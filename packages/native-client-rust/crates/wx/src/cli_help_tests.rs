@@ -168,3 +168,35 @@ fn help_advertises_only_plural_groups_and_select() {
         assert!(help.contains("saves"));
     }
 }
+
+#[test]
+fn every_argument_and_flag_has_help() {
+    fn check(command: &Command, path: &str, missing: &mut Vec<String>) {
+        for arg in command.get_arguments() {
+            let builtin = matches!(
+                arg.get_action(),
+                clap::ArgAction::Help
+                    | clap::ArgAction::HelpShort
+                    | clap::ArgAction::HelpLong
+                    | clap::ArgAction::Version
+            );
+            let documented = arg
+                .get_help()
+                .or_else(|| arg.get_long_help())
+                .is_some_and(|help| !help.to_string().trim().is_empty());
+            if !builtin && !documented {
+                missing.push(format!("{path} {}", arg.get_id()));
+            }
+        }
+        for child in command.get_subcommands() {
+            if child.get_name() != "help" {
+                check(child, &format!("{path} {}", child.get_name()), missing);
+            }
+        }
+    }
+    let mut root = command();
+    root.build();
+    let mut missing = Vec::new();
+    check(&root, "wx", &mut missing);
+    assert!(missing.is_empty(), "add help text to: {missing:#?}");
+}

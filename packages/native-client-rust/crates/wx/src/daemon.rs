@@ -15,11 +15,13 @@ pub enum DaemonCommand {
     Status,
     /// Stop the owned local daemon without logging out of WeChat.
     Stop {
+        /// Seconds to wait for the daemon to exit (1 to 300); it is never force-killed.
         #[arg(long, default_value_t = 30)]
         timeout: u64,
     },
     /// Read the local daemon log, optionally following new lines.
     Logs {
+        /// Keep printing new log lines until interrupted.
         #[arg(long)]
         follow: bool,
     },

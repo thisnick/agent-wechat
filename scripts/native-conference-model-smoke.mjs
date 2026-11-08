@@ -92,8 +92,15 @@ try {
   const env = { AGENT_WECHAT_TOKEN: token, PATH: process.env.PATH, HOME: temporary, TMPDIR: temporary, OPENCLAW_STATE_DIR: join(temporary, 'state'), OPENCLAW_CONFIG_PATH: configPath, NATIVE_CONFERENCE_FIXTURE_DIR: temporary, NATIVE_CONFERENCE_WILDCARD: process.env.NATIVE_CONFERENCE_WILDCARD, NO_COLOR: '1' };
   child = spawn(process.execPath, [join(sdk, 'openclaw.mjs'), 'gateway', 'run'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   for (const stream of [child.stdout, child.stderr]) stream.on('data', chunk => { log = (log + chunk.toString()).slice(-131072); });
+  // Post-ready maintenance can refresh the plugin registry and register the
+  // plugin again. Start the fixture's checks after it, or after 45s at most.
+  const started = (async () => {
+    for (let i = 0; i < 450 && !/startup phase: post-ready\.startup-maintenance \d/.test(log); i++) await sleep(100);
+    await writeFile(join(temporary, 'start'), 'start');
+  })();
   let result;
-  for (let i = 0; i < 600; i++) { if (child.exitCode !== null || child.signalCode) throw Error(`Isolated Gateway exited: ${log}`); try { result = JSON.parse(await readFile(join(temporary, 'result.json'), 'utf8')); break; } catch { await sleep(100); } }
+  for (let i = 0; i < 1200; i++) { if (child.exitCode !== null || child.signalCode) throw Error(`Isolated Gateway exited: ${log}`); try { result = JSON.parse(await readFile(join(temporary, 'result.json'), 'utf8')); break; } catch { await sleep(100); } }
+  await started;
   const toolEvents = await readFile(join(temporary, 'tool-events.jsonl'), 'utf8').catch(() => 'none');
   assert.ok(!log.includes('plugin must declare contracts.trustedToolPolicies'), 'conference consultation tool policy was not registered with the Gateway');
   assert.ok(result, `Conference Gateway deadline: ${log}`); assert.equal(result.error, undefined, `${JSON.stringify(result)}; requests=${requests.length}; events=${toolEvents}; ${log}`);

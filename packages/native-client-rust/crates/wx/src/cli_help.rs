@@ -47,3 +47,7 @@ fn configure(command: Command, parents: &[&str]) -> Command {
 #[cfg(test)]
 #[path = "cli_help_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "cli_interface_tests.rs"]
+mod interface_tests;

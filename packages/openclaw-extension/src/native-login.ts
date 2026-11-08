@@ -77,7 +77,7 @@ export function createNativeLoginTool(account: ResolvedWeChatAccount, dependenci
     catalogMode: "direct-only",
     description: "Check WeChat status, start or resume native login, or wait for the same login operation. Show the returned QR image to the user to scan and approve on their phone; do not generate a replacement QR. Repeated start reuses an active operation. For a new operation, force uses QR instead of saved trust. timeoutMs bounds the wait. Disconnect retains saved trust. Logout reports its durable native outcome; it does not promise saved-device revocation. Forget requires confirm=true and removes local authentication while retaining history.",
     parameters: { type: "object", additionalProperties: false, properties: {
-      action: { type: "string", enum: actions },
+      action: { type: "string", enum: actions, description: "Login step to run; the tool description explains each one." },
       force: { type: "boolean", description: "With start, use QR instead of saved trust for a new login. An active login is still reused." },
       timeoutMs: { type: "integer", minimum: 1000, maximum: 300000, description: "Wait bound in milliseconds; defaults to 30000. Start returns as soon as a QR is available." },
       confirm: { type: "boolean", description: "Required true for forget." },

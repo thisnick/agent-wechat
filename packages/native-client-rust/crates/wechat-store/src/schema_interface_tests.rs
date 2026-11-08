@@ -1,0 +1,199 @@
+//! Generates `interfaces/storage/{account,registry}.txt`: the SQL schema this
+//! daemon owns after every migration, plus a hash of each migration file.
+//! Official WeChat profile databases are not ours and are not listed.
+use super::Store;
+use rusqlite::Connection;
+use sha2::{Digest, Sha256};
+use std::{fs, path::PathBuf};
+
+const UPDATE: &str = "AGENT_WECHAT_UPDATE_INTERFACES";
+
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn row(item: String, attributes: String) -> String {
+    let attributes = if attributes.is_empty() {
+        "-".to_owned()
+    } else {
+        attributes
+    };
+    format!("{item} | {attributes} | -")
+}
+
+fn schema_rows(db: &Connection) -> Vec<String> {
+    let version: i64 = db
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    let mut rows = vec![row("schema version".into(), version.to_string())];
+    let mut statement = db
+        .prepare("SELECT type,name,tbl_name,coalesce(sql,'') FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name")
+        .unwrap();
+    let objects = statement
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    for (kind, name, table, sql) in objects {
+        rows.push(row(format!("{kind} {name}"), one_line(&sql)));
+        if kind != "table" {
+            continue;
+        }
+        let mut columns = db
+            .prepare(&format!("PRAGMA table_xinfo(\"{table}\")"))
+            .unwrap();
+        let columns = columns
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, bool>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, i64>(6)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        for (column, declared, not_null, default, primary_key, hidden) in columns {
+            let mut attributes = vec![if declared.is_empty() {
+                "untyped".to_owned()
+            } else {
+                declared
+            }];
+            if not_null {
+                attributes.push("not null".into());
+            }
+            if let Some(default) = default {
+                attributes.push(format!("default {default}"));
+            }
+            if primary_key > 0 {
+                attributes.push(format!("primary key {primary_key}"));
+            }
+            if hidden != 0 {
+                attributes.push("generated".into());
+            }
+            rows.push(row(
+                format!("table {table}.{column}"),
+                attributes.join(", "),
+            ));
+        }
+        let mut keys = db
+            .prepare(&format!("PRAGMA foreign_key_list(\"{table}\")"))
+            .unwrap();
+        let keys = keys
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, String>(6)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        for (id, parent, from, to, on_delete) in keys {
+            rows.push(row(
+                format!("table {table}.{from} foreign key #{id}"),
+                format!(
+                    "references {parent}({}), on delete {on_delete}",
+                    to.unwrap_or_default()
+                ),
+            ));
+        }
+    }
+    rows
+}
+
+fn migration_rows(directory: &str) -> Vec<String> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("migrations")
+        .join(directory);
+    let mut names = fs::read_dir(&path)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.ends_with(".sql"))
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+        .into_iter()
+        .map(|name| {
+            let bytes = fs::read(path.join(&name)).unwrap();
+            let text = String::from_utf8(bytes).unwrap().replace("\r\n", "\n");
+            let digest = format!("{:x}", Sha256::digest(text.as_bytes()));
+            row(
+                format!("migration {directory}/{name}"),
+                format!("sha256 {}", &digest[..16]),
+            )
+        })
+        .collect()
+}
+
+fn listing(title: &str, mut rows: Vec<String>) -> String {
+    rows.sort_by(|a, b| a.split(" | ").next().cmp(&b.split(" | ").next()));
+    format!(
+        "# {title} Generated by crates/wechat-store/src/schema_interface_tests.rs; do not edit.\n# Run `pnpm interfaces` after adding a migration. Format: ITEM | DEFINITION | -. `table T.c` rows are columns\n{}\n",
+        rows.join("\n")
+    )
+}
+
+fn listings() -> Vec<(&'static str, String)> {
+    let temporary = tempfile::tempdir().unwrap();
+    let store = Store::open(&temporary.path().join("data")).unwrap();
+    store.create_account("schema").unwrap();
+    let mut account = store.control("schema", |db| Ok(schema_rows(db))).unwrap();
+    account.extend(migration_rows("account"));
+    let mut registry = schema_rows(&store.db.lock().unwrap());
+    registry.extend(migration_rows("registry"));
+    vec![
+        (
+            "account.txt",
+            listing(
+                "SQL schema of each account's agent/control.sqlite, after all migrations.",
+                account,
+            ),
+        ),
+        (
+            "registry.txt",
+            listing(
+                "SQL schema of the daemon's registry.sqlite, after all migrations.",
+                registry,
+            ),
+        ),
+    ]
+}
+
+#[test]
+fn storage_schema_listings_are_current() {
+    let directory =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../interfaces/storage");
+    let mut stale = Vec::new();
+    for (name, expected) in listings() {
+        let path = directory.join(name);
+        if std::env::var_os(UPDATE).is_some() {
+            fs::create_dir_all(&directory).unwrap();
+            fs::write(&path, &expected).unwrap();
+            continue;
+        }
+        let actual = fs::read_to_string(&path)
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
+        if actual != expected {
+            stale.push(name);
+        }
+    }
+    assert!(
+        stale.is_empty(),
+        "interfaces/storage/{stale:?} does not match the migrations. Run `pnpm interfaces` and review the diff."
+    );
+}

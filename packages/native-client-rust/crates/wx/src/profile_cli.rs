@@ -13,10 +13,13 @@ pub struct ReadFlags {
     /// Permit a deliberately created plaintext export; encrypted sources remain the default.
     #[arg(long)]
     pub allow_plaintext: bool,
+    /// Return at most this many items (1 to 200).
     #[arg(long,default_value_t=50,value_parser=clap::value_parser!(u16).range(1..=200))]
     pub limit: u16,
+    /// Continue from the next-page cursor of the previous result.
     #[arg(long)]
     pub cursor: Option<String>,
+    /// Only list chats, contacts, groups or members whose name or ID contains this text.
     #[arg(long)]
     pub search: Option<String>,
     /// Include original typed source fields, which can contain private transport metadata.
@@ -27,13 +30,18 @@ pub struct ReadFlags {
 pub enum ProfileCommand {
     /// Register the path and optional key file of a stopped local profile.
     Add {
+        /// Name to save the profile under.
         name: String,
+        /// Stopped official profile folder; add --account-dir if it holds several accounts.
         #[arg(long)]
         path: PathBuf,
+        /// Profile file layout; only official-linux is supported.
         #[arg(long, default_value = "official-linux")]
         format: String,
+        /// Account folder name under --path (or --path/xwechat_files) to use.
         #[arg(long)]
         account_dir: Option<String>,
+        /// Private file with this profile's database keys, from wx profiles keys export.
         #[arg(long)]
         keys_file: Option<PathBuf>,
     },
@@ -41,7 +49,10 @@ pub enum ProfileCommand {
     List,
     #[command(alias = "use")]
     /// Save the default local profile for this CLI or selected server.
-    Select { name: String },
+    Select {
+        /// Profile name from wx profiles list.
+        name: String,
+    },
     /// Inspect the selected profile's layout and key availability.
     Inspect,
     /// List chats from a stopped local profile.
@@ -51,8 +62,10 @@ pub enum ProfileCommand {
     },
     /// Read messages from a stopped local profile.
     Messages {
+        /// Chat ID to read, from wx profiles chats.
         #[arg(long)]
         chat: String,
+        /// Your WeChat username, used to mark which messages you sent.
         #[arg(long)]
         own_username: Option<String>,
         #[command(flatten)]
@@ -65,8 +78,10 @@ pub enum ProfileCommand {
     },
     /// Read groups and saved members from a stopped local profile.
     Groups {
+        /// Show only this group, by ID, instead of the whole list.
         #[arg(long,conflicts_with_all=["search","cursor"])]
         id: Option<String>,
+        /// List the saved members of the group given by --id.
         #[arg(long, requires = "id")]
         members: bool,
         #[command(flatten)]
@@ -74,10 +89,13 @@ pub enum ProfileCommand {
     },
     /// Retrieve a saved image from a stopped local profile.
     Images {
+        /// Message observation ID from wx profiles messages.
         #[arg(long)]
         message: String,
+        /// Which saved copy to export; best picks the highest quality available (full is original).
         #[arg(long,default_value="best",value_parser=["best","thumbnail","standard","original","full"])]
         quality: String,
+        /// Save to this new file outside the profile; an existing file is not overwritten.
         #[arg(long)]
         output: PathBuf,
         #[command(flatten)]
@@ -85,8 +103,10 @@ pub enum ProfileCommand {
     },
     /// Retrieve a saved avatar from a stopped local profile.
     Avatars {
+        /// Username of the contact or group whose saved avatar to export.
         #[arg(long)]
         username: String,
+        /// Save to this new file outside the profile; an existing file is not overwritten.
         #[arg(long)]
         output: PathBuf,
         #[command(flatten)]
@@ -102,17 +122,24 @@ pub enum ProfileCommand {
 pub enum KeyCommand {
     /// Export keys from an authorized password file or agent data directory.
     Export {
+        /// Profile name from wx profiles list; defaults to the selected profile.
         name: Option<String>,
+        /// Private file holding the account password as exactly 32 raw bytes.
         #[arg(long, conflicts_with = "from_agent_data")]
         password_file: Option<PathBuf>,
+        /// Agent data folder, or its agent.db file, holding saved profile keys.
         #[arg(long, conflicts_with = "password_file")]
         from_agent_data: Option<PathBuf>,
+        /// Private file with the token that unlocks the agent data; needed for --from-agent-data.
         #[arg(long, requires = "from_agent_data")]
         agent_token_file: Option<PathBuf>,
+        /// Key session ID to read; needed only when the agent data has several for this account.
         #[arg(long, requires = "from_agent_data")]
         session: Option<String>,
+        /// Write the keys to this new private file outside the profile.
         #[arg(long)]
         output: PathBuf,
+        /// Confirm that the selected source is stopped or is a consistent snapshot.
         #[arg(long, required = true)]
         source_stopped: bool,
     },

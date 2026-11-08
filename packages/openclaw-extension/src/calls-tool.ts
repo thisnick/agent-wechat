@@ -17,9 +17,9 @@ export function registerNativeCallTool(api: OpenClawPluginApi, service: () => Na
     return [{ name: "wechat_call", label: "WeChat Call", catalogMode: "direct-only" as const,
       description: "Check voice-call status, dial an authorized contact, start or join a configured voice conference, invite allowed contacts to its owned conference, or hang up. Use action hangup when asked to leave the current call; in a conference it removes only this agent, leaving the room open for others. Owner-authorized call consultations can control their call without the separate chat-requester allowlist. Destination and group allowlists, host tool policy and approvals still apply. Join requires a current invitation and never creates a room. Invitations do not promote a direct call. Never retry an uncertain operation without the user's request. Do not claim an action was attempted before executing it.",
       parameters: { type: "object", additionalProperties: false, required: ["action"], properties: {
-        action: { type: "string", enum: ["status", "dial", "conference_start", "conference_join", "invite", "hangup"] }, contactId: { type: "string", minLength: 1, maxLength: 200 },
-        groupId: { type: "string", minLength: 1, maxLength: 200 },
-        contactIds: { type: "array", minItems: 1, maxItems: 100, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 200 } },
+        action: { type: "string", enum: ["status", "dial", "conference_start", "conference_join", "invite", "hangup"], description: "Call operation to run; the tool description explains each one." }, contactId: { type: "string", minLength: 1, maxLength: 200, description: "Contact to dial. Required for dial." },
+        groupId: { type: "string", minLength: 1, maxLength: 200, description: "Group of the configured voice conference. Required for conference_start and conference_join." },
+        contactIds: { type: "array", minItems: 1, maxItems: 100, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 200 }, description: "Contacts to invite. Required for conference_start and invite." },
       } },
       execute: async (_id: string, args: unknown, signal?: AbortSignal) => {
         if (!args || typeof args !== "object" || Array.isArray(args)) throw Error("Invalid calling arguments");
