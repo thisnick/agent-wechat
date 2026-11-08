@@ -25,7 +25,6 @@ export function surface(file) {
   if (file === 'interfaces/http/routes.txt') return { kind: 'http', title: 'HTTP API', packages: ['@agent-wechat/cli'] };
   if (file === 'interfaces/http/calls-websocket.txt') return { kind: 'ws', title: 'Calls WebSocket', packages: ['@agent-wechat/cli'] };
   if (file === 'interfaces/ui/scenes.txt') return { kind: 'scenes', title: 'UI scenes', packages: ['@agent-wechat/desktop'] };
-  if (file === 'interfaces/ui/desktop-shell.txt') return { kind: 'shell', title: 'Desktop shell', packages: ['@agent-wechat/desktop'] };
   if (file === 'interfaces/ui/routes.txt') return { kind: 'routes', title: 'UI routes', packages: ['@agent-wechat/desktop'] };
   return { kind: 'other', title: file, packages: [] };
 }
@@ -254,8 +253,6 @@ export function compareListing(kind, base, head) {
       : kind === 'ws' && item.startsWith('client ') ? 'removed from messages clients send: older clients that send it are rejected'
       : kind === 'ws' && item.startsWith('server ') ? 'removed from server messages: clients that read it break'
       : kind === 'routes' ? 'route removed: saved links and notifications that use it stop working'
-      : kind === 'shell' && /^(command|event) /.test(item) ? 'desktop command or event removed: the bundled UI or plugins that use it break'
-      : kind === 'shell' && item.startsWith('permission ') ? 'desktop permission removed'
       : kind === 'http' && item.startsWith('route ') ? 'route removed: callers get 404'
       : kind === 'http' && item.startsWith('request ') ? 'removed from requests the daemon accepts'
       : kind === 'http' && item.startsWith('response ') ? 'removed from responses: callers that read it break' : 'removed' });
