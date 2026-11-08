@@ -97,6 +97,8 @@ jobs:
           key: native-ffmpeg-${{ runner.arch }}-${{ env.FFMPEG_RELEASE }}-${{ env.FFMPEG_SHA256 }}-${{ env.FFPROBE_SHA256 }}
       - name: Install verified image decoder runtime
         if: matrix.suite == 'test' && steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           base="https://github.com/eugeneware/ffmpeg-static/releases/download/$FFMPEG_RELEASE"
           mkdir -p "$RUNNER_TEMP/native-ffmpeg/bin"
@@ -104,14 +106,19 @@ jobs:
             archive="$RUNNER_TEMP/$media_tool.gz"
             expected_sha="$FFMPEG_SHA256"
             if [ "$media_tool" = ffprobe ]; then expected_sha="$FFPROBE_SHA256"; fi
+            # GitHub's release links can fail with HTTP 5xx while the API (gh) still serves the file.
             curl --fail --location --retry 3 --connect-timeout 20 --max-time 180 \
-              "$base/$media_tool-linux-$FFMPEG_ARCH.gz" --output "$archive"
+              "$base/$media_tool-linux-$FFMPEG_ARCH.gz" --output "$archive" ||
+              gh release download "$FFMPEG_RELEASE" -R eugeneware/ffmpeg-static \
+                -p "$media_tool-linux-$FFMPEG_ARCH.gz" -O "$archive" --clobber
             printf '%s  %s\n' "$expected_sha" "$archive" | sha256sum --check
             gzip --decompress --stdout "$archive" > "$RUNNER_TEMP/native-ffmpeg/bin/$media_tool"
             chmod 755 "$RUNNER_TEMP/native-ffmpeg/bin/$media_tool"
           done
           curl --fail --location --retry 3 "$base/linux-$FFMPEG_ARCH.LICENSE" \
-            --output "$RUNNER_TEMP/native-ffmpeg/LICENSE"
+            --output "$RUNNER_TEMP/native-ffmpeg/LICENSE" ||
+            gh release download "$FFMPEG_RELEASE" -R eugeneware/ffmpeg-static \
+              -p "linux-$FFMPEG_ARCH.LICENSE" -O "$RUNNER_TEMP/native-ffmpeg/LICENSE" --clobber
           printf '%s  %s\n' 8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903 \
             "$RUNNER_TEMP/native-ffmpeg/LICENSE" | sha256sum --check
       - name: Enable the pinned image decoder

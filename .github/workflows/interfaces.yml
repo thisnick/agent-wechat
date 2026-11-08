@@ -100,6 +100,8 @@ jobs:
         run: node --test scripts/interfaces/review.test.mjs scripts/interfaces/index.test.mjs
       - name: Check OpenAPI compatibility with oasdiff
         id: oasdiff
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           base=$(git merge-base "origin/${{ github.base_ref }}" HEAD)
           if [ ! -f interfaces/http/openapi.json ] || ! git cat-file -e "$base:interfaces/http/openapi.json" 2>/dev/null; then
@@ -108,7 +110,10 @@ jobs:
           fi
           git show "$base:interfaces/http/openapi.json" > "$RUNNER_TEMP/openapi-base.json"
           version=1.36.0
-          curl -fsSL --retry 3 -o "$RUNNER_TEMP/oasdiff.tar.gz" "https://github.com/oasdiff/oasdiff/releases/download/v${version}/oasdiff_${version}_linux_amd64.tar.gz"
+          asset="oasdiff_${version}_linux_amd64.tar.gz"
+          # GitHub's release links can fail with HTTP 5xx while the API (gh) still serves the file.
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/oasdiff.tar.gz" "https://github.com/oasdiff/oasdiff/releases/download/v${version}/$asset" ||
+            gh release download "v${version}" -R oasdiff/oasdiff -p "$asset" -O "$RUNNER_TEMP/oasdiff.tar.gz" --clobber
           echo "dba65661f6d0f178a3e4884c309f19527a849388bb9df0e81545db76dbb697d6  $RUNNER_TEMP/oasdiff.tar.gz" | sha256sum --check
           tar -xzf "$RUNNER_TEMP/oasdiff.tar.gz" -C "$RUNNER_TEMP" oasdiff
           set +e
