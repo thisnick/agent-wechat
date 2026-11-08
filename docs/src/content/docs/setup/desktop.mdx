@@ -56,7 +56,18 @@ The browser version gives each view its own address, so reload, Back and bookmar
 | Chat or group details | `/{server}/{account}/chats/{chat}/info` |
 | Contacts, new chat, settings | `/{server}/{account}/contacts`, `/new-chat`, `/settings` |
 
-`{server}` is the hub's server ID; copy it and the account ID from the address bar. If the account is signed out, the app shows sign-in and opens the address afterwards. If a chat or message isn't found, the app opens the chat list or the conversation and says so. In the desktop app, clicking a message notification opens its chat at that message.
+`{server}` is the hub's server ID; copy it and the account ID from the address bar. If the account is signed out, the app shows sign-in and opens the address afterwards. If a chat or message isn't found, the app opens the chat list or the conversation and says so.
+
+## Message notifications
+
+Clicking a message notification opens its chat at that message. On macOS:
+
+- Notification Center groups notifications by chat, and opening a chat in the app clears its notifications.
+- **Mark as Read** marks the chat read and clears its notifications. If a newer message has arrived since, the chat stays unread.
+- **Reply** sends your text as a quote reply to that message, then marks the chat read. It appears when the message can be quoted.
+- Notifications still open their chat after the app restarts.
+
+If no notifications appear, allow AgentWechat in **System Settings → Notifications**.
 
 <Aside title="Good to know">
 Once configured, the local hub starts whenever you open the app, even when the interface uses a remote hub. Closing the window keeps it running in the tray or menu bar. Choose **Quit AgentWechat** to stop it. Quitting does not sign out of WeChat or delete profiles. Linux desktops need an unlocked Secret Service keyring. A separately installed CLI does not read the desktop keyring; export a key for it or create a separate [API token](/reference/tokens/).

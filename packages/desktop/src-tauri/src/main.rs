@@ -4,6 +4,8 @@ mod credentials;
 mod emoji;
 mod files;
 mod hub;
+#[cfg(target_os = "macos")]
+mod macos_notifications;
 mod notification_sound;
 mod notifications;
 mod transport;
