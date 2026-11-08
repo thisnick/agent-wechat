@@ -157,8 +157,15 @@ function App() {
     let cancelled = false;
     void (desktop ? desktopInvoke<DesktopSession | null>("desktop_bootstrap").then((session) => session ? desktopConnect(session) : null) : bootstrap())
       .then((value) => {
-        if (cancelled) value?.close();
-        else setConnection(value);
+        if (cancelled) {
+          value?.close();
+          return;
+        }
+        setConnection(value);
+        // A reload keeps the address. Once a hub is open again, the hub picker is not a
+        // place to resume: go to that hub's home instead.
+        if (value && parseRoute(router.hash())?.name === "servers")
+          router.replace(homeRoute(value, value.session.snapshot().accounts));
       })
       .catch((e) => {
         if (!cancelled) setError(desktop && typeof e === "string" ? e : readableError(e));
