@@ -40,9 +40,11 @@ pnpm changeset
    checks and desktop acceptance still gate publication.
 
 5. Successful native asset publication calls **Publish native runtime image** for
-   the same commit/version. It tests and pushes Linux x64/ARM64 images and combines
-   them into the versioned multi-architecture tag. Stable versions also update
-   `latest`.
+   the same commit/version. Each Linux architecture packages its published `wx`
+   executable after verifying the manifest, checksum and source attestation. The
+   workflow tests each image, pushes it with provenance and an SBOM, and verifies
+   the embedded executable's checksum by image digest before combining the images
+   into the versioned multi-architecture tag. Stable versions also update `latest`.
 
 6. When the Version Packages PR changes `@agent-wechat/rust-crates`, the same
    `native-release.yml` workflow independently tests, packages and publishes the
