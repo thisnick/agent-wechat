@@ -5,11 +5,13 @@ import {
   type ConversationCategory,
 } from "./conversation-filters.ts";
 
-export function UnreadCount({ count }: { count: number }) {
+function UnreadCount({ count }: { count: number }) {
   return (
     <>
       <span className="sr-only">{count} unread</span>
-      <span className="filter-unread" aria-hidden="true">{count > 99 ? "99+" : count}</span>
+      {count > 0 && (
+        <span className="filter-unread" aria-hidden="true">{count > 99 ? "99+" : count}</span>
+      )}
     </>
   );
 }
@@ -17,13 +19,13 @@ export function UnreadCount({ count }: { count: number }) {
 export function ConversationFilterBar({
   selected,
   counts,
-  onToggle,
+  onChange,
 }: {
   selected: ConversationCategory[];
-  counts: Record<ConversationCategory, number>;
-  onToggle: (category: ConversationCategory) => void;
+  counts: Record<ConversationCategory | "total", number>;
+  onChange: (categories: ConversationCategory[]) => void;
 }) {
-  const bar = useRef<HTMLDivElement>(null);
+  const track = useRef<HTMLDivElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const chips = useRef<HTMLDivElement>(null);
   const [overflow, setOverflow] = useState(false);
@@ -38,7 +40,7 @@ export function ConversationFilterBar({
   }
 
   useEffect(() => {
-    const container = bar.current!;
+    const container = track.current!;
     const row = chips.current!;
     const observer = new ResizeObserver(() => {
       // Measure the row against the full bar so the buttons cannot cause overflow.
@@ -60,41 +62,64 @@ export function ConversationFilterBar({
   }
 
   return (
-    <div className="conversation-filters" role="group" aria-label="Conversation categories" ref={bar}>
-      {overflow && (
-        <button
-          className="filter-scroll previous"
-          aria-label="Scroll categories left"
-          disabled={edges.start}
-          onClick={() => scroll(-1)}
+    <div className="conversation-filters" role="group" aria-label="Conversation categories">
+      <button
+        type="button"
+        className="filter-chip"
+        aria-pressed={selected.length === 0}
+        onClick={() => onChange([])}
+      >
+        All<span className="sr-only">conversations</span>
+        <UnreadCount count={counts.total} />
+      </button>
+      <div className="filter-track" ref={track}>
+        {overflow && (
+          <button
+            type="button"
+            className="filter-scroll previous"
+            aria-label="Scroll categories left"
+            disabled={edges.start}
+            onClick={() => scroll(-1)}
+          >
+            <Icon name="chevron" />
+          </button>
+        )}
+        <div
+          className="filter-scroller"
+          data-can-scroll-left={!edges.start}
+          data-can-scroll-right={!edges.end}
+          ref={scroller}
+          onScroll={updateEdges}
         >
-          <Icon name="chevron" />
-        </button>
-      )}
-      <div className="filter-scroller" ref={scroller} onScroll={updateEdges}>
-        <div className="filter-chips" ref={chips}>
-          {conversationCategories.map(({ id, label }) => (
-            <button
-              key={id}
-              className="filter-chip"
-              aria-pressed={selected.includes(id)}
-              onClick={() => onToggle(id)}
-            >
-              {label}<UnreadCount count={counts[id]} />
-            </button>
-          ))}
+          <div className="filter-chips" ref={chips}>
+            {conversationCategories.map(({ id, label }) => {
+              const pressed = selected.includes(id);
+              return (
+                <button
+                  type="button"
+                  key={id}
+                  className="filter-chip"
+                  aria-pressed={pressed}
+                  onClick={() => onChange(pressed ? selected.filter((item) => item !== id) : [...selected, id])}
+                >
+                  {label}<UnreadCount count={counts[id]} />
+                </button>
+              );
+            })}
+          </div>
         </div>
+        {overflow && (
+          <button
+            type="button"
+            className="filter-scroll"
+            aria-label="Scroll categories right"
+            disabled={edges.end}
+            onClick={() => scroll(1)}
+          >
+            <Icon name="chevron" />
+          </button>
+        )}
       </div>
-      {overflow && (
-        <button
-          className="filter-scroll"
-          aria-label="Scroll categories right"
-          disabled={edges.end}
-          onClick={() => scroll(1)}
-        >
-          <Icon name="chevron" />
-        </button>
-      )}
     </div>
   );
 }

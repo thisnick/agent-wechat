@@ -119,7 +119,7 @@ export const scenes = [
   {
     name: "chat-filters",
     route: "chats",
-    description: "Two selected conversation categories in a single scrolling row with the All button and total unread count still visible.",
+    description: "The conversation filter bar with All pinned beside the scrolling categories and unread badges for categories with new messages.",
     viewports: ["desktop", "compact"],
     setup: standardWorld,
     target: () => ({ account: ACCOUNT.id }),
@@ -155,7 +155,7 @@ export const scenes = [
       const official = bar.getByRole("button", { name: /^Official.*3 unread$/ });
       const service = bar.getByRole("button", { name: /^Service.*12 unread$/ });
       // The conversation initially open beside the list is marked read.
-      const all = page.getByRole("button", { name: "All conversations 21 unread", exact: true });
+      const all = bar.getByRole("button", { name: "All conversations 21 unread", exact: true });
       await expect(all).toHaveAttribute("aria-pressed", "true");
       const library = row(page, "City Library");
       const metro = row(page, "Metro Alerts");
@@ -188,14 +188,16 @@ export const scenes = [
 
       const scroller = bar.locator(".filter-scroller");
       const right = bar.getByRole("button", { name: "Scroll categories right" });
+      const left = bar.getByRole("button", { name: "Scroll categories left" });
       if (page.viewportSize().width === viewports.compact.width) {
         await expect(right).toBeHidden();
         await expect.poll(() => scroller.evaluate((el) => el.scrollWidth - el.clientWidth)).toBeGreaterThan(0);
       } else {
         await page.setViewportSize({ ...viewports.desktop, width: 1100 });
-        await expect(bar.getByRole("button", { name: "Scroll categories left" })).toBeDisabled();
+        await expect(left).toBeHidden();
         await right.click();
-        await expect(right).toBeDisabled();
+        await expect(right).toBeHidden();
+        await expect(left).toBeVisible();
         await expect(service).toBeInViewport();
         await page.setViewportSize(viewports.desktop);
       }
@@ -213,6 +215,7 @@ export const scenes = [
       await expect(official).toHaveAttribute("aria-pressed", "true");
       await expect(all).toHaveAttribute("aria-pressed", "false");
       await expect(all).toBeInViewport();
+      await expect(bar.getByRole("button", { name: "Groups 0 unread", exact: true }).locator(".filter-unread")).toHaveCount(0);
       await search.clear();
       await search.blur();
       await expect(library).toBeVisible();

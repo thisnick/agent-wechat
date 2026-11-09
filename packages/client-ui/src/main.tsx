@@ -1,5 +1,5 @@
 import { ConversationRow } from "./conversation-row.tsx";
-import { ConversationFilterBar, UnreadCount } from "./conversation-filter-bar.tsx";
+import { ConversationFilterBar } from "./conversation-filter-bar.tsx";
 import { conversationCategory, conversationUnreadCounts, savedConversationCategories } from "./conversation-filters.ts";
 import { ThreadPinSwitch, useThreadPinPreview } from "./thread-pinning.tsx";
 import { ThreadNotifications } from "./thread-notifications.tsx";
@@ -1247,19 +1247,7 @@ function Chats({
         <div className="side-head">
           <div className="eyebrow">{account?.alias || "AgentWechat"}</div>
           <div className="title-row">
-            <div className="title-label">
-              <h1>{section === "chats" ? "Messages" : "Contacts"}</h1>
-              {section === "chats" && (
-                <button
-                  className="filter-chip"
-                  aria-pressed={categories.length === 0}
-                  onClick={() => setCategories((current) => current.length ? [] : current)}
-                >
-                  All<span className="sr-only">conversations</span>
-                  <UnreadCount count={unreadCounts.total} />
-                </button>
-              )}
-            </div>
+            <h1>{section === "chats" ? "Messages" : "Contacts"}</h1>
             <Button
               icon="plus"
               label="New conversation"
@@ -1283,9 +1271,7 @@ function Chats({
             <ConversationFilterBar
               selected={categories}
               counts={unreadCounts}
-              onToggle={(category) => setCategories((current) =>
-                current.includes(category) ? current.filter((item) => item !== category) : [...current, category],
-              )}
+              onChange={setCategories}
             />
           )}
         </div>
