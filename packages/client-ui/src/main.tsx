@@ -1,4 +1,6 @@
 import { ConversationRow } from "./conversation-row.tsx";
+import { ConversationFilterBar, UnreadCount } from "./conversation-filter-bar.tsx";
+import { conversationCategory, conversationUnreadCounts, savedConversationCategories } from "./conversation-filters.ts";
 import { ThreadPinSwitch, useThreadPinPreview } from "./thread-pinning.tsx";
 import { ThreadNotifications } from "./thread-notifications.tsx";
 import { emojiText } from "./emoji-text.ts";
@@ -11,6 +13,7 @@ import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -896,13 +899,10 @@ function Chats({
 }) {
   const { session, simulator } = connection,
     state = useSyncExternalStore(session.subscribe, session.snapshot);
-  const savedView = state.account ? connection.cache.view(state.account) : {};
-  const [query, setQuery] = useState(""),
-    [filter, setFilter] = useState(
-      ["all", "unread", "groups"].includes(savedView.filter ?? "")
-        ? savedView.filter!
-        : "all",
-    );
+  const [query, setQuery] = useState("");
+  const [categories, setCategories] = useState(() =>
+    savedConversationCategories(state.account ? connection.cache.view(state.account) : {}),
+  );
   const [accountMenu, setAccountMenu] = useState(false);
   // What is on screen follows the address. A dialog (settings, new chat) shows
   // over the view that was open before it.
@@ -947,8 +947,8 @@ function Chats({
   }, [connection, state.account, state.selected, section, mobile, settings, newChat, accountMenu]);
   useEffect(() => {
     if (state.account)
-      connection.cache.saveView(state.account, { section, filter });
-  }, [state.account, section, filter]);
+      connection.cache.saveView(state.account, { section, categories });
+  }, [connection, state.account, section, categories]);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const draftsNow = useRef(drafts);
   draftsNow.current = drafts;
@@ -1190,13 +1190,16 @@ function Chats({
     });
     focusMessage();
   }
-  const threads = orderThreads(useThreadPinPreview(connection, state.account!, state.threads)).filter(
-    (t) =>
-      (name(t.id).toLowerCase().includes(query.toLowerCase()) ||
-        (t.id.endsWith("@chatroom") && t.id.toLowerCase().includes(query.toLowerCase()))) &&
-      (filter !== "unread" || !!t.unreadCount) &&
-      (filter !== "groups" || t.kind === "group"),
-  );
+  const unreadCounts = useMemo(() => conversationUnreadCounts(state.threads), [state.threads]);
+  const search = query.toLowerCase();
+  const threads = orderThreads(useThreadPinPreview(connection, state.account!, state.threads)).filter((thread) => {
+    if (categories.length) {
+      const category = conversationCategory(thread);
+      if (!category || !categories.includes(category)) return false;
+    }
+    return name(thread.id).toLowerCase().includes(search) ||
+      (thread.id.endsWith("@chatroom") && thread.id.toLowerCase().includes(search));
+  });
   const firstPinned = threads.find((thread) => thread.pinned === true)?.id;
   return (
     <div className={`shell ${mobile ? "mobile-chat" : ""}`}>
@@ -1244,7 +1247,19 @@ function Chats({
         <div className="side-head">
           <div className="eyebrow">{account?.alias || "AgentWechat"}</div>
           <div className="title-row">
-            <h1>{section === "chats" ? "Messages" : "Contacts"}</h1>
+            <div className="title-label">
+              <h1>{section === "chats" ? "Messages" : "Contacts"}</h1>
+              {section === "chats" && (
+                <button
+                  className="filter-chip"
+                  aria-pressed={categories.length === 0}
+                  onClick={() => setCategories((current) => current.length ? [] : current)}
+                >
+                  All<span className="sr-only">conversations</span>
+                  <UnreadCount count={unreadCounts.total} />
+                </button>
+              )}
+            </div>
             <Button
               icon="plus"
               label="New conversation"
@@ -1265,17 +1280,13 @@ function Chats({
             />
           </label>
           {section === "chats" && (
-            <div className="filters">
-              {(["all", "unread", "groups"] as const).map((f) => (
-                <button
-                  key={f}
-                  className={`pill ${filter === f ? "active" : ""}`}
-                  onClick={() => setFilter(f)}
-                >
-                  {f[0].toUpperCase() + f.slice(1)}
-                </button>
-              ))}
-            </div>
+            <ConversationFilterBar
+              selected={categories}
+              counts={unreadCounts}
+              onToggle={(category) => setCategories((current) =>
+                current.includes(category) ? current.filter((item) => item !== category) : [...current, category],
+              )}
+            />
           )}
         </div>
         {shownNotice && !routeThread && (
