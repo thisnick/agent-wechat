@@ -120,7 +120,10 @@ console.log('Synthetic local transcript');
       await writeFile(join(destination, 'observations.json'), JSON.stringify({ result, requests, hooks, reads, transcriptions }), { mode: 0o600 });
     }
     const inbound = readPolicy === 'on_inbound';
-    const eligible = inbound || conversationAccess && readPolicy !== 'never' && name !== 'text-only';
+    // The pinned host confirms through onPreparedAgentRunStart once the transcript
+    // is prepared, before image capability filtering and without the hook grant.
+    // Confirmation therefore does not prove that a text-only model saw an image.
+    const eligible = inbound || readPolicy !== 'never';
     for (const { id } of scenarios) {
       const item = items.get(id); assert.ok(item);
       if (['pending-image','corrupt-image','expired-image'].includes(id)) {
@@ -142,8 +145,7 @@ console.log('Synthetic local transcript');
       assert.equal(item.manifest.newInputs[0].role,'trigger'); assert.equal(item.manifest.manifestSha256.length,64);
       assert.equal(createHash('sha256').update(await readFile(asset.path)).digest('hex'),asset.sha256);
       if (inbound) { assert.equal(item.runId,undefined); assert.equal(item.handoffUnconfirmed,false); }
-      else if (conversationAccess && name !== 'text-only') { assert.equal(item.runId,item.manifest.runId); assert.equal(item.handoffUnconfirmed,false); }
-      else { assert.equal(item.runId,undefined); assert.equal(item.handoffUnconfirmed,true); }
+      else { assert.equal(item.runId,item.manifest.runId); assert.equal(item.handoffUnconfirmed,false); }
       assert.equal(reads.flat().includes(id),eligible);
       const request = requests.find(request => JSON.stringify(request.messages.at(-1)).includes(`wechat-native:a:${id}`)); assert.ok(request);
       const current = request.messages.filter(message=>message.role==='user').at(-2);
@@ -159,7 +161,7 @@ console.log('Synthetic local transcript');
     }
     if (items.has('file')) { assert.equal(result.outcomes['duplicate-file'],'needs_review'); assert.equal(requests.filter(request=>JSON.stringify(request.messages.at(-1)).includes('wechat-native:a:file')).length,1); }
     if (!eligible) assert.equal(reads.length,0);
-    if (eligible) assert.equal(reads.filter(ids=>ids.includes('file')).length,2);
+    if (eligible && items.has('file')) assert.equal(reads.filter(ids=>ids.includes('file')).length,2);
     console.log(`Pinned media model ${name} passed: exact image bytes/reference manifests, omitted/failed/pending guards, transcription status and durable thread receipts.`);
   } finally {
     if (child && child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await Promise.race([once(child, 'exit'), sleep(8000)]); if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await once(child, 'exit'); } }
