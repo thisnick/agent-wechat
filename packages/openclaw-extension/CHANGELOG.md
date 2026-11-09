@@ -1,5 +1,13 @@
 # @agent-wechat/wechat
 
+## 2.2.1
+
+### Patch Changes
+
+- [#438](https://github.com/thisnick/agent-wechat/pull/438) [`1ffb614`](https://github.com/thisnick/agent-wechat/commit/1ffb614ccc0d6e5e42c77bd59dceba53b3334f2a) Thanks [@thisnick](https://github.com/thisnick)! - Validate the OpenClaw integration against 2026.11.2. On this host, `readPolicy: "on_model_dispatch"` confirms a message when OpenClaw reports the prepared model run for it, without `hooks.allowConversationAccess`; this confirms that the run started, not that a text-only model saw an image. The host's catalog dispatcher is now `dispatch_action` (formerly `tool_call`).
+
+- [#435](https://github.com/thisnick/agent-wechat/pull/435) [`072f7fb`](https://github.com/thisnick/agent-wechat/commit/072f7fb529e26b1e3f87b4d5606c1198a7177f86) Thanks [@thisnick](https://github.com/thisnick)! - Send `.opus`, `.oga`, `.caf` and `.amr` audio as voice notes. OpenClaw text-to-speech replies, which are written as `.opus`, no longer fail with "Voice sending requires an explicit audio attachment", and a remote file served with a generic content type is classified by its name. The daemon now also converts CAF and AMR sources. An unsupported local voice source is now rejected before OpenClaw records the send as dispatched.
+
 ## 2.2.0
 
 ### Patch Changes
