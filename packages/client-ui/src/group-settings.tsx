@@ -127,16 +127,21 @@ export function GroupSettings({
   connection,
   account,
   groupId,
+  title,
 }: {
   connection: Connection;
   account: string;
   groupId: string;
+  title: string;
 }) {
   const session = connection.session;
   const state = useSyncExternalStore(session.subscribe, session.snapshot);
   const model = connection.groupCreation(account, groupId);
   const operation = useSyncExternalStore(model.subscribe, model.snapshot);
   const [group, setGroup] = useState<NativeGroup | null>(null);
+  const sharedName = group?.name === undefined
+    ? (group?.displayName === groupId ? null : group?.displayName)
+    : group.name;
   const [members, setMembers] = useState<NativeGroupMember[]>([]);
   const [error, setError] = useState("");
   const [refreshing, setRefreshing] = useState(false);
@@ -276,7 +281,7 @@ export function GroupSettings({
     setSelected([]);
     setDraft(
       action === "rename"
-        ? group?.name || group?.displayName || ""
+        ? sharedName || ""
         : action === "my_name"
         ? group?.myDisplayName || ""
         : "",
@@ -349,7 +354,7 @@ export function GroupSettings({
           <span>
             Group name
             <strong>
-              {group?.name || group?.displayName || "Unnamed group"}
+              {sharedName || "Unnamed group"}
             </strong>
           </span>
           <button
@@ -591,7 +596,7 @@ export function GroupSettings({
                 )}
                 {mode === "leave" && (
                   <p>
-                    Leave <strong>{group?.displayName || groupId}</strong>?
+                    Leave <strong>{title}</strong>?
                     You’ll stop receiving new messages. Cached history will
                     remain on this agent-wechat hub.
                   </p>
@@ -607,7 +612,7 @@ export function GroupSettings({
                     {group?.muted === true
                       ? "Turn notifications on"
                       : "Mute notifications"}{" "}
-                    for <strong>{group?.displayName || groupId}</strong>?
+                    for <strong>{title}</strong>?
                   </p>
                 )}
                 <div className="group-edit-footer">

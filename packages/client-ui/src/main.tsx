@@ -46,7 +46,7 @@ import { AttachmentPicker, AttachmentTray } from "./attachment-picker.tsx";
 import { sendAttachmentBatch } from "./attachment-drafts.ts";
 import { ComposerHelp } from "./composer-help.tsx";
 import { ConversationAvatar, HubAvatar } from "./avatars.tsx";
-import { orderThreads } from "./thread-preview.ts";
+import { conversationName, orderThreads } from "./thread-preview.ts";
 import {
   messagePresentation,
   recallText,
@@ -978,10 +978,15 @@ function Chats({
     setFind(false);
   }, [state.account, state.selected]);
   const account = state.accounts.find((a) => a.id === state.account);
-  const name = (id: string) =>
-    state.contacts.find((c) => c.id === id)?.displayName ||
-    state.threads.find((t) => t.id === id)?.displayName ||
-    (id === "filehelper" ? "File Transfer" : id);
+  const name = (id: string) => {
+    const thread = state.threads.find((item) => item.id === id);
+    return conversationName(
+      id,
+      state.contacts.find((item) => item.id === id)?.displayName || thread?.displayName,
+      thread?.avatarMembers,
+      account?.ownUsername,
+    );
+  };
   const selectedName = state.selected ? name(state.selected) : "";
   const draftKey = `${state.account}:${state.selected}`,
     draft = drafts[draftKey] ?? "";
@@ -1187,7 +1192,8 @@ function Chats({
   }
   const threads = orderThreads(useThreadPinPreview(connection, state.account!, state.threads)).filter(
     (t) =>
-      name(t.id).toLowerCase().includes(query.toLowerCase()) &&
+      (name(t.id).toLowerCase().includes(query.toLowerCase()) ||
+        (t.id.endsWith("@chatroom") && t.id.toLowerCase().includes(query.toLowerCase()))) &&
       (filter !== "unread" || !!t.unreadCount) &&
       (filter !== "groups" || t.kind === "group"),
   );
@@ -2306,6 +2312,7 @@ function Details({
           connection={connection}
           account={state.account}
           groupId={threadId}
+          title={name}
         />
       )}
     </aside>

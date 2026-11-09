@@ -1,10 +1,27 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  conversationName,
   messageSummary,
   threadPreview,
   orderThreads,
 } from "../src/thread-preview.ts";
+
+test("unnamed group titles use up to three known members besides the signed-in user", () => {
+  const id = "12345678@chatroom";
+  const members = [
+    { id: "self", displayName: "Alex" },
+    { id: "unknown", displayName: "unknown" },
+    { id: "a", displayName: "Alice" },
+    { id: "b", displayName: "Bob" },
+    { id: "c", displayName: "Carol" },
+    { id: "d", displayName: "Daniel" },
+  ];
+  assert.equal(conversationName(id, id, members, "self"), "Group chat · Alice, Bob, Carol");
+  assert.equal(conversationName(id, "Book club", members, "self"), "Book club");
+  assert.equal(conversationName(id, null, members.slice(0, 2), "self"), "Group chat · …5678");
+  assert.equal(conversationName("filehelper", null), "File Transfer");
+});
 
 test("thread previews distinguish incoming, own, group and system messages", () => {
   const message = {
