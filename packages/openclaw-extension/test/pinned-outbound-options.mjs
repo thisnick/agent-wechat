@@ -10,7 +10,7 @@ assert.equal(process.env.HOME, join(root, 'home')); assert.equal(process.env.OPE
 let networkCalls = 0;
 globalThis.fetch = async () => { networkCalls++; throw Error('Network forbidden in synthetic option check'); };
 const pkg = await realpath(join(extension, 'node_modules/openclaw'));
-assert.equal(JSON.parse(await readFile(join(pkg, 'package.json'), 'utf8')).version, '2026.10.9');
+assert.equal(JSON.parse(await readFile(join(pkg, 'package.json'), 'utf8')).version, '2026.11.2');
 const files = await readdir(join(pkg, 'dist'));
 async function runtime(prefix, functionName) {
   for (const file of files.filter(file => file.startsWith(prefix) && file.endsWith('.mjs'))) {
@@ -26,7 +26,11 @@ const { createChannelMessageAdapterFromOutbound } = await import(pathToFileURL(j
 const createRegistry = await runtime('registry-empty-', 'createEmptyPluginRegistry');
 const runMessageAction = await runtime('message-action-runner-', 'runMessageAction');
 const setActiveRegistry = await runtime('runtime-', 'setActivePluginRegistry');
-const resolveSchema = await runtime('message-action-discovery-', 'resolveChannelMessageToolSchemaProperties');
+// The pinned host resolves message-tool schema contributions as discovery steps
+// driven by its synchronous runner; compose them the same way the host does.
+const resolveSchemaSteps = await runtime('message-action-discovery-', 'resolveChannelMessageToolSchemaPropertiesSteps');
+const runDiscovery = await runtime('message-action-discovery-', 'runMessageActionDiscovery');
+const resolveSchema = params => runDiscovery(resolveSchemaSteps(params));
 const createTools = await runtime('openclaw-tools-', 'createOpenClawTools');
 const calls = [], handoffs = []; let preparations = 0;
 const handlers = createWeChatMediaHandlers(async (...args) => {
@@ -140,5 +144,5 @@ for (const forceCoreDelivery of [false, true]) {
   assert.equal(calls.length, before);
 }
 assert.equal(networkCalls, 0);
-await writeFile(join(root, 'result.json'), JSON.stringify({ runtime: '2026.10.9', checks, mentionChecks, messageToolListed: true,
+await writeFile(join(root, 'result.json'), JSON.stringify({ runtime: '2026.11.2', checks, mentionChecks, messageToolListed: true,
   replyChecks, schemaIncludesReplies: true, schemaIncludesQuality: true, schemaIncludesMentions: true, queuedConflictRejected: true, queuedMentionsRejected: true, networkCalls, providerSends: 0 }) + '\n', { mode: 0o600 });

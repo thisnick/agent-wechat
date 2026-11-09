@@ -89,7 +89,7 @@ function createLookupTools(context: OpenClawPluginToolContext, dependencies: Dep
   type Action = "history" | "search" | "message" | "media" | "threads";
   const tool = (name: string, action: Action, description: string, properties: Record<string, unknown>, required: string[] = []): ChannelAgentTool => ({
     name, label: name.replaceAll("_", " "), description,
-    // The pinned host's tool_call wrapper JSON-serializes image blocks. Its
+    // The pinned host's dispatch_action wrapper JSON-serializes image blocks. Its
     // public direct-only surface preserves actual image content for vision.
     ...(action === "media" ? { catalogMode: "direct-only" as const } : {}),
     parameters: { type: "object", additionalProperties: false, properties, required } as ChannelAgentTool["parameters"],
