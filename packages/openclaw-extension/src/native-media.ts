@@ -326,6 +326,13 @@ export function validateNativeMediaSendOptions(options: NativeMediaSendOptions, 
   if (options.videoQuality != null && !["normal", "original"].includes(options.videoQuality)) throw new Error("Invalid WeChat video quality");
   if (options.forceDocument && (audioAsVoice || options.videoQuality != null)) throw new Error("Document sending cannot also request voice or video quality");
 }
+// Names only choose the send kind; the daemon still validates the actual bytes.
+const nameMediaTypes = new Map([[".png", "image/png"], [".jpg", "image/jpeg"], [".jpeg", "image/jpeg"], [".gif", "image/gif"], [".webp", "image/webp"], [".mp4", "video/mp4"],
+  [".wav", "audio/wav"], [".mp3", "audio/mp3"], [".ogg", "audio/ogg"], [".oga", "audio/ogg"], [".opus", "audio/ogg"], [".m4a", "audio/m4a"], [".flac", "audio/flac"],
+  [".aac", "audio/aac"], [".caf", "audio/x-caf"], [".amr", "audio/amr"]]);
+function mediaTypeForName(filename: string): string {
+  return nameMediaTypes.get(extname(filename).toLowerCase()) ?? "application/octet-stream";
+}
 function outboundMediaKind(mime: string, audioAsVoice: boolean, options: NativeMediaSendOptions): MediaSendRequest["kind"] {
   if (options.forceDocument) return "file";
   if (audioAsVoice && !mime.startsWith("audio/")) throw new Error("Voice sending requires an explicit audio attachment");
@@ -333,20 +340,29 @@ function outboundMediaKind(mime: string, audioAsVoice: boolean, options: NativeM
   if (options.videoQuality != null && selected !== "video") throw new Error("Video quality requires a video attachment");
   return selected;
 }
+function localOutboundSource(mediaUrl: string, audioAsVoice: boolean, options: NativeMediaSendOptions) {
+  const path = mediaUrl.startsWith("file:") ? new URL(mediaUrl) : mediaUrl, filename = basename(path instanceof URL ? path.pathname : path), mime = mediaTypeForName(filename);
+  return { path, filename, mime, kind: outboundMediaKind(mime, audioAsVoice, options) };
+}
 function outboundSourceLimit(account: ResolvedWeChatAccount, selectedKind: MediaSendRequest["kind"]): number {
   return Math.min(account.mediaMaxMb * 1024 * 1024, selectedKind === "file" ? NATIVE_MAX_SOURCE_BYTES : selectedKind === "video" ? NATIVE_MAX_VIDEO_SOURCE_BYTES : NATIVE_MAX_ORDINARY_SOURCE_BYTES);
 }
 export async function sendNativeAttachment(client: NativeWeChatClient, account: ResolvedWeChatAccount, threadId: string, mediaUrl: string, audioAsVoice = false, key: string = randomUUID(), beforeSend?: () => Promise<void>, options: NativeMediaSendOptions = {}): Promise<NativeOutboundDelivery> {
   validateNativeMediaSendOptions(options, audioAsVoice);
+  // Classify local files before the dispatch mark, so an unsupported pairing fails as not sent.
+  const local = /^https?:/.test(mediaUrl) ? undefined : localOutboundSource(mediaUrl, audioAsVoice, options);
   await beforeSend?.();
   let filename: string, mime: string, selectedKind: MediaSendRequest["kind"], sourceBytes: number, source: Awaited<ReturnType<NativeWeChatClient["upload"]>>;
   let temporary: string | undefined;
   const accountId = account.native!.accountId;
   try {
     let blob: Blob;
-    if (/^https?:/.test(mediaUrl)) {
+    if (!local) {
       const response = await fetch(mediaUrl, { redirect: "error", signal: AbortSignal.timeout(60 * 60000) }); if (!response.ok) throw new Error(`Native outbound source unavailable (${response.status})`);
-      filename = basename(new URL(mediaUrl).pathname) || "attachment"; mime = response.headers.get("content-type")?.split(";")[0].trim().toLowerCase() ?? "application/octet-stream";
+      filename = basename(new URL(mediaUrl).pathname) || "attachment";
+      // Servers often label audio such as .opus generically; fall back to the name, as for local files.
+      const declared = response.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
+      mime = declared && declared !== "application/octet-stream" ? declared : mediaTypeForName(filename);
       try { selectedKind = outboundMediaKind(mime, audioAsVoice, options); } catch (error) { await response.body?.cancel(); throw error; }
       const max = outboundSourceLimit(account, selectedKind);
       const length = response.headers.get("content-length"); if (length && (!/^\d+$/.test(length) || Number(length) > max)) { await response.body?.cancel(); throw new Error("Native outbound source exceeds configured size"); }
@@ -359,12 +375,10 @@ export async function sendNativeAttachment(client: NativeWeChatClient, account: 
       } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); await file?.close(); }
       blob = await openAsBlob(path, { type: mime });
     } else {
-      const path = mediaUrl.startsWith("file:") ? new URL(mediaUrl) : mediaUrl;
-      filename = basename(path instanceof URL ? path.pathname : path); const extension = extname(filename).toLowerCase(); mime = [".png", ".jpg", ".jpeg", ".gif", ".webp"].includes(extension) ? `image/${extension === ".jpg" ? "jpeg" : extension.slice(1)}` : extension === ".mp4" ? "video/mp4" : [".wav", ".mp3", ".ogg", ".m4a", ".flac", ".aac"].includes(extension) ? `audio/${extension.slice(1)}` : "application/octet-stream";
-      selectedKind = outboundMediaKind(mime, audioAsVoice, options); const max = outboundSourceLimit(account, selectedKind), file = await open(path, "r");
+      ({ filename, mime, kind: selectedKind } = local); const max = outboundSourceLimit(account, selectedKind), file = await open(local.path, "r");
       let size: number;
       try { const stat = await file.stat(); if (!stat.isFile() || !stat.size || stat.size > max) throw new Error("Native outbound source must be a bounded regular file"); size = stat.size; } finally { await file.close(); }
-      blob = await openAsBlob(path, { type: mime });
+      blob = await openAsBlob(local.path, { type: mime });
       if (blob.size !== size) throw new Error("Native outbound source changed before staging");
     }
     sourceBytes = blob.size;
