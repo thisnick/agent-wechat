@@ -4,8 +4,6 @@ name: Interfaces
 # See interfaces/README.md. The approval check lives in interfaces-approval.yml.
 on:
   pull_request:
-  push:
-    branches: [main]
 
 permissions:
   contents: read
