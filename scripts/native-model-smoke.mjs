@@ -76,7 +76,9 @@ async function exercise(name, conversationAccess, readPolicy, dmScope = 'main') 
       if (child.exitCode !== null || child.signalCode) throw Error(`Pinned model Gateway exited: ${log}`);
       try { result = JSON.parse(await readFile(join(temporary, 'result.json'), 'utf8')); break; } catch { await sleep(100); }
     }
-    assert.ok(result, `Model fixture deadline: ${log}`); assert.equal(result.error, undefined, `${result.error}; ${log}`);
+    // On failure, also show the recorded hooks and the Gateway's own log tail.
+    const diagnostics = async () => `\n--- hooks ---\n${(await readFile(join(temporary, 'hooks.jsonl'), 'utf8').catch(() => '')).split('\n').filter(Boolean).map(line => { const { kind, event } = JSON.parse(line); return `${kind} run=${event?.runId ?? ''}`; }).join('\n')}\n--- gateway.log ---\n${(await readFile(join(temporary, 'gateway.log'), 'utf8').catch(() => '')).slice(-32768)}`;
+    if (!result || result.error !== undefined) assert.fail(`${result ? result.error : 'Model fixture deadline'}; ${log}${await diagnostics()}`);
     const items = new Map(result.items.map(item => [item.id, item]));
     const hooks = (await readFile(join(temporary, 'hooks.jsonl'), 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line));
     assert.ok(requests.some(request => JSON.stringify(request.messages).includes('wechat-native:a:single') && JSON.stringify(request.messages).includes('native-model-single-exact-input')));
