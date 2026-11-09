@@ -17,7 +17,7 @@ test("pinned host tools list exposes message mentions and required queues retain
   });
   const result = JSON.parse(await readFile(join(root, "result.json"), "utf8"));
   assert.deepEqual(result.checks, ["prepared-normal", "prepared-original", "forced-core-original", "document-alias", "queued-original", "queued-document-alias"]);
-  assert.equal(result.runtime, "2026.10.9"); assert.equal(result.schemaIncludesQuality, true); assert.equal(result.queuedConflictRejected, true);
+  assert.equal(result.runtime, "2026.11.2"); assert.equal(result.schemaIncludesQuality, true); assert.equal(result.queuedConflictRejected, true);
   assert.equal(result.messageToolListed, true); assert.equal(result.schemaIncludesMentions, true); assert.equal(result.queuedMentionsRejected, true);
   assert.deepEqual(result.mentionChecks, ["prepared-members", "prepared-all", "forced-core-members", "queued-members", "queued-all",
     "prepared-quoted-members", "forced-core-quoted-all", "queued-quoted-members"]);

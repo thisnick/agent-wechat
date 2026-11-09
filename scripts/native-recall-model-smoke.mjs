@@ -14,7 +14,7 @@ import { dirname, join, resolve } from 'node:path';
 const root = resolve(dirname(new URL(import.meta.url).pathname), '..');
 const { build } = createRequire(join(root, 'packages/openclaw-extension/package.json'))('esbuild');
 const sdk = await realpath(join(root, 'packages/openclaw-extension/node_modules/openclaw'));
-assert.equal(JSON.parse(await readFile(join(sdk, 'package.json'), 'utf8')).version, '2026.10.9');
+assert.equal(JSON.parse(await readFile(join(sdk, 'package.json'), 'utf8')).version, '2026.11.2');
 const temporary = await mkdtemp(join(tmpdir(), 'native-recall-model-'));
 const token = 'synthetic-native-token-'.repeat(3), serverId = '18446744073709551614';
 const messages = new Map(), journal = [], streams = new Set(), posts = [], sends = [], requests = [], acknowledgements = [];
@@ -44,11 +44,11 @@ const operation = state => ({ id: 'op_recall', accountId: 'a', kind: 'message_re
   ? { messageId: 'msg_own', threadId: 'wxid_fixture', serverId, status: 'recalled', remoteOutcome: 'accepted', serviceCode: 0, retryable: false, profileProjection: 'complete' }
   : null, createdAt: '2026-10-21T12:00:00Z', updatedAt: '2026-10-21T12:00:01Z' });
 const toolSteps = [
-  ['tool_call', { id: 'message', args: { action: 'send', channel: 'agent-wechat', target: 'wxid_fixture', message: 'Synthetic agent-created recall target' } }],
+  ['dispatch_action', { id: 'message', args: { action: 'send', channel: 'agent-wechat', target: 'wxid_fixture', message: 'Synthetic agent-created recall target' } }],
   ['tool_search', { query: 'wechat_recall recall own sent WeChat message', limit: 4 }],
-  ['tool_call', { id: 'wechat_recall', args: { messageId: 'msg_own', serverId } }],
-  ['tool_call', { id: 'wechat_recall', args: { messageId: 'msg_own', serverId } }],
-  ['tool_call', { id: 'wechat_recall', args: { messageId: 'msg_foreign', serverId: '99' } }],
+  ['dispatch_action', { id: 'wechat_recall', args: { messageId: 'msg_own', serverId } }],
+  ['dispatch_action', { id: 'wechat_recall', args: { messageId: 'msg_own', serverId } }],
+  ['dispatch_action', { id: 'wechat_recall', args: { messageId: 'msg_foreign', serverId: '99' } }],
 ];
 const image = await readFile(join(root, 'packages/openclaw-extension/test/fixtures/native-model.png'));
 const imageAsset = { id: 'asset_recalled', accountId: 'a', messageId: 'media-race', kind: 'image', state: 'available', variant: 'original', actualVariant: 'original',
@@ -199,7 +199,7 @@ try {
   assert.equal((await item(reused.id)).message.body, reused.body);
   const persisted = await readFile(custodyPath, 'utf8');
   assert.ok(!persisted.includes('runtime-recall-blocked-original')); assert.ok(!persisted.includes('Late original must not be delivered'));
-  console.log(JSON.stringify({ gatewayVersion: '2026.10.9', actualRegisteredRecallTool: true, actualSendReceiptReachedProvider: true, exactServerIdPreserved: true, sameTargetStableKey: true,
+  console.log(JSON.stringify({ gatewayVersion: '2026.11.2', actualRegisteredRecallTool: true, actualSendReceiptReachedProvider: true, exactServerIdPreserved: true, sameTargetStableKey: true,
     recallPostAttempts: posts.length, nativeRecallAttempts: nativeRecalls, foreignThreadRejected: true, sseRecallWhileModelBlocked: true,
     lateReplySuppressed: true, freshSourceOccupantDispatchedOnce: true, sseRecallWhileMediaBlocked: true, lateMediaSuppressed: true, outOfOrderRecallSuppressed: true, recycledIdRecallAckPreservesCurrent: true }));
 } finally {
