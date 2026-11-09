@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { render } from "../scripts/scene-listing.mjs";
 import { routeTable } from "../src/routes.ts";
-import { scenes } from "../scenes/scenes.mjs";
+import { scenes, viewports } from "../scenes/scenes.mjs";
 
 test("the committed scene listing matches the scenes", async () => {
   const { problems, files } = await render();
@@ -26,7 +26,9 @@ test("scene rows are sorted, unique and described", async () => {
   for (const row of rows) {
     const [item, attributes, description] = row.split(" | ");
     assert.match(item, /^scene [a-z0-9-]+$/);
-    assert.match(attributes, /^route \/\S*, viewports (desktop|narrow|desktop\+narrow)$/);
+    const match = attributes.match(/^route \/\S*, viewports ([a-z+]+)$/);
+    assert.ok(match, attributes);
+    assert.ok(match[1].split("+").every((size) => size in viewports), attributes);
     assert.ok(description && !description.startsWith("MISSING"), row);
   }
 });
