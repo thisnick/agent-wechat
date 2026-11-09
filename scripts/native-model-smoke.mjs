@@ -92,13 +92,20 @@ async function exercise(name, conversationAccess, readPolicy, dmScope = 'main') 
       }
       assert.ok(!requests.some(request => JSON.stringify(request.messages.at(-1)).includes('wechat-native:a:command')),
         'The built-in command must gain a read without invoking a model');
-    } else if (conversationAccess) {
+    } else {
+      // The pinned host calls onPreparedAgentRunStart once the run's transcript
+      // is prepared. That confirms the handoff with or without the operator's
+      // conversation-hook grant; the grant only enables the hook bridge.
       const single = items.get('single'); assert.equal(single.runId, single.manifest.runId); assert.equal(single.handoffUnconfirmed, false);
       if (readPolicy === 'never') assert.equal(reads.length, 0); else assert.ok(reads.flat().includes('single'));
       if (dmScope === 'per-channel-peer') assert.equal(single.manifest.sessionKey, 'agent:main:agent-wechat:direct:u1');
-      const input = hooks.find(hook => hook.kind === 'llm_input' && hook.event.runId === single.runId); assert.ok(input); assert.equal(input.ctx.channel, 'agent-wechat'); assert.equal(input.ctx.sessionKey, single.manifest.sessionKey);
-      assert.ok(hooks.some(hook => hook.kind === 'model_call_started' && hook.event.runId === single.runId && hook.event.sessionId === input.event.sessionId));
-    } else { assert.equal(reads.length, 0); assert.equal(items.get('single').handoffUnconfirmed, true); }
+      // The host withholds llm_input without the grant; the provider check
+      // below covers the exact input either way.
+      if (conversationAccess) {
+        const input = hooks.find(hook => hook.kind === 'llm_input' && hook.event.runId === single.runId); assert.ok(input); assert.equal(input.ctx.channel, 'agent-wechat'); assert.equal(input.ctx.sessionKey, single.manifest.sessionKey);
+        assert.ok(hooks.some(hook => hook.kind === 'model_call_started' && hook.event.runId === single.runId && hook.event.sessionId === input.event.sessionId));
+      }
+    }
     if (!inbound) { assert.equal(items.get('command').readPending, undefined); assert.ok(!reads.flat().includes('command')); }
     // The released dispatch path can serialize concurrent inputs even in
     // collect mode. Check what actually reached it rather than assuming merge.
@@ -106,16 +113,18 @@ async function exercise(name, conversationAccess, readPolicy, dmScope = 'main') 
     for (const [id, body] of [['blocking', 'native-model-blocking-input'], ['queued-a', 'native-model-queued-alpha'], ['queued-b', 'native-model-queued-beta']]) {
       const item = items.get(id);
       const input = hooks.find(hook => hook.kind === 'llm_input' && hook.event.runId === item.manifest.runId);
-      if (!inbound && conversationAccess && readPolicy !== 'never' && input?.event.prompt.includes(body) && !merged) {
+      if (!inbound && readPolicy !== 'never' && input?.event.prompt.includes(body) && !merged) {
         assert.equal(item.runId, item.manifest.runId); assert.equal(item.handoffUnconfirmed, false); assert.ok(reads.flat().includes(id));
       }
       if (!inbound && merged && id.startsWith('queued-')) assert.ok(!reads.flat().includes(id));
     }
     const inputBodies = new Map([['single', 'native-model-single-exact-input'], ['blocking', 'native-model-blocking-input'], ['queued-a', 'native-model-queued-alpha'], ['queued-b', 'native-model-queued-beta']]);
     for (const id of inbound ? [] : reads.flat()) {
-      const item = items.get(id); const body = inputBodies.get(id); assert.ok(item && body);
-      const input = hooks.find(hook => hook.kind === 'llm_input' && hook.event.runId === item.runId); assert.ok(input);
-      assert.ok(hooks.some(hook => hook.kind === 'model_call_started' && hook.event.runId === item.runId && hook.event.sessionId === input.event.sessionId));
+      const item = items.get(id); const body = inputBodies.get(id); assert.ok(item && body); assert.equal(item.runId, item.manifest.runId);
+      if (conversationAccess) {
+        const input = hooks.find(hook => hook.kind === 'llm_input' && hook.event.runId === item.runId); assert.ok(input);
+        assert.ok(hooks.some(hook => hook.kind === 'model_call_started' && hook.event.runId === item.runId && hook.event.sessionId === input.event.sessionId));
+      }
       assert.ok(requests.some(request => {
         const users = request.messages.filter(message => message.role === 'user');
         return JSON.stringify(users.at(-1)).includes(`wechat-native:a:${id}`) && JSON.stringify(users.at(-2)).includes(body);

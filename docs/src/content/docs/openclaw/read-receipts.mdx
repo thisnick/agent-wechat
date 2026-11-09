@@ -11,7 +11,7 @@ Set `native.readPolicy` to choose when a chat is marked read:
 | --- | --- |
 | `on_inbound` (default) | After OpenClaw has handled the message: it passed the [access checks](/openclaw/access/) and the agent ran, or a built-in command answered it |
 | `never` | Never. Chats stay unread on your phone. |
-| `on_model_dispatch` | Only after confirming the model actually received the message. Stricter, and needs extra setup (below). |
+| `on_model_dispatch` | Only after OpenClaw has started a model run for the message. Stricter than `on_inbound` (below). |
 
 Marking read covers the **whole chat**, up to the newest message. WeChat is told, so your phone and other devices can clear the unread badge too.
 
@@ -23,7 +23,14 @@ Marking read covers the **whole chat**, up to the newest message. WeChat is told
 
 ## Strict mode
 
-`on_model_dispatch` waits for proof that the exact message, and any images, reached the model. It needs this permission:
+`on_model_dispatch` waits until OpenClaw reports that it has prepared a model run containing the message. Built-in commands, ignored messages and media that isn't ready yet stay unread, and the channel status shows `handoffUnconfirmed` for them.
+
+| OpenClaw version | What confirms the message | Needs `allowConversationAccess` |
+| --- | --- | --- |
+| 2026.11.2 and later | OpenClaw's run-start notice for that message | No |
+| Earlier | The model request itself, with exact image bytes checked | Yes |
+
+On older versions, grant the permission like this:
 
 ```json
 "plugins": {
@@ -33,12 +40,12 @@ Marking read covers the **whole chat**, up to the newest message. WeChat is told
 }
 ```
 
-Without it, messages stay unread and the channel status shows `handoffUnconfirmed`. Some providers' history formats prevent confirmation even when the agent replied. For a normal bot, use `on_inbound`.
+For a normal bot, use `on_inbound`.
 
 <Aside title="Good to know">
 - **Ignored messages stay unread**, along with messages whose media is still downloading or whose handling failed.
 - **Earlier messages are included.** Marking a chat read also clears older unread messages the agent never saw.
-- **Read doesn't mean understood.** A chat can be marked read after the agent handled a file it couldn't open.
+- **Read doesn't mean understood.** A chat can be marked read after the agent handled a file it couldn't open. On OpenClaw 2026.11.2 and later, an image is also confirmed when the model only accepts text and never sees it.
 - **No double notifications.** If WeChat's answer to a read notice is lost, it's marked `needs_review` and not resent. Pending reads survive a Gateway restart.
 - The token needs the `read-state` scope unless `readPolicy` is `never`.
 </Aside>
