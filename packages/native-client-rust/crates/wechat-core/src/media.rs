@@ -3652,7 +3652,7 @@ fn audio_pcm(bytes: &[u8], cancelled: impl FnMut() -> Result<()>) -> Result<Vec<
     let raw = run_ffmpeg(
         bytes,
         "audio.pcm",
-        "wav,mp3,flac,ogg,aac,mov,matroska,webm",
+        "wav,mp3,flac,ogg,aac,mov,matroska,webm,caf,amr",
         &[
             "-vn", "-ac", "1", "-ar", "16000", "-f", "s16le", "-t", "301",
         ],
@@ -5934,6 +5934,54 @@ mod tests {
         let silk = wechat_protocol::silk::encode(&pcm).unwrap();
         let decoded = audio_pcm(&silk, || Ok(())).unwrap();
         assert_eq!(decoded.len(), 16000);
+    }
+    #[test]
+    fn voice_sources_include_opus_caf_and_amr() {
+        // Newer FFmpeg muxers cannot write Opus into CAF; ALAC still covers the container.
+        let encoded = |codec: &str, format: &str| {
+            let dir = wechat_platform::private_tempdir("wechat-voice-source-test-").unwrap();
+            let path = dir.path().join("source");
+            assert!(std::process::Command::new("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-nostdin",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:duration=1",
+                    "-ar",
+                    "48000",
+                    "-c:a",
+                    codec,
+                    "-f",
+                    format,
+                ])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success());
+            std::fs::read(path).unwrap()
+        };
+        // AMR storage format: magic, then fifty 20 ms speech frames of one mode.
+        let amr = |magic: &[u8], frame_header: u8, payload: usize| {
+            let mut file = magic.to_vec();
+            for _ in 0..50 {
+                file.push(frame_header);
+                file.resize(file.len() + payload, 0);
+            }
+            file
+        };
+        for (name, source) in [
+            ("ogg opus", encoded("libopus", "ogg")),
+            ("webm opus", encoded("libopus", "webm")),
+            ("caf alac", encoded("alac", "caf")),
+            ("amr-nb", amr(b"#!AMR\n", 0x3c, 31)),
+            ("amr-wb", amr(b"#!AMR-WB\n", 0x44, 60)),
+        ] {
+            let pcm = audio_pcm(&source, || Ok(())).unwrap_or_else(|e| panic!("{name}: {e:#}"));
+            assert!(pcm.len().abs_diff(16000) <= 800, "{name}: {}", pcm.len());
+        }
     }
 }
 

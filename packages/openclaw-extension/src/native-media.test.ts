@@ -171,6 +171,36 @@ test("remote ordinary files spool exact bytes for one upload and release the pri
   assert.equal((await sendNativeAttachment(client, account, "filehelper", "https://example.invalid/file.pdf", false, "remote-key")).messageId, "stored-file");
   assert.equal(uploads, 1); assert.equal(sends, 1); await assert.rejects(uploaded!.arrayBuffer());
 });
+function voiceClient(staged: string[], kinds: string[]): NativeWeChatClient {
+  return { upload: async (_a: string, _blob: Blob, filename: string, mime: string) => { staged.push(`${filename} ${mime}`); return { id: "upload" }; },
+    sendMedia: async (_a: string, input: { kind: string }) => { kinds.push(input.kind); return sendJob({ result: { messageIds: ["msg_voice"], chunks: [{ state: "accepted", serverMessageId: "18446744073709551614" }] } }); },
+    message: async () => ({ id: "msg_voice", accountId: "a", threadId: "filehelper", direction: "outgoing", serverId: "18446744073709551614" }) } as unknown as NativeWeChatClient;
+}
+test("voice sends accept Opus, CAF and AMR files and reject other names before dispatch", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "native-voice-names-")); t.after(() => rm(directory, { recursive: true, force: true }));
+  const staged: string[] = [], kinds: string[] = [];
+  for (const name of ["speech.opus", "note.OGA", "memo.caf", "note.amr"]) {
+    const path = join(directory, name); await writeFile(path, bytes);
+    assert.equal((await sendNativeAttachment(voiceClient(staged, kinds), account, "filehelper", path, true, `voice-${name}`)).messageId, "msg_voice");
+  }
+  assert.deepEqual(staged, ["speech.opus audio/ogg", "note.OGA audio/ogg", "memo.caf audio/x-caf", "note.amr audio/amr"]);
+  assert.deepEqual(kinds, ["voice", "voice", "voice", "voice"]);
+  const opus = join(directory, "speech.opus"), unknown = join(directory, "speech.bin"); await writeFile(unknown, bytes); let dispatched = 0;
+  assert.equal((await sendNativeAttachment(voiceClient(staged, kinds), account, "filehelper", opus, false, "ordinary-opus")).messageId, "msg_voice");
+  assert.equal(kinds.at(-1), "file", "Opus without voice stays an ordinary file");
+  await assert.rejects(sendNativeAttachment(voiceClient(staged, kinds), account, "filehelper", unknown, true, "voice-unknown", async () => { dispatched++; }), /explicit audio attachment/);
+  assert.equal(dispatched, 0, "An unsupported local voice source fails before the dispatch mark"); assert.equal(staged.length, 5);
+});
+test("remote voice uses the file name when the server labels audio generically", async t => {
+  let declared = "application/octet-stream";
+  t.mock.method(globalThis, "fetch", async () => new Response(bytes, { headers: { "content-type": declared, "content-length": String(bytes.length) } }));
+  const staged: string[] = [], kinds: string[] = [];
+  await sendNativeAttachment(voiceClient(staged, kinds), account, "filehelper", "https://example.invalid/tts/speech.opus", true, "remote-opus");
+  declared = "audio/opus"; await sendNativeAttachment(voiceClient(staged, kinds), account, "filehelper", "https://example.invalid/voice", true, "remote-declared");
+  declared = "application/octet-stream";
+  await assert.rejects(sendNativeAttachment(voiceClient(staged, kinds), account, "filehelper", "https://example.invalid/speech.bin", true, "remote-unknown"), /explicit audio attachment/);
+  assert.deepEqual(staged, ["speech.opus audio/ogg", "voice audio/opus"]); assert.deepEqual(kinds, ["voice", "voice"]);
+});
 test("large file polling allows a 36-minute transfer and a one-hour deadline never resubmits", async t => {
   const directory = await mkdtemp(join(tmpdir(), "native-large-file-wait-")); t.after(() => rm(directory, { recursive: true, force: true }));
   const path = join(directory, "synthetic.bin"); await writeFile(path, new Uint8Array(1)); await truncate(path, 26 * 1024 * 1024);
