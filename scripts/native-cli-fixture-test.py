@@ -241,6 +241,25 @@ with tempfile.TemporaryDirectory(prefix="native-cli-fixture-") as temporary:
         try:
             inspected=run("--local-profile","archive","profiles","inspect");assert inspected["keysState"]=="keys_missing" and inspected["databases"][0]["relativePath"]=="contact.db"
             assert run("profile","inspect")==inspected
+            run("config", "servers", "select", "fixture")
+            before = run("config", "servers", "list")
+            profiles_before = run("--local-profile", "archive", "profiles", "list")
+            run("config", "servers", "add", "spare", "--url", "http://127.0.0.1:1", "--token-file", str(token))
+            removed = run("config", "servers", "remove", "spare")
+            assert removed["state"] == "removed"
+            assert run("config", "servers", "list") == before
+            saved_config = config.read_bytes()
+            run("config", "servers", "remove", "missing", code=2)
+            assert config.read_bytes() == saved_config
+            selected = before["activeServer"]
+            assert selected is not None
+            removed = run("config", "servers", "remove", selected)
+            assert removed == {"server": selected, "state": "removed", "activeServer": None}
+            after = run("config", "servers", "list")
+            assert after["activeServer"] is None and selected not in after["items"]
+            profiles_after = run("--local-profile", "archive", "profiles", "list")
+            assert profiles_after["items"] == profiles_before["items"]
+            assert renamed.is_file() and not token.exists()
         finally:renamed.rename(token)
         print("Native CLI fixture passed: pre-request send/recall/login receipts, same-key lookup/conflict, exact recall IDs, recall uncertainty/lost-response recovery without automatic resubmission, queued acceptance/uncertain exits, best/strict cached quality, attached-login QR/SIGINT cancellation, official-file login discovery/explicit server paths, and token-free offline inspection. No WeChat request.")
     finally:server.shutdown();server.server_close()

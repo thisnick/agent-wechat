@@ -41,7 +41,8 @@ fn response(bytes: &[u8]) -> Result<LogoutReply> {
 impl NativeClient {
     /// Submit one authenticated logout without renewal, retry or login fallback.
     /// An error can follow submission and must be treated as an unknown outcome.
-    pub fn logout(&self, state: &mut AccountState) -> Result<LogoutReply> {
+    #[doc(hidden)]
+    pub(crate) fn logout_snapshot(&self, state: &mut AccountState) -> Result<LogoutReply> {
         let body = request(state)?;
         response(&self.authenticated_rpc(state, CGI, PATH, &body)?)
     }

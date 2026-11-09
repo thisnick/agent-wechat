@@ -4,8 +4,8 @@ description: Rust crate responsibilities, dependencies and client adapters.
 ---
 
 The Rust workspace separates WeChat transport, official-profile access, account
-orchestration and client adapters. Four libraries are published; the daemon,
-CLI and supporting runtime crates remain internal.
+orchestration and client adapters. Five libraries are published; the daemon,
+CLI and remaining runtime crates stay internal.
 
 ## Package dependencies
 
@@ -19,8 +19,9 @@ flowchart TD
   WX --> CFG["wechat-config: configuration"]
   WX --> CORE["wechat-core: account runtime"]
   API --> CORE
-  CORE --> CALLS["wechat-calls: media and Opus"]
-  CORE --> PROTOCOL["wechat-protocol: WeChat transport"]
+  CORE --> CALLS["wechat-calls: call admission, sessions and media"]
+  CALLS --> PROTOCOL
+  CORE --> PROTOCOL["wechat-protocol: account owner and transport"]
   CORE --> PROFILE["wechat-profile: official profile"]
   CORE --> STORE["wechat-store: operational records"]
   PROFILE --> MEDIA["wechat-media: message media"]
@@ -34,34 +35,46 @@ flowchart TD
   PROTOCOL --> PLATFORM
 ```
 
-Utility dependencies are omitted. The API uses `wechat-calls` for internal
-PCM envelopes; the CLI reuses its audio format types. Client sockets carry raw
-PCM samples and JSON metadata, while the daemon assembles and paces audio frames.
+Utility dependencies are omitted. Core owns the daemon's internal PCM envelope;
+the API and CLI reuse `wechat-calls` audio format types. Call sockets use JSON
+with base64 PCM, while the daemon assembles and paces audio frames.
 
 | Package | Responsibility | Published crate? |
 | --- | --- | --- |
 | `wechat-platform` | OS/file primitives | Yes |
 | `wechat-media` | Message image/media inspection | Yes |
 | `wechat-profile` | Supported official profile readers and writers | Yes |
-| `wechat-protocol` | WeChat requests, signaling and encrypted transport | Yes |
-| `wechat-calls` | PCM frames, pacing, queues and optional Opus codec | No |
+| `wechat-protocol` | Account-owning `NativeClient`, authenticated requests, signaling and encrypted transport | Yes |
+| `wechat-calls` | Per-account call admission, sessions, media workers, source tracking, PCM, pacing, mixing and Opus | Yes |
 | `wechat-audio` | Microphone/speaker adapter and resampling | No |
-| `wechat-core` | Account authorization, ownership, call state and workers | No |
+| `wechat-core` | Daemon permissions, profile integration, operation journals and call orchestration | No |
 | `wechat-api` | HTTP routes, authenticated control/media sockets and contracts | No |
 | `wechat-store` | Pending operations and recovery receipts | No |
 | `wechat-config` | CLI/daemon configuration files | No |
 | `wechat-simulator` | Synthetic backend and development fixtures | No |
 | `wx-native` | `wx` executable, daemon startup and CLI participation | No |
 
+`NativeClient` owns account state and the authenticated request lifecycle.
+Cloning a client shares that account rather than creating another mutable copy.
+Core uses the same client and keeps daemon permissions and operation journals.
+
+Call admission in `wechat-calls` decides which controller owns a call attempt
+and whether a request is new, duplicated or stale. Core uses that same state
+machine. An unresolved submission keeps the account's call slot reserved until
+cleanup; a timeout alone does not authorize another invitation.
+
 Canonical chat state stays in the official profile. Operational call records
-do not create another history database. The four public crates remain unchanged.
+do not create another history database. Call sessions consume the protocol
+crate's codecs and account-owned transport.
 [Reusable Rust libraries](../../reference/rust-libraries/) describes their standalone APIs.
 
 ## Media adapters
 
-Outgoing client PCM passes through the API, Core's call worker, `wechat-calls`
-encoding and `wechat-protocol` transport. Incoming media follows the reverse
-path. Negotiation belongs in the worker/transport layers, not the device adapter.
+Outgoing client PCM passes through the API and Core adapter into `wechat-calls`
+media workers. Those workers handle pacing and Opus with `wechat-protocol`
+packet codecs. Incoming media follows the reverse path. Core supplies daemon
+permissions, interruption checks and event delivery; the calls crate has no
+Core, HTTP, persistence or device dependency.
 
 | Dependency | Where and why |
 | --- | --- |

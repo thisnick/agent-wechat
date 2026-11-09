@@ -668,6 +668,22 @@ impl Store {
     pub fn pending_sync(&self, account: &str) -> Result<Vec<(String, Vec<u8>)>> {
         self.pending_sync_stream(account, "message")
     }
+    /// Read an unfinished batch's stream and sealed payload without enabling a retry.
+    pub fn retained_sync_batch(
+        &self,
+        account: &str,
+        id: &str,
+    ) -> Result<Option<(String, Vec<u8>)>> {
+        self.control(account, |db| {
+            Ok(db
+                .query_row(
+                    "SELECT stream,payload FROM apply_intents WHERE id=?1 AND state!='projected'",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?)
+        })
+    }
     pub fn pending_contact_sync(&self, account: &str) -> Result<Vec<(String, Vec<u8>)>> {
         self.pending_sync_stream(account, "contact")
     }
@@ -1057,6 +1073,46 @@ mod tests {
         assert!(store.begin_read("test", "thread", "0", &intent).is_err());
         assert_eq!(store.read_version("test", "thread").unwrap(), "1");
     }
+    #[test]
+    fn retained_sync_lookup_is_scoped_and_never_enables_blocked_work() {
+        let (_t, store) = setup();
+        store.create_account("other").unwrap();
+        store
+            .stage_sync("test", "message", b"sealed-message", b"cursor")
+            .unwrap();
+        store
+            .stage_contact_sync("test", "contact", b"sealed-contact", b"cursor")
+            .unwrap();
+        store.block_sync("test", "message").unwrap();
+        store.block_sync("test", "contact").unwrap();
+        assert_eq!(
+            store.retained_sync_batch("test", "message").unwrap(),
+            Some(("message".into(), b"sealed-message".to_vec()))
+        );
+        assert_eq!(
+            store.retained_sync_batch("test", "contact").unwrap(),
+            Some(("contact".into(), b"sealed-contact".to_vec()))
+        );
+        assert!(store
+            .retained_sync_batch("other", "message")
+            .unwrap()
+            .is_none());
+        assert!(store
+            .retained_sync_batch("test", "missing")
+            .unwrap()
+            .is_none());
+        assert!(store.pending_sync("test").unwrap().is_empty());
+        assert!(store.pending_contact_sync("test").unwrap().is_empty());
+        store.finish_sync("test", "message").unwrap();
+        assert!(store
+            .retained_sync_batch("test", "message")
+            .unwrap()
+            .is_none());
+        assert_eq!(store.pending_sync_count("test").unwrap(), 1);
+        store.retry_blocked("test").unwrap();
+        assert_eq!(store.pending_contact_sync("test").unwrap().len(), 1);
+    }
+
     #[test]
     fn blocked_batches_are_retained_without_starving_later_work() {
         let (_t, store) = setup();

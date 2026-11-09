@@ -17,7 +17,6 @@ use wechat_protocol::{
         PreparedUpload, PreparedVideoUpload, StickerDescriptor, UploadedImage, UploadedMedia,
         UploadedVideo,
     },
-    NativeOptions,
 };
 use wechat_store::{MediaAssetRecord, MediaJobRecord, OwnedMediaSource};
 #[path = "media_auto.rs"]
@@ -1433,7 +1432,9 @@ impl Core {
                 } else {
                     None
                 };
-                let cdn = self.upstream.media_transport_route(&mut state, route)?;
+                let cdn = self
+                    .account_upstream(account)?
+                    .media_transport_route(&mut state, route)?;
                 self.save_state(account, &state)?;
                 let unlocked = permit.is_some();
                 let fence = unlocked
@@ -1549,7 +1550,7 @@ impl Core {
                             .transpose()?;
                         let before = serde_json::to_vec(&state)?;
                         let reply = cdn_transfer(permit.as_deref_mut(), self, account, || {
-                            self.upstream.download_voice(
+                            self.account_upstream(account)?.download_voice(
                                 &mut state,
                                 server_id,
                                 length,
@@ -1567,8 +1568,9 @@ impl Core {
                         let chunk = match reply {
                             Ok(chunk) => chunk,
                             Err(error) if !renewed && is_media_auth_rejected(&error) => {
-                                state =
-                                    self.upstream.renew_session(&state, "agent-wechat media")?;
+                                state = self
+                                    .account_upstream(account)?
+                                    .renew_session(&state, "agent-wechat media")?;
                                 self.save_state(account, &state)?;
                                 renewed = true;
                                 continue;
@@ -1857,7 +1859,28 @@ impl Core {
 // Only a whole numeric suffix on these fixed library messages may cross the
 // protected boundary. General error strings can contain URLs or account data.
 fn cdn_download_failure(error: &anyhow::Error) -> Option<serde_json::Value> {
-    use wechat_protocol::media::LargeFileDownloadError;
+    use wechat_protocol::media::{LargeFileDownloadError, SourceEvidence};
+    if let Some(mismatch) = video_representation_mismatch(error) {
+        let evidence = |value: Option<SourceEvidence>| {
+            value.map(|value| {
+                json!({
+                    "matchesAdvertised": value.matches_advertised,
+                    "matchesDelivered": value.matches_delivered,
+                })
+            })
+        };
+        return Some(json!({
+            "kind": "video_representation_mismatch",
+            "advertisedBytes": mismatch.advertised_bytes,
+            "deliveredBytes": mismatch.delivered_bytes,
+            "advertisedDigestMatches": mismatch.advertised_digest_matches,
+            "substituteftype": mismatch.substituted_filetype,
+            "istrans": mismatch.istrans,
+            "videoformat": mismatch.videoformat,
+            "rawfilesize": evidence(mismatch.rawfilesize),
+            "rawfilemd5": evidence(mismatch.rawfilemd5),
+        }));
+    }
     let failure = error
         .chain()
         .find_map(|cause| cause.downcast_ref::<LargeFileDownloadError>())?;
@@ -1867,6 +1890,11 @@ fn cdn_download_failure(error: &anyhow::Error) -> Option<serde_json::Value> {
             json!({"kind":"fixed_control_mismatch","field":control.field_name(),"actual":actual})
         }
     })
+}
+fn video_representation_mismatch(
+    error: &anyhow::Error,
+) -> Option<&wechat_protocol::media::VideoRepresentationMismatch> {
+    error.chain().find_map(|cause| cause.downcast_ref())
 }
 fn service_diagnostic(error: &anyhow::Error) -> Option<(&'static str, i32)> {
     for cause in error.chain() {
@@ -1909,6 +1937,9 @@ fn classify_error(error: &anyhow::Error) -> String {
             return "transport_unavailable".into();
         }
         return "media_service_rejected".into();
+    }
+    if video_representation_mismatch(error).is_some() {
+        return "media_integrity_failed".into();
     }
     for cause in error.chain() {
         let message = cause.to_string();
@@ -1968,7 +1999,11 @@ fn classify_error(error: &anyhow::Error) -> String {
             return code.into();
         }
     }
-    if message.contains("checksum") || message.contains("length mismatch") {
+    // Delivered bytes or reply metadata disagree with the advertised tuple.
+    if message.contains("checksum")
+        || message.contains("length mismatch")
+        || message.contains("size mismatch")
+    {
         return "media_integrity_failed".into();
     }
     if message.contains("unsupported") || message.contains("Unsupported") {
@@ -2497,7 +2532,6 @@ impl Core {
             // and upload path. Authenticate the source before any network I/O.
             let source_md5 = hex_string(&wechat_protocol::crypto::md5(&bytes));
             drop(bytes);
-            let native = self.upstream.native(NativeOptions::default())?;
             return self.perform_reused_file_send(
                 account,
                 id,
@@ -2505,9 +2539,11 @@ impl Core {
                 (&source, &source_md5),
                 |uploaded, state| {
                     let conf = if uploaded.descriptor.quality == MediaQuality::LargeFile {
-                        native.large_cdn_config(state, LargeCdnRoute::Download)?
+                        self.native_request(account, state, |request| {
+                            request.large_cdn_config(LargeCdnRoute::Download)
+                        })?
                     } else {
-                        native.cdn_config(state)?
+                        self.native_request(account, state, |request| request.cdn_config())?
                     };
                     self.save_state(account, state)?;
                     let cdn = CdnClient::new(conf, Duration::from_secs(25))?;
@@ -2521,14 +2557,15 @@ impl Core {
                     Ok(downloaded.sha256)
                 },
                 |plan, state| {
-                    native.send_file_with_reservation(
-                        state,
-                        &plan.request.thread_id,
-                        &plan.client_id,
-                        plan.created_at,
-                        plan.uploaded_file.as_ref().unwrap(),
-                        plan.reservation.as_ref(),
-                    )
+                    self.native_request(account, state, |request| {
+                        request.send_file(
+                            &plan.request.thread_id,
+                            &plan.client_id,
+                            plan.created_at,
+                            plan.uploaded_file.as_ref().unwrap(),
+                            plan.reservation.as_ref(),
+                        )
+                    })
                 },
             );
         }
@@ -2599,7 +2636,7 @@ impl Core {
                 plan.voice[index].status = "submitting".into();
                 self.save_send_plan(account, id, &plan)?;
                 let part = &plan.voice[index];
-                let result = self.upstream.submit_media(
+                let result = self.account_upstream(account)?.submit_media(
                     &mut state,
                     MediaSubmission {
                         destination: &plan.request.thread_id,
@@ -2662,16 +2699,14 @@ impl Core {
         let modern_file = plan.request.kind == MediaKind::File && file_uses_multiphase(bytes.len());
         let upload_route = modern_file.then_some(LargeCdnRoute::Upload);
         let mut cdn = self
-            .upstream
+            .account_upstream(account)?
             .media_transport_route(&mut state, upload_route)?;
         self.save_state(account, &state)?;
         let destination = plan.request.thread_id.clone();
         let progress_id = plan.file_upload_progress_id.clone();
         if self.reserve_media_file_upload(account, id, &mut plan, bytes.len(), || {
-            self.upstream
-                .native(NativeOptions::default())?
-                .reserve_file_upload(
-                    &mut state,
+            self.native_request(account, &mut state, |request| {
+                request.reserve_file_upload(
                     &destination,
                     progress_id
                         .as_deref()
@@ -2680,6 +2715,7 @@ impl Core {
                     bytes.len(),
                     &hex_string(&wechat_protocol::crypto::md5(&bytes)),
                 )
+            })
         })? {
             self.save_state(account, &state)?;
         }
@@ -2836,7 +2872,9 @@ impl Core {
                         &raw_material.file_key,
                     )?;
                     let route = file_uses_multiphase(bytes.len()).then_some(LargeCdnRoute::Upload);
-                    let raw_cdn = self.upstream.media_transport_route(&mut state, route)?;
+                    let raw_cdn = self
+                        .account_upstream(account)?
+                        .media_transport_route(&mut state, route)?;
                     self.save_state(account, &state)?;
                     self.phase_media(account, id, "uploading")?;
                     let fence = self.media_authorization_fence(account)?;
@@ -2871,7 +2909,7 @@ impl Core {
             let download_route = (uploaded.descriptor.quality == MediaQuality::LargeFile)
                 .then_some(LargeCdnRoute::Download);
             cdn = self
-                .upstream
+                .account_upstream(account)?
                 .media_transport_route(&mut state, download_route)?;
             self.save_state(account, &state)?;
         }
@@ -2912,7 +2950,9 @@ impl Core {
                         .expected_bytes
                         .is_some_and(|length| length > 25 * 1024 * 1024))
                 .then_some(LargeCdnRoute::VideoDownload);
-                let download_cdn = self.upstream.media_transport_route(&mut state, route)?;
+                let download_cdn = self
+                    .account_upstream(account)?
+                    .media_transport_route(&mut state, route)?;
                 self.save_state(account, &state)?;
                 let fence = self.media_authorization_fence(account)?;
                 let downloaded = cdn_transfer(permit.as_deref_mut(), self, account, || {
@@ -2947,7 +2987,7 @@ impl Core {
             },
             _ => bail!("unsupported_media_send"),
         };
-        let result = self.upstream.submit_media(
+        let result = self.account_upstream(account)?.submit_media(
             &mut state,
             MediaSubmission {
                 destination: &plan.request.thread_id,
@@ -3612,7 +3652,7 @@ fn audio_pcm(bytes: &[u8], cancelled: impl FnMut() -> Result<()>) -> Result<Vec<
     let raw = run_ffmpeg(
         bytes,
         "audio.pcm",
-        "wav,mp3,flac,ogg,aac,mov,matroska,webm",
+        "wav,mp3,flac,ogg,aac,mov,matroska,webm,caf,amr",
         &[
             "-vn", "-ac", "1", "-ar", "16000", "-f", "s16le", "-t", "301",
         ],
@@ -3792,6 +3832,91 @@ mod tests {
             "Unsupported large-file download response field with private details"
         ))
         .is_none());
+    }
+    #[test]
+    fn video_representation_mismatch_is_an_integrity_failure_with_a_typed_diagnostic() {
+        use wechat_protocol::media::{SourceEvidence, VideoRepresentationMismatch};
+        let (_dir, core) = test_core();
+        let (row, created) = core
+            .store
+            .create_media_job(
+                "one",
+                "video-mismatch",
+                "download:asset-video",
+                &digest(b"asset-video"),
+                "download",
+                &json!({"assetId":"asset-video","completedBytes":0}),
+                b"",
+            )
+            .unwrap();
+        assert!(created);
+        let mut row = row;
+        row.state = "running".into();
+        row.phase = "downloading".into();
+        core.store.save_media_job("one", &row).unwrap();
+        let mismatch = VideoRepresentationMismatch {
+            advertised_bytes: Some(9_390_687),
+            delivered_bytes: 15_272_939,
+            advertised_digest_matches: Some(false),
+            substituted_filetype: Some(4),
+            istrans: None,
+            videoformat: Some(1),
+            rawfilesize: Some(SourceEvidence {
+                matches_advertised: false,
+                matches_delivered: true,
+            }),
+            rawfilemd5: None,
+        };
+        let secret = "private raw body route file-id auth-key value";
+        let error = anyhow::Error::new(mismatch).context(secret);
+        assert_eq!(classify_error(&error), "media_integrity_failed");
+        core.record_media_failure_diagnostics("one", "video-mismatch", &error)
+            .unwrap();
+        core.fail_media_job("one", "video-mismatch", &classify_error(&error))
+            .unwrap();
+        let saved = core.store.media_job("one", "video-mismatch").unwrap();
+        assert_eq!(
+            saved.data["result"]["cdnDownloadFailure"],
+            json!({
+                "kind": "video_representation_mismatch",
+                "advertisedBytes": 9_390_687,
+                "deliveredBytes": 15_272_939,
+                "advertisedDigestMatches": false,
+                "substituteftype": 4,
+                "istrans": null,
+                "videoformat": 1,
+                "rawfilesize": {"matchesAdvertised": false, "matchesDelivered": true},
+                "rawfilemd5": null,
+            })
+        );
+        assert_eq!(saved.error_code.as_deref(), Some("media_integrity_failed"));
+        assert_eq!(saved.state, "failed");
+        assert!(!saved.retryable);
+        assert!(!serde_json::to_string(&saved.data).unwrap().contains(secret));
+        let public = public_job("one", &saved);
+        assert_eq!(public.reason.as_deref(), Some("media_integrity_failed"));
+    }
+    #[test]
+    fn advertised_size_and_checksum_mismatches_share_the_integrity_code() {
+        for message in [
+            "Advertised media size mismatch",
+            "Advertised media checksum mismatch",
+            "Large-video download source size mismatch",
+            "Large-file download source size mismatch",
+            "CDN source checksum mismatch",
+        ] {
+            let error = anyhow::anyhow!(message).context("opaque wrapper");
+            assert_eq!(
+                classify_error(&error),
+                "media_integrity_failed",
+                "{message}"
+            );
+            assert!(cdn_download_failure(&error).is_none());
+        }
+        assert_eq!(
+            classify_error(&anyhow::anyhow!("Inconsistent CDN range response")),
+            "media_processing_failed"
+        );
     }
     // Large metadata with a tiny sealed fixture keeps admission tests from
     // allocating hundreds of MiB. Full worker source authentication is tested
@@ -5809,6 +5934,54 @@ mod tests {
         let silk = wechat_protocol::silk::encode(&pcm).unwrap();
         let decoded = audio_pcm(&silk, || Ok(())).unwrap();
         assert_eq!(decoded.len(), 16000);
+    }
+    #[test]
+    fn voice_sources_include_opus_caf_and_amr() {
+        // Newer FFmpeg muxers cannot write Opus into CAF; ALAC still covers the container.
+        let encoded = |codec: &str, format: &str| {
+            let dir = wechat_platform::private_tempdir("wechat-voice-source-test-").unwrap();
+            let path = dir.path().join("source");
+            assert!(std::process::Command::new("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-nostdin",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:duration=1",
+                    "-ar",
+                    "48000",
+                    "-c:a",
+                    codec,
+                    "-f",
+                    format,
+                ])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success());
+            std::fs::read(path).unwrap()
+        };
+        // AMR storage format: magic, then fifty 20 ms speech frames of one mode.
+        let amr = |magic: &[u8], frame_header: u8, payload: usize| {
+            let mut file = magic.to_vec();
+            for _ in 0..50 {
+                file.push(frame_header);
+                file.resize(file.len() + payload, 0);
+            }
+            file
+        };
+        for (name, source) in [
+            ("ogg opus", encoded("libopus", "ogg")),
+            ("webm opus", encoded("libopus", "webm")),
+            ("caf alac", encoded("alac", "caf")),
+            ("amr-nb", amr(b"#!AMR\n", 0x3c, 31)),
+            ("amr-wb", amr(b"#!AMR-WB\n", 0x44, 60)),
+        ] {
+            let pcm = audio_pcm(&source, || Ok(())).unwrap_or_else(|e| panic!("{name}: {e:#}"));
+            assert!(pcm.len().abs_diff(16000) <= 800, "{name}: {}", pcm.len());
+        }
     }
 }
 

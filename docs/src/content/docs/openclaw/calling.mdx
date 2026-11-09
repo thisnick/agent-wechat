@@ -1,15 +1,18 @@
 ---
 title: Set up calling
-description: Configure voice and video permissions, realtime speech, OpenAI credentials and agent consultation.
+description: Configure voice calling, conversation modes, credentials and agent consultation.
 ---
 
 Configure calling under `channels.agent-wechat.calls`. Voice and video each default
-to disabled. The current daemon and plugin handle direct voice calls.
+to disabled. Voice supports direct calls and separately configured conferences.
+Both support [realtime speech or agent-and-TTS conversation](#models-and-behavior).
 
 ## Connect the daemon
 
 1. Finish [Quick setup](../setup/) and check `wx calls status`. The daemon must
-   advertise `directAudio: true`; see [Calling](/reference/calls/) for build options.
+   advertise `directAudio: true` for direct calls, or the corresponding
+   `conferenceJoin`, `conferenceCreate`, `conferenceInvite` and `conferenceAudio`
+   capabilities; see [Calling](/reference/calls/).
 2. Give the channel token the `calls` scope alongside its existing messaging scopes:
 
    ```bash
@@ -23,9 +26,12 @@ to disabled. The current daemon and plugin handle direct voice calls.
 
 ## Configure speech and access
 
-Merge this example into your existing channel and agent configuration. Replace
+Merge this realtime example into your existing channel and agent configuration. Replace
 the example contact and owner IDs.
 Set `OPENAI_API_KEY` in the **Gateway process's environment**.
+The `wechat_call` tool is optional: the `tools.alsoAllow` entry below is required
+for agent call control, even when voice answering already works. Preserve your
+other tool entries. See [Agent tools](../tools/#calling) for a global grant example.
 
 ```json
 {
@@ -98,16 +104,151 @@ Restart the Gateway after saving the configuration. An enabled, prepared voice
 service reports `available` when the daemon is free; provider or capability
 failure reports `unavailable` and leaves calls unanswered.
 
+For incoming direct voice calls, `inboundAllowFrom: ["*"]` accepts any caller
+when `inboundPolicy` is `"allowlist"`. Use contact IDs to restrict callers.
+An empty list accepts none. This setting does not grant owner tools.
+
+## Conference calls
+
+Add group IDs under `calls.voice.conferences.groups`. Use `"*"` as a fallback
+for other groups:
+
+```json
+{
+  "conferences": {
+    "groups": {
+      "test-group@chatroom": {
+        "autoJoin": true,
+        "autoJoinAllowFrom": ["trusted-inviter"],
+        "toolPolicy": "safe-read-only"
+      },
+      "*": {
+        "autoJoin": true,
+        "autoJoinAllowFrom": ["trusted-inviter"],
+        "toolPolicy": "safe-read-only"
+      },
+      "quiet-group@chatroom": {
+        "autoJoin": false
+      }
+    }
+  }
+}
+```
+
+An exact group rule replaces the wildcard rule, including `autoJoin: false`;
+the rules are not merged. The example accepts `trusted-inviter` across groups,
+except `quiet-group@chatroom`.
+
+An empty map enables no conference automation or conference tool destinations.
+`autoJoin` defaults to `false`; when enabled, the plugin prepares speech before
+joining a current invitation. `autoJoinAllowFrom` lists eligible inviters:
+
+| Value | Eligible invitations |
+| --- | --- |
+| `["trusted-inviter"]` | Only that contact. |
+| `["*"]` | Any inviter. |
+| `[]` | None. |
+| Omitted | Any inviter for an exact group rule; invalid for wildcard auto-join. |
+
+The inviter and current rule are rechecked before joining. Direct-call allowlists
+remain separate. Wildcards do not apply to outbound contact lists, tool requesters
+or owner grants; each group still needs its own exact owner grant for owner
+consultation.
+
+These conference rules are separate from normal group-chat access. The chat
+wildcard is `channels.agent-wechat.groups["*"]`; configuring either wildcard does
+not enable the other. See [Who the bot answers](../access/) for chat replies.
+
+The optional `wechat_call` tool supports these additional actions:
+
+| Action | Arguments |
+| --- | --- |
+| `conference_start` | `groupId`, `contactIds: ["contact-a", "contact-b"]` |
+| `conference_join` | `groupId`; requires one current invitation and never creates a room |
+| `invite` | `contactIds`; requires this plugin's connected conference |
+| `hangup` | Leave our participation while other members remain connected |
+
+Tool requesters still need owner authorization and `outboundToolAllowFrom`.
+Starting or inviting also requires `outboundPolicy: "allowlist"` and every
+invitee in `outboundAllowTo`. Submission does not mean an invitee joined;
+`status` includes the roster and latest individual invitation results.
+
+The speech model hears a timed mix of the receive tracks and sends one room
+uplink. It converses without a name or mention gate and does not claim verified
+speaker identity. Missing sources contribute silence; late audio is discarded
+rather than building a backlog. Existing interruption handling and output silence
+fill remain active.
+
+The voice agent receives the direct caller's identity or the conference invitation
+sender and current call roster. It greets after audio connects and can say hi or
+bye when people join or leave. Names come from cached contacts or group-visible
+member names, with account IDs as a fallback. Group-chat membership is not treated
+as attendance, and the inviter is not necessarily the room creator. The direct contact is the conversation partner. In a conference with exactly one
+other joined participant, the agent can address that participant normally. With
+several participants, the roster identifies who is present, while mixed audio
+alone does not identify which person spoke. The bot excludes its own account
+when counting participants; unavailable attendance does not imply a sole caller.
+Display names and roster changes grant no permissions.
+Names that arrive later refresh the roster without announcing another arrival.
+The latest roster takes precedence over older call summaries; earlier summaries
+and recent chat snippets remain available when recent context is enabled.
+The agent can use that roster to say who is present, even though mixed audio
+does not tell it who spoke. Gateway `context` logs show observed updates, name
+lookup results and voice-bridge submissions using counts and message digests;
+they omit names, IDs and message contents. Submission is not a model receipt.
+
+Consultation defaults to read-only and needs the same persistence opt-in as
+direct calls. Owner consultation requires all three settings:
+
+1. `calls.voice.toolPolicy: "owner"`.
+2. This group's `toolPolicy: "owner"`.
+3. An exact `agent-wechat:test-group@chatroom` entry in OpenClaw's
+   `commands.ownerAllowFrom`.
+
+This trusts the whole group as its own principal, not an individual speaker.
+Normal agent tools and approvals still apply; changing group authority cancels
+pending consultations. The plugin does not modify the owner allowlist during calls.
+Sessions are separated by account, group and authority. An optional group
+`sessionKey` seeds a new session only from that same group's route; a tool
+requester's private direct-message session is not copied into the room.
+
+To use owner tools only when an owner invited the bot, keep the group's default
+read-only and add `ownerInviterToolPolicy`:
+
+```json
+{
+  "autoJoin": true,
+  "toolPolicy": "safe-read-only",
+  "ownerInviterToolPolicy": "owner"
+}
+```
+
+The authenticated inviter must have an exact `agent-wechat:CONTACT_ID` entry in
+`commands.ownerAllowFrom`; voice-level owner policy and the group's host owner
+grant are also required. Other invitations use `toolPolicy`. Leaving out
+`autoJoinAllowFrom` admits any inviter for this configured group. The override
+trusts everyone in that call, including later joiners, and stays in effect if the
+inviter leaves. Permissions can decrease during a call; increases require a new
+call. Status reports the inviter and effective policy. Owner and read-only calls
+use separate sessions and recaps; old call recaps without a known permission
+level are not reused.
+
+Conferences started by the bot use the group's `toolPolicy`. The
+`ownerInviterToolPolicy` override applies only to incoming invitations; the
+requesting agent session's owner permissions do not transfer into a new call.
+
 ## Models and behavior
 
 All paths below are relative to `calls.voice`.
 
 | Setting | Behavior / default |
 | --- | --- |
-| `realtime.provider` | Required; `openai` is the supported adapter. |
+| `mode` | `bidi` (default) for Realtime/Live speech, or `agent` for transcription, normal agent turns and OpenClaw TTS. Applies to direct calls and conferences. |
+| `transcription` | Agent-mode provider, optional model/language and optional API-key SecretRef. |
+| `realtime.provider` | Required in `bidi` mode; `openai` is the supported adapter. |
 | `realtime.model`, `realtime.voice` | Optional speech model/voice overrides; otherwise provider defaults. |
 | `realtime.instructions` | Optional conversation guidance, up to 4,000 characters. |
-| `realtime.agentContext.enabled` | Defaults to `false`. Set to `true` to include excerpts from the selected agent's `IDENTITY.md` and `SOUL.md`. |
+| `realtime.agentContext.enabled` | Defaults to `false`. Set to `true` to include the selected agent's `IDENTITY.md`, `USER.md` and `SOUL.md` through OpenClaw's voice-context resolver for direct calls and conferences. |
 | `agentId` | Required. Selects the voice persona, provider authentication and agent for permitted consultations. |
 | `toolPolicy` | `none`, `safe-read-only`, or `owner`. Opting in to session persistence defaults to `safe-read-only`. |
 | `allowConsultSessionPersistence` | Set to `true` to allow consultation in OpenClaw sessions for calls. |
@@ -119,10 +260,11 @@ All paths below are relative to `calls.voice`.
 | `consultation.timeoutMs` | 30,000 by default; 1,000–120,000 ms. |
 | `maxDurationSeconds` | 3,600 (one hour) by default; 30–3,600 seconds. The plugin hangs up when it is reached. The native daemon currently ends calls after 20 minutes. |
 
-The speech model handles conversation; the selected OpenClaw agent handles
-delegated questions and permitted tools. Incoming/outgoing policies default to `disabled`;
-allowlists accept exact IDs, without `*`. Tool callers must also be authorized
-owners in `outboundToolAllowFrom`. Messaging permissions do not authorize calls.
+In `bidi` mode, the speech model handles conversation; the selected OpenClaw agent
+handles delegated questions and permitted tools. Incoming/outgoing policies default to `disabled`;
+allowlists accept exact IDs, without `*`. Chat tool requesters must also be
+authorized owners in `outboundToolAllowFrom`; owner call consultations use their
+current call authority instead. Messaging permissions do not authorize calls.
 
 Set `realtime.model` to one of these OpenAI models. Omit it to use the
 provider's default, `gpt-realtime-2.1`.
@@ -135,7 +277,38 @@ provider's default, `gpt-realtime-2.1`.
 
 The speech model receives the selected agent's configured identity. When
 workspace context is enabled, the realtime provider also receives bounded
-excerpts of the two persona files. Keep those files suitable for this use.
+profile excerpts from `IDENTITY.md`, `USER.md` and `SOUL.md`, up to 6,000 characters. `USER.md` supplies user grounding; it does not make every caller that user. The regular consultation agent receives its normal workspace instructions, including `AGENTS.md`.
+
+### Use your agent and TTS
+
+1. Configure an OpenClaw TTS provider in your normal Gateway settings.
+2. Merge these fields into your existing `calls.voice` configuration:
+
+   ```json
+   {
+     "enabled": true,
+     "mode": "agent",
+     "agentId": "main",
+     "allowConsultSessionPersistence": true,
+     "toolPolicy": "safe-read-only",
+     "transcription": {
+       "provider": "openai"
+     }
+   }
+   ```
+
+3. Keep your inbound, outbound and conference allowlists. Inspect `wechat_call`
+   status for `mode: "agent"` and the selected `agentId` before testing a call.
+
+`transcription.apiKey` accepts a key or SecretRef; omission
+uses the transcription provider's configured credentials. These credentials are
+separate from realtime voice credentials.
+
+In agent mode, `toolPolicy: "none"` permits conversation without tools in a
+separate session. Session persistence still requires opting in because agent
+mode creates OpenClaw sessions even when tools are disabled.
+
+### Consultation and sessions
 
 Calls placed with `wechat_call` use the requesting session as context when
 consultation is enabled and that session belongs to `calls.voice.agentId`. Set `consultation.inboundSessionKey` to do the same for
@@ -150,19 +323,35 @@ same WeChat peer and channel account. Other allowed participants get read-only
 consultation in a separate session. Add inbound callers to `inboundAllowFrom`
 separately.
 
+Owner-authorized call consultations may use `wechat_call` without the extra
+chat-requester allowlist. The grant is tied to the current call and is revoked
+when that call ends or loses owner consultation. Read-only consultations cannot
+control calls. Configured destinations/groups and normal host restrictions
+still apply. A conference hang-up removes only the agent.
+
 Consultations run like the agent's normal chat turns. They use its configured
 model, including CLI runtimes such as `claude-cli`, and its fallback models.
 
 :::note[Good to know]
+Mode changes apply to new calls after the channel reloads.
 Disabled call types are ignored without answering or declining. Video permission
 does not supply video capability: even with `video.enabled: true`, this backend
-cannot handle video or convert it to voice.
+cannot handle video or convert it to voice. Neither conversation mode enables
+promotion from a direct call to a conference.
 
 The bridge sends silence while it waits for the caller to speak. With a
 realtime model, if the caller interrupts a reply, the bridge clears queued audio
 and reports the estimated playback position to the speech model. GPT-Live models
-handle interruptions themselves. Either way, the voice agent can keep talking
-with the caller while the OpenClaw agent works on a consultation.
+handle interruptions themselves. Realtime can queue up to ten minutes of a reply;
+reaching that limit cancels the reply and reports its playback position instead
+of silently cutting its tail. Live keeps a three-second audio queue to limit delay.
+Either way, the voice agent can keep talking
+with the caller while the OpenClaw agent works on a consultation. It acknowledges
+a lookup once, waits quietly for the result, and can answer a status question
+while the lookup runs.
+In agent mode, nearby transcript fragments form one turn. Input keeps flowing
+during reasoning and TTS; interruption clears queued speech and discards late
+agent or TTS results without retrying an action.
 This adapter does not record calls. Consultations, and the transcript the agent
 summarizes after a call, persist in OpenClaw when opted in; the adapter keeps only
 short call summaries. Other provider adapters fail preflight without automatic

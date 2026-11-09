@@ -7,6 +7,8 @@ pub use group_detail::*;
 #[path = "group_inventory.rs"]
 mod group_inventory;
 pub use group_inventory::*;
+#[path = "account.rs"]
+mod account;
 #[path = "logout.rs"]
 mod logout;
 #[path = "revoke.rs"]
@@ -22,6 +24,11 @@ use crate::{
     crypto::Ecdh,
     mmtls::{self, Session},
     protobuf as p, wire,
+};
+pub use account::{
+    AccountIdentity, AccountLease, AccountLifecycle, AccountPersistence, AccountPersistenceFailed,
+    AccountPushConnection, AccountRequest, AccountStatus, NativeRequestNotSubmitted, PendingLogout,
+    TextSendOptions,
 };
 use anyhow::{bail, ensure, Result};
 pub use logout::*;
@@ -462,15 +469,22 @@ impl Default for NativeOptions {
         }
     }
 }
-/// Blocking client for supported WeChat server operations.
+/// Native account client and login bootstrap for supported WeChat operations.
 ///
-/// Construct with [`Self::new`], obtain an [`AccountState`] through approved login,
-/// then use methods such as [`Self::send_text`] or [`Self::sync`]. The state is
-/// passed mutably because authenticated responses can update credentials/routing.
-/// This client does not own a daemon, profile, send queue or recovery journal.
+/// Use [`Self::new`] for login bootstrap, then transfer accepted [`AccountState`]
+/// into [`Self::from_account`]. Cloned account handles share accepted credentials
+/// and lifecycle; methods such as [`Self::send_text`] and [`Self::sync`] run
+/// blocking transport on Tokio workers without holding the state lock across
+/// network waits. This client does not own a daemon, profile, send queue or
+/// recovery journal. Explicit state export is secret data, not a second writer.
+#[derive(Clone)]
 pub struct NativeClient {
     options: NativeOptions,
+    account: Option<std::sync::Arc<account::OwnedAccount>>,
+    submission_guard: Option<std::sync::Arc<dyn Fn() -> Result<()> + Send + Sync>>,
+    call_reply_observer: Option<std::sync::Arc<CallReplyObserver>>,
 }
+type CallReplyObserver = dyn Fn(&[u8]) -> Result<()> + Send + Sync;
 /// Polling an issued login challenge is repeatable. This does not authorize
 /// retrying QR creation, credential exchange, sends or rejected authentication.
 pub fn is_retryable_login_poll_error(error: &anyhow::Error) -> bool {
@@ -517,13 +531,16 @@ impl NativeClient {
             (1024..=crate::MAX_MESSAGE_BYTES).contains(&options.receive_budget),
             "Invalid receive budget"
         );
-        Ok(Self { options })
+        Ok(Self {
+            options,
+            account: None,
+            submission_guard: None,
+            call_reply_observer: None,
+        })
     }
     fn session(&self, host: &str) -> Result<Session> {
+        self.check_snapshot_transport()?;
         Session::connect(host, self.options.timeout, self.options.receive_budget)
-    }
-    pub fn push_connection(&self, state: &AccountState) -> Result<crate::push::Connection> {
-        crate::push::Connection::open(state, self.options.timeout, self.options.receive_budget)
     }
     #[allow(clippy::too_many_arguments)]
     fn prelogin_rpc(
@@ -545,6 +562,7 @@ impl NativeClient {
         };
         let prepared = Prelogin::prepare(plain, &profile, auth_key)?;
         let packet = business::prelogin_packet(&prepared, cgi, profile.version, cookie)?;
+        self.check_submission()?;
         let reply = mmtls::short_exchange(
             &session.short,
             short_host,
@@ -876,7 +894,8 @@ impl NativeClient {
     }
     /// One trusted AutoAuth exchange, retaining identity and replacing selected key
     /// sections atomically in the returned value. Does not silently fall back to QR.
-    pub fn renew_session(
+    #[doc(hidden)]
+    pub(crate) fn renew_session_snapshot(
         &self,
         previous: &AccountState,
         computer_name: &str,
@@ -920,26 +939,11 @@ impl NativeClient {
         }
         bail!("AutoAuth redirect limit reached")
     }
-    /// Perform one experimental call host RPC using its fixed CGI/path pair.
-    /// The owner must first retain its intent, hold account mutation authority and
-    /// fence account/logout generations. This method does not retry uncertain
-    /// operations. An active Ax policy is unsupported here; there is no ordinary
-    /// packing fallback. Returned CommonResponse/application results still need
-    /// their own checks. Accepted cookie updates follow normal native transport.
-    pub fn experimental_call_rpc(
-        &self,
-        state: &mut AccountState,
-        route: crate::calls::host_policy::CallHostRoute,
-        request: &[u8],
-    ) -> Result<Vec<u8>> {
-        self.experimental_call_rpc_guarded(state, route, request, || Ok(()))
-    }
-
-    /// As [`Self::experimental_call_rpc`], with one final owner check after
+    /// One internal snapshot exchange with a final account check after
     /// handshake/preparation and before handing business bytes to transport.
     /// A guard cannot retract bytes after transport handoff. Handshake traffic
     /// can already have occurred when this guard stops the business request.
-    pub fn experimental_call_rpc_guarded(
+    pub(crate) fn call_rpc_snapshot_guarded(
         &self,
         state: &mut AccountState,
         route: crate::calls::host_policy::CallHostRoute,
@@ -949,26 +953,36 @@ impl NativeClient {
         self.call_rpc_with_exchange(state, route, request, before_submit, mmtls::short_exchange)
     }
 
-    /// Allow the embedding daemon to stop awaiting a pre-answer LiveSync.
-    /// The returned interruption does not assert that the request was unsent.
+    /// Wait longer for a read-only call poll while retaining the ordinary
+    /// handshake deadline. The host must be able to interrupt this wait when
+    /// its call/media lifetime ends; no request is retried by this method.
     #[doc(hidden)]
-    pub fn experimental_call_live_sync_guarded(
+    pub(crate) fn call_live_sync_snapshot_with_wait_timeout(
         &self,
         state: &mut AccountState,
         request: &[u8],
+        wait_timeout: Duration,
         before_submit: impl FnOnce() -> Result<()>,
         wait: impl for<'a> FnOnce(
             std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>>> + Send + 'a>>,
         ) -> Result<Vec<u8>>,
     ) -> Result<Vec<u8>> {
+        ensure!(
+            !wait_timeout.is_zero() && wait_timeout <= Duration::from_secs(120),
+            "Invalid call poll wait timeout"
+        );
         self.call_rpc_with_exchange(
             state,
             crate::calls::host_policy::CallHostRoute::LiveSync,
             request,
             before_submit,
-            |session, host, path, payload, timeout| {
+            |session, host, path, payload, _| {
                 wait(Box::pin(mmtls::short_exchange_interruptible(
-                    session, host, path, payload, timeout,
+                    session,
+                    host,
+                    path,
+                    payload,
+                    wait_timeout,
                 )))
             },
         )
@@ -984,8 +998,9 @@ impl NativeClient {
     ) -> Result<Vec<u8>> {
         use crate::calls::{
             host_policy::{selected_policy, CallHostPolicy},
-            host_transport::{connect_call_session, CallHostRpcError, CallHostStage},
+            host_transport::{CallHostRpcError, CallHostStage},
         };
+        self.check_snapshot_transport()?;
         mmtls::validate_short_route(route.path())
             .map_err(|error| CallHostRpcError::from_cause(CallHostStage::Route, &error))?;
         let policy = selected_policy(&state.auth_snapshot, route.command())
@@ -993,11 +1008,15 @@ impl NativeClient {
         if policy != CallHostPolicy::Ordinary {
             return Err(CallHostRpcError::new(CallHostStage::Route, "ax_unsupported", None).into());
         }
-        let session = connect_call_session(route, self.options.timeout, |timeout| {
-            Session::connect(&state.long_host, timeout, self.options.receive_budget)
-        })?;
+        let session = Session::connect(
+            &state.long_host,
+            self.options.timeout,
+            self.options.receive_budget,
+        )
+        .map_err(|error| CallHostRpcError::from_cause(CallHostStage::Handshake, &error))?;
         let packet = AuthenticatedPacket::prepare(state, route.command(), request)
             .map_err(|error| CallHostRpcError::from_cause(CallHostStage::Prepare, &error))?;
+        self.check_submission()?;
         before_submit()?;
         let reply = exchange(
             &session.short,
@@ -1007,14 +1026,28 @@ impl NativeClient {
             self.options.timeout,
         )
         .map_err(|error| {
-            if error.is::<crate::calls::client::CallLiveSyncInterrupted>() {
+            if error.is::<crate::calls::host_transport::CallLiveSyncInterrupted>() {
                 error
             } else {
                 CallHostRpcError::from_cause(CallHostStage::Exchange, &error).into()
             }
         })?;
+        self.accept_call_reply(state, route.command(), &reply)
+    }
+
+    fn accept_call_reply(
+        &self,
+        state: &mut AccountState,
+        command: u16,
+        reply: &[u8],
+    ) -> Result<Vec<u8>> {
         let (plain, cookie) =
-            crate::calls::host_transport::decode_verified_reply(state, route.command(), &reply)?;
+            crate::calls::host_transport::decode_verified_reply(state, command, reply)?;
+        // The embedding journal must retain an authenticated allocation before
+        // accepted account updates become visible or a call actor advances.
+        if let Some(retain) = &self.call_reply_observer {
+            retain(&plain)?;
+        }
         if !cookie.is_empty() {
             state.cookie = cookie;
         }
@@ -1040,6 +1073,7 @@ impl NativeClient {
     ) -> Result<Vec<u8>> {
         let session = self.session(&state.long_host)?;
         let packet = AuthenticatedPacket::prepare(state, cgi, request)?;
+        self.check_submission()?;
         before_submit()?;
         let reply = mmtls::short_exchange(
             &session.short,
@@ -1058,10 +1092,16 @@ impl NativeClient {
     /// Returned commands include their original payloads. Persist and handle all
     /// required commands before committing the returned cursor; this call does
     /// not write history or manage a checkpoint for the application.
-    pub fn sync(&self, state: &mut AccountState, cursor: &[u8]) -> Result<SyncBatch> {
-        self.sync_scene(state, cursor, 6)
+    #[doc(hidden)]
+    pub(crate) fn sync_snapshot(
+        &self,
+        state: &mut AccountState,
+        cursor: &[u8],
+    ) -> Result<SyncBatch> {
+        self.sync_scene_snapshot(state, cursor, 6)
     }
-    pub fn sync_scene(
+    #[doc(hidden)]
+    pub(crate) fn sync_scene_snapshot(
         &self,
         state: &mut AccountState,
         cursor: &[u8],
@@ -1077,7 +1117,12 @@ impl NativeClient {
     }
     /// Request heartbeat hints for a committed sync cursor. Hints are not message
     /// contents; the application still needs to fetch and handle sync commands.
-    pub fn heartbeat(&self, state: &mut AccountState, cursor: &[u8]) -> Result<Heartbeat> {
+    #[doc(hidden)]
+    pub(crate) fn heartbeat_snapshot(
+        &self,
+        state: &mut AccountState,
+        cursor: &[u8],
+    ) -> Result<Heartbeat> {
         let request = wire::heartbeat_request(state, cursor)?;
         wire::decode_heartbeat(&self.authenticated_rpc(
             state,
@@ -1086,88 +1131,11 @@ impl NativeClient {
             &request,
         )?)
     }
-    /// Submit exactly once. An I/O error after submission is an uncertain outcome;
-    /// services must persist the intent and must not automatically retry this call.
-    ///
-    /// `destination` is an exact WeChat username, not a display name or daemon
-    /// account ID. `created_at` is Unix seconds; `client_message_id` is a nonzero
-    /// protocol ID derived with [`wire::client_message_id`] from the caller's task
-    /// ID. Check acceptance and both returned-identity matches in the receipt.
-    /// No official-profile history is written by this method.
-    pub fn send_text(
-        &self,
-        state: &mut AccountState,
-        destination: &str,
-        content: &str,
-        created_at: u32,
-        client_message_id: u32,
-    ) -> Result<TextSendResult> {
-        self.send_text_guarded(
-            state,
-            destination,
-            content,
-            created_at,
-            client_message_id,
-            || Ok(()),
-        )
-    }
-    /// Recheck the embedding daemon's admission immediately before submitting.
-    #[doc(hidden)]
-    pub fn send_text_guarded(
-        &self,
-        state: &mut AccountState,
-        destination: &str,
-        content: &str,
-        created_at: u32,
-        client_message_id: u32,
-        before_submit: impl FnOnce() -> Result<()>,
-    ) -> Result<TextSendResult> {
-        let request = wire::text_send_request_with_source(
-            destination,
-            content,
-            created_at,
-            client_message_id,
-            None,
-        )?;
-        wire::decode_text_send(
-            &self.authenticated_rpc_guarded(
-                state,
-                522,
-                "/cgi-bin/micromsg-bin/newsendmsg",
-                &request,
-                before_submit,
-            )?,
-            destination,
-            client_message_id,
-        )
-    }
-    /// Submit text with optional native message-source XML. For a simple send use
-    /// [`Self::send_text`]. This has the same single-submission/uncertainty contract.
-    pub fn send_text_with_source(
-        &self,
-        state: &mut AccountState,
-        destination: &str,
-        content: &str,
-        created_at: u32,
-        client_message_id: u32,
-        source: Option<&str>,
-    ) -> Result<TextSendResult> {
-        let request = wire::text_send_request_with_source(
-            destination,
-            content,
-            created_at,
-            client_message_id,
-            source,
-        )?;
-        wire::decode_text_send(
-            &self.authenticated_rpc(state, 522, "/cgi-bin/micromsg-bin/newsendmsg", &request)?,
-            destination,
-            client_message_id,
-        )
-    }
+
     /// Look up exact usernames on the server. The returned records are not
     /// automatically written into a local profile.
-    pub fn lookup_contacts(
+    #[doc(hidden)]
+    pub(crate) fn lookup_contacts_snapshot(
         &self,
         state: &mut AccountState,
         usernames: &[String],
@@ -1178,7 +1146,8 @@ impl NativeClient {
             usernames,
         )
     }
-    pub fn lookup_room(
+    #[doc(hidden)]
+    pub(crate) fn lookup_room_snapshot(
         &self,
         state: &mut AccountState,
         room_id: &str,
@@ -1195,7 +1164,8 @@ impl NativeClient {
             room_id,
         )
     }
-    pub fn init_contacts(
+    #[doc(hidden)]
+    pub(crate) fn init_contacts_snapshot(
         &self,
         state: &mut AccountState,
         contact_sequence: u32,
@@ -1217,7 +1187,8 @@ impl NativeClient {
         );
         Ok(page)
     }
-    pub fn download_avatars(
+    #[doc(hidden)]
+    pub(crate) fn download_avatars_snapshot(
         &self,
         state: &mut AccountState,
         usernames: &[String],
@@ -1233,7 +1204,8 @@ impl NativeClient {
             usernames,
         )
     }
-    pub fn download_voice_chunk(
+    #[doc(hidden)]
+    pub(crate) fn download_voice_chunk_snapshot(
         &self,
         state: &mut AccountState,
         server_message_id: u64,
@@ -1248,13 +1220,18 @@ impl NativeClient {
             offset,
         )
     }
-    pub fn cdn_config(&self, state: &mut AccountState) -> Result<crate::media::CdnConfig> {
+    #[doc(hidden)]
+    pub(crate) fn cdn_config_snapshot(
+        &self,
+        state: &mut AccountState,
+    ) -> Result<crate::media::CdnConfig> {
         let request = p::bytes(1, &wire::base_request(&state.device, state.uin, 0)?);
         let reply =
             self.authenticated_rpc(state, 379, "/cgi-bin/micromsg-bin/getcdndns", &request)?;
         crate::media::decode_cdn_config(&reply, state)
     }
-    pub fn large_cdn_config(
+    #[doc(hidden)]
+    pub(crate) fn large_cdn_config_snapshot(
         &self,
         state: &mut AccountState,
         route: crate::media::LargeCdnRoute,
@@ -1266,7 +1243,8 @@ impl NativeClient {
     }
     /// Submit a URL card once through the app-message carrier. The caller owns
     /// the durable intent and must inspect an uncertain submission outcome.
-    pub fn send_share(
+    #[doc(hidden)]
+    pub(crate) fn send_share_snapshot(
         &self,
         state: &mut AccountState,
         destination: &str,
@@ -1286,19 +1264,9 @@ impl NativeClient {
             client_id,
         )
     }
-    /// Submit a quoted reply once. The caller owns the persisted XML, intent and
-    /// uncertain-submission handling, as for other app-message sends.
-    pub fn send_quote(
-        &self,
-        state: &mut AccountState,
-        destination: &str,
-        client_id: &str,
-        created_at: u32,
-        content: &str,
-    ) -> Result<crate::media_send::MediaSendResult> {
-        self.send_quote_with_source(state, destination, client_id, created_at, content, None)
-    }
-    pub fn send_quote_with_source(
+
+    #[doc(hidden)]
+    pub(crate) fn send_quote_with_source_snapshot(
         &self,
         state: &mut AccountState,
         destination: &str,
@@ -1322,7 +1290,8 @@ impl NativeClient {
     }
     /// Reserve one file-upload message. An uncertain response must not be
     /// retried automatically; retain the returned receipt with the send intent.
-    pub fn reserve_file_upload(
+    #[doc(hidden)]
+    pub(crate) fn reserve_file_upload_snapshot(
         &self,
         state: &mut AccountState,
         destination: &str,
@@ -1346,28 +1315,10 @@ impl NativeClient {
             &request,
         )?)
     }
-    pub fn send_file(
-        &self,
-        state: &mut AccountState,
-        destination: &str,
-        client_id: &str,
-        created_at: u32,
-        upload: &crate::media::UploadedMedia,
-    ) -> Result<crate::media_send::MediaSendResult> {
-        let request = crate::media_send::file_send_request(
-            state,
-            destination,
-            client_id,
-            created_at,
-            upload,
-        )?;
-        crate::media_send::decode_file_send(
-            &self.authenticated_rpc(state, 222, "/cgi-bin/micromsg-bin/sendappmsg", &request)?,
-            client_id,
-        )
-    }
+
     #[allow(clippy::too_many_arguments)]
-    pub fn send_file_with_reservation(
+    #[doc(hidden)]
+    pub(crate) fn send_file_with_reservation_snapshot(
         &self,
         state: &mut AccountState,
         destination: &str,
@@ -1398,7 +1349,8 @@ impl NativeClient {
             crate::media_send::decode_file_send(&reply, client_id)
         }
     }
-    pub fn send_image(
+    #[doc(hidden)]
+    pub(crate) fn send_image_snapshot(
         &self,
         state: &mut AccountState,
         destination: &str,
@@ -1413,7 +1365,8 @@ impl NativeClient {
             destination,
         )
     }
-    pub fn send_video(
+    #[doc(hidden)]
+    pub(crate) fn send_video_snapshot(
         &self,
         state: &mut AccountState,
         destination: &str,
@@ -1436,7 +1389,8 @@ impl NativeClient {
     /// Submit one voice note, as consecutive byte ranges when it exceeds one
     /// request. Each range is sent once; an error after the first submission is
     /// an uncertain outcome that the caller must not retry automatically.
-    pub fn send_voice(
+    #[doc(hidden)]
+    pub(crate) fn send_voice_snapshot(
         &self,
         state: &mut AccountState,
         destination: &str,

@@ -119,13 +119,16 @@ enum Command {
     /// Look up known contact IDs on the selected account.
     #[command(hide = true)]
     LookupContacts {
+        /// Contact IDs to look up on WeChat; give one or more.
         #[arg(required = true)]
         ids: Vec<String>,
     },
     /// Look up a known group ID on the selected account.
     #[command(hide = true)]
     LookupGroup {
+        /// Group ID, ending in @chatroom, to fetch the member roster for.
         room: String,
+        /// Roster version to request from WeChat; the reply shows the current version.
         #[arg(long, default_value_t = 0)]
         version: u32,
     },
@@ -137,8 +140,10 @@ enum Command {
     },
     /// Fetch new messages for the selected account.
     Sync {
+        /// Return as soon as the work is queued instead of waiting for it.
         #[arg(long)]
         detach: bool,
+        /// Seconds to wait for completion; the work keeps running after the wait ends.
         #[arg(long, default_value_t = 30, conflicts_with = "detach")]
         wait: u64,
     },
@@ -165,8 +170,10 @@ enum Command {
     /// List message threads for the selected account.
     #[command(hide = true)]
     Threads {
+        /// Continue from the next-page cursor of the previous result.
         #[arg(long)]
         cursor: Option<String>,
+        /// Return at most this many items.
         #[arg(long)]
         limit: Option<usize>,
     },
@@ -174,8 +181,10 @@ enum Command {
     Contacts {
         #[command(subcommand)]
         command: Option<ContactCommand>,
+        /// Only list contacts whose name or ID contains this text.
         #[arg(long)]
         search: Option<String>,
+        /// Continue from the next-page cursor of the previous result.
         #[arg(long)]
         cursor: Option<String>,
     },
@@ -183,8 +192,10 @@ enum Command {
     Groups {
         #[command(subcommand)]
         command: Option<GroupCommand>,
+        /// Only list groups whose name or ID contains this text.
         #[arg(long)]
         search: Option<String>,
+        /// Continue from the next-page cursor of the previous result.
         #[arg(long)]
         cursor: Option<String>,
     },
@@ -197,8 +208,10 @@ enum Command {
     Events {
         #[command(subcommand)]
         command: Option<EventCommand>,
+        /// Start after this event cursor, such as the last one you processed.
         #[arg(long, default_value = "0")]
         after: String,
+        /// Keep printing new events as they arrive instead of listing once.
         #[arg(long)]
         watch: bool,
     },
@@ -231,17 +244,28 @@ enum ConfigCommand {
 enum ServerCommand {
     /// Save a server URL and the local path to its API token file.
     Add {
+        /// Name to save the server under.
         name: String,
+        /// Daemon URL, such as https://wx.example.com.
         #[arg(long)]
         url: String,
+        /// File holding this server's API token.
         #[arg(long)]
         token_file: PathBuf,
     },
     /// List saved servers and the current selection.
     List,
+    /// Remove a saved server from this CLI's configuration.
+    Remove {
+        /// Saved server name from wx config servers list.
+        name: String,
+    },
     #[command(alias = "use")]
     /// Save the server to use for subsequent commands.
-    Select { name: String },
+    Select {
+        /// Saved server name from wx config servers list.
+        name: String,
+    },
 }
 #[derive(Subcommand)]
 enum AccountCommand {
@@ -249,19 +273,33 @@ enum AccountCommand {
     List,
     /// Create an account slot with an ID or alias.
     Create {
+        /// ID for the new account; the daemon picks one if you give only --alias.
         id: Option<String>,
+        /// Short name you can use in place of the account ID.
         #[arg(long)]
         alias: Option<String>,
     },
     /// Show one account by ID or alias, or the selected account.
-    Get { id: Option<String> },
+    Get {
+        /// Account ID or alias from wx accounts list; omit for the selected account.
+        id: Option<String>,
+    },
     #[command(alias = "default")]
     /// Save the default account for the selected named server.
-    Select { id: String },
+    Select {
+        /// Account ID or alias from wx accounts list.
+        id: String,
+    },
     /// Rename an account's alias.
-    Alias { id: String, alias: String },
+    Alias {
+        /// Account ID or current alias from wx accounts list.
+        id: String,
+        /// New alias for the account.
+        alias: String,
+    },
     /// Remove a signed-out profile from the hub, retaining its local files.
     Remove {
+        /// Account ID from wx accounts list.
         id: String,
         /// Repeat the exact account ID to confirm removal.
         #[arg(long)]
@@ -279,8 +317,10 @@ enum AccountCommand {
     Capabilities,
     /// Reconnect the selected account using its saved WeChat session.
     Connect {
+        /// Return as soon as the work is queued instead of waiting for it.
         #[arg(long)]
         detach: bool,
+        /// Seconds to wait for completion; the work keeps running after the wait ends.
         #[arg(long, default_value_t = 30, conflicts_with = "detach")]
         wait: u64,
     },
@@ -293,10 +333,13 @@ enum JobsAction {
     Resource(ResourceAction),
     /// Repair local profile writes using saved bytes and receipts.
     RepairWriteback {
+        /// Repair at most this many saved items in one run (1 to 100).
         #[arg(long, default_value_t = 25)]
         limit: usize,
+        /// Return as soon as the work is queued instead of waiting for it.
         #[arg(long)]
         detach: bool,
+        /// Seconds to wait for completion; the work keeps running after the wait ends.
         #[arg(long, default_value_t = 30, conflicts_with = "detach")]
         wait: u64,
     },
@@ -305,11 +348,18 @@ enum JobsAction {
 enum ResourceAction {
     #[command(alias = "status")]
     /// Show the current result and state of an item by ID.
-    Get { id: String },
+    Get {
+        /// ID printed when the job, operation or login attempt was started.
+        id: String,
+    },
     /// Request cancellation of an item by ID.
-    Cancel { id: String },
+    Cancel {
+        /// ID printed when the job, operation or login attempt was started.
+        id: String,
+    },
     /// Retry an eligible failed item by ID.
     Retry {
+        /// ID printed when the job, operation or login attempt was started.
         id: String,
         /// Reuse a completed file upload whose message submission never started.
         #[arg(long)]
@@ -322,6 +372,7 @@ enum ContactCommand {
     Catalog(CatalogCommand),
     /// Look up one or more known contact IDs on WeChat.
     Lookup {
+        /// Contact IDs to look up on WeChat; give one or more.
         #[arg(required = true)]
         ids: Vec<String>,
     },
@@ -331,32 +382,48 @@ enum ContactCommand {
 enum CatalogCommand {
     /// Retrieve a saved avatar or request an avatar refresh.
     Avatar {
+        /// ID of the contact whose avatar to retrieve.
         id: String,
+        /// Save the avatar to this new file (required unless --refresh).
         #[arg(long)]
         output: Option<PathBuf>,
+        /// Ask WeChat for a fresh avatar instead of reading the saved one.
         #[arg(long)]
         refresh: bool,
+        /// Return as soon as the work is queued instead of waiting for it.
         #[arg(long)]
         detach: bool,
+        /// Seconds to wait for completion; the work keeps running after the wait ends.
         #[arg(long, default_value_t = 30)]
         wait: u64,
     },
     /// List saved entries with optional pagination.
     List {
+        /// Return at most this many items.
         #[arg(long)]
         limit: Option<usize>,
+        /// Continue from the next-page cursor of the previous result.
         #[arg(long)]
         cursor: Option<String>,
     },
     /// Show a saved entry by ID.
-    Get { id: String },
+    Get {
+        /// ID of the contact or group, from the matching list command.
+        id: String,
+    },
     /// Find saved entries matching a name or ID.
-    Find { query: String },
+    Find {
+        /// Name or ID text to search for.
+        query: String,
+    },
     /// Refresh one entry from WeChat.
     Refresh {
+        /// ID of the contact or group, from the matching list command.
         id: String,
+        /// Return as soon as the work is queued instead of waiting for it.
         #[arg(long)]
         detach: bool,
+        /// Seconds to wait for completion; the work keeps running after the wait ends.
         #[arg(long, default_value_t = 30, conflicts_with = "detach")]
         wait: u64,
     },
@@ -367,8 +434,10 @@ enum CatalogCommand {
     },
     /// Refresh the catalog from WeChat.
     Sync {
+        /// Return as soon as the work is queued instead of waiting for it.
         #[arg(long)]
         detach: bool,
+        /// Seconds to wait for completion; the work keeps running after the wait ends.
         #[arg(long, default_value_t = 30, conflicts_with = "detach")]
         wait: u64,
     },
@@ -377,62 +446,82 @@ enum CatalogCommand {
 enum ChatCommand {
     /// Pin an ordinary direct chat or group to the top of the thread list.
     Pin {
+        /// Chat ID from wx chats list.
         id: String,
         #[command(flatten)]
         options: MutationOptions,
     },
     /// Unpin an ordinary direct chat or group.
     Unpin {
+        /// Chat ID from wx chats list.
         id: String,
         #[command(flatten)]
         options: MutationOptions,
     },
     /// Mute a direct chat or group.
     Mute {
+        /// Chat ID from wx chats list.
         id: String,
         #[command(flatten)]
         options: MutationOptions,
     },
     /// Unmute a direct chat or group.
     Unmute {
+        /// Chat ID from wx chats list.
         id: String,
         #[command(flatten)]
         options: MutationOptions,
     },
     /// List chats with optional pagination and kind filtering.
     List {
+        /// Return at most this many items.
         #[arg(long)]
         limit: Option<usize>,
+        /// Continue from the next-page cursor of the previous result.
         #[arg(long)]
         cursor: Option<String>,
+        /// Only list chats of this kind: direct, group or system.
         #[arg(long)]
         kind: Option<String>,
     },
     /// Show one chat and its current read-state version.
-    Get { id: String },
+    Get {
+        /// Chat ID from wx chats list.
+        id: String,
+    },
     /// Find chats matching a name or ID.
     Find {
+        /// Name or ID text to search for.
         query: String,
+        /// Only find chats of this kind: direct, group or system.
         #[arg(long)]
         kind: Option<String>,
     },
     /// Mark the whole chat read using its current read-state version.
     Read {
+        /// Chat ID from wx chats list.
         id: String,
+        /// Read-state version from wx chats get; refused if the chat changed since.
         #[arg(long)]
         expected_version: String,
     },
     /// Retained for compatibility; opening a native GUI is unsupported.
     #[command(hide = true)]
-    Open { id: String },
+    Open {
+        /// Chat ID from wx chats list.
+        id: String,
+    },
 }
 
 #[derive(Args)]
 struct MutationOptions {
+    /// Reuse this key when retrying so the daemon applies the request only once.
     #[arg(long)]
     idempotency_key: Option<String>,
+    /// Return as soon as the work is queued instead of waiting for it.
     #[arg(long)]
     detach: bool,
+    /// Seconds to wait for completion; the work keeps running after the wait ends.
     #[arg(long, default_value_t = 30, conflicts_with = "detach")]
     wait: u64,
 }
@@ -442,14 +531,18 @@ enum GroupCommand {
     Catalog(CatalogCommand),
     /// Fetch the member roster for a known group ID from WeChat.
     Lookup {
+        /// Group ID, ending in @chatroom, to fetch the member roster for.
         room: String,
+        /// Roster version to request from WeChat; the reply shows the current version.
         #[arg(long, default_value_t = 0)]
         version: u32,
     },
     /// Create a group with two to forty initial members.
     Create {
+        /// Contact IDs of the initial members, from wx contacts list; two to forty.
         #[arg(required = true, num_args = 2..=40)]
         members: Vec<String>,
+        /// Shared name for the new group.
         #[arg(long)]
         name: Option<String>,
         #[command(flatten)]
@@ -457,26 +550,32 @@ enum GroupCommand {
     },
     /// Change a group's shared name.
     Rename {
+        /// Group ID from wx groups list.
         id: String,
+        /// New shared name for the group.
         name: String,
         #[command(flatten)]
         options: MutationOptions,
     },
     /// Leave a group while retaining local history.
     Leave {
+        /// Group ID from wx groups list.
         id: String,
         #[command(flatten)]
         options: MutationOptions,
     },
     /// Change your display name in a group.
     MyName {
+        /// Group ID from wx groups list.
         id: String,
+        /// Your new display name in this group.
         display_name: String,
         #[command(flatten)]
         options: MutationOptions,
     },
     /// Clear a group's announcement when permitted.
     ClearAnnouncement {
+        /// Group ID from wx groups list.
         id: String,
         #[command(flatten)]
         options: MutationOptions,
@@ -486,25 +585,38 @@ enum GroupCommand {
 enum MemberCommand {
     /// List saved members of a group.
     List {
+        /// Group ID from wx groups list.
         id: String,
+        /// Return at most this many items.
         #[arg(long)]
         limit: Option<usize>,
+        /// Continue from the next-page cursor of the previous result.
         #[arg(long)]
         cursor: Option<String>,
     },
     /// Show one saved group member.
-    Get { id: String, username: String },
+    Get {
+        /// Group ID from wx groups list.
+        id: String,
+        /// Member's contact ID, from wx groups members list.
+        username: String,
+    },
     /// Refresh a group's member list from WeChat.
     Refresh {
+        /// Group ID from wx groups list.
         id: String,
+        /// Return as soon as the work is queued instead of waiting for it.
         #[arg(long)]
         detach: bool,
+        /// Seconds to wait for completion; the work keeps running after the wait ends.
         #[arg(long, default_value_t = 30, conflicts_with = "detach")]
         wait: u64,
     },
     /// Add one or more contacts to a group.
     Add {
+        /// Group ID from wx groups list.
         id: String,
+        /// Contact IDs to add; give one or more.
         #[arg(required = true)]
         members: Vec<String>,
         #[command(flatten)]
@@ -512,7 +624,9 @@ enum MemberCommand {
     },
     /// Remove one or more members from a group.
     Remove {
+        /// Group ID from wx groups list.
         id: String,
+        /// Member IDs to remove; give one or more.
         #[arg(required = true)]
         members: Vec<String>,
         #[command(flatten)]
@@ -523,22 +637,28 @@ enum MemberCommand {
 enum EventCommand {
     /// Stream new events, optionally saving a resume cursor.
     Watch {
+        /// Start after this event cursor, such as the last one you processed.
         #[arg(long, default_value = "0")]
         after: String,
+        /// Save the last event cursor to this private file and resume from it next time.
         #[arg(long)]
         cursor_file: Option<PathBuf>,
     },
     /// Read events after a cursor.
     List {
+        /// Start after this event cursor, such as the last one you processed.
         #[arg(long, default_value = "0")]
         after: String,
+        /// Return at most this many events.
         #[arg(long, default_value_t = 100)]
         limit: usize,
     },
     /// Save a consumer's progress through an event cursor.
     Ack {
+        /// Name of the consumer whose progress is being saved.
         #[arg(long)]
         consumer: String,
+        /// Cursor of the last event this consumer has finished handling.
         #[arg(long)]
         through: String,
     },
@@ -557,32 +677,49 @@ enum AuthCommand {
         /// Use supported stopped Linux files in place; optional absolute path on the daemon host, not the CLI host. macOS/Windows profiles are unverified.
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "")]
         official: Option<String>,
+        /// Reuse this key when retrying so the daemon applies the request only once.
         #[arg(long)]
         idempotency_key: Option<String>,
+        /// Which sign-in method to use; auto tries saved device trust first, then a QR code.
         #[arg(long,value_parser=["auto","saved-device","qr"],default_value="auto")]
         strategy: String,
+        /// Replace an expired, unscanned QR code automatically, or leave it expired.
         #[arg(long,value_parser=["auto","manual"],default_value="auto")]
         qr_refresh: String,
+        /// Most times an expired QR code is replaced automatically (0 to 3).
         #[arg(long,default_value_t=3,value_parser=clap::value_parser!(u8).range(0..=3))]
         max_refreshes: u8,
+        /// Skip saved device trust and sign in with a QR code.
         #[arg(long, alias = "qr")]
         force_qr: bool,
+        /// Never show a QR code; sign in only with saved device trust.
         #[arg(long, alias = "saved-only", conflicts_with = "force_qr")]
         no_qr: bool,
+        /// Seconds to allow for the login to finish (30 to 900).
         #[arg(long, alias = "wait", default_value_t = 300)]
         timeout: u64,
+        /// Return as soon as the work is queued instead of waiting for it.
         #[arg(long)]
         detach: bool,
+        /// Save the login QR code PNG to this path; later refreshes add a -N suffix.
         #[arg(long, alias = "qr-out")]
         qr_output: Option<PathBuf>,
     },
     /// Show a login attempt by ID.
-    Operation { id: String },
+    Operation {
+        /// Login attempt ID printed by wx auth login.
+        id: String,
+    },
     /// Cancel a login attempt by ID.
-    Cancel { id: String },
+    Cancel {
+        /// Login attempt ID printed by wx auth login.
+        id: String,
+    },
     /// Show or save the QR code for a login attempt.
     Qr {
+        /// Login attempt ID printed by wx auth login.
         id: String,
+        /// Save the QR code PNG to this path instead of the default folder.
         #[arg(long)]
         output: Option<PathBuf>,
     },
@@ -596,17 +733,22 @@ enum AuthCommand {
         /// Sign out on the daemon and keep saved credentials, without contacting WeChat.
         #[arg(long, conflicts_with_all = ["idempotency_key", "detach", "wait"])]
         local: bool,
+        /// Reuse this key when retrying so the daemon applies the request only once.
         #[arg(long)]
         idempotency_key: Option<String>,
+        /// Return as soon as the work is queued instead of waiting for it.
         #[arg(long)]
         detach: bool,
+        /// Seconds to wait for completion; the work keeps running after the wait ends.
         #[arg(long, default_value_t = 30)]
         wait: u64,
     },
     /// Forget local authentication material while retaining history.
     Forget {
+        /// Confirm discarding this account's saved login credentials; history is kept.
         #[arg(long, required = true)]
         yes: bool,
+        /// Reuse this key when retrying so the daemon applies the request only once.
         #[arg(long)]
         idempotency_key: Option<String>,
     },
@@ -615,35 +757,49 @@ enum AuthCommand {
 enum MessageCommand {
     /// Recall an own message using its opaque local ID and exact remote ID.
     Recall {
+        /// Message ID from wx messages list --json (the id field).
         id: String,
+        /// Exact server ID of the message, from wx messages list --json (serverId).
         #[arg(long)]
         server_id: String,
+        /// Reuse this key when retrying so the daemon applies the request only once.
         #[arg(long)]
         idempotency_key: Option<String>,
+        /// Return as soon as the work is queued instead of waiting for it.
         #[arg(long)]
         detach: bool,
+        /// Seconds to wait for completion; the work keeps running after the wait ends.
         #[arg(long, default_value_t = 30, conflicts_with = "detach")]
         wait: u64,
     },
     /// Stream message events, optionally saving a resume cursor.
     Watch {
+        /// Start after this event cursor, such as the last one you processed.
         #[arg(long, default_value = "0")]
         after: String,
+        /// Save the last event cursor to this private file and resume from it next time.
         #[arg(long)]
         cursor_file: Option<PathBuf>,
     },
     /// Retrieve a message attachment or report its availability.
     Media {
+        /// Chat ID the message belongs to, from wx chats list.
         thread: String,
+        /// Message ID from wx messages list.
         id: String,
+        /// Copy to retrieve: images have thumbnail, standard and original; videos normal and original; voice encoded. best picks the best available and full means original.
         #[arg(long,default_value="best",value_parser=["best","thumbnail","standard","original","full","normal","encoded"])]
         quality: String,
+        /// Save the attachment to this new file; an existing file is not overwritten.
         #[arg(long)]
         output: Option<PathBuf>,
+        /// Use only a copy the daemon has already saved; never start a download.
         #[arg(long)]
         cached_only: bool,
+        /// Return as soon as the work is queued instead of waiting for it.
         #[arg(long)]
         detach: bool,
+        /// Seconds to wait for the download; it keeps running after the wait ends.
         #[arg(long, default_value_t = 20, conflicts_with = "detach")]
         wait: u64,
     },
@@ -659,24 +815,34 @@ enum MessageCommand {
     },
     /// List messages in a chat.
     List {
+        /// Chat ID from wx chats list.
         thread: String,
+        /// Continue from the next-page cursor of the previous result.
         #[arg(long)]
         cursor: Option<String>,
+        /// Return at most this many items.
         #[arg(long)]
         limit: Option<usize>,
     },
     /// Show a message by local ID, optionally qualified by chat.
     Get {
+        /// Message ID, or the chat ID when a message ID follows.
         thread_or_id: String,
+        /// Message ID from wx messages list, checked to belong to the chat.
         id: Option<String>,
     },
     /// Send text, a URL share, an image, a file, a video or a voice note.
     Send(Box<MessageSendArgs>),
     /// Show an outgoing send by ID.
-    SendStatus { id: String },
+    SendStatus {
+        /// Send ID printed by wx messages send.
+        id: String,
+    },
     /// Mark a whole chat read using its current read-state version.
     Read {
+        /// Chat ID from wx chats list.
         thread: String,
+        /// Read-state version from wx chats get; refused if the chat changed since.
         #[arg(long)]
         expected_version: String,
     },
@@ -685,20 +851,27 @@ enum MessageCommand {
 }
 #[derive(Args)]
 struct MessageSendArgs {
+    /// Chat ID to send to, from wx chats list.
     thread: String,
+    /// Send this URL as a shared link card; --title is required.
     #[arg(long, group = "payload", requires = "title")]
     share: Option<String>,
+    /// Title shown on the shared link card.
     #[arg(long, requires = "share")]
     title: Option<String>,
+    /// Description shown on the shared link card.
     #[arg(long, requires = "share")]
     description: Option<String>,
+    /// Thumbnail image URL shown on the shared link card.
     #[arg(long, requires = "share")]
     thumbnail_url: Option<String>,
+    /// Send this text message.
     #[arg(long, group = "payload")]
     text: Option<String>,
     /// Quote a stored message in this chat; also supply its exact server ID.
     #[arg(long, requires_all = ["text", "quote_server_id"], conflicts_with_all = ["share", "image", "file", "video", "voice"])]
     quote_message_id: Option<String>,
+    /// Exact server ID of the quoted message; use it with --quote-message-id.
     #[arg(long, requires_all = ["text", "quote_message_id"], conflicts_with_all = ["share", "image", "file", "video", "voice"])]
     quote_server_id: Option<String>,
     /// Mention a group member by account ID; repeat for multiple members.
@@ -707,32 +880,46 @@ struct MessageSendArgs {
     /// Mention all group members (WeChat enforces the account's permissions).
     #[arg(long, requires = "text", conflicts_with_all = ["mention", "share", "image", "file", "video", "voice"])]
     mention_all: bool,
+    /// Send this image file.
     #[arg(long, group = "payload")]
     image: Option<PathBuf>,
+    /// Send this file as an attachment.
     #[arg(long, group = "payload")]
     file: Option<PathBuf>,
+    /// Send this MP4 video file.
     #[arg(long, group = "payload")]
     video: Option<PathBuf>,
     /// Prepare normal playback, or include the unchanged original video too.
     #[arg(long, requires = "video", value_parser = ["normal", "original"])]
     video_quality: Option<String>,
+    /// Send this audio file as a voice message.
     #[arg(long, group = "payload")]
     voice: Option<PathBuf>,
+    /// Reuse this key when retrying so the daemon applies the request only once.
     #[arg(long)]
     idempotency_key: Option<String>,
+    /// Return as soon as the work is queued instead of waiting for it.
     #[arg(long)]
     detach: bool,
+    /// Seconds to wait for the send to finish (up to 3600 for attachments, 900 otherwise).
     #[arg(long, default_value_t = 30, conflicts_with = "detach")]
     wait: u64,
 }
 #[derive(Subcommand)]
 enum SendAction {
     /// Show an outgoing send by ID.
-    Get { id: String },
+    Get {
+        /// Send ID printed by wx messages send.
+        id: String,
+    },
     /// Request cancellation of an outgoing send.
-    Cancel { id: String },
+    Cancel {
+        /// Send ID printed by wx messages send.
+        id: String,
+    },
     /// Find an outgoing send by its original idempotency key.
     Lookup {
+        /// Key that was given when the send was submitted.
         #[arg(long)]
         idempotency_key: String,
     },
@@ -743,84 +930,114 @@ enum TokenCommand {
     List,
     /// Create an API token with account and permission scopes.
     Create {
+        /// Label for the new token.
         name: String,
+        /// Account ID the token may use, or * for all accounts; repeat for several.
         #[arg(long, required = true)]
         accounts: Vec<String>,
+        /// Permission to grant: read, media, send, read-state, login, admin or calls; repeat.
         #[arg(long, required = true)]
         scopes: Vec<String>,
+        /// Expire the token at this Unix time in seconds; it never expires if omitted.
         #[arg(long)]
         expires_at: Option<i64>,
     },
     /// Revoke an API token by ID.
-    Revoke { id: String },
+    Revoke {
+        /// Token ID from wx tokens list.
+        id: String,
+    },
 }
 #[derive(Subcommand)]
 enum StoreCommand {
     /// List accounts in the local daemon store.
     List,
     /// Create an offline account slot.
-    Create { id: String },
+    Create {
+        /// ID for the new offline account slot.
+        id: String,
+    },
     /// Attach a supported stopped official profile in place.
     Attach {
+        /// Stopped official profile home or account folder to use in place.
         #[arg(long)]
         path: PathBuf,
+        /// Confirm the official client is stopped; wx cannot check this for you.
         #[arg(long, required = true)]
         source_stopped: bool,
     },
     /// Copy a supported stopped profile into the local store.
     Import {
+        /// Stopped official profile home or account folder to copy into the store.
         #[arg(long)]
         source: PathBuf,
+        /// Confirm the official client is stopped; wx cannot check this for you.
         #[arg(long, required = true)]
         source_stopped: bool,
     },
     /// Copy an owned stopped profile to a new destination.
     Export {
+        /// New folder to copy the profile into; its parent must exist but it must not.
         #[arg(long)]
         destination: PathBuf,
+        /// Confirm the official client is stopped; wx cannot check this for you.
         #[arg(long, required = true)]
         source_stopped: bool,
+        /// Copy even when saved changes have not reached the official files; gaps are reported.
         #[arg(long)]
         allow_incomplete: bool,
     },
     /// Register a verified key file for the selected account.
     BindKeys {
+        /// Private key file for this profile, such as one from wx profiles keys export.
         #[arg(long)]
         keys_file: PathBuf,
     },
     /// Derive profile keys from an authorized password file.
     DeriveKeys {
+        /// Stopped account folder, the one containing db_storage, to derive keys for.
         #[arg(long)]
         profile: PathBuf,
+        /// Private file holding the account password as exactly 32 raw bytes.
         #[arg(long)]
         password_file: PathBuf,
+        /// Confirm the official client is stopped; wx cannot check this for you.
         #[arg(long, required = true)]
         source_stopped: bool,
     },
     /// Restore saved credentials from an authorized local file.
     RestoreCredentials {
+        /// Private file with the saved login state to restore.
         #[arg(long)]
         file: PathBuf,
+        /// Private file with the raw sync cursor to restore along with the login state.
         #[arg(long)]
         cursor_file: Option<PathBuf>,
     },
     /// Enable supported official-profile writes for a stopped client.
     EnableWrites {
+        /// WeChat username of the account; it must match the logged-in account.
         #[arg(long)]
         own_username: String,
+        /// Official profile's MMKV identity store file, inside the selected profile.
         #[arg(long)]
         mmkv_store: PathBuf,
+        /// Private file holding the 16-byte MMKV format key.
         #[arg(long)]
         format_key_file: PathBuf,
+        /// Confirm the official client is stopped; wx cannot check this for you.
         #[arg(long, required = true)]
         official_client_stopped: bool,
     },
     /// Bind an account to supported stopped profile identity files.
     BindIdentity {
+        /// Official profile's MMKV identity store file, inside the selected profile.
         #[arg(long)]
         mmkv_store: PathBuf,
+        /// Private file holding the 16-byte MMKV format key.
         #[arg(long)]
         format_key_file: PathBuf,
+        /// Confirm the official client is stopped; wx cannot check this for you.
         #[arg(long, required = true)]
         official_client_stopped: bool,
     },
@@ -1176,6 +1393,22 @@ async fn run(cli: Cli) -> Result<()> {
         println!();
         return Ok(());
     }
+    if matches!(
+        &cli.command,
+        Command::Calls {
+            command: Some(calls_cli::CallsCommand::Conference { command: None })
+        }
+    ) {
+        let mut command = cli_help::command();
+        command.build();
+        command
+            .find_subcommand_mut("calls")
+            .and_then(|calls| calls.find_subcommand_mut("conference"))
+            .context("missing conference command")?
+            .print_help()?;
+        println!();
+        return Ok(());
+    }
     if matches!(cli.command, Command::Licenses) {
         return output.print(
             &json!({"silkProject":include_str!("../../wechat-protocol/vendor/silk/LICENSE-MIT"),"silkSdk":include_str!("../../wechat-protocol/vendor/silk/LICENSE-SDK"),"protocol":include_str!("../../wechat-protocol/NOTICE")}),
@@ -1292,6 +1525,20 @@ async fn run(cli: Cli) -> Result<()> {
                 settings.settings.active_server = Some(name.clone());
                 settings.save()?;
                 return output.print(&json!({"server":name}));
+            }
+            ServerCommand::Remove { name } => {
+                if settings.settings.servers.remove(&name).is_none() {
+                    bail!("saved server not found");
+                }
+                if settings.settings.active_server.as_deref() == Some(&name) {
+                    settings.settings.active_server = None;
+                }
+                settings.save()?;
+                return output.print(&json!({
+                    "server": name,
+                    "state": "removed",
+                    "activeServer": settings.settings.active_server,
+                }));
             }
             ServerCommand::List => {
                 return output.print(

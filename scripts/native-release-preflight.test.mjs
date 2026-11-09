@@ -39,6 +39,29 @@ test('annotated version tags must peel to the exact native source commit', async
     else await assert.rejects(validateNativeRelease(options), /different source commit/);
   }
 });
+test('tag reservation creates only the missing version tag at the checked source', async t => {
+  let created = false;
+  const options = await fixture(t, async (url, init) => {
+    if (String(url).startsWith('https://registry.npmjs.org/')) return missing();
+    if (init.method === 'POST') {
+      assert.ok(!created);
+      assert.match(url, /\/git\/refs$/);
+      assert.deepEqual(JSON.parse(init.body), { ref: 'refs/tags/v0.17.0', sha: sourceCommit });
+      created = true;
+      return Response.json({ object: { type: 'commit', sha: sourceCommit } }, { status: 201 });
+    }
+    return created ? Response.json({ object: { type: 'commit', sha: sourceCommit } }) : missing();
+  });
+  await assert.rejects(validateNativeRelease({ ...options, tagMode: 'require' }), /Missing release tag/);
+  assert.equal((await validateNativeRelease({ ...options, tagMode: 'reserve' })).tagExists, true);
+  assert.equal((await validateNativeRelease({ ...options, tagMode: 'reserve' })).tagExists, true);
+  assert.equal((await validateNativeRelease({ ...options, tagMode: 'require' })).tagExists, true);
+});
+test('denied tag creation stops with exact-source recovery information', async t => {
+  const options = await fixture(t, async (url, init) => init?.method === 'POST'
+    ? new Response(null, { status: 403 }) : missing());
+  await assert.rejects(validateNativeRelease({ ...options, tagMode: 'reserve' }), /Cannot reserve v0\.17\.0 at a{40} \(HTTP 403\)/);
+});
 test('release checks fail closed on registry/API errors and mismatched requested version', async t => {
   const options = await fixture(t, async () => new Response(null, { status: 503 }));
   await assert.rejects(validateNativeRelease(options), /HTTP 503/);

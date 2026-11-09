@@ -1,0 +1,127 @@
+name: Interfaces
+
+# Keeps interfaces/ in step with the code and reports listing changes on each PR.
+# See interfaces/README.md. The approval check lives in interfaces-approval.yml.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: interfaces-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+jobs:
+  listings:
+    name: Interfaces up to date
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            relevant:
+              - 'interfaces/**'
+              - 'scripts/interfaces/**'
+              - 'scripts/native-crates.mjs'
+              - 'packages/native-client-rust/**'
+              - 'packages/openclaw-extension/**'
+              - 'packages/client-ui/**'
+              - 'packages/shared/**'
+              - 'docs/src/content/docs/openclaw/tools.mdx'
+              - 'rust-toolchain.toml'
+              - 'pnpm-lock.yaml'
+              - 'package.json'
+              - '.github/workflows/interfaces.yml'
+      # Required checks must always report, so unrelated PRs skip the build but still pass.
+      - name: Skip unrelated changes
+        if: github.event_name == 'pull_request' && steps.filter.outputs.relevant != 'true'
+        run: echo "No interface sources changed."
+      - if: github.event_name != 'pull_request' || steps.filter.outputs.relevant == 'true'
+        uses: pnpm/action-setup@v6
+      - if: github.event_name != 'pull_request' || steps.filter.outputs.relevant == 'true'
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - if: github.event_name != 'pull_request' || steps.filter.outputs.relevant == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        id: rust
+        with:
+          toolchain: 1.93.1
+      - if: github.event_name != 'pull_request' || steps.filter.outputs.relevant == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/native-client-rust -> target
+          add-rust-environment-hash-key: false
+          key: interfaces-${{ steps.rust.outputs.cachekey }}
+      - if: github.event_name != 'pull_request' || steps.filter.outputs.relevant == 'true'
+        name: Install native build tools
+        run: sudo apt-get update && sudo apt-get install -y cmake
+      - if: github.event_name != 'pull_request' || steps.filter.outputs.relevant == 'true'
+        run: pnpm install --frozen-lockfile
+      - if: github.event_name != 'pull_request' || steps.filter.outputs.relevant == 'true'
+        name: Check every listing against the code
+        run: pnpm interfaces --check --all
+      - if: failure()
+        name: Explain a stale listing
+        run: |
+          echo "::error::An interface listing no longer matches the code. Run 'pnpm interfaces', review the diff under interfaces/ and commit it."
+          git status --short interfaces/
+
+  docs:
+    name: Interface docs
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      - name: Test the review tool
+        run: node --test scripts/interfaces/review.test.mjs scripts/interfaces/index.test.mjs
+      - name: Check OpenAPI compatibility with oasdiff
+        id: oasdiff
+        run: |
+          base=$(git merge-base "origin/${{ github.base_ref }}" HEAD)
+          if [ ! -f interfaces/http/openapi.json ] || ! git cat-file -e "$base:interfaces/http/openapi.json" 2>/dev/null; then
+            echo "No earlier OpenAPI document to compare."
+            exit 0
+          fi
+          git show "$base:interfaces/http/openapi.json" > "$RUNNER_TEMP/openapi-base.json"
+          version=1.36.0
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/oasdiff.tar.gz" "https://github.com/oasdiff/oasdiff/releases/download/v${version}/oasdiff_${version}_linux_amd64.tar.gz"
+          echo "dba65661f6d0f178a3e4884c309f19527a849388bb9df0e81545db76dbb697d6  $RUNNER_TEMP/oasdiff.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/oasdiff.tar.gz" -C "$RUNNER_TEMP" oasdiff
+          set +e
+          "$RUNNER_TEMP/oasdiff" breaking "$RUNNER_TEMP/openapi-base.json" interfaces/http/openapi.json --format markdown --fail-on ERR > "$RUNNER_TEMP/oasdiff.md"
+          status=$?
+          set -e
+          # A failure with no report is a tool error, not a breaking change.
+          if [ "$status" -ne 0 ] && [ ! -s "$RUNNER_TEMP/oasdiff.md" ]; then exit "$status"; fi
+          echo "report=$RUNNER_TEMP/oasdiff.md" >> "$GITHUB_OUTPUT"
+          echo "breaking=$([ "$status" -ne 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - name: Compare listings, update the PR comment and check documentation
+        run: |
+          args=(--base "origin/${{ github.base_ref }}" --comment --fail-on-missing-docs)
+          if [ -n "${{ steps.oasdiff.outputs.report }}" ]; then args+=(--oasdiff "${{ steps.oasdiff.outputs.report }}"); fi
+          if [ "${{ steps.oasdiff.outputs.breaking }}" = true ]; then args+=(--oasdiff-breaking); fi
+          node scripts/interfaces/review.mjs "${args[@]}"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

@@ -1,0 +1,2442 @@
+{
+  "asyncapi": "3.0.0",
+  "channels": {
+    "control": {
+      "address": "/v1/accounts/{a}/calls/socket",
+      "description": "Call commands and events as JSON text. Send call.hello within five seconds of connecting, then wait for hello.",
+      "messages": {
+        "client.call.answer": {
+          "$ref": "#/components/messages/client.call.answer"
+        },
+        "client.call.cancel": {
+          "$ref": "#/components/messages/client.call.cancel"
+        },
+        "client.call.clear_audio": {
+          "$ref": "#/components/messages/client.call.clear_audio"
+        },
+        "client.call.dial": {
+          "$ref": "#/components/messages/client.call.dial"
+        },
+        "client.call.hangup": {
+          "$ref": "#/components/messages/client.call.hangup"
+        },
+        "client.call.hello": {
+          "$ref": "#/components/messages/client.call.hello"
+        },
+        "client.call.invite": {
+          "$ref": "#/components/messages/client.call.invite"
+        },
+        "client.call.join": {
+          "$ref": "#/components/messages/client.call.join"
+        },
+        "client.call.mute": {
+          "$ref": "#/components/messages/client.call.mute"
+        },
+        "client.call.ready": {
+          "$ref": "#/components/messages/client.call.ready"
+        },
+        "client.call.reject": {
+          "$ref": "#/components/messages/client.call.reject"
+        },
+        "server.call.control": {
+          "$ref": "#/components/messages/server.call.control"
+        },
+        "server.call.error": {
+          "$ref": "#/components/messages/server.call.error"
+        },
+        "server.call.invitation_result": {
+          "$ref": "#/components/messages/server.call.invitation_result"
+        },
+        "server.call.offered": {
+          "$ref": "#/components/messages/server.call.offered"
+        },
+        "server.call.pending": {
+          "$ref": "#/components/messages/server.call.pending"
+        },
+        "server.call.state": {
+          "$ref": "#/components/messages/server.call.state"
+        },
+        "server.calls.availability": {
+          "$ref": "#/components/messages/server.calls.availability"
+        },
+        "server.command.result": {
+          "$ref": "#/components/messages/server.command.result"
+        },
+        "server.conference.invitations": {
+          "$ref": "#/components/messages/server.conference.invitations"
+        },
+        "server.hello": {
+          "$ref": "#/components/messages/server.hello"
+        },
+        "server.participant.updated": {
+          "$ref": "#/components/messages/server.participant.updated"
+        },
+        "server.protocol.error": {
+          "$ref": "#/components/messages/server.protocol.error"
+        },
+        "server.track.added": {
+          "$ref": "#/components/messages/server.track.added"
+        },
+        "server.track.removed": {
+          "$ref": "#/components/messages/server.track.removed"
+        },
+        "server.track.updated": {
+          "$ref": "#/components/messages/server.track.updated"
+        }
+      },
+      "parameters": {
+        "a": {
+          "description": "Account ID or alias."
+        }
+      },
+      "title": "The control socket"
+    },
+    "media": {
+      "address": "/v1/accounts/{a}/calls/{call}/media",
+      "description": "Audio for one call you own, as JSON text with base64 PCM. Send media.attach within five seconds of connecting, then wait for media.ready. Binary messages are rejected.",
+      "messages": {
+        "client.audio.chunk": {
+          "$ref": "#/components/messages/client.audio.chunk"
+        },
+        "client.audio.start": {
+          "$ref": "#/components/messages/client.audio.start"
+        },
+        "client.media.attach": {
+          "$ref": "#/components/messages/client.media.attach"
+        },
+        "server.audio.chunk": {
+          "$ref": "#/components/messages/server.audio.chunk"
+        },
+        "server.call.error": {
+          "$ref": "#/components/messages/server.call.error"
+        },
+        "server.media.ready": {
+          "$ref": "#/components/messages/server.media.ready"
+        },
+        "server.protocol.error": {
+          "$ref": "#/components/messages/server.protocol.error"
+        },
+        "server.track.added": {
+          "$ref": "#/components/messages/server.track.added"
+        },
+        "server.track.removed": {
+          "$ref": "#/components/messages/server.track.removed"
+        }
+      },
+      "parameters": {
+        "a": {
+          "description": "Account ID or alias."
+        },
+        "call": {
+          "description": "ID of the call whose audio the socket carries."
+        }
+      },
+      "title": "The media socket"
+    }
+  },
+  "components": {
+    "messages": {
+      "client.audio.chunk": {
+        "contentType": "application/json",
+        "name": "audio.chunk",
+        "payload": {
+          "$ref": "#/components/schemas/CallMediaCommand.audio.chunk"
+        },
+        "summary": "A chunk of PCM audio. You send it on your track; the daemon sends it on receive tracks.",
+        "title": "CallMediaCommand[audio.chunk]"
+      },
+      "client.audio.start": {
+        "contentType": "application/json",
+        "name": "audio.start",
+        "payload": {
+          "$ref": "#/components/schemas/CallMediaCommand.audio.start"
+        },
+        "summary": "Start sending audio on your track for a generation. Send it before the first chunk, and again after each new generation.",
+        "title": "CallMediaCommand[audio.start]"
+      },
+      "client.call.answer": {
+        "contentType": "application/json",
+        "name": "call.answer",
+        "payload": {
+          "$ref": "#/components/schemas/CallCommand.call.answer"
+        },
+        "summary": "Answer the incoming call. The first client to answer owns the call; others get `already_claimed`.",
+        "title": "CallCommand[call.answer]"
+      },
+      "client.call.cancel": {
+        "contentType": "application/json",
+        "name": "call.cancel",
+        "payload": {
+          "$ref": "#/components/schemas/CallCommand.call.cancel"
+        },
+        "summary": "Cancel your outgoing call before the other side picks up.",
+        "title": "CallCommand[call.cancel]"
+      },
+      "client.call.clear_audio": {
+        "contentType": "application/json",
+        "name": "call.clear_audio",
+        "payload": {
+          "$ref": "#/components/schemas/CallCommand.call.clear_audio"
+        },
+        "summary": "Discard queued outgoing audio, for example to interrupt a reply. This starts a new send generation, announced by `track.updated`.",
+        "title": "CallCommand[call.clear_audio]"
+      },
+      "client.call.dial": {
+        "contentType": "application/json",
+        "name": "call.dial",
+        "payload": {
+          "$ref": "#/components/schemas/CallCommand.call.dial"
+        },
+        "summary": "Start an outgoing call. The socket becomes the call's owner.",
+        "title": "CallCommand[call.dial]"
+      },
+      "client.call.hangup": {
+        "contentType": "application/json",
+        "name": "call.hangup",
+        "payload": {
+          "$ref": "#/components/schemas/CallCommand.call.hangup"
+        },
+        "summary": "End a call after answering or connecting. In a conference this leaves the call without ending it for the others.",
+        "title": "CallCommand[call.hangup]"
+      },
+      "client.call.hello": {
+        "contentType": "application/json",
+        "name": "call.hello",
+        "payload": {
+          "$ref": "#/components/schemas/CallClientHello.call.hello"
+        },
+        "summary": "Announce the protocol versions this client supports. Send it within five seconds of opening the control socket, before any command.",
+        "title": "CallClientHello[call.hello]"
+      },
+      "client.call.invite": {
+        "contentType": "application/json",
+        "name": "call.invite",
+        "payload": {
+          "$ref": "#/components/schemas/CallCommand.call.invite"
+        },
+        "summary": "Invite more contacts into a connected conference call you own. Results arrive as `call.invitation_result`.",
+        "title": "CallCommand[call.invite]"
+      },
+      "client.call.join": {
+        "contentType": "application/json",
+        "name": "call.join",
+        "payload": {
+          "$ref": "#/components/schemas/CallCommand.call.join"
+        },
+        "summary": "Join a conference call from one of the listed invitations. The socket becomes the call's owner, as with `call.dial`.",
+        "title": "CallCommand[call.join]"
+      },
+      "client.call.mute": {
+        "contentType": "application/json",
+        "name": "call.mute",
+        "payload": {
+          "$ref": "#/components/schemas/CallCommand.call.mute"
+        },
+        "summary": "Mute or unmute your outgoing audio. This also clears queued audio and starts a new send generation, announced by `track.updated`.",
+        "title": "CallCommand[call.mute]"
+      },
+      "client.call.ready": {
+        "contentType": "application/json",
+        "name": "call.ready",
+        "payload": {
+          "$ref": "#/components/schemas/CallCommand.call.ready"
+        },
+        "summary": "Advertise or withdraw readiness to handle call audio. A new connection is passive until it advertises readiness.",
+        "title": "CallCommand[call.ready]"
+      },
+      "client.call.reject": {
+        "contentType": "application/json",
+        "name": "call.reject",
+        "payload": {
+          "$ref": "#/components/schemas/CallCommand.call.reject"
+        },
+        "summary": "Reject the incoming call.",
+        "title": "CallCommand[call.reject]"
+      },
+      "client.media.attach": {
+        "contentType": "application/json",
+        "name": "media.attach",
+        "payload": {
+          "$ref": "#/components/schemas/CallMediaCommand.media.attach"
+        },
+        "summary": "Attach the socket to a call you own. Send it first, within five seconds of connecting; the daemon answers `media.ready`.",
+        "title": "CallMediaCommand[media.attach]"
+      },
+      "server.audio.chunk": {
+        "contentType": "application/json",
+        "name": "audio.chunk",
+        "payload": {
+          "$ref": "#/components/schemas/CallMediaCommand.audio.chunk"
+        },
+        "summary": "A chunk of PCM audio. You send it on your track; the daemon sends it on receive tracks.",
+        "title": "CallMediaCommand[audio.chunk]"
+      },
+      "server.call.control": {
+        "contentType": "application/json",
+        "name": "call.control",
+        "payload": {
+          "$ref": "#/components/schemas/CallEvent.call.control"
+        },
+        "summary": "The other party of a direct call changed a control, such as muting their microphone. It needs no reply.",
+        "title": "CallEvent[call.control]"
+      },
+      "server.call.error": {
+        "contentType": "application/json",
+        "name": "call.error",
+        "payload": {
+          "$ref": "#/components/schemas/CallEvent.call.error"
+        },
+        "summary": "A failure that is not tied to a command, such as an invalid message or a missing permission. The daemon then closes the socket, except for `outcome_unknown`, which follows `hello` and leaves it open.",
+        "title": "CallEvent[call.error]"
+      },
+      "server.call.invitation_result": {
+        "contentType": "application/json",
+        "name": "call.invitation_result",
+        "payload": {
+          "$ref": "#/components/schemas/CallEvent.call.invitation_result"
+        },
+        "summary": "The outcome of each invited contact for a create or invite command, sent to the call's owner.",
+        "title": "CallEvent[call.invitation_result]"
+      },
+      "server.call.offered": {
+        "contentType": "application/json",
+        "name": "call.offered",
+        "payload": {
+          "$ref": "#/components/schemas/CallEvent.call.offered"
+        },
+        "summary": "An incoming call that can be answered or rejected now.",
+        "title": "CallEvent[call.offered]"
+      },
+      "server.call.pending": {
+        "contentType": "application/json",
+        "name": "call.pending",
+        "payload": {
+          "$ref": "#/components/schemas/CallEvent.call.pending"
+        },
+        "summary": "An incoming call that cannot be answered yet, or null when none is pending.",
+        "title": "CallEvent[call.pending]"
+      },
+      "server.call.state": {
+        "contentType": "application/json",
+        "name": "call.state",
+        "payload": {
+          "$ref": "#/components/schemas/CallEvent.call.state"
+        },
+        "summary": "The call changed. Sent to every client of the same account.",
+        "title": "CallEvent[call.state]"
+      },
+      "server.calls.availability": {
+        "contentType": "application/json",
+        "name": "calls.availability",
+        "payload": {
+          "$ref": "#/components/schemas/CallEvent.calls.availability"
+        },
+        "summary": "Whether this account is in a call changed.",
+        "title": "CallEvent[calls.availability]"
+      },
+      "server.command.result": {
+        "contentType": "application/json",
+        "name": "command.result",
+        "payload": {
+          "$ref": "#/components/schemas/CallEvent.command.result"
+        },
+        "summary": "The result of a command, matched to it by `requestId`. Acceptance starts the operation; it does not mean the call connected.",
+        "title": "CallEvent[command.result]"
+      },
+      "server.conference.invitations": {
+        "contentType": "application/json",
+        "name": "conference.invitations",
+        "payload": {
+          "$ref": "#/components/schemas/CallEvent.conference.invitations"
+        },
+        "summary": "Replaces the list of conference calls this account can join. An empty list clears it.",
+        "title": "CallEvent[conference.invitations]"
+      },
+      "server.hello": {
+        "contentType": "application/json",
+        "name": "hello",
+        "payload": {
+          "$ref": "#/components/schemas/CallEvent.hello"
+        },
+        "summary": "The first event on the control socket: this connection's ID and the current calling state. Check `protocolVersion` before sending commands.",
+        "title": "CallEvent[hello]"
+      },
+      "server.media.ready": {
+        "contentType": "application/json",
+        "name": "media.ready",
+        "payload": {
+          "$ref": "#/components/schemas/CallEvent.media.ready"
+        },
+        "summary": "Sent on the media socket after `media.attach` succeeds: the tracks to use.",
+        "title": "CallEvent[media.ready]"
+      },
+      "server.participant.updated": {
+        "contentType": "application/json",
+        "name": "participant.updated",
+        "payload": {
+          "$ref": "#/components/schemas/CallEvent.participant.updated"
+        },
+        "summary": "A conference participant's membership or microphone changed. A `call.state` with the new roster follows.",
+        "title": "CallEvent[participant.updated]"
+      },
+      "server.protocol.error": {
+        "contentType": "application/json",
+        "name": "protocol.error",
+        "payload": {
+          "$ref": "#/components/schemas/CallEvent.protocol.error"
+        },
+        "summary": "The protocol version could not be agreed. The daemon then closes the socket with WebSocket code 1002.",
+        "title": "CallEvent[protocol.error]"
+      },
+      "server.track.added": {
+        "contentType": "application/json",
+        "name": "track.added",
+        "payload": {
+          "$ref": "#/components/schemas/CallEvent.track.added"
+        },
+        "summary": "A receive audio track appeared. Audio for it follows.",
+        "title": "CallEvent[track.added]"
+      },
+      "server.track.removed": {
+        "contentType": "application/json",
+        "name": "track.removed",
+        "payload": {
+          "$ref": "#/components/schemas/CallEvent.track.removed"
+        },
+        "summary": "A receive track ended. Audio for that generation stops.",
+        "title": "CallEvent[track.removed]"
+      },
+      "server.track.updated": {
+        "contentType": "application/json",
+        "name": "track.updated",
+        "payload": {
+          "$ref": "#/components/schemas/CallEvent.track.updated"
+        },
+        "summary": "A track moved to a new generation, for example after `call.clear_audio` or a mute change. Send new audio on the new generation.",
+        "title": "CallEvent[track.updated]"
+      }
+    },
+    "schemas": {
+      "CallAudioFormat": {
+        "additionalProperties": false,
+        "description": "The PCM format of call audio. The daemon currently supports only 16,000 Hz,\nmono, 20 ms frames.",
+        "properties": {
+          "channels": {
+            "description": "Number of interleaved channels.",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "frameMs": {
+            "description": "Length of one audio frame in milliseconds.",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sampleRate": {
+            "description": "Samples per second, per channel.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sampleRate",
+          "channels",
+          "frameMs"
+        ],
+        "type": "object"
+      },
+      "CallAudioTrack": {
+        "additionalProperties": false,
+        "description": "One audio stream: the single track you send, or one source you receive.",
+        "properties": {
+          "direction": {
+            "$ref": "#/components/schemas/CallTrackDirection",
+            "description": "Whether you send or receive audio on this track."
+          },
+          "format": {
+            "$ref": "#/components/schemas/CallAudioFormat",
+            "description": "The PCM format of the track."
+          },
+          "generation": {
+            "description": "Version of the stream. Chunks for an older generation are discarded; a\nnew generation starts after `call.clear_audio` or a mute change.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "description": "Track ID to use in `audio.start` and `audio.chunk`.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "participantId": {
+            "description": "The conference participant this track carries. Omitted when the track\nis not tied to a participant.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "generation",
+          "direction",
+          "format"
+        ],
+        "type": "object"
+      },
+      "CallCapabilities": {
+        "additionalProperties": false,
+        "description": "Calling operations that are available. A missing flag means unavailable.",
+        "properties": {
+          "conferenceAudio": {
+            "description": "Audio in conference calls is available.",
+            "type": "boolean"
+          },
+          "conferenceCreate": {
+            "description": "Starting a conference call in a group is available.",
+            "type": "boolean"
+          },
+          "conferenceInvite": {
+            "description": "Inviting more contacts into a connected conference call is available.",
+            "type": "boolean"
+          },
+          "conferenceJoin": {
+            "description": "Joining a conference call from an invitation is available.",
+            "type": "boolean"
+          },
+          "conferenceVideo": {
+            "description": "Video in conference calls is available. This version never sets it.",
+            "type": "boolean"
+          },
+          "directAudio": {
+            "description": "Direct voice calls with one contact are available.",
+            "type": "boolean"
+          },
+          "directVideo": {
+            "description": "Direct video calls are available. This version never sets it.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "CallClientHello.call.hello": {
+        "additionalProperties": false,
+        "description": "Announce the protocol versions this client supports. Send it within five\nseconds of opening the control socket, before any command.",
+        "properties": {
+          "supportedProtocolVersions": {
+            "description": "One to eight distinct positive version numbers. The daemon speaks a\nsingle version and answers `protocol.error` when the list does not\ninclude it.",
+            "items": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "type": {
+            "const": "call.hello",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "supportedProtocolVersions"
+        ],
+        "type": "object"
+      },
+      "CallCommand.call.answer": {
+        "additionalProperties": false,
+        "description": "Answer the incoming call. The first client to answer owns the call;\nothers get `already_claimed`.",
+        "properties": {
+          "callId": {
+            "description": "ID of the offered call.",
+            "type": "string"
+          },
+          "expectedRevision": {
+            "description": "The latest offer `revision` you received. A stale revision is\nrejected.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "requestId": {
+            "description": "Your ID for this command. The `command.result` repeats it.",
+            "type": "string"
+          },
+          "type": {
+            "const": "call.answer",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "requestId",
+          "callId",
+          "expectedRevision"
+        ],
+        "type": "object"
+      },
+      "CallCommand.call.cancel": {
+        "additionalProperties": false,
+        "description": "Cancel your outgoing call before the other side picks up.",
+        "properties": {
+          "callId": {
+            "description": "ID of your outgoing call.",
+            "type": "string"
+          },
+          "expectedRevision": {
+            "description": "The latest call `revision` you received. A stale revision is\nrejected.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "requestId": {
+            "description": "Your ID for this command. The `command.result` repeats it.",
+            "type": "string"
+          },
+          "type": {
+            "const": "call.cancel",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "requestId",
+          "callId",
+          "expectedRevision"
+        ],
+        "type": "object"
+      },
+      "CallCommand.call.clear_audio": {
+        "additionalProperties": false,
+        "description": "Discard queued outgoing audio, for example to interrupt a reply. This\nstarts a new send generation, announced by `track.updated`.",
+        "properties": {
+          "callId": {
+            "description": "ID of the call.",
+            "type": "string"
+          },
+          "requestId": {
+            "description": "Your ID for this command. The `command.result` repeats it.",
+            "type": "string"
+          },
+          "type": {
+            "const": "call.clear_audio",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "requestId",
+          "callId"
+        ],
+        "type": "object"
+      },
+      "CallCommand.call.dial": {
+        "additionalProperties": false,
+        "description": "Start an outgoing call. The socket becomes the call's owner.",
+        "properties": {
+          "callType": {
+            "$ref": "#/components/schemas/CallType",
+            "description": "Only voice calls are supported."
+          },
+          "requestId": {
+            "description": "Your ID for this command. The `command.result` repeats it.",
+            "type": "string"
+          },
+          "target": {
+            "$ref": "#/components/schemas/CallTarget",
+            "description": "Who to call."
+          },
+          "type": {
+            "const": "call.dial",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "requestId",
+          "target",
+          "callType"
+        ],
+        "type": "object"
+      },
+      "CallCommand.call.hangup": {
+        "additionalProperties": false,
+        "description": "End a call after answering or connecting. In a conference this leaves\nthe call without ending it for the others.",
+        "properties": {
+          "callId": {
+            "description": "ID of the call.",
+            "type": "string"
+          },
+          "expectedRevision": {
+            "description": "The latest call `revision` you received. A stale revision is\nrejected.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "requestId": {
+            "description": "Your ID for this command. The `command.result` repeats it.",
+            "type": "string"
+          },
+          "type": {
+            "const": "call.hangup",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "requestId",
+          "callId",
+          "expectedRevision"
+        ],
+        "type": "object"
+      },
+      "CallCommand.call.invite": {
+        "additionalProperties": false,
+        "description": "Invite more contacts into a connected conference call you own. Results\narrive as `call.invitation_result`.",
+        "properties": {
+          "callId": {
+            "description": "ID of the conference call.",
+            "type": "string"
+          },
+          "contactIds": {
+            "description": "Contacts to invite: between 1 and 100.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "requestId": {
+            "description": "Your ID for this command. The `command.result` repeats it.",
+            "type": "string"
+          },
+          "type": {
+            "const": "call.invite",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "requestId",
+          "callId",
+          "contactIds"
+        ],
+        "type": "object"
+      },
+      "CallCommand.call.join": {
+        "additionalProperties": false,
+        "description": "Join a conference call from one of the listed invitations. The socket\nbecomes the call's owner, as with `call.dial`.",
+        "properties": {
+          "invitationId": {
+            "description": "The `invitationId` of an entry in `conferenceInvitations`.",
+            "type": "string"
+          },
+          "invitationRevision": {
+            "description": "The `revision` of that entry. A stale or used invitation fails with\n`offer_expired`.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "requestId": {
+            "description": "Your ID for this command. The `command.result` repeats it.",
+            "type": "string"
+          },
+          "type": {
+            "const": "call.join",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "requestId",
+          "invitationId",
+          "invitationRevision"
+        ],
+        "type": "object"
+      },
+      "CallCommand.call.mute": {
+        "additionalProperties": false,
+        "description": "Mute or unmute your outgoing audio. This also clears queued audio and\nstarts a new send generation, announced by `track.updated`.",
+        "properties": {
+          "callId": {
+            "description": "ID of the call.",
+            "type": "string"
+          },
+          "muted": {
+            "description": "True to mute, false to unmute.",
+            "type": "boolean"
+          },
+          "requestId": {
+            "description": "Your ID for this command. The `command.result` repeats it.",
+            "type": "string"
+          },
+          "type": {
+            "const": "call.mute",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "requestId",
+          "callId",
+          "muted"
+        ],
+        "type": "object"
+      },
+      "CallCommand.call.ready": {
+        "additionalProperties": false,
+        "description": "Advertise or withdraw readiness to handle call audio. A new connection\nis passive until it advertises readiness.",
+        "properties": {
+          "format": {
+            "$ref": "#/components/schemas/CallAudioFormat",
+            "description": "The PCM format you will send and receive. It must match the\ndaemon's audio format."
+          },
+          "ready": {
+            "description": "True to advertise readiness, false to withdraw it.",
+            "type": "boolean"
+          },
+          "requestId": {
+            "description": "Your ID for this command. The `command.result` repeats it.",
+            "type": "string"
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CallReadyScope"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Which calls readiness covers. Omitted means all. Ignored when\nwithdrawing readiness."
+          },
+          "type": {
+            "const": "call.ready",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "requestId",
+          "ready",
+          "format"
+        ],
+        "type": "object"
+      },
+      "CallCommand.call.reject": {
+        "additionalProperties": false,
+        "description": "Reject the incoming call.",
+        "properties": {
+          "callId": {
+            "description": "ID of the offered call.",
+            "type": "string"
+          },
+          "expectedRevision": {
+            "description": "The latest offer `revision` you received. A stale revision is\nrejected.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "requestId": {
+            "description": "Your ID for this command. The `command.result` repeats it.",
+            "type": "string"
+          },
+          "type": {
+            "const": "call.reject",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "requestId",
+          "callId",
+          "expectedRevision"
+        ],
+        "type": "object"
+      },
+      "CallCommandStatus": {
+        "description": "How the daemon handled a command.",
+        "oneOf": [
+          {
+            "const": "accepted",
+            "description": "The command started. This does not mean the call connected.",
+            "type": "string"
+          },
+          {
+            "const": "replayed",
+            "description": "An identical earlier command was already accepted.",
+            "type": "string"
+          },
+          {
+            "const": "error",
+            "description": "The command was rejected; see `code`.",
+            "type": "string"
+          }
+        ]
+      },
+      "CallConferenceInvitation": {
+        "additionalProperties": false,
+        "description": "A conference call this account can join. It carries no room credentials.",
+        "properties": {
+          "callerId": {
+            "description": "Contact ID of the caller.",
+            "type": "string"
+          },
+          "groupId": {
+            "description": "The group the conference call is in.",
+            "type": "string"
+          },
+          "invitationId": {
+            "description": "Opaque ID for this account. Send it in `call.join`.",
+            "type": "string"
+          },
+          "revision": {
+            "description": "Revision of the invitation. Send it in `call.join` exactly as listed.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "invitationId",
+          "revision",
+          "groupId",
+          "callerId"
+        ],
+        "type": "object"
+      },
+      "CallControl": {
+        "additionalProperties": false,
+        "description": "A control a call participant can report. A microphone update does not\nchange the audio format.",
+        "properties": {
+          "kind": {
+            "const": "microphone",
+            "type": "string"
+          },
+          "muted": {
+            "description": "True when the microphone is muted.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "kind",
+          "muted"
+        ],
+        "type": "object"
+      },
+      "CallDirection": {
+        "description": "Whether this account placed the call or received it.",
+        "oneOf": [
+          {
+            "const": "incoming",
+            "description": "Another party called this account.",
+            "type": "string"
+          },
+          {
+            "const": "outgoing",
+            "description": "This account placed the call.",
+            "type": "string"
+          }
+        ]
+      },
+      "CallErrorCode": {
+        "description": "Why a command or socket failed. Lost replies do not authorize an automatic\nretry.",
+        "oneOf": [
+          {
+            "const": "invalid_request",
+            "description": "The message was malformed or a value was out of range.",
+            "type": "string"
+          },
+          {
+            "const": "busy",
+            "description": "This account is already in a call, or an earlier call's outcome is\nunresolved.",
+            "type": "string"
+          },
+          {
+            "const": "already_claimed",
+            "description": "Another client already answered the incoming call.",
+            "type": "string"
+          },
+          {
+            "const": "offer_expired",
+            "description": "The offer or invitation is no longer available.",
+            "type": "string"
+          },
+          {
+            "const": "not_owner",
+            "description": "This socket does not own the call.",
+            "type": "string"
+          },
+          {
+            "const": "unsupported",
+            "description": "The daemon does not support this operation.",
+            "type": "string"
+          },
+          {
+            "const": "media_not_ready",
+            "description": "No client has advertised readiness. Send `call.ready` first.",
+            "type": "string"
+          },
+          {
+            "const": "outcome_unknown",
+            "description": "An earlier call's outcome was never confirmed. Do not retry\nautomatically.",
+            "type": "string"
+          },
+          {
+            "const": "capacity",
+            "description": "A limit was reached, such as too much queued audio.",
+            "type": "string"
+          },
+          {
+            "const": "stale",
+            "description": "The revision, generation or connection is out of date.",
+            "type": "string"
+          },
+          {
+            "const": "forbidden",
+            "description": "The token's scopes do not allow this action.",
+            "type": "string"
+          },
+          {
+            "const": "closed",
+            "description": "The connection or call is closed.",
+            "type": "string"
+          }
+        ]
+      },
+      "CallEvent.call.control": {
+        "additionalProperties": false,
+        "description": "The other party of a direct call changed a control, such as muting their\nmicrophone. It needs no reply.",
+        "properties": {
+          "callId": {
+            "description": "ID of the direct call.",
+            "type": "string"
+          },
+          "control": {
+            "$ref": "#/components/schemas/CallControl",
+            "description": "The control and its new value."
+          },
+          "participantId": {
+            "description": "The contact whose control changed.",
+            "type": "string"
+          },
+          "type": {
+            "const": "call.control",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "callId",
+          "participantId",
+          "control"
+        ],
+        "type": "object"
+      },
+      "CallEvent.call.error": {
+        "additionalProperties": false,
+        "description": "A failure that is not tied to a command, such as an invalid message or a\nmissing permission. The daemon then closes the socket, except for\n`outcome_unknown`, which follows `hello` and leaves it open.",
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/CallErrorCode",
+            "description": "What went wrong."
+          },
+          "type": {
+            "const": "call.error",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "code"
+        ],
+        "type": "object"
+      },
+      "CallEvent.call.invitation_result": {
+        "additionalProperties": false,
+        "description": "The outcome of each invited contact for a create or invite command, sent\nto the call's owner.",
+        "properties": {
+          "callId": {
+            "description": "ID of the conference call.",
+            "type": "string"
+          },
+          "requestId": {
+            "description": "The `requestId` of the create or invite command.",
+            "type": "string"
+          },
+          "results": {
+            "description": "One result per invited contact.",
+            "items": {
+              "$ref": "#/components/schemas/CallInvitationResult"
+            },
+            "type": "array"
+          },
+          "type": {
+            "const": "call.invitation_result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "callId",
+          "requestId",
+          "results"
+        ],
+        "type": "object"
+      },
+      "CallEvent.call.offered": {
+        "additionalProperties": false,
+        "description": "An incoming call that can be answered or rejected now.",
+        "properties": {
+          "offer": {
+            "$ref": "#/components/schemas/CallOffer",
+            "description": "The offer. Send its `revision` in `call.answer` or `call.reject`."
+          },
+          "type": {
+            "const": "call.offered",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "offer"
+        ],
+        "type": "object"
+      },
+      "CallEvent.call.pending": {
+        "additionalProperties": false,
+        "description": "An incoming call that cannot be answered yet, or null when none is\npending.",
+        "properties": {
+          "offer": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CallPendingOffer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The pending call, or null to clear it."
+          },
+          "type": {
+            "const": "call.pending",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "offer"
+        ],
+        "type": "object"
+      },
+      "CallEvent.call.state": {
+        "additionalProperties": false,
+        "description": "The call changed. Sent to every client of the same account.",
+        "properties": {
+          "call": {
+            "$ref": "#/components/schemas/CallView",
+            "description": "The call as it is now."
+          },
+          "type": {
+            "const": "call.state",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "call"
+        ],
+        "type": "object"
+      },
+      "CallEvent.calls.availability": {
+        "additionalProperties": false,
+        "description": "Whether this account is in a call changed.",
+        "properties": {
+          "availability": {
+            "$ref": "#/components/schemas/CallsAvailability",
+            "description": "The new availability."
+          },
+          "type": {
+            "const": "calls.availability",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "availability"
+        ],
+        "type": "object"
+      },
+      "CallEvent.command.result": {
+        "additionalProperties": false,
+        "description": "The result of a command, matched to it by `requestId`. Acceptance starts\nthe operation; it does not mean the call connected.",
+        "properties": {
+          "callId": {
+            "description": "The call the command claimed. Null unless it was a dial, answer or\njoin that succeeded.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "code": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CallErrorCode"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why the command failed. Null unless `status` is `error`."
+          },
+          "ownerToken": {
+            "description": "Secret token for `media.attach` on the claimed call. Null unless a\ncall was claimed. Do not log it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "requestId": {
+            "description": "The `requestId` of the command.",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/CallCommandStatus",
+            "description": "Whether the command was accepted, repeated or rejected."
+          },
+          "type": {
+            "const": "command.result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "requestId",
+          "status",
+          "callId",
+          "ownerToken",
+          "code"
+        ],
+        "type": "object"
+      },
+      "CallEvent.conference.invitations": {
+        "additionalProperties": false,
+        "description": "Replaces the list of conference calls this account can join. An empty\nlist clears it.",
+        "properties": {
+          "invitations": {
+            "description": "The current invitations.",
+            "items": {
+              "$ref": "#/components/schemas/CallConferenceInvitation"
+            },
+            "type": "array"
+          },
+          "type": {
+            "const": "conference.invitations",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "invitations"
+        ],
+        "type": "object"
+      },
+      "CallEvent.hello": {
+        "additionalProperties": false,
+        "description": "The first event on the control socket: this connection's ID and the\ncurrent calling state. Check `protocolVersion` before sending commands.",
+        "properties": {
+          "audioFormat": {
+            "$ref": "#/components/schemas/CallAudioFormat",
+            "description": "The PCM format used for call audio."
+          },
+          "availability": {
+            "$ref": "#/components/schemas/CallsAvailability",
+            "description": "Whether this account is in a call."
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/CallCapabilities",
+            "description": "Calling operations that are available."
+          },
+          "clientId": {
+            "description": "ID of this connection. Send it as `clientId` in `media.attach`.",
+            "type": "string"
+          },
+          "conferenceInvitations": {
+            "default": [],
+            "description": "Conference calls this account can join.",
+            "items": {
+              "$ref": "#/components/schemas/CallConferenceInvitation"
+            },
+            "type": "array"
+          },
+          "currentCall": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CallView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The active call, or null."
+          },
+          "currentOffer": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CallOffer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The incoming call that can be answered now, or null."
+          },
+          "currentPendingOffer": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CallPendingOffer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "An incoming call that cannot be answered yet, or null."
+          },
+          "protocolVersion": {
+            "description": "The protocol version the daemon speaks on this socket.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": {
+            "const": "hello",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "conferenceInvitations",
+          "protocolVersion",
+          "clientId",
+          "capabilities",
+          "availability",
+          "currentOffer",
+          "currentPendingOffer",
+          "currentCall",
+          "audioFormat"
+        ],
+        "type": "object"
+      },
+      "CallEvent.media.ready": {
+        "additionalProperties": false,
+        "description": "Sent on the media socket after `media.attach` succeeds: the tracks to\nuse.",
+        "properties": {
+          "protocolVersion": {
+            "description": "The protocol version the daemon speaks on the media socket.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "receiveTracks": {
+            "description": "The tracks for audio you receive, one per source.",
+            "items": {
+              "$ref": "#/components/schemas/CallAudioTrack"
+            },
+            "type": "array"
+          },
+          "sendTrack": {
+            "$ref": "#/components/schemas/CallAudioTrack",
+            "description": "The track for audio you send."
+          },
+          "type": {
+            "const": "media.ready",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "protocolVersion",
+          "sendTrack",
+          "receiveTracks"
+        ],
+        "type": "object"
+      },
+      "CallEvent.participant.updated": {
+        "additionalProperties": false,
+        "description": "A conference participant's membership or microphone changed. A\n`call.state` with the new roster follows.",
+        "properties": {
+          "callId": {
+            "description": "ID of the conference call.",
+            "type": "string"
+          },
+          "participant": {
+            "$ref": "#/components/schemas/CallParticipant",
+            "description": "The participant as it is now."
+          },
+          "revision": {
+            "description": "The call revision after this change.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": {
+            "const": "participant.updated",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "callId",
+          "revision",
+          "participant"
+        ],
+        "type": "object"
+      },
+      "CallEvent.protocol.error": {
+        "additionalProperties": false,
+        "description": "The protocol version could not be agreed. The daemon then closes the\nsocket with WebSocket code 1002.",
+        "properties": {
+          "clientVersions": {
+            "description": "The versions the client announced. Empty when the list was invalid.",
+            "items": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "code": {
+            "$ref": "#/components/schemas/CallProtocolErrorCode",
+            "description": "Why the versions were refused."
+          },
+          "serverVersions": {
+            "description": "The versions the daemon supports.",
+            "items": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "type": {
+            "const": "protocol.error",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "code",
+          "clientVersions",
+          "serverVersions"
+        ],
+        "type": "object"
+      },
+      "CallEvent.track.added": {
+        "additionalProperties": false,
+        "description": "A receive audio track appeared. Audio for it follows.",
+        "properties": {
+          "callId": {
+            "description": "ID of the call.",
+            "type": "string"
+          },
+          "track": {
+            "$ref": "#/components/schemas/CallAudioTrack",
+            "description": "The new track."
+          },
+          "type": {
+            "const": "track.added",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "callId",
+          "track"
+        ],
+        "type": "object"
+      },
+      "CallEvent.track.removed": {
+        "additionalProperties": false,
+        "description": "A receive track ended. Audio for that generation stops.",
+        "properties": {
+          "callId": {
+            "description": "ID of the call.",
+            "type": "string"
+          },
+          "generation": {
+            "description": "The generation that ended.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "reason": {
+            "description": "Why the track ended. Currently `source_unavailable`.",
+            "type": "string"
+          },
+          "trackId": {
+            "description": "ID of the track that ended.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": {
+            "const": "track.removed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "callId",
+          "trackId",
+          "generation",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "CallEvent.track.updated": {
+        "additionalProperties": false,
+        "description": "A track moved to a new generation, for example after `call.clear_audio`\nor a mute change. Send new audio on the new generation.",
+        "properties": {
+          "callId": {
+            "description": "ID of the call.",
+            "type": "string"
+          },
+          "track": {
+            "$ref": "#/components/schemas/CallAudioTrack",
+            "description": "The track with its new generation."
+          },
+          "type": {
+            "const": "track.updated",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "callId",
+          "track"
+        ],
+        "type": "object"
+      },
+      "CallInvitationResult": {
+        "additionalProperties": false,
+        "description": "The outcome of inviting one contact. It does not mean the contact joined.",
+        "properties": {
+          "contactId": {
+            "description": "The contact this result is for.",
+            "type": "string"
+          },
+          "serviceCode": {
+            "description": "The code the service returned. Omitted when unavailable.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/CallInvitationStatus",
+            "description": "What happened to the invitation."
+          },
+          "verificationRequired": {
+            "description": "True when the service asked for a verification step. The event carries\nno verification link.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "contactId",
+          "status",
+          "verificationRequired"
+        ],
+        "type": "object"
+      },
+      "CallInvitationStatus": {
+        "description": "What happened to one invitation. It is separate from room membership.",
+        "oneOf": [
+          {
+            "const": "submitted",
+            "description": "The service accepted the invitation.",
+            "type": "string"
+          },
+          {
+            "const": "rejected",
+            "description": "The service rejected the invitation.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "The service gave no result for this contact.",
+            "type": "string"
+          },
+          {
+            "const": "uncertain",
+            "description": "The invitation may have reached the service. Do not retry\nautomatically.",
+            "type": "string"
+          }
+        ]
+      },
+      "CallKind": {
+        "description": "Whether a call is with one contact or with a group.",
+        "oneOf": [
+          {
+            "const": "direct",
+            "description": "A call with one contact.",
+            "type": "string"
+          },
+          {
+            "const": "conference",
+            "description": "A call in a group.",
+            "type": "string"
+          }
+        ]
+      },
+      "CallMediaCommand.audio.chunk": {
+        "additionalProperties": false,
+        "description": "A chunk of PCM audio. You send it on your track; the daemon sends it on\nreceive tracks.",
+        "properties": {
+          "generation": {
+            "description": "The track generation. Chunks for an older generation are discarded.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "pcmBase64": {
+            "description": "PCM16 little-endian samples as padded base64. A chunk you send is\nwhole samples, at most 65,536 bytes once decoded.",
+            "type": "string"
+          },
+          "sampleOffset": {
+            "description": "Position of the chunk in per-channel samples on the shared call\ntimeline. The daemon sets it on chunks it sends; you must not send it.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "sequence": {
+            "description": "Order of the chunk within its source. The daemon sets it on chunks\nit sends; you must not send it.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "trackId": {
+            "description": "The track the audio belongs to.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": {
+            "const": "audio.chunk",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "trackId",
+          "generation",
+          "pcmBase64"
+        ],
+        "type": "object"
+      },
+      "CallMediaCommand.audio.start": {
+        "additionalProperties": false,
+        "description": "Start sending audio on your track for a generation. Send it before the\nfirst chunk, and again after each new generation.",
+        "properties": {
+          "generation": {
+            "description": "The generation to start.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "trackId": {
+            "description": "The send track's ID.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": {
+            "const": "audio.start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "trackId",
+          "generation"
+        ],
+        "type": "object"
+      },
+      "CallMediaCommand.media.attach": {
+        "additionalProperties": false,
+        "description": "Attach the socket to a call you own. Send it first, within five seconds\nof connecting; the daemon answers `media.ready`.",
+        "properties": {
+          "clientId": {
+            "description": "The `clientId` from the control socket's `hello`.",
+            "type": "string"
+          },
+          "ownerToken": {
+            "description": "The secret `ownerToken` from the `command.result` that claimed the\ncall. Do not log it.",
+            "type": "string"
+          },
+          "supportedProtocolVersions": {
+            "description": "The protocol versions you support.",
+            "items": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "type": {
+            "const": "media.attach",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "supportedProtocolVersions",
+          "clientId",
+          "ownerToken"
+        ],
+        "type": "object"
+      },
+      "CallMembership": {
+        "description": "Whether a participant is in a conference call.",
+        "oneOf": [
+          {
+            "const": "joined",
+            "description": "In the room.",
+            "type": "string"
+          },
+          {
+            "const": "invited",
+            "description": "Invited but not in the room.",
+            "type": "string"
+          },
+          {
+            "const": "left",
+            "description": "Was in the room and left.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "The server has not said.",
+            "type": "string"
+          }
+        ]
+      },
+      "CallOffer": {
+        "additionalProperties": false,
+        "description": "An incoming call that can be answered or rejected now.",
+        "properties": {
+          "callId": {
+            "description": "ID of the offered call.",
+            "type": "string"
+          },
+          "callType": {
+            "$ref": "#/components/schemas/CallType",
+            "description": "Whether the call is voice or video."
+          },
+          "callerId": {
+            "description": "Contact ID of the caller.",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/CallKind",
+            "description": "Whether the call is direct or a conference."
+          },
+          "revision": {
+            "description": "Increases when the offer changes. Send the latest value as\n`expectedRevision` when answering or rejecting.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "callId",
+          "revision",
+          "kind",
+          "callType",
+          "callerId"
+        ],
+        "type": "object"
+      },
+      "CallParticipant": {
+        "additionalProperties": false,
+        "description": "One participant in a conference call.",
+        "properties": {
+          "contactId": {
+            "description": "Contact ID of the participant.",
+            "type": "string"
+          },
+          "membership": {
+            "$ref": "#/components/schemas/CallMembership",
+            "description": "Whether the participant is in the room."
+          },
+          "microphoneEnabled": {
+            "description": "Whether the participant's microphone is on. Omitted until the server\nreports it; an omitted value is unknown, not false.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "participantId": {
+            "description": "ID of the participant within this call. It is not a contact ID; use it\nto match audio tracks to participants.",
+            "type": "string"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CallParticipantStatus"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Signaling progress, separate from membership. Omitted until reported."
+          }
+        },
+        "required": [
+          "participantId",
+          "contactId",
+          "membership"
+        ],
+        "type": "object"
+      },
+      "CallParticipantControl": {
+        "additionalProperties": false,
+        "description": "A control reported by one participant.",
+        "properties": {
+          "control": {
+            "$ref": "#/components/schemas/CallControl",
+            "description": "The control and its value."
+          },
+          "participantId": {
+            "description": "The participant the control belongs to. In a direct call this is the\ncontact ID.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "participantId",
+          "control"
+        ],
+        "type": "object"
+      },
+      "CallParticipantStatus": {
+        "additionalProperties": false,
+        "description": "Signaling progress of a participant, independent of membership.",
+        "properties": {
+          "code": {
+            "description": "The status number the service reported. Keep it for codes `kind` does\nnot name.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/CallParticipantStatusKind",
+            "description": "What the code means."
+          }
+        },
+        "required": [
+          "code",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "CallParticipantStatusKind": {
+        "description": "What a participant status code means. Cancelled, busy, rejected and no\nresponse do not by themselves mean a participant left.",
+        "oneOf": [
+          {
+            "const": "undefined",
+            "description": "Code 0: no state reported.",
+            "type": "string"
+          },
+          {
+            "const": "joined",
+            "description": "Code 1: in the room.",
+            "type": "string"
+          },
+          {
+            "const": "invited",
+            "description": "Code 2: invited, not in the room.",
+            "type": "string"
+          },
+          {
+            "const": "acknowledged",
+            "description": "Code 3: invited and acknowledged, not in the room.",
+            "type": "string"
+          },
+          {
+            "const": "left",
+            "description": "Code 4: left the room.",
+            "type": "string"
+          },
+          {
+            "const": "cancelled",
+            "description": "Code 5: cancelled.",
+            "type": "string"
+          },
+          {
+            "const": "busy",
+            "description": "Code 6: busy.",
+            "type": "string"
+          },
+          {
+            "const": "rejected",
+            "description": "Code 7: rejected.",
+            "type": "string"
+          },
+          {
+            "const": "no_response",
+            "description": "Code 8: no response.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Any other code. No join or departure is implied.",
+            "type": "string"
+          }
+        ]
+      },
+      "CallPendingOffer": {
+        "additionalProperties": false,
+        "description": "An incoming call that cannot be answered yet, because it is waiting for a\nready client or for the daemon to finish preparing it.",
+        "properties": {
+          "callId": {
+            "description": "ID of the incoming call.",
+            "type": "string"
+          },
+          "callType": {
+            "$ref": "#/components/schemas/CallType",
+            "description": "Whether the call is voice or video."
+          },
+          "callerId": {
+            "description": "Contact ID of the caller.",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/CallKind",
+            "description": "Whether the call is direct or a conference."
+          },
+          "phase": {
+            "$ref": "#/components/schemas/CallPendingPhase",
+            "description": "What the call is waiting for."
+          },
+          "revision": {
+            "description": "Increases when the offer changes.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "callId",
+          "revision",
+          "kind",
+          "callType",
+          "callerId",
+          "phase"
+        ],
+        "type": "object"
+      },
+      "CallPendingPhase": {
+        "description": "How far along an incoming call is before it can be answered.",
+        "oneOf": [
+          {
+            "const": "waiting_for_ready",
+            "description": "Waiting for a client to advertise readiness.",
+            "type": "string"
+          },
+          {
+            "const": "preparing",
+            "description": "The daemon is preparing the call.",
+            "type": "string"
+          }
+        ]
+      },
+      "CallProtocolErrorCode": {
+        "description": "Why the daemon refused the protocol versions a client announced.",
+        "oneOf": [
+          {
+            "const": "unsupported_protocol_version",
+            "description": "The list does not include the version the daemon speaks, or no list was\nsent (a missing list means version 1).",
+            "type": "string"
+          },
+          {
+            "const": "invalid_protocol_version",
+            "description": "The list is empty, null, has duplicates or is otherwise malformed.",
+            "type": "string"
+          }
+        ]
+      },
+      "CallReadyScope": {
+        "description": "Which calls a readiness announcement covers.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Incoming and outgoing calls.",
+            "properties": {
+              "kind": {
+                "const": "all",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Outgoing calls only.",
+            "properties": {
+              "kind": {
+                "const": "outgoing",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "One pending incoming call.",
+            "properties": {
+              "callId": {
+                "description": "ID of the pending incoming call.",
+                "type": "string"
+              },
+              "expectedRevision": {
+                "description": "The offer revision you expect; a different revision is rejected.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "offer",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "callId",
+              "expectedRevision"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "CallState": {
+        "description": "Where a call is in its life. Stop sending audio at `ending`, and keep the\ncontrol socket connected while the daemon finishes cleanup.",
+        "oneOf": [
+          {
+            "const": "offered",
+            "description": "An incoming call is waiting to be answered or rejected.",
+            "type": "string"
+          },
+          {
+            "const": "dialing",
+            "description": "An outgoing call is being placed.",
+            "type": "string"
+          },
+          {
+            "const": "ringing",
+            "description": "The other side is ringing.",
+            "type": "string"
+          },
+          {
+            "const": "connecting",
+            "description": "The call was accepted and audio is being set up.",
+            "type": "string"
+          },
+          {
+            "const": "connected",
+            "description": "The call is up and audio can flow.",
+            "type": "string"
+          },
+          {
+            "const": "ending",
+            "description": "The call is being hung up.",
+            "type": "string"
+          },
+          {
+            "const": "ended",
+            "description": "The call is over.",
+            "type": "string"
+          },
+          {
+            "const": "uncertain",
+            "description": "The outcome could not be confirmed.",
+            "type": "string"
+          }
+        ]
+      },
+      "CallTarget": {
+        "description": "Who to call.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "A direct call with one contact.",
+            "properties": {
+              "contactId": {
+                "description": "The contact to call. A group ID is not accepted.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "direct",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "contactId"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A new conference call in a group.",
+            "properties": {
+              "groupId": {
+                "description": "The group to call, whose ID ends in `@chatroom`.",
+                "type": "string"
+              },
+              "invitees": {
+                "description": "Contacts to invite: between 1 and 100.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "const": "conference",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "groupId",
+              "invitees"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "CallTrackDirection": {
+        "description": "Whether an audio track carries audio you send or audio you receive.",
+        "oneOf": [
+          {
+            "const": "send",
+            "description": "Audio from you to the call.",
+            "type": "string"
+          },
+          {
+            "const": "receive",
+            "description": "Audio from the call to you.",
+            "type": "string"
+          }
+        ]
+      },
+      "CallType": {
+        "description": "Whether a call is voice or video, independent of the media currently\nnegotiated. A video call can continue with audio only. This daemon places\nand answers voice calls only.",
+        "oneOf": [
+          {
+            "const": "voice",
+            "description": "A voice call.",
+            "type": "string"
+          },
+          {
+            "const": "video",
+            "description": "A video call.",
+            "type": "string"
+          }
+        ]
+      },
+      "CallView": {
+        "additionalProperties": false,
+        "description": "A call this account is in.",
+        "properties": {
+          "callId": {
+            "description": "ID of the call.",
+            "type": "string"
+          },
+          "callType": {
+            "$ref": "#/components/schemas/CallType",
+            "description": "Whether the call is voice or video."
+          },
+          "controls": {
+            "description": "The latest controls reported by the other party of a direct call, also\ngiven to a newly connected observer. Omitted until one is reported.",
+            "items": {
+              "$ref": "#/components/schemas/CallParticipantControl"
+            },
+            "type": "array"
+          },
+          "direction": {
+            "$ref": "#/components/schemas/CallDirection",
+            "description": "Whether this account placed the call or received it."
+          },
+          "groupId": {
+            "description": "The group of a conference call. Omitted for a direct call.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "$ref": "#/components/schemas/CallKind",
+            "description": "Whether the call is direct or a conference."
+          },
+          "ownedByThisClient": {
+            "description": "True when this connection owns the call. Always false in HTTP snapshots.",
+            "type": "boolean"
+          },
+          "participants": {
+            "description": "The latest conference roster. Omitted for a direct call.",
+            "items": {
+              "$ref": "#/components/schemas/CallParticipant"
+            },
+            "type": "array"
+          },
+          "revision": {
+            "description": "Increases each time the call changes. Send the latest value as\n`expectedRevision`.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "state": {
+            "$ref": "#/components/schemas/CallState",
+            "description": "Where the call is in its life."
+          }
+        },
+        "required": [
+          "callId",
+          "revision",
+          "kind",
+          "callType",
+          "direction",
+          "state",
+          "ownedByThisClient"
+        ],
+        "type": "object"
+      },
+      "CallsAvailability": {
+        "additionalProperties": false,
+        "description": "Whether this account is in a call.",
+        "properties": {
+          "busy": {
+            "description": "True while this account has a call, including one whose outcome is\nunresolved, so a new call cannot start.",
+            "type": "boolean"
+          },
+          "ownedByThisClient": {
+            "description": "True when this connection owns that call.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "busy",
+          "ownedByThisClient"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "Call commands, events and audio on two WebSockets of the agent-wechat daemon. Both speak call protocol version 2. The daemon's HTTP routes are described in openapi.json.",
+    "license": {
+      "name": "MIT"
+    },
+    "title": "agent-wechat calls WebSocket API",
+    "version": "2"
+  },
+  "operations": {
+    "controlReceive": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/control"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/control/messages/client.call.hello"
+        },
+        {
+          "$ref": "#/channels/control/messages/client.call.answer"
+        },
+        {
+          "$ref": "#/channels/control/messages/client.call.cancel"
+        },
+        {
+          "$ref": "#/channels/control/messages/client.call.clear_audio"
+        },
+        {
+          "$ref": "#/channels/control/messages/client.call.dial"
+        },
+        {
+          "$ref": "#/channels/control/messages/client.call.hangup"
+        },
+        {
+          "$ref": "#/channels/control/messages/client.call.invite"
+        },
+        {
+          "$ref": "#/channels/control/messages/client.call.join"
+        },
+        {
+          "$ref": "#/channels/control/messages/client.call.mute"
+        },
+        {
+          "$ref": "#/channels/control/messages/client.call.ready"
+        },
+        {
+          "$ref": "#/channels/control/messages/client.call.reject"
+        }
+      ],
+      "security": [
+        {
+          "description": "An API token with the calls scope, sent in the Authorization header of the upgrade request.",
+          "scheme": "bearer",
+          "type": "http",
+          "x-agent-wechat-scope": "calls"
+        }
+      ],
+      "summary": "Messages the daemon accepts from the client."
+    },
+    "controlSend": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/control"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/control/messages/server.call.control"
+        },
+        {
+          "$ref": "#/channels/control/messages/server.call.error"
+        },
+        {
+          "$ref": "#/channels/control/messages/server.call.invitation_result"
+        },
+        {
+          "$ref": "#/channels/control/messages/server.call.offered"
+        },
+        {
+          "$ref": "#/channels/control/messages/server.call.pending"
+        },
+        {
+          "$ref": "#/channels/control/messages/server.call.state"
+        },
+        {
+          "$ref": "#/channels/control/messages/server.calls.availability"
+        },
+        {
+          "$ref": "#/channels/control/messages/server.command.result"
+        },
+        {
+          "$ref": "#/channels/control/messages/server.conference.invitations"
+        },
+        {
+          "$ref": "#/channels/control/messages/server.hello"
+        },
+        {
+          "$ref": "#/channels/control/messages/server.participant.updated"
+        },
+        {
+          "$ref": "#/channels/control/messages/server.protocol.error"
+        },
+        {
+          "$ref": "#/channels/control/messages/server.track.added"
+        },
+        {
+          "$ref": "#/channels/control/messages/server.track.removed"
+        },
+        {
+          "$ref": "#/channels/control/messages/server.track.updated"
+        }
+      ],
+      "security": [
+        {
+          "description": "An API token with the calls scope, sent in the Authorization header of the upgrade request.",
+          "scheme": "bearer",
+          "type": "http",
+          "x-agent-wechat-scope": "calls"
+        }
+      ],
+      "summary": "Messages the daemon sends to the client."
+    },
+    "mediaReceive": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/media"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/media/messages/client.audio.chunk"
+        },
+        {
+          "$ref": "#/channels/media/messages/client.audio.start"
+        },
+        {
+          "$ref": "#/channels/media/messages/client.media.attach"
+        }
+      ],
+      "security": [
+        {
+          "description": "An API token with the calls scope, sent in the Authorization header of the upgrade request.",
+          "scheme": "bearer",
+          "type": "http",
+          "x-agent-wechat-scope": "calls"
+        }
+      ],
+      "summary": "Messages the daemon accepts from the client."
+    },
+    "mediaSend": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/media"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/media/messages/server.call.error"
+        },
+        {
+          "$ref": "#/channels/media/messages/server.media.ready"
+        },
+        {
+          "$ref": "#/channels/media/messages/server.protocol.error"
+        },
+        {
+          "$ref": "#/channels/media/messages/server.track.added"
+        },
+        {
+          "$ref": "#/channels/media/messages/server.track.removed"
+        },
+        {
+          "$ref": "#/channels/media/messages/server.audio.chunk"
+        }
+      ],
+      "security": [
+        {
+          "description": "An API token with the calls scope, sent in the Authorization header of the upgrade request.",
+          "scheme": "bearer",
+          "type": "http",
+          "x-agent-wechat-scope": "calls"
+        }
+      ],
+      "summary": "Messages the daemon sends to the client."
+    }
+  },
+  "servers": {
+    "daemon": {
+      "description": "The daemon listens on localhost by default.",
+      "host": "127.0.0.1:6174",
+      "protocol": "ws"
+    }
+  }
+}

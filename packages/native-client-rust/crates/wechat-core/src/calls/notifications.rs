@@ -337,6 +337,40 @@ pub(crate) fn after_sync_staged(
         let Ok(Some(control)) = super::incoming::decode_system_control(&message) else {
             continue;
         };
+        let remaining =
+            Duration::from_secs(ADMISSION_SECONDS.saturating_sub(now.saturating_sub(source)));
+        if remaining.is_zero() {
+            continue;
+        }
+        if message.from.ends_with("@chatroom") {
+            let Some(sender) = control
+                .source_sender
+                .as_deref()
+                .filter(|sender| valid_identity(sender))
+            else {
+                continue;
+            };
+            if matches!(&control.payload, NotificationPayload::Invite(invite) if invite.caller_username.as_deref()!=Some(sender) || invite.callee_username.as_deref()!=Some(own.as_str()))
+            {
+                continue;
+            }
+            let note = IncomingNotification {
+                lease: lease.clone(),
+                receipt_id: format!("{batch_id}:{index}"),
+                source_created_at: source,
+                received_at_unix_ms: received,
+                own_username: own.clone(),
+                caller_username: sender.to_owned(),
+                original_message: Arc::from(command.payload.clone()),
+                control,
+                core: Arc::downgrade(core),
+                header_from: message.from,
+            };
+            if let Ok(service) = core.call_service(&lease.authority().account_id) {
+                service.observe_conference(Arc::new(note), remaining);
+            }
+            continue;
+        }
         let caller = match &control.payload {
             NotificationPayload::Invite(invite) => {
                 if invite.room_type != Some(2)
@@ -366,11 +400,6 @@ pub(crate) fn after_sync_staged(
             }
             NotificationPayload::Cancel(_) => String::new(),
         };
-        let remaining =
-            Duration::from_secs(ADMISSION_SECONDS.saturating_sub(now.saturating_sub(source)));
-        if remaining.is_zero() {
-            continue;
-        }
         let note = IncomingNotification {
             lease: lease.clone(),
             receipt_id: format!("{batch_id}:{index}"),

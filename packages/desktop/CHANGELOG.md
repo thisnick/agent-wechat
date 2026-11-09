@@ -1,5 +1,51 @@
 # @agent-wechat/desktop
 
+## 2.2.0
+
+### Minor Changes
+
+- [#428](https://github.com/thisnick/agent-wechat/pull/428) [`8fbdc98`](https://github.com/thisnick/agent-wechat/commit/8fbdc98a1e310787699a5a57eec954bdcc39e114) Thanks [@thisnick](https://github.com/thisnick)! - On macOS, message notifications are grouped by chat in Notification Center and offer **Mark as Read** and **Reply**. Mark as Read marks the chat read unless a newer message has arrived since. Reply sends your text as a quote reply to that message and marks the chat read; it appears only when the message can be quoted. Opening a chat clears its notifications, and a notification still opens its chat after the app restarts. The first notification after updating may ask again to allow notifications.
+
+### Patch Changes
+
+- [#431](https://github.com/thisnick/agent-wechat/pull/431) [`82938af`](https://github.com/thisnick/agent-wechat/commit/82938affc9db1faf110639dd0bc4f4fb272bc840) Thanks [@thisnick](https://github.com/thisnick)! - Resume only the original group update after refreshing group metadata, instead of retrying every blocked sync batch. Unsupported commands remain retained for local repair.
+
+- [#426](https://github.com/thisnick/agent-wechat/pull/426) [`62b93b1`](https://github.com/thisnick/agent-wechat/commit/62b93b101f39f7cc3c058a70b2fefd5beb1d5781) Thanks [@thisnick](https://github.com/thisnick)! - On macOS, clicking a message notification now opens its chat, whether you click the banner or the notification later in Notification Center. Previously a click only brought the app to the front.
+
+## 2.1.0
+
+### Minor Changes
+
+- [#423](https://github.com/thisnick/agent-wechat/pull/423) [`4bfc492`](https://github.com/thisnick/agent-wechat/commit/4bfc492675cb8228abe1cf45a71fb624f63d7bff) Thanks [@thisnick](https://github.com/thisnick)! - Every view in the chat window now has its own address. Reloading keeps you on the same chat, Back and Forward move between chats, the account list, settings and the photo viewer, and a link to a chat or message opens it once the account is signed in. A link to a chat or message that no longer exists opens the chat list or the conversation with a note. Clicking a message notification now opens its chat scrolled to that message and highlights it.
+
+## 2.0.0
+
+### Minor Changes
+
+- [#403](https://github.com/thisnick/agent-wechat/pull/403) [`635fbc9`](https://github.com/thisnick/agent-wechat/commit/635fbc912fe1890dd4779c414a080746815888b1) Thanks [@thisnick](https://github.com/thisnick)! - Video sends now accept sources up to 512 MiB, matching ordinary files, instead of 50 MiB. The CLI, HTTP API capabilities, desktop and web composer, and OpenClaw extension all use the new limit; OpenClaw still applies `channels.agent-wechat.mediaMaxMb`, which defaults to 50. Original-quality videos of 25 MiB and above upload in blocks through the same path as large files.
+
+### Patch Changes
+
+- [#398](https://github.com/thisnick/agent-wechat/pull/398) [`1bc8f55`](https://github.com/thisnick/agent-wechat/commit/1bc8f550f710319c9ab5cda507c07d5d899ed9ac) Thanks [@thisnick](https://github.com/thisnick)! - Add `wx config servers remove NAME` to remove a saved server entry. Removing the selected server clears the CLI's active server selection.
+
+- Updated dependencies []:
+  - @agent-wechat/client-ui@0.3.4
+
+## 2.0.0-beta.1
+
+## 2.0.0-beta.0
+
+### Minor Changes
+
+- [#403](https://github.com/thisnick/agent-wechat/pull/403) [`635fbc9`](https://github.com/thisnick/agent-wechat/commit/635fbc912fe1890dd4779c414a080746815888b1) Thanks [@thisnick](https://github.com/thisnick)! - Video sends now accept sources up to 512 MiB, matching ordinary files, instead of 50 MiB. The CLI, HTTP API capabilities, desktop and web composer, and OpenClaw extension all use the new limit; OpenClaw still applies `channels.agent-wechat.mediaMaxMb`, which defaults to 50. Original-quality videos of 25 MiB and above upload in blocks through the same path as large files.
+
+### Patch Changes
+
+- [#398](https://github.com/thisnick/agent-wechat/pull/398) [`1bc8f55`](https://github.com/thisnick/agent-wechat/commit/1bc8f550f710319c9ab5cda507c07d5d899ed9ac) Thanks [@thisnick](https://github.com/thisnick)! - Add `wx config servers remove NAME` to remove a saved server entry. Removing the selected server clears the CLI's active server selection.
+
+- Updated dependencies []:
+  - @agent-wechat/client-ui@0.3.4-beta.0
+
 ## 1.5.1
 
 ## 1.5.0

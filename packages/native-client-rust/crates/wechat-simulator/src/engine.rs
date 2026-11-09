@@ -489,7 +489,8 @@ impl Engine {
                 account,
                 peer,
                 kind,
-            } => media::receive(&mut db, &account, &peer, &kind)?,
+                sender,
+            } => media::receive(&mut db, &account, &peer, &kind, sender.as_deref())?,
             Control::Login { account, status } => {
                 ensure!(
                     matches!(
@@ -530,13 +531,21 @@ impl Engine {
                 body,
                 self_sent,
                 notify: notification,
+                sender,
             } => {
-                validate_peer(&peer)?;
+                let envelope = if self_sent {
+                    validate_peer(&peer)?;
+                    ensure!(sender.is_none(), "sender_requires_group");
+                    String::new()
+                } else {
+                    group_envelope(&db, &account, &peer, sender.as_deref())?
+                };
                 ensure!(
                     !body.is_empty() && body.len() <= 64 * 1024,
                     "invalid_message"
                 );
                 seed(&mut db, &account)?;
+                let body = format!("{envelope}{body}");
                 let tx = db.transaction()?;
                 let time = clock(&tx)?;
                 let (from, to) = if self_sent {
@@ -711,6 +720,25 @@ fn validate_peer(peer: &str) -> Result<()> {
         "unknown_synthetic_peer"
     );
     Ok(())
+}
+/// A message a group receives names its sender in a `username:\n` prefix, as WeChat
+/// delivers it; an unprefixed group message cannot be attributed and stalls the
+/// hub's projection. Direct conversations take no sender.
+fn group_envelope(
+    db: &Connection,
+    account: &str,
+    peer: &str,
+    sender: Option<&str>,
+) -> Result<String> {
+    if !peer.ends_with("@chatroom") {
+        validate_peer(peer)?;
+        ensure!(sender.is_none(), "sender_requires_group");
+        return Ok(String::new());
+    }
+    validate_destination(db, account, peer)?;
+    let sender = sender.context("group_sender_required")?;
+    validate_peer(sender)?;
+    Ok(format!("{sender}:\n"))
 }
 fn validate_destination(db: &Connection, account: &str, peer: &str) -> Result<()> {
     if validate_peer(peer).is_ok() {
@@ -1062,6 +1090,73 @@ mod tests {
         wechat_protocol::decode_group_mutation(request, &bytes, &requested).unwrap()
     }
     #[test]
+    fn group_messages_name_their_sender_and_direct_messages_take_none() {
+        let scratch = wechat_platform::private_tempdir("simulator-envelope-").unwrap();
+        let engine = Engine::open(&scratch.path().join("remote.sqlite")).unwrap();
+        let session = login(&engine, "personal");
+        let state = authorization("personal", session.generation, device()).unwrap();
+        let create = wechat_protocol::group_mutation_requests(
+            &state,
+            &wechat_protocol::GroupMutation::Create {
+                members: vec!["sim_mei".into(), "sim_daniel".into()],
+                name: Some("Envelope regression group".into()),
+            },
+            false,
+        )
+        .unwrap();
+        let room = mutate_group(&engine, &session, &create[0])
+            .group_id
+            .unwrap();
+        let text = |peer: &str, sender: Option<&str>| {
+            engine.control(Control::Inbound {
+                account: "personal".into(),
+                peer: peer.into(),
+                body: "Envelope check".into(),
+                self_sent: false,
+                notify: true,
+                sender: sender.map(Into::into),
+            })
+        };
+        let media = |sender: Option<&str>| {
+            engine.control(Control::ReceiveMedia {
+                account: "personal".into(),
+                peer: room.clone(),
+                kind: "image".into(),
+                sender: sender.map(Into::into),
+            })
+        };
+        // A group message without a sender would stall the hub's projection.
+        assert!(text(&room, None).is_err());
+        assert!(text(&room, Some("stranger")).is_err());
+        assert!(text("sim_mei", Some("sim_daniel")).is_err());
+        assert!(media(None).is_err());
+        text(&room, Some("sim_mei")).unwrap();
+        text("sim_mei", None).unwrap();
+        media(Some("sim_daniel")).unwrap();
+        let db = engine.db.lock().unwrap();
+        let payloads: Vec<Vec<u8>> = db
+            .prepare("SELECT command FROM messages WHERE account='personal' ORDER BY sequence")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|raw| {
+                serde_json::from_str::<SyncCommand>(&raw.unwrap())
+                    .unwrap()
+                    .payload
+            })
+            .collect();
+        let holds = |needle: &[u8]| {
+            payloads
+                .iter()
+                .filter(|payload| payload.windows(needle.len()).any(|part| part == needle))
+                .count()
+        };
+        assert_eq!(holds(b"sim_mei:\nEnvelope check"), 1);
+        assert_eq!(holds(b"sim_daniel:\n<msg>"), 1);
+        // The direct message carries only its text.
+        assert_eq!(holds(b"Envelope check"), 2);
+    }
+    #[test]
     fn pinning_round_trips_through_contact_refresh_and_preserves_notification_preferences() {
         use wechat_protocol::{contact_notification_request, contact_pinning_requests};
 
@@ -1403,6 +1498,7 @@ mod tests {
                 body: "Missed notification".into(),
                 self_sent: false,
                 notify: false,
+                sender: None,
             })
             .unwrap();
         assert_eq!(

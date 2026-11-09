@@ -4,7 +4,7 @@ import type { NativeCallPcmObserver } from "@agent-wechat/shared";
 type Counter = "wsRxChunks" | "wsRxSamples" | "wsRxDroppedChunks" | "wsRxDroppedSamples"
   | "inputConsumedChunks" | "inputConsumedSamples" | "realtimeInputChunks" | "realtimeInputSamples"
   | "providerOutputChunks" | "providerOutputSamples" | "daemonOutputChunks" | "daemonOutputSamples"
-  | "outputDiscardedSamples" | "outputOverflowSamples" | "outputOverflowProviderSamples" | "outputTruncatedItems"
+  | "outputDiscardedSamples" | "outputOverflowSamples" | "outputBudgetInterruptions"
   | "outputStaleChunks" | "outputFailures" | "outputSilenceSamples" | "outputSkippedSilenceSamples";
 type Gap = "wsRxGapMs" | "inputConsumeGapMs" | "realtimeInputGapMs" | "providerOutputGapMs" | "daemonOutputGapMs";
 type Measure = Gap | "sdkRxQueueDepth" | "sdkRxWaitMs" | "inputResampleMs" | "realtimeForwardMs"

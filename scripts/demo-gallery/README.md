@@ -101,6 +101,5 @@ send-failure scenarios without connecting to WeChat. It starts its own fixtures;
 These are presentation assets for the recorded demo, not an additional capability
 guarantee. In particular, a synthetic quoted-reply screenshot does not establish
 recipient rendering, and a recorded desktop build does not establish every
-platform's installed-app acceptance. Current limits live in
-[`FEATURES.md`](../../packages/native-client-rust/FEATURES.md) and
+platform's installed-app acceptance. Current platform status lives in
 [`PLATFORM-ACCEPTANCE.md`](../../PLATFORM-ACCEPTANCE.md).

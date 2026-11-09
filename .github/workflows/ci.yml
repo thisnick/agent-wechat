@@ -23,10 +23,14 @@ on:
       - 'scripts/native-release-policy*.mjs'
       - 'scripts/native-release-orchestration*.mjs'
       - 'scripts/native-release-trigger*.mjs'
+      - 'scripts/native-crates*'
+      - 'scripts/native-sync-version*'
+      - '.github/workflows/rust-crates.yml'
       - 'scripts/native-ci-*'
       - 'scripts/native-build-release.test.py'
       - 'scripts/native-release-preflight*.mjs'
       - 'scripts/native-merge-release*.mjs'
+      - 'scripts/native-image-release*.mjs'
       - '.changeset/**'
       - 'scripts/install-ci-npm.sh'
       - 'scripts/verify-ci-publisher*.mjs'
@@ -57,12 +61,15 @@ jobs:
               - 'scripts/native-build-release*'
               - 'scripts/native-release-preflight*'
               - 'scripts/native-merge-release*'
+              - 'scripts/native-image-release*'
               - '.github/workflows/ci.yml'
               - '.github/workflows/native-*.yml'
               - '.github/workflows/desktop.yml'
             release:
               - 'scripts/native-crates*'
-              - 'scripts/native-sync-version.mjs'
+              - 'scripts/native-sync-version*'
+              - 'packages/rust-crates/**'
+              - 'packages/native-client-rust/**/Cargo.toml'
               - '.github/workflows/rust-crates.yml'
               - '.node-version'
               - '.github/workflows/release.yml'
@@ -107,6 +114,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version-file: .node-version
+      - run: pnpm install --filter agent-wechat --frozen-lockfile --ignore-scripts
       - run: bash -n scripts/install-ci-npm.sh
       - run: bash scripts/install-ci-npm.sh
       - run: |
@@ -116,7 +124,7 @@ jobs:
           node --test scripts/native-release-policy.test.mjs
           node --test scripts/native-release-orchestration.test.mjs
           node --test scripts/native-release-trigger.test.mjs
-          node --test scripts/native-crates.test.mjs
+          node --test scripts/native-crates*.test.mjs scripts/native-sync-version.test.mjs
           node scripts/native-release-notes.mjs --output "$RUNNER_TEMP/native-release-notes.md"
           node scripts/verify-ci-publisher.mjs
 
@@ -167,6 +175,7 @@ jobs:
           python3 scripts/native-ci-build.test.py
           python3 scripts/native-build-release.test.py
           node --test scripts/native-ci-artifact.test.mjs scripts/native-ci-media-assertions.test.mjs scripts/native-release-preflight.test.mjs scripts/native-merge-release.test.mjs
+          node --test scripts/native-image-release.test.mjs
 
   docs:
     needs: changes

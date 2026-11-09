@@ -25,6 +25,8 @@ pub enum NotificationFamily {
 /// All three protobuf layers remain available; unknown fields are not discarded.
 /// No audio/video interpretation or account/call authority is inferred here.
 pub struct DecodedCallControl {
+    /// Group transport prefix, without granting caller or membership authority.
+    pub source_sender: Option<String>,
     pub family: NotificationFamily,
     pub carrier: NotificationCarrier,
     pub conference: ConferenceNotification,
@@ -42,7 +44,24 @@ pub fn decode_system_control(message: &AddMessage) -> Result<Option<DecodedCallC
         message.content.len() <= MAX_SIGNALING_BYTES,
         "Call XML too large"
     );
-    let xml = std::str::from_utf8(&message.content)?;
+    let content = std::str::from_utf8(&message.content)?;
+    let (source_sender, xml) = if message.from.ends_with("@chatroom") {
+        let (sender, xml) = content
+            .split_once(":\n")
+            .context("Missing group call sender prefix")?;
+        ensure!(
+            !sender.is_empty()
+                && sender.len() <= 128
+                && !sender.ends_with("@chatroom")
+                && !sender
+                    .chars()
+                    .any(|character| character.is_control() || character == ':'),
+            "Invalid group call sender prefix"
+        );
+        (Some(sender.to_owned()), xml)
+    } else {
+        (None, content)
+    };
     let document = roxmltree::Document::parse_with_options(
         xml,
         roxmltree::ParsingOptions {
@@ -98,6 +117,7 @@ pub fn decode_system_control(message: &AddMessage) -> Result<Option<DecodedCallC
     let conference = carrier.conference_notification()?;
     let payload = conference.payload()?;
     Ok(Some(DecodedCallControl {
+        source_sender,
         family,
         carrier,
         conference,
@@ -188,6 +208,33 @@ mod tests {
             "<sysmsg type='{family}'><voipmt><{child}>{}</{child}></voipmt></sysmsg>",
             STANDARD.encode(raw)
         )
+    }
+
+    #[test]
+    fn group_transport_prefix_is_separate_from_the_preserved_control() {
+        let source = format!("test-sender:\n{}", xml("voipmt", "invite", &carrier(true)));
+        let mut input = message(10002, &source);
+        input.from = "test@chatroom".into();
+        let control = decode_system_control(&input).unwrap().unwrap();
+        assert_eq!(control.source_sender.as_deref(), Some("test-sender"));
+        assert_eq!(p::scalar(control.carrier.fields(), 88).unwrap(), 9);
+        assert_eq!(input.content, source.as_bytes());
+        // A sender prefix is recognized only in a group message envelope.
+        input.from = "test-direct".into();
+        assert!(decode_system_control(&input).is_err());
+    }
+
+    #[test]
+    fn invalid_group_transport_prefixes_do_not_decode_as_calls() {
+        for prefix in ["", "bad:sender", "room@chatroom", "bad\nsender"] {
+            let source = format!("{prefix}:\n{}", xml("voipmt", "invite", &carrier(true)));
+            let mut input = message(10002, &source);
+            input.from = "test@chatroom".into();
+            assert!(decode_system_control(&input).is_err());
+        }
+        let mut input = message(10002, &xml("voipmt", "invite", &carrier(true)));
+        input.from = "test@chatroom".into();
+        assert!(decode_system_control(&input).is_err());
     }
 
     #[test]

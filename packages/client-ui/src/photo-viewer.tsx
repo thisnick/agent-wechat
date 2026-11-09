@@ -29,11 +29,30 @@ import { mediaSwipeDirection } from "./media-swipe.ts";
 
 import { MediaViewerContext } from "./media-viewer-context.ts";
 
+/**
+ * The viewer is a view of the address: `id` names the open message, and every
+ * way of opening, moving or closing goes through the address.
+ */
+export type MediaRoute = {
+  id: string | null;
+  /** Opens the viewer on a message; adds a history entry. */
+  open: (id: string) => void;
+  /** Shows another item while the viewer stays open. */
+  move: (id: string) => void;
+  close: () => void;
+  /** Leaves the viewer for the message in its conversation. */
+  showMessage: (id: string) => void;
+  /** The named message is not a viewable item of this conversation. */
+  missing: () => void;
+};
+
 export function PhotoViewer({
   connection,
+  route,
   children,
 }: {
   connection: Connection;
+  route: MediaRoute;
   children: ReactNode;
 }) {
   useLocale();
@@ -41,7 +60,12 @@ export function PhotoViewer({
     connection.session.subscribe,
     connection.session.snapshot,
   );
-  const [selected, setSelected] = useState<NativeMessage | null>(null);
+  // A message outside the loaded pages (a search result or a link) is fetched once.
+  const [fetched, setFetched] = useState<NativeMessage | null>(null);
+  const loaded = route.id
+    ? state.messages.find((message) => message.id === route.id)
+    : undefined;
+  const selected = loaded ?? (fetched?.id === route.id ? fetched : null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const reducedMotion = useReducedMotion();
@@ -73,15 +97,47 @@ export function PhotoViewer({
   }, [current?.id]);
   const previous = index > 0 || !!state.nextMessages;
   const next = index >= 0 && index < photos.length - 1;
-  function close() {
+  function reset() {
     request.current++;
-    setSelected(null);
     setLoading(false);
     setError("");
   }
+  const unavailable = !!route.id && !!scoped && !current;
+  const missing = useRef(route.missing);
+  missing.current = route.missing;
+  useEffect(() => {
+    if (unavailable) missing.current();
+  }, [unavailable]);
+  useEffect(() => {
+    if (
+      !route.id ||
+      loaded ||
+      fetched?.id === route.id ||
+      state.loading ||
+      !state.account ||
+      !state.selected
+    )
+      return;
+    const { account, selected: thread } = state;
+    const id = route.id;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const message = await connection.session.client.message(account, id);
+        if (message.accountId !== account || message.threadId !== thread)
+          throw new Error("Not in this conversation");
+        if (!cancelled) setFetched(message);
+      } catch {
+        if (!cancelled) missing.current();
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [route.id, !!loaded, state.account, state.selected, state.loading]);
   useEffect(() => {
     if (!active) {
-      close();
+      reset();
       return;
     }
     const target = dialog.current;
@@ -97,7 +153,7 @@ export function PhotoViewer({
     if (loading || !current) return;
     setError("");
     if (photos[index + direction]) {
-      setSelected(photos[index + direction]);
+      route.move(photos[index + direction].id);
       return;
     }
     if (direction !== -1 || !state.nextMessages) return;
@@ -127,7 +183,7 @@ export function PhotoViewer({
         );
         const position = updated.findIndex((photo) => photo.id === anchor.id);
         if (position > 0) {
-          setSelected(updated[position - 1]);
+          route.move(updated[position - 1].id);
           return;
         }
         if (after.nextMessages === before.nextMessages) {
@@ -147,7 +203,8 @@ export function PhotoViewer({
       value={{
         open: (message) => {
           setError("");
-          setSelected(message);
+          setFetched(message);
+          route.open(message.id);
         },
       }}
     >
@@ -161,10 +218,10 @@ export function PhotoViewer({
             aria-label={t("Media viewer", "媒体查看器")}
             onCancel={(event) => {
               event.preventDefault();
-              close();
+              route.close();
             }}
             onClick={(event) => {
-              if (event.target === event.currentTarget) close();
+              if (event.target === event.currentTarget) route.close();
             }}
             onKeyDown={(event) => {
               // Native video controls use arrow keys for seeking.
@@ -235,10 +292,7 @@ export function PhotoViewer({
                       })}`}
                     {navigation && (
                       <button
-                        onClick={() => {
-                          close();
-                          void navigation.jump(current);
-                        }}
+                        <button onClick={() => route.showMessage(current.id)}>
                       >
                         {t("Show message", "定位到消息")}
                       </button>
@@ -250,11 +304,7 @@ export function PhotoViewer({
                     <PhotoZoomControls animationTime={animationTime} />
                   )}
                   <PhotoDownload message={current} connection={connection} />
-                  <Button
-                    icon="close"
-                    label={t("Close viewer", "关闭查看器")}
-                    onClick={close}
-                  />
+                  <Button icon="close" label="Close viewer" onClick={route.close} />
                 </div>
               </div>
               <div className="photo-viewer-body">
@@ -311,7 +361,7 @@ export function PhotoViewer({
                         : t("Photo", "图片")
                     } ${position + 1}`}
                     aria-current={photo.id === current.id ? "true" : undefined}
-                    onClick={() => setSelected(photo)}
+                    onClick={() => route.move(photo.id)}
                   >
                     <MediaCard
                       message={photo}

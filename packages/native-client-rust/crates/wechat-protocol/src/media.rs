@@ -18,6 +18,14 @@ const UPLOAD_CHUNK: usize = 65536;
 pub const MAX_CDN_TRANSFER_BYTES: usize = 25 * 1024 * 1024;
 pub const MAX_NATIVE_UPLOAD_BYTES: usize = 25 * 1024 * 1024 - 17;
 pub const MAX_LARGE_FILE_BYTES: usize = wechat_media::MAX_FILE_BYTES;
+/// Incoming video plaintext limit, matching the ordinary-file download and
+/// automatic-download ceiling. Every such transfer stays bound to the
+/// advertised length and MD5. Outgoing preparation keeps the separate
+/// `wechat_media::MAX_VIDEO_SOURCE_BYTES` source limit.
+pub const MAX_VIDEO_DOWNLOAD_BYTES: usize = wechat_media::MAX_FILE_BYTES;
+/// A video advertised at or below the ordinary transfer threshold is fetched
+/// before its length is compared, so its reply keeps the earlier 50 MiB bound.
+const MAX_SMALL_VIDEO_REPLY_BYTES: usize = 50 * 1024 * 1024;
 #[path = "large_cdn_config.rs"]
 mod large_cdn_config;
 #[path = "large_file.rs"]
@@ -557,8 +565,10 @@ impl CdnClient {
         let strict_transfer = large || large_video;
         let plaintext_limit = if large {
             MAX_LARGE_FILE_BYTES
+        } else if large_video {
+            MAX_VIDEO_DOWNLOAD_BYTES
         } else if descriptor.quality == MediaQuality::Video && descriptor.expected_bytes.is_some() {
-            wechat_media::MAX_VIDEO_SOURCE_BYTES
+            MAX_SMALL_VIDEO_REPLY_BYTES
         } else {
             MAX_CDN_TRANSFER_BYTES
         };
@@ -598,6 +608,8 @@ impl CdnClient {
         let mut substituted_filetype = None;
         let mut picture_format = None;
         let mut server_md5 = None;
+        let observe_video = descriptor.quality == MediaQuality::Video && !strict_transfer;
+        let mut video_reply = VideoReplyMetadata::default();
         for sequence in 1..=u32::try_from(ciphertext_limit.div_ceil(chunk_bytes))? {
             progress(
                 position as u64,
@@ -674,6 +686,9 @@ impl CdnClient {
                     }
                 }
             }
+            if observe_video {
+                video_reply.observe(&reply);
+            }
             progress(position as u64, Some(total as u64))?;
             if position == total {
                 break;
@@ -686,19 +701,32 @@ impl CdnClient {
         let bytes = decrypt_cdn(&encrypted, &descriptor.aes_key)?;
         ensure!(bytes.len() <= plaintext_limit, "Decoded CDN body too large");
         let size_matches = descriptor.expected_bytes.map(|n| n == bytes.len() as u64);
-        ensure!(
-            !(strict_transfer || descriptor.strict_size) || size_matches != Some(false),
-            "Advertised media size mismatch"
-        );
+        let size_rejected =
+            (strict_transfer || descriptor.strict_size) && size_matches == Some(false);
         let digest = hex::encode(md5(&bytes));
-        if let Some(expected) = &descriptor.expected_md5 {
-            ensure!(
-                expected.len() == 32
-                    && expected.bytes().all(|b| b.is_ascii_hexdigit())
-                    && digest.eq_ignore_ascii_case(expected),
-                "Advertised media checksum mismatch"
-            );
+        let digest_matches = descriptor.expected_md5.as_ref().map(|expected| {
+            expected.len() == 32
+                && expected.bytes().all(|b| b.is_ascii_hexdigit())
+                && digest.eq_ignore_ascii_case(expected)
+        });
+        if observe_video && (size_rejected || digest_matches == Some(false)) {
+            // Reject exactly as before, but keep comparison facts so a different
+            // server-selected representation can be told apart from corruption.
+            return Err(video_reply
+                .mismatch(
+                    descriptor,
+                    bytes.len(),
+                    &digest,
+                    digest_matches,
+                    substituted_filetype,
+                )
+                .into());
         }
+        ensure!(!size_rejected, "Advertised media size mismatch");
+        ensure!(
+            digest_matches != Some(false),
+            "Advertised media checksum mismatch"
+        );
         if let Some(expected) = server_md5 {
             ensure!(
                 digest.eq_ignore_ascii_case(&expected),
@@ -807,6 +835,103 @@ impl fmt::Display for LargeFileDownloadError {
     }
 }
 impl std::error::Error for LargeFileDownloadError {}
+
+/// How an optional reply value relates to the selected message tuple and to
+/// the bytes actually delivered. Values are compared, never retained.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceEvidence {
+    pub matches_advertised: bool,
+    pub matches_delivered: bool,
+}
+
+/// A complete video transfer at or below the ordinary transfer threshold
+/// decrypted successfully but did not match the selected message tuple. The
+/// download is still rejected. Only fixed numeric controls and comparison
+/// results are kept, so a caller can store a diagnostic without reply bytes or
+/// digests. Fields use wire key names; their meanings are not established.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VideoRepresentationMismatch {
+    pub advertised_bytes: Option<u64>,
+    pub delivered_bytes: u64,
+    pub advertised_digest_matches: Option<bool>,
+    pub substituted_filetype: Option<u32>,
+    pub istrans: Option<i64>,
+    pub videoformat: Option<i64>,
+    pub rawfilesize: Option<SourceEvidence>,
+    pub rawfilemd5: Option<SourceEvidence>,
+}
+impl fmt::Display for VideoRepresentationMismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Advertised video representation mismatch")
+    }
+}
+impl std::error::Error for VideoRepresentationMismatch {}
+
+/// First value of each optional video reply field on the ordinary path. This is
+/// diagnostic only: an absent or malformed value never rejects a reply.
+#[derive(Default)]
+struct VideoReplyMetadata {
+    istrans: Option<i64>,
+    videoformat: Option<i64>,
+    rawfilesize: Option<Option<u64>>,
+    rawfilemd5: Option<Option<String>>,
+}
+impl VideoReplyMetadata {
+    fn observe(&mut self, reply: &CdnFields) {
+        for (key, target) in [
+            ("istrans", &mut self.istrans),
+            ("videoformat", &mut self.videoformat),
+        ] {
+            if target.is_none() {
+                *target = integer(reply, key).ok();
+            }
+        }
+        if self.rawfilesize.is_none() && reply.contains_key("rawfilesize") {
+            self.rawfilesize = Some(
+                integer(reply, "rawfilesize")
+                    .ok()
+                    .and_then(|value| u64::try_from(value).ok()),
+            );
+        }
+        if self.rawfilemd5.is_none() {
+            if let Some(raw) = reply.get("rawfilemd5") {
+                self.rawfilemd5 = Some(
+                    (raw.len() == 32 && raw.iter().all(u8::is_ascii_hexdigit))
+                        .then(|| String::from_utf8_lossy(raw).to_ascii_lowercase()),
+                );
+            }
+        }
+    }
+    fn mismatch(
+        &self,
+        descriptor: &MediaDescriptor,
+        delivered_bytes: usize,
+        delivered_md5: &str,
+        advertised_digest_matches: Option<bool>,
+        substituted_filetype: Option<u32>,
+    ) -> VideoRepresentationMismatch {
+        let delivered_bytes = delivered_bytes as u64;
+        VideoRepresentationMismatch {
+            advertised_bytes: descriptor.expected_bytes,
+            delivered_bytes,
+            advertised_digest_matches,
+            substituted_filetype,
+            istrans: self.istrans,
+            videoformat: self.videoformat,
+            rawfilesize: self.rawfilesize.map(|value| SourceEvidence {
+                matches_advertised: value.is_some() && value == descriptor.expected_bytes,
+                matches_delivered: value == Some(delivered_bytes),
+            }),
+            rawfilemd5: self.rawfilemd5.as_ref().map(|value| SourceEvidence {
+                matches_advertised: value
+                    .as_ref()
+                    .zip(descriptor.expected_md5.as_ref())
+                    .is_some_and(|(value, expected)| value.eq_ignore_ascii_case(expected)),
+                matches_delivered: value.as_deref() == Some(delivered_md5),
+            }),
+        }
+    }
+}
 
 // Type 4 retains the normal download endpoint. Unlike file7, representation
 // and routing metadata cannot be ignored for a byte-exact original video.
@@ -1622,7 +1747,7 @@ mod tests {
         }
         for (size, checksum) in [
             (
-                Some(wechat_media::MAX_VIDEO_SOURCE_BYTES as u64 + 1),
+                Some(MAX_VIDEO_DOWNLOAD_BYTES as u64 + 1),
                 descriptor.expected_md5.clone(),
             ),
             (descriptor.expected_bytes, None),
@@ -2446,5 +2571,194 @@ mod tests {
             "filehelper"
         )
         .is_err());
+    }
+    fn video_mismatch(
+        descriptor: &MediaDescriptor,
+        ciphertext: &[u8],
+        extra: &[(&str, &[u8])],
+    ) -> VideoRepresentationMismatch {
+        let error = client()
+            .download_with_transport(
+                descriptor,
+                |_, _| Ok(()),
+                |_, fields| {
+                    let mut reply = download_reply(fields, descriptor, ciphertext);
+                    for (key, value) in extra {
+                        reply.insert((*key).into(), value.to_vec());
+                    }
+                    Ok(reply)
+                },
+            )
+            .err()
+            .expect("mismatched video must be rejected");
+        let text = format!("{error:#} {error:?}");
+        assert!(!text.contains(descriptor.expected_md5.as_deref().unwrap()));
+        *error
+            .downcast_ref::<VideoRepresentationMismatch>()
+            .expect("typed video mismatch")
+    }
+    #[test]
+    fn normal_video_of_another_length_is_rejected_with_comparison_facts_only() {
+        // Synthetic values: the advertised tuple describes one object while the
+        // CDN returns a complete, correctly encrypted object of another length.
+        let (descriptor, _, _) = download_fixture(9_390, MediaQuality::Video);
+        let delivered = vec![0x6b; 15_272];
+        let delivered_md5 = hex::encode(md5(&delivered));
+        let ciphertext = ecb_encrypt(&delivered, &descriptor.aes_key).unwrap();
+        let bare = video_mismatch(&descriptor, &ciphertext, &[]);
+        assert_eq!(
+            bare,
+            VideoRepresentationMismatch {
+                advertised_bytes: Some(9_390),
+                delivered_bytes: 15_272,
+                advertised_digest_matches: Some(false),
+                substituted_filetype: None,
+                istrans: None,
+                videoformat: None,
+                rawfilesize: None,
+                rawfilemd5: None,
+            }
+        );
+        let delivered_size = delivered.len().to_string();
+        let described = video_mismatch(
+            &descriptor,
+            &ciphertext,
+            &[
+                ("substituteftype", b"4"),
+                ("istrans", b"7"),
+                ("videoformat", b"3"),
+                ("rawfilesize", delivered_size.as_bytes()),
+                ("rawfilemd5", delivered_md5.to_uppercase().as_bytes()),
+            ],
+        );
+        assert_eq!(described.substituted_filetype, Some(4));
+        assert_eq!(
+            (described.istrans, described.videoformat),
+            (Some(7), Some(3))
+        );
+        let delivered_only = Some(SourceEvidence {
+            matches_advertised: false,
+            matches_delivered: true,
+        });
+        assert_eq!(described.rawfilesize, delivered_only);
+        assert_eq!(described.rawfilemd5, delivered_only);
+        let advertised_size = descriptor.expected_bytes.unwrap().to_string();
+        let advertised_md5 = descriptor.expected_md5.clone().unwrap();
+        let source = video_mismatch(
+            &descriptor,
+            &ciphertext,
+            &[
+                ("rawfilesize", advertised_size.as_bytes()),
+                ("rawfilemd5", advertised_md5.as_bytes()),
+            ],
+        );
+        let advertised_only = Some(SourceEvidence {
+            matches_advertised: true,
+            matches_delivered: false,
+        });
+        assert_eq!(source.rawfilesize, advertised_only);
+        assert_eq!(source.rawfilemd5, advertised_only);
+        let malformed = video_mismatch(
+            &descriptor,
+            &ciphertext,
+            &[("rawfilesize", b"-1"), ("rawfilemd5", b"not-a-digest")],
+        );
+        let neither = Some(SourceEvidence {
+            matches_advertised: false,
+            matches_delivered: false,
+        });
+        assert_eq!(
+            (malformed.rawfilesize, malformed.rawfilemd5),
+            (neither, neither)
+        );
+        // A representation that only some chunks label is still refused.
+        assert!(client()
+            .download_with_transport(
+                &descriptor,
+                |_, _| Ok(()),
+                |_, fields| {
+                    let mut reply = download_reply(fields, &descriptor, &ciphertext);
+                    put(&mut reply, "substituteftype", integer(fields, "seq")?);
+                    Ok(reply)
+                },
+            )
+            .is_err());
+    }
+    #[test]
+    fn normal_video_digest_mismatch_and_valid_metadata_keep_existing_outcomes() {
+        let (mut descriptor, raw, ciphertext) = download_fixture(9_390, MediaQuality::Video);
+        // Optional metadata is diagnostic only; malformed values never reject
+        // a transfer that matches its advertised tuple.
+        for (key, value) in [
+            ("rawfilesize", "-1"),
+            ("rawfilemd5", "not-a-digest"),
+            ("istrans", "x"),
+            ("videoformat", "12345678901234567"),
+        ] {
+            let downloaded = client()
+                .download_with_transport(
+                    &descriptor,
+                    |_, _| Ok(()),
+                    |_, fields| {
+                        let mut reply = download_reply(fields, &descriptor, &ciphertext);
+                        reply.insert(key.into(), value.as_bytes().to_vec());
+                        Ok(reply)
+                    },
+                )
+                .unwrap();
+            assert_eq!(downloaded.bytes, raw);
+            assert_eq!(downloaded.advertised_size_matches, Some(true));
+        }
+        descriptor.expected_md5 = Some("0".repeat(32));
+        let same_size = video_mismatch(&descriptor, &ciphertext, &[]);
+        assert_eq!(same_size.delivered_bytes, 9_390);
+        assert_eq!(same_size.advertised_digest_matches, Some(false));
+        // Other kinds keep their plain messages.
+        let (mut image, _, image_ciphertext) = download_fixture(9_390, MediaQuality::Original);
+        image.expected_bytes = Some(9_391);
+        let error = client()
+            .download_with_transport(
+                &image,
+                |_, _| Ok(()),
+                |_, fields| Ok(download_reply(fields, &image, &image_ciphertext)),
+            )
+            .err()
+            .expect("download must fail");
+        assert!(error
+            .downcast_ref::<VideoRepresentationMismatch>()
+            .is_none());
+        assert_eq!(error.to_string(), "Advertised media size mismatch");
+    }
+    #[test]
+    fn video_limits_admit_sizes_above_the_former_50_mib_bound() {
+        assert_eq!(MAX_VIDEO_DOWNLOAD_BYTES, 536_870_912);
+        assert_eq!(wechat_media::MAX_VIDEO_SOURCE_BYTES, 536_870_912);
+        assert_eq!(
+            upload_plaintext_limit(MediaQuality::Video),
+            wechat_media::MAX_VIDEO_SOURCE_BYTES
+        );
+        // A small advertised video keeps its own bound on an unchecked reply.
+        assert_eq!(MAX_SMALL_VIDEO_REPLY_BYTES, 52_428_800);
+        let (mut descriptor, _, _) = download_fixture(16, MediaQuality::Video);
+        for size in [MAX_SMALL_VIDEO_REPLY_BYTES + 1, MAX_VIDEO_DOWNLOAD_BYTES] {
+            descriptor.expected_bytes = Some(size as u64);
+            let mut requests = 0;
+            let error = client()
+                .download_with_transport(
+                    &descriptor,
+                    |_, _| Ok(()),
+                    |path, fields| {
+                        requests += 1;
+                        assert_eq!(path, "/download");
+                        assert_eq!(integer(fields, "filetype")?, 4);
+                        assert_eq!(integer(fields, "rangeend")?, 512 * 1024 - 1);
+                        bail!("synthetic transport stop")
+                    },
+                )
+                .err()
+                .expect("download must stop");
+            assert_eq!(error.to_string(), "synthetic transport stop");
+            assert_eq!(requests, 1);
+        }
     }
 }

@@ -1,15 +1,15 @@
-//! Experimental call signaling and media building blocks.
+//! Call signaling codecs, authenticated host routes and media packet transforms.
 //!
-//! Explicit native session methods can submit authenticated direct-voice host
-//! operations. Enabling this feature alone starts no daemon call worker. The
-//! caller owns account/logout fences, intent persistence, current negotiation,
-//! socket/device lifetimes and separate live-test authorization. Media key
-//! lifecycle and broader peer interoperability still need validation.
+//! Call lifecycle and session state machines live in wechat-calls, which depends
+//! on this crate. NativeClient owns authenticated account state. Embedding hosts
+//! retain authorization, operation journals and device policy. Decoding a packet
+//! or preparing a request starts no call. Media key lifetime and broader peer
+//! interoperability still require separate validation.
 
 pub mod app_frame;
 pub mod app_session;
 pub mod audio_packet;
-pub mod client;
+pub mod conference;
 pub mod host_policy;
 pub mod host_transport;
 pub mod incoming;

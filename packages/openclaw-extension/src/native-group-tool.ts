@@ -18,8 +18,8 @@ export function createNativeGroupTools(context: OpenClawPluginToolContext, depen
     description: "Read cached group information and one page of members for the configured WeChat account. Available only to the trusted OpenClaw owner. Does not create groups, invite people or change settings. Cached member absence does not prove non-membership.",
     parameters: { type: "object", additionalProperties: false, properties: {
       groupId: { type: "string", minLength: 10, maxLength: 256, description: "Exact ordinary group username ending in @chatroom." },
-      limit: { type: "integer", minimum: 1, maximum: 100 },
-      cursor: { type: "string", maxLength: 8192 },
+      limit: { type: "integer", minimum: 1, maximum: 100, description: "Maximum number of members on this page." },
+      cursor: { type: "string", maxLength: 8192, description: "Opaque nextCursor from the previous wechat_group_info result; do not invent one." },
       username: { type: "string", minLength: 1, maxLength: 256, description: "Optionally inspect one exact member instead of listing a page." },
     }, required: ["groupId"] } as ChannelAgentTool["parameters"],
     execute: async (_callId, input: unknown, signal?: AbortSignal) => {

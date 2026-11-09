@@ -2084,8 +2084,19 @@ fn history_does_not_load_off_page_bodies() {
 
 /// Opt-in timing gate for a quiet release builder. Ordinary CI exercises the
 /// deterministic off-page-body and snapshot-reuse regressions above instead.
+///
+/// Run it with temporary files on the filesystem being measured:
+///
+/// ```text
+/// cargo +1.93.1 test --release --locked \
+///   --manifest-path packages/native-client-rust/Cargo.toml \
+///   -p wechat-core history_latency_benchmark -- --ignored --nocapture
+/// ```
+///
+/// The default p95 budget is 100 ms; set `WECHAT_HISTORY_P95_MS` to an agreed
+/// budget for a different builder.
 #[test]
-#[ignore = "run on a quiet release builder; see FEATURES.md"]
+#[ignore = "run on a quiet release builder"]
 fn history_latency_benchmark() {
     if cfg!(debug_assertions) {
         eprintln!("Use --release for comparable history timings.");

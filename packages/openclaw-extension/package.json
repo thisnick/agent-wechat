@@ -1,6 +1,6 @@
 {
   "name": "@agent-wechat/agent-wechat",
-  "version": "1.5.1",
+  "version": "2.2.0",
   "license": "MIT",
   "type": "module",
   "files": [
@@ -214,7 +214,7 @@
             "calls": {
               "type": "object",
               "additionalProperties": false,
-              "description": "Independent voice and video permissions. Both default off; the current backend supports direct voice only.",
+              "description": "Independent voice and video permissions. Voice includes direct calls and separately configured conferences; both default off.",
               "properties": {
                 "voice": {
                   "type": "object",
@@ -223,7 +223,42 @@
                     "enabled": {
                       "type": "boolean",
                       "default": false,
-                      "description": "Enable direct voice calling. Disabled voice calls are ignored without answering or declining."
+                      "description": "Enable voice calling. Conferences require an exact group rule or an explicit wildcard group rule. Disabled voice calls are ignored without answering or declining."
+                    },
+                    "mode": {
+                      "type": "string",
+                      "enum": [
+                        "bidi",
+                        "agent"
+                      ],
+                      "default": "bidi",
+                      "description": "bidi uses a realtime voice model (including Live); agent transcribes speech, runs the configured OpenClaw agent and speaks through OpenClaw TTS. Applies to direct calls and conferences."
+                    },
+                    "transcription": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "provider": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200,
+                          "default": "openai",
+                          "description": "Registered realtime transcription provider for agent mode."
+                        },
+                        "model": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "language": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "apiKey": {
+                          "description": "Optional OpenClaw SecretRef or API-key string for the transcription provider. Omitted uses provider configuration."
+                        }
+                      }
                     },
                     "inboundPolicy": {
                       "type": "string",
@@ -239,7 +274,8 @@
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 200
-                      }
+                      },
+                      "description": "Direct-call caller IDs; an explicit '*' accepts any incoming caller. Admission does not grant owner consultation."
                     },
                     "outboundPolicy": {
                       "type": "string",
@@ -264,6 +300,98 @@
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 200
+                      }
+                    },
+                    "conferences": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "groups": {
+                          "type": "object",
+                          "maxProperties": 128,
+                          "propertyNames": {
+                            "type": "string",
+                            "pattern": "^(?:\\*|.+@chatroom)$",
+                            "maxLength": 200
+                          },
+                          "description": "Exact group IDs or '*'. An exact rule overrides the wildcard, including autoJoin=false. Wildcard auto-join requires autoJoinAllowFrom; use ['*'] to accept any inviter.",
+                          "allOf": [
+                            {
+                              "if": {
+                                "required": [
+                                  "*"
+                                ],
+                                "properties": {
+                                  "*": {
+                                    "required": [
+                                      "autoJoin"
+                                    ],
+                                    "properties": {
+                                      "autoJoin": {
+                                        "const": true
+                                      }
+                                    }
+                                  }
+                                }
+                              },
+                              "then": {
+                                "properties": {
+                                  "*": {
+                                    "required": [
+                                      "autoJoinAllowFrom"
+                                    ]
+                                  }
+                                }
+                              }
+                            }
+                          ],
+                          "additionalProperties": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                              "autoJoin": {
+                                "type": "boolean",
+                                "default": false,
+                                "description": "Join current authenticated invitations matching this group rule after voice preflight. No configured groups means no conference automation."
+                              },
+                              "autoJoinAllowFrom": {
+                                "type": "array",
+                                "maxItems": 128,
+                                "items": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 200
+                                },
+                                "description": "Conference inviter IDs; '*' accepts any inviter and an empty list disables auto-join. Required for wildcard-group auto-join. An exact group may omit this field to accept any inviter. The current inviter is rechecked before joining."
+                              },
+                              "toolPolicy": {
+                                "type": "string",
+                                "enum": [
+                                  "none",
+                                  "safe-read-only",
+                                  "owner"
+                                ],
+                                "default": "safe-read-only",
+                                "description": "Conference consultation authority. Owner requires voice.toolPolicy=owner and an exact agent-wechat:GROUP_ID grant in commands.ownerAllowFrom. It trusts the whole group without attributing speech to a person; otherwise consultation stays read-only."
+                              },
+                              "ownerInviterToolPolicy": {
+                                "type": "string",
+                                "enum": [
+                                  "none",
+                                  "safe-read-only",
+                                  "owner"
+                                ],
+                                "description": "Optional policy for calls whose authenticated inviter exactly matches an agent-wechat:CONTACT_ID owner grant. Otherwise toolPolicy applies. Owner also requires voice.toolPolicy=owner and an exact group owner grant. Applies to the whole call, including later participants; permissions can decrease but cannot increase during a call."
+                              },
+                              "sessionKey": {
+                                "type": "string",
+                                "pattern": "^agent:[a-z0-9][a-z0-9_-]{0,63}:[^:\\s][^\\s]*$",
+                                "maxLength": 1024,
+                                "description": "Optional consultation parent session of this voice agent for this group. Default sessions are isolated by account, group and authority."
+                              }
+                            }
+                          }
+                        }
                       }
                     },
                     "agentId": {
@@ -305,7 +433,7 @@
                             "enabled": {
                               "type": "boolean",
                               "default": false,
-                              "description": "Send bounded excerpts of the selected agent's IDENTITY.md and SOUL.md to the Realtime provider. Configured agent identity is used independently."
+                              "description": "Use OpenClaw's shared voice context to send bounded IDENTITY.md, USER.md and SOUL.md excerpts for direct calls and conferences. Configured agent identity is used independently; normal agent/TTS turns already receive host context."
                             }
                           }
                         },

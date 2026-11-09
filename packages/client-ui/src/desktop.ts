@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { connect, type Connection } from "./connection.ts";
 import type { NativeStatus } from "@agent-wechat/shared";
 import { desktopMultipart } from "./desktop-multipart.ts";
+import type { Route } from "./routes.ts";
 export const desktop = isTauri();
 export type DesktopSession = { id: string; endpoint: string; local: boolean; status?: NativeStatus };
 export type DesktopSettings = {
@@ -32,16 +33,30 @@ export async function desktopConnect(
   connection.desktopId = session.id;
   return connection;
 }
-export type NotificationTarget = { connectionId: string; serverId: string; accountId: string; threadId: string };
-export function desktopNotifications(connection: Connection, open: () => void): () => void {
+export type NotificationTarget = {
+  connectionId: string;
+  serverId: string;
+  accountId: string;
+  threadId: string;
+  /** The message that raised the alert, when the notification knows it. */
+  messageId?: string;
+};
+/** Where a clicked notification leads: the message when known, else its conversation. */
+export function notificationRoute(target: NotificationTarget): Route {
+  const where = { server: target.serverId, account: target.accountId, thread: target.threadId };
+  return target.messageId
+    ? { name: "message", ...where, message: target.messageId }
+    : { name: "chat", ...where };
+}
+/** Calls `open` with the route of each notification the user clicks on this hub. */
+export function desktopNotifications(connection: Connection, open: (route: Route) => void): () => void {
   let stopped = false;
   const take = async () => {
-    const target = await invoke<NotificationTarget | null>("notifications_take_target");
+    // Name this window's connection so a target for another connection stays pending.
+    if (!connection.desktopId) return;
+    const target = await invoke<NotificationTarget | null>("notifications_take_target", { connectionId: connection.desktopId });
     if (!target || stopped || target.connectionId !== connection.desktopId) return;
-    await connection.session.activate(target.accountId);
-    if (stopped) return;
-    await connection.session.select(target.threadId);
-    open();
+    open(notificationRoute(target));
   };
   const listening = listen("desktop-open-thread", () => { void take().catch(() => {}); });
   const focus = () => { void take().catch(() => {}); };

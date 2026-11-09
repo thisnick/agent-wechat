@@ -1,4 +1,5 @@
-//! Decoded upstream operations. Account admission, persistence and projection stay in Core.
+//! Simulation and bootstrap dispatch. NativeClient owns live account state;
+//! Core retains daemon permissions, journals and official-profile integration.
 use anyhow::{bail, ensure, Result};
 use std::{
     path::Path,
@@ -50,35 +51,63 @@ pub trait PushConnection: Send {
 /// operations fail closed through `native`, including secondary media paths.
 pub trait Upstream: Send + Sync {
     fn kind(&self) -> UpstreamKind;
+    /// Native account dispatch is supplied by Core; simulators implement decoded operations.
+    fn uses_account_owner(&self) -> bool {
+        false
+    }
     fn group_mutation_raw(
         &self,
-        state: &mut AccountState,
-        request: &wechat_protocol::GroupRpc,
+        _state: &mut AccountState,
+        _request: &wechat_protocol::GroupRpc,
     ) -> Result<Vec<u8>> {
-        self.native(NativeOptions::default())?
-            .group_mutation_raw(state, request)
+        bail!(
+            "{}",
+            if self.kind() == UpstreamKind::Simulator {
+                "unsupported_simulator_operation"
+            } else {
+                "account_runtime_required"
+            }
+        )
     }
-    fn group_detail_raw(&self, state: &mut AccountState, room: &str) -> Result<Vec<u8>> {
-        self.native(NativeOptions::default())?
-            .group_detail_raw(state, room)
+    fn group_detail_raw(&self, _state: &mut AccountState, _room: &str) -> Result<Vec<u8>> {
+        bail!(
+            "{}",
+            if self.kind() == UpstreamKind::Simulator {
+                "unsupported_simulator_operation"
+            } else {
+                "account_runtime_required"
+            }
+        )
     }
     fn lookup_room_raw(
         &self,
-        state: &mut AccountState,
-        room: &str,
-        version: u32,
+        _state: &mut AccountState,
+        _room: &str,
+        _version: u32,
     ) -> Result<Vec<u8>> {
-        self.native(NativeOptions::default())?
-            .lookup_room_raw(state, room, version)
+        bail!(
+            "{}",
+            if self.kind() == UpstreamKind::Simulator {
+                "unsupported_simulator_operation"
+            } else {
+                "account_runtime_required"
+            }
+        )
     }
     fn lookup_room_receipt(
         &self,
-        state: &mut AccountState,
-        room: &str,
-        version: u32,
+        _state: &mut AccountState,
+        _room: &str,
+        _version: u32,
     ) -> Result<wechat_protocol::MetadataReply<wechat_protocol::RoomRoster>> {
-        self.native(NativeOptions::default())?
-            .lookup_room_receipt(state, room, version)
+        bail!(
+            "{}",
+            if self.kind() == UpstreamKind::Simulator {
+                "unsupported_simulator_operation"
+            } else {
+                "account_runtime_required"
+            }
+        )
     }
     fn contact_patch(
         &self,
@@ -136,69 +165,96 @@ pub trait Upstream: Send + Sync {
         )?;
         Ok(Box::new(NativeChallenge { client, attempt }))
     }
-    fn renew_session(&self, state: &AccountState, computer_name: &str) -> Result<AccountState> {
-        self.native(NativeOptions::default())?
-            .renew_session(state, computer_name)
+    fn renew_session(&self, _state: &AccountState, _computer_name: &str) -> Result<AccountState> {
+        bail!(
+            "{}",
+            if self.kind() == UpstreamKind::Simulator {
+                "unsupported_simulator_operation"
+            } else {
+                "account_runtime_required"
+            }
+        )
     }
-    fn heartbeat(&self, state: &mut AccountState, cursor: &[u8]) -> Result<Heartbeat> {
-        self.native(NativeOptions::default())?
-            .heartbeat(state, cursor)
+    fn heartbeat(&self, _state: &mut AccountState, _cursor: &[u8]) -> Result<Heartbeat> {
+        bail!(
+            "{}",
+            if self.kind() == UpstreamKind::Simulator {
+                "unsupported_simulator_operation"
+            } else {
+                "account_runtime_required"
+            }
+        )
     }
-    fn sync(&self, state: &mut AccountState, cursor: &[u8]) -> Result<SyncBatch> {
-        self.native(NativeOptions::default())?.sync(state, cursor)
+    fn sync(&self, _state: &mut AccountState, _cursor: &[u8]) -> Result<SyncBatch> {
+        bail!(
+            "{}",
+            if self.kind() == UpstreamKind::Simulator {
+                "unsupported_simulator_operation"
+            } else {
+                "account_runtime_required"
+            }
+        )
     }
     fn contact_sync(
         &self,
-        state: &mut AccountState,
-        cursor: &[u8],
-        message_cursor: &[u8],
-        continuation: bool,
+        _state: &mut AccountState,
+        _cursor: &[u8],
+        _message_cursor: &[u8],
+        _continuation: bool,
     ) -> Result<wechat_protocol::contact_sync::ContactSyncBatch> {
-        self.native(NativeOptions::default())?.contact_sync(
-            state,
-            cursor,
-            message_cursor,
-            continuation,
+        bail!(
+            "{}",
+            if self.kind() == UpstreamKind::Simulator {
+                "unsupported_simulator_operation"
+            } else {
+                "account_runtime_required"
+            }
         )
     }
-    fn logout(&self, state: &mut AccountState) -> Result<(bool, i32)> {
-        let reply = self.native(NativeOptions::default())?.logout(state)?;
-        Ok((reply.accepted, reply.service_code))
+    fn logout(&self, _state: &mut AccountState) -> Result<(bool, i32)> {
+        bail!(
+            "{}",
+            if self.kind() == UpstreamKind::Simulator {
+                "unsupported_simulator_operation"
+            } else {
+                "account_runtime_required"
+            }
+        )
     }
     fn send_text(
         &self,
-        state: &mut AccountState,
-        destination: &str,
-        content: &str,
-        created_at: u32,
-        client_message_id: u32,
+        _state: &mut AccountState,
+        _destination: &str,
+        _content: &str,
+        _created_at: u32,
+        _client_message_id: u32,
     ) -> Result<TextSendResult> {
-        self.native(NativeOptions::default())?.send_text(
-            state,
-            destination,
-            content,
-            created_at,
-            client_message_id,
+        bail!(
+            "{}",
+            if self.kind() == UpstreamKind::Simulator {
+                "unsupported_simulator_operation"
+            } else {
+                "account_runtime_required"
+            }
         )
     }
     fn send_text_with_source(
         &self,
-        state: &mut AccountState,
-        destination: &str,
-        content: &str,
-        created_at: u32,
-        client_message_id: u32,
-        source: &str,
+        _state: &mut AccountState,
+        _destination: &str,
+        _content: &str,
+        _created_at: u32,
+        _client_message_id: u32,
+        _source: &str,
     ) -> Result<TextSendResult> {
-        self.native(NativeOptions::default())?
-            .send_text_with_source(
-                state,
-                destination,
-                content,
-                created_at,
-                client_message_id,
-                Some(source),
-            )
+        bail!(
+            "{}",
+            if self.kind() == UpstreamKind::Simulator {
+                "unsupported_simulator_operation"
+            } else {
+                "account_runtime_required"
+            }
+        )
     }
     fn send_text_guarded(
         &self,
@@ -209,123 +265,111 @@ pub trait Upstream: Send + Sync {
         client_message_id: u32,
         before_submit: &mut dyn FnMut() -> Result<()>,
     ) -> Result<TextSendResult> {
-        self.native(NativeOptions::default())?.send_text_guarded(
-            state,
-            destination,
-            content,
-            created_at,
-            client_message_id,
-            before_submit,
-        )
+        before_submit()?;
+        self.send_text(state, destination, content, created_at, client_message_id)
     }
     fn send_quote(
         &self,
-        state: &mut AccountState,
-        destination: &str,
-        client_id: &str,
-        created_at: u32,
-        content: &str,
-        source: Option<&str>,
+        _state: &mut AccountState,
+        _destination: &str,
+        _client_id: &str,
+        _created_at: u32,
+        _content: &str,
+        _source: Option<&str>,
     ) -> Result<MediaSendResult> {
-        self.native(NativeOptions::default())?
-            .send_quote_with_source(state, destination, client_id, created_at, content, source)
+        bail!(
+            "{}",
+            if self.kind() == UpstreamKind::Simulator {
+                "unsupported_simulator_operation"
+            } else {
+                "account_runtime_required"
+            }
+        )
     }
     fn send_share(
         &self,
-        state: &mut AccountState,
-        destination: &str,
-        client_id: &str,
-        created_at: u32,
-        content: &str,
+        _state: &mut AccountState,
+        _destination: &str,
+        _client_id: &str,
+        _created_at: u32,
+        _content: &str,
     ) -> Result<MediaSendResult> {
-        self.native(NativeOptions::default())?.send_share(
-            state,
-            destination,
-            client_id,
-            created_at,
-            content,
+        bail!(
+            "{}",
+            if self.kind() == UpstreamKind::Simulator {
+                "unsupported_simulator_operation"
+            } else {
+                "account_runtime_required"
+            }
         )
     }
     fn media_transport_route(
         &self,
-        state: &mut AccountState,
-        route: Option<wechat_protocol::media::LargeCdnRoute>,
+        _state: &mut AccountState,
+        _route: Option<wechat_protocol::media::LargeCdnRoute>,
     ) -> Result<Box<dyn media::MediaTransport>> {
-        let native = self.native(NativeOptions::default())?;
-        let load = |state: &mut AccountState| match route {
-            Some(route) => native.large_cdn_config(state, route),
-            None => native.cdn_config(state),
-        };
-        let mut conf = match load(state) {
-            Ok(conf) => conf,
-            Err(error) if crate::media::is_media_auth_rejected(&error) => {
-                *state = native.renew_session(state, "agent-wechat media")?;
-                load(state)?
+        bail!(
+            "{}",
+            if self.kind() == UpstreamKind::Simulator {
+                "unsupported_simulator_operation"
+            } else {
+                "account_runtime_required"
             }
-            Err(error) => return Err(error),
-        };
-        let cdn = wechat_protocol::media::CdnClient::new(conf.clone(), Duration::from_secs(25))?;
-        conf.auth_key.fill(0);
-        Ok(Box::new(cdn))
+        )
     }
     fn submit_media(
         &self,
-        state: &mut AccountState,
-        input: media::MediaSubmission<'_>,
+        _state: &mut AccountState,
+        _input: media::MediaSubmission<'_>,
     ) -> Result<MediaSendResult> {
-        let native = self.native(NativeOptions::default())?;
-        match input.body {
-            media::MediaBody::File {
-                upload,
-                reservation,
-            } => native.send_file_with_reservation(
-                state,
-                input.destination,
-                input.client_id,
-                input.created_at,
-                upload,
-                reservation,
-            ),
-            media::MediaBody::Image(upload) => {
-                native.send_image(state, input.destination, input.client_id, upload)
+        bail!(
+            "{}",
+            if self.kind() == UpstreamKind::Simulator {
+                "unsupported_simulator_operation"
+            } else {
+                "account_runtime_required"
             }
-            media::MediaBody::Video { upload, seconds } => {
-                native.send_video(state, input.destination, input.client_id, upload, seconds)
-            }
-            media::MediaBody::Voice {
-                encoded,
-                duration_ms,
-            } => native.send_voice(
-                state,
-                input.destination,
-                input.client_id,
-                input.created_at,
-                duration_ms,
-                encoded,
-            ),
-        }
+        )
     }
     fn download_voice(
         &self,
-        state: &mut AccountState,
-        server_id: u64,
-        length: u32,
-        offset: u32,
+        _state: &mut AccountState,
+        _server_id: u64,
+        _length: u32,
+        _offset: u32,
     ) -> Result<wechat_protocol::wire::VoiceChunk> {
-        self.native(NativeOptions::default())?
-            .download_voice_chunk(state, server_id, length, offset)
+        bail!(
+            "{}",
+            if self.kind() == UpstreamKind::Simulator {
+                "unsupported_simulator_operation"
+            } else {
+                "account_runtime_required"
+            }
+        )
     }
     fn notify_read(
         &self,
-        state: &mut AccountState,
-        notification: &wechat_protocol::SessionReadNotification,
+        _state: &mut AccountState,
+        _notification: &wechat_protocol::SessionReadNotification,
     ) -> Result<wechat_protocol::SessionReadReply> {
-        self.native(NativeOptions::default())?
-            .notify_read_session(state, notification)
+        bail!(
+            "{}",
+            if self.kind() == UpstreamKind::Simulator {
+                "unsupported_simulator_operation"
+            } else {
+                "account_runtime_required"
+            }
+        )
     }
-    fn lookup_contacts_raw(&self, state: &mut AccountState, ids: &[String]) -> Result<Vec<u8>> {
-        self.native(NativeOptions::default())?
-            .lookup_contacts_raw(state, ids)
+    fn lookup_contacts_raw(&self, _state: &mut AccountState, _ids: &[String]) -> Result<Vec<u8>> {
+        bail!(
+            "{}",
+            if self.kind() == UpstreamKind::Simulator {
+                "unsupported_simulator_operation"
+            } else {
+                "account_runtime_required"
+            }
+        )
     }
     fn download_avatar(&self, _state: &mut AccountState, source: &str) -> Result<Vec<u8>> {
         require_native(self.kind())?;
@@ -340,16 +384,23 @@ pub trait Upstream: Send + Sync {
         require_native(self.kind())?;
         wechat_protocol::media::fetch_sticker(descriptor, progress)
     }
-    fn push_connection(&self, state: &AccountState) -> Result<Box<dyn PushConnection>> {
-        Ok(Box::new(
-            self.native(NativeOptions::default())?
-                .push_connection(state)?,
-        ))
+    fn push_connection(&self, _state: &AccountState) -> Result<Box<dyn PushConnection>> {
+        bail!(
+            "{}",
+            if self.kind() == UpstreamKind::Simulator {
+                "unsupported_simulator_operation"
+            } else {
+                "account_runtime_required"
+            }
+        )
     }
 }
 
 pub(crate) struct NativeUpstream;
 impl Upstream for NativeUpstream {
+    fn uses_account_owner(&self) -> bool {
+        true
+    }
     fn kind(&self) -> UpstreamKind {
         UpstreamKind::Native
     }
@@ -387,17 +438,6 @@ impl LoginChallenge for NativeChallenge {
         let client = NativeClient::new(NativeOptions::default())?;
         let attempt = client.refresh_qr_login(&self.attempt)?;
         Ok(Box::new(Self { client, attempt }))
-    }
-}
-impl PushConnection for wechat_protocol::push::Connection {
-    fn heartbeat(&mut self, state: &mut AccountState, cursor: &[u8]) -> Result<Heartbeat> {
-        self.heartbeat(state, cursor)
-    }
-    fn sync(&mut self, state: &mut AccountState, cursor: &[u8], scene: u32) -> Result<SyncBatch> {
-        self.sync(state, cursor, scene)
-    }
-    fn poll(&mut self, timeout: Duration) -> Result<Option<Notification>> {
-        self.poll(timeout)
     }
 }
 

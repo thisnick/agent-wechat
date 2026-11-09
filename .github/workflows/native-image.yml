@@ -46,12 +46,18 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version-file: .node-version
-      - name: Require prepared exact-version source assets
+      - name: Stage and verify the exact release executable
         env:
           RELEASE_VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          node --input-type=module -e 'import fs from "node:fs"; if(JSON.parse(fs.readFileSync("packages/cli/package.json")).version!==process.env.RELEASE_VERSION)throw Error("Version mismatch");'
-          node scripts/native-prepare-package.mjs
+          release_dir="$RUNNER_TEMP/native-image-release"
+          node scripts/native-image-release.mjs "$RELEASE_VERSION" "$release_dir"
+          for path in "$release_dir/manifest.json" "$release_dir/wx"; do
+            gh attestation verify "$path" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/native-release.yml" \
+              --source-digest "$GITHUB_SHA" --source-ref refs/heads/main
+          done
       - uses: docker/setup-buildx-action@v4.4.1
         id: buildx
       - name: Build the native image candidate
@@ -60,14 +66,16 @@ jobs:
           builder: ${{ steps.buildx.outputs.name }}
           context: .
           file: deploy/native/Dockerfile
+          target: release-image
+          build-contexts: release-binary=${{ runner.temp }}/native-image-release
           platforms: linux/${{ matrix.arch }}
           load: true
           tags: native-candidate
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ inputs.version }}
-          cache-from: type=gha,scope=native-linux-${{ runner.arch }}
-      - name: Build and test on the native architecture before publishing
+          cache-from: type=gha,scope=native-runtime-image-${{ runner.arch }}
+      - name: Test on the native architecture before publishing
         run: |
           docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges native-candidate --json version
           python3 scripts/native-container-smoke.py native-candidate
@@ -83,6 +91,8 @@ jobs:
           builder: ${{ steps.buildx.outputs.name }}
           context: .
           file: deploy/native/Dockerfile
+          target: release-image
+          build-contexts: release-binary=${{ runner.temp }}/native-image-release
           platforms: linux/${{ matrix.arch }}
           outputs: type=image,name=ghcr.io/${{ github.repository }}-native,push-by-digest=true,name-canonical=true,push=true
           labels: |
@@ -90,12 +100,21 @@ jobs:
             org.opencontainers.image.version=${{ inputs.version }}
           provenance: mode=max
           sbom: true
-          cache-from: type=gha,scope=native-linux-${{ runner.arch }}
-          cache-to: type=gha,mode=max,scope=native-linux-${{ runner.arch }}
-      - name: Record digest
+          cache-from: type=gha,scope=native-runtime-image-${{ runner.arch }}
+          cache-to: type=gha,mode=max,scope=native-runtime-image-${{ runner.arch }}
+      - name: Verify the published executable and record the image digest
         env:
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          PLATFORM: linux/${{ matrix.arch }}
         run: |
+          expected=$(sha256sum "$RUNNER_TEMP/native-image-release/wx")
+          embedded=$(docker run --rm --platform "$PLATFORM" --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --entrypoint /usr/bin/sha256sum \
+            "ghcr.io/$GITHUB_REPOSITORY-native@$IMAGE_DIGEST" /usr/local/bin/wx)
+          if [ "${embedded%% *}" != "${expected%% *}" ]; then
+            echo '::error::Published image executable differs from the verified release binary.'
+            exit 1
+          fi
           mkdir -p artifacts/digests
           touch "artifacts/digests/${IMAGE_DIGEST#sha256:}"
       - uses: actions/upload-artifact@v7

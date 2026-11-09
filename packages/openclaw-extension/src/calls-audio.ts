@@ -2,7 +2,7 @@ import type { CallAudioFormat, NativeCallMediaClient } from "@agent-wechat/share
 import type { CallAudioTrace } from "./calls-audio-trace.ts";
 import type { PreparedCallVoice, StreamingPcmResampler } from "./calls-voice.ts";
 
-const MAX_BACKLOG_MS = 8_000;
+const MAX_RESPONSE_BACKLOG_MS = 10 * 60 * 1000;
 // A continuous stream plays as it arrives; a longer backlog only adds delay.
 const MAX_CONTINUOUS_BACKLOG_MS = 3_000;
 // A continuous stream arrives as fast as it plays, so a backlog left by a
@@ -14,6 +14,7 @@ const LOOK_AHEAD_FRAMES = 2;
 const MAX_QUEUED_SPANS = 256;
 type AudioSpan = { itemId: string; bytes: number };
 type PlayoutSpan = AudioSpan & { startsAt: number; endsAt: number };
+export type CallAudioClearReason = "application" | "barge-in" | "output-budget" | "continuity-reset" | "consultation" | "authority" | "provider";
 
 function isSilent(pcm: Buffer): boolean {
   for (let i = 0; i + 1 < pcm.length; i += 2) if (Math.abs(pcm.readInt16LE(i)) > SILENT_PEAK) return false;
@@ -35,10 +36,9 @@ export class CallPcmOutput {
   private submittedUntilMs = 0;
   private generation?: number;
   private resampler: StreamingPcmResampler;
-  private resamplerNeedsReset = false;
   private readonly items = new Set<string>();
   private readonly revokedItems = new Set<string>();
-  private readonly truncatedItems = new Set<string>();
+  private overflowItem?: string;
   private readonly queuedSpans: AudioSpan[] = [];
   private readonly scheduledSpans: PlayoutSpan[] = [];
   private readonly playedBytes = new Map<string, number>();
@@ -52,9 +52,11 @@ export class CallPcmOutput {
   private readonly failed: () => void;
   private readonly trace?: CallAudioTrace;
   private readonly continuous: boolean;
+  private readonly onResponseOverflow?: () => void;
+  private readonly diagnostic?: (line: string) => void;
   constructor(media: Pick<NativeCallMediaClient, "sendPcm" | "tracks">, format: CallAudioFormat,
     voice: PreparedCallVoice, clearRemote: () => Promise<unknown>, failed: () => void, trace?: CallAudioTrace,
-    options?: { continuous?: boolean }) {
+    options?: { continuous?: boolean; onResponseOverflow?: () => void; diagnostic?: (line: string) => void }) {
     if (format.channels !== 1 || format.frameMs !== 20 || ![8000, 12000, 16000, 24000, 48000].includes(format.sampleRate)) throw Error("Calling PCM format unsupported");
     this.media = media;
     this.format = format;
@@ -63,10 +65,14 @@ export class CallPcmOutput {
     this.failed = failed;
     this.trace = trace;
     this.continuous = options?.continuous === true;
+    this.onResponseOverflow = options?.onResponseOverflow;
+    this.diagnostic = options?.diagnostic;
     this.bytesPerMs = format.sampleRate * 2 / 1000;
     this.frameBytes = this.bytesPerMs * format.frameMs;
-    this.queue = Buffer.alloc(this.bytesPerMs * MAX_BACKLOG_MS);
+    const capacityMs = this.continuous ? MAX_CONTINUOUS_BACKLOG_MS : MAX_RESPONSE_BACKLOG_MS;
+    this.queue = Buffer.alloc(this.bytesPerMs * capacityMs);
     this.resampler = voice.resampler(voice.sampleRate, format.sampleRate);
+    this.log(`stage=buffer-ready mode=${this.continuous ? "continuous" : "response"} capacityMs=${capacityMs} capacityBytes=${this.queue.length}`);
   }
   start(): void {
     if (this.started || this.closed) return;
@@ -83,6 +89,9 @@ export class CallPcmOutput {
       items.set(span.itemId, (items.get(span.itemId) ?? this.playedBytes.get(span.itemId) ?? 0)
         + Math.min(span.bytes, elapsed * this.bytesPerMs));
     }
+    // A new item rejected at capacity has played zero samples, but must still
+    // be included in the SDK's conversation-item truncation request.
+    if (this.overflowItem && !items.has(this.overflowItem)) items.set(this.overflowItem, this.playedBytes.get(this.overflowItem) ?? 0);
     return [...items].map(([itemId, bytes]) => ({ itemId, audioEndMs: Math.floor(bytes / this.bytesPerMs) }));
   }
   enqueue(audio: Buffer, metadata?: { itemId: string }): void {
@@ -97,12 +106,10 @@ export class CallPcmOutput {
     // Item identity lets clear reject late chunks from an interrupted response.
     if (!item || item.length > 200 || audio.length % 2 !== 0 || audio.length > this.voice.sampleRate * 4) return this.fail();
     if (this.revokedItems.has(item)) { this.trace?.add("outputStaleChunks"); return; }
-    if (this.truncatedItems.has(item)) { this.trace?.add("outputOverflowProviderSamples", audio.length / 2); return; }
     if (!this.items.has(item) && this.items.size >= 256) return this.fail();
     this.items.add(item);
     let converted: Buffer;
     try {
-      if (this.resamplerNeedsReset && !this.resetResampler(epoch)) return;
       converted = this.resampler.process(audio);
     } catch { if (epoch === this.clearEpoch) this.fail(); return; }
     this.trace?.measure("outputResampleMs", performance.now() - started);
@@ -130,12 +137,15 @@ export class CallPcmOutput {
     const spanAvailable = lastSpan?.itemId === item || this.queuedSpans.length < MAX_QUEUED_SPANS;
     const accepted = spanAvailable ? Math.min(converted.length, this.queue.length - this.pendingBytes) : 0;
     if (accepted < converted.length) {
-      // Keep the coherent prefix. Future chunks from this item cannot follow a cut.
-      this.truncatedItems.add(item);
-      this.trace?.add("outputTruncatedItems");
-      this.trace?.add("outputOverflowSamples", (converted.length - accepted) / 2);
-      converted = converted.subarray(0, accepted);
-      this.resamplerNeedsReset = true;
+      this.trace?.add("outputBudgetInterruptions");
+      this.trace?.add("outputOverflowSamples", converted.length / 2);
+      this.log(`stage=buffer-limit reason=${spanAvailable ? "capacity" : "span-limit"} queuedMs=${this.pendingBytes / this.bytesPerMs} capacityMs=${this.queue.length / this.bytesPerMs} incomingMs=${converted.length / this.bytesPerMs}`);
+      this.overflowItem = item;
+      // Preserve playback accounting until the public SDK reads it, cancels
+      // generation and calls clear(). Never silently cut the response tail.
+      try { this.onResponseOverflow?.(); } catch { this.fail(); }
+      if (!this.closed && epoch === this.clearEpoch) this.fail();
+      return;
     }
     const tail = (this.readOffset + this.pendingBytes) % this.queue.length;
     const first = Math.min(converted.length, this.queue.length - tail);
@@ -151,13 +161,13 @@ export class CallPcmOutput {
     // outstanding. Only its current acknowledgement can resume playout.
     if (!this.paused && !this.timer) this.flush();
   }
-  async clear(): Promise<void> {
+  async clear(reason: CallAudioClearReason = "application"): Promise<void> {
     if (this.closed) return;
     const epoch = ++this.clearEpoch;
     this.paused = true;
+    this.log(`stage=clear reason=${reason} queuedMs=${this.pendingBytes / this.bytesPerMs}`);
     this.discard();
     for (const item of this.items) this.revokedItems.add(item);
-    this.truncatedItems.clear();
     // Continuous stream labels change with each clear, so the epoch check
     // already rejects audio from before it.
     if (this.continuous) { this.items.clear(); this.revokedItems.clear(); }
@@ -174,7 +184,6 @@ export class CallPcmOutput {
     const resampler = this.voice.resampler(this.voice.sampleRate, this.format.sampleRate);
     if (this.closed || epoch !== this.clearEpoch) return false;
     this.resampler = resampler;
-    this.resamplerNeedsReset = false;
     return true;
   }
   private settlePlayback(now: number): void {
@@ -257,12 +266,14 @@ export class CallPcmOutput {
     this.playedBytes.clear();
     this.submittedUntilMs = 0;
     this.generation = undefined;
+    this.overflowItem = undefined;
   }
+  private log(line: string): void { try { this.diagnostic?.(line); } catch { /* Diagnostics cannot affect audio. */ } }
   private fail(): void {
     if (this.closed) return;
     this.trace?.add("outputFailures");
     this.close();
     this.failed();
   }
-  close(): void { this.closed = true; this.discard(); this.items.clear(); this.revokedItems.clear(); this.truncatedItems.clear(); }
+  close(): void { this.closed = true; this.discard(); this.items.clear(); this.revokedItems.clear(); }
 }

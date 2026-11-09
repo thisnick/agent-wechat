@@ -16,6 +16,7 @@ wechat-platform = { path = "../wechat-platform" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+schemars.workspace = true
 tokio = { workspace = true, features = ["sync", "time"] }
 wechat-store = { path = "../wechat-store" }
 wechat-profile = { path = "../wechat-profile" }

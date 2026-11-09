@@ -21,13 +21,18 @@ dependencies = [
 
 [[package]]
 name = "agent-wechat-desktop"
-version = "1.5.1"
+version = "2.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "block2",
  "chrono",
  "keyring",
+ "mac-notification-sys",
  "notify-rust",
+ "objc2",
+ "objc2-foundation",
+ "objc2-user-notifications",
  "rand 0.8.8",
  "rcgen",
  "reqwest 0.12.28",
@@ -2997,6 +3002,8 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9df9128cbbfef73cda168416ccf7f837b62737d748333bfe9ab71c245d76613e"
 dependencies = [
+ "bitflags 2.13.2",
+ "block2",
  "objc2",
  "objc2-foundation",
 ]
@@ -5856,7 +5863,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-platform"
-version = "1.5.1"
+version = "2.0.0"
 dependencies = [
  "libc",
  "tempfile",

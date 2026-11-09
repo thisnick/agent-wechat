@@ -9,7 +9,7 @@ const sourceCommit = 'a'.repeat(40);
 const repo = { full_name: releaseRepository };
 const pr = { merged_at: '2026-10-23T00:00:00Z', merge_commit_sha: sourceCommit,
   base: { ref: 'main', repo }, head: { ref: 'changeset-release/main', repo } };
-const push = { eventName: 'push', event: { ref: 'refs/heads/main' }, sourceCommit };
+const push = { eventName: 'push', event: { ref: 'refs/heads/main' }, sourceCommit, previousVersion: '0.0.0' };
 
 test('only a merged same-repository Changesets PR at the exact push commit qualifies', async () => {
   assert.equal(await isVersionPackageMerge({ sourceCommit, fetchImpl: async () => Response.json([pr]) }), true);
@@ -56,10 +56,26 @@ test('manual recovery requires confirmation and main', async () => {
   }
 });
 
+test('a library-only manual recovery does not start application publication', async () => {
+  assert.deepEqual(await nativeReleaseTrigger({ eventName: 'workflow_dispatch',
+    event: { ref: 'refs/heads/main', inputs: { confirm_publish: true, version: '', crate_version: '2.0.1' } } }), { publish: false });
+});
+
 test('API errors, invalid metadata and ambiguous results fail before building', async () => {
   await assert.rejects(isVersionPackageMerge({ sourceCommit: 'main' }), /full source commit/);
   await assert.rejects(isVersionPackageMerge({ sourceCommit, fetchImpl: async () => new Response(null, { status: 403 }) }), /HTTP 403/);
   for (const value of [{}, Array(100).fill(pr)]) {
     await assert.rejects(isVersionPackageMerge({ sourceCommit, fetchImpl: async () => Response.json(value) }), /establish/);
   }
+});
+
+test('a library-only version PR never starts an unchanged app version, even if it is unpublished', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'native-trigger-unchanged-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const version = '2.0.1';
+  await writeFile(join(root, 'package.json'), JSON.stringify({ name: '@agent-wechat/cli', version }));
+  assert.deepEqual(await nativeReleaseTrigger({ ...push, root, previousVersion: version, fetchImpl: async url => {
+    assert.ok(url.includes('/pulls?'), 'must not check registries for an unchanged app version');
+    return Response.json([pr]);
+  } }), { publish: false, version });
 });

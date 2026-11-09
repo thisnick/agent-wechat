@@ -47,6 +47,15 @@ impl Core {
     ) -> Result<()> {
         self.session_state(account, fence)?;
         self.check_state_profile(account, state)?;
+        if let Some(accepted) = self.persisted_native_state(account, state)? {
+            anyhow::ensure!(
+                self.store.runtime(account, "desired")?.as_deref() == desired,
+                "session_superseded"
+            );
+            self.bind_call_authorization(account, &accepted)?;
+            let _ = self.project_saved_login(account, &accepted);
+            return Ok(());
+        }
         let sealed = self
             .vault
             .seal(account, "account-state", &serde_json::to_vec(state)?)?;

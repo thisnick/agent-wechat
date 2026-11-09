@@ -220,8 +220,15 @@ fn save_object(
     )?;
     Ok(())
 }
-pub(super) fn receive(db: &mut Connection, account: &str, peer: &str, kind: &str) -> Result<()> {
+pub(super) fn receive(
+    db: &mut Connection,
+    account: &str,
+    peer: &str,
+    kind: &str,
+    sender: Option<&str>,
+) -> Result<()> {
     validate_destination(db, account, peer)?;
+    let envelope = group_envelope(db, account, peer, sender)?;
     ensure!(
         ["image", "file", "video", "voice", "sticker"].contains(&kind),
         "unsupported_simulator_media"
@@ -312,6 +319,7 @@ pub(super) fn receive(db: &mut Connection, account: &str, peer: &str, kind: &str
         };
         (message_type, xml, None)
     };
+    let xml = format!("{envelope}{xml}");
     let (server, command) = store_message(
         &tx,
         account,
@@ -430,6 +438,7 @@ mod tests {
                     account: first.account.clone(),
                     peer: "sim_mei".into(),
                     kind: kind.into(),
+                    sender: None,
                 })
                 .unwrap();
         }

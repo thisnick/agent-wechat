@@ -4,18 +4,27 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use wechat_protocol::media::{MediaDescriptor, MediaQuality};
 
-#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+/// A share card to send: a link with a title, an optional description and an optional thumbnail
+/// address. Nothing is fetched from the linked page.
+#[derive(Clone, Debug, Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[serde(deny_unknown_fields)]
 pub enum ShareSendRequest {
+    /// Send a link card to a chat.
     Share {
+        /// ID of the chat to send to.
         #[serde(rename = "threadId")]
         thread_id: String,
+        /// Card title. It must not be blank.
         title: String,
+        /// Address the card opens. It must be an http or https address.
         url: String,
+        /// Text shown under the title. Optional.
         #[serde(default)]
         #[ts(optional)]
         description: Option<String>,
+        /// Address of a preview image for the card. It must be an http or https address without a
+        /// port or fragment.
         #[serde(default, rename = "thumbnailUrl")]
         #[ts(optional)]
         thumbnail_url: Option<String>,
@@ -57,12 +66,19 @@ impl ShareSendRequest {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+/// Details of a shared link, article, music or video card, or a Channels post.
+#[derive(Clone, Debug, Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkCard {
+    /// Card title. Null when there is none.
     pub title: Option<String>,
+    /// Card description or summary. Null when there is none.
     pub description: Option<String>,
+    /// Address the card opens. Null when the card has none or it is not a valid http or https
+    /// address.
     pub url: Option<String>,
+    /// Name of the site or account that published the card, such as a Channels account. Null when
+    /// there is none.
     pub source_name: Option<String>,
 }
 impl LinkCard {

@@ -599,7 +599,8 @@ export class HubSession {
       signInRequired: signedOut ? account : null,
     });
   }
-  async activate(account: string): Promise<void> {
+  /** Opens an account. `preferred` is the conversation to open first, when the account lists it. */
+  async activate(account: string, preferred?: string): Promise<void> {
     const activation = ++this.activationRequest;
     if (this.cache) {
       const accounts =
@@ -746,7 +747,10 @@ export class HubSession {
       }
       this.replayReady = true;
       this.restoring = false;
-      const previous = this.cache?.view(account).thread;
+      const previous =
+        preferred && this.value.threads.some((thread) => thread.id === preferred)
+          ? preferred
+          : this.cache?.view(account).thread;
       const target =
         previous && this.value.threads.some((thread) => thread.id === previous)
           ? previous

@@ -1,6 +1,6 @@
 [package]
 name = "wechat-protocol"
-version.workspace = true
+version = "2.0.0"
 edition.workspace = true
 license-file = "LICENSE"
 publish = ["crates-io"]
@@ -19,11 +19,12 @@ default = []
 experimental-calls = []
 
 [dependencies]
-wechat-media = { path = "../wechat-media", version = "=1.5.1" }
-wechat-platform = { path = "../wechat-platform", version = "=1.5.1" }
+wechat-media = { path = "../wechat-media", version = "=2.0.0" }
+wechat-platform = { path = "../wechat-platform", version = "=2.0.0" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 openssl = { version = "0.10", features = ["vendored"] }
 flate2 = "1"
 base64 = "0.22"

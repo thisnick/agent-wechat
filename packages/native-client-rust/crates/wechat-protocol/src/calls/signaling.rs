@@ -21,6 +21,7 @@ pub enum CallOperation {
     Reject,
     Cancel,
     Exit,
+    SwitchAv,
 }
 
 impl CallOperation {
@@ -32,6 +33,7 @@ impl CallOperation {
             Self::Reject => 3095,
             Self::Cancel => 3310,
             Self::Exit => 3380,
+            Self::SwitchAv => 3197,
         }
     }
 
@@ -43,6 +45,7 @@ impl CallOperation {
             Self::Reject => "/cloudim/cloud-bin/cloudvoipmtreject",
             Self::Cancel => "/cloudim/cloud-bin/cloudvoipmtcancel",
             Self::Exit => "/cloudim/cloud-bin/cloudvoipmtexit",
+            Self::SwitchAv => "/cloudim/cloud-bin/cloudvoipmtswitchav",
         }
     }
 
@@ -54,6 +57,7 @@ impl CallOperation {
             Self::Reject,
             Self::Cancel,
             Self::Exit,
+            Self::SwitchAv,
         ] {
             if command_id == operation.command_id() && path == operation.path() {
                 return Ok(operation);
@@ -256,7 +260,8 @@ fn validate_base_response(input: &[u8]) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn decode_fields(input: &[u8]) -> Result<Vec<Field>> {
+/// Decode a size- and field-count-limited signaling envelope.
+pub fn decode_fields(input: &[u8]) -> Result<Vec<Field>> {
     ensure!(
         input.len() <= MAX_SIGNALING_BYTES,
         "Call envelope too large"

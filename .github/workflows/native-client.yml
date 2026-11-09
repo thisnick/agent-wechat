@@ -16,6 +16,7 @@ on:
       - 'scripts/native-generate-types.sh'
       - 'scripts/native-simulator-smoke.mjs'
       - 'scripts/native-calls-api-smoke.mjs'
+      - 'scripts/native-cli-conference-smoke.*'
       - 'packages/openclaw-extension/src/calls*'
       - 'scripts/client-ui*-smoke.mjs'
       - 'packages/client-ui/**'
@@ -137,7 +138,7 @@ jobs:
         run: bash crates/wechat-audio/tests/pulse-loopback.sh target/debug/examples/isolated_loopback
       - name: Check portable call media for WebAssembly
         if: matrix.suite == 'test' && runner.arch == 'X64'
-        run: cargo check --locked -p wechat-calls --target wasm32-unknown-unknown
+        run: cargo check --locked -p wechat-calls --no-default-features --target wasm32-unknown-unknown
       - if: matrix.suite == 'test'
         run: |
           if [ '${{ github.event_name == 'pull_request' || inputs.simulator_checks }}' = true ]; then
@@ -173,3 +174,7 @@ jobs:
         if: matrix.suite == 'test' && (github.event_name == 'pull_request' || inputs.simulator_checks) && (runner.arch == 'X64' || github.event_name != 'pull_request')
         working-directory: .
         run: node --experimental-strip-types scripts/native-calls-api-smoke.mjs
+
+      - name: Exercise interactive conference CLI with isolated generated audio
+        if: matrix.suite == 'test' && runner.arch == 'X64' && (github.event_name == 'pull_request' || inputs.simulator_checks)
+        run: bash ../../scripts/native-cli-conference-smoke.sh target/debug/wx target/debug/wx-calls-fixture

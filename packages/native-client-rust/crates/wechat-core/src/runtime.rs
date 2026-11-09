@@ -25,6 +25,8 @@ mod identity;
 #[path = "official_profile.rs"]
 mod official_profile;
 pub use official_profile::{OfficialProfileRequest, OfficialProfileSelection};
+#[path = "native_account.rs"]
+mod native_account;
 #[path = "profile_network.rs"]
 mod profile_network;
 #[path = "push.rs"]
@@ -113,6 +115,7 @@ struct AccountCalls {
 #[doc(hidden)]
 pub struct CoreShared {
     account_calls: Mutex<AccountCalls>,
+    native_accounts: Mutex<BTreeMap<String, Option<wechat_protocol::NativeClient>>>,
 
     pub(crate) call_epochs: Mutex<BTreeMap<String, crate::calls::authority::Entry>>,
     pub(crate) upstream: Arc<dyn crate::upstream::Upstream>,
@@ -126,6 +129,8 @@ pub struct CoreShared {
         Mutex<BTreeMap<String, (std::time::Instant, wechat_profile::OwnedReaderCache)>>,
     #[cfg(test)]
     pub(crate) profile_snapshot_opens: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    pub(crate) projection_command_attempts: std::sync::atomic::AtomicUsize,
     pub(crate) profile_format_key: Mutex<Option<zeroize::Zeroizing<Vec<u8>>>>,
     pub(crate) bootstrap_leases: Mutex<std::collections::BTreeSet<String>>,
     pub(crate) startup_profiles_recovered: AtomicBool,
@@ -146,44 +151,71 @@ pub(crate) struct DownloadPermit {
     _account: tokio::sync::OwnedSemaphorePermit,
     _global: tokio::sync::OwnedSemaphorePermit,
 }
-#[derive(Clone, Serialize, Deserialize, ts_rs::TS)]
+/// Options for signing an account in. Every field is optional.
+#[derive(Clone, Serialize, Deserialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LoginRequest {
+    /// How to sign in. The default is `auto`.
     #[serde(default)]
     pub strategy: LoginStrategy,
+    /// How an expired QR code is replaced.
     #[serde(default)]
     pub qr_refresh: QrRefresh,
+    /// Whether a QR code may be shown. When false, only a saved login can be used. The default is
+    /// true.
     #[serde(default = "yes")]
     pub allow_qr: bool,
+    /// True to skip the saved login and use a QR code, the same as strategy `qr`. The default is
+    /// false.
     #[serde(default)]
     pub force_qr: bool,
+    /// How long to wait for the sign-in to finish, from 10 to 900 seconds. The default is 300.
     #[serde(default = "deadline")]
     #[ts(type = "number")]
     pub timeout_seconds: u64,
+    /// Name this computer gives WeChat while signing in, up to 100 characters. The default is
+    /// `agent-wechat`.
     #[serde(default = "computer")]
     pub computer_name: String,
 }
-#[derive(Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+/// How to sign in.
+#[derive(
+    Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS, schemars::JsonSchema,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum LoginStrategy {
+    /// Use the saved login if there is one, and fall back to a QR code if it is missing or
+    /// rejected.
     #[default]
     Auto,
+    /// Use only the saved login. If it cannot be used, the attempt ends as `needs_login` without
+    /// showing a QR code.
     SavedDevice,
+    /// Always sign in by scanning a QR code.
     Qr,
 }
-#[derive(Clone, Serialize, Deserialize, ts_rs::TS)]
+/// How an expired QR code is replaced.
+#[derive(Clone, Serialize, Deserialize, ts_rs::TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct QrRefresh {
+    /// Whether an expired QR code that nobody scanned is replaced automatically. The default is
+    /// `auto`.
     #[serde(default)]
     pub mode: QrRefreshMode,
+    /// How many times to replace an expired QR code automatically, from 0 to 3. The default is 3.
     #[serde(default = "refreshes")]
     pub max_refreshes: u8,
 }
-#[derive(Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+/// Whether an expired QR code is replaced automatically.
+#[derive(
+    Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum QrRefreshMode {
+    /// Replace an expired, unscanned QR code with a new one, up to the refresh limit.
     #[default]
     Auto,
+    /// Do not replace it. An expired QR code ends the attempt as `expired`.
     Manual,
 }
 fn refreshes() -> u8 {
@@ -341,6 +373,7 @@ impl Core {
             live_store: None,
             shared: Arc::new(CoreShared {
                 account_calls: Mutex::new(AccountCalls::default()),
+                native_accounts: Mutex::new(BTreeMap::new()),
 
                 call_epochs: Mutex::new(BTreeMap::new()),
                 upstream,
@@ -352,6 +385,8 @@ impl Core {
                 profile_readers: Mutex::new(BTreeMap::new()),
                 #[cfg(test)]
                 profile_snapshot_opens: std::sync::atomic::AtomicUsize::new(0),
+                #[cfg(test)]
+                projection_command_attempts: std::sync::atomic::AtomicUsize::new(0),
                 profile_format_key: Mutex::new(Some(crate::format::global_mmkv_format_key())),
                 bootstrap_leases: Mutex::new(bootstrap_leases),
                 startup_profiles_recovered: AtomicBool::new(false),
@@ -569,7 +604,10 @@ impl Core {
         if self.store.runtime(account, "logged-out")?.is_some() {
             bail!("auth_required");
         }
-        let state = self.state_unfenced(account)?;
+        let state = match self.native_account_snapshot(account)? {
+            Some(state) => state,
+            None => self.state_unfenced(account)?,
+        };
         self.check_state_profile(account, &state)?;
         Ok(state)
     }
@@ -579,6 +617,15 @@ impl Core {
     fn persist_state(&self, account: &str, state: &AccountState, accepted: bool) -> Result<()> {
         self.upstream.validate_state(state)?;
         self.check_state_profile(account, state)?;
+        if let Some(accepted) = accepted
+            .then(|| self.persisted_native_state(account, state))
+            .transpose()?
+            .flatten()
+        {
+            self.bind_call_authorization(account, &accepted)?;
+            let _ = self.project_saved_login(account, &accepted);
+            return Ok(());
+        }
         if let Ok(prior) = self.state_unfenced(account) {
             if prior.uin != state.uin || prior.own_username != state.own_username {
                 bail!("account_identity_mismatch");
@@ -683,6 +730,7 @@ impl Core {
         let record = self.store.account(account)?;
         let saved = self.account_state(account).is_ok();
         let auth = saved
+            && self.native_account_lease(account).is_ok()
             && self
                 .store
                 .runtime(account, "validated-generation")?
@@ -708,6 +756,7 @@ impl Core {
         )
     }
     pub fn disconnect(&self, account: &str) -> Result<()> {
+        self.stop_native_account(account);
         self.fence_call_authority(account);
         self.store.clear_runtime(account, "validated-generation")?;
         if let Ok(map) = self.cancels.lock() {
@@ -907,6 +956,7 @@ impl Core {
         }
         let start = Instant::now();
         let account = op.account_id.clone();
+        self.reset_native_account(&account);
         let previous = self.state_unfenced(&account).ok();
         if let Some(state) = &previous {
             self.check_state_profile(&account, state)?;
@@ -919,7 +969,7 @@ impl Core {
             self.progress(&op, "resuming", json!({"method":"active"}))?;
             let mut state = saved.clone();
             let cursor = self.cursor(&account)?;
-            let upstream = self.upstream.clone();
+            let upstream = self.account_upstream(&account)?;
             let validated = blocking(move || {
                 let client = upstream;
                 match client.heartbeat(&mut state, &cursor) {
@@ -1220,7 +1270,7 @@ impl Core {
             let desired = core.store.runtime(&account, "desired")?;
             let mut state = core.session_state(&account, &fence)?;
             let cursor = core.cursor(&account)?;
-            let native = &core.upstream;
+            let native = core.account_upstream(&account)?;
             let batch = permit.transfer(&core, &account, || native.sync(&mut state, &cursor))?;
             core.save_network_state(&account, &state, &expected, &fence, desired.as_deref())?;
             core.store.put_runtime(
@@ -1245,10 +1295,9 @@ impl Core {
         let account = account.to_string();
         blocking(move || {
             let mut state = core.account_state(&account)?;
-            let contacts = core
-                .upstream
-                .native(NativeOptions::default())?
-                .lookup_contacts(&mut state, &ids)?;
+            let contacts = core.native_request(&account, &mut state, |request| {
+                request.lookup_contacts(&ids)
+            })?;
             core.save_state(&account, &state)?;
             let items: Vec<_> = contacts.contacts.iter().map(contact_lookup_item).collect();
             Ok(json!({"items": items, "results": contacts.results}))
@@ -1266,7 +1315,7 @@ impl Core {
         let core = self.clone();
         let account = account.to_string();
         let room = room.to_string();
-        blocking(move||{let mut state=core.account_state(&account)?;let roster=core.upstream.native(NativeOptions::default())?.lookup_room(&mut state,&room,version)?;core.save_state(&account,&state)?;
+        blocking(move||{let mut state=core.account_state(&account)?;let roster=core.native_request(&account, &mut state, |request| request.lookup_room(&room,version))?;core.save_state(&account,&state)?;
             Ok(json!({"id":roster.room_id,"version":roster.version,"items":roster.members.into_iter().map(|m|json!({"id":m.username,"nickname":m.nickname,"roomDisplayName":m.room_display_name})).collect::<Vec<_>>(),"profileProjection":"pending"}))
         }).await
     }
@@ -1531,7 +1580,7 @@ impl Core {
                 .open_record(&account, "send-payload", &encrypted)?;
             let payload: SendPayload = serde_json::from_slice(&plain)?;
             let mut state = core.account_state(&account)?;
-            let native = &core.upstream;
+            let native = core.account_upstream(&account)?;
             if let Some(mentions) = &payload.mentions {
                 if let Err(error) = core.validate_mention_recipients(
                     &account,
@@ -2161,7 +2210,6 @@ impl Core {
                 let _guard = guard;
                 let _ = core.recover_text_projections(&owned)?;
                 if core.refresh_incoming_groups(&owned, true)? > 0 {
-                    core.store.retry_blocked(&owned)?;
                     core.project_pending(&owned)?;
                 }
                 if core.store.pending_sync_count(&owned)? == 0 {
@@ -2184,7 +2232,6 @@ impl Core {
                 };
                 let _ = core.recover_text_projections(&account)?;
                 if core.refresh_incoming_groups(&account, true)? > 0 {
-                    core.store.retry_blocked(&account)?;
                     core.project_pending(&account)?;
                 }
                 if core.store.pending_sync_count(&account)? == 0 {
@@ -2196,7 +2243,7 @@ impl Core {
                     .context("auth_required")?;
                 let mut state = core.session_state(&account, &fence)?;
                 let cursor = core.cursor(&account)?;
-                let native = &core.upstream;
+                let native = core.account_upstream(&account)?;
                 let beat =
                     permit.transfer(&core, &account, || native.heartbeat(&mut state, &cursor))?;
                 core.save_network_state(&account, &state, &expected, &fence, Some(b"connected"))?;
@@ -2262,7 +2309,12 @@ impl Core {
                 shutdowns.spawn(async move { service.shutdown().await });
             }
             while shutdowns.join_next().await.is_some() {}
+            core.stopping.store(true, Ordering::SeqCst);
+            let clients = core.native_clients();
             core.shutdown();
+            for client in clients {
+                let _ = client.shutdown().await;
+            }
         })
         .await
         .is_err()
@@ -2272,6 +2324,7 @@ impl Core {
     }
     pub fn shutdown(&self) {
         self.stopping.store(true, Ordering::SeqCst);
+        self.stop_native_accounts();
 
         self.fence_all_call_authorities();
         if let Ok(cancels) = self.cancels.lock() {
@@ -2768,6 +2821,7 @@ mod tests {
         store
             .mark_validated_if_active("one", &core.ownership_generation)
             .unwrap();
+        core.install_login_state("one", &state(), None).unwrap();
         core.stopping.store(true, Ordering::SeqCst);
         let request = crate::ShareSendRequest::Share {
             thread_id: "peer".into(),
@@ -2912,6 +2966,7 @@ mod tests {
         store
             .mark_validated_if_active("one", &core.ownership_generation)
             .unwrap();
+        core.install_login_state("one", &state(), None).unwrap();
         assert_eq!(core.account_status("one").unwrap()["connection"], "online");
         drop(core);
         drop(store);

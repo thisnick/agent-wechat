@@ -31,7 +31,7 @@ COPY --from=builder /build/rustc-version /build/rustc-version
 # docker create requires a command; this extraction image is never started.
 CMD ["/build/target/release/wx"]
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim AS runtime-base
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates tini ffmpeg libpulse0 \
     && rm -rf /var/lib/apt/lists/* \
@@ -40,18 +40,26 @@ RUN apt-get update \
     && mkdir -p /var/lib/agent-wechat /var/cache/agent-wechat /etc/agent-wechat/server \
     && chown 10001:10001 /var/lib/agent-wechat /var/cache/agent-wechat \
     && chmod 0700 /var/lib/agent-wechat /var/cache/agent-wechat
-COPY --from=builder /build/target/release/wx /usr/local/bin/wx
 COPY LICENSE /usr/share/doc/agent-wechat-native/LICENSE
 COPY packages/cli/THIRD_PARTY_NOTICES.txt /usr/share/doc/agent-wechat-native/THIRD-PARTY-NOTICES.txt
-COPY --from=builder /build/crates/wechat-protocol/NOTICE /usr/share/doc/agent-wechat-native/NOTICE
-COPY --from=builder /build/crates/wechat-protocol/fixtures/LICENSE-CITIZENLAB /usr/share/doc/agent-wechat-native/LICENSE-CITIZENLAB
-COPY --from=builder /build/crates/wechat-protocol/vendor/silk/LICENSE-MIT /usr/share/doc/agent-wechat-native/LICENSE-SILK-MIT
-COPY --from=builder /build/crates/wechat-protocol/vendor/silk/LICENSE-SDK /usr/share/doc/agent-wechat-native/LICENSE-SILK-SDK
-COPY --from=builder /build/crates/wechat-media/NOTICE.md /usr/share/doc/agent-wechat-native/NOTICE-WXGF
-COPY --from=builder /build/crates/wechat-media/LICENSE-CHATLOG /usr/share/doc/agent-wechat-native/LICENSE-CHATLOG
+COPY packages/native-client-rust/crates/wechat-protocol/NOTICE /usr/share/doc/agent-wechat-native/NOTICE
+COPY packages/native-client-rust/crates/wechat-protocol/fixtures/LICENSE-CITIZENLAB /usr/share/doc/agent-wechat-native/LICENSE-CITIZENLAB
+COPY packages/native-client-rust/crates/wechat-protocol/vendor/silk/LICENSE-MIT /usr/share/doc/agent-wechat-native/LICENSE-SILK-MIT
+COPY packages/native-client-rust/crates/wechat-protocol/vendor/silk/LICENSE-SDK /usr/share/doc/agent-wechat-native/LICENSE-SILK-SDK
+COPY packages/native-client-rust/crates/wechat-media/NOTICE.md /usr/share/doc/agent-wechat-native/NOTICE-WXGF
+COPY packages/native-client-rust/crates/wechat-media/LICENSE-CHATLOG /usr/share/doc/agent-wechat-native/LICENSE-CHATLOG
 USER 10001:10001
 ENV HOME=/var/lib/agent-wechat
 ENV TMPDIR=/var/cache/agent-wechat
 STOPSIGNAL SIGTERM
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/wx"]
 CMD ["serve", "--server-config", "/etc/agent-wechat/server/config.toml"]
+
+# The release workflow supplies a context containing the attested executable.
+FROM scratch AS release-binary
+
+FROM runtime-base AS release-image
+COPY --from=release-binary --chmod=0755 /wx /usr/local/bin/wx
+
+FROM runtime-base AS source-image
+COPY --from=builder /build/target/release/wx /usr/local/bin/wx

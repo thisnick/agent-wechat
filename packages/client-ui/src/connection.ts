@@ -24,6 +24,8 @@ export type Connection = {
   clearCache: (account: string) => Promise<void>;
   simulator: boolean;
   endpoint: string;
+  /** The hub's stable identity; the first segment of every route. */
+  serverId: string;
   loginAttempt: (account: string) => LoginAttempt;
   mediaOutbox: (account: string) => MediaOutbox;
   attachmentDrafts: AttachmentDrafts;
@@ -276,6 +278,7 @@ export async function connect(
     },
     simulator,
     endpoint: client.baseUrl.origin,
+    serverId: status.serverId,
     close() {
       stopSignOut();
       stopCache();

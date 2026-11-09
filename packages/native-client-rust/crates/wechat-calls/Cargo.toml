@@ -1,19 +1,32 @@
 [package]
 name = "wechat-calls"
-version.workspace = true
+version = "2.0.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
-description = "Portable call audio interfaces, pacing and native Opus codec"
-publish = false
+homepage.workspace = true
+readme = "README.md"
+description = "WeChat voice session and media building blocks, PCM pacing, mixing and native Opus"
+keywords = ["wechat", "audio", "opus", "voip"]
+categories = ["multimedia::audio", "network-programming"]
+include = ["src/**", "examples/**", "README.md", "LICENSE", "NOTICE.md", "LICENSE-OPUS", "LICENSE-OPUSIC"]
+publish = ["crates-io"]
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
 
 [features]
-default = ["native-opus"]
+default = ["native-runtime"]
+native-runtime = ["native-opus", "dep:wechat-protocol", "dep:anyhow", "dep:zeroize", "dep:serde"]
 native-opus = ["dep:opusic-c"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 opusic-c = { version = "=1.6.1", optional = true }
+wechat-protocol = { path = "../wechat-protocol", version = "=2.0.0", optional = true }
+anyhow = { workspace = true, optional = true }
+zeroize = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
 
 [[example]]
 name = "tone_roundtrip"

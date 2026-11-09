@@ -1,5 +1,7 @@
 //! Interactive local devices. No stream is opened until dial or an accepted prompt.
 use super::*;
+use anyhow::ensure;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use std::{
     collections::VecDeque,
     io::IsTerminal,
@@ -16,12 +18,17 @@ use tokio::{
 use wechat_audio::{AudioConfig, AudioError, AudioSession, PlaybackHandle, PlaybackToken};
 use wechat_calls::audio::AudioFormat;
 use wechat_core::call_types::{
-    CallMediaCommand, CallReadyScope, CallState, CallTarget, CallTrackDirection,
+    CallConferenceInvitation, CallMediaCommand, CallReadyScope, CallState, CallTarget,
+    CallTrackDirection,
 };
 
 type Input = Lines<BufReader<Stdin>>;
-const CALL_KEYS: &str = "m + Enter  Mute/unmute    h + Enter  Hang up\n\
-                        Ctrl-C     End call       ? + Enter  Show keys";
+const CALL_KEYS: &str = "m + Enter    Microphone          s + Enter    Speaker\n\
+                        i + Enter    Invite              p + Enter    Participants\n\
+                        d + Enter    Devices             ? + Enter    Help\n\
+                        l/h + Enter  Leave call          Ctrl-C       Leave and exit";
+const MONITOR_WAITING: &str =
+    "Waiting for calls. Leave a call with l/h + Enter to keep monitoring; Ctrl-C exits.";
 
 pub(super) async fn run(remote: &Remote, command: CallsCommand, json: bool) -> Result<()> {
     if json {
@@ -36,8 +43,8 @@ pub(super) async fn run(remote: &Remote, command: CallsCommand, json: bool) -> R
         result=Control::connect(remote)=>result?,
     };
     control.cancellation = Some(cancellation.clone());
-    if !control.capabilities.direct_audio {
-        bail!("direct voice calling is unavailable on this daemon");
+    if !control.capabilities.direct_audio && !control.capabilities.conference_audio {
+        bail!("voice calling is unavailable on this daemon");
     }
     if control.format != CallAudioFormat::default() {
         bail!("unsupported negotiated call audio format");
@@ -48,6 +55,10 @@ pub(super) async fn run(remote: &Remote, command: CallsCommand, json: bool) -> R
             monitor(remote, &mut control, &audio, &mut input, &cancellation).await
         }
         CallsCommand::Dial { contact, audio } => {
+            ensure!(
+                control.capabilities.direct_audio,
+                "direct calling unavailable on this daemon"
+            );
             if control.availability.busy {
                 bail!("busy: the daemon already has an ongoing or unresolved call");
             }
@@ -73,7 +84,48 @@ pub(super) async fn run(remote: &Remote, command: CallsCommand, json: bool) -> R
             )
             .await
         }
-        CallsCommand::Status | CallsCommand::Devices => {
+        CallsCommand::Conference {
+            command: Some(command),
+        } => {
+            if control.availability.busy {
+                bail!("busy: the account already has an ongoing or unresolved call");
+            }
+            let (action, options) = match command {
+                ConferenceCommand::Start {
+                    group,
+                    invitees,
+                    audio,
+                } => {
+                    ensure!(
+                        control.capabilities.conference_create
+                            && control.capabilities.conference_audio,
+                        "conference creation/audio unavailable on this daemon"
+                    );
+                    (Participation::ConferenceStart { group, invitees }, audio)
+                }
+                ConferenceCommand::Join { group, audio } => {
+                    ensure!(
+                        control.capabilities.conference_join
+                            && control.capabilities.conference_audio,
+                        "conference joining/audio unavailable on this daemon"
+                    );
+                    let invitation = conference_invitation(&control, &group)?;
+                    (Participation::ConferenceJoin(invitation), audio)
+                }
+            };
+            participate(
+                remote,
+                &mut control,
+                &options,
+                action,
+                &mut input,
+                &cancellation,
+            )
+            .await
+        }
+        CallsCommand::Conference { command: None }
+        | CallsCommand::Status
+        | CallsCommand::Devices => {
             unreachable!("status is handled without devices")
         }
     };
@@ -87,6 +139,22 @@ fn exact_offer(offer: Option<&CallOffer>, requested: Option<&str>) -> Result<Cal
         bail!("offer_expired: that call is no longer offered");
     }
     Ok(offer.clone())
+}
+
+fn conference_invitation(control: &Control, group: &str) -> Result<CallConferenceInvitation> {
+    let mut matches = control
+        .conference_invitations
+        .iter()
+        .filter(|item| item.group_id == group);
+    let selected = matches
+        .next()
+        .context("no current invitation for this group; join never creates a room")?
+        .clone();
+    ensure!(
+        matches.next().is_none(),
+        "more than one invitation for this group; wait for a current unambiguous invitation"
+    );
+    Ok(selected)
 }
 
 fn request_id() -> String {
@@ -114,11 +182,29 @@ async fn monitor(
     // Readiness declares this interactive client's ability to prepare devices;
     // it does not open or continuously capture its microphone while waiting.
     ready(control, true).await?;
-    eprintln!("Waiting for calls. Ctrl-C exits.");
+    eprintln!("{MONITOR_WAITING}");
     let mut shown = None;
     let mut dismissed = None;
     let mut renew_after_terminal = false;
+    let mut shown_invitations = Vec::new();
     loop {
+        let invitations = control
+            .conference_invitations
+            .iter()
+            .map(|i| (i.invitation_id.clone(), i.revision))
+            .collect::<Vec<_>>();
+        if invitations != shown_invitations {
+            shown_invitations = invitations;
+            for (index, invitation) in control.conference_invitations.iter().enumerate() {
+                eprintln!(
+                    "Conference invitation {}: {} from {}. Type j {} then Enter to join.",
+                    index + 1,
+                    super::levels::clean_label(&invitation.group_id, 64),
+                    super::levels::clean_label(&invitation.caller_id, 64),
+                    index + 1
+                );
+            }
+        }
         if let Some(offer) = &control.offer {
             let identity = (offer.call_id.clone(), offer.revision);
             if shown.as_ref() != Some(&identity) && dismissed.as_ref() != Some(&identity) {
@@ -136,6 +222,16 @@ async fn monitor(
             }
             line = input.next_line() => {
                 let Some(line)=line? else { return Ok(()); };
+                if line.trim()=="j" || line.trim().starts_with("j ") {
+                    let selected=line.trim().strip_prefix("j ").unwrap_or("1").parse::<usize>().ok().and_then(|index|index.checked_sub(1)).and_then(|index|control.conference_invitations.get(index)).cloned();
+                    if let Some(invitation)=selected {
+                        if !control.capabilities.conference_join || !control.capabilities.conference_audio {eprintln!("Conference joining/audio unavailable.");continue;}
+                        if let Err(error)=participate(remote,control,options,Participation::ConferenceJoin(invitation),input,cancellation).await {eprintln!("{error}");}
+                        if cancellation.is_cancelled(){return Ok(());}
+                        restore_monitor_readiness(control).await?;shown_invitations.clear();eprintln!("{MONITOR_WAITING}");
+                    }else{eprintln!("No matching current conference invitation.");}
+                    continue;
+                }
                 let Some(offer)=control.offer.clone() else { continue; };
                 match line.trim().to_ascii_lowercase().as_str() {
                     "a" | "accept" => {
@@ -149,7 +245,7 @@ async fn monitor(
                         if cancellation.is_cancelled() {return Ok(());}
                         if completed {restore_monitor_readiness(control).await?;renew_after_terminal=false;}
                         shown=None;
-                        eprintln!("Waiting for calls. Ctrl-C exits.");
+                        eprintln!("{MONITOR_WAITING}");
                     }
                     "d" | "dismiss" => { dismissed=Some((offer.call_id,offer.revision)); }
                     "r" | "reject" => {
@@ -169,6 +265,11 @@ pub(super) async fn restore_monitor_readiness(control: &mut Control) -> Result<(
 
 enum Participation {
     Dial(String),
+    ConferenceStart {
+        group: String,
+        invitees: Vec<String>,
+    },
+    ConferenceJoin(CallConferenceInvitation),
     Answer(AnswerTarget),
 }
 
@@ -240,7 +341,9 @@ async fn participate(
         audio=LocalAudio::open(options)=>audio?,
     };
     let scope = match &action {
-        Participation::Dial(_) => CallReadyScope::Outgoing,
+        Participation::Dial(_)
+        | Participation::ConferenceStart { .. }
+        | Participation::ConferenceJoin(_) => CallReadyScope::Outgoing,
         Participation::Answer(target) => CallReadyScope::Offer {
             call_id: target.call_id.clone(),
             expected_revision: target.revision,
@@ -259,6 +362,19 @@ async fn participate(
             request_id: request_id(),
             target: CallTarget::Direct { contact_id },
             call_type: wechat_core::call_types::CallType::Voice,
+        },
+        Participation::ConferenceStart { group, invitees } => CallCommand::Dial {
+            request_id: request_id(),
+            target: CallTarget::Conference {
+                group_id: group,
+                invitees,
+            },
+            call_type: wechat_core::call_types::CallType::Voice,
+        },
+        Participation::ConferenceJoin(invitation) => CallCommand::Join {
+            request_id: request_id(),
+            invitation_id: invitation.invitation_id,
+            invitation_revision: invitation.revision,
         },
         Participation::Answer(target) => {
             let offer = await_exact_offer(control, &target, cancellation).await?;
@@ -331,8 +447,8 @@ impl OwnedCall {
 pub(super) struct Media {
     socket: Socket,
     send_track: wechat_core::call_types::CallAudioTrack,
-    receive_track: u32,
-    receive_generation: u32,
+    receive: super::receive_audio::ReceiveAudio,
+    attached: Instant,
     started_generation: Option<u32>,
     pcm_writes: u64,
 }
@@ -348,6 +464,7 @@ impl Media {
         send_json(
             &mut socket,
             &CallMediaCommand::Attach {
+                supported_protocol_versions: vec![wechat_core::call_types::CALL_PROTOCOL_VERSION],
                 client_id: control.client_id.clone(),
                 owner_token: owner_token.into(),
             },
@@ -360,22 +477,34 @@ impl Media {
             bail!("media attachment rejected: {}", serde_json::to_value(code)?);
         }
         let CallEvent::MediaReady {
+            protocol_version,
             send_track,
-            receive_track,
+            receive_tracks,
         } = event
         else {
             bail!("media attachment was not accepted");
         };
-        if send_track.format != control.format
-            || receive_track.format != control.format
-            || send_track.direction != CallTrackDirection::Send
-            || receive_track.direction != CallTrackDirection::Receive
-            || send_track.id == receive_track.id
-            || send_track.id == 0
-            || send_track.generation == 0
-        {
-            bail!("unsupported call audio tracks");
-        }
+        ensure!(
+            protocol_version == wechat_core::call_types::CALL_PROTOCOL_VERSION,
+            "unsupported call media version"
+        );
+        ensure!(
+            send_track.format == control.format
+                && send_track.direction == CallTrackDirection::Send
+                && send_track.id != 0
+                && send_track.generation != 0,
+            "unsupported send audio track"
+        );
+        ensure!(
+            receive_tracks.iter().all(|track| track.id != send_track.id),
+            "overlapping send and receive tracks"
+        );
+        let format = AudioFormat::new(
+            control.format.sample_rate,
+            control.format.channels,
+            control.format.frame_ms,
+        )?;
+        let receive = super::receive_audio::ReceiveAudio::new(format, receive_tracks)?;
         debug_call(
             "media",
             format_args!(
@@ -385,8 +514,8 @@ impl Media {
         );
         Ok(Self {
             socket,
-            receive_track: receive_track.id,
-            receive_generation: receive_track.generation,
+            receive,
+            attached: Instant::now(),
             send_track,
             started_generation: None,
             pcm_writes: 0,
@@ -398,7 +527,7 @@ impl Media {
         call_id: &str,
     ) -> Result<(bool, bool)> {
         let mut send_changed = false;
-        let mut receive_changed = false;
+        let receive_changed = false;
         for ((id, _), track) in &control.tracks {
             if id != call_id {
                 continue;
@@ -413,13 +542,6 @@ impl Media {
                 {
                     self.send_track = track.clone();
                     send_changed = true;
-                }
-                CallTrackDirection::Receive
-                    if track.id == self.receive_track
-                        && track.generation > self.receive_generation =>
-                {
-                    self.receive_generation = track.generation;
-                    receive_changed = true;
                 }
                 _ => {}
             }
@@ -437,7 +559,10 @@ impl Media {
             );
             if let Err(error) = send_json(
                 &mut self.socket,
-                &CallMediaCommand::AudioStart { generation },
+                &CallMediaCommand::AudioStart {
+                    track_id: self.send_track.id,
+                    generation,
+                },
             )
             .await
             {
@@ -465,7 +590,16 @@ impl Media {
         }
         if let Err(error) = timeout(
             WRITE_TIMEOUT,
-            self.socket.send(Message::Binary(bytes.into())),
+            self.socket.send(Message::Text(
+                serde_json::to_string(&CallMediaCommand::AudioChunk {
+                    track_id: self.send_track.id,
+                    generation,
+                    sequence: None,
+                    sample_offset: None,
+                    pcm_base64: BASE64.encode(&bytes),
+                })?
+                .into(),
+            )),
         )
         .await
         .context("call media write timed out")
@@ -515,9 +649,16 @@ async fn owned_call(
     )?;
     let media = &mut call.media;
     let mut muted = false;
+    let mut speaker_enabled = true;
+    let mut pending = std::collections::BTreeMap::<String, (Instant, Option<bool>)>::new();
+    let mut interaction = super::interaction::Interaction::new();
+    let mut device_change = DeviceChange(None);
     let mut tick = tokio::time::interval(Duration::from_millis(u64::from(control.format.frame_ms)));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    eprintln!("Call {call_id}\n{CALL_KEYS}");
+    eprintln!(
+        "Call {}\n{CALL_KEYS}",
+        super::levels::clean_label(call_id, 80)
+    );
     let mut levels = super::levels::CallLevels::new();
     let mut meter_tick = tokio::time::interval(Duration::from_millis(100));
     meter_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -525,19 +666,12 @@ async fn owned_call(
         if cancellation.is_cancelled() {
             return Ok(false);
         }
-        if let Some(media) = media {
-            let (send_changed, receive_changed) = media.synchronize_tracks(control, call_id)?;
-            if send_changed {
-                audio.discard_capture();
-                levels.clear_microphone();
+        if let Some(view) = control.call.as_ref().filter(|view| view.call_id == call_id) {
+            levels.roster(view);
+            if let Some(media) = media {
+                media.receive.roster(view)?;
             }
-            if receive_changed {
-                audio.playback_token = audio.playback.clear()?;
-                levels.clear_speaker();
-            }
-        }
-        if let Some(call) = control.call.as_ref().filter(|call| call.call_id == call_id) {
-            match call.state {
+            match view.state {
                 CallState::Ended => return Ok(true),
                 CallState::Uncertain => {
                     bail!("call outcome unknown; check calls status before retrying")
@@ -545,67 +679,176 @@ async fn owned_call(
                 _ => {}
             }
         }
+        while let Some((id, results)) = control.invitation_results.pop_front() {
+            if id == call_id {
+                for result in results {
+                    let state = match result.status {
+                        wechat_core::call_types::CallInvitationStatus::Submitted => {
+                            "submitted; waiting for acceptance"
+                        }
+                        wechat_core::call_types::CallInvitationStatus::Rejected => "rejected",
+                        wechat_core::call_types::CallInvitationStatus::Unknown => "unknown",
+                        wechat_core::call_types::CallInvitationStatus::Uncertain => {
+                            "outcome uncertain; do not resend"
+                        }
+                    };
+                    levels.notice(&format!(
+                        "Invitation to {}: {state}{}",
+                        super::levels::clean_label(&result.contact_id, 64),
+                        if result.verification_required {
+                            "; contact verification required"
+                        } else {
+                            ""
+                        }
+                    ));
+                }
+            }
+        }
+        if let Some(media) = media {
+            let (changed, _) = media.synchronize_tracks(control, call_id)?;
+            if changed {
+                audio.discard_capture();
+                levels.clear_microphone();
+            }
+        }
         if control
             .call
             .as_ref()
-            .is_some_and(|call| call.call_id == call_id && call.state == CallState::Connected)
+            .is_some_and(|view| view.call_id == call_id && view.state == CallState::Connected)
             && media.is_none()
         {
-            let attached = tokio::select! {
-                _=cancellation.wait()=>return Ok(false),
-                attached=Media::attach(remote,control,call_id,owner_token)=>attached?,
-            };
+            let attached = tokio::select! {_=cancellation.wait()=>return Ok(false),result=Media::attach(remote,control,call_id,owner_token)=>result?};
+            let sources = attached.receive.track_count();
             audio.discard_capture();
             levels.clear_microphone();
             *media = Some(attached);
-            levels.notice("Connected. Local microphone and speakers are active.");
+            levels.notice(&format!("Connected. Microphone and mixed speakers active; {sources} receive tracks.\n{CALL_KEYS}"));
         }
         tokio::select! {
             _=cancellation.wait()=>return Ok(false),
-            line=input.next_line()=> {
-                let Some(line)=line? else {return Ok(false);};
-                levels.input_received();
-                match line.trim().to_ascii_lowercase().as_str() {
-                    "h"|"hangup"|"q"=>return Ok(false),
-                    "m"|"mute"=> {
-                        muted = !muted;
-                        control.command(CallCommand::Mute {request_id:request_id(),call_id:call_id.into(),muted}).await?;
-                        levels.microphone(&[], muted);
-                        levels.notice(if muted {"Microphone muted."} else {"Microphone unmuted."});
+            line=input.next_line()=>{
+                let Some(line)=line? else{return Ok(false);};levels.input_received();
+                let trimmed=line.trim();
+                match trimmed {
+                    "l"|"leave"|"h"|"hangup"|"q"=>return Ok(false),
+                    "m"|"mute"=>{
+                        if pending.values().any(|(_,old)|old.is_some()){levels.notice("A microphone request is pending; audio continues.");continue;}
+                        let old=muted;muted = !muted;audio.discard_capture();levels.microphone(&[],muted);
+                        let id=request_id();
+                        send_json(&mut control.socket,&CallCommand::Mute {request_id:id.clone(),call_id:call_id.into(),muted}).await?;
+                        pending.insert(id,(Instant::now(),Some(old)));
+                        levels.notice(if muted {"Microphone locally muted; signaling pending."}else{"Microphone locally unmuted; signaling pending."});
                     }
-                    "?"|"help"=>levels.notice(CALL_KEYS),
-                    _=>levels.notice("Unknown key. Type ? then Enter to see the call controls."),
+                    "s"|"speaker"=>{
+                        speaker_enabled = !speaker_enabled;audio.playback_token=audio.playback.clear()?;levels.playback_enabled(speaker_enabled);
+                        levels.notice(if speaker_enabled {"Local speaker enabled."}else{"Local speaker disabled; participant meters still measure incoming audio."});
+                    }
+                    "p"|"participants"=>{
+                        let mut text=String::from("Participants (microphone state is independent of signal level):\n");
+                        if let Some(view)=control.call.as_ref().filter(|view|view.call_id==call_id) {
+                            for p in &view.participants {text.push_str(&format!("{}: {:?}; microphone {}\n",super::levels::clean_label(&p.contact_id,64),p.membership,match p.microphone_enabled {Some(true)=>"on",Some(false)=>"off",None=>"unknown"}));}
+                        }
+                        levels.notice(text.trim_end());
+                    }
+                    "?"|"help"=>levels.notice(&format!("{CALL_KEYS}\ni searches contacts; invite CONTACT_ID [...] sends selected IDs.\nd lists devices; d input NUMBER / d output NUMBER selects one.\nInvitations never promote a direct call. Enter cancel to close a picker.")),
+                    _=>match interaction.line(trimmed,remote,control.call.as_ref().filter(|view|view.call_id==call_id),&audio.options,&mut levels) {
+                        Ok(super::interaction::UiAction::None)=>{},
+                        Ok(super::interaction::UiAction::Invite(contact_ids))=>{
+                            if !control.capabilities.conference_invite {levels.notice("Conference invitations unavailable on this daemon.");continue;}
+                            let id=request_id();
+                            send_json(&mut control.socket,&CallCommand::Invite {request_id:id.clone(),call_id:call_id.into(),contact_ids}).await?;
+                            pending.insert(id,(Instant::now(),None));levels.notice("Invitation request submitted; media continues while it completes.");
+                        }
+                        Ok(super::interaction::UiAction::Devices(options))=>{
+                            if device_change.0.is_some(){levels.notice("A device change is already preparing.");continue;}
+                            device_change.0=Some(tokio::spawn(async move{LocalAudio::open(&options).await}));
+                            levels.notice("Preparing new devices; current audio remains active.");
+                        }
+                        Err(error)=>levels.notice(&error.to_string()),
+                    },
                 }
             }
-            event=control.next_event()=> {
-                let event=event?;
-                control.update(&event);
+            _=interaction.completed(&mut levels)=>{},
+            replacement=device_change.completed()=>{
+                device_change.0=None;
+                match replacement {
+                    Ok(mut replacement)=>{
+                        replacement.discard_capture();let mut previous=std::mem::replace(audio,replacement);previous.request_stop();
+                        tokio::spawn(async move{let _=previous.stop().await;});
+                        levels.clear_microphone();levels.clear_speaker();levels.notice("Local audio devices changed.");
+                    }
+                    Err(error)=>levels.notice(&format!("Device change failed; current devices retained: {error}")),
+                }
+            }
+            event=control.next_event()=>{
+                let event=event?;control.update(&event);
                 match event {
-                    CallEvent::State {call} if call.call_id==call_id=> match call.state {
-                        CallState::Ended=>{levels.notice("Call ended.");return Ok(true);},
-                        CallState::Uncertain=>bail!("call outcome unknown; check calls status before retrying"),
-                        _=>{},
-                    },
+                    CallEvent::State {call:view} if view.call_id==call_id=>match view.state {CallState::Ended=>{levels.notice("Call ended.");return Ok(true);},CallState::Uncertain=>bail!("call outcome unknown; check calls status before retrying"),_=>{}},
                     CallEvent::Availability {availability} if !availability.busy=>return Ok(true),
+                    CallEvent::CommandResult {request_id,status,code,..}=>{
+                        if let Some((_,old))=pending.remove(&request_id) {
+                            if status==wechat_core::call_types::CallCommandStatus::Error {
+                                if let Some(old)=old {muted=old;audio.discard_capture();levels.microphone(&[],muted);}
+                                levels.notice(&format!("Command rejected: {}",serde_json::to_value(code)?));
+                            }else if old.is_some(){levels.notice(if muted {"Microphone muted."}else{"Microphone unmuted."});}
+                        }
+                    }
                     CallEvent::Error {code}=>bail!("call error: {}",serde_json::to_value(code)?),
                     _=>{},
                 }
             }
-            message=next_media(media)=> {
-                let Message::Binary(bytes)=message? else {bail!("unexpected call media message");};
-                if bytes.is_empty() || bytes.len() > 64 * 1024 || !bytes.len().is_multiple_of(usize::from(format.channels()) * 2) {bail!("invalid call PCM samples");}
-                let samples:Vec<f32>=bytes.chunks_exact(2).map(|sample|f32::from(i16::from_le_bytes([sample[0], sample[1]]))/32768.0).collect();
-                match audio.playback.enqueue(audio.playback_token,&samples,format.sample_rate()) {
-                    Ok(())=>levels.speaker(&samples),
-                    Err(AudioError::QueueFull)=>{audio.playback_token=audio.playback.clear()?;levels.clear_speaker();},
-                    Err(error)=>return Err(error.into()),
+            message=next_media(media)=>{
+                let Message::Text(text)=message? else {bail!("unexpected binary call media message");};
+                let current=media.as_mut().context("media detached")?;
+                let value:serde_json::Value=serde_json::from_str(&text)?;
+                if value["type"]=="audio.chunk" {
+                    current.receive.chunk(serde_json::from_value(value)?,current.attached.elapsed(),&mut levels)?;
+                }else{
+                    let event:CallEvent=serde_json::from_value(value)?;
+                    match &event {
+                        CallEvent::TrackAdded {track,..}|CallEvent::TrackUpdated {track,..} if track.direction==CallTrackDirection::Send=>{control.update(&event);},
+                        CallEvent::TrackAdded {..}|CallEvent::TrackUpdated {..}|CallEvent::TrackRemoved {..}=>{
+                            if current.receive.event(&event,call_id)? && matches!(event,CallEvent::TrackRemoved {..}) {audio.playback_token=audio.playback.clear()?;levels.clear_speaker();}
+                        }
+                        CallEvent::Error {code}=>bail!("media error: {}",serde_json::to_value(code)?),
+                        _=>bail!("unexpected media lifecycle event"),
+                    }
                 }
             }
-            _=meter_tick.tick()=>levels.refresh(),
-            _=tick.tick()=> {
-                let samples=audio.frame(format.samples_per_frame(),muted)?;
-                if let Some(media)=media {levels.microphone(&samples,muted);media.send(&samples,format).await?;}
+            _=meter_tick.tick()=>{
+                levels.refresh();
+                let expired=pending.iter().filter(|(_, (started,_))|started.elapsed()>Duration::from_secs(30)).map(|(id,_)|id.clone()).collect::<Vec<_>>();
+                for id in expired {pending.remove(&id);levels.notice("Command outcome uncertain; no retry was made. Check the roster/status before submitting again.");}
             }
+            _=tick.tick()=>{
+                let samples=audio.frame(format.samples_per_frame(),muted)?;
+                if let Some(media)=media {
+                    if let Some(mixed)=media.receive.render(media.attached.elapsed())? {
+                        if speaker_enabled {
+                            let mixed=mixed.iter().map(|s|f32::from(*s)/32768.0).collect::<Vec<_>>();
+                            match audio.playback.enqueue(audio.playback_token,&mixed,format.sample_rate()) {Ok(())=>levels.speaker(&mixed),Err(AudioError::QueueFull)=>{audio.playback_token=audio.playback.clear()?;levels.clear_speaker();},Err(error)=>return Err(error.into())}
+                        }
+                    }
+                    levels.microphone(&samples,muted);media.send(&samples,format).await?;
+                }
+            }
+        }
+    }
+}
+
+struct DeviceChange(Option<tokio::task::JoinHandle<Result<LocalAudio>>>);
+impl DeviceChange {
+    async fn completed(&mut self) -> Result<LocalAudio> {
+        match self.0.as_mut() {
+            Some(task) => task.await.context("device worker stopped")?,
+            None => std::future::pending().await,
+        }
+    }
+}
+impl Drop for DeviceChange {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
         }
     }
 }
@@ -681,6 +924,7 @@ async fn terminate(control: &mut Control, call_id: &str) -> Result<()> {
 }
 
 struct LocalAudio {
+    options: AudioOptions,
     playback: PlaybackHandle,
     playback_token: PlaybackToken,
     capture: mpsc::Receiver<Vec<f32>>,
@@ -747,6 +991,7 @@ impl LocalAudio {
                 Ok(())
             })?;
         Ok(Self {
+            options: options.clone(),
             playback,
             playback_token,
             capture,
@@ -837,6 +1082,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            super::super::tests::assert_client_hello(&mut socket).await;
             let mut initial = hello();
             if let CallEvent::Hello {
                 capabilities,

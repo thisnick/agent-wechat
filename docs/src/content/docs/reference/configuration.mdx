@@ -66,6 +66,20 @@ Under `channels.agent-wechat` in `openclaw.json`. The `native` block can also go
 
 `~/.config/agent-wechat/client.toml` stores the servers added with `wx config servers add` and each server's default account. The CLI reads each saved server's token file independently of the server's own configuration. `--token-stdin` accepts a key through a private pipe for one HTTP client invocation or for `serve`. It cannot be combined with `--token-file`. See [global flags](/reference/cli/#global-flags) for the matching environment variables.
 
+Remove a saved server with its name from `wx config servers list`.
+
+```bash
+wx config servers remove box
+```
+
+```text
+Active Server: —
+Server: box
+State: removed
+```
+
+Removing the selected entry clears the active server selection. Token files and registered local profiles are retained.
+
 ## Installer
 
 | Environment variable | Effect |

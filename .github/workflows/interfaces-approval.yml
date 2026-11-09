@@ -1,0 +1,35 @@
+name: Interface approval
+
+# Passes when a PR leaves interfaces/ unchanged, or when the owner's
+# interfaces-approved label covers the current listings. See interfaces/README.md.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: interfaces-approval-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  approval:
+    name: Interface approval
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      - name: Check approval of the interface listings
+        run: node scripts/interfaces/approval.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          BASE_REF: origin/${{ github.base_ref }}

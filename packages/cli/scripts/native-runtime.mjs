@@ -68,10 +68,10 @@ export async function readManifest(root = packageRoot) {
   const manifest = JSON.parse(data);
   return { version: pkg.version, manifest, asset: validateManifest(manifest, pkg.version) };
 }
-export async function fetchBytes(url, maxBytes, { fetchImpl = fetch, allowHttpLoopback = false } = {}) {
+export async function fetchBytes(url, maxBytes, { fetchImpl = fetch, allowHttpLoopback = false, timeoutMs = 30_000 } = {}) {
   let current = new URL(url);
   if (current.protocol === 'https:' && process.env.NODE_TLS_REJECT_UNAUTHORIZED === '0') throw new Error('Native downloads refuse disabled TLS verification');
-  const signal = AbortSignal.timeout(30000);
+  const signal = AbortSignal.timeout(timeoutMs);
   for (let redirects = 0; redirects <= 3; redirects++) {
     const testLocal = allowHttpLoopback && current.protocol === 'http:' && ['127.0.0.1', '[::1]'].includes(current.hostname);
     if (current.username || current.password || current.hash || (!testLocal && (current.protocol !== 'https:' || !allowedDownloadHosts.has(current.hostname) || current.port))) {
@@ -138,7 +138,9 @@ export async function installNative({ root = packageRoot, artifactDir, fetchOpti
     if (!info.isFile() || info.isSymbolicLink() || info.size !== asset.bytes) throw new Error('Invalid offline native release file');
     bytes = await readFile(source);
   } else {
-    bytes = await fetchBytes(downloadUrl ?? releaseUrl(version, asset.name), asset.bytes, fetchOptions);
+    bytes = await fetchBytes(downloadUrl ?? releaseUrl(version, asset.name), asset.bytes, {
+      ...fetchOptions, timeoutMs: 300_000,
+    });
   }
   verifyBytes(bytes, asset);
   const destination = installPath(root, version);

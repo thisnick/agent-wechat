@@ -1,49 +1,49 @@
 use super::*;
 pub(super) fn routes() -> Router<App> {
     Router::new()
-        .route(
+        .api_route(
             "/v1/accounts/{a}/settings",
             get(account_settings).patch(update_settings),
         )
-        .route(
+        .api_route(
             "/v1/accounts/{a}/messages/{id}/recall",
             post(recall_message),
         )
-        .route("/v1/accounts/{a}/capabilities", get(capabilities))
-        .route("/v1/accounts/{a}/connect", post(connect))
-        .route("/v1/accounts/{a}/disconnect", post(disconnect))
-        .route("/v1/accounts/{a}/logout", post(logout))
-        .route("/v1/accounts/{a}/forget-credentials", post(forget))
-        .route("/v1/accounts/{a}/login-attempts", post(login))
-        .route(
+        .api_route("/v1/accounts/{a}/capabilities", get(capabilities))
+        .api_route("/v1/accounts/{a}/connect", post(connect))
+        .api_route("/v1/accounts/{a}/disconnect", post(disconnect))
+        .api_route("/v1/accounts/{a}/logout", post(logout))
+        .api_route("/v1/accounts/{a}/forget-credentials", post(forget))
+        .api_route("/v1/accounts/{a}/login-attempts", post(login))
+        .api_route(
             "/v1/accounts/{a}/login-attempts/{id}",
             get(operation).delete(cancel),
         )
-        .route("/v1/accounts/{a}/login-attempts/{id}/qr", get(qr))
-        .route("/v1/accounts/{a}/login-attempts/{id}/cancel", post(cancel))
-        .route(
+        .api_route("/v1/accounts/{a}/login-attempts/{id}/qr", get(qr))
+        .api_route("/v1/accounts/{a}/login-attempts/{id}/cancel", post(cancel))
+        .api_route(
             "/v1/accounts/{a}/sends/by-idempotency-key",
             get(send_by_key),
         )
-        .route("/v1/accounts/{a}/sends/{id}/cancel", post(cancel_send))
-        .route("/v1/accounts/{a}/threads/{id}", get(thread))
-        .route("/v1/accounts/{a}/contacts/{id}", get(contact))
-        .route("/v1/accounts/{a}/groups/{id}", get(group))
-        .route(
+        .api_route("/v1/accounts/{a}/sends/{id}/cancel", post(cancel_send))
+        .api_route("/v1/accounts/{a}/threads/{id}", get(thread))
+        .api_route("/v1/accounts/{a}/contacts/{id}", get(contact))
+        .api_route("/v1/accounts/{a}/groups/{id}", get(group))
+        .api_route(
             "/v1/accounts/{a}/contacts/{id}/refresh",
             post(refresh_contact),
         )
-        .route("/v1/accounts/{a}/groups/{id}/refresh", post(refresh_group))
-        .route(
+        .api_route("/v1/accounts/{a}/groups/{id}/refresh", post(refresh_group))
+        .api_route(
             "/v1/accounts/{a}/groups/{id}/members/refresh",
             post(refresh_members),
         )
-        .route(
+        .api_route(
             "/v1/accounts/{a}/avatars/{id}/refresh",
             post(refresh_avatar),
         )
-        .route("/v1/accounts/{a}/contact-sync", post(sync_contacts))
-        .route("/v1/accounts/{a}/group-sync", post(sync_groups))
+        .api_route("/v1/accounts/{a}/contact-sync", post(sync_contacts))
+        .api_route("/v1/accounts/{a}/group-sync", post(sync_groups))
 }
 async fn recall_message(
     State(app): State<App>,
@@ -105,7 +105,7 @@ pub(super) async fn update_account(
     State(app): State<App>,
     Extension(c): Extension<Claims>,
     Path(a): Path<String>,
-    Json(input): Json<UpdateAccount>,
+    Json(input): Json<UpdateAccountRequest>,
 ) -> ApiResult<Json<Value>> {
     c.require(Some(&a), "admin")?;
     if let Some(alias) = input.alias {
@@ -118,10 +118,13 @@ pub(super) async fn update_account(
     }
     Ok(Json(app.core.account_status(&a)?))
 }
-#[derive(Deserialize)]
+/// Request to change an account.
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(super) struct UpdateAccount {
+pub(super) struct UpdateAccountRequest {
+    /// The new alias.
     alias: Option<String>,
+    /// Whether the account connects automatically when the daemon starts.
     auto_connect: Option<bool>,
 }
 async fn capabilities(
@@ -193,16 +196,18 @@ async fn forget(
         ),
     ))
 }
-#[derive(Deserialize)]
+/// Options for finding a send by its idempotency key.
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct SendKey {
+pub(super) struct SendKeyQuery {
+    /// The `Idempotency-Key` the send was submitted with, up to 200 characters.
     key: String,
 }
 async fn send_by_key(
     State(app): State<App>,
     Extension(c): Extension<Claims>,
     Path(a): Path<String>,
-    Query(q): Query<SendKey>,
+    Query(q): Query<SendKeyQuery>,
 ) -> ApiResult<Json<Value>> {
     c.require(Some(&a), "send")?;
     if q.key.is_empty() || q.key.len() > 200 {
@@ -401,7 +406,7 @@ mod tests {
         assert_eq!(body["textMentions"], true);
         assert_eq!(body["inlineTextMentions"], true);
         assert_eq!(body["mediaSendMaxBytes"]["file"], 536_870_912);
-        assert_eq!(body["mediaSendMaxBytes"]["video"], 52_428_800);
+        assert_eq!(body["mediaSendMaxBytes"]["video"], 536_870_912);
         for kind in ["image", "voice"] {
             assert_eq!(body["mediaSendMaxBytes"][kind], 26_214_383);
         }

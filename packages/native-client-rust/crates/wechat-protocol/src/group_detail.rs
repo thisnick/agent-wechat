@@ -108,7 +108,12 @@ pub fn decode_group_detail(raw: &[u8], group: &str) -> Result<GroupDetail> {
     })
 }
 impl NativeClient {
-    pub fn group_detail_raw(&self, state: &mut AccountState, group: &str) -> Result<Vec<u8>> {
+    #[doc(hidden)]
+    pub(crate) fn group_detail_raw_snapshot(
+        &self,
+        state: &mut AccountState,
+        group: &str,
+    ) -> Result<Vec<u8>> {
         self.authenticated_rpc(
             state,
             223,

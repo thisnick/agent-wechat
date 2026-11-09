@@ -2,21 +2,25 @@
 use crate::notifications::Target;
 use anyhow::Result;
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(windows)]
 use tauri_plugin_notification::NotificationExt;
 
 #[cfg(target_os = "macos")]
 const SOUND_NAME: &str = "AgentWechatSoftPair";
+/// The bundled sound's file name, as the UserNotifications framework looks it up.
+#[cfg(target_os = "macos")]
+const SOUND_FILE: &str = "AgentWechatSoftPair.wav";
 #[cfg(windows)]
 const SOUND_NAME: &str = "Default";
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(windows)]
 pub async fn show(
     app: &tauri::AppHandle,
     title: &str,
     subtitle: Option<&str>,
     body: &str,
     target: Option<Target>,
+    _server_id: Option<String>,
     sound: bool,
 ) -> Result<()> {
     if let Some(subtitle) = subtitle {
@@ -33,7 +37,7 @@ pub async fn show(
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(windows)]
 fn native_group_notification(
     title: &str,
     subtitle: &str,
@@ -52,7 +56,7 @@ fn native_group_notification(
     notification
 }
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(windows)]
 fn show_group(
     app: &tauri::AppHandle,
     title: &str,
@@ -63,25 +67,15 @@ fn show_group(
 ) -> Result<()> {
     // The Tauri builder omits subtitles. Use its underlying native library for
     // group alerts, preserving the same application identity and click handling.
-    #[allow(unused_mut)]
     let mut notification = native_group_notification(title, subtitle, body, sound);
-    #[cfg(windows)]
-    {
-        let exe = tauri::utils::platform::current_exe()?;
-        if exe.parent().is_some_and(|parent| {
-            !["debug", "release"]
-                .iter()
-                .any(|profile| parent.ends_with(std::path::Path::new("target").join(profile)))
-        }) {
-            notification.app_id(&app.config().identifier);
-        }
+    let exe = tauri::utils::platform::current_exe()?;
+    if exe.parent().is_some_and(|parent| {
+        !["debug", "release"]
+            .iter()
+            .any(|profile| parent.ends_with(std::path::Path::new("target").join(profile)))
+    }) {
+        notification.app_id(&app.config().identifier);
     }
-    #[cfg(target_os = "macos")]
-    let _ = notify_rust::set_application(if tauri::is_dev() {
-        "com.apple.Terminal"
-    } else {
-        &app.config().identifier
-    });
     let clicked = app.clone();
     std::thread::Builder::new()
         .name("group-notification".into())
@@ -98,6 +92,109 @@ fn show_group(
             });
         })?;
     Ok(())
+}
+
+/// Shows the alert and opens `target` when it is clicked.
+///
+/// The bundled app posts through the UserNotifications framework: alerts are grouped
+/// by chat, a click works even after the app restarted, and a quotable message offers
+/// an inline Reply (see `macos_notifications`). Without a bundle, such as under
+/// `tauri dev`, it falls back to `mac-notification-sys`.
+#[cfg(target_os = "macos")]
+pub async fn show(
+    app: &tauri::AppHandle,
+    title: &str,
+    subtitle: Option<&str>,
+    body: &str,
+    target: Option<Target>,
+    server_id: Option<String>,
+    sound: bool,
+) -> Result<()> {
+    if let Some(target) = target
+        .as_ref()
+        .filter(|_| crate::macos_notifications::available())
+    {
+        let payload = crate::notifications::Payload {
+            target: target.clone(),
+            server_id,
+        };
+        crate::macos_notifications::post(&crate::macos_notifications::Alert {
+            request_id: &target.request_id(),
+            thread_key: &target.thread_key(),
+            title,
+            subtitle,
+            body,
+            sound: sound.then_some(SOUND_FILE),
+            payload: &serde_json::to_string(&payload)?,
+            reply: payload.quotable(),
+        });
+        return Ok(());
+    }
+    show_fallback(app, title, subtitle, body, target, sound)
+}
+
+/// Shows the alert outside a bundle and opens `target` on a click, including one
+/// later in Notification Center.
+///
+/// `notify-rust`'s macOS `wait_for_response`, which the Tauri notification plugin
+/// also uses, returns as soon as an alert without buttons is delivered, so a click
+/// that comes after it is lost. `mac-notification-sys` is told to wait for the click
+/// instead: `send` blocks on a thread of its own until the alert is clicked or
+/// dismissed, while the delegate callbacks arrive on Tauri's main run loop.
+#[cfg(target_os = "macos")]
+fn show_fallback(
+    app: &tauri::AppHandle,
+    title: &str,
+    subtitle: Option<&str>,
+    body: &str,
+    target: Option<Target>,
+    sound: bool,
+) -> Result<()> {
+    // The first call sets the identity for the life of the process.
+    let _ = mac_notification_sys::set_application(if tauri::is_dev() {
+        "com.apple.Terminal"
+    } else {
+        &app.config().identifier
+    });
+    let (title, subtitle, body) = (
+        title.to_owned(),
+        subtitle.map(str::to_owned),
+        body.to_owned(),
+    );
+    let clicked = app.clone();
+    std::thread::Builder::new()
+        .name("notification".into())
+        .spawn(move || {
+            let mut notification = mac_notification_sys::Notification::new();
+            notification
+                .title(&title)
+                .maybe_subtitle(subtitle.as_deref())
+                .message(&body)
+                .wait_for_click(true);
+            if sound {
+                notification.sound(SOUND_NAME);
+            }
+            if opens_target(&notification.send()) {
+                if let Some(target) = target {
+                    crate::notifications::open_target(clicked, target);
+                }
+            }
+        })?;
+    Ok(())
+}
+
+/// Only a click on the alert itself opens its conversation; a dismissal, an alert
+/// that could not be delivered or one removed without a click opens nothing.
+#[cfg(target_os = "macos")]
+fn opens_target(
+    response: &mac_notification_sys::error::NotificationResult<
+        mac_notification_sys::NotificationResponse,
+    >,
+) -> bool {
+    matches!(
+        response,
+        Ok(mac_notification_sys::NotificationResponse::Click)
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -142,6 +239,7 @@ pub async fn show(
     subtitle: Option<&str>,
     body: &str,
     target: Option<Target>,
+    _server_id: Option<String>,
     sound: bool,
 ) -> Result<()> {
     use tauri::Manager;
@@ -220,7 +318,7 @@ mod tests {
         assert_eq!(notification.body, "Team &lt;Friends&gt;\nHello");
     }
 
-    #[cfg(any(target_os = "macos", windows))]
+    #[cfg(windows)]
     #[test]
     fn native_groups_use_separate_title_subtitle_and_body_fields() {
         let notification = super::native_group_notification("Alice", "Team", "Hello", true);
@@ -239,5 +337,20 @@ mod tests {
     #[test]
     fn macos_uses_the_bundled_sound_name() {
         assert_eq!(super::SOUND_NAME, "AgentWechatSoftPair");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_opens_the_conversation_only_for_a_click() {
+        use mac_notification_sys::NotificationResponse;
+        assert!(super::opens_target(&Ok(NotificationResponse::Click)));
+        for response in [
+            NotificationResponse::None,
+            NotificationResponse::CloseButton("Close".into()),
+            NotificationResponse::ActionButton("Reply".into()),
+            NotificationResponse::Reply("Hi".into()),
+        ] {
+            assert!(!super::opens_target(&Ok(response)));
+        }
     }
 }

@@ -1,0 +1,228 @@
+# Public API of the wechat-calls crate (default features, x86_64-unknown-linux-gnu). Generated from rustdoc JSON; do not edit.
+# Run `pnpm interfaces` after changing the crate. Format: ITEM | SIGNATURE | DOC SUMMARY
+const wechat_calls::opus::MAX_OPUS_PACKET_BYTES | usize | Local allocation/input budget for a single raw Opus packet.
+enum wechat_calls::audio::MediaError | enum | MISSING DOC
+enum wechat_calls::ordering::RtpOrderError | enum | MISSING DOC
+enum wechat_calls::playout::OverflowPolicy | enum | Overflow is chosen per stream. Incoming playback can discard stale frames; outgoing audio rejects overflow so a producer cannot silently outrun pacing.
+enum wechat_calls::track_queue::Delivery | enum<A, E> | MISSING DOC
+field wechat_calls::audio::AudioFrame::generation | u64 | MISSING DOC
+field wechat_calls::audio::AudioFrame::samples | alloc::vec::Vec<i16> | MISSING DOC
+field wechat_calls::audio::AudioFrame::sequence | u64 | MISSING DOC
+field wechat_calls::audio::AudioFrame::timestamp | u64 | MISSING DOC
+field wechat_calls::audio::MediaError::Codec::code | i32 | MISSING DOC
+field wechat_calls::conference_media::ConferenceReceiver::report | wechat_calls::conference_media::StreamReport | MISSING DOC
+field wechat_calls::conference_media::DecodedAudio::sample_offset | u64 | MISSING DOC
+field wechat_calls::conference_media::DecodedAudio::samples | alloc::vec::Vec<i16> | MISSING DOC
+field wechat_calls::conference_media::DecodedAudio::sequence | u64 | MISSING DOC
+field wechat_calls::conference_media::StreamReport::aggregate_member_hints | alloc::collections::btree::map::BTreeMap<u16, u64> | MISSING DOC
+field wechat_calls::conference_media::StreamReport::aggregate_packets | u64 | MISSING DOC
+field wechat_calls::conference_media::StreamReport::authenticated_nonce_reuses | alloc::collections::btree::map::BTreeMap<u8, u64> | MISSING DOC
+field wechat_calls::conference_media::StreamReport::authenticated_packets | u64 | MISSING DOC
+field wechat_calls::conference_media::StreamReport::codec_markers | alloc::collections::btree::map::BTreeMap<alloc::string::String, u64> | MISSING DOC
+field wechat_calls::conference_media::StreamReport::control_packets | u64 | MISSING DOC
+field wechat_calls::conference_media::StreamReport::decode_errors | u64 | MISSING DOC
+field wechat_calls::conference_media::StreamReport::decoded_frames | u64 | MISSING DOC
+field wechat_calls::conference_media::StreamReport::feedback_packets | u64 | MISSING DOC
+field wechat_calls::conference_media::StreamReport::identity_quarantined | bool | MISSING DOC
+field wechat_calls::conference_media::StreamReport::invalid_packets | u64 | MISSING DOC
+field wechat_calls::conference_media::StreamReport::invalid_reasons | alloc::collections::btree::map::BTreeMap<&'static str, u64> | MISSING DOC
+field wechat_calls::conference_media::StreamReport::invalid_while_inactive | u64 | MISSING DOC
+field wechat_calls::conference_media::StreamReport::joined_events | u64 | MISSING DOC
+field wechat_calls::conference_media::StreamReport::left_events | u64 | MISSING DOC
+field wechat_calls::conference_media::StreamReport::malformed_aggregates | u64 | MISSING DOC
+field wechat_calls::conference_media::StreamReport::nonzero_frames | u64 | MISSING DOC
+field wechat_calls::conference_media::StreamReport::nonzero_second_bins | alloc::collections::btree::map::BTreeMap<u16, u64> | MISSING DOC
+field wechat_calls::conference_media::StreamReport::ordering_drops | u64 | MISSING DOC
+field wechat_calls::conference_media::StreamReport::payload_kinds | alloc::collections::btree::map::BTreeMap<u8, u64> | MISSING DOC
+field wechat_calls::conference_media::StreamReport::peak_magnitude | u16 | MISSING DOC
+field wechat_calls::conference_media::StreamReport::replayed_packets | u64 | MISSING DOC
+field wechat_calls::conference_media::StreamReport::unsupported_audio | u64 | MISSING DOC
+field wechat_calls::conference_media::StreamReport::unsupported_lengths | alloc::collections::btree::map::BTreeMap<usize, u64> | MISSING DOC
+field wechat_calls::conference_media::StreamReport::unsupported_reasons | alloc::collections::btree::map::BTreeMap<&'static str, u64> | MISSING DOC
+field wechat_calls::conference_send::PreparedAudio::generation | u32 | MISSING DOC
+field wechat_calls::conference_send::PreparedAudio::packet | alloc::vec::Vec<u8> | MISSING DOC
+field wechat_calls::mixer::MixedFrame::contributing_tracks | alloc::vec::Vec<u32> | Tracks with a frame in this slot, not a claim that a person spoke.
+field wechat_calls::mixer::MixedFrame::sample_offset | u64 | MISSING DOC
+field wechat_calls::mixer::MixedFrame::samples | alloc::vec::Vec<i16> | MISSING DOC
+field wechat_calls::mixer::MixerMetrics::late_frames | u64 | MISSING DOC
+field wechat_calls::mixer::MixerMetrics::missing_frames | u64 | MISSING DOC
+field wechat_calls::mixer::MixerMetrics::overflow_frames | u64 | MISSING DOC
+field wechat_calls::ordering::PrimaryAdmission::gap | u16 | Missing primaries before the first newly admitted primary in this packet.
+field wechat_calls::ordering::PrimaryAdmission::skip | usize | Leading primaries that are duplicate or older than the high-water mark.
+field wechat_calls::playout::QueueMetrics::cleared_frames | u64 | MISSING DOC
+field wechat_calls::playout::QueueMetrics::dropped_frames | u64 | MISSING DOC
+field wechat_calls::playout::QueueMetrics::underruns | u64 | MISSING DOC
+field wechat_calls::track_queue::Delivery::Audio::0 | A | -
+field wechat_calls::track_queue::Delivery::Control::0 | E | -
+fn wechat_calls::audio::AudioDecoder::conceal | required fn(&mut self) -> core::result::Result<alloc::vec::Vec<i16>, wechat_calls::audio::MediaError> | MISSING DOC
+fn wechat_calls::audio::AudioDecoder::decode | required fn(&mut self, packet: &[u8]) -> core::result::Result<alloc::vec::Vec<i16>, wechat_calls::audio::MediaError> | MISSING DOC
+fn wechat_calls::audio::AudioDecoder::format | required fn(&self) -> wechat_calls::audio::AudioFormat | MISSING DOC
+fn wechat_calls::audio::AudioDecoder::reset | required fn(&mut self) -> core::result::Result<(), wechat_calls::audio::MediaError> | MISSING DOC
+fn wechat_calls::audio::AudioEncoder::encode | required fn(&mut self, samples: &[i16]) -> core::result::Result<alloc::vec::Vec<u8>, wechat_calls::audio::MediaError> | MISSING DOC
+fn wechat_calls::audio::AudioEncoder::format | required fn(&self) -> wechat_calls::audio::AudioFormat | MISSING DOC
+fn wechat_calls::audio::AudioEncoder::reset | required fn(&mut self) -> core::result::Result<(), wechat_calls::audio::MediaError> | MISSING DOC
+fn wechat_calls::audio::AudioFormat::channels | fn(self) -> u8 | MISSING DOC
+fn wechat_calls::audio::AudioFormat::frame_ms | fn(self) -> u16 | MISSING DOC
+fn wechat_calls::audio::AudioFormat::new | fn(sample_rate: u32, channels: u8, frame_ms: u16) -> core::result::Result<Self, wechat_calls::audio::MediaError> | Validate a format supported by ordinary Opus frames.
+fn wechat_calls::audio::AudioFormat::sample_rate | fn(self) -> u32 | MISSING DOC
+fn wechat_calls::audio::AudioFormat::samples_per_channel | fn(self) -> usize | MISSING DOC
+fn wechat_calls::audio::AudioFormat::samples_per_frame | fn(self) -> usize | MISSING DOC
+fn wechat_calls::audio::AudioFormat::validate_frame | fn(self, samples: &[i16]) -> core::result::Result<(), wechat_calls::audio::MediaError> | MISSING DOC
+fn wechat_calls::conference_media::ConferenceReceiver::close | fn(&mut self) | MISSING DOC
+fn wechat_calls::conference_media::ConferenceReceiver::consume | fn(&mut self, epoch: wechat_protocol::calls::audio_packet::MediaEpoch, packet: &[u8], elapsed_ms: u64, decode_audio: bool) -> anyhow::Result<alloc::vec::Vec<wechat_calls::conference_media::DecodedAudio>> | MISSING DOC
+fn wechat_calls::conference_media::ConferenceReceiver::new | fn(selected: &wechat_protocol::calls::relay::SelectedRelay, member: u16, epoch: wechat_protocol::calls::audio_packet::MediaEpoch) -> anyhow::Result<Self> | MISSING DOC
+fn wechat_calls::conference_media::ConferenceReceiver::reset_decoder | fn(&mut self) -> anyhow::Result<()> | New application track incarnation; keep authenticated replay/order state and the shared presentation clock, while discarding codec history.
+fn wechat_calls::conference_send::ConferenceSender::new | fn(selected: &wechat_protocol::calls::relay::SelectedRelay, reference_member: u16, epoch: wechat_protocol::calls::audio_packet::MediaEpoch, grouping: u8, start: core::time::Duration) -> anyhow::Result<Self> | MISSING DOC
+fn wechat_calls::conference_send::ConferenceSender::poll | fn(&mut self, now: core::time::Duration, generation: u32, microphone_enabled: bool, source: impl core::ops::function::FnOnce() -> core::option::Option<alloc::vec::Vec<i16>>) -> anyhow::Result<core::option::Option<wechat_calls::conference_send::PreparedAudio>> | The source is called only for one due slot. A late worker skips elapsed slots instead of requesting a catch-up burst. The host must recheck this returned generation under its physical UDP handoff gate.
+fn wechat_calls::mixer::PcmMixer::add_track | fn(&mut self, track_id: u32, generation: u64) -> core::result::Result<(), wechat_calls::audio::MediaError> | Announce a receive source. A newer generation replaces queued PCM but does not reset the call clock or any transport cryptographic state.
+fn wechat_calls::mixer::PcmMixer::metrics | fn(&self) -> wechat_calls::mixer::MixerMetrics | MISSING DOC
+fn wechat_calls::mixer::PcmMixer::new | fn(format: wechat_calls::audio::AudioFormat, track_capacity: usize, frames_per_track: usize, start_offset: u64) -> core::result::Result<Self, wechat_calls::audio::MediaError> | MISSING DOC
+fn wechat_calls::mixer::PcmMixer::push | fn(&mut self, track_id: u32, frame: wechat_calls::audio::AudioFrame) -> core::result::Result<(), wechat_calls::audio::MediaError> | MISSING DOC
+fn wechat_calls::mixer::PcmMixer::remove_track | fn(&mut self, track_id: u32) -> bool | MISSING DOC
+fn wechat_calls::mixer::PcmMixer::render | fn(&mut self, sample_offset: u64) -> core::result::Result<wechat_calls::mixer::MixedFrame, wechat_calls::audio::MediaError> | Mix one due slot. Advancing past skipped slots drops old PCM rather than building a catch-up backlog. Sequence/generation checks remain per track.
+fn wechat_calls::mixer::PcmMixer::set_muted | fn(&mut self, track_id: u32, muted: bool) -> core::result::Result<(), wechat_calls::audio::MediaError> | MISSING DOC
+fn wechat_calls::opus::OpusDecoder::new | fn(format: wechat_calls::audio::AudioFormat) -> core::result::Result<Self, wechat_calls::audio::MediaError> | MISSING DOC
+fn wechat_calls::opus::OpusEncoder::new | fn(format: wechat_calls::audio::AudioFormat, bitrate: u32) -> core::result::Result<Self, wechat_calls::audio::MediaError> | Construct a VOIP encoder. Bitrate is an application-selected value; passing this range check does not establish remote negotiation.
+fn wechat_calls::ordering::RtpOrder::admit | fn(&mut self, last_sequence: u16, last_timestamp: u32, primary_count: usize) -> core::result::Result<wechat_calls::ordering::PrimaryAdmission, wechat_calls::ordering::RtpOrderError> | Call only after transport authentication and ordinary95 extent checks. Feed `primaries.iter().skip(admission.skip)` to the decoder in order.
+fn wechat_calls::ordering::RtpOrder::new | fn() -> Self | MISSING DOC
+fn wechat_calls::pcm_output::PcmOutput::new | fn(format: wechat_calls::audio::AudioFormat, capacity_samples: usize) -> core::result::Result<Self, wechat_calls::audio::MediaError> | MISSING DOC
+fn wechat_calls::pcm_output::PcmOutput::pending_bytes | fn(&self) -> usize | MISSING DOC
+fn wechat_calls::pcm_output::PcmOutput::pop | fn(&mut self, current: u32) -> core::result::Result<core::option::Option<wechat_calls::audio::AudioFrame>, wechat_calls::audio::MediaError> | MISSING DOC
+fn wechat_calls::pcm_output::PcmOutput::push | fn(&mut self, generation: u32, current: u32, bytes: &[u8]) -> core::result::Result<(), wechat_calls::audio::MediaError> | Admission is atomic. A full queue never accepts a prefix of a chunk.
+fn wechat_calls::pcm_output::PcmOutput::start | fn(&mut self, generation: u32, current: u32) -> core::result::Result<(), wechat_calls::audio::MediaError> | MISSING DOC
+fn wechat_calls::playout::AudioQueue::clear | fn(&mut self) -> core::result::Result<u64, wechat_calls::audio::MediaError> | Invalidate all queued and in-flight frames from the previous generation. Overflow leaves the current queue untouched and requires stream teardown.
+fn wechat_calls::playout::AudioQueue::generation | fn(&self) -> u64 | MISSING DOC
+fn wechat_calls::playout::AudioQueue::is_empty | fn(&self) -> bool | MISSING DOC
+fn wechat_calls::playout::AudioQueue::len | fn(&self) -> usize | MISSING DOC
+fn wechat_calls::playout::AudioQueue::metrics | fn(&self) -> wechat_calls::playout::QueueMetrics | MISSING DOC
+fn wechat_calls::playout::AudioQueue::new | fn(format: wechat_calls::audio::AudioFormat, capacity: usize, policy: wechat_calls::playout::OverflowPolicy, generation: u64) -> core::result::Result<Self, wechat_calls::audio::MediaError> | MISSING DOC
+fn wechat_calls::playout::AudioQueue::pop | fn(&mut self) -> core::option::Option<wechat_calls::audio::AudioFrame> | Call once for each due playback frame, not in a busy loop.
+fn wechat_calls::playout::AudioQueue::push | fn(&mut self, frame: wechat_calls::audio::AudioFrame) -> core::result::Result<(), wechat_calls::audio::MediaError> | MISSING DOC
+fn wechat_calls::playout::FramePacer::new | fn(format: wechat_calls::audio::AudioFormat, start: core::time::Duration) -> Self | MISSING DOC
+fn wechat_calls::playout::FramePacer::poll | fn(&mut self, now: core::time::Duration) -> core::result::Result<bool, wechat_calls::audio::MediaError> | MISSING DOC
+fn wechat_calls::playout::FramePacer::skipped_slots | fn(&self) -> u64 | MISSING DOC
+fn wechat_calls::tone::PulseTone::format | fn(&self) -> wechat_calls::audio::AudioFormat | MISSING DOC
+fn wechat_calls::tone::PulseTone::new | fn(format: wechat_calls::audio::AudioFormat, frequency_hz: f64, amplitude: f64, on: core::time::Duration, off: core::time::Duration) -> core::result::Result<Self, wechat_calls::audio::MediaError> | `amplitude` is a fraction of full-scale PCM. Pulses include short ramps to avoid hard transitions; test with conservative playback volume.
+fn wechat_calls::tone::PulseTone::next_frame | fn(&mut self) -> core::result::Result<alloc::vec::Vec<i16>, wechat_calls::audio::MediaError> | MISSING DOC
+fn wechat_calls::track_queue::TrackQueue::add | fn(&mut self, id: u32, generation: u32, event: E) -> core::result::Result<(), wechat_calls::audio::MediaError> | MISSING DOC
+fn wechat_calls::track_queue::TrackQueue::control | fn(&mut self, event: E) -> core::result::Result<(), wechat_calls::audio::MediaError> | MISSING DOC
+fn wechat_calls::track_queue::TrackQueue::initial_track | fn(&mut self, id: u32, generation: u32) -> core::result::Result<(), wechat_calls::audio::MediaError> | Install tracks already included in an atomic readiness snapshot. Later announcements must use add so they precede their audio on this queue.
+fn wechat_calls::track_queue::TrackQueue::new | fn(max_tracks: usize, frames_per_track: usize, max_controls: usize) -> core::result::Result<Self, wechat_calls::audio::MediaError> | MISSING DOC
+fn wechat_calls::track_queue::TrackQueue::pending_audio | fn(&self) -> usize | MISSING DOC
+fn wechat_calls::track_queue::TrackQueue::pop | fn(&mut self) -> core::option::Option<wechat_calls::track_queue::Delivery<A, E>> | MISSING DOC
+fn wechat_calls::track_queue::TrackQueue::push | fn(&mut self, id: u32, generation: u32, audio: A) -> core::result::Result<(), wechat_calls::audio::MediaError> | MISSING DOC
+fn wechat_calls::track_queue::TrackQueue::remove | fn(&mut self, id: u32, generation: u32, event: E) -> core::result::Result<(), wechat_calls::audio::MediaError> | MISSING DOC
+fn wechat_calls::track_queue::TrackQueue::take_dropped | fn(&mut self) -> u64 | MISSING DOC
+impl core::clone::Clone for wechat_calls::audio::AudioFormat | impl | -
+impl core::clone::Clone for wechat_calls::audio::AudioFrame | impl | -
+impl core::clone::Clone for wechat_calls::audio::MediaError | impl | -
+impl core::clone::Clone for wechat_calls::mixer::MixedFrame | impl | -
+impl core::clone::Clone for wechat_calls::mixer::MixerMetrics | impl | -
+impl core::clone::Clone for wechat_calls::ordering::PrimaryAdmission | impl | -
+impl core::clone::Clone for wechat_calls::ordering::RtpOrderError | impl | -
+impl core::clone::Clone for wechat_calls::playout::OverflowPolicy | impl | -
+impl core::clone::Clone for wechat_calls::playout::QueueMetrics | impl | -
+impl core::cmp::Eq for wechat_calls::audio::AudioFormat | impl | -
+impl core::cmp::Eq for wechat_calls::audio::AudioFrame | impl | -
+impl core::cmp::Eq for wechat_calls::audio::MediaError | impl | -
+impl core::cmp::Eq for wechat_calls::mixer::MixedFrame | impl | -
+impl core::cmp::Eq for wechat_calls::mixer::MixerMetrics | impl | -
+impl core::cmp::Eq for wechat_calls::ordering::PrimaryAdmission | impl | -
+impl core::cmp::Eq for wechat_calls::ordering::RtpOrderError | impl | -
+impl core::cmp::Eq for wechat_calls::playout::OverflowPolicy | impl | -
+impl core::cmp::Eq for wechat_calls::playout::QueueMetrics | impl | -
+impl core::cmp::PartialEq for wechat_calls::audio::AudioFormat | impl | -
+impl core::cmp::PartialEq for wechat_calls::audio::AudioFrame | impl | -
+impl core::cmp::PartialEq for wechat_calls::audio::MediaError | impl | -
+impl core::cmp::PartialEq for wechat_calls::mixer::MixedFrame | impl | -
+impl core::cmp::PartialEq for wechat_calls::mixer::MixerMetrics | impl | -
+impl core::cmp::PartialEq for wechat_calls::ordering::PrimaryAdmission | impl | -
+impl core::cmp::PartialEq for wechat_calls::ordering::RtpOrderError | impl | -
+impl core::cmp::PartialEq for wechat_calls::playout::OverflowPolicy | impl | -
+impl core::cmp::PartialEq for wechat_calls::playout::QueueMetrics | impl | -
+impl core::default::Default for wechat_calls::conference_media::StreamReport | impl | -
+impl core::default::Default for wechat_calls::mixer::MixerMetrics | impl | -
+impl core::default::Default for wechat_calls::ordering::RtpOrder | impl | -
+impl core::default::Default for wechat_calls::playout::QueueMetrics | impl | -
+impl core::error::Error for wechat_calls::audio::MediaError | impl | -
+impl core::error::Error for wechat_calls::ordering::RtpOrderError | impl | -
+impl core::fmt::Debug for wechat_calls::audio::AudioFormat | impl | -
+impl core::fmt::Debug for wechat_calls::audio::AudioFrame | impl | -
+impl core::fmt::Debug for wechat_calls::audio::MediaError | impl | -
+impl core::fmt::Debug for wechat_calls::mixer::MixedFrame | impl | -
+impl core::fmt::Debug for wechat_calls::mixer::MixerMetrics | impl | -
+impl core::fmt::Debug for wechat_calls::ordering::PrimaryAdmission | impl | -
+impl core::fmt::Debug for wechat_calls::ordering::RtpOrderError | impl | -
+impl core::fmt::Debug for wechat_calls::playout::OverflowPolicy | impl | -
+impl core::fmt::Debug for wechat_calls::playout::QueueMetrics | impl | -
+impl core::fmt::Display for wechat_calls::audio::MediaError | impl | -
+impl core::fmt::Display for wechat_calls::ordering::RtpOrderError | impl | -
+impl core::marker::Copy for wechat_calls::audio::AudioFormat | impl | -
+impl core::marker::Copy for wechat_calls::mixer::MixerMetrics | impl | -
+impl core::marker::Copy for wechat_calls::ordering::PrimaryAdmission | impl | -
+impl core::marker::Copy for wechat_calls::ordering::RtpOrderError | impl | -
+impl core::marker::Copy for wechat_calls::playout::OverflowPolicy | impl | -
+impl core::marker::Copy for wechat_calls::playout::QueueMetrics | impl | -
+impl core::marker::StructuralPartialEq for wechat_calls::audio::AudioFormat | impl | -
+impl core::marker::StructuralPartialEq for wechat_calls::audio::AudioFrame | impl | -
+impl core::marker::StructuralPartialEq for wechat_calls::audio::MediaError | impl | -
+impl core::marker::StructuralPartialEq for wechat_calls::mixer::MixedFrame | impl | -
+impl core::marker::StructuralPartialEq for wechat_calls::mixer::MixerMetrics | impl | -
+impl core::marker::StructuralPartialEq for wechat_calls::ordering::PrimaryAdmission | impl | -
+impl core::marker::StructuralPartialEq for wechat_calls::ordering::RtpOrderError | impl | -
+impl core::marker::StructuralPartialEq for wechat_calls::playout::OverflowPolicy | impl | -
+impl core::marker::StructuralPartialEq for wechat_calls::playout::QueueMetrics | impl | -
+impl core::ops::drop::Drop for wechat_calls::conference_media::ConferenceReceiver | impl | -
+impl core::ops::drop::Drop for wechat_calls::conference_send::ConferenceSender | impl | -
+impl serde_core::ser::Serialize for wechat_calls::conference_media::StreamReport | impl | -
+impl wechat_calls::audio::AudioDecoder for wechat_calls::opus::OpusDecoder | impl | -
+impl wechat_calls::audio::AudioEncoder for wechat_calls::opus::OpusEncoder | impl | -
+mod wechat_calls | - | Voice-session and media building blocks without devices or persistence.
+mod wechat_calls::audio | - | Owned PCM and codec interfaces shared by native and hosted implementations.
+mod wechat_calls::conference_media | #[cfg(all(feature = \"native-runtime\", not(target_arch = \"wasm32\")))] | Authenticated conference source decoding. Devices, sockets and persistence belong to the embedding runtime; no packet can announce its own participant.
+mod wechat_calls::conference_send | #[cfg(all(feature = \"native-runtime\", not(target_arch = \"wasm32\")))] | One paced conference uplink. Application interruption never resets crypto counters or the presentation clock. Missing application audio becomes silence.
+mod wechat_calls::mixer | - | PCM mixing on a shared presentation clock. This module owns no timer or device: the consumer supplies the due sample offset after its alignment delay.
+mod wechat_calls::opus | #[cfg(all(feature = \"native-opus\", not(target_arch = \"wasm32\")))] | Optional native libopus implementation of the portable audio interfaces.
+mod wechat_calls::ordering | - | Drop-late ordering for authenticated ordinary95 audio primaries.
+mod wechat_calls::pcm_output | - | Generation-scoped PCM chunk admission and framing, independent of sockets.
+mod wechat_calls::playout | - | Queue and pacing policy without a timer or executor dependency.
+mod wechat_calls::tone | - | Synthetic pulsed PCM for an operator-approved audio check.
+mod wechat_calls::track_queue | - | Independent audio budgets with ordered, non-droppable track controls. The host supplies synchronization and wakeups; this queue opens no runtime.
+struct wechat_calls::audio::AudioFormat | struct { private fields } | Interleaved signed 16-bit PCM, grouped into fixed-duration frames.
+struct wechat_calls::audio::AudioFrame | struct { public fields } | An owned frame. Generation fences queued output after interruption; timestamp is the stream's sample-frame position per channel, not wall-clock time.
+struct wechat_calls::conference_media::ConferenceReceiver | struct { private fields } | MISSING DOC
+struct wechat_calls::conference_media::DecodedAudio | struct { public fields } | MISSING DOC
+struct wechat_calls::conference_media::StreamReport | struct { public fields } | MISSING DOC
+struct wechat_calls::conference_send::ConferenceSender | struct { private fields } | MISSING DOC
+struct wechat_calls::conference_send::PreparedAudio | struct { public fields } | MISSING DOC
+struct wechat_calls::mixer::MixedFrame | struct { public fields } | MISSING DOC
+struct wechat_calls::mixer::MixerMetrics | struct { public fields } | MISSING DOC
+struct wechat_calls::mixer::PcmMixer | struct { private fields } | A fixed-format mixer with separate queue budgets for each receive track. Missing/muted tracks contribute silence. Rendering never waits for a source.
+struct wechat_calls::opus::OpusDecoder | struct { private fields } | MISSING DOC
+struct wechat_calls::opus::OpusEncoder | struct { private fields } | MISSING DOC
+struct wechat_calls::ordering::PrimaryAdmission | struct { public fields } | MISSING DOC
+struct wechat_calls::ordering::RtpOrder | struct { private fields } | MISSING DOC
+struct wechat_calls::pcm_output::PcmOutput | struct { private fields } | MISSING DOC
+struct wechat_calls::playout::AudioQueue | struct { private fields } | Fixed-frame PCM queue. Clearing starts a new output generation, so delayed producers cannot refill it with the interrupted response.
+struct wechat_calls::playout::FramePacer | struct { private fields } | One frame per interval using host-supplied monotonic elapsed time. If the host stalls, skip elapsed slots instead of transmitting a catch-up burst. This schedules media; it does not implement network congestion control.
+struct wechat_calls::playout::QueueMetrics | struct { public fields } | MISSING DOC
+struct wechat_calls::tone::PulseTone | struct { private fields } | MISSING DOC
+struct wechat_calls::track_queue::TrackQueue | struct<A, E> { private fields } | Controls are drained before audio. Audio pressure drops only that source's oldest waiting frame; it cannot consume another source's budget or a control.
+trait wechat_calls::audio::AudioDecoder | trait | Decode only packets admitted by the authenticated transport. Empty packets are rejected; concealment is a separate deliberate operation by the host.
+trait wechat_calls::audio::AudioEncoder | trait | Encode exactly one configured PCM frame to one raw codec packet. This method is called by a worker, never the audio device callback.
+variant wechat_calls::audio::MediaError::Capacity | - | MISSING DOC
+variant wechat_calls::audio::MediaError::Codec | { public fields } | MISSING DOC
+variant wechat_calls::audio::MediaError::InvalidConfiguration | - | MISSING DOC
+variant wechat_calls::audio::MediaError::InvalidFormat | - | MISSING DOC
+variant wechat_calls::audio::MediaError::InvalidFrame | - | MISSING DOC
+variant wechat_calls::audio::MediaError::InvalidPacket | - | MISSING DOC
+variant wechat_calls::audio::MediaError::OutOfOrder | - | MISSING DOC
+variant wechat_calls::audio::MediaError::QueueFull | - | MISSING DOC
+variant wechat_calls::audio::MediaError::StaleGeneration | - | MISSING DOC
+variant wechat_calls::audio::MediaError::WrongTrack | - | MISSING DOC
+variant wechat_calls::ordering::RtpOrderError::AmbiguousSequence | - | MISSING DOC
+variant wechat_calls::ordering::RtpOrderError::InvalidPrimaryCount | - | MISSING DOC
+variant wechat_calls::playout::OverflowPolicy::DropOldest | - | MISSING DOC
+variant wechat_calls::playout::OverflowPolicy::RejectNewest | - | MISSING DOC
+variant wechat_calls::track_queue::Delivery::Audio | (A) | MISSING DOC
+variant wechat_calls::track_queue::Delivery::Control | (E) | MISSING DOC

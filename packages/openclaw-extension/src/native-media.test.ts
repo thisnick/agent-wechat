@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, readFile, writeFile, truncate, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { NATIVE_MAX_SOURCE_BYTES, NativeApiError, NativeWeChatClient, type NativeMessage, type MediaAsset, type MediaJob } from "@agent-wechat/shared";
+import { NATIVE_MAX_SOURCE_BYTES, NATIVE_MAX_VIDEO_SOURCE_BYTES, NativeApiError, NativeWeChatClient, type NativeMessage, type MediaAsset, type MediaJob } from "@agent-wechat/shared";
 import { NativeMediaJobInspectionError, prepareNativeAttachment, sendNativeAttachment, waitNativeMediaJob, waitNativeMediaSendReceipts } from "./native-media.ts";
 import { resolveWeChatAccount } from "./types.ts";
 const account=resolveWeChatAccount({channels:{"agent-wechat":{backend:"native",native:{mode:"external",accountId:"a",endpoint:"http://127.0.0.1:6174",token: "synthetic-native-token-".repeat(3),consumerStateDir:"/unused"}}}})!;
@@ -104,7 +104,7 @@ test("native outbound ordinary audio stays file and explicit voice stays voice",
   const kinds:string[]=[];let submissions=0;const client={upload:async()=>({id:"upload"}),sendMedia:async(_account:string,input:any,key:string)=>{submissions++;kinds.push(input.kind);assert.equal(key,"stable-key");return sendJob({result:{messageIds:["msg"],chunks:[{state:"accepted",serverMessageId:"18446744073709551614"}]}});}}as unknown as NativeWeChatClient;
   await sendNativeAttachment(client,account,"filehelper",path,false,"stable-key");await sendNativeAttachment(client,account,"filehelper",path,true,"stable-key");assert.deepEqual(kinds,["file","voice"]);assert.equal(submissions,2);
 });
-test("video quality reaches the native request, 50 MiB admission is separate, and document mode preserves file selection", async t => {
+test("video quality reaches the native request, account and video limits apply before staging, and document mode preserves file selection", async t => {
   const directory = await mkdtemp(join(tmpdir(), "native-video-options-")); t.after(() => rm(directory, { recursive: true, force: true }));
   const path = join(directory, "source.mp4"); await writeFile(path, new Uint8Array(1)); await truncate(path, 50 * 1024 * 1024);
   const selected: any[] = []; let uploads = 0;
@@ -117,7 +117,10 @@ test("video quality reaches the native request, 50 MiB admission is separate, an
   await sendNativeAttachment(client, account, "filehelper", path, false, "document", undefined, { forceDocument: true });
   assert.equal(selected[3].kind, "file"); assert.equal(selected[3].videoQuality, undefined);
   await truncate(path, 50 * 1024 * 1024 + 1);
-  await assert.rejects(sendNativeAttachment(client, { ...account, mediaMaxMb: 512 }, "filehelper", path, false, "too-large"), /bounded regular file/);
+  await assert.rejects(sendNativeAttachment(client, account, "filehelper", path, false, "above-account-limit"), /bounded regular file/);
+  assert.equal(NATIVE_MAX_VIDEO_SOURCE_BYTES, 512 * 1024 * 1024);
+  await truncate(path, NATIVE_MAX_VIDEO_SOURCE_BYTES + 1);
+  await assert.rejects(sendNativeAttachment(client, { ...account, mediaMaxMb: 1024 }, "filehelper", path, false, "too-large"), /bounded regular file/);
   assert.equal(uploads, 4);
 });
 test("document/quality conflicts and quality on a non-video fail before staging", async t => {
@@ -129,7 +132,7 @@ test("document/quality conflicts and quality on a non-video fail before staging"
   await assert.rejects(sendNativeAttachment(client, account, "filehelper", path, true, "invalid", undefined, { forceDocument: true }), /cannot also request/);
   assert.equal(uploads, 0);
 });
-test("only selected file sends accept the exact 512 MiB file limit without reading it into memory", async t => {
+test("the exact 512 MiB file limit is staged without reading it into memory and other kinds keep their limits", async t => {
   const directory = await mkdtemp(join(tmpdir(), "native-file-size-")); t.after(() => rm(directory, { recursive: true, force: true }));
   let uploads = 0, sends = 0;
   const largeAccount = { ...account, mediaMaxMb: 512 };
@@ -145,8 +148,8 @@ test("only selected file sends accept the exact 512 MiB file limit without readi
   await truncate(file, 512 * 1024 * 1024 + 1);
   await assert.rejects(sendNativeAttachment(client, { ...largeAccount, mediaMaxMb: 1024 }, "filehelper", file), /bounded regular file/);
   for (const [extension, voice] of [["jpg", false], ["mp4", false], ["wav", true]] as const) {
-    const path = join(directory, `synthetic.${extension}`); await writeFile(path, new Uint8Array(1)); await truncate(path, extension === "mp4" ? 50 * 1024 * 1024 + 1 : 25 * 1024 * 1024 - 16);
-    await assert.rejects(sendNativeAttachment(client, largeAccount, "filehelper", path, voice), /bounded regular file/);
+    const path = join(directory, `synthetic.${extension}`); await writeFile(path, new Uint8Array(1)); await truncate(path, extension === "mp4" ? NATIVE_MAX_VIDEO_SOURCE_BYTES + 1 : 25 * 1024 * 1024 - 16);
+    await assert.rejects(sendNativeAttachment(client, { ...largeAccount, mediaMaxMb: 1024 }, "filehelper", path, voice), /bounded regular file/);
   }
   assert.equal(uploads, 1); assert.equal(sends, 1);
 });
@@ -167,6 +170,36 @@ test("remote ordinary files spool exact bytes for one upload and release the pri
     message: async () => ({ id: "stored-file", accountId: "a", threadId: "filehelper", direction: "outgoing", serverId: "18446744073709551614" }) } as unknown as NativeWeChatClient;
   assert.equal((await sendNativeAttachment(client, account, "filehelper", "https://example.invalid/file.pdf", false, "remote-key")).messageId, "stored-file");
   assert.equal(uploads, 1); assert.equal(sends, 1); await assert.rejects(uploaded!.arrayBuffer());
+});
+function voiceClient(staged: string[], kinds: string[]): NativeWeChatClient {
+  return { upload: async (_a: string, _blob: Blob, filename: string, mime: string) => { staged.push(`${filename} ${mime}`); return { id: "upload" }; },
+    sendMedia: async (_a: string, input: { kind: string }) => { kinds.push(input.kind); return sendJob({ result: { messageIds: ["msg_voice"], chunks: [{ state: "accepted", serverMessageId: "18446744073709551614" }] } }); },
+    message: async () => ({ id: "msg_voice", accountId: "a", threadId: "filehelper", direction: "outgoing", serverId: "18446744073709551614" }) } as unknown as NativeWeChatClient;
+}
+test("voice sends accept Opus, CAF and AMR files and reject other names before dispatch", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "native-voice-names-")); t.after(() => rm(directory, { recursive: true, force: true }));
+  const staged: string[] = [], kinds: string[] = [];
+  for (const name of ["speech.opus", "note.OGA", "memo.caf", "note.amr"]) {
+    const path = join(directory, name); await writeFile(path, bytes);
+    assert.equal((await sendNativeAttachment(voiceClient(staged, kinds), account, "filehelper", path, true, `voice-${name}`)).messageId, "msg_voice");
+  }
+  assert.deepEqual(staged, ["speech.opus audio/ogg", "note.OGA audio/ogg", "memo.caf audio/x-caf", "note.amr audio/amr"]);
+  assert.deepEqual(kinds, ["voice", "voice", "voice", "voice"]);
+  const opus = join(directory, "speech.opus"), unknown = join(directory, "speech.bin"); await writeFile(unknown, bytes); let dispatched = 0;
+  assert.equal((await sendNativeAttachment(voiceClient(staged, kinds), account, "filehelper", opus, false, "ordinary-opus")).messageId, "msg_voice");
+  assert.equal(kinds.at(-1), "file", "Opus without voice stays an ordinary file");
+  await assert.rejects(sendNativeAttachment(voiceClient(staged, kinds), account, "filehelper", unknown, true, "voice-unknown", async () => { dispatched++; }), /explicit audio attachment/);
+  assert.equal(dispatched, 0, "An unsupported local voice source fails before the dispatch mark"); assert.equal(staged.length, 5);
+});
+test("remote voice uses the file name when the server labels audio generically", async t => {
+  let declared = "application/octet-stream";
+  t.mock.method(globalThis, "fetch", async () => new Response(bytes, { headers: { "content-type": declared, "content-length": String(bytes.length) } }));
+  const staged: string[] = [], kinds: string[] = [];
+  await sendNativeAttachment(voiceClient(staged, kinds), account, "filehelper", "https://example.invalid/tts/speech.opus", true, "remote-opus");
+  declared = "audio/opus"; await sendNativeAttachment(voiceClient(staged, kinds), account, "filehelper", "https://example.invalid/voice", true, "remote-declared");
+  declared = "application/octet-stream";
+  await assert.rejects(sendNativeAttachment(voiceClient(staged, kinds), account, "filehelper", "https://example.invalid/speech.bin", true, "remote-unknown"), /explicit audio attachment/);
+  assert.deepEqual(staged, ["speech.opus audio/ogg", "voice audio/opus"]); assert.deepEqual(kinds, ["voice", "voice"]);
 });
 test("large file polling allows a 36-minute transfer and a one-hour deadline never resubmits", async t => {
   const directory = await mkdtemp(join(tmpdir(), "native-large-file-wait-")); t.after(() => rm(directory, { recursive: true, force: true }));

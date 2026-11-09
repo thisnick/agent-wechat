@@ -5,10 +5,8 @@ use crate::calls::notifications::{
     IncomingCancellation, IncomingNotification, IncomingPreparation, IncomingRequest,
 };
 use std::sync::mpsc::RecvTimeoutError;
-use wechat_protocol::calls::{
-    client::{IncomingPhase, NativeIncomingSession},
-    incoming::NotificationPayload,
-};
+use wechat_calls::session::{IncomingPhase, NativeIncomingSession};
+use wechat_protocol::calls::incoming::NotificationPayload;
 
 type PreparationReply =
     Arc<Mutex<Option<oneshot::Sender<std::result::Result<IncomingPreparation, CallServiceError>>>>>;
@@ -78,6 +76,7 @@ pub(super) async fn prepare(
         identity: request.identity.clone(),
         peer_id: request.notification.caller_username.clone(),
         lease: request.notification.lease.clone(),
+        account_lease: std::sync::OnceLock::new(),
         stop: AtomicBool::new(false),
         media_stop: AtomicBool::new(false),
         locally_closed: AtomicBool::new(false),
@@ -86,6 +85,9 @@ pub(super) async fn prepare(
         metrics: MediaMetrics::default(),
         mutations_submitted: AtomicBool::new(false),
         incoming: Some(mailbox.clone()),
+        conference: None,
+        conference_start: None,
+        conference_commands: Mutex::new(std::collections::VecDeque::new()),
         audio,
         done: Mutex::new(None),
         notify: Notify::new(),
@@ -291,7 +293,7 @@ impl Actor {
             crypto::random::<32>()?,
         )?;
         let mut parameters = independent_voice_parameters()?;
-        offer.apply_to(&mut parameters);
+        parameters.apply_offer(&offer);
         let session = NativeIncomingSession::authenticate(
             &self.transport,
             &mut self.state,
@@ -363,12 +365,12 @@ impl Actor {
                 continue;
             }
             ensure!(
-                self.worker.lease.current(),
+                self.worker.authorized(),
                 "Incoming account authority revoked"
             );
             if self.phase() == IncomingPhase::Joined {
                 if self.local_stop_requested()
-                    || !self.worker.lease.current()
+                    || !self.worker.authorized()
                     || self
                         .joined_deadline
                         .is_some_and(|deadline| Instant::now() >= deadline)
@@ -388,7 +390,7 @@ impl Actor {
                 // No controller owns an unanswered offer. Neither local expiry
                 // nor disappearing listeners grants a user Reject operation.
                 ensure!(
-                    self.worker.lease.current()
+                    self.worker.authorized()
                         && self.request.guard.is_current()
                         && !self.worker.stop.load(Ordering::Acquire),
                     "Unowned incoming admission expired"
@@ -413,7 +415,7 @@ impl Actor {
                         return Ok(());
                     }
                     if self.phase() == IncomingPhase::Joined
-                        && (self.local_stop_requested() || !self.worker.lease.current())
+                        && (self.local_stop_requested() || !self.worker.authorized())
                     {
                         return self.exit();
                     }
@@ -446,8 +448,8 @@ impl Actor {
     }
     fn awaiting_reject(&self) -> bool {
         self.phase() == IncomingPhase::Acknowledged
-            && self.worker.lease.current()
-            && self.worker.lease.current()
+            && self.worker.authorized()
+            && self.worker.authorized()
             && !self.worker.stop.load(Ordering::Acquire)
             && !self.mailbox.cancellation_pending()
             && self
@@ -503,7 +505,7 @@ impl Actor {
                 return Ok(false);
             }
             if self.ignored_cancellations != ignored
-                && self.worker.lease.current()
+                && self.worker.authorized()
                 && self.transport.admits(false, false)
             {
                 // A queued Cancel briefly fenced this unsent poll, then the
@@ -589,7 +591,7 @@ impl Actor {
     fn cancel_note(&mut self, note: &IncomingNotification) -> Result<IncomingCancellation> {
         ensure!(
             note.lease.current()
-                && self.worker.lease.current()
+                && self.worker.authorized()
                 && note.lease.authority() == self.worker.lease.authority()
                 && note.own_username == self.request.notification.own_username
                 && note.header_from == self.request.notification.header_from
@@ -644,7 +646,7 @@ impl Actor {
                 && request.ticket.authority() == self.worker.lease.authority()
                 && request.peer_id == self.request.notification.caller_username
                 && request.call_type == crate::call_types::CallType::Voice
-                && self.worker.lease.current(),
+                && self.worker.authorized(),
             "Incoming winner identity mismatch"
         );
         ensure!(
@@ -655,7 +657,7 @@ impl Actor {
             Operation::Answer => {
                 ensure!(
                     sink.is_current()
-                        && self.worker.lease.current()
+                        && self.worker.authorized()
                         && !self.worker.stop.load(Ordering::Acquire),
                     "Incoming Answer admission revoked"
                 );
@@ -683,7 +685,7 @@ impl Actor {
                         .is_some_and(|error| error.0 == CallErrorCode::Stale);
                     if stale_binding
                         && self.phase() == IncomingPhase::Joined
-                        && self.worker.lease.current()
+                        && self.worker.authorized()
                         && self
                             .sink
                             .as_ref()
@@ -928,7 +930,7 @@ pub(super) async fn cancel(
 ) -> std::result::Result<IncomingCancellation, CallServiceError> {
     let worker = active(&inner, &identity)?;
     if worker.lease.authority() != note.lease.authority()
-        || !worker.lease.current()
+        || !worker.authorized()
         || !note.lease.current()
     {
         return Ok(IncomingCancellation::Uncertain);

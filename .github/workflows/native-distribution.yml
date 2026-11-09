@@ -77,6 +77,7 @@ jobs:
               - 'scripts/native-gateway-smoke.mjs'
               - 'scripts/native-smoke-plugin.mjs'
               - 'scripts/native-model-smoke.mjs'
+              - 'scripts/native-conference-model-smoke.mjs'
               - 'scripts/native-media-model-smoke.mjs'
               - 'scripts/native-history-model-smoke.mjs'
               - 'scripts/native-recall-model-smoke.mjs'
@@ -116,7 +117,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [model, media-model, tools]
+        suite: [model, media-model, tools, voice-current]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -128,14 +129,21 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @agent-wechat/agent-wechat... build
+      - name: Install current Gateway for voice boundary regression
+        if: matrix.suite == 'voice-current'
+        run: npm install --prefix "$RUNNER_TEMP/openclaw-voice-current" --ignore-scripts --no-audit --no-fund openclaw@2026.11.1
       - name: Validate pinned Gateway and model integration
         env:
           SMOKE_SUITE: ${{ matrix.suite }}
         run: |
           case "$SMOKE_SUITE" in
             model|media-model) node "scripts/native-${SMOKE_SUITE}-smoke.mjs" ;;
+            voice-current)
+              OPENCLAW_TEST_SDK_ROOT="$RUNNER_TEMP/openclaw-voice-current/node_modules/openclaw" node scripts/native-conference-model-smoke.mjs
+              ;;
             tools)
               node scripts/native-gateway-smoke.mjs
+              node scripts/native-conference-model-smoke.mjs
               node scripts/native-history-model-smoke.mjs
               node scripts/native-recall-model-smoke.mjs
               node scripts/native-archive-tools-smoke.mjs

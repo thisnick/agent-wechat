@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { OpenClawConfig, PluginRuntime } from "openclaw/plugin-sdk/core";
 import type { CallSessionScope } from "./calls-config.ts";
 
@@ -42,7 +42,12 @@ const CONTACT_ID = /^[A-Za-z0-9_.@-]{1,200}$/;
  * agent remembers earlier calls; read-only callers get a separate session from
  * the owner's, so a later loss of owner status never exposes an owner session.
  * per-call, or a contact ID unfit for a key, gets a new session for each call. */
-export function callSessionKey(agentId: string, scope: CallSessionScope, contactId: string, owner: boolean): string {
+export function callSessionKey(agentId: string, scope: CallSessionScope, contactId: string, owner: boolean,
+  conference?: { accountId: string; nativeAccountId?: string; groupId: string }): string {
+  if (conference) {
+    const principal = createHash("sha256").update(JSON.stringify([conference.accountId, conference.nativeAccountId ?? "", conference.groupId])).digest("hex");
+    return `agent:${agentId}:wechat-conference:${principal}:${owner ? "owner" : "read-only"}${scope === "per-call" ? `:${randomUUID()}` : ""}`;
+  }
   if (scope === "per-contact" && CONTACT_ID.test(contactId) && !contactId.endsWith("@chatroom")) {
     return `agent:${agentId}:wechat-call:${contactId.toLowerCase()}${owner ? "" : ":read-only"}`;
   }
@@ -92,7 +97,7 @@ export async function resolveCallParentSession(cfg: OpenClawConfig, runtime: Plu
 }
 
 export function currentCallParentKey(cfg: OpenClawConfig, runtime: PluginRuntime, agentId: string,
-  bound: BoundCallParentSession | undefined, ownerPeer?: { senderId: string; accountId: string }): string | undefined {
+  bound: BoundCallParentSession | undefined, ownerPeer?: { senderId: string; accountId: string; group?: boolean }): string | undefined {
   if (!bound) return;
   const entry = readParentSession(cfg, runtime, agentId, bound.key);
   if (!entry || entry.sessionId !== bound.sessionId) return;
@@ -101,8 +106,10 @@ export function currentCallParentKey(cfg: OpenClawConfig, runtime: PluginRuntime
     // same-peer route so it cannot fall through to a foreign thread's route.
     const route = entry.delivery?.kind === "external" ? entry.delivery.context : undefined;
     const { senderId, accountId } = ownerPeer;
+    const targets = [senderId, `wechat:${senderId}`, `agent-wechat:${senderId}`,
+      ...(ownerPeer.group ? [`group:${senderId}`, `wechat:group:${senderId}`, `agent-wechat:group:${senderId}`] : [])];
     if (route?.channel !== "agent-wechat" || (route.accountId ?? "default") !== accountId
-      || route.threadId !== undefined || ![senderId, `wechat:${senderId}`, `agent-wechat:${senderId}`].includes(route.to ?? "")) return;
+      || route.threadId !== undefined || !targets.includes(route.to ?? "")) return;
   }
   return bound.key;
 }

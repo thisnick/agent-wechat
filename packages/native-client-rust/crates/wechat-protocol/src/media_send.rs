@@ -1206,13 +1206,13 @@ mod tests {
         assert_eq!(p::data(&fields, 48).unwrap(), "a".repeat(32).as_bytes());
         assert_eq!(p::data(&fields, 49).unwrap(), b"raw-object");
         assert_eq!(p::data(&fields, 50).unwrap(), "03".repeat(16).as_bytes());
-        assert_eq!(p::scalar(&fields, 51).unwrap(), 52_428_800);
+        assert_eq!(p::scalar(&fields, 51).unwrap(), 536_870_912);
         let xml = local_video_xml(&video, 4).unwrap();
         for expected in [
             "cdnvideourl=\"normal-object\"",
             "length=\"30\"",
             "cdnrawvideourl=\"raw-object\"",
-            "rawlength=\"52428800\"",
+            "rawlength=\"536870912\"",
             "rawmd5=\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
         ] {
             assert!(xml.contains(expected));

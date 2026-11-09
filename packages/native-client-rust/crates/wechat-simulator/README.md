@@ -67,6 +67,7 @@ Representative JSON control bodies:
 {"op":"inbound","account":"personal","peer":"sim_mei","body":"Synthetic incoming message"}
 {"op":"inbound","account":"personal","peer":"sim_mei","body":"Synthetic account-originated message","self_sent":true}
 {"op":"inbound","account":"personal","peer":"sim_mei","body":"Catch up after restart","notify":false}
+{"op":"inbound","account":"personal","peer":"<group room ID>","sender":"sim_mei","body":"Synthetic group message"}
 {"op":"notify","account":"personal","count":2}
 {"op":"echo_send","account":"personal","client_id":123}
 {"op":"status_notification","account":"personal","operation_id":2}
@@ -78,10 +79,14 @@ Representative JSON control bodies:
 {"op":"unknown_sync","account":"personal"}
 {"op":"advertise_image","account":"personal","peer":"sim_mei"}
 {"op":"receive_media","account":"personal","peer":"sim_mei","kind":"sticker"}
+{"op":"receive_media","account":"personal","peer":"<group room ID>","sender":"sim_daniel","kind":"image"}
 ```
 
 Account IDs contain lowercase ASCII letters, digits, underscores or hyphens, up
 to 32 characters. Synthetic peers are `sim_mei`, `sim_daniel` and `filehelper`.
+Messages into a group created on the hub name the speaking contact in `sender`
+(`sim_mei` or `sim_daniel`); a group message without one is refused, and a direct
+message takes none.
 The service seeds the account's contacts and initial conversation on first login.
 Each account has independent sessions, changes, notification positions and send
 receipts. `GET /state` returns a bounded scenario summary with no credentials.

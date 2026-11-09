@@ -22,6 +22,8 @@ pub enum CallHostPolicy {
 /// remain inside the transfer envelope, never substituted for a host CGI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CallHostRoute {
+    ConferenceJoin,
+    ConferenceAddMembers,
     AppAuth,
     RingingAck,
     Transfer,
@@ -32,6 +34,8 @@ pub enum CallHostRoute {
 impl CallHostRoute {
     pub const fn command(self) -> u16 {
         match self {
+            Self::ConferenceJoin => 14754,
+            Self::ConferenceAddMembers => 10857,
             Self::AppAuth => 7994,
             Self::RingingAck => 8069,
             Self::Transfer => 11421,
@@ -42,6 +46,8 @@ impl CallHostRoute {
     }
     pub const fn path(self) -> &'static str {
         match self {
+            Self::ConferenceJoin => "/cgi-bin/micromsg-bin/voipilinkjoin",
+            Self::ConferenceAddMembers => "/cgi-bin/micromsg-bin/voipilinkaddmember",
             Self::AppAuth => "/cgi-bin/micromsg-bin/mm_ilink_cloud_app_auth",
             Self::RingingAck => "/cgi-bin/micromsg-bin/voipilinkack",
             Self::Transfer => "/cgi-bin/micromsg-bin/mmilinktransfer",
@@ -154,7 +160,7 @@ fn is_terminal_transfer(
     let group = Fields::decode(exit.required_bytes(2)?)?;
     if group.0.iter().any(|f| !(1..=7).contains(&f.number))
         || group.required_bytes(1)? != b"wechat"
-        || group.required_bytes(3)? != b"voip-2p"
+        || !matches!(group.required_bytes(3)?, b"voip-2p" | b"voip-mt")
         || group.required_u64(5)? != 1
     {
         return Ok(false);
@@ -180,6 +186,7 @@ impl From<super::personal::HostOperation> for CallHostRoute {
         match value {
             super::personal::HostOperation::RingingAck => Self::RingingAck,
             super::personal::HostOperation::Invite => Self::Invite,
+            super::personal::HostOperation::ConferenceAddMembers => Self::ConferenceAddMembers,
             super::personal::HostOperation::Cancel => Self::Cancel,
             super::personal::HostOperation::LiveSync => Self::LiveSync,
         }
@@ -192,7 +199,10 @@ impl From<super::personal::HostOperation> for CallHostRoute {
 /// any separately configured host override before dispatching.
 pub fn selected_policy(snapshot: &AuthSnapshot, command: u16) -> Result<CallHostPolicy> {
     ensure!(
-        matches!(command, 7994 | 8069 | 11421 | 10342 | 9332 | 9262),
+        matches!(
+            command,
+            7994 | 8069 | 11421 | 10342 | 9332 | 9262 | 14754 | 10857
+        ),
         "Unsupported call host command"
     );
     let root = Fields::decode(&snapshot.response)?;
@@ -319,6 +329,26 @@ mod tests {
         retained.update_mask = 8;
         assert!(selected_policy(&retained, 7994).is_err());
         assert!(selected_policy(&AuthSnapshot::default(), 7994).is_err());
+    }
+
+    #[test]
+    fn additional_invitations_keep_their_route_policy_and_nonterminal_authority() {
+        let selected = snapshot(8, 10857);
+        assert_eq!(
+            selected_policy(&selected, 10857).unwrap(),
+            CallHostPolicy::AxSelected
+        );
+        assert_eq!(
+            selected_policy(&selected, 10342).unwrap(),
+            CallHostPolicy::Ordinary
+        );
+        assert_eq!(CallHostRoute::ConferenceAddMembers.command(), 10857);
+        assert_eq!(
+            CallHostRoute::ConferenceAddMembers.path(),
+            "/cgi-bin/micromsg-bin/voipilinkaddmember"
+        );
+        assert!(!is_teardown_request(CallHostRoute::ConferenceAddMembers, &[]).unwrap());
+        assert!(!is_reject_request(CallHostRoute::ConferenceAddMembers, &[]).unwrap());
     }
 
     #[test]

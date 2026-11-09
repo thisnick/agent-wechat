@@ -15,8 +15,12 @@ class MockSocket {
 }
 class MockCallServer {
   capabilities = { directAudio: true };
+  protocolVersion = 2;
+  mediaProtocolVersion = 2;
+  conferenceInvitations = [];
+  currentCall = null;
   sockets = []; controls = []; media = []; owner = null; counter = 0; hold = false;
-  tracks = { sendTrack: { id: 1, generation: 1, direction: 'send', format: audio }, receiveTrack: { id: 2, generation: 1, direction: 'receive', format: audio } };
+  tracks = { sendTrack: { id: 1, generation: 1, direction: 'send', format: audio }, receiveTracks: [{ id: 2, generation: 1, direction: 'receive', format: audio }] };
   result(socket, requestId, extra = {}) { queueMicrotask(() => socket.receive({ type: 'command.result', requestId, status: 'accepted', callId: null, ownerToken: null, code: null, ...extra })); }
   factory = (url, options) => {
     assert.equal(options.headers.Authorization, 'Bearer synthetic-api-token');
@@ -30,10 +34,12 @@ class MockCallServer {
           assert.equal(command.type, 'media.attach');
           assert.equal(command.clientId, this.owner);
           assert.equal(command.ownerToken, `owner-${this.owner}`);
-          attached = true; queueMicrotask(() => socket.receive({ type: 'media.ready', ...structuredClone(this.tracks) }));
+          attached = true; queueMicrotask(() => socket.receive({ type: 'media.ready', protocolVersion: this.mediaProtocolVersion, ...structuredClone(this.tracks) }));
         } else if (typeof value === 'string') {
-          const start = JSON.parse(value); assert.equal(start.type, 'audio.start');
-          assert.equal(start.generation, this.tracks.sendTrack.generation);
+          const command = JSON.parse(value);
+          assert.ok(['audio.start', 'audio.chunk'].includes(command.type));
+          assert.equal(command.trackId, 1);
+          assert.equal(command.generation, this.tracks.sendTrack.generation);
         } else assert.ok(value instanceof Uint8Array);
       });
       this.sockets.push(socket); this.media.push(socket); queueMicrotask(() => socket.open()); return socket;
@@ -41,6 +47,7 @@ class MockCallServer {
     const id = `client-${++this.counter}`;
     const socket = new MockSocket(value => {
       const command = JSON.parse(value);
+      if (command.type === 'call.hello') { assert.deepEqual(command.supportedProtocolVersions, [2]); return; }
       if (this.hold) return;
       if (command.type === 'call.ready') { socket.ready = command.ready; this.result(socket, command.requestId); }
       else if (command.type === 'call.answer' || command.type === 'call.dial') {
@@ -55,12 +62,15 @@ class MockCallServer {
     });
     socket.id = id; this.sockets.push(socket); this.controls.push(socket);
     queueMicrotask(() => {
-      socket.open(); socket.receive({ type: 'hello', protocolVersion: 1, clientId: id,
+      socket.open(); socket.receive({ type: 'hello', protocolVersion: this.protocolVersion, clientId: id,
         capabilities: this.capabilities,
-        availability: { busy: false, ownedByThisClient: false }, currentOffer: offer, currentCall: null, audioFormat: audio });
+        availability: { busy: false, ownedByThisClient: false }, conferenceInvitations: this.conferenceInvitations, currentOffer: offer, currentCall: this.currentCall, audioFormat: audio });
     });
     return socket;
   };
+}
+function receivePcm(socket, bytes, generation = 1, trackId = 2) {
+  socket.receive({type:'audio.chunk',trackId,generation,pcmBase64:Buffer.from(bytes).toString('base64')});
 }
 function client(server, extra = {}) { return new NativeCallsClient({ baseUrl: 'http://127.0.0.1:6174', accountId: 'test-account', token: 'synthetic-api-token', webSocketFactory: server.factory, ...extra }); }
 
@@ -77,7 +87,7 @@ test('pending request ID deduplicates locally, detects changed payload and never
     assert.equal(owner.command(command), pending);
     await assert.rejects(owner.command({ ...command, target: { kind: 'direct', contactId: 'different-contact' } }), error => error.code === 'idempotency_conflict');
     await assert.rejects(pending, error => error.code === 'command_timeout' && error.outcomeUnknown);
-    assert.equal(server.controls[0].sent.length, 1);
+    assert.equal(server.controls[0].sent.length, 2);
   } finally { owner.close(); }
 });
 
@@ -103,7 +113,7 @@ test('ending stops audio but retains owner transports until terminal confirmatio
       assert.throws(() => media.sendPcm(new Int16Array(320), 1), error => error.code === 'call_ending');
       // Cross-socket data already queued before Ending must neither play nor
       // overflow a stopped consumer and detach its still-terminating owner.
-      for (let i = 0; i < 20; i++) server.media[0].receive(new Uint8Array(640));
+      for (let i = 0; i < 20; i++) receivePcm(server.media[0], new Uint8Array(640));
       assert.equal(server.media[0].readyState, 1);
       server.controls[0].receive({ type: 'call.state', call: { ...snapshot, revision: 3, state: terminal } });
       assert.equal(server.media[0].readyState, 3);
@@ -132,7 +142,7 @@ test('PCM overrun keeps the latest chunks without detaching the owner or rewindi
     const arrivals = [];
     const media = await owner.attachMedia('call-1', arrival => arrivals.push(arrival));
     const socket = server.media[0];
-    for (let i = 0; i < 20; i++) socket.receive(new Uint8Array(640).fill(i));
+    for (let i = 0; i < 20; i++) receivePcm(socket, new Uint8Array(640).fill(i));
     assert.equal(socket.readyState, 1);
     assert.equal(arrivals.length, 20);
     assert.equal(Math.max(...arrivals.map(arrival => arrival.queueDepth)), 16);
@@ -144,9 +154,9 @@ test('PCM overrun keeps the latest chunks without detaching the owner or rewindi
       assert.equal(frame.sampleOffset, i * 320);
       assert.equal(frame.receivedAtMs, arrivals[i].receivedAtMs);
     }
-    socket.receive(new Uint8Array(640).fill(20));
-    socket.receive({ type: 'track.updated', callId: 'call-1', track: { ...server.tracks.receiveTrack, generation: 2 } });
-    socket.receive(new Uint8Array(640).fill(21));
+    receivePcm(socket, new Uint8Array(640).fill(20));
+    socket.receive({ type: 'track.updated', callId: 'call-1', track: { ...server.tracks.receiveTracks[0], generation: 2 } });
+    receivePcm(socket, new Uint8Array(640).fill(21), 2);
     const { value: current } = await iterator.next();
     assert.equal(current.payload[0], 21);
     assert.equal(current.sampleOffset, 21 * 320);
@@ -168,15 +178,15 @@ test('slow control consumer and malformed media fail closed with fixed queue lim
   assert.throws(() => media.sendPcm(new Int16Array(320), 1), error => error.code === 'media_backpressure');
   server.media[0].bufferedAmount = 0;
   media.sendPcm(new Int16Array(320), 1);
-  assert.deepEqual(JSON.parse(server.media[0].sent[1]), { type: 'audio.start', generation: 1 });
-  assert.deepEqual(server.media[0].sent[2], new Uint8Array(640));
+  assert.deepEqual(JSON.parse(server.media[0].sent[1]), { type: 'audio.start', trackId: 1, generation: 1 });
+  assert.deepEqual(Buffer.from(JSON.parse(server.media[0].sent[2]).pcmBase64, "base64"), Buffer.alloc(640));
   media.sendPcm(new Int16Array([-32768, 32767, -1]), 1);
-  assert.deepEqual([...server.media[0].sent[3]], [0, 128, 255, 127, 255, 255]);
+  assert.deepEqual([...Buffer.from(JSON.parse(server.media[0].sent[3]).pcmBase64, "base64")], [0, 128, 255, 127, 255, 255]);
   await owner.clearAudio('clear-pcm', 'call-1');
   assert.throws(() => media.sendPcm(new Int16Array(1), 1), error => error.code === 'stale');
   media.sendPcm(new Int16Array(1), 2);
-  assert.deepEqual(JSON.parse(server.media[0].sent[4]), { type: 'audio.start', generation: 2 });
-  server.media[0].receive(new Uint8Array(3));
+  assert.deepEqual(JSON.parse(server.media[0].sent[4]), { type: 'audio.start', trackId: 1, generation: 2 });
+  receivePcm(server.media[0], new Uint8Array(3));
   await assert.rejects(media.frames()[Symbol.asyncIterator]().next(), error => error.code === 'invalid_media');
   owner.close();
   for (const capabilities of [{}, { directAudio: true }, { directAudio: false }, { futureCallingMode: true }]) {
@@ -209,5 +219,158 @@ test('slow control consumer and malformed media fail closed with fixed queue lim
     invalidServer.controls[0].receive({ type: 'call.control', callId: 'call-1', participantId: 'synthetic-contact', control });
     assert.equal(invalidServer.controls[0].readyState, 3);
     invalidClient.close();
+  }
+});
+
+
+test('JSON media demultiplexes tracks and preserves independent sample offsets', async () => {
+  const server = new MockCallServer(); const owner = client(server);
+  try {
+    await owner.connect(); await owner.ready('ready', true); await owner.dial('dial', 'synthetic-contact');
+    server.tracks.receiveTracks.push({id:3,generation:1,direction:'receive',format:audio});
+    const media = await owner.attachMedia('call-1');
+    receivePcm(server.media[0], new Uint8Array([1,0]), 1, 2);
+    receivePcm(server.media[0], new Uint8Array([2,0]), 1, 3);
+    receivePcm(server.media[0], new Uint8Array([3,0]), 1, 2);
+    const frames = media.frames()[Symbol.asyncIterator]();
+    for (const [trackId, sampleOffset, firstByte] of [[2,0,1],[3,0,2],[2,1,3]]) {
+      const {value} = await frames.next();
+      assert.equal(value.trackId, trackId);
+      assert.equal(value.sampleOffset, sampleOffset);
+      assert.equal(value.payload[0], firstByte);
+    }
+    receivePcm(server.media[0], new Uint8Array([1,0]), 1, 99);
+    await assert.rejects(frames.next(), error => error.code === 'invalid_media');
+  } finally { owner.close(); }
+});
+
+
+test('missing and incompatible server versions fail before readiness or media', async () => {
+  for (const version of [undefined, 1, 3]) {
+    const server = new MockCallServer(); server.protocolVersion = version;
+    const owner = client(server);
+    try {
+      await assert.rejects(owner.connect(), error => error.code === 'unsupported_protocol_version');
+      assert.deepEqual(server.controls[0].sent.map(text => JSON.parse(text).type), ['call.hello']);
+    } finally { owner.close(); }
+  }
+  for (const version of [undefined, 1, 3]) {
+    const server = new MockCallServer(); server.mediaProtocolVersion = version;
+    const owner = client(server);
+    try {
+      await owner.connect(); await owner.ready('ready', true); await owner.dial('dial', 'synthetic-contact');
+      await assert.rejects(owner.attachMedia('call-1'), error => error.code === 'unsupported_protocol_version');
+    } finally { owner.close(); }
+  }
+});
+
+test('base64 expansion permits a full decoded chunk and receive generations fence only their own track', async () => {
+  const server = new MockCallServer();
+  server.tracks.receiveTracks.push({id:3, generation:1, direction:'receive', format:audio});
+  const owner = client(server, {maxBufferedBytes:100000});
+  try {
+    await owner.connect(); await owner.ready('ready', true); await owner.dial('dial', 'synthetic-contact');
+    const media = await owner.attachMedia('call-1'); const frames = media.frames()[Symbol.asyncIterator]();
+    media.sendPcm(new Int16Array(32768).fill(-32768), 1);
+    const sent = JSON.parse(server.media[0].sent.at(-1));
+    const pcm = Buffer.from(sent.pcmBase64, 'base64');
+    assert.equal(pcm.length, 65536); assert.equal(pcm.readInt16LE(), -32768);
+    receivePcm(server.media[0], new Uint8Array([1,0]), 1, 2);
+    receivePcm(server.media[0], new Uint8Array([2,0]), 1, 3);
+    server.media[0].receive({type:'track.updated',callId:'call-1',track:{id:2,generation:2,direction:'receive',format:audio}});
+    receivePcm(server.media[0], new Uint8Array([3,0]), 1, 2);
+    receivePcm(server.media[0], new Uint8Array([4,0]), 2, 2);
+    const a = (await frames.next()).value; const b = (await frames.next()).value;
+    assert.equal(a.trackId, 3); assert.equal(a.payload[0], 2);
+    assert.equal(b.trackId, 2); assert.equal(b.payload[0], 4); assert.equal(b.sampleOffset, 1);
+  } finally { owner.close(); }
+});
+
+test('conference metadata does not detach the owner and media socket owns source ordering and clock', async () => {
+  const server = new MockCallServer(); const owner = client(server);
+  try {
+    await owner.connect(); await owner.ready('ready', true); await owner.dial('dial', 'synthetic-contact');
+    const media = await owner.attachMedia('call-1'); const frames = media.frames()[Symbol.asyncIterator]();
+    server.controls[0].receive({type:'conference.invitations', invitations:[{invitationId:'inv-1', revision:1, groupId:'test@chatroom', callerId:'contact-a'}]});
+    server.controls[0].receive({type:'participant.updated', callId:'call-1', revision:3, participant:{participantId:'p-a', contactId:'contact-a', membership:'joined', microphoneEnabled:false}});
+    server.controls[0].receive({type:'call.invitation_result', callId:'call-1', requestId:'invite-1', results:[{contactId:'contact-b',status:'submitted',verificationRequired:false}]});
+    // Control can overtake PCM. Only the media socket removes this source.
+    server.controls[0].receive({type:'track.removed', callId:'call-1', trackId:2, generation:1, reason:'participant_left'});
+    server.media[0].receive({type:'audio.chunk',trackId:2,generation:1,sequence:5,sampleOffset:1600,pcmBase64:'AQA='});
+    assert.equal((await frames.next()).value.sampleOffset,1600);
+    server.media[0].receive({type:'track.removed', callId:'call-1',trackId:2,generation:1,reason:'participant_left'});
+    assert.deepEqual(media.tracks().receiveTracks,[]);
+    server.media[0].receive({type:'track.added',callId:'call-1',track:{id:2,generation:2,direction:'receive',format:audio,participantId:'p-a'}});
+    server.media[0].receive({type:'audio.chunk',trackId:2,generation:2,sequence:6,sampleOffset:5000,pcmBase64:'AgA='});
+    const frame=(await frames.next()).value;
+    assert.equal(frame.generation,2);assert.equal(frame.sampleOffset,5000);
+    assert.equal(server.controls[0].readyState,1);assert.equal(server.media[0].readyState,1);
+  } finally { owner.close(); }
+});
+
+test('conference helpers use exact opaque invitations and keep submission separate from membership', async () => {
+  const server = new MockCallServer(); const owner = client(server);
+  try {
+    await owner.connect(); await owner.ready('conference-ready', true);
+    await owner.startConference('conference-create', 'group@chatroom', ['contact-a', 'contact-b']);
+    await owner.joinConference('conference-join', 'opaque-invitation', 7);
+    await owner.invite('conference-invite', 'call-1', ['contact-c']);
+    const commands = server.controls[0].sent.map(value => JSON.parse(value));
+    assert.deepEqual(commands.find(value => value.requestId === 'conference-create'), { type: 'call.dial', requestId: 'conference-create', target: { kind: 'conference', groupId: 'group@chatroom', invitees: ['contact-a', 'contact-b'] }, callType: 'voice' });
+    assert.deepEqual(commands.find(value => value.requestId === 'conference-join'), { type: 'call.join', requestId: 'conference-join', invitationId: 'opaque-invitation', invitationRevision: 7 });
+    assert.deepEqual(commands.find(value => value.requestId === 'conference-invite'), { type: 'call.invite', requestId: 'conference-invite', callId: 'call-1', contactIds: ['contact-c'] });
+  } finally { owner.close(); }
+});
+test('hello validates conference invitation and participant authority fields before commands', async () => {
+  const invitation = { invitationId: 'inv', revision: 1, groupId: 'group@chatroom', callerId: 'contact-a' };
+  for (const invalid of [null, [{ ...invitation, revision: '1' }], [{ ...invitation, groupId: null }]]) {
+    const server = new MockCallServer(); server.conferenceInvitations = invalid;
+    const owner = client(server); await assert.rejects(owner.connect(), error => error.code === 'invalid_event'); owner.close();
+  }
+  const participant = { participantId: 'a', contactId: 'contact-a', membership: 'joined' };
+  for (const participants of [[{ ...participant, microphoneEnabled: 'false' }], [participant, participant]]) {
+    const server = new MockCallServer(); server.currentCall = { ...offer, direction: 'incoming', state: 'connected', ownedByThisClient: false, kind: 'conference', groupId: 'group@chatroom', participants };
+    const owner = client(server); await assert.rejects(owner.connect(), error => error.code === 'invalid_event'); owner.close();
+  }
+});
+test('received audio preserves its independent sequence and shared presentation position', async () => {
+  const server = new MockCallServer(); const owner = client(server);
+  try {
+    await owner.connect(); await owner.ready('ready', true); await owner.dial('dial', 'contact-a');
+    const media = await owner.attachMedia('call-1');
+    const frames = media.frames()[Symbol.asyncIterator]();
+    server.media[0].receive({ type: 'audio.chunk', trackId: 2, generation: 1, sequence: 91, sampleOffset: 32000, pcmBase64: 'AQACAA==' });
+    const { value } = await frames.next(); assert.equal(value.sequence, 91); assert.equal(value.sampleOffset, 32000); assert.deepEqual([...value.payload], [1, 0, 2, 0]);
+  } finally { owner.close(); }
+});
+
+
+test('participant signaling statuses survive control snapshots and updates without becoming membership', async () => {
+  const server = new MockCallServer();
+  server.currentCall = {callId:'conference',revision:1,kind:'conference',callType:'voice',direction:'incoming',state:'connected',ownedByThisClient:false,
+    participants:[{participantId:'p',contactId:'contact',membership:'invited',status:{code:3,kind:'acknowledged'}}]};
+  const owner = client(server);
+  try {
+    const hello = await owner.connect();
+    assert.deepEqual(hello.currentCall.participants[0].status, {code:3,kind:'acknowledged'});
+    const events = owner.events()[Symbol.asyncIterator]();
+    let revision = 1;
+    for (const [code,kind] of [[0,'undefined'],[1,'joined'],[2,'invited'],[3,'acknowledged'],[4,'left'],[5,'cancelled'],[6,'busy'],[7,'rejected'],[8,'no_response'],[9,'unknown'],[10,'unknown'],[4294967295,'unknown']]) {
+      const update = {type:'participant.updated',callId:'conference',revision:++revision,participant:{participantId:'p',contactId:'contact',membership:code===1?'joined':code===4?'left':code===2||code===3?'invited':'unknown',status:{code,kind}}};
+      server.controls[0].receive(update);
+      let event; do { event=(await events.next()).value; } while (event.type!=='participant.updated');
+      assert.deepEqual(event,update);
+    }
+  } finally { owner.close(); }
+});
+
+
+test('invalid or contradictory participant status objects fail admission', async () => {
+  for (const status of [null, {code:-1,kind:'unknown'}, {code:4294967296,kind:'unknown'}, {code:4,kind:'joined'}, {code:9,kind:'join_failed'}]) {
+    const server = new MockCallServer();
+    server.currentCall = {callId:'conference',revision:1,kind:'conference',callType:'voice',direction:'incoming',state:'connected',ownedByThisClient:false,
+      participants:[{participantId:'p',contactId:'contact',membership:'unknown',status}]};
+    const owner = client(server);
+    try { await assert.rejects(owner.connect(), error => error.code==='invalid_event'); } finally { owner.close(); }
   }
 });

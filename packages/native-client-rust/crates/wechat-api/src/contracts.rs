@@ -3,273 +3,437 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use ts_rs::TS;
 
-#[derive(Serialize, Deserialize, TS)]
+/// Who a message mentions, read from the mention list saved with the message.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeMentions {
+    /// `known` when the mention list was read, `unknown` when it is missing or cannot be parsed.
+    /// When unknown, `userIds` is empty and the flags are null.
     pub state: String,
+    /// IDs of the members mentioned by name, not counting the mention-everyone marker (see `all`).
     pub user_ids: Vec<String>,
+    /// True when this account is among the mentioned members, false when it is not, and null when
+    /// the mentions are unknown.
     #[serde(rename = "self")]
     pub self_mention: Option<bool>,
+    /// True when the message mentions everyone, false when it does not, and null when the mentions
+    /// are unknown.
     pub all: Option<bool>,
+    /// Where the mentions were read from, currently `msgsource.atuserlist`. Null when there is no
+    /// source, for example when `state` is `unknown`.
     pub source: Option<String>,
 }
-#[derive(Serialize, Deserialize, TS)]
+/// A saved message as read from the account's profile. It carries only readable fields and never
+/// raw message XML.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeMessage {
+    /// Message ID. Pass it back unchanged to routes that take a message ID.
     pub id: String,
+    /// ID of the account the message belongs to.
     pub account_id: String,
+    /// ID of the chat the message is in.
     pub thread_id: String,
+    /// WeChat's own ID for the message, as a string because it can exceed the largest whole number
+    /// JavaScript holds exactly. Null when the saved message has none.
     pub server_id: Option<String>,
+    /// ID of the sender. Null for system notices and when the sender cannot be determined.
     pub sender_id: Option<String>,
+    /// WeChat's numeric message type, such as 1 text, 3 image, 34 voice, 43 video, 47 sticker, 48
+    /// location, 49 app message (links, files, quotes) and 10000 system notice.
     #[serde(rename = "type")]
     pub message_type: i32,
+    /// For app messages (type 49), the app subtype, such as 5 link, 6 file, 8 shared sticker, 19
+    /// forwarded chat and 57 quote reply. Null for other messages.
     #[serde(default)]
     #[ts(optional)]
     pub app_message_type: Option<i32>,
+    /// The message this one replies to, when it is a quote reply. Null otherwise.
     #[serde(default)]
     #[ts(optional)]
     pub quote: Option<NativeQuoteReference>,
+    /// Link card details when the message is a shared link, article, music or video card, or a
+    /// Channels post. Null otherwise.
     #[serde(default)]
     #[ts(optional)]
     pub link: Option<wechat_core::LinkCard>,
+    /// Pin details when the message is a static location. Omitted for other messages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub location: Option<wechat_core::LocationCard>,
+    /// Recall details. Present only when the message was recalled, in which case `body` is
+    /// `[Message recalled]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub recall: Option<NativeRecallInfo>,
+    /// `outgoing` when this account sent the message and `incoming` when someone else did. Null for
+    /// system notices and when it cannot be determined.
     pub direction: Option<String>,
+    /// Readable text of the message, such as the text itself or a summary of a link, location or
+    /// forwarded chat. Null when there is nothing readable, for example for a photo.
     pub body: Option<String>,
+    /// When the message was created, as an RFC 3339 time. Null when the saved time is missing.
     pub created_at: Option<String>,
+    /// Which members the message mentions.
     pub mentions: NativeMentions,
+    /// Fingerprint of the saved profile data this message was read from. It changes whenever the
+    /// profile files change, not only when this message changes.
     pub version: String,
+    /// Always an empty list today. Use the message's media routes to list its attachments.
     #[ts(type = "unknown[]")]
     pub media: Vec<Value>,
 }
-#[derive(Serialize, Deserialize, TS)]
+/// Details of a recalled message.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeRecallInfo {
+    /// When the daemon first saw the recall, as an RFC 3339 time.
     pub observed_at: String,
+    /// When WeChat says the message was recalled, as an RFC 3339 time. Omitted when that time is
+    /// not known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub recalled_at: Option<String>,
+    /// The notice text WeChat saved in place of the message. Omitted or null when there is none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable)]
     pub replacement_text: Option<String>,
 }
-#[derive(Serialize, Deserialize, TS)]
+/// The message a quote reply refers to. Its content comes only from the excerpt carried inside the
+/// reply, never from a saved copy of the original.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeQuoteReference {
+    /// WeChat's ID of the quoted message, as a string.
     pub server_id: String,
+    /// WeChat's numeric type of the quoted message, with the same values as `type` on a message.
     #[serde(rename = "type")]
     pub message_type: i32,
+    /// How much of the quote could be shown: `embedded` when the reply carries readable content,
+    /// `missing` when it carries none, `unsupported` for a kind of message that cannot be shown as
+    /// a quote, and `recalled` when the original was recalled and its content is hidden.
     #[serde(default)]
     #[ts(optional)]
     pub state: Option<String>,
+    /// ID of the quoted message's sender, when the reply says who it was.
     #[serde(default)]
     #[ts(optional)]
     pub sender_id: Option<String>,
+    /// `outgoing` when the quoted message was sent by this account and `incoming` when someone else
+    /// sent it. Null when that cannot be told.
     #[serde(default)]
     #[ts(optional)]
     pub direction: Option<String>,
+    /// App subtype of the quoted message when it is an app message (type 49), such as 5 for a link.
+    /// Null for other messages.
     #[serde(default)]
     #[ts(optional)]
     pub app_message_type: Option<i32>,
+    /// Readable text of the quoted message, taken from the reply. Null when there is none.
     #[serde(default)]
     #[ts(optional)]
     pub embedded_text: Option<String>,
+    /// True when the reply carries the quoted image, so it can be downloaded through the reply's
+    /// media routes.
     #[serde(default)]
     #[ts(optional)]
     pub embedded_image: Option<bool>,
+    /// Link card of the quoted message when it was a shared link, with the same fields as `link` on
+    /// a message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub embedded_link: Option<wechat_core::LinkCard>,
+    /// True when the quoted message is a sticker. Omitted otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub embedded_sticker: Option<bool>,
 }
-#[derive(Serialize, Deserialize, TS)]
+/// A chat in the chat list: a direct chat, a group or a built-in chat such as File Transfer.
+/// Summaries come from saved history and are not refreshed from WeChat.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeThread {
+    /// Chat ID. For a direct chat it is the contact's username, and for a group it ends with
+    /// `@chatroom`.
     pub id: String,
+    /// ID of the account the chat belongs to.
     pub account_id: String,
+    /// ID of the person or group on the other side of the chat. It is the same as `id`.
     pub peer_id: String,
+    /// `direct` for a one-to-one chat, `group` for a group, and `system` for a built-in chat such
+    /// as File Transfer.
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub classification: Option<wechat_core::PeerClassification>,
+    /// Name shown for the chat: your remark if set, else the contact's nickname or the group's
+    /// name, else the ID.
     pub display_name: Option<String>,
+    /// Number of unread messages as saved in the profile. Null when the saved data does not say.
     #[ts(type = "number | null")]
     pub unread_count: Option<i64>,
-    // Saved notification preference; null means the profile cannot establish it.
+    /// Saved notification preference: true when the chat is muted and false when it is not. Null
+    /// means the profile cannot establish it.
     #[serde(default)]
     #[ts(optional = nullable)]
     pub muted: Option<bool>,
-    // Saved pin preference; null means the profile cannot establish it.
+    /// Saved pin preference: true when the chat is pinned and false when it is not. Null means the
+    /// profile cannot establish it.
     #[serde(default)]
     #[ts(optional = nullable)]
     pub pinned: Option<bool>,
+    /// Version of the chat's read state. Send it as `expectedVersion` when marking the chat read;
+    /// the request is refused if the chat changed since.
     pub read_state_version: String,
-    // Absent when local message shards are unavailable; null for empty history.
+    /// Preview of the latest message. Omitted when local message data is unavailable, and null when
+    /// the chat has no messages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable)]
     pub last_message: Option<NativeThreadMessage>,
+    /// Up to four cached group members, for drawing the group's picture. Empty for direct chats or
+    /// when the member list is unavailable.
     #[serde(default)]
     #[ts(optional)]
     pub avatar_members: Option<Vec<NativeThreadAvatarMember>>,
+    /// How complete the saved history is. It currently always reports partial coverage and no local
+    /// message count.
     #[ts(type = "unknown")]
     pub history: Value,
 }
-#[derive(Serialize, Deserialize, TS)]
+/// Preview of the latest message in a chat.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeThreadMessage {
+    /// ID of the message, the same as `id` on the full message.
     pub id: String,
+    /// ID of the sender. Null for system notices and when the sender is unknown.
     pub sender_id: Option<String>,
+    /// Name of the sender, taken from the group's cached members or your contacts. Null when the
+    /// message has no sender or the name is unknown.
     pub sender_name: Option<String>,
+    /// `outgoing` when this account sent the message and `incoming` when someone else did. Null
+    /// when it cannot be determined.
     pub direction: Option<String>,
+    /// WeChat's numeric message type, with the same values as `type` on a message.
     #[serde(rename = "type")]
     pub message_type: i32,
+    /// Plain-text preview of up to 160 characters. Media messages use labels such as Photo and
+    /// Sticker, and a recalled message shows its recall notice.
     pub text: String,
+    /// When the message was created, as an RFC 3339 time. Null when unknown.
     pub created_at: Option<String>,
 }
-#[derive(Serialize, Deserialize, TS)]
+/// A group member shown in the group's picture.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeThreadAvatarMember {
+    /// Member ID.
     pub id: String,
+    /// Name to show for the member.
     pub display_name: String,
 }
 
-#[derive(Serialize, Deserialize, TS)]
+/// Messages whose attachments to list without downloading anything.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeMediaBatchRequest {
+    /// IDs of the messages to look up, from 1 to 40 per request.
     pub message_ids: Vec<String>,
 }
-#[derive(Serialize, Deserialize, TS)]
+/// The attachments found for one message.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeMediaBatchItem {
+    /// ID of the message that was looked up.
     pub message_id: String,
+    /// Attachments of the message. Empty when `error` is set.
     pub assets: Vec<wechat_core::MediaAsset>,
+    /// Error code when this message's attachments could not be listed, otherwise null.
     pub error: Option<String>,
 }
-#[derive(Serialize, Deserialize, TS)]
+/// Attachments of several messages.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeMediaBatch {
+    /// One entry for each requested message.
     pub items: Vec<NativeMediaBatchItem>,
 }
-#[derive(Serialize, Deserialize, TS)]
+/// A contact saved in the account's profile.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeContact {
+    /// Contact ID. It is the same as `username`.
     pub id: String,
+    /// The contact's WeChat username.
     pub username: String,
+    /// Name to show: the remark if set, else the nickname, else the username.
     pub display_name: Option<String>,
+    /// The name the contact chose for themselves. Null when none is saved.
     pub nickname: Option<String>,
+    /// Your private name for the contact. Null when none is saved.
     pub remark: Option<String>,
+    /// The custom WeChat ID the contact chose, which they can change. Null when none is saved.
     pub alias: Option<String>,
+    /// Relationship to this account. It currently always reports `unknown`, including for saved
+    /// friends.
     pub relation: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub classification: Option<wechat_core::PeerClassification>,
 }
-#[derive(Serialize, Deserialize, TS)]
+/// A group chat saved in the account's profile.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeGroup {
+    /// Group ID, ending with `@chatroom`. It is the same as `roomId`.
     pub id: String,
+    /// Group ID, the same as `id`.
     pub room_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub classification: Option<wechat_core::PeerClassification>,
+    /// Name to show for the group: your remark if set, else the group's name, else the ID.
     pub display_name: Option<String>,
+    /// ID of the member who owns the group. Null when the saved data does not say.
     pub owner_id: Option<String>,
+    /// IDs of the group's administrators. The owner is not listed unless WeChat lists them too, and
+    /// the field is null when the saved data cannot say.
     #[serde(default)]
     #[ts(optional = nullable)]
     pub administrator_ids: Option<Vec<String>>,
-    // Missing on legacy servers; null means permission is not established.
+    /// Whether this account may mention everyone: true for the owner and administrators and false
+    /// for other members. Null means permission is not established, and older servers omit the
+    /// field.
     #[serde(default)]
     #[ts(optional = nullable)]
     pub can_mention_all: Option<bool>,
+    /// Text of the group's current announcement. Null when there is none.
     pub announcement: Option<String>,
+    /// The group's own shared name. Null when none is saved.
     #[serde(default)]
     #[ts(optional = nullable)]
     pub name: Option<String>,
+    /// Your private name for the group. Null when none is saved.
     #[serde(default)]
     #[ts(optional = nullable)]
     pub remark: Option<String>,
+    /// True when notifications for the group are muted and false when they are on. Null when the
+    /// saved data does not say.
     #[serde(default)]
     #[ts(optional = nullable)]
     pub muted: Option<bool>,
+    /// True when the group is minimized (folded) in the chat list and false when it is not. Null
+    /// when the saved data does not say.
     #[serde(default)]
     #[ts(optional = nullable)]
     pub minimized: Option<bool>,
+    /// True when this account is still a member of the group and false when it is not. Null when
+    /// the saved data does not say.
     #[serde(default)]
     #[ts(optional = nullable)]
     pub is_in_group: Option<bool>,
+    /// This account's own display name in the group. Null or omitted when it is not known.
     #[serde(default)]
     #[ts(optional = nullable)]
     pub my_display_name: Option<String>,
 }
-#[derive(Serialize, Deserialize, TS)]
+/// A member of a group, as saved in the account's profile.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeGroupMember {
+    /// Member ID. It is the same as `username`.
     pub id: String,
+    /// The member's WeChat username.
     pub username: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub classification: Option<wechat_core::PeerClassification>,
+    /// Name to show for the member: your remark, else their name in this group, else their
+    /// nickname, else their username.
     pub display_name: Option<String>,
+    /// The member's own display name in this group. Null when none is saved.
     pub room_display_name: Option<String>,
+    /// Name used for this member in mention text. It comes from their name in the group or their
+    /// nickname, never from your private remark, and falls back to the username.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub mention_name: Option<String>,
 }
-#[derive(Serialize, Deserialize, TS)]
+/// Result of looking up one person in a group's saved member list.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeGroupMemberLookup {
+    /// ID of the group that was searched.
     pub group_id: String,
+    /// Username that was looked up.
     pub username: String,
+    /// `present` when the person is in the saved member list and `unconfirmed` when they are not. A
+    /// missing row does not prove they left, because the saved list can be incomplete.
     pub state: String,
+    /// The member's details when `state` is `present`, otherwise null.
     pub member: Option<NativeGroupMember>,
+    /// How the answer was obtained. It is currently always `cached`, meaning saved data only.
     pub coverage: String,
 }
-#[derive(Serialize, Deserialize, TS)]
+/// Request to create a group chat.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeGroupCreateRequest {
+    /// IDs of the contacts to add, from 2 to 40, without repeats and without this account's own ID.
     pub members: Vec<String>,
+    /// Name for the new group, up to 512 bytes. Optional.
     #[serde(default)]
     #[ts(optional)]
     pub name: Option<String>,
 }
-#[derive(Serialize, Deserialize, TS)]
+/// Request to rename a group.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeGroupNameRequest {
+    /// The new group name. It must not be blank and can be up to 512 bytes.
     pub name: String,
 }
-#[derive(Serialize, Deserialize, TS)]
+/// Members to add to or remove from a group.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeGroupMembersRequest {
+    /// IDs of the contacts, from 1 to 40, without repeats and without this account's own ID.
     pub members: Vec<String>,
 }
-#[derive(Serialize, Deserialize, TS)]
+/// Request to change this account's display name in a group.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeGroupMyNameRequest {
+    /// The new display name, up to 512 bytes.
     pub display_name: String,
 }
-#[derive(Serialize, Deserialize, TS)]
+/// Request to mute or unmute notifications for a chat.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeThreadNotificationsRequest {
+    /// True to mute the chat and false to turn its notifications back on.
     pub muted: bool,
 }
-#[derive(Serialize, Deserialize, TS)]
+/// Request to pin or unpin a chat.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeThreadPinRequest {
+    /// True to pin the chat and false to unpin it.
     pub pinned: bool,
 }
-#[derive(Serialize, Deserialize, TS)]
+/// Stands in for a resource that was in the list when it was first read but is no longer in the
+/// saved profile. It keeps the resource's place in the list.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeTombstone {
+    /// ID of the removed resource.
     pub id: String,
+    /// Always true, marking the resource as removed.
     #[serde(deserialize_with = "true_only")]
     #[ts(type = "true")]
     pub deleted: bool,
+    /// Fingerprint of the saved profile data in which the resource is missing, the same value as
+    /// `sourceGeneration` on the page.
     pub version: String,
 }
 fn true_only<'de, D: serde::Deserializer<'de>>(
@@ -281,114 +445,194 @@ fn true_only<'de, D: serde::Deserializer<'de>>(
     }
     Ok(value)
 }
-#[derive(Serialize, Deserialize, TS)]
+/// One entry on a page: the resource itself, or a tombstone when the resource has been removed
+/// since the list was first read.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(untagged)]
+#[schemars(rename = "NativePageItemOf{T}")]
 pub enum NativePageItem<T> {
     Resource(T),
     Tombstone(NativeTombstone),
 }
-#[derive(Serialize, Deserialize, TS)]
+/// One page of a list. `items` holds the resources, `nextCursor` continues the list, and the other
+/// fields describe the saved data the list was read from.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
+#[schemars(rename = "NativePageOf{T}")]
 pub struct NativePage<T> {
+    /// The entries on this page, in list order.
     pub items: Vec<NativePageItem<T>>,
+    /// Pass it as `cursor` with the same query to get the next page. Null on the last page.
     pub next_cursor: Option<String>,
+    /// Which saved databases the read covered, as `partial` (true when some could not be read) and
+    /// `databases` (each one with its state). It describes local data, not completeness on WeChat's
+    /// servers.
     #[ts(type = "unknown")]
     pub coverage: Value,
+    /// Fingerprint of the saved profile data the page was read from. It changes when the profile
+    /// files change.
     pub source_generation: String,
+    /// Event cursor that was current when the list was first read. Resume the event stream from it
+    /// to catch changes made after the read.
     #[serde(default)]
     #[ts(optional)]
     pub as_of_event_cursor: Option<String>,
 }
-#[derive(Serialize, Deserialize, TS)]
+/// A background operation such as signing in or out, refreshing contacts or changing a group. Poll
+/// it by ID until it finishes.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeOperation {
+    /// Operation ID.
     pub id: String,
+    /// ID of the account the operation belongs to.
     pub account_id: String,
+    /// What the operation does, such as `login`, `logout`, `sync`, `metadata`, `group_mutation`,
+    /// `message_recall` or `media-writeback`.
     pub kind: String,
+    /// Where the operation stands, such as `queued`, `running`, `succeeded`, `failed` or
+    /// `cancelled`. Some kinds report more states, for example `needs_review`, or `awaiting_scan`
+    /// and `awaiting_approval` during a login.
     pub state: String,
+    /// Details of the outcome. Its fields depend on `kind`, and it is empty until the operation has
+    /// something to report.
     #[ts(type = "unknown")]
     pub result: Value,
+    /// When the operation was created, as an RFC 3339 time.
     pub created_at: String,
+    /// When the operation last changed, as an RFC 3339 time.
     pub updated_at: String,
 }
-#[derive(Serialize, Deserialize, TS)]
+/// A text or share-card send and how far it got. Media sends are reported as media jobs instead.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeSendIntent {
+    /// Send ID, used to look the send up or cancel it.
     pub id: String,
+    /// ID of the account that is sending.
     pub account_id: String,
+    /// ID of the chat the message is sent to.
     pub destination: String,
+    /// `queued`, `submitting`, `accepted` (WeChat took it), `failed` (WeChat refused it),
+    /// `needs_review` (the outcome is unknown, so check the chat before sending again) or
+    /// `cancelled`.
     pub state: String,
+    /// ID the daemon gave the message when it submitted it to WeChat.
     pub client_id: Option<String>,
+    /// WeChat's ID of the message once it was accepted, as a string. Null until then.
     pub server_id: Option<String>,
+    /// Why the send failed or needs review. Null otherwise.
     pub error_code: Option<String>,
+    /// ID of the saved message that represents this send, once it appears in the profile. Omitted
+    /// until then.
     #[serde(default)]
     #[ts(optional)]
     pub local_message_id: Option<String>,
+    /// When the send was created, as an RFC 3339 time.
     pub created_at: String,
 }
-#[derive(Serialize, Deserialize, TS)]
+/// An entry in the account's event log, which keeps only about the most recent 10,000 events.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeEvent {
+    /// Position of the event in the log, a decimal number written as a string that only increases.
+    /// Pass the last one you handled as `after` to resume.
     pub cursor: String,
+    /// Kind of event, such as `message.committed`, `thread.updated`, `group.updated`,
+    /// `operation.updated` or `send.updated`.
     pub kind: String,
+    /// Details of the event. The fields depend on `kind`; for example `message.committed` carries
+    /// `messageId` and `threadId`.
     #[ts(type = "Record<string, unknown>")]
     pub data: Value,
+    /// When the event was recorded, as an RFC 3339 time.
     pub created_at: String,
 }
-#[derive(Serialize, Deserialize, TS)]
+/// Which daemon is running and what it supports.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeIdentity {
+    /// Product name, `agent-wechat`.
     pub product: String,
+    /// Backend in use, normally `native`.
     pub backend: String,
+    /// Version of the daemon.
     pub version: String,
+    /// Version of this HTTP API, currently 1.
     pub api_version: u32,
+    /// Platform the daemon was built for, as a Rust target triple such as
+    /// `x86_64-unknown-linux-gnu`.
     #[serde(default)]
     #[ts(optional)]
     pub target: Option<String>,
+    /// Names of the features this daemon supports, such as `text-send` and `events`.
     pub capabilities: Vec<String>,
 }
-#[derive(Serialize, Deserialize, TS)]
+/// Identity and state of the running daemon.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeStatus {
+    /// ID of this daemon's data directory. It is created once and kept across restarts.
     pub server_id: String,
+    /// Path of the data directory on the daemon's host.
     pub data_dir: String,
+    /// Process ID of the daemon.
     pub pid: u32,
+    /// Random ID created each time the daemon starts. A shutdown request must repeat it.
     pub ownership_generation: String,
+    /// Identity and build of the daemon.
     pub version: NativeIdentity,
+    /// Daemon state. It is `ready` while the daemon is serving requests.
     pub state: String,
 }
-#[derive(Serialize, Deserialize, TS)]
+/// Request to send a text message, optionally as a quote reply or with mentions.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeTextSendRequest {
+    /// ID of the chat to send to.
     pub thread_id: String,
+    /// The message text. A quote reply can hold up to 16 KiB and other text up to 64 KiB, including
+    /// mention names.
     pub text: String,
+    /// The saved message this text replies to. The token also needs the `read` scope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub quote: Option<wechat_core::QuoteSendReference>,
+    /// Group members to mention. Only allowed when sending to a group.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub mentions: Option<wechat_core::TextMentions>,
 }
-#[derive(Serialize, Deserialize, TS)]
+/// Request to recall a message this account sent.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeRecallRequest {
-    // Exact expected remote identity; an opaque source ID can be reused locally.
+    /// The message's `serverId`, copied as a string. The recall is refused if it does not match the
+    /// message in the URL.
     pub server_id: String,
 }
-#[derive(Serialize, Deserialize, TS)]
+/// Request to mark a chat as read.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeReadRequest {
+    /// The chat's `readStateVersion` from when you read it. The request is refused if the chat has
+    /// changed since.
     pub expected_version: String,
 }
 
-#[derive(Serialize, Deserialize, TS)]
+/// Request to delete the account's saved login credentials.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeForgetRequest {
+    /// Must be true. It confirms that the credentials should be deleted.
     pub confirm: bool,
 }
-#[derive(Serialize, Deserialize, TS)]
+/// Request to repair saved media records from bytes the daemon already holds. It never downloads or
+/// sends anything.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeMediaWritebackRequest {
+    /// How many saved media records to repair in this request, from 1 to 100.
     #[ts(type = "number")]
     pub limit: usize,
 }
@@ -400,29 +644,47 @@ pub fn checked<T: serde::de::DeserializeOwned>(value: Value) -> anyhow::Result<V
     Ok(value)
 }
 
-#[derive(Default, Serialize, Deserialize, TS)]
+/// Options for retrying a media job.
+#[derive(Default, Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeMediaJobRetryRequest {
+    /// True to reuse the upload a send job already finished instead of uploading again. The
+    /// retry-completed-upload route requires true here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub reuse_completed_upload: Option<bool>,
 }
 
-#[derive(Serialize, Deserialize, TS)]
+/// Request to remove a signed-out account.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeAccountRemovalRequest {
+    /// Must repeat the account ID from the URL, to confirm the removal.
     pub confirm_account_id: String,
 }
-#[derive(Serialize, Deserialize, TS)]
+/// Result of removing an account.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeAccountRemoval {
+    /// ID of the account that was removed.
     pub account_id: String,
+    /// True when the account was removed.
     pub removed: bool,
+    /// True when the account's local files were kept. They are always kept.
     pub files_retained: bool,
 }
 
 pub fn typescript() -> String {
     let declarations = [
+        wechat_core::call_types::CallClientHello::decl(),
+        wechat_core::call_types::CallParticipant::decl(),
+        wechat_core::call_types::CallMembership::decl(),
+        wechat_core::call_types::CallParticipantStatus::decl(),
+        wechat_core::call_types::CallParticipantStatusKind::decl(),
+        wechat_core::call_types::CallConferenceInvitation::decl(),
+        wechat_core::call_types::CallInvitationResult::decl(),
+        wechat_core::call_types::CallInvitationStatus::decl(),
+        wechat_core::call_types::CallProtocolErrorCode::decl(),
         wechat_core::call_types::CallCapabilities::decl(),
         wechat_core::call_types::CallAudioFormat::decl(),
         wechat_core::call_types::CallTarget::decl(),
@@ -525,6 +787,16 @@ pub fn typescript() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The generated TypeScript without doc comments and with whitespace
+    /// collapsed, so shape checks do not depend on documentation.
+    fn typescript_shapes() -> String {
+        let mut text = typescript();
+        while let Some(start) = text.find("/**") {
+            let end = text[start..].find("*/").expect("closed doc comment") + start + 2;
+            text.replace_range(start..end, "");
+        }
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
     #[test]
     fn thread_mute_contract_preserves_unknown_and_boolean_preferences() {
         let mut thread = serde_json::json!({"id":"peer","accountId":"one","peerId":"peer","kind":"direct","displayName":null,"unreadCount":0,"readStateVersion":"v","history":{}});
@@ -570,7 +842,7 @@ mod tests {
         ] {
             assert!(serde_json::from_value::<NativeThreadPinRequest>(input).is_err());
         }
-        let generated = typescript();
+        let generated = typescript_shapes();
         assert!(generated.contains("pinned?: boolean | null"));
         assert!(generated.contains("NativeThreadPinRequest = { pinned: boolean, }"));
     }
@@ -628,10 +900,10 @@ mod tests {
     }
     #[test]
     fn generated_contract_uses_lossless_strings_and_nullable_metadata() {
-        let generated = typescript();
+        let generated = typescript_shapes();
         assert!(generated.contains("NATIVE_MAX_SOURCE_BYTES = 536870912 as const"));
         assert!(generated.contains("NATIVE_MAX_ORDINARY_SOURCE_BYTES = 26214383 as const"));
-        assert!(generated.contains("NATIVE_MAX_VIDEO_SOURCE_BYTES = 52428800 as const"));
+        assert!(generated.contains("NATIVE_MAX_VIDEO_SOURCE_BYTES = 536870912 as const"));
         assert!(generated.contains("videoQuality?: VideoSendQuality"));
         assert!(generated.contains("serverId: string | null"));
         assert!(generated.contains("unreadCount: number | null"));

@@ -127,6 +127,16 @@ test("source bounds follow kind and hub capabilities, including 80 MiB native fi
     () => review("clip.mov", 80 * MiB),
     /video source limit is 50 MiB/,
   );
+  const current = accountAttachmentLimits({
+    ...capabilities,
+    mediaSendMaxBytes: { ...capabilities.mediaSendMaxBytes, video: 512 * MiB },
+  });
+  assert.equal(attachmentSourceLimit("video"), 512 * MiB);
+  assert.equal(review("clip.mov", 512 * MiB, current)[0].kind, "video");
+  assert.throws(
+    () => review("clip.mov", 512 * MiB + 1, current),
+    /video source limit is 512 MiB/,
+  );
   assert.throws(
     () => review("photo.jpg", 80 * MiB),
     /image source limit is just under 25 MiB/,

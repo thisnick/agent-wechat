@@ -175,7 +175,7 @@ impl Core {
                     job.contact_revision = self.group_revision(account, &job.group)?;
                     job.contact_raw =
                         Some(self.group_read(account, job.epoch.as_deref(), |state| {
-                            self.upstream
+                            self.account_upstream(account)?
                                 .lookup_contacts_raw(state, std::slice::from_ref(&job.group))
                         })?);
                     self.save_incoming_group(account, &key, &job)?;
@@ -186,7 +186,8 @@ impl Core {
                     }
                     job.roster_raw =
                         Some(self.group_read(account, job.epoch.as_deref(), |state| {
-                            self.upstream.lookup_room_raw(state, &job.group, 0)
+                            self.account_upstream(account)?
+                                .lookup_room_raw(state, &job.group, 0)
                         })?);
                     self.save_incoming_group(account, &key, &job)?;
                 }
@@ -196,7 +197,8 @@ impl Core {
                     }
                     job.detail_raw =
                         Some(self.group_read(account, job.epoch.as_deref(), |state| {
-                            self.upstream.group_detail_raw(state, &job.group)
+                            self.account_upstream(account)?
+                                .group_detail_raw(state, &job.group)
                         })?);
                     self.save_incoming_group(account, &key, &job)?;
                 }
@@ -210,6 +212,9 @@ impl Core {
                 )?;
                 self.store.append_event_once(account,&format!("group-refreshed:{}",job.source),"group.updated",&json!({"groupId":job.group,"origin":job.origin,"source":"remote_sync_refresh","membersRefreshed":job.members,"announcementRefreshed":job.detail,"profileProjection":"partial"}))?;
                 self.store.put_runtime(account, &done(&job.source), b"1")?;
+                // Keep the completed job until its original command has been
+                // revisited, so a restart cannot lose this local recovery work.
+                self.resume_incoming_group_source(account, &job)?;
                 self.store.clear_runtime(account, &key)?;
                 Ok(true)
             })();
@@ -230,6 +235,60 @@ impl Core {
             }
         }
         Ok(0)
+    }
+    fn resume_incoming_group_source(&self, account: &str, job: &Refresh) -> Result<()> {
+        let Some(source) = job.source.strip_prefix("projected:") else {
+            // A direct metadata application has no enclosing sync batch.
+            return Ok(());
+        };
+        let (batch_id, index) = source
+            .rsplit_once(':')
+            .context("invalid_group_source_receipt")?;
+        let index: usize = index.parse().context("invalid_group_source_receipt")?;
+        let Some((stream, sealed)) = self.store.retained_sync_batch(account, batch_id)? else {
+            return Ok(());
+        };
+        let raw = self
+            .vault
+            .open_record(account, &format!("apply:{batch_id}"), &sealed)?;
+        let commands = match stream.as_str() {
+            "message" => serde_json::from_slice::<wechat_protocol::wire::SyncBatch>(&raw)?.commands,
+            "contact" => {
+                serde_json::from_slice::<wechat_protocol::contact_sync::ContactSyncBatch>(&raw)?
+                    .commands
+            }
+            _ => bail!("invalid_group_source_stream"),
+        };
+        let command = commands
+            .get(index)
+            .context("invalid_group_source_receipt")?;
+        ensure!(command.id == 2, "group_source_command_mismatch");
+        ensure!(
+            wechat_protocol::wire::decode_contact_record(&command.payload)?.username == job.group,
+            "group_source_command_mismatch"
+        );
+        if self.store.runtime(account, &job.source)?.is_none() {
+            if let Err(error) = self.apply_sync_command(account, command, &job.source, &job.origin)
+            {
+                if sync_projection::projection_blocker(&error).is_some() {
+                    // The refreshed fields may coexist with unsupported controls.
+                    // Keep their batch blocked until a separately requested repair.
+                    return Ok(());
+                }
+                return Err(error);
+            }
+        }
+        // Completion checks read receipts only. They never dispatch unrelated
+        // commands in this batch or reopen the account's other blocked batches.
+        for start in (0..commands.len()).step_by(500) {
+            let receipts: Vec<_> = (start..commands.len().min(start + 500))
+                .map(|index| format!("projected:{batch_id}:{index}"))
+                .collect();
+            if self.store.runtime_keys(account, &receipts)?.len() != receipts.len() {
+                return Ok(());
+            }
+        }
+        self.store.finish_sync(account, batch_id)
     }
     fn apply_incoming_group(&self, account: &str, intent: &str, job: &Refresh) -> Result<()> {
         let (location, keys) = self.profile_location_keys(account)?;
@@ -379,8 +438,8 @@ fn sealed_receipt(core: &Core, account: &str, key: &str, job: &Refresh) -> Resul
 mod tests {
     use super::*;
     use wechat_protocol::wire::SyncCommand;
-    const ROOM: &str = "synthetic@chatroom";
-    fn contact(name: &str, signals: bool) -> Vec<u8> {
+    pub(super) const ROOM: &str = "synthetic@chatroom";
+    pub(super) fn contact(name: &str, signals: bool) -> Vec<u8> {
         let mut f = vec![
             p::bytes(1, &p::bytes(1, ROOM.as_bytes())),
             p::bytes(2, &p::bytes(1, name.as_bytes())),
@@ -421,13 +480,22 @@ mod tests {
                 .to_string(),
             "group_metadata_refresh_pending"
         );
-        let (key, sealed) = core
+        ready_refresh(core, "phone-change")
+    }
+    pub(super) fn ready_refresh(core: &Core, source: &str) -> (String, Refresh) {
+        let (key, mut job) = core
             .store
             .incoming_group_refreshes("one")
             .unwrap()
-            .remove(0);
-        let mut job: Refresh =
-            serde_json::from_slice(&core.vault.open_record("one", &key, &sealed).unwrap()).unwrap();
+            .into_iter()
+            .map(|(key, sealed)| {
+                let job: Refresh =
+                    serde_json::from_slice(&core.vault.open_record("one", &key, &sealed).unwrap())
+                        .unwrap();
+                (key, job)
+            })
+            .find(|(_, job)| job.source == source)
+            .unwrap();
         job.contact_revision = core.group_revision("one", ROOM).unwrap();
         job.contact_raw = Some(
             p::message(&[
@@ -546,3 +614,7 @@ mod tests {
         assert_eq!(core.refresh_incoming_groups("one", false).unwrap(), 0);
     }
 }
+
+#[cfg(test)]
+#[path = "incoming_group_projection_tests.rs"]
+mod projection_tests;

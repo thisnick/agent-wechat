@@ -38,6 +38,39 @@ pub struct Target {
     server_id: String,
     account_id: String,
     thread_id: String,
+    /// The message that raised the alert, so the window can scroll to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    message_id: Option<String>,
+}
+#[cfg(target_os = "macos")]
+impl Target {
+    /// Groups one chat's alerts together in Notification Center.
+    pub(crate) fn thread_key(&self) -> String {
+        thread_key(&self.connection_id, &self.account_id, &self.thread_id)
+    }
+    /// Identifies the alert for one message, so a repeat replaces it.
+    pub(crate) fn request_id(&self) -> String {
+        format!(
+            "{}|{}|{}",
+            self.connection_id,
+            self.account_id,
+            self.message_id.as_deref().unwrap_or(&self.thread_id)
+        )
+    }
+}
+#[cfg(target_os = "macos")]
+fn thread_key(connection: &str, account: &str, thread: &str) -> String {
+    format!("{connection}|{account}|{thread}")
+}
+/// What a macOS alert carries, so a click or reply still works after the app restarts.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Payload {
+    pub(crate) target: Target,
+    /// WeChat's ID of the message, needed to quote it. Reply is offered only with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) server_id: Option<String>,
 }
 #[derive(Default, Serialize, Deserialize)]
 struct Ledger {
@@ -304,6 +337,9 @@ fn muted_or_read(thread: &Value, focus: Option<&Focus>, target: &Target, reading
             })
 }
 pub fn start(app: tauri::AppHandle) -> Result<()> {
+    // Installed while the app launches, so a click that launched it is delivered.
+    #[cfg(target_os = "macos")]
+    install_macos(&app);
     let clicked = app.clone();
     app.notification().on_action(move |action| {
         if action.action_id() != "tap" {
@@ -325,7 +361,9 @@ pub(crate) fn open_target(app: tauri::AppHandle, target: Target) {
     tauri::async_runtime::spawn(async move {
         let desktop = app.state::<Desktop>();
         let active = desktop.inner.lock().await.active.clone();
-        if active.is_none_or(|active| {
+        // A click can arrive before the hub is connected, such as one that launched the
+        // app. Keep its target pending: the window takes it once that hub is connected.
+        if active.is_some_and(|active| {
             active.connection.id != target.connection_id
                 || active.connection.server_id.as_deref() != Some(target.server_id.as_str())
         }) {
@@ -406,7 +444,7 @@ async fn coordinate(app: tauri::AppHandle) {
                         tokio::select! { _ = child.cancelled() => {}, _ = listen(app, active, account) => {} }
                     }));
                 }
-                *desktop.notifications.status.lock().await = "Listening for new messages".into();
+                *desktop.notifications.status.lock().await = listening_status();
             } else {
                 *desktop.notifications.status.lock().await = "Waiting for the hub".into();
             }
@@ -425,6 +463,21 @@ async fn coordinate(app: tauri::AppHandle) {
     for (_, task) in tasks {
         task.abort();
     }
+}
+/// The status shown while listening, which on macOS also reports alerts that cannot
+/// be shown.
+fn listening_status() -> String {
+    #[cfg(target_os = "macos")]
+    if crate::macos_notifications::available() {
+        if crate::macos_notifications::permitted() == Some(false) {
+            return "Allow AgentWechat in System Settings > Notifications to see new messages"
+                .into();
+        }
+        if let Some(error) = crate::macos_notifications::last_error() {
+            return format!("Listening for new messages; the last alert failed: {error}");
+        }
+    }
+    "Listening for new messages".into()
 }
 async fn tail(active: &Active, account: &str) -> Result<u64> {
     let mut url = api(active, &["v1", "accounts", account, "threads"])?;
@@ -563,6 +616,7 @@ async fn alert(
             .context("Missing hub identity")?,
         account_id: account.into(),
         thread_id: thread_id.into(),
+        message_id: Some(id.into()),
     };
     let desktop = app.state::<Desktop>();
     let inner = desktop.inner.lock().await;
@@ -601,8 +655,20 @@ async fn alert(
         Instant::now(),
     );
     drop(inner);
-    crate::notification_sound::show(app, &title, subtitle.as_deref(), &body, Some(target), sound)
-        .await?;
+    let server_id = message["serverId"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned);
+    crate::notification_sound::show(
+        app,
+        &title,
+        subtitle.as_deref(),
+        &body,
+        Some(target),
+        server_id,
+        sound,
+    )
+    .await?;
     Ok(())
 }
 #[derive(Default)]
@@ -656,26 +722,40 @@ pub async fn notifications_context(
     }) {
         return Err("Invalid reading context".into());
     }
+    #[cfg(target_os = "macos")]
+    if let Some(Focus {
+        connection_id,
+        account_id: Some(account),
+        thread_id: Some(thread),
+    }) = &focus
+    {
+        if crate::macos_notifications::available() {
+            crate::macos_notifications::clear_thread(&thread_key(connection_id, account, thread));
+        }
+    }
     *state.notifications.focus.lock().await = focus;
     Ok(())
 }
 #[tauri::command]
 pub async fn notifications_take_target(
     state: State<'_, Desktop>,
+    connection_id: Option<String>,
 ) -> Result<Option<Target>, String> {
     let inner = state.inner.lock().await;
-    Ok(state
-        .notifications
-        .pending
-        .lock()
-        .await
-        .take()
-        .filter(|target| {
-            inner.active.as_ref().is_some_and(|active| {
-                active.connection.id == target.connection_id
-                    && active.connection.server_id.as_deref() == Some(target.server_id.as_str())
-            })
-        }))
+    let mut pending = state.notifications.pending.lock().await;
+    // A caller that names its connection leaves another connection's target pending
+    // instead of taking and discarding it.
+    if let (Some(expected), Some(target)) = (connection_id.as_deref(), pending.as_ref()) {
+        if target.connection_id != expected {
+            return Ok(None);
+        }
+    }
+    Ok(pending.take().filter(|target| {
+        inner.active.as_ref().is_some_and(|active| {
+            active.connection.id == target.connection_id
+                && active.connection.server_id.as_deref() == Some(target.server_id.as_str())
+        })
+    }))
 }
 #[tauri::command]
 pub async fn notifications_account_settings(
@@ -754,6 +834,241 @@ pub async fn status(desktop: &Desktop) -> String {
     desktop.notifications.status.lock().await.clone()
 }
 
+#[cfg(target_os = "macos")]
+impl Payload {
+    /// Whether the message can be quoted, which a reply needs.
+    pub(crate) fn quotable(&self) -> bool {
+        self.server_id.is_some() && self.target.message_id.is_some()
+    }
+}
+/// Routes clicks and actions on macOS alerts to the window and the hub.
+#[cfg(target_os = "macos")]
+fn install_macos(app: &tauri::AppHandle) {
+    use crate::macos_notifications::{self as mac, Action};
+    if !mac::available() {
+        return;
+    }
+    let app = app.clone();
+    mac::install(
+        move |mac::Response {
+                  request_id,
+                  action,
+                  payload,
+              }| {
+            let Some(payload) = payload
+                .as_deref()
+                .and_then(|payload| serde_json::from_str::<Payload>(payload).ok())
+            else {
+                return;
+            };
+            let app = app.clone();
+            match action {
+                Action::Open => open_target(app, payload.target),
+                Action::Reply(text) => {
+                    tauri::async_runtime::spawn(async move {
+                        match send_reply(&app, &request_id, &payload, &text).await {
+                            Err(error) => {
+                                action_failed(&request_id, &payload, "Reply not sent", &error)
+                            }
+                            // Replying means the chat was read, as when replying on a phone.
+                            Ok(true) => {
+                                if let Err(error) = mark_read(&app, &payload).await {
+                                    action_failed(
+                                        &request_id,
+                                        &payload,
+                                        "Replied, but not marked as read",
+                                        &error,
+                                    );
+                                }
+                            }
+                            Ok(false) => {}
+                        }
+                    });
+                }
+                Action::MarkRead => {
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(error) = mark_read(&app, &payload).await {
+                            action_failed(&request_id, &payload, "Not marked as read", &error);
+                        }
+                    });
+                }
+                Action::Other => {}
+            }
+        },
+    );
+}
+/// The idempotency key and body of a quoted reply, or `None` when there is nothing to
+/// send or the message cannot be quoted. The key is derived from the alert, so a
+/// retried request sends at most once.
+#[cfg(target_os = "macos")]
+fn reply_request(request_id: &str, payload: &Payload, text: &str) -> Option<(String, Value)> {
+    let text = text.trim();
+    let server_id = payload.server_id.as_deref()?;
+    let message_id = payload.target.message_id.as_deref()?;
+    if text.is_empty() {
+        return None;
+    }
+    let key = format!("desktop-reply-{:x}", Sha256::digest(request_id.as_bytes()));
+    let body = serde_json::json!({
+        "threadId": payload.target.thread_id,
+        "text": text,
+        "quote": { "messageId": message_id, "serverId": server_id },
+    });
+    Some((key, body))
+}
+/// Sends a reply typed into an alert as a quote of the alert's message. Returns
+/// whether anything was sent.
+#[cfg(target_os = "macos")]
+async fn send_reply(
+    app: &tauri::AppHandle,
+    request_id: &str,
+    payload: &Payload,
+    text: &str,
+) -> Result<bool> {
+    let Some((key, body)) = reply_request(request_id, payload, text) else {
+        return Ok(false);
+    };
+    let active = connected(app, &payload.target).await?;
+    let url = api(
+        &active,
+        &["v1", "accounts", &payload.target.account_id, "sends"],
+    )?;
+    if let Some(reason) = post(&active, url, &body, Some(&key)).await? {
+        bail!("The hub refused the reply ({reason})");
+    }
+    Ok(true)
+}
+/// Whether an incoming message newer than `message_id` is on a newest-first page
+/// of a chat's messages: `None` when the page does not reach `message_id`.
+#[cfg(target_os = "macos")]
+fn newer_incoming(page: &Value, message_id: &str) -> Option<bool> {
+    let mut newer = false;
+    for message in page["items"].as_array()? {
+        if message["id"] == message_id {
+            return Some(newer);
+        }
+        newer |= message["direction"] == "incoming";
+    }
+    None
+}
+/// Marks the alert's chat read and clears its alerts, unless an incoming message newer
+/// than the alerted one has arrived: the user has not seen it, so the chat stays
+/// unread. Returns whether the chat was marked read.
+#[cfg(target_os = "macos")]
+async fn mark_read(app: &tauri::AppHandle, payload: &Payload) -> Result<bool> {
+    let target = &payload.target;
+    let Some(message_id) = target.message_id.as_deref() else {
+        return Ok(false);
+    };
+    let active = connected(app, target).await?;
+    let thread = [
+        "v1",
+        "accounts",
+        &target.account_id,
+        "threads",
+        &target.thread_id,
+    ];
+    // The read-state version changes with every change to the profile, so it is read
+    // just before the request; a change in between is a conflict, checked once more.
+    for _ in 0..2 {
+        let mut url = api(&active, &[&thread[..], &["messages"]].concat())?;
+        url.query_pairs_mut().append_pair("limit", "50");
+        if newer_incoming(&get(&active, url).await?, message_id) != Some(false) {
+            return Ok(false);
+        }
+        let current = get(&active, api(&active, &thread)?).await?;
+        let body = serde_json::json!({ "expectedVersion": field(&current, "readStateVersion")? });
+        let url = api(&active, &[&thread[..], &["read-state"]].concat())?;
+        match post(&active, url, &body, None).await? {
+            None => {
+                crate::macos_notifications::clear_thread(&target.thread_key());
+                return Ok(true);
+            }
+            Some(reason) if reason == "read_state_conflict" => continue,
+            Some(reason) => bail!("The hub refused it ({reason})"),
+        }
+    }
+    Ok(false)
+}
+/// Posts JSON to the hub: `Ok(None)` when it accepted the request, `Ok(Some(code))`
+/// with the hub's error code when it refused it.
+#[cfg(target_os = "macos")]
+async fn post(
+    active: &Active,
+    url: reqwest::Url,
+    body: &Value,
+    idempotency_key: Option<&str>,
+) -> Result<Option<String>> {
+    let mut request = active
+        .http
+        .post(url)
+        .bearer_auth(active.key.as_str())
+        .json(body);
+    if let Some(key) = idempotency_key {
+        request = request.header("Idempotency-Key", key);
+    }
+    let response = tokio::time::timeout(Duration::from_secs(15), request.send())
+        .await
+        .context("The hub did not answer in time")?
+        .context("Cannot reach the hub")?;
+    let status = response.status();
+    if status.is_success() {
+        return Ok(None);
+    }
+    let reason = response
+        .json::<Value>()
+        .await
+        .ok()
+        .and_then(|error| {
+            error["error"]["code"]
+                .as_str()
+                .or(error["error"].as_str())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| status.to_string());
+    Ok(Some(reason))
+}
+/// The connection to the alert's hub, waiting briefly while the app is still
+/// connecting, such as when the action launched it.
+#[cfg(target_os = "macos")]
+async fn connected(app: &tauri::AppHandle, target: &Target) -> Result<Arc<Active>> {
+    for _ in 0..40 {
+        let active = app.state::<Desktop>().inner.lock().await.active.clone();
+        match active {
+            Some(active)
+                if active.connection.id == target.connection_id
+                    && active.connection.server_id.as_deref()
+                        == Some(target.server_id.as_str()) =>
+            {
+                return Ok(active)
+            }
+            Some(_) => bail!("AgentWechat is connected to a different hub"),
+            None => tokio::time::sleep(Duration::from_millis(500)).await,
+        }
+    }
+    bail!("AgentWechat is not connected to the hub")
+}
+/// Tells the user an action on an alert failed. Clicking it opens the chat.
+#[cfg(target_os = "macos")]
+fn action_failed(request_id: &str, payload: &Payload, title: &str, error: &anyhow::Error) {
+    let failed = Payload {
+        target: payload.target.clone(),
+        server_id: None,
+    };
+    let Ok(json) = serde_json::to_string(&failed) else {
+        return;
+    };
+    crate::macos_notifications::post(&crate::macos_notifications::Alert {
+        request_id: &format!("{request_id}|failed"),
+        thread_key: &payload.target.thread_key(),
+        title,
+        subtitle: None,
+        body: &format!("{error}. Click to open the chat."),
+        sound: None,
+        payload: &json,
+        reply: false,
+    });
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -793,6 +1108,7 @@ mod tests {
             server_id: "server".into(),
             account_id: "one".into(),
             thread_id: "room".into(),
+            message_id: None,
         };
         let focus = Focus {
             connection_id: "hub".into(),
@@ -990,5 +1306,101 @@ mod tests {
         event["data"]["direction"] = json!("incoming");
         event["createdAt"] = json!("2020-01-01T00:00:00Z");
         assert!(!live(&event));
+    }
+
+    #[cfg(target_os = "macos")]
+    fn quoted(server_id: Option<&str>, message_id: Option<&str>) -> Payload {
+        Payload {
+            target: Target {
+                connection_id: "hub".into(),
+                server_id: "server".into(),
+                account_id: "me".into(),
+                thread_id: "team@chatroom".into(),
+                message_id: message_id.map(Into::into),
+            },
+            server_id: server_id.map(Into::into),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_reply_quotes_the_alerted_message_once() {
+        let payload = quoted(Some("7302551184426"), Some("m-1"));
+        assert!(payload.quotable());
+        let (key, body) = reply_request("hub|me|m-1", &payload, "  On my way \n").unwrap();
+        assert_eq!(
+            body,
+            json!({
+                "threadId": "team@chatroom",
+                "text": "On my way",
+                "quote": { "messageId": "m-1", "serverId": "7302551184426" },
+            })
+        );
+        // Same alert, same key: a retried request cannot send twice.
+        assert_eq!(
+            key,
+            reply_request("hub|me|m-1", &payload, "Other").unwrap().0
+        );
+        assert_ne!(
+            key,
+            reply_request("hub|me|m-2", &payload, "On my way")
+                .unwrap()
+                .0
+        );
+        assert!(key.len() <= 200 && key.bytes().all(|b| b.is_ascii_graphic()));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn reply_needs_a_quotable_message_and_some_text() {
+        assert!(!quoted(None, Some("m-1")).quotable());
+        assert!(!quoted(Some("73"), None).quotable());
+        assert!(reply_request("id", &quoted(None, Some("m-1")), "Hi").is_none());
+        assert!(reply_request("id", &quoted(Some("73"), None), "Hi").is_none());
+        assert!(reply_request("id", &quoted(Some("73"), Some("m-1")), " \n ").is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn alerts_group_by_chat_and_are_identified_by_message() {
+        let payload = quoted(Some("73"), Some("m-1"));
+        assert_eq!(payload.target.thread_key(), "hub|me|team@chatroom");
+        assert_eq!(payload.target.request_id(), "hub|me|m-1");
+        assert_eq!(
+            thread_key("hub", "me", "team@chatroom"),
+            payload.target.thread_key(),
+            "the read chat clears the same group its alerts were posted in"
+        );
+        let json = serde_json::to_string(&payload).unwrap();
+        let back: Payload = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.server_id.as_deref(), Some("73"));
+        assert_eq!(back.target.request_id(), "hub|me|m-1");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mark_read_waits_for_newer_incoming_messages_to_be_seen() {
+        let page = |items: Value| json!({ "items": items });
+        let m = |id: &str, direction: &str| json!({ "id": id, "direction": direction });
+        // Only our own reply came after the alerted message: safe to mark read.
+        let replied = page(json!([
+            m("r", "outgoing"),
+            m("a", "incoming"),
+            m("z", "incoming")
+        ]));
+        assert_eq!(newer_incoming(&replied, "a"), Some(false));
+        // Someone wrote again after the alert: the user hasn't seen it.
+        let newer = page(json!([
+            m("b", "incoming"),
+            m("r", "outgoing"),
+            m("a", "incoming")
+        ]));
+        assert_eq!(newer_incoming(&newer, "a"), Some(true));
+        // The alerted message isn't on the page: unknown, so not safe.
+        assert_eq!(
+            newer_incoming(&page(json!([m("b", "incoming")])), "a"),
+            None
+        );
+        assert_eq!(newer_incoming(&json!({}), "a"), None);
     }
 }
