@@ -30,8 +30,9 @@ pnpm changeset
 4. Merge the Version Packages PR. Application version changes automatically start
    **Prepare native release assets** (`native-release.yml`) for that exact commit.
    The automatic run requires a merged PR from this repository's
-   `changeset-release/main` branch. It builds and tests the configured targets, verifies
-   source and checksums, and publishes the GitHub release assets. Existing
+   `changeset-release/main` branch. It reserves the version tag at that commit
+   before building, then builds and tests the configured targets, verifies source
+   and checksums, and publishes the GitHub release assets. Existing
    `native-release` environment reviewer requirements still apply.
 
    Releases skip the development-only `wx-dev` upstream simulator and its smoke
@@ -216,6 +217,15 @@ available for native recovery. npm publication runs only on the automatic
 version-merge run. Preserve existing release assets when recovering a release.
 The preflight refuses conflicting tags or published npm versions. Host deployment
 is a separate operation.
+
+### Release tag recovery
+
+If GitHub denies tag creation after a workflow change lands on `main`, check
+that the version tag is absent and the failed run's commit is the Version
+Packages merge for that version. An authorized maintainer can push that exact
+commit as the new version tag with
+`git push origin SOURCE_SHA:refs/tags/vVERSION`, then re-run failed jobs on the
+original run. If the tag already exists, verify it resolves to the run's commit.
 
 ## Trusted Publishing (OIDC)
 

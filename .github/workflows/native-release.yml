@@ -48,8 +48,29 @@ jobs:
         run: node scripts/native-release-trigger.mjs
         env:
           GH_TOKEN: ${{ github.token }}
-  build:
+  reserve-tag:
     needs: plan
+    if: needs.plan.outputs.publish == 'true'
+    environment: native-release
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      # Reserve the version while main still points at the version PR commit.
+      - name: Reserve the exact application release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          node scripts/native-release-policy.mjs --check-registry
+          node scripts/native-release-preflight.mjs --reserve-tag
+  build:
+    needs: [plan, reserve-tag]
     if: needs.plan.outputs.publish == 'true'
     strategy:
       fail-fast: false
@@ -111,7 +132,7 @@ jobs:
           path: artifacts/native/*
           if-no-files-found: error
   portable:
-    needs: plan
+    needs: [plan, reserve-tag]
     if: needs.plan.outputs.publish == 'true'
     uses: ./.github/workflows/native-portable.yml
     with:
@@ -180,21 +201,17 @@ jobs:
           RELEASE_VERSION: ${{ needs.plan.outputs.version }}
           RELEASE_IS_PRERELEASE: ${{ steps.release_policy.outputs.prerelease }}
         run: |
-          node scripts/native-release-preflight.mjs
+          node scripts/native-release-preflight.mjs --require-tag
           TAG="v$RELEASE_VERSION"
           RELEASE_FLAGS=(--prerelease=false)
           if [ "$RELEASE_IS_PRERELEASE" = true ]; then
             RELEASE_FLAGS=(--prerelease --latest=false)
           fi
-          if ! gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" >/dev/null 2>&1; then
-            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/$TAG" -f "sha=$GITHUB_SHA" >/dev/null
-          fi
-          node scripts/native-release-preflight.mjs
           if gh release view "$TAG" --json body --jq .body > artifacts/existing-release-notes.md; then
             node scripts/native-release-notes.mjs --existing artifacts/existing-release-notes.md --output artifacts/release-notes.md
             gh release edit "$TAG" --notes-file artifacts/release-notes.md "${RELEASE_FLAGS[@]}"
           else
-            gh release create "$TAG" --verify-tag --target "$GITHUB_SHA" --title "$TAG" --notes-file artifacts/release-notes.md "${RELEASE_FLAGS[@]}"
+            gh release create "$TAG" --verify-tag --title "$TAG" --notes-file artifacts/release-notes.md "${RELEASE_FLAGS[@]}"
           fi
           gh release upload "$TAG" artifacts/native/* artifacts/desktop/*
 
