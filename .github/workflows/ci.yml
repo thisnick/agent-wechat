@@ -30,6 +30,7 @@ on:
       - 'scripts/native-build-release.test.py'
       - 'scripts/native-release-preflight*.mjs'
       - 'scripts/native-merge-release*.mjs'
+      - 'scripts/native-image-release*.mjs'
       - '.changeset/**'
       - 'scripts/install-ci-npm.sh'
       - 'scripts/verify-ci-publisher*.mjs'
@@ -60,6 +61,7 @@ jobs:
               - 'scripts/native-build-release*'
               - 'scripts/native-release-preflight*'
               - 'scripts/native-merge-release*'
+              - 'scripts/native-image-release*'
               - '.github/workflows/ci.yml'
               - '.github/workflows/native-*.yml'
               - '.github/workflows/desktop.yml'
@@ -173,6 +175,7 @@ jobs:
           python3 scripts/native-ci-build.test.py
           python3 scripts/native-build-release.test.py
           node --test scripts/native-ci-artifact.test.mjs scripts/native-ci-media-assertions.test.mjs scripts/native-release-preflight.test.mjs scripts/native-merge-release.test.mjs
+          node --test scripts/native-image-release.test.mjs
 
   docs:
     needs: changes
