@@ -15,6 +15,13 @@ description: 常见安装、登录、Profile 数据、多媒体及 OpenClaw 问�
 
 **旧版 `serverUrl` 或 `backend` 配置被拒绝。** 说明你正在使用 0.x 版本的旧配置。参考[从旧容器迁移](/zh-cn/setup/migrate/)进行升级调整。
 
+**提示 "cannot open … database WAL …; existing files preserved"。** 说明 Daemon 自身的某个 SQLite 数据库与其日志（旁边的 `-wal` 文件）不一致。通常发生于计算机、虚拟机或 WSL 突发断电或异常关机。Daemon 会自动尝试修复常见异常，并在数据库同级目录下保留一份带有 `.sqlite-recovery-…` 前缀的原始副本。如果依然拒绝启动：
+
+1. 停止 Daemon 服务。
+2. 将报错信息中提及的数据库文件以及旁边的 `-wal` 与 `-shm` 文件备份复制到安全位置。
+3. 如果报错信息包含 `commits from a newer log generation`、`index exceeds log` 或 `published frame is not a verified commit`，说明日志缺少最新变更。若需丢弃这些未提交更改直接启动，可将该目录下的 `-shm` 文件移出目录，然后启动 Daemon。Daemon 会在正式写入前重新校验日志。
+4. 若为其他报错信息，说明日志本身已损坏。请从备份中恢复数据目录，或携带完整报错信息[前往 GitHub 提交 Issue](https://github.com/thisnick/agent-wechat/issues)。
+
 ## 登录相关
 
 **提示 "Account mismatch" 或数据库无法解密解锁。** 说明当前扫码登录的微信账号与该 Profile 目录原本所属的账号不一致。必须使用该 Profile 原绑定的账号进行登录，重新扫码并不能混用不同账号的数据。

@@ -34,6 +34,5 @@ import { Aside } from '@astrojs/starlight/components';
 - **历史记录来自本地微信数据，而非云端。** 微信不会向新登录的设备同步全部云端历史，因此新创建的 Profile 仅记录自登录起收到的消息。
 - **数据保留微信官方原生格式。** agent-wechat 直接读写 Linux 版微信的数据文件，可完美继承原有数据。
 - OpenClaw 和其他客户端可以运行在能访问 Daemon 端口的任意机器上。
-- 查看 [功能验证清单](https://github.com/thisnick/agent-wechat/blob/main/packages/native-client-rust/FEATURES.md) 获取具体测试验证详情。
 - 发送不同类型的附件具有[不同的体积限制](/zh-cn/use/media/)；大文件通道具有独立的状态验证流程。
 </Aside>

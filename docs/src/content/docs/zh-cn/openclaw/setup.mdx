@@ -61,6 +61,8 @@ import chat from '../../../../assets/wechat-chat.svg';
 
 下一步：配置[响应权限控制](/zh-cn/openclaw/access/)（包含群聊权限），为智能体分配专属[工具](/zh-cn/openclaw/tools/)，以及按需开启[语音通话](/zh-cn/openclaw/calling/)。
 
+可选工具需要通过 OpenClaw 显式单独授权。例如，开启语音通话并不会自动将 `wechat_call` 添加到智能体的工具列表中；需要按照[智能体工具](/zh-cn/openclaw/tools/#语音通话)中的说明将其添加到 `tools.alsoAllow` 中。
+
 <Aside title="使用提示">
 - **默认不响应任何消息。** 若未配置 `dmPolicy` 或 `groupPolicy`，智能体将对所有来信保持沉默。
 - **智能体代表你本人回复。** 所有外发消息均直接从你的微信账号发出，且 OpenClaw 处理完成后会自动将该会话标记为已读。详见[已读回执](/zh-cn/openclaw/read-receipts/)。

@@ -42,6 +42,33 @@ wx --server-name desktop --ca-cert-file /path/to/certificate.pem status
 
 在配置远程连接时，请将对应的 HTTPS 地址保存为服务器 URL。
 
+## 通过地址打开指定视图
+
+Web 客户端为每个视图提供了独立的 URL 路径，因此刷新、后退与书签都能保留当前位置。会话、消息和图片均使用经过 URL 编码的 ID 命名。请在这些路径前加上 `#`：
+
+| 打开目标 | 路径 |
+| --- | --- |
+| 账号列表 | `/{server}/accounts` |
+| 会话列表 | `/{server}/{account}/chats` |
+| 指定会话 | `/{server}/{account}/chats/{chat}` |
+| 高亮显示指定消息 | `/{server}/{account}/chats/{chat}/message/{message}` |
+| 图片或视频查看器 | `/{server}/{account}/chats/{chat}/media/{message}` |
+| 会话或群聊详情 | `/{server}/{account}/chats/{chat}/info` |
+| 通讯录、发起新聊天、设置 | `/{server}/{account}/contacts`, `/new-chat`, `/settings` |
+
+`{server}` 为 Hub 的服务器 ID；可直接从浏览器地址栏中复制它与账号 ID。若该账号已登出，应用会展示登录界面并在登录成功后跳转到目标地址。若未找到对应会话或消息，应用会打开会话列表或聊天界面并进行提示。
+
+## 消息通知
+
+点击消息通知可直接定位并打开该消息所在的会话。在 macOS 上：
+
+- 通知中心会按会话对通知进行分组折叠，在应用中打开会话会自动清除该会话的所有通知。
+- **标记已读 (Mark as Read)** 会将该会话标记为已读并清除通知。若此后收到了更新的消息，该会话仍将保持未读。
+- **回复 (Reply)** 会将输入的文本作为对该消息的引用回复发出，并随后将该会话标记为已读。该操作仅在消息支持被引用时显示。
+- 应用重启后，点击通知仍可正常打开对应的会话。
+
+若未弹出通知，请前往 **系统设置 → 通知** 中允许 AgentWechat 发送通知。
+
 <Aside title="使用提示">
 配置完成后，每当打开应用时本地 Hub 会自动启动（即使当前图形界面连接的是远程节点）。关闭窗口后应用仍将在托盘或状态栏中后台运行。如需彻底停止服务，请选择 **退出 AgentWechat**。退出程序不会导致微信退出登录或删除 Profile。Linux 桌面端需要运行未锁定的 Secret Service 密钥环。单独安装的 CLI 无法直接读取桌面密钥环，需导出密钥文件或创建独立的 [API 令牌](/zh-cn/reference/tokens/)。
 </Aside>
