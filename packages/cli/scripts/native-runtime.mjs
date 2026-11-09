@@ -68,53 +68,39 @@ export async function readManifest(root = packageRoot) {
   const manifest = JSON.parse(data);
   return { version: pkg.version, manifest, asset: validateManifest(manifest, pkg.version) };
 }
-/** Read bounded release bytes under one deadline for redirects and the response body. */
 export async function fetchBytes(url, maxBytes, { fetchImpl = fetch, allowHttpLoopback = false, timeoutMs = 30_000 } = {}) {
-  const original = new URL(url);
-  let current = original;
+  let current = new URL(url);
   if (current.protocol === 'https:' && process.env.NODE_TLS_REJECT_UNAUTHORIZED === '0') throw new Error('Native downloads refuse disabled TLS verification');
   const signal = AbortSignal.timeout(timeoutMs);
-  try {
-    for (let redirects = 0; redirects <= 3; redirects++) {
-      const testLocal = allowHttpLoopback && current.protocol === 'http:' && ['127.0.0.1', '[::1]'].includes(current.hostname);
-      if (current.username || current.password || current.hash || (!testLocal && (current.protocol !== 'https:' || !allowedDownloadHosts.has(current.hostname) || current.port))) {
-        throw new Error('Native downloads require an approved HTTPS release host');
-      }
-      const response = await fetchImpl(current, { redirect: 'manual', signal });
-      if ([301, 302, 303, 307, 308].includes(response.status)) {
-        await response.body?.cancel();
-        const location = response.headers.get('location');
-        if (!location || redirects === 3) throw new Error('Invalid or excessive native release redirects');
-        current = new URL(location, current);
-        continue;
-      }
-      if (!response.ok) { await response.body?.cancel(); throw new Error(`Native release download failed (HTTP ${response.status})`); }
-      const declared = response.headers.get('content-length');
-      if (declared && (!/^\d+$/.test(declared) || Number(declared) > maxBytes)) {
-        await response.body?.cancel(); throw new Error('Native release asset exceeds its size bound');
-      }
-      const chunks = [];
-      let total = 0;
-      if (!response.body) throw new Error('Native release asset has no body');
-      for await (const chunk of response.body) {
-        total += chunk.byteLength;
-        if (total > maxBytes) throw new Error('Native release asset exceeds its size bound');
-        chunks.push(chunk);
-      }
-      return Buffer.concat(chunks);
+  for (let redirects = 0; redirects <= 3; redirects++) {
+    const testLocal = allowHttpLoopback && current.protocol === 'http:' && ['127.0.0.1', '[::1]'].includes(current.hostname);
+    if (current.username || current.password || current.hash || (!testLocal && (current.protocol !== 'https:' || !allowedDownloadHosts.has(current.hostname) || current.port))) {
+      throw new Error('Native downloads require an approved HTTPS release host');
     }
-  } catch (error) {
-    if (signal.aborted && (error === signal.reason || ['AbortError', 'TimeoutError'].includes(error?.name))) {
-      const name = original.pathname.split('/').pop() || 'native release asset';
-      throw new Error(`Native release download of ${name} timed out after ${timeoutMs / 1000} seconds`, { cause: error });
+    const response = await fetchImpl(current, { redirect: 'manual', signal });
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      await response.body?.cancel();
+      const location = response.headers.get('location');
+      if (!location || redirects === 3) throw new Error('Invalid or excessive native release redirects');
+      current = new URL(location, current);
+      continue;
     }
-    throw error;
+    if (!response.ok) { await response.body?.cancel(); throw new Error(`Native release download failed (HTTP ${response.status})`); }
+    const declared = response.headers.get('content-length');
+    if (declared && (!/^\d+$/.test(declared) || Number(declared) > maxBytes)) {
+      await response.body?.cancel(); throw new Error('Native release asset exceeds its size bound');
+    }
+    const chunks = [];
+    let total = 0;
+    if (!response.body) throw new Error('Native release asset has no body');
+    for await (const chunk of response.body) {
+      total += chunk.byteLength;
+      if (total > maxBytes) throw new Error('Native release asset exceeds its size bound');
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks);
   }
   throw new Error('Native release redirect failed');
-}
-/** Download an executable with enough time for large release assets. */
-export function fetchBinary(url, maxBytes, options) {
-  return fetchBytes(url, maxBytes, { ...options, timeoutMs: 300_000 });
 }
 export function verifyBytes(bytes, asset) {
   if (bytes.length !== asset.bytes || createHash('sha256').update(bytes).digest('hex') !== asset.sha256) {
@@ -152,7 +138,9 @@ export async function installNative({ root = packageRoot, artifactDir, fetchOpti
     if (!info.isFile() || info.isSymbolicLink() || info.size !== asset.bytes) throw new Error('Invalid offline native release file');
     bytes = await readFile(source);
   } else {
-    bytes = await fetchBinary(downloadUrl ?? releaseUrl(version, asset.name), asset.bytes, fetchOptions);
+    bytes = await fetchBytes(downloadUrl ?? releaseUrl(version, asset.name), asset.bytes, {
+      ...fetchOptions, timeoutMs: 300_000,
+    });
   }
   verifyBytes(bytes, asset);
   const destination = installPath(root, version);
