@@ -1,5 +1,17 @@
 # @agent-wechat/desktop
 
+## 2.2.0
+
+### Minor Changes
+
+- [#428](https://github.com/thisnick/agent-wechat/pull/428) [`8fbdc98`](https://github.com/thisnick/agent-wechat/commit/8fbdc98a1e310787699a5a57eec954bdcc39e114) Thanks [@thisnick](https://github.com/thisnick)! - On macOS, message notifications are grouped by chat in Notification Center and offer **Mark as Read** and **Reply**. Mark as Read marks the chat read unless a newer message has arrived since. Reply sends your text as a quote reply to that message and marks the chat read; it appears only when the message can be quoted. Opening a chat clears its notifications, and a notification still opens its chat after the app restarts. The first notification after updating may ask again to allow notifications.
+
+### Patch Changes
+
+- [#431](https://github.com/thisnick/agent-wechat/pull/431) [`82938af`](https://github.com/thisnick/agent-wechat/commit/82938affc9db1faf110639dd0bc4f4fb272bc840) Thanks [@thisnick](https://github.com/thisnick)! - Resume only the original group update after refreshing group metadata, instead of retrying every blocked sync batch. Unsupported commands remain retained for local repair.
+
+- [#426](https://github.com/thisnick/agent-wechat/pull/426) [`62b93b1`](https://github.com/thisnick/agent-wechat/commit/62b93b101f39f7cc3c058a70b2fefd5beb1d5781) Thanks [@thisnick](https://github.com/thisnick)! - On macOS, clicking a message notification now opens its chat, whether you click the banner or the notification later in Notification Center. Previously a click only brought the app to the front.
+
 ## 2.1.0
 
 ### Minor Changes

@@ -1,5 +1,13 @@
 # @agent-wechat/cli
 
+## 2.2.0
+
+### Patch Changes
+
+- [#432](https://github.com/thisnick/agent-wechat/pull/432) [`a2524b9`](https://github.com/thisnick/agent-wechat/commit/a2524b92e41a91000673755f2057e17e59db4394) Thanks [@thisnick](https://github.com/thisnick)! - Allow up to five minutes for the npm installer to download the native executable.
+
+- [#431](https://github.com/thisnick/agent-wechat/pull/431) [`82938af`](https://github.com/thisnick/agent-wechat/commit/82938affc9db1faf110639dd0bc4f4fb272bc840) Thanks [@thisnick](https://github.com/thisnick)! - Resume only the original group update after refreshing group metadata, instead of retrying every blocked sync batch. Unsupported commands remain retained for local repair.
+
 ## 2.1.0
 
 ### Patch Changes

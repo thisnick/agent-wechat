@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 2.2.0
+
+### Patch Changes
+
+- [#431](https://github.com/thisnick/agent-wechat/pull/431) [`82938af`](https://github.com/thisnick/agent-wechat/commit/82938affc9db1faf110639dd0bc4f4fb272bc840) Thanks [@thisnick](https://github.com/thisnick)! - Resume only the original group update after refreshing group metadata, instead of retrying every blocked sync batch. Unsupported commands remain retained for local repair.
+
 ## 2.1.0
 
 ### Patch Changes
