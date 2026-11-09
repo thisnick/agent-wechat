@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { mkdtemp } from 'node:fs/promises';
-import { fetchBytes, inspectBinary, manifestName, releaseUrl, validateManifest, verifyBytes } from '../packages/cli/scripts/native-runtime.mjs';
+import { fetchBinary, fetchBytes, inspectBinary, manifestName, releaseUrl, validateManifest, verifyBytes } from '../packages/cli/scripts/native-runtime.mjs';
 export async function nativePackageUnpublished({ root = resolve('packages/cli'), fetchImpl = fetch } = {}) {
   const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
   if (pkg.name !== '@agent-wechat/cli' || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(pkg.version)) throw new Error('Invalid CLI publication identity');
@@ -28,7 +28,7 @@ export async function prepareNativePackage({ root = resolve('packages/cli'), sou
   const temporary = await mkdtemp(join(tmpdir(), 'agent-wechat-native-release-'));
   try {
     for (const item of manifest.assets) {
-      const binary = await fetchBytes(releaseUrl(version, item.name), item.bytes, fetchOptions);
+      const binary = await fetchBinary(releaseUrl(version, item.name), item.bytes, fetchOptions);
       verifyBytes(binary, item);
       if (item.name === asset.name) {
         const path = join(temporary, 'wx');

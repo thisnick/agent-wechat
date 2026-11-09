@@ -133,6 +133,33 @@ test('installer fetches pinned bytes from a local HTTP fixture and validates bef
   await installNative({ root, downloadUrl: url, fetchOptions: { allowHttpLoopback: true } });
   assert.equal(await resolveNative({ root }), installPath(root, version));
 });
+test('binary timeout covers redirects and the response body and names the original asset', async t => {
+  const { root, bytes, asset } = await fixture(t);
+  const deadline = new AbortController();
+  const reason = new DOMException('Deadline expired', 'TimeoutError');
+  const timeout = t.mock.method(AbortSignal, 'timeout', () => deadline.signal);
+  const signals = [];
+  const fetchImpl = async (_url, { signal }) => {
+    signals.push(signal);
+    if (signals.length === 1) {
+      return new Response(null, { status: 302, headers: { location: 'https://release-assets.githubusercontent.com/file?signature=fixture' } });
+    }
+    return new Response(new ReadableStream({
+      start(body) { body.enqueue(bytes.subarray(0, 1)); },
+      pull(body) {
+        deadline.abort(reason);
+        body.error(reason);
+      },
+    }));
+  };
+  await assert.rejects(installNative({ root, fetchOptions: { fetchImpl } }), {
+    message: `Native release download of ${asset.name} timed out after 300 seconds`,
+    cause: reason,
+  });
+  assert.deepEqual(timeout.mock.calls.map(call => call.arguments), [[300_000]]);
+  assert.deepEqual(signals, [deadline.signal, deadline.signal]);
+  await assert.rejects(readFile(installPath(root, version)), /ENOENT/);
+});
 test('HTTP is rejected in production and redirect hosts cannot escape the allowlist', async t => {
   await assert.rejects(fetchBytes('http://127.0.0.1/native', 10), /approved HTTPS/);
   await assert.rejects(fetchBytes('https://evil.example/native', 10), /approved HTTPS/);
@@ -151,7 +178,9 @@ test('download bounds declared and streamed sizes and rejects missing release as
 test('package publication requires prepared release from the exact source commit', async t => {
   const { root, manifest, bytes } = await fixture(t);
   const fetchImpl = async url => String(url).endsWith('.json') ? new Response(JSON.stringify(manifest)) : new Response(bytes);
+  const timeout = t.mock.method(AbortSignal, 'timeout', () => new AbortController().signal);
   await prepareNativePackage({ root, sourceCommit: manifest.sourceCommit, fetchOptions: { fetchImpl } });
+  assert.deepEqual(timeout.mock.calls.map(call => call.arguments[0]), [30_000, ...manifest.assets.map(() => 300_000)]);
   await assert.rejects(prepareNativePackage({ root, sourceCommit: 'c'.repeat(40), fetchOptions: { fetchImpl } }), /publication source commit/);
 });
 
