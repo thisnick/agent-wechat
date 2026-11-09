@@ -141,6 +141,29 @@ export const scenes = [
     },
   },
   {
+    name: "unnamed-group-chat",
+    route: "chat",
+    description: "An unnamed group labeled with member names in the chat list and conversation header.",
+    viewports: ["desktop", "narrow"],
+    setup: async (sim) => {
+      await sim.addAccount(ACCOUNT);
+      await sim.signIn(ACCOUNT);
+      await sim.warmAvatars(["sim_mei", "sim_daniel"], ["MC", "DP"]);
+      const group = await sim.createGroup("", ["sim_mei", "sim_daniel"]);
+      await sim.inbound(group, "Has everyone picked a time?", { sender: "sim_mei" });
+      await sim.settled(group);
+      return { group };
+    },
+    target: (world) => ({ account: ACCOUNT.id, thread: world.group }),
+    ready: async ({ page, expect }) => {
+      const title = "Group chat · Daniel Park, Mei Chen";
+      await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
+      if (page.viewportSize().width === viewports.desktop.width)
+        await expect(row(page, title)).toBeVisible();
+      await expect(page.locator(".workspace").getByText("Has everyone picked a time?", { exact: true })).toBeVisible();
+    },
+  },
+  {
     name: "message-highlight",
     route: "message",
     description: "A conversation opened at one message, which is highlighted.",
