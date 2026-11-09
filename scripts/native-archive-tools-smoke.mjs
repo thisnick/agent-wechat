@@ -132,7 +132,7 @@ try {
   const config = {
     gateway: { mode: 'local', bind: 'loopback', port, auth: { mode: 'token', token: 'synthetic-gateway-token-'.repeat(3) }, controlUi: { enabled: false } },
     browser: { enabled: false }, cron: { enabled: false }, discovery: { mdns: { mode: 'off' } }, update: { checkOnStart: false }, session: { dmScope: 'per-channel-peer' },
-    models: { mode: 'merge', providers: { fixture: { baseUrl: `http://127.0.0.1:${apiPort}/model/v1`, api: 'openai-completions', apiKey: 'synthetic-model-key', models: [{ id: 'fixture-model', name: 'Fixture', reasoning: false, input: ['text', 'image'], contextWindow: 32768, maxTokens: 256, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } },
+    models: { mode: 'merge', catalogRefresh: { enabled: false }, providers: { fixture: { baseUrl: `http://127.0.0.1:${apiPort}/model/v1`, api: 'openai-completions', apiKey: 'synthetic-model-key', models: [{ id: 'fixture-model', name: 'Fixture', reasoning: false, input: ['text', 'image'], contextWindow: 32768, maxTokens: 256, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } },
     agents: { ownership: 'explicit', defaults: { workspace: join(temporary, 'workspace'), model: { primary: 'fixture/fixture-model', fallbacks: [] } }, entries: {
       ungranted: {}, ordinary: { tools: { profile: 'full', deny: ['wechat_archive_*'] } }, privileged: { tools: { alsoAllow: ['wechat_archive_*'] } },
     } },
