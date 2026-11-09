@@ -164,6 +164,47 @@ export const scenes = [
     },
   },
   {
+    name: "new-group-avatar",
+    route: "chats",
+    description: "A newly received group shows its room avatar while its member list is unavailable.",
+    viewports: ["desktop"],
+    setup: async (sim) => {
+      await sim.addAccount(ACCOUNT);
+      await sim.signIn(ACCOUNT);
+      return {
+        async receiveGroup() {
+          const group = await sim.createGroup("Neighborhood group", ["sim_mei", "sim_daniel"]);
+          await sim.advance(60);
+          await sim.inbound(group, "See you at the park.", { sender: "sim_mei" });
+          await sim.settled(group);
+        },
+      };
+    },
+    target: () => ({ account: ACCOUNT.id }),
+    ready: async ({ page, expect }) => {
+      await expect(row(page, "Mei Chen")).toBeVisible();
+      await expect(row(page, "Neighborhood group")).toHaveCount(0);
+    },
+    actions: async ({ page, expect, world }) => {
+      await page.route(/\/threads(?:\?.*)?$/, async (route) => {
+        const response = await route.fetch();
+        if (!response.ok()) return route.fulfill({ response });
+        const threads = await response.json();
+        // The hub can discover a room before its saved roster is available.
+        for (const thread of threads.items) {
+          if (thread.displayName === "Neighborhood group") thread.avatarMembers = [];
+        }
+        await route.fulfill({ response, json: threads });
+      });
+      await world.receiveGroup();
+      const avatar = row(page, "Neighborhood group").locator(".group-avatar img");
+      await expect(avatar).toBeVisible();
+      await expect.poll(() => avatar.evaluate((image) => image.naturalWidth)).toBeGreaterThan(0);
+    },
+    // The simulator generates a different image color for each random room ID.
+    mask: (page) => [row(page, "Neighborhood group").locator(".group-avatar img")],
+  },
+  {
     name: "message-highlight",
     route: "message",
     description: "A conversation opened at one message, which is highlighted.",
