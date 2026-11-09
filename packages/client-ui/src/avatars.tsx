@@ -33,26 +33,25 @@ export function ConversationAvatar({
         all.findIndex((other) => other.id === member.id) === index,
     )
     .slice(0, 4);
+  if (faces.length === 0)
+    return (
+      <RoomAvatar connection={connection} account={account} username={username} />
+    );
+
   return (
     <span
-      className={`conversation-avatar group-avatar ${
-        faces.length ? "has-members" : ""
-      }`}
+      className="conversation-avatar group-avatar has-members"
       aria-hidden="true"
     >
-      {faces.length ? (
-        faces.map((member) => (
-          <HubAvatar
-            key={member.id}
-            connection={connection}
-            account={account}
-            username={member.id}
-            name={member.displayName}
-          />
-        ))
-      ) : (
-        <Icon name="people" />
-      )}
+      {faces.map((member) => (
+        <HubAvatar
+          key={member.id}
+          connection={connection}
+          account={account}
+          username={member.id}
+          name={member.displayName}
+        />
+      ))}
       {faces.length === 1 && (
         <span className="group-avatar-placeholder">
           <Icon name="people" />
@@ -61,6 +60,28 @@ export function ConversationAvatar({
     </span>
   );
 }
+
+function RoomAvatar({
+  connection,
+  account,
+  username,
+}: {
+  connection: Connection;
+  account: string;
+  username: string;
+}) {
+  const { element, url } = useHubAvatar(connection, account, username);
+  return (
+    <span
+      ref={element}
+      className="conversation-avatar group-avatar"
+      aria-hidden="true"
+    >
+      {url ? <img src={url} alt="" /> : <Icon name="people" />}
+    </span>
+  );
+}
+
 export function HubAvatar({
   connection,
   account,
@@ -72,6 +93,15 @@ export function HubAvatar({
   username?: string | null;
   name: string;
 }) {
+  const { element, url } = useHubAvatar(connection, account, username);
+  return <Avatar ref={element} name={name} src={url} />;
+}
+
+function useHubAvatar(
+  connection: Connection,
+  account: string,
+  username?: string | null,
+) {
   const cache = connection.avatars;
   const opening = useSyncExternalStore(
     connection.session.subscribe,
@@ -100,5 +130,5 @@ export function HubAvatar({
     if (!username || !visible) return;
     return cache.show(account, username);
   }, [cache, account, username, visible, opening]);
-  return <Avatar ref={element} name={name} src={url} />;
+  return { element, url };
 }
