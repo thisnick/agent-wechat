@@ -1,5 +1,11 @@
 # @agent-wechat/client-ui
 
+## 0.4.0
+
+### Minor Changes
+
+- [#443](https://github.com/thisnick/agent-wechat/pull/443) [`68f3958`](https://github.com/thisnick/agent-wechat/commit/68f3958a0c559bc8ee86008770a2cce8290e25b0) Thanks [@thisnick](https://github.com/thisnick)! - Show the desktop app and web UI in Simplified Chinese as well as English. The language follows your system by default; change it under Settings → Language or on the sign-in screen. The tray menu, notification previews and notification actions follow the same choice. A desktop settings file saved by this version cannot be opened by an older version of the desktop app.
+
 ## 0.3.4
 
 ### Patch Changes

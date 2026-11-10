@@ -1,5 +1,22 @@
 # @agent-wechat/desktop
 
+## 2.3.0
+
+### Minor Changes
+
+- [#443](https://github.com/thisnick/agent-wechat/pull/443) [`68f3958`](https://github.com/thisnick/agent-wechat/commit/68f3958a0c559bc8ee86008770a2cce8290e25b0) Thanks [@thisnick](https://github.com/thisnick)! - Show the desktop app and web UI in Simplified Chinese as well as English. The language follows your system by default; change it under Settings → Language or on the sign-in screen. The tray menu, notification previews and notification actions follow the same choice. A desktop settings file saved by this version cannot be opened by an older version of the desktop app.
+
+### Patch Changes
+
+- [#439](https://github.com/thisnick/agent-wechat/pull/439) [`7921590`](https://github.com/thisnick/agent-wechat/commit/7921590128af8bad472051d129697487be5dc340) Thanks [@thisnick](https://github.com/thisnick)! - Filter the Messages sidebar by multiple conversation categories, see unread counts, and return to the full inbox with All.
+
+- [#441](https://github.com/thisnick/agent-wechat/pull/441) [`1b4c215`](https://github.com/thisnick/agent-wechat/commit/1b4c2152d4fcfa302c6bebc48a473eab97064f0f) Thanks [@Lazily01](https://github.com/Lazily01)! - Expose the sender's supplied display name as optional `quote.senderName` in received quoted replies, including replies quoting OpenIM members. The name comes from the delivered reply payload.
+
+  Desktop quoted replies show the supplied author name, with cached-name fallback for older replies.
+
+- Updated dependencies [[`68f3958`](https://github.com/thisnick/agent-wechat/commit/68f3958a0c559bc8ee86008770a2cce8290e25b0)]:
+  - @agent-wechat/client-ui@0.4.0
+
 ## 2.2.1
 
 ### Patch Changes
