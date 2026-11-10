@@ -1,4 +1,6 @@
 import { ConversationRow } from "./conversation-row.tsx";
+import { ConversationFilterBar } from "./conversation-filter-bar.tsx";
+import { conversationCategory, conversationUnreadCounts, savedConversationCategories } from "./conversation-filters.ts";
 import { ThreadPinSwitch, useThreadPinPreview } from "./thread-pinning.tsx";
 import { ThreadNotifications } from "./thread-notifications.tsx";
 import { emojiText } from "./emoji-text.ts";
@@ -19,6 +21,7 @@ import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -54,7 +57,7 @@ import { AttachmentPicker, AttachmentTray } from "./attachment-picker.tsx";
 import { sendAttachmentBatch } from "./attachment-drafts.ts";
 import { ComposerHelp } from "./composer-help.tsx";
 import { ConversationAvatar, HubAvatar } from "./avatars.tsx";
-import { orderThreads } from "./thread-preview.ts";
+import { conversationName, orderThreads } from "./thread-preview.ts";
 import {
   messagePresentation,
   recallText,
@@ -981,12 +984,10 @@ function Chats({
     state = useSyncExternalStore(session.subscribe, session.snapshot);
   const [locale] = useLocale();
   const savedView = state.account ? connection.cache.view(state.account) : {};
-  const [query, setQuery] = useState(""),
-    [filter, setFilter] = useState(
-      ["all", "unread", "groups"].includes(savedView.filter ?? "")
-        ? savedView.filter!
-        : "all",
-    );
+  const [query, setQuery] = useState("");
+  const [categories, setCategories] = useState(() =>
+    savedConversationCategories(state.account ? connection.cache.view(state.account) : {}),
+  );
   const [accountMenu, setAccountMenu] = useState(false);
   // What is on screen follows the address. A dialog (settings, new chat) shows
   // over the view that was open before it.
@@ -1031,8 +1032,8 @@ function Chats({
   }, [connection, state.account, state.selected, section, mobile, settings, newChat, accountMenu]);
   useEffect(() => {
     if (state.account)
-      connection.cache.saveView(state.account, { section, filter });
-  }, [state.account, section, filter]);
+      connection.cache.saveView(state.account, { section, categories });
+  }, [connection, state.account, section, categories]);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const draftsNow = useRef(drafts);
   draftsNow.current = drafts;
@@ -1062,10 +1063,15 @@ function Chats({
     setFind(false);
   }, [state.account, state.selected]);
   const account = state.accounts.find((a) => a.id === state.account);
-  const name = (id: string) =>
-    state.contacts.find((c) => c.id === id)?.displayName ||
-    state.threads.find((t) => t.id === id)?.displayName ||
-    (id === "filehelper" ? t("File Transfer", "文件传输助手") : id);
+  const name = (id: string) => {
+    const thread = state.threads.find((item) => item.id === id);
+    return conversationName(
+      id,
+      state.contacts.find((item) => item.id === id)?.displayName || thread?.displayName,
+      thread?.avatarMembers,
+      account?.ownUsername,
+    );
+  };
   const selectedName = state.selected ? name(state.selected) : "";
   const draftKey = `${state.account}:${state.selected}`,
     draft = drafts[draftKey] ?? "";
@@ -1269,12 +1275,16 @@ function Chats({
     });
     focusMessage();
   }
-  const threads = orderThreads(useThreadPinPreview(connection, state.account!, state.threads)).filter(
-    (t) =>
-      name(t.id).toLowerCase().includes(query.toLowerCase()) &&
-      (filter !== "unread" || !!t.unreadCount) &&
-      (filter !== "groups" || t.kind === "group"),
-  );
+  const unreadCounts = useMemo(() => conversationUnreadCounts(state.threads), [state.threads]);
+  const search = query.toLowerCase();
+  const threads = orderThreads(useThreadPinPreview(connection, state.account!, state.threads)).filter((thread) => {
+    if (categories.length) {
+      const category = conversationCategory(thread);
+      if (!category || !categories.includes(category)) return false;
+    }
+    return name(thread.id).toLowerCase().includes(search) ||
+      (thread.id.endsWith("@chatroom") && thread.id.toLowerCase().includes(search));
+  });
   const firstPinned = threads.find((thread) => thread.pinned === true)?.id;
   return (
     <div className={`shell ${mobile ? "mobile-chat" : ""}`}>
@@ -1351,21 +1361,11 @@ function Chats({
             />
           </label>
           {section === "chats" && (
-            <div className="filters">
-              {(["all", "unread", "groups"] as const).map((f) => (
-                <button
-                  key={f}
-                  className={`pill ${filter === f ? "active" : ""}`}
-                  onClick={() => setFilter(f)}
-                >
-                  {f === "all"
-                    ? t("All", "全部")
-                    : f === "unread"
-                    ? t("Unread", "未读")
-                    : t("Groups", "群聊")}
-                </button>
-              ))}
-            </div>
+            <ConversationFilterBar
+              selected={categories}
+              counts={unreadCounts}
+              onChange={setCategories}
+            />
           )}
         </div>
         {shownNotice && !routeThread && (
@@ -2489,6 +2489,7 @@ function Details({
           connection={connection}
           account={state.account}
           groupId={threadId}
+          title={name}
         />
       )}
     </aside>

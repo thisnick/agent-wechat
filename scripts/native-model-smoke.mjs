@@ -14,7 +14,7 @@ import { dirname, join, resolve } from 'node:path';
 const root = resolve(dirname(new URL(import.meta.url).pathname), '..');
 const { build } = createRequire(join(root, 'packages/openclaw-extension/package.json'))('esbuild');
 const sdk = await realpath(join(root, 'packages/openclaw-extension/node_modules/openclaw'));
-assert.equal(JSON.parse(await readFile(join(sdk, 'package.json'), 'utf8')).version, '2026.10.9');
+assert.equal(JSON.parse(await readFile(join(sdk, 'package.json'), 'utf8')).version, '2026.11.2');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function exercise(name, conversationAccess, readPolicy, dmScope = 'main') {
@@ -61,7 +61,7 @@ async function exercise(name, conversationAccess, readPolicy, dmScope = 'main') 
     const probe = createServer(); probe.listen(0, '127.0.0.1'); await once(probe, 'listening'); const port = probe.address().port; await new Promise(resolve => probe.close(resolve));
     const config = { gateway: { mode: 'local', bind: 'loopback', port, auth: { mode: 'token', token: 'synthetic-gateway-token-'.repeat(3) }, controlUi: { enabled: false } }, browser: { enabled: false }, cron: { enabled: false }, discovery: { mdns: { mode: 'off' } }, update: { checkOnStart: false },
       session: { dmScope }, messages: { queue: { mode: 'collect' } },
-      models: { mode: 'merge', providers: { fixture: { baseUrl: `http://127.0.0.1:${nativePort}/model/v1`, api: 'openai-completions', apiKey: 'synthetic-model-key', models: [{ id: 'fixture-model', name: 'Fixture', reasoning: false, input: ['text'], contextWindow: 32768, maxTokens: 256, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } },
+      models: { mode: 'merge', catalogRefresh: { enabled: false }, providers: { fixture: { baseUrl: `http://127.0.0.1:${nativePort}/model/v1`, api: 'openai-completions', apiKey: 'synthetic-model-key', models: [{ id: 'fixture-model', name: 'Fixture', reasoning: false, input: ['text'], contextWindow: 32768, maxTokens: 256, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } },
       agents: { defaults: { workspace: join(temporary, 'workspace'), model: { primary: 'fixture/fixture-model', fallbacks: [] } } },
       plugins: { allow: ['agent-wechat'], load: { paths: [join(temporary, 'plugin')] }, entries: { 'agent-wechat': { enabled: true, hooks: { allowConversationAccess: conversationAccess }, config: { backend: 'native', native: { mode: 'external', accountId: 'a', endpoint: `http://127.0.0.1:${nativePort}`, token: { source: 'env', provider: 'default', id: 'AGENT_WECHAT_TOKEN' }, consumerStateDir: join(temporary, 'consumer'), readPolicy } } } } },
       logging: { file: join(temporary, 'gateway.log') }, channels: { 'agent-wechat': { enabled: true, dmPolicy: 'open', allowFrom: ['*'], groupPolicy: 'open', groupAllowFrom: ['*'] } } };
@@ -76,7 +76,9 @@ async function exercise(name, conversationAccess, readPolicy, dmScope = 'main') 
       if (child.exitCode !== null || child.signalCode) throw Error(`Pinned model Gateway exited: ${log}`);
       try { result = JSON.parse(await readFile(join(temporary, 'result.json'), 'utf8')); break; } catch { await sleep(100); }
     }
-    assert.ok(result, `Model fixture deadline: ${log}`); assert.equal(result.error, undefined, `${result.error}; ${log}`);
+    // On failure, also show the recorded hooks and the Gateway's own log tail.
+    const diagnostics = async () => `\n--- hooks ---\n${(await readFile(join(temporary, 'hooks.jsonl'), 'utf8').catch(() => '')).split('\n').filter(Boolean).map(line => { const { kind, event } = JSON.parse(line); return `${kind} run=${event?.runId ?? ''}`; }).join('\n')}\n--- gateway.log ---\n${(await readFile(join(temporary, 'gateway.log'), 'utf8').catch(() => '')).slice(-32768)}`;
+    if (!result || result.error !== undefined) assert.fail(`${result ? result.error : 'Model fixture deadline'}; ${log}${await diagnostics()}`);
     const items = new Map(result.items.map(item => [item.id, item]));
     const hooks = (await readFile(join(temporary, 'hooks.jsonl'), 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line));
     assert.ok(requests.some(request => JSON.stringify(request.messages).includes('wechat-native:a:single') && JSON.stringify(request.messages).includes('native-model-single-exact-input')));
@@ -92,13 +94,20 @@ async function exercise(name, conversationAccess, readPolicy, dmScope = 'main') 
       }
       assert.ok(!requests.some(request => JSON.stringify(request.messages.at(-1)).includes('wechat-native:a:command')),
         'The built-in command must gain a read without invoking a model');
-    } else if (conversationAccess) {
+    } else {
+      // The pinned host calls onPreparedAgentRunStart once the run's transcript
+      // is prepared. That confirms the handoff with or without the operator's
+      // conversation-hook grant; the grant only enables the hook bridge.
       const single = items.get('single'); assert.equal(single.runId, single.manifest.runId); assert.equal(single.handoffUnconfirmed, false);
       if (readPolicy === 'never') assert.equal(reads.length, 0); else assert.ok(reads.flat().includes('single'));
       if (dmScope === 'per-channel-peer') assert.equal(single.manifest.sessionKey, 'agent:main:agent-wechat:direct:u1');
-      const input = hooks.find(hook => hook.kind === 'llm_input' && hook.event.runId === single.runId); assert.ok(input); assert.equal(input.ctx.channel, 'agent-wechat'); assert.equal(input.ctx.sessionKey, single.manifest.sessionKey);
-      assert.ok(hooks.some(hook => hook.kind === 'model_call_started' && hook.event.runId === single.runId && hook.event.sessionId === input.event.sessionId));
-    } else { assert.equal(reads.length, 0); assert.equal(items.get('single').handoffUnconfirmed, true); }
+      // The host withholds llm_input without the grant; the provider check
+      // below covers the exact input either way.
+      if (conversationAccess) {
+        const input = hooks.find(hook => hook.kind === 'llm_input' && hook.event.runId === single.runId); assert.ok(input); assert.equal(input.ctx.channel, 'agent-wechat'); assert.equal(input.ctx.sessionKey, single.manifest.sessionKey);
+        assert.ok(hooks.some(hook => hook.kind === 'model_call_started' && hook.event.runId === single.runId && hook.event.sessionId === input.event.sessionId));
+      }
+    }
     if (!inbound) { assert.equal(items.get('command').readPending, undefined); assert.ok(!reads.flat().includes('command')); }
     // The released dispatch path can serialize concurrent inputs even in
     // collect mode. Check what actually reached it rather than assuming merge.
@@ -106,16 +115,18 @@ async function exercise(name, conversationAccess, readPolicy, dmScope = 'main') 
     for (const [id, body] of [['blocking', 'native-model-blocking-input'], ['queued-a', 'native-model-queued-alpha'], ['queued-b', 'native-model-queued-beta']]) {
       const item = items.get(id);
       const input = hooks.find(hook => hook.kind === 'llm_input' && hook.event.runId === item.manifest.runId);
-      if (!inbound && conversationAccess && readPolicy !== 'never' && input?.event.prompt.includes(body) && !merged) {
+      if (!inbound && readPolicy !== 'never' && input?.event.prompt.includes(body) && !merged) {
         assert.equal(item.runId, item.manifest.runId); assert.equal(item.handoffUnconfirmed, false); assert.ok(reads.flat().includes(id));
       }
       if (!inbound && merged && id.startsWith('queued-')) assert.ok(!reads.flat().includes(id));
     }
     const inputBodies = new Map([['single', 'native-model-single-exact-input'], ['blocking', 'native-model-blocking-input'], ['queued-a', 'native-model-queued-alpha'], ['queued-b', 'native-model-queued-beta']]);
     for (const id of inbound ? [] : reads.flat()) {
-      const item = items.get(id); const body = inputBodies.get(id); assert.ok(item && body);
-      const input = hooks.find(hook => hook.kind === 'llm_input' && hook.event.runId === item.runId); assert.ok(input);
-      assert.ok(hooks.some(hook => hook.kind === 'model_call_started' && hook.event.runId === item.runId && hook.event.sessionId === input.event.sessionId));
+      const item = items.get(id); const body = inputBodies.get(id); assert.ok(item && body); assert.equal(item.runId, item.manifest.runId);
+      if (conversationAccess) {
+        const input = hooks.find(hook => hook.kind === 'llm_input' && hook.event.runId === item.runId); assert.ok(input);
+        assert.ok(hooks.some(hook => hook.kind === 'model_call_started' && hook.event.runId === item.runId && hook.event.sessionId === input.event.sessionId));
+      }
       assert.ok(requests.some(request => {
         const users = request.messages.filter(message => message.role === 'user');
         return JSON.stringify(users.at(-1)).includes(`wechat-native:a:${id}`) && JSON.stringify(users.at(-2)).includes(body);

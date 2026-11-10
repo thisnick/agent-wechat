@@ -4,6 +4,7 @@ import type {
   NativeThread,
 } from "@agent-wechat/shared";
 import type { CachedHistory } from "./history-cache.ts";
+import type { ConversationCategory } from "./conversation-filters.ts";
 
 const stores = [
   "threads",
@@ -37,6 +38,7 @@ export type AccountSnapshot = {
 export type ViewState = {
   thread?: string;
   section?: "chats" | "contacts";
+  categories?: ConversationCategory[];
   filter?: "all" | "unread" | "groups";
 };
 export type SavedBlob = {

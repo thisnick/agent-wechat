@@ -60,10 +60,6 @@ body {
 .chat-row.selected {
   background: #eaecea;
 }
-.pill.active {
-  background: var(--accent-soft);
-  color: var(--accent-ink);
-}
 .send-btn,
 .primary {
   background: var(--accent);
@@ -898,8 +894,7 @@ body {
 .dark .wave i {
   background: var(--muted);
 }
-.dark .settings-tabs button.active,
-.dark .pill.active {
+.dark .settings-tabs button.active {
   background: var(--accent-soft);
   color: var(--accent-ink);
 }

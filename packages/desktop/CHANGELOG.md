@@ -1,5 +1,15 @@
 # @agent-wechat/desktop
 
+## 2.2.1
+
+### Patch Changes
+
+- [#436](https://github.com/thisnick/agent-wechat/pull/436) [`d4bd0cc`](https://github.com/thisnick/agent-wechat/commit/d4bd0cc1a6304c3651f556e1f2fcb2c937dc0397) Thanks [@thisnick](https://github.com/thisnick)! - Show unnamed group chats with up to three known member names, or a short ID suffix when member names are unavailable.
+
+  Load the room avatar for visible groups while their member list is unavailable.
+
+- [#435](https://github.com/thisnick/agent-wechat/pull/435) [`072f7fb`](https://github.com/thisnick/agent-wechat/commit/072f7fb529e26b1e3f87b4d5606c1198a7177f86) Thanks [@thisnick](https://github.com/thisnick)! - Send `.opus`, `.oga`, `.caf` and `.amr` audio as voice notes. OpenClaw text-to-speech replies, which are written as `.opus`, no longer fail with "Voice sending requires an explicit audio attachment", and a remote file served with a generic content type is classified by its name. The daemon now also converts CAF and AMR sources. An unsupported local voice source is now rejected before OpenClaw records the send as dispatched.
+
 ## 2.2.0
 
 ### Minor Changes

@@ -229,9 +229,12 @@ async function dispatchNativeMessageInput(params: NativeDispatchParams, revision
           if (urls.length || payload.text) params.onDelivered?.();
         }, onError: () => { failed = true; } },
       // This hook is intentionally separate from onModelSelected and old
-      // onAgentRunStart (which can also report direct-tool execution). Released
-      // hosts without it need the separately verified text input/model-call
-      // and media-snapshot bridge; unsupported or ambiguous handoffs leave reads unchanged.
+      // onAgentRunStart (which can also report direct-tool execution). Hosts that
+      // implement it (OpenClaw 2026.11.2+) call it once the run's transcript is
+      // prepared, before provider image filtering, and it confirms the handoff
+      // without the conversation-hook grant. Hosts without it need the separately
+      // verified text input/model-call and media-snapshot bridge; unsupported or
+      // ambiguous handoffs leave reads unchanged.
       replyOptions: { runId: dispatchManifest.runId, onModelSelected, onPreparedAgentRunStart: callback },
     });
     params.signal?.throwIfAborted();

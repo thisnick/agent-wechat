@@ -1,11 +1,34 @@
 import type {
   NativeThread,
+  NativeThreadAvatarMember,
   NativeMessage,
   NativeThreadMessage,
 } from "@agent-wechat/shared";
 import { isZh, t } from "./i18n.ts";
 import { messagePresentation, recallText } from "./message-presentation.ts";
 import { emojiText } from "./emoji-text.ts";
+
+export function conversationName(
+  id: string,
+  displayName: string | null | undefined,
+  members: NativeThreadAvatarMember[] | undefined,
+  ownUsername?: string | null,
+): string {
+  if (!id.endsWith("@chatroom"))
+    return displayName || (id === "filehelper" ? "File Transfer" : id);
+  const savedName = displayName?.trim();
+  if (savedName && savedName !== id) return savedName;
+  const names = (members ?? [])
+    .filter((member) => member.id !== ownUsername)
+    .map((member) => {
+      const name = member.displayName.trim();
+      return name === member.id ? "" : name;
+    })
+    .filter(Boolean)
+    .slice(0, 3);
+  const suffix = id.slice(0, -"@chatroom".length).slice(-4);
+  return `Group chat · ${names.length ? names.join(", ") : `…${suffix}`}`;
+}
 
 export function orderThreads(threads: NativeThread[]): NativeThread[] {
   // The hub orders both pinned and ordinary chats. Never rank its saved page again.

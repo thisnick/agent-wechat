@@ -1,5 +1,11 @@
 # @agent-wechat/cli
 
+## 2.2.1
+
+### Patch Changes
+
+- [#435](https://github.com/thisnick/agent-wechat/pull/435) [`072f7fb`](https://github.com/thisnick/agent-wechat/commit/072f7fb529e26b1e3f87b4d5606c1198a7177f86) Thanks [@thisnick](https://github.com/thisnick)! - Send `.opus`, `.oga`, `.caf` and `.amr` audio as voice notes. OpenClaw text-to-speech replies, which are written as `.opus`, no longer fail with "Voice sending requires an explicit audio attachment", and a remote file served with a generic content type is classified by its name. The daemon now also converts CAF and AMR sources. An unsupported local voice source is now rejected before OpenClaw records the send as dispatched.
+
 ## 2.2.0
 
 ### Patch Changes

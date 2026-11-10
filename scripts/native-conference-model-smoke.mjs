@@ -12,7 +12,7 @@ import { dirname, join, resolve } from 'node:path';
 const root = resolve(dirname(new URL(import.meta.url).pathname), '..');
 const { build } = createRequire(join(root, 'packages/openclaw-extension/package.json'))('esbuild');
 const sdk = await realpath(process.env.OPENCLAW_TEST_SDK_ROOT ?? join(root, 'packages/openclaw-extension/node_modules/openclaw'));
-assert.ok(['2026.10.9', '2026.10.10', '2026.11.1'].includes(JSON.parse(await readFile(join(sdk, 'package.json'), 'utf8')).version));
+assert.ok(['2026.10.9', '2026.10.10', '2026.11.1', '2026.11.2'].includes(JSON.parse(await readFile(join(sdk, 'package.json'), 'utf8')).version));
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const temporary = await mkdtemp(join(tmpdir(), 'native-conference-model-'));
 const requests = [], streams = new Set(); let child, log = '';
@@ -80,7 +80,7 @@ try {
   await writeFile(join(temporary, 'workspace/AGENTS.md'), 'private-agents-profile-sentinel');
   const config = { gateway: { mode: 'local', bind: 'loopback', port, auth: { mode: 'token', token: 'synthetic-gateway-token-'.repeat(3) }, controlUi: { enabled: false } }, browser: { enabled: false }, cron: { enabled: false }, discovery: { mdns: { mode: 'off' } }, update: { checkOnStart: false },
     commands: { ownerAllowFrom: ['agent-wechat:synthetic-human-owner', 'agent-wechat:synthetic-group@chatroom'] }, tools: { toolSearch: false, codeMode: false, profile: 'coding', alsoAllow: ['conference_owner_probe'] },
-    models: { mode: 'merge', providers: { fixture: { baseUrl: `http://127.0.0.1:${nativePort}/model/v1`, api: 'openai-completions', apiKey: 'synthetic-model-key', models: [{ id: 'fixture-model', name: 'Fixture', reasoning: false, input: ['text'], contextWindow: 262144, maxTokens: 256, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } },
+    models: { mode: 'merge', catalogRefresh: { enabled: false }, providers: { fixture: { baseUrl: `http://127.0.0.1:${nativePort}/model/v1`, api: 'openai-completions', apiKey: 'synthetic-model-key', models: [{ id: 'fixture-model', name: 'Fixture', reasoning: false, input: ['text'], contextWindow: 262144, maxTokens: 256, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } },
     agents: { defaults: { workspace: join(temporary, 'workspace'), model: { primary: 'fixture/fixture-model', fallbacks: [] } }, entries: { main: { tools: { alsoAllow: ['conference_owner_probe', 'wechat_call'] } } } },
     plugins: { allow: ['agent-wechat'], load: { paths: [join(temporary, 'plugin')] }, entries: { 'agent-wechat': { enabled: true, config: { backend: 'native', native: { mode: 'external', accountId: 'a', endpoint: `http://127.0.0.1:${nativePort}`, token: { source: 'env', provider: 'default', id: 'AGENT_WECHAT_TOKEN' }, consumerStateDir: join(temporary, 'consumer'), readPolicy: 'never' } } } } },
     tts: { provider: 'fixture-speech', providers: { 'fixture-speech': {} } },

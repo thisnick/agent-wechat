@@ -34,8 +34,9 @@ export default { ...base, register(api: any) {
         state.accept(String(++sequence), message("gap", "native-model-deferred-gap"), "live");
         await projectNativeRead(client, "a", state);
         const started = new Promise<void>(resolve => { nextStart = resolve; });
+        const blockingStart = Date.now();
         const blocking = dispatch("blocking", "native-model-blocking-input");
-        await Promise.race([started, new Promise((_, reject) => setTimeout(() => reject(Error("Model start deadline")), 10000))]);
+        await Promise.race([started, new Promise((_, reject) => setTimeout(() => reject(Error(`Model start deadline (${Date.now() - blockingStart}ms after blocking dispatch)`)), 10000))]);
         const queuedA = dispatch("queued-a", "native-model-queued-alpha");
         const queuedB = dispatch("queued-b", "native-model-queued-beta");
         await Promise.all([blocking, queuedA, queuedB]);

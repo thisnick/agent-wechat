@@ -176,10 +176,12 @@ export function GroupSettings({
   connection,
   account,
   groupId,
+  title,
 }: {
   connection: Connection;
   account: string;
   groupId: string;
+  title: string;
 }) {
   useLocale();
   const session = connection.session;
@@ -187,6 +189,9 @@ export function GroupSettings({
   const model = connection.groupCreation(account, groupId);
   const operation = useSyncExternalStore(model.subscribe, model.snapshot);
   const [group, setGroup] = useState<NativeGroup | null>(null);
+  const sharedName = group?.name === undefined
+    ? (group?.displayName === groupId ? null : group?.displayName)
+    : group.name;
   const [members, setMembers] = useState<NativeGroupMember[]>([]);
   const [error, setError] = useState("");
   const [refreshing, setRefreshing] = useState(false);
@@ -332,7 +337,7 @@ export function GroupSettings({
     setSelected([]);
     setDraft(
       action === "rename"
-        ? group?.name || group?.displayName || ""
+        ? sharedName || ""
         : action === "my_name"
         ? group?.myDisplayName || ""
         : "",
@@ -412,8 +417,7 @@ export function GroupSettings({
           <span>
             {t("Group name", "群名称")}
             <strong>
-              {group?.name ||
-                group?.displayName ||
+              {sharedName ||
                 t("Unnamed group", "未命名群聊")}
             </strong>
           </span>
@@ -680,7 +684,7 @@ export function GroupSettings({
                 {mode === "leave" && (
                   <p>
                     {t("Leave ", "确定退出 ")}
-                    <strong>{group?.displayName || groupId}</strong>
+                    <strong>{title}</strong>
                     {t(
                       "? You’ll stop receiving new messages. Cached history will remain on this agent-wechat hub.",
                       "？你将不再接收新消息，已缓存的聊天记录仍保留在此 agent-wechat Hub 上。",
@@ -698,9 +702,9 @@ export function GroupSettings({
                 {mode === "mute" && (
                   <p>
                     {group?.muted === true
-                      ? t("Turn notifications on for ", "开启通知：")
-                      : t("Mute notifications for ", "静音通知：")}
-                    <strong>{group?.displayName || groupId}</strong>
+                      ? t("Turn notifications on", "开启通知：")
+                      : t("Mute notifications", "静音通知：")}
+                    <strong>{title}</strong>
                     {t("?", "？")}
                   </p>
                 )}
