@@ -1,5 +1,13 @@
 # @agent-wechat/wechat
 
+## 2.3.0
+
+### Patch Changes
+
+- [#441](https://github.com/thisnick/agent-wechat/pull/441) [`1b4c215`](https://github.com/thisnick/agent-wechat/commit/1b4c2152d4fcfa302c6bebc48a473eab97064f0f) Thanks [@Lazily01](https://github.com/Lazily01)! - Expose the sender's supplied display name as optional `quote.senderName` in received quoted replies, including replies quoting OpenIM members. The name comes from the delivered reply payload.
+
+  Desktop quoted replies show the supplied author name, with cached-name fallback for older replies.
+
 ## 2.2.1
 
 ### Patch Changes
