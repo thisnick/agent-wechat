@@ -34,7 +34,7 @@ These checks cover startup. Booking, ordering, payment, and complete signed-in f
 | Requirement | Runner behavior |
 | --- | --- |
 | Main archive and subpackage loading | Verified main archive. Same-release staged JavaScript subpackages can load lazily. Subpackage pages, automatic subpackage download and preload rules remain unavailable. |
-| Compiled templates and styles | Glass-easel and selected Exparser pages. Legacy WXSS uses the CSS adapter. Native Skyline, XR and Mini Game renderers are unavailable. |
+| Compiled templates and styles | Glass-easel and selected Exparser pages. Both paths adapt compiled app/page WXSS and responsive units; styles stay outside the host toolbar. Exparser also supports selected component styles. Native Skyline, XR and Mini Game renderers are unavailable. |
 | Page navigation and app lifecycle | Main-archive page stack and browser visibility. App tab bar, custom route builders, app bar, and native split frames are unavailable. |
 | WeUI extended library and plugins | Require separately supplied code and host support. Extended library resolution and native plugins are unavailable. |
 | Cloud development and ads | Cloud database, cloud functions, cloud files and the advertising SDK are unavailable. |
@@ -216,7 +216,7 @@ browser implementations. The other two probes are unavailable.
 | `wx.setClipboardData` | 3 | Unavailable | The runner does not expose this capability. |
 | `wx.setKeepScreenOn` | 6 | Unavailable | The runner does not expose this capability. |
 | `wx.setNavigationBarColor` | 1 | Unavailable | The runner does not expose this capability. |
-| `wx.setNavigationBarTitle` | 1 | Unavailable | The runner does not expose this capability. |
+| `wx.setNavigationBarTitle` | 1 | Partial | Sets the browser document title and completes the usual success/failure callbacks. Native WeChat navigation chrome is not reproduced. |
 | `wx.setScreenBrightness` | 1 | Unavailable | The runner does not expose this capability. |
 | `wx.setStorage` | 1 | Partial | Browser memory for the current session. Persistent and encrypted storage are unavailable. |
 | `wx.setStorageSync` | 7 | Partial | Browser memory for the current session. Persistent and encrypted storage are unavailable. |
@@ -300,7 +300,7 @@ by renderer even where a basic tag can be displayed.
 | `match-media` | 1 | Unavailable | No dedicated native behavior. Generic rendering does not establish compatibility. |
 | `movable-area` | 2 | Unavailable | No dedicated native behavior. Generic rendering does not establish compatibility. |
 | `movable-view` | 2 | Unavailable | No dedicated native behavior. Generic rendering does not establish compatibility. |
-| `navigator` | 137 | Unavailable | No dedicated native behavior. Generic rendering does not establish compatibility. |
+| `navigator` | 137 | Partial | Clicks open supported local pages through the existing page stack. Exparser links also support Enter and success/failure events. Tab switching, cross-program navigation and unstaged subpackage pages are unavailable. |
 | `open-container` | 1 | Unavailable | No dedicated native behavior. Generic rendering does not establish compatibility. |
 | `open-data` | 1 | Unavailable | No dedicated native behavior. Generic rendering does not establish compatibility. |
 | `open-data-item` | 1 | Unavailable | No dedicated native behavior. Generic rendering does not establish compatibility. |

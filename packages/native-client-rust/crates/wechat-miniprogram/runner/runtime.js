@@ -1,7 +1,8 @@
 import { MiniProgramEnv, glassEasel } from "./adapter.js";
 import * as initial from "./page.js";
 import { appConfig, componentConfigs, registerModules } from "./modules.js";
-import { createSelectorQuery, createIntersectionObserver, mountLegacy, needsPrivacyAuthorization, registerBehavior } from "./legacy.js";
+import { createSelectorQuery, createIntersectionObserver, mountLegacy, needsPrivacyAuthorization, registerBehavior, navigateBuiltin } from "./legacy.js";
+import { applyGlassStyles } from "./styles.js";
 
 const launchKey = window.location.hash.slice(1);
 if (initial.allowWasm) {
@@ -572,6 +573,7 @@ function setForeground(visible) {
   }
 }
 
+let glassBackend;
 function mountGlass(view, module, query, setLoadingPage) {
   const { entry, templatesFactory } = module;
   const object = value => value ?? Object.create(null);
@@ -585,8 +587,11 @@ function mountGlass(view, module, query, setLoadingPage) {
   });
   space.addComponentStaticConfig(entry, {});
   space.componentEnv(entry, ({ Page, Component, Behavior }) => loadPage(module, Page, Component, Behavior));
-  const dom = new glassEasel.CurrentWindowBackendContext();
-  dom.onEvent(glassEasel.Event.triggerBackendEvent);
+  if (!glassBackend) {
+    glassBackend = new glassEasel.CurrentWindowBackendContext();
+    glassBackend.onEvent(glassEasel.Event.triggerBackendEvent);
+  }
+  const dom = glassBackend;
   const root = env.associateBackend(dom).createRoot("mini-page", space, entry);
   const instance = root.get();
   instance.route = entry;
@@ -594,12 +599,19 @@ function mountGlass(view, module, query, setLoadingPage) {
   setLoadingPage(instance);
   instance.onLoad?.({ ...query });
   root.attach(view, view.firstElementChild);
+  view.addEventListener("click", event => {
+    const navigator = event.target.closest?.("navigator");
+    if (!navigator || !view.contains(navigator) || event.defaultPrevented) return;
+    event.preventDefault();
+    void navigateBuiltin(Object.fromEntries([...navigator.attributes].map(attr => [attr.name, attr.value])))
+      .catch(() => wx.showToast({ title: "This page could not be opened.", icon: "none" }));
+  });
   return {
     instance,
     show: () => instance.onShow?.(),
     hide: () => instance.onHide?.(),
     ready: () => instance.onReady?.(),
-    close: () => instance.onUnload?.(),
+    close: () => { instance.onUnload?.(); root.release(); },
   };
 }
 
@@ -608,12 +620,7 @@ function display(module, query, mode = "push") {
   view.className = "mini-app-view";
   const content = document.createElement("section");
   content.append(document.createElement("span"));
-  if (module.stylesheet && module.framework !== "exparser") {
-    const stylesheet = document.createElement("link");
-    stylesheet.rel = "stylesheet";
-    stylesheet.href = module.stylesheet;
-    view.append(stylesheet);
-  }
+  const releaseStyles = module.framework !== "exparser" ? applyGlassStyles(view, module.entry) : () => {};
   view.append(content);
   main.append(view);
   const setLoadingPage = instance => {
@@ -626,11 +633,14 @@ function display(module, query, mode = "push") {
       ? mountLegacy(content, module, query, register => loadPage(module, register, value => register(value, true)), loadComponent, setLoadingPage)
       : mountGlass(content, module, query, setLoadingPage);
   } catch (error) {
+    releaseStyles();
     view.remove();
     throw error;
   } finally {
     loadingPages = undefined;
   }
+  const close = lifecycle.close;
+  lifecycle.close = () => { try { close(); } finally { releaseStyles(); } };
   const previous = stack.at(-1);
   if (previous) {
     if (foreground) previous.lifecycle.hide();
@@ -730,6 +740,10 @@ const wxApis = {
   hideToast: options => localCall("hideToast", options, () => clearFeedback("toast")),
   showLoading: options => localCall("showLoading", options, () => showFeedback(options, "loading")),
   hideLoading: options => localCall("hideLoading", options, () => clearFeedback("loading")),
+  setNavigationBarTitle: options => localCall("setNavigationBarTitle", options, () => {
+    if (typeof options?.title !== "string") throw new Error("A title is required");
+    document.title = options.title;
+  }),
   // Hosted launches do not forward app analytics.
   reportAnalytics() {},
   getNetworkType,

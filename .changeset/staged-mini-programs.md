@@ -17,7 +17,12 @@ account, package and access key allow it. The runner supports local network
 status, app visibility events, window-scoped storage, feedback UI, and
 supported compiled Exparser components across template chunks in the same
 staged archive, compiled stylesheet imports and responsive units, and isolated
-page/component styles. Load full view templates separately from service logic and
+page/component styles. Apply compiled app/page styles to Glass-easel pages without styling the host
+toolbar. Support local navigator links and page titles, retain one Glass-easel
+event backend across navigation, and expose current component IDs and typed
+datasets for component lookup and click handlers. Update legacy DOM elements in
+place so background data refreshes do not detach controls during a click.
+Load full view templates separately from service logic and
 report element visibility using the browser’s geometry. Render embedded images
 and convert responsive units in inline styles as well as stylesheets. Load public
 HTTPS display images and CSS backgrounds through a separate image-only bridge,

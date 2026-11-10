@@ -2,6 +2,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import glassTemplates from "./native-miniprogram-glass.mjs";
 
 const APP = "wx0123456789abcdef";
 const EMBEDDED_IMAGE = "data:image/svg+xml," + encodeURIComponent(
@@ -19,8 +20,9 @@ function page(route, id, initial, alternate, componentPage = false) {
       {tag:"wx-text",children:[data.note]},
       {tag:"wx-button",attr:{bindtap:"toggle"},children:["Change title"]},
       {tag:"wx-view",attr:{id:"next-page",bindtap:"navigate","data-navigation":[["next",true]]},children:["Open next page"]},
+      {tag:"wx-navigator",attr:{url:"/${alternate}?menu=linked"},children:["Open linked page"]},
       ...(data.privacyTest ? [{tag:"wx-button",attr:{openType:"agreePrivacyAuthorization",bindagreeprivacyauthorization:"acceptedPrivacy"},children:["Accept privacy terms"]}] : []),
-      {tag:"wx-demo-counter",attr:{id:"counter",label:data.title,bindupdated:"countChanged"},
+      {tag:"wx-demo-counter",attr:{id:"counter",label:data.title,"data-ref":data.title,"data-options":{enabled:true},bindupdated:"countChanged"},
         children:[{tag:"wx-text",children:["Count reported: " + data.reported]}]}
     ]};
   }}}(0,__g.aa);
@@ -56,6 +58,40 @@ function page(route, id, initial, alternate, componentPage = false) {
     });` : "Page(definition);"}
   },{isPage:true,isComponent:true,currentFile:'${route}.js'});
   `;
+}
+
+/** Stage compiled Glass-easel styles and navigation without third-party bytes. */
+export async function stageGlassMiniProgram(dataDir, account) {
+  const appId = "wx0123456789abcdea";
+  const directory = join(dataDir, "hub", "miniprograms", account, appId);
+  const home = "pages/glass/index";
+  const second = "pages/glass/second";
+  const service = `
+    __wxCodeSpace__.batchAddCompiledTemplate(${glassTemplates});
+    define("${home}.js",function(require,module,exports){
+      Page({ data:{count:0}, increment(){this.setData({count:this.data.count+1});} });
+    },{isPage:true,isComponent:false,currentFile:"${home}.js"});
+    define("${second}.js",function(require,module,exports){
+      Page({back(){wx.navigateBack();}});
+    },{isPage:true,isComponent:false,currentFile:"${second}.js"});
+  `;
+  const bytes = archive({
+    "app-config.json": JSON.stringify({ pages: [home, second] }),
+    "app-service.js": service,
+    "app-wxss.js": `
+      setCssToHead(["wx-text{color:rgb(18,80,62)}.mini-toolbar{display:none}"])();
+      __wxAppCode__['${home}.wxss']=setCssToHead(["page{padding:30rpx}.card{background:rgb(230,240,250)}"]);
+      __wxAppCode__['${second}.wxss']=setCssToHead(["page{padding:60rpx}.second{background:rgb(250,240,230)}"]);
+    `,
+  });
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(directory, "manifest.json"), JSON.stringify({
+    title: "Glass fixture", version: "1", packageId: "main",
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    entryPage: home, servicePath: "app-service.js",
+  }));
+  await writeFile(join(directory, "package.wxapkg"), bytes);
+  return appId;
 }
 
 function archive(files) {

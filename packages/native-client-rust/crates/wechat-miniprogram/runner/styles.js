@@ -4,6 +4,39 @@ import { remoteImage } from "./images.js";
 
 const sheets = new Map();
 const inlineStyles = new WeakMap();
+let glassViewId = 0;
+
+// Glass-easel's DOM backend uses native tag names, unlike the legacy adapter's
+// data-wx-tag elements. Keep each page's CSS inside its own view and remove it
+// with the view on navigation.
+export function applyGlassStyles(view, route) {
+  const scope = String(++glassViewId);
+  view.dataset.miniGlass = scope;
+  const owned = [];
+  for (const name of ["app", route]) {
+    const source = compiledStyles.get(name);
+    if (source === undefined) continue;
+    const ast = parse(source, { parseCustomProperty: true });
+    responsiveUnits(ast);
+    walk(ast, {
+      visit: "TypeSelector",
+      enter(node) {
+        if (["body", "page", "wx-page"].includes(node.name)) node.name = "mini-page";
+        else if (node.name.startsWith("wx-")) node.name = node.name.slice(3);
+      },
+    });
+    const remote = imageUrls(ast, name);
+    const style = new CSSStyleSheet();
+    const apply = css => style.replaceSync(`@scope ([data-mini-glass="${scope}"]) { ${css} }`);
+    apply(generate(ast));
+    owned.push(style);
+    loadImages(ast, remote, apply);
+  }
+  document.adoptedStyleSheets = [...document.adoptedStyleSheets, ...owned];
+  return () => {
+    document.adoptedStyleSheets = document.adoptedStyleSheets.filter(sheet => !owned.includes(sheet));
+  };
+}
 
 function responsiveUnits(ast) {
   walk(ast, {
@@ -57,6 +90,10 @@ export function applyInlineStyle(element, source, route) {
   loadImages(ast, remote, css => {
     if (element.isConnected && inlineStyles.get(element) === ast) element.style.cssText = css;
   });
+}
+
+export function clearInlineStyle(element) {
+  inlineStyles.delete(element);
 }
 
 const defaults = new CSSStyleSheet();

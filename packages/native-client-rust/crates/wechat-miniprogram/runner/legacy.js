@@ -1,4 +1,4 @@
-import { createLegacyView, applyInlineStyle } from "./styles.js";
+import { createLegacyView, applyInlineStyle, clearInlineStyle } from "./styles.js";
 import { intersection } from "./intersection.js";
 import { remoteImage } from "./images.js";
 
@@ -7,6 +7,8 @@ const tags = new Map([
   ["wx-page", "section"], ["wx-view", "div"], ["wx-text", "span"],
   ["wx-button", "button"], ["wx-input", "input"], ["wx-textarea", "textarea"],
   ["wx-scroll-view", "div"], ["wx-label", "label"], ["wx-image", "img"],
+  ["wx-navigator", "a"],
+  ["wx-slot", "slot"],
 ]);
 
 const events = new Map([
@@ -18,6 +20,21 @@ const behaviors = new Map();
 const roots = new WeakMap();
 const observers = new WeakMap();
 const datasets = new WeakMap();
+const attributeSources = new WeakMap();
+const imageRequests = new WeakMap();
+
+function reconcileChildren(parent, nodes) {
+  let cursor = parent.firstChild;
+  for (const node of nodes.flat(Infinity)) {
+    if (node === cursor) cursor = cursor.nextSibling;
+    else parent.insertBefore(node, cursor);
+  }
+  while (cursor) {
+    const next = cursor.nextSibling;
+    cursor.remove();
+    cursor = next;
+  }
+}
 
 function elementDataset(element) {
   return { ...element?.dataset, ...datasets.get(element) };
@@ -191,6 +208,7 @@ function mountInstance(main, { route, definition, query, template, loadComponent
   page.properties = page.data;
   if (owner) page.selectOwnerComponent = () => owner;
   const children = new Map();
+  const nodes = new Map();
   function matchingChildren(selector) {
     return [...children.values()].filter(child => child.element.matches(selector)).map(child => child.instance);
   }
@@ -211,6 +229,8 @@ function mountInstance(main, { route, definition, query, template, loadComponent
   let pending = false;
   function update(nextAttrs, nextSlot) {
     slot = nextSlot;
+    page.id = main.id;
+    page.dataset = { ...datasets.get(main) };
     const changes = [];
     for (const [key, spec] of Object.entries(properties)) {
       const attribute = key.replace(/[A-Z]/g, letter => "-" + letter.toLowerCase());
@@ -246,20 +266,14 @@ function mountInstance(main, { route, definition, query, template, loadComponent
     const index = focused ? [...rendered.querySelectorAll("input,textarea,button")].indexOf(focused) : -1;
     const cursor = focused?.selectionStart;
     const retained = new Set();
+    const retainedNodes = new Set();
     function make(node, level, key) {
       if (++limit.nodes > 20000 || level > 64) throw new Error("Legacy view exceeded limits");
       if (node == null || typeof node === "boolean") return document.createTextNode("");
       if (typeof node !== "object") return document.createTextNode(String(node));
-      if (node.tag === "wx-slot") {
-        const element = document.createElement("slot");
-        element.name = node.attr?.name ?? "";
-        return element;
-      }
       if (Array.isArray(node) || node.tag === "virtual") {
-        const fragment = document.createDocumentFragment();
         const items = Array.isArray(node) ? node : node.children ?? [];
-        items.forEach((child, index) => fragment.append(make(child, level + 1, `${key}/${index}`)));
-        return fragment;
+        return items.flatMap((child, index) => make(child, level + 1, `${key}/${index}`));
       }
       const tag = tags.get(node.tag) ?? "div";
       const tagName = node.tag?.replace(/^wx-/, "");
@@ -267,24 +281,22 @@ function mountInstance(main, { route, definition, query, template, loadComponent
       const supported = component && typeof template(component.route) === "function";
       const childKey = `${key}:${node.wxKey ?? ""}:${tagName}`;
       const existing = supported ? children.get(childKey) : undefined;
-      const element = existing?.element ?? document.createElement(tag);
+      const previous = nodes.get(childKey);
+      const element = existing?.element ?? previous?.element ?? document.createElement(tag);
       const attrs = node.attr ?? {};
       applyAttributes(element, tag, node.tag, attrs, route);
-      const controller = supported ? new AbortController() : undefined;
-      existing?.controller.abort();
+      const controller = new AbortController();
+      previous?.controller.abort();
+      nodes.set(childKey, { element, controller });
+      retainedNodes.add(childKey);
       bindEvents(element, attrs, page, controller, supported);
       if (supported) {
         const projectSlot = name => {
-          const fragment = document.createDocumentFragment();
-          (node.children ?? []).forEach((child, index) => {
-            if ((child?.attr?.slot ?? "") === name) fragment.append(make(child, level + 1, `${key}/${index}`));
-          });
-          return fragment;
+          return (node.children ?? []).flatMap((child, index) =>
+            (child?.attr?.slot ?? "") === name ? make(child, level + 1, `${key}/${index}`) : []);
         };
-        element.replaceChildren(projectSlot(""));
-        for (const name of new Set((node.children ?? []).map(child => child?.attr?.slot).filter(Boolean))) {
-          element.append(projectSlot(name));
-        }
+        reconcileChildren(element, [projectSlot(""),
+          ...[...new Set((node.children ?? []).map(child => child?.attr?.slot).filter(Boolean))].map(projectSlot)]);
         const child = existing ?? {
           ...mountInstance(element, {
             ...component, template, loadComponent, depth: depth + 1, owner: page, attrs, slot: projectSlot,
@@ -298,19 +310,24 @@ function mountInstance(main, { route, definition, query, template, loadComponent
         if (existing) child.update(attrs, projectSlot, limit);
         else child.ready();
       } else {
-        (node.children ?? []).forEach((child, index) => element.append(make(child, level + 1, `${key}/${index}`)));
+        reconcileChildren(element, (node.children ?? []).map((child, index) => make(child, level + 1, `${key}/${index}`)));
       }
       return element;
     }
 
-    rendered = document.createElement("section");
-    rendered.append(make(tree, 0, ""));
+    rendered ??= document.createElement("section");
+    reconcileChildren(rendered, [make(tree, 0, "")]);
+    for (const [key, node] of nodes) {
+      if (retainedNodes.has(key)) continue;
+      node.controller.abort();
+      nodes.delete(key);
+    }
     for (const [key, child] of children) {
       if (retained.has(key)) continue;
       child.close();
       children.delete(key);
     }
-    view.replaceChildren(rendered);
+    if (rendered.parentNode !== view) view.append(rendered);
     const replacement = rendered.querySelectorAll("input,textarea,button")[index];
     if (replacement) {
       replacement.focus({ preventScroll: true });
@@ -335,6 +352,8 @@ function mountInstance(main, { route, definition, query, template, loadComponent
     close() {
       for (const child of children.values()) child.close();
       children.clear();
+      for (const node of nodes.values()) node.controller.abort();
+      nodes.clear();
       for (const observer of observers.get(page) ?? []) observer.disconnect();
       observers.delete(page);
       roots.delete(page);
@@ -369,23 +388,37 @@ function mountInstance(main, { route, definition, query, template, loadComponent
 }
 
 function applyAttributes(element, tag, wxTag, attrs, route) {
+  // Compilers create fresh attribute objects for unchanged nodes. Compare their
+  // serialized view attributes before touching styles or restarting image loads.
+  const dataset = Object.create(null);
+  for (const [name, value] of Object.entries(attrs)) {
+    if (/^data-[a-z0-9-]+$/.test(name) && value != null) {
+      dataset[name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())] = value;
+    }
+  }
+  datasets.set(element, dataset);
+  const source = JSON.stringify(Object.entries(attrs).map(([name, value]) => [name, typeof value, value == null ? null : String(value)]));
+  if (attributeSources.get(element) === source) return;
+  attributeSources.set(element, source);
+  const imageRequest = {};
+  imageRequests.set(element, imageRequest);
+  clearInlineStyle(element);
   for (const attr of [...element.attributes]) element.removeAttribute(attr.name);
   element.className = wxTag === "wx-scroll-view" ? "mini-legacy-node mini-scroll" : "mini-legacy-node";
   element.setAttribute("data-wx-tag", wxTag ?? "wx-view");
-  const dataset = Object.create(null);
   for (const [name, value] of Object.entries(attrs)) {
     if (value == null) continue;
     if (name === "class") element.className += " " + String(value);
-    else if (["id", "title", "aria-label", "placeholder", "slot"].includes(name)) element.setAttribute(name, String(value));
+    else if (["id", "title", "aria-label", "placeholder", "slot", "name"].includes(name)) element.setAttribute(name, String(value));
     else if (name === "style") applyInlineStyle(element, String(value), route);
     else if (name === "src" && tag === "img" && typeof value === "string" && value.startsWith("https://")) {
       element.dataset.imageState = "loading";
       void remoteImage(value).then(source => {
-        if (!element.isConnected) return;
+        if (!element.isConnected || imageRequests.get(element) !== imageRequest) return;
         element.src = source;
         element.dataset.imageState = "loaded";
       }, () => {
-        if (!element.isConnected) return;
+        if (!element.isConnected || imageRequests.get(element) !== imageRequest) return;
         element.dataset.imageState = "unavailable";
         element.dispatchEvent(new CustomEvent("error", { detail: { errMsg: "Image is unavailable" } }));
       });
@@ -407,15 +440,45 @@ function applyAttributes(element, tag, wxTag, attrs, route) {
     else if (name === "value" && (tag === "input" || tag === "textarea")) element.value = String(value);
     else if (/^data-[a-z0-9-]+$/.test(name)) {
       element.setAttribute(name, String(value));
-      const key = name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
-      dataset[key] = value;
     }
   }
-  datasets.set(element, dataset);
+  if (wxTag === "wx-navigator") {
+    element.setAttribute("role", "link");
+    element.tabIndex = 0;
+  }
+}
+
+// Native navigator components use the same local page stack as wx navigation.
+// Never let the browser interpret their URLs as external top-level navigation.
+export async function navigateBuiltin(attrs) {
+  const methods = new Set(["navigateTo", "redirectTo", "switchTab", "reLaunch", "navigateBack"]);
+  const method = attrs.openType ?? attrs["open-type"] ?? "navigateTo";
+  if (!methods.has(method) || typeof globalThis.wx[method] !== "function"
+    || (attrs.target && attrs.target !== "self")) {
+    throw new Error("This navigator target is unsupported");
+  }
+  return globalThis.wx[method]({ url: attrs.url, delta: Number(attrs.delta ?? 1) });
 }
 
 function bindEvents(element, attrs, page, controller, custom) {
   const bindings = new Map(events);
+  if (!custom && element.dataset.wxTag === "wx-navigator") {
+    const navigate = event => {
+      if (event.type === "keydown" && event.key !== "Enter") return;
+      event.preventDefault();
+      void navigateBuiltin(attrs).then(
+        detail => element.dispatchEvent(new CustomEvent("mini:success", { detail })),
+        error => {
+          element.dispatchEvent(new CustomEvent("mini:fail", { detail: { errMsg: error.errMsg ?? error.message } }));
+          void globalThis.wx.showToast({ title: "This page could not be opened.", icon: "none" });
+        },
+      );
+    };
+    element.addEventListener("click", navigate, { signal: controller?.signal });
+    element.addEventListener("keydown", navigate, { signal: controller?.signal });
+    bindings.set("mini:success", "success");
+    bindings.set("mini:fail", "fail");
+  }
   if (element.tagName === "BUTTON" && (attrs.openType ?? attrs["open-type"]) === "agreePrivacyAuthorization") {
     bindings.set("mini:agreeprivacyauthorization", "agreeprivacyauthorization");
     element.addEventListener("click", async event => {

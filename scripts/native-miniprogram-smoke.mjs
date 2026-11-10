@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { createInterface } from "node:readline";
 import { promisify } from "node:util";
+import { stageGlassMiniProgram } from "./fixtures/native-miniprogram.mjs";
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(join(repository, "packages/client-ui/package.json"));
 const { chromium } = process.env.PLAYWRIGHT_MODULE
@@ -125,6 +126,41 @@ try {
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
     args: ["--disable-background-networking", "--disable-dev-shm-usage"],
   });
+  const glassApp = await stageGlassMiniProgram(stack.dataDir, ACCOUNT.id);
+  const glassHost = await childReady([...args, glassApp]);
+  const glassPage = await browser.newPage({ viewport: { width: 410, height: 776 } });
+  const glassErrors = [];
+  glassPage.on("pageerror", error => glassErrors.push(error.message));
+  glassPage.on("console", message => { if (message.type() === "error") glassErrors.push(message.text()); });
+  await glassPage.goto(glassHost.url);
+  await glassPage.getByText("Count 0", { exact: true }).waitFor();
+  const glassStyle = await glassPage.getByText("Count 0", { exact: true }).evaluate(node => ({
+    color: getComputedStyle(node).color,
+    padding: getComputedStyle(node.closest("mini-page")).paddingLeft,
+    background: getComputedStyle(node.parentElement).backgroundColor,
+  }));
+  assert.equal(glassStyle.color, "rgb(18, 80, 62)");
+  assert.equal(glassStyle.background, "rgb(230, 240, 250)");
+  assert.ok(Math.abs(parseFloat(glassStyle.padding) - 16.4) < 0.1);
+  await glassPage.locator(".mini-toolbar").waitFor({ state: "visible" });
+  await glassPage.getByRole("button", { name: "Increment", exact: true }).click();
+  await glassPage.getByText("Count 1", { exact: true }).waitFor();
+  const glassSheets = await glassPage.evaluate(() => document.adoptedStyleSheets.length);
+  await glassPage.getByText("Next page", { exact: true }).click();
+  await glassPage.getByText("Second page", { exact: true }).waitFor();
+  assert.equal(await glassPage.locator(".second").evaluate(node => getComputedStyle(node).backgroundColor), "rgb(250, 240, 230)");
+  await glassPage.getByRole("button", { name: "Return", exact: true }).click();
+  await glassPage.getByText("Count 1", { exact: true }).waitFor();
+  assert.equal(await glassPage.evaluate(() => document.adoptedStyleSheets.length), glassSheets);
+  await glassPage.getByRole("button", { name: "Increment", exact: true }).click();
+  await glassPage.getByText("Count 2", { exact: true }).waitFor();
+  assert.deepEqual(glassErrors, []);
+  const titleResult = await glassPage.evaluate(() => wx.setNavigationBarTitle({ title: "Fixture title" }));
+  assert.equal(titleResult.errMsg, "setNavigationBarTitle:ok");
+  assert.equal(await glassPage.title(), "Fixture title");
+  await glassPage.screenshot({ path: join(output, "cli-glass-easel.png") });
+  await glassPage.close();
+  console.log("PASS: Glass-easel compiled CSS, rpx, scoped toolbar, tap, native navigator, back and stylesheet cleanup");
   const page = await browser.newPage({ viewport: { width: 410, height: 776 } });
   const pageErrors = [];
   page.on("pageerror", error => pageErrors.push(error.message));
@@ -228,6 +264,10 @@ try {
   await page.getByRole("button", { name: "Add one" }).click();
   await page.getByText("Menu: seasonal: 1", { exact: true }).waitFor();
   await page.getByText("Count reported: 1", { exact: true }).waitFor();
+  assert.deepEqual(await page.evaluate(() => {
+    const child = getCurrentPages().at(-1).selectComponent("#counter");
+    return { id: child.id, dataset: child.dataset };
+  }), { id: "counter", dataset: { ref: "Menu: seasonal", options: { enabled: true } } });
   const common = await page.evaluate(async () => {
     const current = getCurrentPages().at(-1);
     const selected = current.selectComponent("#counter");
@@ -320,14 +360,26 @@ try {
   await page.context().setOffline(false);
   await page.waitForFunction(() => navigator.onLine);
   console.log("PASS: browser wx network snapshots, online/offline events, deduplication and listener removal");
-  await page.getByRole("button", { name: "Change title" }).click();
+  const changingButton = page.getByRole("button", { name: "Change title" });
+  await changingButton.evaluate(node => { globalThis.pressedButton = node; });
+  await changingButton.hover();
+  await page.mouse.down();
+  await page.evaluate(() => new Promise(resolve => getCurrentPages().at(-1).setData({ unrelatedRefresh: 1 }, resolve)));
+  assert.equal(await changingButton.evaluate(node => node === globalThis.pressedButton && node.isConnected), true);
+  await page.mouse.up();
   await page.getByText("Menu updated", { exact: true }).waitFor();
   await page.getByText("Menu updated: 1", { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => getCurrentPages().at(-1).selectComponent("#counter").dataset.ref), "Menu updated");
   await page.getByPlaceholder("Add a note").pressSequentially("Lunch");
   await page.getByText("Lunch", { exact: true }).waitFor();
   await page.screenshot({ path: join(output, "cli-exparser.png") });
   await page.locator("#next-page").click();
   await page.getByText("Menu: next", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Back", exact: true }).click();
+  await page.getByText("Menu updated", { exact: true }).waitFor();
+  await page.getByRole("link", { name: "Open linked page" }).focus();
+  await page.keyboard.press("Enter");
+  await page.getByText("Menu: linked", { exact: true }).waitFor();
   await page.getByRole("button", { name: "Back", exact: true }).click();
   await page.getByText("Menu updated", { exact: true }).waitFor();
   assert.deepEqual(pageErrors, []);
@@ -565,6 +617,22 @@ try {
   assert.equal(imageStyles.rejectsHtml, true);
   assert.equal(imageStyles.rejectsCredentials, true);
   assert.equal(imageRequests, 2);
+  await page.unroute("**/_wx/image");
+  let holdImage;
+  const heldImage = new Promise(resolve => { holdImage = resolve; });
+  await page.route("**/_wx/image", route => holdImage(route));
+  await page.evaluate(() => getCurrentPages().at(-1).setData({ image: "https://example.invalid/slow-image" }));
+  const imageRoute = await heldImage;
+  await page.evaluate(image => getCurrentPages().at(-1).setData({ image }), originalImage);
+  await page.locator("#embedded-image").evaluate(image => image.decode());
+  await imageRoute.fulfill({ json: { statusCode: 200, header: { "content-type": "image/svg+xml" },
+    body: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>').toString("base64"),
+  } });
+  await page.evaluate(async () => {
+    await (await import("/images.js")).remoteImage("https://example.invalid/slow-image");
+    await new Promise(resolve => requestAnimationFrame(resolve));
+  });
+  assert.equal(await page.locator("#embedded-image").getAttribute("src"), originalImage);
   await page.unroute("**/_wx/image");
   console.log("PASS: scoped remote images, shared cache, CSS/inline backgrounds, load dimensions and non-image rejection");
   deniedHost.child.kill("SIGINT");
