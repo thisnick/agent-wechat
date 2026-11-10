@@ -84,8 +84,6 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
-      pull-requests: write
-      issues: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -95,7 +93,7 @@ jobs:
         with:
           node-version-file: .node-version
       - name: Test the review tool
-        run: node --test scripts/interfaces/review.test.mjs scripts/interfaces/index.test.mjs
+        run: node --test scripts/interfaces/review.test.mjs scripts/interfaces/index.test.mjs scripts/interfaces/publish-comment.test.mjs
       - name: Check OpenAPI compatibility with oasdiff
         id: oasdiff
         run: |
@@ -117,11 +115,17 @@ jobs:
           if [ "$status" -ne 0 ] && [ ! -s "$RUNNER_TEMP/oasdiff.md" ]; then exit "$status"; fi
           echo "report=$RUNNER_TEMP/oasdiff.md" >> "$GITHUB_OUTPUT"
           echo "breaking=$([ "$status" -ne 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-      - name: Compare listings, update the PR comment and check documentation
+      - name: Compare listings, save the report and check documentation
         run: |
-          args=(--base "origin/${{ github.base_ref }}" --comment --fail-on-missing-docs)
+          args=(--base "origin/${{ github.base_ref }}" --report-file "$RUNNER_TEMP/interface-report.json" --fail-on-missing-docs)
           if [ -n "${{ steps.oasdiff.outputs.report }}" ]; then args+=(--oasdiff "${{ steps.oasdiff.outputs.report }}"); fi
           if [ "${{ steps.oasdiff.outputs.breaking }}" = true ]; then args+=(--oasdiff-breaking); fi
           node scripts/interfaces/review.mjs "${args[@]}"
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+      - name: Upload the comment report even when documentation is missing
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: interface-report-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/interface-report.json
+          retention-days: 7
+          if-no-files-found: warn

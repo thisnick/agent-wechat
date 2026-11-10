@@ -85,3 +85,5 @@ It also warns when a changed listing has no changeset for its package, or a brea
 The owner approves by adding the `interfaces-approved` label to the PR. The check records the listings' tree hash at that moment. A later push that changes the listings removes the label and asks again; other pushes keep the approval.
 
 Coding agents never add this label themselves and never merge a PR while **Interface approval** is pending or failing.
+
+Interface reports are generated in the read-only PR workflow and retained in its job summary and artifact. A separate default-branch workflow posts the comment after the Interfaces run completes, including for forks and failed documentation checks. It checks the current PR commit, source repository and run attempt before posting; artifact contents are read as JSON, never executed. Older runs leave the comment unchanged. The publisher becomes active after its workflow reaches the default branch.
