@@ -294,6 +294,7 @@ impl crate::upstream::Upstream for BoundUpstream {
     forward!(lookup_room_raw(room: &str, version: u32) -> Vec<u8> => lookup_room_raw);
     forward!(lookup_room_receipt(room: &str, version: u32) -> wechat_protocol::MetadataReply<wechat_protocol::RoomRoster> => lookup_room_receipt);
     forward!(lookup_contacts_raw(ids: &[String]) -> Vec<u8> => lookup_contacts_raw);
+    forward!(lookup_openim_contact_raw(username: &str, room: Option<&str>, ticket: Option<&str>) -> Vec<u8> => lookup_openim_contact_raw);
     forward!(contact_sync(cursor: &[u8], message_cursor: &[u8], continuation: bool) -> wechat_protocol::contact_sync::ContactSyncBatch => contact_sync);
     forward!(download_voice(server_id: u64, length: u32, offset: u32) -> wechat_protocol::VoiceChunk => download_voice_chunk);
     forward!(notify_read(request: &wechat_protocol::SessionReadNotification) -> wechat_protocol::SessionReadReply => notify_read_session);

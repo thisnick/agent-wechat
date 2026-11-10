@@ -84,7 +84,14 @@ impl Core {
                             } else {
                                 "operation_failed"
                             };
-                            let _ = core.progress(&worker, "failed", json!({"code":code}));
+                            let result = if let Some(failure) =
+                                error.downcast_ref::<wechat_protocol::openim::OpenImServiceError>()
+                            {
+                                json!({"code":"openim_contact_failed","serviceCode":failure.service_code})
+                            } else {
+                                json!({"code":code})
+                            };
+                            let _ = core.progress(&worker, "failed", result);
                         }
                     }
                 }

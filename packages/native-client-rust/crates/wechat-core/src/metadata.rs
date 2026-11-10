@@ -13,12 +13,28 @@ use wechat_protocol::{
     rename_all_fields = "camelCase"
 )]
 pub enum MetadataAction {
-    Contact { contact_id: String },
-    Group { group_id: String },
-    Members { group_id: String, version: u32 },
-    ContactSync { max_pages: u32 },
-    GroupSync { max_pages: u32 },
-    Avatar { contact_id: String },
+    Contact {
+        contact_id: String,
+    },
+    Group {
+        group_id: String,
+    },
+    Members {
+        group_id: String,
+        version: u32,
+    },
+    ContactSync {
+        max_pages: u32,
+    },
+    GroupSync {
+        max_pages: u32,
+    },
+    Avatar {
+        contact_id: String,
+        /// Known group containing an OpenIM member, when lookup needs context.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        room_id: Option<String>,
+    },
 }
 #[derive(Serialize, Deserialize)]
 enum ReceiptBody {
@@ -442,8 +458,19 @@ impl Core {
         action: MetadataAction,
     ) -> Result<Operation> {
         match &action {
-            MetadataAction::Contact { contact_id } | MetadataAction::Avatar { contact_id } => {
-                valid_name(contact_id)?
+            MetadataAction::Contact { contact_id } => valid_name(contact_id)?,
+            MetadataAction::Avatar {
+                contact_id,
+                room_id,
+            } => {
+                valid_name(contact_id)?;
+                if let Some(room) = room_id {
+                    valid_name(room)?;
+                    ensure!(
+                        room.ends_with("@chatroom") || room.ends_with("@im.chatroom"),
+                        "invalid_avatar_room_context"
+                    );
+                }
             }
             MetadataAction::Group { group_id } | MetadataAction::Members { group_id, .. } => {
                 valid_name(group_id)?;
@@ -774,6 +801,36 @@ impl Core {
             Err(error) => Err(error),
         }
     }
+    fn metadata_openim_avatar_source(
+        &self,
+        account: &str,
+        username: &str,
+        room: Option<&str>,
+    ) -> Result<String> {
+        let mut state = self.account_state(account)?;
+        let capture = |state: &mut AccountState| -> Result<String> {
+            let raw = self
+                .account_upstream(account)?
+                .lookup_openim_contact_raw(state, username, room, None)?;
+            self.retain_contact_wire(account, &[username.to_owned()], &raw)?;
+            let contact = wechat_protocol::openim::decode_response(&raw, username)?;
+            self.save_state(account, state)?;
+            contact
+                .small_avatar_url
+                .filter(|value| !value.is_empty())
+                .context("avatar_not_advertised")
+        };
+        match capture(&mut state) {
+            Ok(source) => Ok(source),
+            Err(error) if auth_rejected(&error) => {
+                state = self
+                    .account_upstream(account)?
+                    .renew_session(&state, "agent-wechat OpenIM avatar")?;
+                capture(&mut state)
+            }
+            Err(error) => Err(error),
+        }
+    }
     fn contact_unavailable(&self, account: &str) -> Result<Vec<CatalogRejection>> {
         const KEY: &str = "metadata-contacts-unavailable";
         let values = match self.store.runtime(account, KEY)? {
@@ -883,25 +940,33 @@ impl Core {
                     json!({"memberCount":count,"profileProjection":"complete","completeRoster":complete}),
                 )
             }
-            MetadataAction::Avatar { contact_id } => {
-                let reply =
-                    self.metadata_contact_reply(account, std::slice::from_ref(&contact_id))?;
-                let source = reply
-                    .value
-                    .contacts
-                    .iter()
-                    .find(|r| r.username == contact_id)
-                    .and_then(|r| r.small_avatar_url.clone())
-                    .filter(|s| !s.is_empty())
-                    .context("avatar_not_advertised")?;
-                let id = self.stage_metadata_body(
-                    account,
-                    ReceiptBody::Contacts {
-                        requested: vec![contact_id.clone()],
-                        reply,
-                    },
-                )?;
-                self.apply_metadata_receipt(account, &id, false)?;
+            MetadataAction::Avatar {
+                contact_id,
+                room_id,
+            } => {
+                let source = if contact_id.ends_with("@openim") {
+                    self.metadata_openim_avatar_source(account, &contact_id, room_id.as_deref())?
+                } else {
+                    let reply =
+                        self.metadata_contact_reply(account, std::slice::from_ref(&contact_id))?;
+                    let source = reply
+                        .value
+                        .contacts
+                        .iter()
+                        .find(|r| r.username == contact_id)
+                        .and_then(|r| r.small_avatar_url.clone())
+                        .filter(|s| !s.is_empty())
+                        .context("avatar_not_advertised")?;
+                    let id = self.stage_metadata_body(
+                        account,
+                        ReceiptBody::Contacts {
+                            requested: vec![contact_id.clone()],
+                            reply,
+                        },
+                    )?;
+                    self.apply_metadata_receipt(account, &id, false)?;
+                    source
+                };
                 self.metadata_check(account, operation, deadline)?;
                 let mut state = self.account_state(account)?;
                 let bytes = self.upstream.download_avatar(&mut state, &source)?;
@@ -1394,6 +1459,116 @@ mod tests {
         assert!(types.contains("contact_sync"));
         assert!(types.contains("maxPages"));
         assert!(!types.contains("max_pages"));
+    }
+    #[test]
+    fn avatar_context_is_optional_and_legacy_actions_remain_readable() {
+        let legacy: MetadataAction =
+            serde_json::from_value(json!({"kind":"avatar","contactId":"peer"})).unwrap();
+        assert!(matches!(
+            legacy,
+            MetadataAction::Avatar { room_id: None, .. }
+        ));
+        assert!(serde_json::to_value(&legacy)
+            .unwrap()
+            .get("roomId")
+            .is_none());
+        let contextual: MetadataAction = serde_json::from_value(
+            json!({"kind":"avatar","contactId":"200001@openim","roomId":"room@chatroom"}),
+        )
+        .unwrap();
+        assert!(
+            matches!(contextual, MetadataAction::Avatar { room_id: Some(ref room), .. } if room == "room@chatroom")
+        );
+    }
+    #[test]
+    fn openim_avatar_lookup_keeps_group_context_and_checks_response_identity() {
+        struct AvatarHost {
+            mismatch: bool,
+        }
+        impl crate::upstream::Upstream for AvatarHost {
+            fn kind(&self) -> crate::upstream::UpstreamKind {
+                crate::upstream::UpstreamKind::Native
+            }
+            fn lookup_contacts_raw(&self, _: &mut AccountState, _: &[String]) -> Result<Vec<u8>> {
+                panic!("OpenIM avatar must use the dedicated contact request");
+            }
+            fn lookup_openim_contact_raw(
+                &self,
+                state: &mut AccountState,
+                username: &str,
+                room: Option<&str>,
+                ticket: Option<&str>,
+            ) -> Result<Vec<u8>> {
+                assert_eq!(username, "200001@openim");
+                assert_eq!(room, Some("group@chatroom"));
+                assert_eq!(ticket, None);
+                state.cookie = vec![7];
+                let identity = if self.mismatch {
+                    "other@openim"
+                } else {
+                    username
+                };
+                p::message(&[
+                    p::int32(1, 0),
+                    p::bytes(
+                        2,
+                        &p::message(&[
+                            p::bytes(1, identity.as_bytes()),
+                            p::bytes(6, b"https://wework.qpic.cn/wwhead/synthetic/100"),
+                        ])?,
+                    ),
+                ])
+            }
+        }
+        for mismatch in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Arc::new(Store::open(&dir.path().join("data")).unwrap());
+            store.create_account("one").unwrap();
+            let core = Core::with_upstream(store, None, Arc::new(AvatarHost { mismatch })).unwrap();
+            core.save_state("one", &super::super::tests::state())
+                .unwrap();
+            let result =
+                core.metadata_openim_avatar_source("one", "200001@openim", Some("group@chatroom"));
+            if mismatch {
+                assert!(result.is_err());
+            } else {
+                assert_eq!(
+                    result.unwrap(),
+                    "https://wework.qpic.cn/wwhead/synthetic/100"
+                );
+                assert_eq!(core.account_state("one").unwrap().cookie, vec![7]);
+            }
+        }
+    }
+    #[tokio::test]
+    async fn openim_operation_reports_only_the_numeric_service_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&dir.path().join("data")).unwrap());
+        store.create_account("one").unwrap();
+        let core = Core::new(store.clone(), None).unwrap();
+        let op = core
+            .start_operation("one", "metadata", |_, _| async {
+                Err(wechat_protocol::openim::OpenImServiceError { service_code: -42 }.into())
+            })
+            .unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let value = store.operation("one", &op.id).unwrap();
+                if value.state == "failed" {
+                    break value.result;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            result,
+            json!({"code":"openim_contact_failed","serviceCode":-42})
+        );
+        assert!(auth_rejected(
+            &wechat_protocol::openim::OpenImServiceError { service_code: -13 }.into()
+        ));
     }
     #[test]
     fn sparse_contacts_preserve_absence_and_explicit_empty() {

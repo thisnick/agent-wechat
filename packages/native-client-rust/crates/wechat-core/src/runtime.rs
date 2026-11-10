@@ -292,6 +292,12 @@ fn now() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 fn auth_rejected(error: &anyhow::Error) -> bool {
+    if error
+        .downcast_ref::<wechat_protocol::openim::OpenImServiceError>()
+        .is_some_and(|failure| failure.service_code == -13)
+    {
+        return true;
+    }
     error.chain().any(|cause| {
         let message = cause.to_string();
         [

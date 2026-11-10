@@ -371,6 +371,16 @@ pub trait Upstream: Send + Sync {
             }
         )
     }
+    /// Fetch one known OpenIM identity using optional group and ticket context.
+    fn lookup_openim_contact_raw(
+        &self,
+        _state: &mut AccountState,
+        _username: &str,
+        _room: Option<&str>,
+        _ticket: Option<&str>,
+    ) -> Result<Vec<u8>> {
+        bail!("unsupported_openim_contact_lookup")
+    }
     fn download_avatar(&self, _state: &mut AccountState, source: &str) -> Result<Vec<u8>> {
         require_native(self.kind())?;
         wechat_protocol::media::download_advertised_avatar(source)

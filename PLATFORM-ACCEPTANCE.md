@@ -25,6 +25,14 @@ verified fragments from an exact committed version on main.
 
 ## Offline checks on each respective machine
 
+The OpenIM avatar lookup has matching Linux 4.1.13.26 request/response codec fixtures,
+group-context routing checks and bounded avatar-source validation. One authorized
+macOS ARM64 account accepted native lookups for two known OpenIM group members
+with group context and no ticket. Both JPEG downloads and profile projections
+completed, and the restored prior daemon returned identical cached bytes. No
+message submissions occurred. This does not establish arbitrary-account,
+ticket-required, Linux or Windows live acceptance.
+
 Record OS version, CPU, `wx --json version` output and source commit. Use an empty
 scratch directory, never an existing official profile or deployed daemon.
 

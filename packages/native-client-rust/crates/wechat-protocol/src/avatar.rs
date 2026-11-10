@@ -8,7 +8,8 @@ pub fn validate_avatar_url(value: &str) -> Result<reqwest::Url> {
             && u.host_str().is_some_and(|h| [
                 "wx.qlogo.cn",
                 "mmhead.c2c.wechat.com",
-                "mmhead.hk.wechat.com"
+                "mmhead.hk.wechat.com",
+                "wework.qpic.cn"
             ]
             .contains(&h))
             && u.username().is_empty()
@@ -84,8 +85,10 @@ mod tests {
     #[test]
     fn exact_avatar_hosts_only() {
         assert!(validate_avatar_url("https://wx.qlogo.cn/a?opaque=1").is_ok());
+        assert!(validate_avatar_url("https://wework.qpic.cn/wwhead/synthetic/100").is_ok());
         for url in [
             "https://wx.qlogo.cn.invalid/a",
+            "https://wework.qpic.cn.invalid/a",
             "http://127.0.0.1/a",
             "file:///etc/passwd",
             "https://user@wx.qlogo.cn/a",
