@@ -1993,36 +1993,48 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn mini_program_ipc_requires_read_and_mini_program_scopes_for_the_account() {
+    async fn mini_program_routes_separate_listing_and_running() {
         let (_temp, core, app) = setup();
-        for (scopes, account, expected) in [
-            (&["read", "login"][..], "one", StatusCode::FORBIDDEN),
-            (&["mini-programs"], "one", StatusCode::FORBIDDEN),
-            (&["read", "mini-programs"], "two", StatusCode::FORBIDDEN),
-            (&["read", "mini-programs"], "one", StatusCode::NOT_FOUND),
-        ] {
-            let token = uuid::Uuid::new_v4().simple().to_string();
+        let reader = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let runner = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        for (token, scope) in [(reader, "read"), (runner, "mini-programs")] {
             core.store
                 .issue_token(
-                    "mini-program-fixture",
+                    scope,
                     &format!("{:x}", Sha256::digest(token.as_bytes())),
                     &["one".into()],
-                    &scopes.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                    &[scope.into()],
                     None,
                 )
                 .unwrap();
-            // An invalid launch ID stops an authorized request before profile or network access.
-            let (status, _) = call(
-                app.clone(),
-                "POST",
-                &format!(
-                    "/v1/accounts/{account}/mini-programs/wx0123456789abcdef/launches/invalid/ipc"
-                ),
-                Some(&token),
-                Some(json!({"method":"wx.login"})),
-            )
-            .await;
-            assert_eq!(status, expected);
+        }
+        let app_id = "wx0123456789abcdef";
+        let launch = format!("/{app_id}/launches");
+        let archive = format!("/{app_id}/packages/1/main");
+        let fetch = format!("/{app_id}/packages");
+        let ipc = format!("{launch}/invalid/ipc");
+        let card = Some(json!({"sourceMessageId":"saved-card"}));
+        let login = Some(json!({"method":"wx.login"}));
+        let forbidden = StatusCode::FORBIDDEN;
+        // A missing fixture archive or invalid launch ID reaches 404 after authorization.
+        let not_found = StatusCode::NOT_FOUND;
+        for (token, account, method, suffix, body, expected) in [
+            (reader, "one", "GET", "", None, StatusCode::OK),
+            (runner, "one", "GET", "", None, forbidden),
+            (reader, "one", "POST", &launch, None, forbidden),
+            (runner, "one", "POST", &launch, None, not_found),
+            (runner, "one", "POST", &launch, card, forbidden),
+            (runner, "two", "POST", &launch, None, forbidden),
+            (reader, "one", "GET", &archive, None, forbidden),
+            (runner, "one", "GET", &archive, None, not_found),
+            (runner, "one", "POST", &fetch, None, forbidden),
+            (reader, "one", "POST", &ipc, login.clone(), forbidden),
+            (runner, "two", "POST", &ipc, login.clone(), forbidden),
+            (runner, "one", "POST", &ipc, login, not_found),
+        ] {
+            let path = format!("/v1/accounts/{account}/mini-programs{suffix}");
+            let (status, _) = call(app.clone(), method, &path, Some(token), body).await;
+            assert_eq!(status, expected, "{method} {path}");
         }
     }
     #[tokio::test]

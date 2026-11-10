@@ -97,8 +97,21 @@ try {
   const command = ["--json", "--server", stack.hub.endpoint, "--account", ACCOUNT.id, "--token-file", apiKeyPath, "--config", configPath, "miniprogram"];
   const { stdout } = await promisify(execFile)(bin, [...command, "fetch", app]);
   assert.deepEqual(JSON.parse(stdout), launch.packages[0]);
-  const args = [...command, "serve"];
-  const host = await childReady([...args, app, "--message", card.id]);
+  async function serveArgs(scopes) {
+    const name = scopes.join("-");
+    const { token } = await sim.client.request("v1/tokens", {
+      method: "POST",
+      body: JSON.stringify({ name, scopes, accounts: [ACCOUNT.id] }),
+    });
+    const tokenPath = join(stack.dataDir, `cli-${name}-key`);
+    await writeFile(tokenPath, token + "\n", { mode: 0o600 });
+    const scoped = [...command, "serve"];
+    scoped[scoped.indexOf("--token-file") + 1] = tokenPath;
+    return scoped;
+  }
+  const args = await serveArgs(["mini-programs"]);
+  const cardArgs = await serveArgs(["read", "mini-programs"]);
+  const host = await childReady([...cardArgs, app, "--message", card.id]);
   browser = await chromium.launch({ headless: true,
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
     args: ["--disable-background-networking", "--disable-dev-shm-usage"],

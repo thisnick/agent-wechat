@@ -132,15 +132,16 @@ async fn launch(
     Path((account, app_id)): Path<(String, String)>,
     input: Option<Json<NativeMiniProgramLaunchRequest>>,
 ) -> ApiResult<impl IntoResponse> {
-    claims.require(Some(&account), "read")?;
-    let can_login = claims.require(Some(&account), "mini-programs").is_ok();
+    claims.require(Some(&account), "mini-programs")?;
     let input = input.map(|Json(input)| input).unwrap_or_default();
+    if input.source_message_id.is_some() {
+        claims.require(Some(&account), "read")?;
+    }
     let (selected, network_policy) = work(move || {
         let selected = app.core.prepare_mini_program(
             &account,
             &app_id,
             principal(&claims),
-            can_login,
             input.source_message_id.as_deref(),
         )?;
         let network = app
@@ -198,7 +199,7 @@ async fn package(
     Extension(claims): Extension<Claims>,
     Path((account, app_id, version, id)): Path<(String, String, String, String)>,
 ) -> ApiResult<impl IntoResponse> {
-    claims.require(Some(&account), "read")?;
+    claims.require(Some(&account), "mini-programs")?;
     let bytes = work(move || {
         app.core
             .mini_program_package(&account, &app_id, &version, &id)
@@ -220,7 +221,6 @@ async fn ipc(
     headers: HeaderMap,
     Json(NativeMiniProgramIpcRequest::Login {}): Json<NativeMiniProgramIpcRequest>,
 ) -> ApiResult<impl IntoResponse> {
-    claims.require(Some(&account), "read")?;
     claims.require(Some(&account), "mini-programs")?;
     let id = Uuid::parse_str(&id)
         .map_err(|_| ApiError(StatusCode::NOT_FOUND, "mini_program_launch_unavailable"))?;

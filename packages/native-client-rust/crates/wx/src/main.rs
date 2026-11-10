@@ -1689,11 +1689,13 @@ async fn run(cli: Cli) -> Result<()> {
             | Command::Tokens { .. }
             | Command::Config { .. }
     );
-    // Calling grants can observe/control one selected account without also
-    // reading the account catalog. The API resolves aliases and checks scope.
-    let selected_call_account =
-        matches!(&cli.command, Command::Calls { .. }) && r.account.is_some();
-    if requires_account && !selected_call_account {
+    // Calls and Mini Programs can use a selected account without reading the
+    // account catalog. The API resolves aliases and checks the relevant scope.
+    let selected_account_without_catalog = matches!(
+        &cli.command,
+        Command::Calls { .. } | Command::MiniProgram { .. }
+    ) && r.account.is_some();
+    if requires_account && !selected_account_without_catalog {
         let catalog = r.get("v1/accounts").await?;
         let items = catalog["items"]
             .as_array()

@@ -7953,6 +7953,7 @@
     },
     "/v1/accounts/{a}/mini-programs/{app}/launches": {
       "post": {
+        "description": "Scope: mini-programs, plus read when sourceMessageId identifies a saved chat card.",
         "operationId": "prepareMiniProgram",
         "parameters": [
           {
@@ -8005,7 +8006,7 @@
         "security": [
           {
             "bearer": [
-              "read"
+              "mini-programs"
             ]
           }
         ],
@@ -8013,6 +8014,7 @@
         "tags": [
           "mini-programs"
         ],
+        "x-agent-wechat-scope": "depends on the request",
         "x-agent-wechat-sdk-request": [
           {
             "$ref": "#/components/schemas/NativeMiniProgramLaunchRequest"
@@ -8099,7 +8101,6 @@
         "security": [
           {
             "bearer": [
-              "read",
               "mini-programs"
             ]
           }
@@ -8237,7 +8238,7 @@
         "security": [
           {
             "bearer": [
-              "read"
+              "mini-programs"
             ]
           }
         ],

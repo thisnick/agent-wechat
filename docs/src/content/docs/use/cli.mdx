@@ -110,7 +110,7 @@ Reading marks the whole chat read and tells your other devices. Recall needs the
 
 ## Open a Mini Program
 
-Mini Programs are experimental.
+Mini Programs are experimental. A scoped access key needs `mini-programs` to serve a cached app. Select its account with `--account ACCOUNT_ID` or in your CLI config.
 
 Run `wx miniprogram serve APP_ID` and open the URL it prints in a browser on the same machine. Press Ctrl-C in the terminal to close it.
 
@@ -134,7 +134,7 @@ The runner can load JavaScript dependencies through `require.async` from a stage
 
 The runner can instantiate uncompressed WebAssembly files from the verified main archive. On supported Exparser pages, a Mini Program’s privacy button opens a confirmation in the runner. Your choice applies to the current window only.
 
-To open the page from a saved chat card, use its message ID:
+To open the page from a saved chat card, use its message ID and a key that also has `read`:
 
 ```bash
 wx miniprogram serve APP_ID --message MESSAGE_ID
@@ -154,7 +154,7 @@ wx miniprogram serve APP_ID \
 
 This optional restriction matches the scheme, host, port and path while allowing query parameters. It cannot expand a retrieved server policy. When the account is offline and no server policy is available, `wx.request` stays unavailable. A failed online policy lookup reports an error.
 
-For `wx.login`, the manifest must set `allowLogin` to `true`, the account must be online, and a scoped access key must include `mini-programs` as well as `read`. Keep the printed URL private when it includes a launch key.
+For `wx.login`, the manifest must set `allowLogin` to `true` and the account must be online. Keep the printed URL private when it includes a launch key.
 
 ## Use a daemon on another machine
 

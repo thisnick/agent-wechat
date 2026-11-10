@@ -427,7 +427,6 @@ impl Core {
         account: &str,
         app: &str,
         principal: &str,
-        can_login: bool,
         source_message: Option<&str>,
     ) -> Result<MiniProgramLaunch> {
         let account = &self.store.account(account)?.id;
@@ -458,8 +457,7 @@ impl Core {
             .context("mini_program_page_unsupported")?;
         let subpackages = staged_subpackages(&dir, &archive, &package)?;
         let id = Uuid::new_v4();
-        let login =
-            can_login && package.allow_login && self.mini_program_login_available(account)?;
+        let login = package.allow_login && self.mini_program_login_available(account)?;
         if login {
             let now = Instant::now();
             let mut grants = self
