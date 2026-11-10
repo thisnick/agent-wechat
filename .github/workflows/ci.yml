@@ -19,6 +19,7 @@ on:
       - '.github/workflows/native-distribution.yml'
       - '.github/workflows/desktop.yml'
       - 'scripts/client-ui-smoke.mjs'
+      - 'scripts/i18n/**'
       - 'scripts/native-release-notes*.mjs'
       - 'scripts/native-release-policy*.mjs'
       - 'scripts/native-release-orchestration*.mjs'
@@ -88,6 +89,7 @@ jobs:
               - 'packages/shared/**'
               - 'packages/client-ui/**'
               - 'scripts/client-ui-smoke.mjs'
+              - 'scripts/i18n/**'
               - 'packages/openclaw-extension/**'
               - '.node-version'
               - 'pnpm-lock.yaml'
@@ -158,6 +160,12 @@ jobs:
 
       - name: Test (all packages)
         run: pnpm -r --if-present test
+
+      # Missing translations are fine; English-side errors and broken translations fail.
+      - name: Check translations
+        run: |
+          node --test scripts/i18n/index.test.mjs
+          pnpm i18n check
 
   helpers:
     needs: changes

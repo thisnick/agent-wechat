@@ -6,7 +6,9 @@
 // returns, once `setup` has seeded the simulator. `ready` waits for the screen to be
 // complete using roles and text; `actions` reaches states no address expresses.
 // Screenshots are named `<scene>@<viewport>`, which is how Argos matches them to the
-// baseline, so renaming a scene or a viewport shows up as removed plus added.
+// baseline, so renaming a scene or a viewport shows up as removed plus added. Each
+// scene is also captured in every translation as `<scene>@<viewport>@<language>`
+// (see capture.spec.mjs); `ready` and `actions` stay in English.
 import { ACCOUNT, SPARE } from "./accounts.mjs";
 
 /** Desktop, phone and compact phone sizes for visual review. */
@@ -64,8 +66,11 @@ async function standardWorld(sim) {
 
 /** A row of the chat or contact list, found by the conversation's name rather than its preview text. */
 const row = (page, name) => page.locator(".chat-row").filter({ has: page.getByText(name, { exact: true }) });
-/** The sign-in code is random on every run; the countdown beside it is not. */
-const qr = (page) => [page.getByRole("img", { name: /sign-in QR code/ })];
+/**
+ * The sign-in code is random on every run; the countdown beside it is not. Masks
+ * select by class, not text, so they also apply to the translated captures.
+ */
+const qr = (page) => [page.locator("img.login-qr")];
 /** The hub address includes the port the scenes server happened to get. */
 const hubAddress = (page) => [page.locator("#hub-address")];
 
@@ -405,7 +410,7 @@ export const scenes = [
       await expect(page.getByText("Automatic downloads")).toBeVisible();
     },
     // The hub address carries the scenes server's port, and the cache totals depend on what was opened.
-    mask: (page) => [page.getByText(/^http:\/\/127\.0\.0\.1:\d+$/), page.getByText(/chats · .* messages/)],
+    mask: (page) => [page.getByText(/^http:\/\/127\.0\.0\.1:\d+$/), page.locator(".cache-usage")],
   },
   {
     name: "hub-picker",

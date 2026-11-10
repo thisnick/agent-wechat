@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import type { Connection } from "./connection.ts";
 import type { AttachmentDraft } from "./attachment-drafts.ts";
+import { t } from "./i18n.ts";
 import { Button, Icon } from "./ui.tsx";
 import {
   bindComposerAttachments,
@@ -33,7 +34,9 @@ export function AttachmentPicker({
     [dragging, setDragging] = useState(false);
   function choose(files: File[]) {
     if (!enabled || !threadId) {
-      setError("Attachments aren't available in this conversation right now.");
+      setError(
+        t("attachmentPicker.attachmentsArenTAvailableConversation"),
+      );
       return;
     }
     try {
@@ -50,7 +53,7 @@ export function AttachmentPicker({
       setError(
         error instanceof Error
           ? error.message
-          : "Couldn't select these files. Choose them again.",
+          : t("attachmentPicker.couldnTSelectTheseFiles"),
       );
     }
   }
@@ -76,7 +79,7 @@ export function AttachmentPicker({
     <>
       <Button
         icon="attach"
-        label="Attach file"
+        label={t("attachmentPicker.attachFile")}
         disabled={!enabled || !threadId}
         onClick={() => input.current?.click()}
       />
@@ -85,7 +88,7 @@ export function AttachmentPicker({
         className="attachment-input"
         type="file"
         multiple
-        aria-label="Choose attachment"
+        aria-label={t("attachmentPicker.chooseAttachment")}
         onChange={(event) => {
           const files = Array.from(event.target.files ?? []);
           event.target.value = "";
@@ -94,7 +97,7 @@ export function AttachmentPicker({
       />
       {dragging && (
         <span className="composer-drop-hint" role="status">
-          <Icon name="attach" /> Drop to attach
+          <Icon name="attach" /> {t("attachmentPicker.dropAttach")}
         </span>
       )}
       {error && (
@@ -117,11 +120,13 @@ export function AttachmentTray({
 }) {
   if (!draft.files.length) return null;
   return (
-    <section className="composer-attachments" aria-label="Staged attachments">
+    <section
+      className="composer-attachments"
+      aria-label={t("attachmentPicker.stagedAttachments")}
+    >
       <div className="composer-attachments-head">
         <span>
-          {draft.files.length}{" "}
-          {draft.files.length === 1 ? "attachment" : "attachments"}
+          {t("attachmentPicker.attachmentCount", { count: draft.files.length })}
         </span>
       </div>
       <ul className="composer-attachment-list">
@@ -130,7 +135,7 @@ export function AttachmentTray({
             <AttachmentPreview item={item} />
             <Button
               icon="close"
-              label={`Remove ${item.file.name}`}
+              label={t("attachmentPicker.remove", { name: item.file.name })}
               disabled={!!draft.submission}
               onClick={() => remove(item.id)}
             />
@@ -146,10 +151,12 @@ export function AttachmentTray({
               disabled={!!draft.submission}
               onChange={(event) => quality(event.target.checked)}
             />
-            Original media quality
+            {t("attachmentPicker.originalMediaQuality")}
           </label>
-          <ComposerHelp label="About original media quality">
-            Include the unchanged video file alongside the playback copy.
+          <ComposerHelp
+            label={t("attachmentPicker.aboutOriginalMediaQuality")}
+          >
+            {t("attachmentPicker.includeUnchangedVideoFileAlongside")}
           </ComposerHelp>
         </div>
       )}
@@ -180,7 +187,7 @@ function AttachmentPreview({
         <img
           className="attachment-review-preview"
           src={url}
-          alt="Staged image"
+          alt={t("attachmentPicker.stagedImage")}
         />
       )}
       {url && kind === "video" && !previewFailed && (
@@ -189,12 +196,14 @@ function AttachmentPreview({
           src={url}
           muted
           preload="metadata"
-          aria-label="Staged video"
+          aria-label={t("attachmentPicker.stagedVideo")}
           onError={() => setPreviewFailed(true)}
         />
       )}
       {kind === "video" && previewFailed && (
-        <p className="field-help">Video preview unavailable.</p>
+        <p className="field-help">
+          {t("attachmentPicker.videoPreviewUnavailable")}
+        </p>
       )}
       <div className="attachment-file">
         <Icon
@@ -203,8 +212,12 @@ function AttachmentPreview({
         <span>
           <strong>{file.name}</strong>
           <small>
-            {kind === "file" ? "File" : kind === "image" ? "Image" : "Video"} ·{" "}
-            {size}
+            {kind === "file"
+              ? t("attachmentPicker.file")
+              : kind === "image"
+                ? t("attachmentPicker.image")
+                : t("attachmentPicker.video")}{" "}
+            · {size}
           </small>
         </span>
       </div>

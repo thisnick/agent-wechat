@@ -4,6 +4,7 @@ import {
   type NativeOperation,
   type NativeWeChatClient,
 } from "@agent-wechat/shared";
+import { t } from "./i18n.ts";
 import { pause, readableError } from "./session.ts";
 
 export function canRecall(message: NativeMessage): boolean {
@@ -125,7 +126,7 @@ export class MessageRecall {
             "recall_target_unavailable",
             "recall_identity_mismatch",
           ].includes(error.code)
-            ? "This message can’t be recalled."
+            ? t("messageRecall.messageCanTRecalled")
             : readableError(error),
         uncertain: !(error instanceof NativeApiError && error.status < 500),
       });
@@ -179,8 +180,8 @@ export class MessageRecall {
           this.publish({
             error:
               operation.state === "needs_review"
-                ? "Recall couldn’t be confirmed. Check the conversation."
-                : "This message couldn’t be recalled.",
+                ? t("messageRecall.recallCouldnTConfirmedCheck")
+                : t("messageRecall.messageCouldnTRecalled"),
           });
         return;
       }

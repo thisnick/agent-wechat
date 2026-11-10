@@ -12,6 +12,7 @@ import {
   AtSign,
 } from "lucide-react";
 import type { ReactNode } from "react";
+import { languages, t, useLanguage, type LanguagePreference } from "./i18n.ts";
 const icons: Record<string, string> = {
   chat: "M21 11.5a8.4 8.4 0 0 1-9 8.5 10 10 0 0 1-4-.8L3 21l1.6-4.5A8.3 8.3 0 0 1 3 11.5 8.4 8.4 0 0 1 12 3a8.4 8.4 0 0 1 9 8.5ZM8 11h.01M12 11h.01M16 11h.01",
   people:
@@ -186,7 +187,7 @@ function AppIllustration() {
           AW
         </text>
         <text x="53" y="52" fill="#e6e7e1" fontSize="10" fontWeight="550">
-          Chats
+          {t("ui.chats")}
         </text>
         <path d="M145 45v9m-4-4h8" stroke="#a3a5a0" />
         <path d="M164 31v251" stroke="#ffffff0c" />
@@ -308,19 +309,21 @@ export function Story() {
       </a>
       <div className="story-content">
         <p className="product-description">
-          Chat, share files and manage your WeChat accounts alongside your AI
-          agents.
+          {t("ui.chatShareFilesManageWechat")}
         </p>
         <div className="illustration-viewport">
           <AppIllustration />
         </div>
       </div>
-      <nav className="project-links" aria-label="Project links">
+      <nav
+        className="project-links"
+        aria-label={t("ui.projectLinks")}
+      >
         {[
           ["GitHub", "https://github.com/thisnick/agent-wechat"],
-          ["Docs", "https://thisnick.github.io/agent-wechat/"],
+          [t("ui.docs"), "https://thisnick.github.io/agent-wechat/"],
         ].map(([label, url]) => (
-          <a key={label} href={url} target="_blank" rel="noreferrer">
+          <a key={url} href={url} target="_blank" rel="noreferrer">
             {label}
             <svg viewBox="0 0 16 16" aria-hidden="true">
               <path d="M5 11 11 5M5 5h6v6" />
@@ -331,6 +334,26 @@ export function Story() {
     </aside>
   );
 }
+/** Chooses the UI language; "System" follows the operating system or browser. */
+export function LanguageSelect({ className, label }: { className?: string; label?: string }) {
+  const [preference, setPreference] = useLanguage();
+  return (
+    <select
+      className={className}
+      aria-label={label}
+      value={preference}
+      onChange={(event) => setPreference(event.target.value as LanguagePreference)}
+    >
+      <option value="system">{t("ui.languageSystem")}</option>
+      {languages.map((language) => (
+        <option key={language.tag} value={language.tag} lang={language.tag}>
+          {language.name}
+        </option>
+      ))}
+    </select>
+  );
+}
+
 export function Welcome({
   children,
   simulator,
@@ -343,16 +366,19 @@ export function Welcome({
       <Story />
       <section className="onboarding-main">
         <header className="onboarding-top">
-          {simulator && <span className="demo-tag">Simulator</span>}
+          {simulator && (
+            <span className="demo-tag">{t("ui.simulator")}</span>
+          )}
         </header>
         <div className="onboarding-center">{children}</div>
         <footer className="onboarding-footer">
           <span className="connection-location">
             <i />
             {simulator
-              ? "agent-wechat hub: this device · synthetic accounts"
+              ? t("ui.agentWechatHubDeviceSynthetic")
               : "agent-wechat hub"}
           </span>
+          <LanguageSelect className="locale-switch" label={t("ui.language")} />
         </footer>
       </section>
     </main>

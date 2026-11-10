@@ -12,6 +12,13 @@ import { startUiServer } from "./server.mjs";
 import { seeder } from "./seed.mjs";
 import { startStack } from "./stack.mjs";
 
+/**
+ * Translations captured after English. Each scene runs and is checked in English,
+ * then switches language in place (as another window changing the setting would)
+ * and is captured again as `<scene>@<viewport>@<language>`.
+ */
+const TRANSLATIONS = ["zh-CN"];
+
 /** Gitignored, next to the Playwright results; see playwright.config.mjs. */
 const outputRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../.scenes");
 
@@ -125,16 +132,28 @@ for (const scene of scenes) {
         await scene.ready({ page, expect, world });
         await scene.actions?.({ page, expect, world });
         await settle(page, requests, sim.avatarInitials);
+        const capture = async (name) => {
+          const attachments = await argosScreenshot(page, name, {
+            mask: scene.mask?.(page, world) ?? [],
+            maskColor: "#000000",
+          });
+          // Keep a copy outside Playwright's result folders for looking at locally.
+          const png = attachments.find((attachment) => attachment.contentType === "image/png");
+          if (png) {
+            await mkdir(join(outputRoot, "screenshots"), { recursive: true });
+            await copyFile(png.path, join(outputRoot, "screenshots", `${name}.png`));
+          }
+        };
         const name = `${scene.name}@${viewport}`;
-        const attachments = await argosScreenshot(page, name, {
-          mask: scene.mask?.(page, world) ?? [],
-          maskColor: "#000000",
-        });
-        // Keep a copy outside Playwright's result folders for looking at locally.
-        const png = attachments.find((attachment) => attachment.contentType === "image/png");
-        if (png) {
-          await mkdir(join(outputRoot, "screenshots"), { recursive: true });
-          await copyFile(png.path, join(outputRoot, "screenshots", `${name}.png`));
+        await capture(name);
+        for (const language of TRANSLATIONS) {
+          await page.evaluate((language) => {
+            localStorage.setItem("agentwechat-lang", language);
+            dispatchEvent(new StorageEvent("storage", { key: "agentwechat-lang", newValue: language }));
+          }, language);
+          await page.waitForFunction((language) => document.documentElement.lang === language, language);
+          await settle(page, requests, sim.avatarInitials);
+          await capture(`${name}@${language}`);
         }
         expect(errors, "uncaught page errors").toEqual([]);
       });

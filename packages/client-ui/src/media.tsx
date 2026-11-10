@@ -12,6 +12,7 @@ import {
   type NativeMessage,
 } from "@agent-wechat/shared";
 import type { Connection } from "./connection.ts";
+import { t } from "./i18n.ts";
 import { mediaPreviewIdentity } from "./media-preview-cache.ts";
 import { readableError } from "./session.ts";
 import { Avatar, Button, Icon } from "./ui.tsx";
@@ -70,32 +71,40 @@ export function PendingAttachments({
             job?.state === "needs_review" ||
             job?.state === "partial";
           const label = uncertain
-            ? "Check the conversation before sending again"
+            ? t("media.checkConversationBeforeSendingAgain")
             : job?.state === "accepted"
-              ? "Accepted · loading message…"
+              ? t("media.acceptedLoadingMessage")
               : item.stage === "uploading"
-                ? "Uploading…"
+                ? t("media.uploading")
                 : item.stage === "submitting"
-                  ? "Submitting…"
+                  ? t("media.submitting")
                   : item.stage === "cancelled" || job?.state === "cancelled"
-                    ? "Cancelled"
+                    ? t("media.cancelled")
                     : item.stage === "failed" || job?.state === "failed"
-                      ? "Attachment failed"
-                      : job?.phase || "Checking submission…";
+                      ? t("media.attachmentFailed")
+                      : job?.phase || t("media.checkingSubmission");
+          const kindLabel =
+            item.kind === "image"
+              ? t("media.image")
+              : item.kind === "video"
+                ? t("media.video")
+                : item.kind === "voice"
+                  ? t("media.voice")
+                  : t("media.file");
           return (
             <article
               className="message own"
               key={item.key}
               data-media-state={job?.state ?? item.stage}
             >
-              <Avatar name="You" />
+              <Avatar name={t("media.you")} />
               <div className="message-body">
                 <div className="bubble attachment-file">
                   <Icon name="file" />
                   <span>
                     <strong>{item.name}</strong>
                     <small>
-                      {size(item.size)} · {item.kind}
+                      {size(item.size)} · {kindLabel}
                     </small>
                   </span>
                 </div>
@@ -129,14 +138,16 @@ export function PendingAttachments({
                         }[];
                       }
                     ).chunks
-                      .map((chunk) => `Note ${chunk.index + 1}: ${chunk.state}`)
+                      .map((chunk) =>
+                        t("media.note", { value: chunk.index + 1, state: chunk.state }),
+                      )
                       .join(" · ")}
                   </small>
                 )}
                 <div className="attachment-job-actions">
                   {(item.sourceId || job) && (
                     <button onClick={() => void outbox.check(item.key)}>
-                      Check status
+                      {t("media.checkStatus")}
                     </button>
                   )}
                   {(item.stage === "uploading" ||
@@ -145,19 +156,21 @@ export function PendingAttachments({
                       disabled={job?.cancelRequested}
                       onClick={() => void outbox.cancel(item.key)}
                     >
-                      {job?.cancelRequested ? "Cancelling…" : "Cancel"}
+                      {job?.cancelRequested
+                        ? t("media.cancelling")
+                        : t("media.cancel")}
                     </button>
                   )}
                   {job?.retryable && !uncertain && (
                     <button onClick={() => void outbox.retry(item.key)}>
-                      Retry
+                      {t("media.retry")}
                     </button>
                   )}
                   {(item.stage === "failed" ||
                     item.stage === "cancelled" ||
                     (job && ended.has(job.state))) && (
                     <button onClick={() => outbox.dismiss(item.key)}>
-                      Dismiss
+                      {t("media.dismiss")}
                     </button>
                   )}
                 </div>
@@ -266,7 +279,7 @@ export function MediaCard({
       {!visual && !voice && (
         <div className="attachment-file">
           <Icon name="file" />
-          <strong>{asset?.filename || "Attachment"}</strong>
+          <strong>{asset?.filename || t("media.attachment")}</strong>
         </div>
       )}
       {video && !viewer ? (
@@ -296,15 +309,15 @@ export function MediaCard({
           aria-label={
             !state.loaded || working
               ? voice
-                ? "Loading voice message"
+                ? t("media.loadingVoiceMessage")
                 : video
-                ? "Loading video"
-                : "Loading image"
+                ? t("media.loadingVideo")
+                : t("media.loadingImage")
               : voice
-              ? "Voice message unavailable"
+              ? t("media.voiceMessageUnavailable")
               : video
-              ? "Video unavailable"
-              : "Image unavailable"
+              ? t("media.videoUnavailable")
+              : t("media.imageUnavailable")
           }
         >
           <Icon name={voice || video ? "play" : "image-off"} />
@@ -312,7 +325,9 @@ export function MediaCard({
             <span className="media-spinner" />
           ) : !previewOnly && asset && canRetrieve(asset) ? (
             <button onClick={() => void model.retrieve(asset)}>
-              {asset.state === "pending" ? "Load" : "Retry"}
+              {asset.state === "pending"
+                ? t("media.load")
+                : t("media.retry")}
             </button>
           ) : null}
         </div>
@@ -331,7 +346,7 @@ export function MediaCard({
         !working &&
         canRetrieve(asset) && (
           <button onClick={() => void model.retrieve(asset)}>
-            Retry voice message
+            {t("media.retryVoiceMessage")}
           </button>
         )}
       {state.error && (
@@ -366,7 +381,11 @@ function VideoPoster({
     </>
   );
   return open ? (
-    <button className="video-poster" aria-label="Open video" onClick={open}>
+    <button
+      className="video-poster"
+      aria-label={t("media.openVideo")}
+      onClick={open}
+    >
       {content}
     </button>
   ) : (
@@ -449,7 +468,9 @@ export function AssetContent({
       src={url}
       data-media-variant={shownVariant}
       alt={
-        asset.kind === "sticker" ? "Sticker" : asset.filename || "Shared image"
+        asset.kind === "sticker"
+          ? t("media.sticker")
+          : asset.filename || t("media.sharedImage")
       }
     />
   );
@@ -459,7 +480,7 @@ export function AssetContent({
         <div
           className="media-placeholder"
           role="status"
-          aria-label="Preview unavailable"
+          aria-label={t("media.previewUnavailable")}
         >
           <Icon name="image-off" />
         </div>
@@ -468,7 +489,7 @@ export function AssetContent({
         <div
           className="media-placeholder"
           role="status"
-          aria-label="Loading media"
+          aria-label={t("media.loadingMedia")}
         >
           <span className="media-spinner" />
         </div>
@@ -479,7 +500,7 @@ export function AssetContent({
             <button
               className="photo-open"
               onClick={open}
-              aria-label="Open photo"
+              aria-label={t("media.openPhoto")}
             >
               {image}
             </button>
@@ -499,14 +520,14 @@ export function AssetContent({
             src={url}
             controls
             preload="metadata"
-            aria-label="Voice message"
+            aria-label={t("media.voiceMessage")}
           />
         ))}
       {error && (
         <div
           className="media-placeholder"
           role="status"
-          aria-label="Media unavailable"
+          aria-label={t("media.mediaUnavailable")}
           title={error}
         >
           <Icon name="image-off" />
@@ -589,18 +610,20 @@ function MediaDownloadAction({
       ? "standard"
       : "";
   const label = saving
-    ? "Saving…"
+    ? t("media.saving")
     : working
       ? original
-        ? "Getting original…"
-        : "Downloading…"
+        ? t("media.gettingOriginal")
+        : t("media.downloading")
       : ready
-        ? "Download"
+        ? t("media.download")
         : original && canRetrieve(asset)
-          ? "Get original"
+          ? t("media.getOriginal")
           : canRetrieve(asset)
-            ? "Download"
-            : `${original ? "Original" : "Download"} unavailable`;
+            ? t("media.download")
+            : original
+              ? t("media.originalUnavailable")
+              : t("media.downloadUnavailable");
   const progress = job?.totalBytes
     ? Math.min(100, Math.round((job.completedBytes / job.totalBytes) * 100))
     : undefined;
@@ -658,25 +681,29 @@ function MediaDownloadAction({
       <span className="download-disclosure" id={id} role="tooltip">
         {quality
           ? quality === "original"
-            ? "Original"
-            : "Compressed"
-          : asset.filename || "File"}
-        {downloadBytes ? ` · ${size(downloadBytes)}` : " · Size unknown"}
+            ? t("media.original")
+            : t("media.compressed")
+          : asset.filename || t("media.file2")}
+        {downloadBytes
+          ? ` · ${size(downloadBytes)}`
+          : t("media.sizeUnknown")}
         {quality === "standard" &&
         !state.assets.some((item) => item.variant === "original")
-          ? " · Original unavailable"
+          ? t("media.originalUnavailable2")
           : ""}
         {!ready && canRetrieve(asset)
           ? original
-            ? " · Make original available for download"
-            : " · Make available for download"
+            ? t("media.makeOriginalAvailableDownload")
+            : t("media.makeAvailableDownload")
           : ""}
       </span>
       {working && (
         <>
           <progress
             aria-label={
-              original ? "Original download progress" : "Download progress"
+              original
+                ? t("media.originalDownloadProgress")
+                : t("media.downloadProgress")
             }
             value={progress}
             max={100}
@@ -687,7 +714,9 @@ function MediaDownloadAction({
           <button
             className="media-transfer-cancel"
             aria-label={
-              original ? "Cancel original download" : "Cancel download"
+              original
+                ? t("media.cancelOriginalDownload")
+                : t("media.cancelDownload")
             }
             disabled={!job || job.cancelRequested}
             onClick={() => {
@@ -696,7 +725,9 @@ function MediaDownloadAction({
                 .catch((error) => setError(readableError(error)));
             }}
           >
-            {job?.cancelRequested ? "Cancelling…" : "Cancel"}
+            {job?.cancelRequested
+              ? t("media.cancelling")
+              : t("media.cancel")}
           </button>
         </>
       )}

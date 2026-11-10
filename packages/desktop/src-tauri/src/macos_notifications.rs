@@ -213,16 +213,16 @@ fn categories() -> Retained<NSSet<UNNotificationCategory>> {
     let none = NSArray::<NSString>::new();
     let reply = UNTextInputNotificationAction::actionWithIdentifier_title_options_textInputButtonTitle_textInputPlaceholder(
         &NSString::from_str(REPLY_ACTION),
-        &NSString::from_str("Reply"),
+        &NSString::from_str(&crate::i18n::text("actionReply")),
         UNNotificationActionOptions::empty(),
-        &NSString::from_str("Send"),
-        &NSString::from_str("Message"),
+        &NSString::from_str(&crate::i18n::text("actionSend")),
+        &NSString::from_str(&crate::i18n::text("actionMessage")),
     );
     // Without the foreground option, an action is handled without bringing the app forward.
     let mark_read = || {
         UNNotificationAction::actionWithIdentifier_title_options(
             &NSString::from_str(MARK_READ_ACTION),
-            &NSString::from_str("Mark as Read"),
+            &NSString::from_str(&crate::i18n::text("actionMarkRead")),
             UNNotificationActionOptions::empty(),
         )
     };

@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import type { Connection } from "./connection.ts";
+import { t } from "./i18n.ts";
 import { readableError } from "./session.ts";
 
 const MB = 1024 * 1024;
@@ -60,7 +61,7 @@ export function MediaDownloadSettings({
             if (lifetime.signal.aborted) return;
             setSaved(settings.autoDownloadMaxBytes);
             setLimit(String(settings.autoDownloadMaxBytes / MB));
-            setNotice("Saved.");
+            setNotice(t("mediaDownloadSettings.saved"));
             connection.incomingMedia.refreshAccount(account);
           })
           .catch((error) => {
@@ -71,9 +72,9 @@ export function MediaDownloadSettings({
           });
       }}
     >
-      <label htmlFor={id}>Automatic downloads</label>
+      <label htmlFor={id}>{t("mediaDownloadSettings.automaticDownloads")}</label>
       <div className="media-limit-setting">
-        <span>Up to</span>
+        <span>{t("mediaDownloadSettings.up")}</span>
         <input
           id={id}
           type="number"
@@ -91,11 +92,11 @@ export function MediaDownloadSettings({
           className="secondary"
           disabled={busy || !valid || saved === undefined || bytes === saved}
         >
-          {busy ? "Saving…" : "Save"}
+          {busy ? t("mediaDownloadSettings.saving") : t("mediaDownloadSettings.save")}
         </button>
       </div>
       <small id={`${id}-help`}>
-        On agent-wechat hub. Thumbnails and voice notes always download.
+        {t("mediaDownloadSettings.agentWechatHubThumbnailsVoice")}
       </small>
       {notice && <small role="status">{notice}</small>}
     </form>

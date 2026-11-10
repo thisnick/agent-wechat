@@ -3,6 +3,7 @@ import {
   NATIVE_MAX_SOURCE_BYTES,
   NATIVE_MAX_VIDEO_SOURCE_BYTES,
 } from "@agent-wechat/shared";
+import { formatLocale, t } from "./i18n.ts";
 
 export type AttachmentKind = "image" | "video" | "file";
 export const COMPOSER_MAX_SOURCE_BYTES = NATIVE_MAX_SOURCE_BYTES;
@@ -44,13 +45,21 @@ export function accountAttachmentLimits(
   ) as AttachmentLimits;
 }
 
+function kindLabel(kind: AttachmentKind): string {
+  if (kind === "image") return t("composerAttachments.kindImage");
+  if (kind === "video") return t("composerAttachments.kindVideo");
+  return t("composerAttachments.kindFile");
+}
+
 export function validateAttachmentSource(
   file: { name: string; size: number },
   kind: AttachmentKind,
   limits?: AttachmentLimits,
 ) {
   if (!Number.isSafeInteger(file.size) || file.size <= 0)
-    throw new Error(`${file.name || "This file"}: choose a nonempty file.`);
+    throw new Error(
+      t("composerAttachments.chooseNonemptyFile", { name: file.name || t("composerAttachments.thisFile") }),
+    );
   const limit = Math.min(
     attachmentSourceLimit(kind),
     limits?.[kind] ?? attachmentSourceLimit(kind),
@@ -58,14 +67,16 @@ export function validateAttachmentSource(
   if (file.size > limit) {
     const bound =
       limit === NATIVE_MAX_ORDINARY_SOURCE_BYTES
-        ? "just under 25 MiB"
+        ? t("composerAttachments.justUnder25Mib")
         : limit % (1024 * 1024) === 0
         ? `${limit / 1024 / 1024} MiB`
-        : `${limit.toLocaleString("en-US")} bytes`;
+        : t("composerAttachments.byteCount", { value: limit.toLocaleString(formatLocale()) });
     throw new Error(
-      `${
-        file.name || "This file"
-      }: this hub's ${kind} source limit is ${bound}. Choose a smaller file.`,
+      t("composerAttachments.sourceLimit", {
+        name: file.name || t("composerAttachments.thisFile"),
+        kind: kindLabel(kind),
+        limit: bound,
+      }),
     );
   }
 }
@@ -102,13 +113,19 @@ export function reviewAttachments(
   supported: readonly string[],
   limits?: AttachmentLimits,
 ): ReviewedAttachment[] {
-  if (!files.length) throw new Error("Choose a file to attach.");
+  if (!files.length)
+    throw new Error(t("composerAttachments.chooseFileAttach"));
   if (files.length > MAX_COMPOSER_ATTACHMENTS)
-    throw new Error("Choose up to 10 files at a time.");
+    throw new Error(
+      t("composerAttachments.chooseUp10FilesTime"),
+    );
   return files.map((file) => {
     const kind = attachmentKind(file);
-    if (!supported.includes(kind))
-      throw new Error(`This hub doesn't support ${kind} attachments.`);
+    if (!supported.includes(kind)) {
+      throw new Error(
+        t("composerAttachments.unsupportedKind", { kind: kindLabel(kind) }),
+      );
+    }
     validateAttachmentSource(file, kind, limits);
     return { file, kind };
   });

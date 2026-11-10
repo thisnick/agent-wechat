@@ -1,5 +1,6 @@
 import type { NativeThread } from "@agent-wechat/shared";
 import type { ViewState } from "./browser-cache.ts";
+import { t } from "./i18n.ts";
 
 export const conversationCategories = [
   { id: "dm", label: "DMs" },
@@ -9,6 +10,19 @@ export const conversationCategories = [
 ] as const;
 
 export type ConversationCategory = (typeof conversationCategories)[number]["id"];
+
+export function categoryLabel(category: ConversationCategory): string {
+  switch (category) {
+    case "dm":
+      return t("conversationFilters.dms");
+    case "group":
+      return t("conversationFilters.groups");
+    case "official":
+      return t("conversationFilters.official");
+    case "service":
+      return t("conversationFilters.service");
+  }
+}
 
 export function savedConversationCategories(view: ViewState): ConversationCategory[] {
   const saved = view.categories;

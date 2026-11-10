@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { Connection } from "./connection.ts";
 import { HubAvatar } from "./avatars.tsx";
+import { t } from "./i18n.ts";
 import { Button } from "./ui.tsx";
 import { groupEnded } from "./group-creation.ts";
 import { GroupResult } from "./group-settings.tsx";
@@ -103,24 +104,28 @@ export function NewChat({
         className="modal new-chat"
         role="dialog"
         aria-modal="true"
-        aria-label="New chat"
+        aria-label={t("newChat.newChat")}
         onClick={(event) => event.stopPropagation()}
       >
         <div className="modal-head">
-          <h2>New chat</h2>
-          <Button icon="close" label="Close new chat" onClick={close} />
+          <h2>{t("newChat.newChat")}</h2>
+          <Button
+            icon="close"
+            label={t("newChat.closeNewChat")}
+            onClick={close}
+          />
         </div>
         <div
           className="new-chat-tabs"
           role="tablist"
-          aria-label="Conversation type"
+          aria-label={t("newChat.conversationType")}
         >
           <button
             role="tab"
             aria-selected={!group}
             onClick={() => setGroup(false)}
           >
-            Direct message
+            {t("newChat.directMessage")}
           </button>
           <button
             role="tab"
@@ -128,18 +133,20 @@ export function NewChat({
             disabled={!canCreate}
             onClick={() => setGroup(true)}
           >
-            New group
+            {t("newChat.newGroup")}
           </button>
         </div>
         {!canCreate && (
           <p className="field-help">
-            Group creation is not available on this agent-wechat hub yet.
+            {t("newChat.groupCreationNotAvailableAgent")}
           </p>
         )}
         {group && result.receipt ? (
           <div className="group-result">
-            <h3>{receiptInput?.name || "New group"}</h3>
-            <p>{receiptInput?.members.length} contacts selected</p>
+            <h3>{receiptInput?.name || t("newChat.newGroup")}</h3>
+            <p>
+              {t("newChat.contactsSelected", { count: receiptInput?.members.length })}
+            </p>
             <GroupResult model={creation} />
             {roomId ? (
               <button
@@ -148,10 +155,10 @@ export function NewChat({
                 onClick={() => void openCreated()}
               >
                 {opening
-                  ? "Opening…"
+                  ? t("newChat.opening")
                   : operation?.state === "succeeded"
-                    ? "Open group"
-                    : "Inspect group"}
+                    ? t("newChat.openGroup")
+                    : t("newChat.inspectGroup")}
               </button>
             ) : (
               <button
@@ -159,7 +166,7 @@ export function NewChat({
                 disabled={result.busy}
                 onClick={() => void creation.check()}
               >
-                Check status
+                {t("newChat.checkStatus")}
               </button>
             )}
             {operation && !groupEnded(operation) && (
@@ -168,14 +175,14 @@ export function NewChat({
                 disabled={result.busy}
                 onClick={() => void creation.cancel()}
               >
-                Cancel if not started
+                {t("newChat.cancelIfNotStarted")}
               </button>
             )}
             {(result.receipt.notAdmitted ||
               operation?.state === "failed" ||
               operation?.state === "cancelled") && (
               <button className="text-button" onClick={() => creation.clear()}>
-                Start again
+                {t("newChat.startAgain")}
               </button>
             )}
             {(result.error || error) && (
@@ -188,21 +195,21 @@ export function NewChat({
           <>
             {group && (
               <label className="group-name" htmlFor="new-group-name">
-                Group name (optional)
+                {t("newChat.groupNameOptional")}
                 <input
                   id="new-group-name"
                   maxLength={80}
                   value={name}
                   onChange={(event) => setName(event.target.value)}
-                  placeholder="Name this group"
+                  placeholder={t("newChat.nameGroup")}
                 />
               </label>
             )}
             <label className="search">
               <input
                 autoFocus
-                aria-label="Find contacts"
-                placeholder="Find contacts"
+                aria-label={t("newChat.findContacts")}
+                placeholder={t("newChat.findContacts")}
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
               />
@@ -220,7 +227,7 @@ export function NewChat({
                     <span>{contact.displayName || contact.id}</span>
                     <input
                       type="checkbox"
-                      aria-label={`Select ${contact.displayName || contact.id}`}
+                      aria-label={t("newChat.select", { value: contact.displayName || contact.id })}
                       checked={selected.includes(contact.id)}
                       disabled={
                         !selected.includes(contact.id) && selected.length >= 40
@@ -251,13 +258,15 @@ export function NewChat({
                 ),
               )}
               {!visible.length && (
-                <p className="no-results">No contacts found.</p>
+                <p className="no-results">
+                  {t("newChat.noContactsFound")}
+                </p>
               )}
             </div>
             {group && (
               <div className="new-chat-footer">
                 <small>
-                  {selected.length} selected · Choose at least 2 contacts
+                  {t("newChat.selectedChooseLeast2Contacts", { count: selected.length })}
                 </small>
                 <button
                   className="primary"
@@ -266,7 +275,7 @@ export function NewChat({
                     void creation.create({ name, members: selected })
                   }
                 >
-                  Create group
+                  {t("newChat.createGroup")}
                 </button>
               </div>
             )}
@@ -274,8 +283,7 @@ export function NewChat({
         )}
         {group && connection.simulator && (
           <p className="field-help">
-            Creates a group in the simulator. No real WeChat invitations are
-            sent.
+            {t("newChat.createsGroupSimulatorNoReal")}
           </p>
         )}
       </section>

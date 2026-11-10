@@ -6,6 +6,7 @@ import {
   useMessageScrollerScrollable,
 } from "@shadcn/react/message-scroller";
 import type { BrowserCache } from "./browser-cache.ts";
+import { t } from "./i18n.ts";
 import { Icon } from "./ui.tsx";
 import { ScrollToQuotedMessage } from "./conversation-navigation.tsx";
 import {
@@ -33,7 +34,11 @@ export function ConversationScroll({
   showedHistory.current ||= history.hasMore;
   if (searching)
     return (
-      <div className="messages" role="region" aria-label="Search results">
+      <div
+        className="messages"
+        role="region"
+        aria-label={t("conversationScroll.searchResults")}
+      >
         {children}
       </div>
     );
@@ -152,13 +157,15 @@ function ConversationViewport({
             onClick={() => load(false)}
           >
             {!history.hasMore
-              ? "Beginning of conversation"
+              ? t("conversationScroll.beginningConversation")
               : history.loading
-              ? "Loading older messages…"
-              : "Load older messages"}
+              ? t("conversationScroll.loadingOlderMessages")
+              : t("conversationScroll.loadOlderMessages")}
           </button>
         ) : history.loading ? (
-          <p className="date-label">Loading messages…</p>
+          <p className="date-label">
+            {t("conversationScroll.loadingMessages")}
+          </p>
         ) : null}
         {/* A prepended page must not remove a date prefix from an existing message row. */}
         {leading}
@@ -166,9 +173,9 @@ function ConversationViewport({
       </MessageScroller.Viewport>
       <MessageScroller.Button
         className="jump-to-latest"
-        aria-label="Jump to latest message"
+        aria-label={t("conversationScroll.jumpLatestMessage")}
       >
-        <Icon name="down" /> Latest messages
+        <Icon name="down" /> {t("conversationScroll.latestMessages")}
       </MessageScroller.Button>
     </MessageScroller.Root>
   );

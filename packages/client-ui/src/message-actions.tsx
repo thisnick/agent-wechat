@@ -8,6 +8,7 @@ import {
 import { createPortal } from "react-dom";
 import type { NativeMessage } from "@agent-wechat/shared";
 import type { Connection } from "./connection.ts";
+import { t } from "./i18n.ts";
 import { canRecall } from "./message-recall.ts";
 import { messagePresentation } from "./message-presentation.ts";
 import { useMediaViewer } from "./media-viewer-context.ts";
@@ -53,12 +54,12 @@ export function MessageActions({
       <div
         className="message-actions"
         role="toolbar"
-        aria-label="Message actions"
+        aria-label={t("messageActions.messageActions")}
       >
         {composer?.enabled && canReply(message) && (
           <Button
             icon="reply"
-            label="Reply"
+            label={t("messageActions.reply")}
             onClick={() => composer.reply(message)}
           />
         )}
@@ -78,7 +79,10 @@ export function MessageActions({
               }
             }}
           >
-            <summary aria-label="More message actions" title="More">
+            <summary
+              aria-label={t("messageActions.moreMessageActions")}
+              title={t("messageActions.more")}
+            >
               <Icon name="more" />
             </summary>
             <div className="message-menu-items">
@@ -87,12 +91,14 @@ export function MessageActions({
                   onClick={() => {
                     void navigator.clipboard
                       .writeText(message.body!)
-                      .then(() => setStatus("Copied"))
-                      .catch(() => setStatus("Couldn’t copy text."));
+                      .then(() => setStatus(t("messageActions.copied")))
+                      .catch(() =>
+                        setStatus(t("messageActions.couldnTCopyText")),
+                      );
                     if (menu.current) menu.current.open = false;
                   }}
                 >
-                  Copy text
+                  {t("messageActions.copyText")}
                 </button>
               )}
               {photo && (
@@ -102,7 +108,9 @@ export function MessageActions({
                     if (menu.current) menu.current.open = false;
                   }}
                 >
-                  {message.type === 43 ? "Open video" : "Open photo"}
+                  {message.type === 43
+                    ? t("messageActions.openVideo")
+                    : t("messageActions.openPhoto")}
                 </button>
               )}
             </div>
@@ -140,10 +148,10 @@ function RecallButton({
     state.operation?.state,
   ]);
   const label = state.busy
-    ? "Recalling…"
+    ? t("messageActions.recalling")
     : state.uncertain
-      ? "Check recall"
-      : "Recall";
+      ? t("messageActions.checkRecall")
+      : t("messageActions.recall");
   return (
     <>
       <span className="recall-action">
@@ -220,17 +228,17 @@ function RecallConfirmation({
         close();
       }}
     >
-      <h2 id={heading}>Recall this message?</h2>
-      <p id={description}>This can’t be undone.</p>
+      <h2 id={heading}>{t("messageActions.recallMessage")}</h2>
+      <p id={description}>{t("messageActions.canTUndone")}</p>
       <blockquote className="recall-preview">
-        {emojiText(messageSummary(message, "You").text).slice(0, 240)}
+        {emojiText(messageSummary(message, t("messageActions.you")).text).slice(0, 240)}
       </blockquote>
       <div className="recall-confirm-actions">
         <button className="secondary" autoFocus onClick={close}>
-          Cancel
+          {t("messageActions.cancel")}
         </button>
         <button className="primary" onClick={confirm}>
-          Recall
+          {t("messageActions.recall")}
         </button>
       </div>
     </dialog>,

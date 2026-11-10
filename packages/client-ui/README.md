@@ -438,6 +438,26 @@ Group details load all roster pages.
 | Settings         | Appearance and account controls; agent configuration and desktop settings remain follow-ups                   |
 | Distribution     | Browser development preview; production hosting and Tauri packaging remain follow-ups                         |
 
+## Translations
+
+UI text lives in `locales/en.json`, keyed by file (keys used in `main.tsx` start with
+`main.`). Other languages are `locales/<tag>.json` with the same keys; a key a
+translation lacks shows the English text.
+
+- Show text with `t("area.key", { name })` from `src/i18n.ts`, with `{{name}}` in
+  the catalog. For counts, add `key_one` and `key_other` and pass `count`.
+- For a sentence containing an element, use `richText("area.key", { name: <strong>…</strong> })`
+  rather than joining fragments, so a translator can reorder the sentence.
+- Add new English text to `en.json` only; translations follow separately.
+- The desktop app's tray and notification text is under `desktopShell` and is read
+  by `packages/desktop/src-tauri/src/i18n.rs`.
+- To add a language, add `locales/<tag>.json` and list the tag in `languages` in
+  `src/i18n.ts` and `CATALOGS` in `src-tauri/src/i18n.rs`.
+
+`pnpm i18n check` (run in CI) fails on keys used in code but missing from English,
+unused English keys, and translations that would render wrongly. Missing translations
+never fail it.
+
 ## Visual review scenes
 
 `scenes/` holds scripted scenes of the UI for visual review: a signed-out account's
@@ -447,7 +467,9 @@ Each scene runs against a fresh simulator hub with a fixed account, a simulator
 clock that never advances on its own, a fixed browser clock, locale and time zone,
 frozen animations and no network beyond loopback. Screenshots are named
 `<scene>@<viewport>`; `desktop` is 1280x800, `narrow` is 390x844 and
-`compact` is a 320x700 touch viewport.
+`compact` is a 320x700 touch viewport. After the English capture, each scene
+switches to every translation in place and is captured again as
+`<scene>@<viewport>@<language>`, for example `chat-list@desktop@zh-CN`.
 
 ```sh
 pnpm --filter @agent-wechat/client-ui scenes                  # run every scene

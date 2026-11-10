@@ -18,20 +18,32 @@ import {
   type GroupAction,
 } from "./group-creation.ts";
 import { HubAvatar } from "./avatars.tsx";
+import { richText, t } from "./i18n.ts";
 import { Button } from "./ui.tsx";
 import { inventory, pause, readableError } from "./session.ts";
 
-const labels: Record<GroupAction["action"], string> = {
-  create: "Create group",
-  rename: "Rename group",
-  leave: "Leave group",
-  add_members: "Add members",
-  remove_members: "Remove members",
-  my_name: "My name in this group",
-  clear_announcement: "Clear announcement",
-  mute: "Notifications",
-  pin: "Pin chat",
-};
+function groupLabel(action: GroupAction["action"]): string {
+  switch (action) {
+    case "create":
+      return t("groupSettings.createGroup");
+    case "rename":
+      return t("groupSettings.renameGroup");
+    case "leave":
+      return t("groupSettings.leaveGroup");
+    case "add_members":
+      return t("groupSettings.addMembers");
+    case "remove_members":
+      return t("groupSettings.removeMembers");
+    case "my_name":
+      return t("groupSettings.myNameGroup");
+    case "clear_announcement":
+      return t("groupSettings.clearAnnouncement");
+    case "mute":
+      return t("groupSettings.notifications");
+    case "pin":
+      return t("groupSettings.pinChat");
+  }
+}
 type Result = {
   groupId?: string;
   remoteOutcome?: string;
@@ -52,26 +64,26 @@ export function GroupResult({ model }: { model: GroupMutations }) {
     <div className="group-operation-result">
       <p role="status">
         {receipt.notAdmitted
-          ? "The change wasn’t submitted."
+          ? t("groupSettings.changeWasnTSubmitted")
           : operation?.state === "succeeded"
           ? partial
             ? receipt.input.action === "create"
-              ? "Group created. Some selected contacts weren’t confirmed as added."
-              : "Group updated. Some member changes weren’t confirmed."
+              ? t("groupSettings.groupCreatedSomeSelectedContacts")
+              : t("groupSettings.groupUpdatedSomeMemberChanges")
             : receipt.input.action === "leave"
-            ? "You left the group. Cached history is still available."
+            ? t("groupSettings.leftGroupCachedHistoryStill")
             : receipt.input.action === "create"
-            ? "Group created."
-            : "Group updated."
+            ? t("groupSettings.groupCreated")
+            : t("groupSettings.groupUpdated")
           : operation?.state === "needs_review"
-          ? "The outcome couldn’t be confirmed. Check the group before attempting this change again."
+          ? t("groupSettings.outcomeCouldnTConfirmedCheck")
           : operation?.state === "failed"
-          ? "The change failed. Review the result before trying again."
+          ? t("groupSettings.changeFailedReviewResultBefore")
           : operation?.state === "cancelled"
-          ? "Cancelled before submission."
+          ? t("groupSettings.cancelledBeforeSubmission")
           : operation
-          ? "Updating group…"
-          : "Checking whether the change was submitted…"}
+          ? t("groupSettings.updatingGroup")
+          : t("groupSettings.checkingWhetherChangeWasSubmitted")}
       </p>
       {result?.members && result.members.length > 0 && (
         <ul className="group-member-results">
@@ -81,10 +93,10 @@ export function GroupResult({ model }: { model: GroupMutations }) {
               <small>
                 {receipt.input.action === "remove_members" &&
                 member.status === null
-                  ? "Removal acknowledged"
+                  ? t("groupSettings.removalAcknowledged")
                   : member.status === 0
-                  ? "Accepted"
-                  : `Not confirmed (status ${member.status ?? "unknown"})`}
+                  ? t("groupSettings.accepted")
+                  : t("groupSettings.notConfirmedStatus", { status: member.status ?? t("groupSettings.statusUnknown") })}
               </small>
             </li>
           ))}
@@ -92,27 +104,27 @@ export function GroupResult({ model }: { model: GroupMutations }) {
       )}
       {!!result?.unconfirmedMembers?.length && (
         <p className="field-help">
-          Unconfirmed: {result.unconfirmedMembers.join(", ")}. These members
-          were not assumed to have changed.
+          {t("groupSettings.unconfirmedTheseMembersWereNot", { name: result.unconfirmedMembers.join(", ") })}
         </p>
       )}
       {result?.steps?.some((step) => !step.accepted) && (
         <p className="field-help">
-          One or more steps were rejected.{" "}
+          {t("groupSettings.oneMoreStepsWereRejected")}
           {receipt.input.action === "leave"
-            ? "The final quit result is shown above; cleanup results are retained separately."
-            : "Refresh the group to inspect its current state."}
+            ? t("groupSettings.finalQuitResultShownAbove")
+            : t("groupSettings.refreshGroupInspectCurrentState")}
         </p>
       )}
       {result?.remoteOutcome === "accepted" &&
         result.profileProjection === "pending" && (
           <p className="field-help">
-            WeChat accepted this change. The saved view on this agent-wechat hub
-            is still updating.
+            {t("groupSettings.wechatAcceptedChangeSavedView")}
           </p>
         )}
       {partial && (
-        <p className="field-help">No members will be retried automatically.</p>
+        <p className="field-help">
+          {t("groupSettings.noMembersWillRetriedAutomatically")}
+        </p>
       )}
       {state.error && (
         <p className="attachment-error" role="alert">
@@ -235,12 +247,12 @@ export function GroupSettings({
         ["failed", "cancelled", "needs_review", "expired"].includes(item.state)
       )
         throw new Error(
-          "The group refresh did not finish. The saved view may be incomplete.",
+          t("groupSettings.groupRefreshDidNotFinish"),
         );
       await pause(700, signal);
     }
     throw new Error(
-      "Group refresh is still pending. Try Refresh group again to inspect the latest view.",
+      t("groupSettings.groupRefreshStillPendingTry"),
     );
   }
   async function refresh() {
@@ -332,58 +344,65 @@ export function GroupSettings({
     <>
       <div className="detail-section group-settings">
         <div className="group-section-head">
-          <div className="section-head">Group settings</div>
+          <div className="section-head">{t("groupSettings.groupSettings")}</div>
           <button
             className="text-button"
             disabled={refreshing || !state.connected}
             onClick={() => void refresh()}
           >
-            {refreshing ? "Refreshing…" : "Refresh group"}
+            {refreshing
+              ? t("groupSettings.refreshing")
+              : t("groupSettings.refreshGroup")}
           </button>
         </div>
         {group?.isInGroup === false ? (
-          <p className="group-membership">You are no longer in this group.</p>
+          <p className="group-membership">
+            {t("groupSettings.noLongerGroup")}
+          </p>
         ) : (
           group?.isInGroup !== true && (
             <p className="field-help">
-              Membership is unconfirmed. Refresh before making changes.
+              {t("groupSettings.membershipUnconfirmedRefreshBeforeMaking")}
             </p>
           )
         )}
         <div className="group-setting-row">
           <span>
-            Group name
+            {t("groupSettings.groupName")}
             <strong>
-              {sharedName || "Unnamed group"}
+              {sharedName ||
+                t("groupSettings.unnamedGroup")}
             </strong>
           </span>
           <button
             disabled={!enabled("rename") || refreshing}
-            aria-label="Edit group name"
+            aria-label={t("groupSettings.editGroupName")}
             onClick={() => edit("rename")}
           >
-            Edit
+            {t("groupSettings.edit")}
           </button>
         </div>
         <div className="group-setting-row">
           <span>
-            My name in this group
-            <strong>{group?.myDisplayName || "Using profile name"}</strong>
+            {t("groupSettings.myNameGroup")}
+            <strong>
+              {group?.myDisplayName || t("groupSettings.usingProfileName")}
+            </strong>
           </span>
           <button
             disabled={!enabled("my_name") || refreshing}
-            aria-label="Edit my name in this group"
+            aria-label={t("groupSettings.editMyNameGroup")}
             onClick={() => edit("my_name")}
           >
-            Edit
+            {t("groupSettings.edit")}
           </button>
         </div>
         <div className="group-announcement">
-          <div className="section-head">Announcement</div>
+          <div className="section-head">{t("groupSettings.announcement")}</div>
           <p>
             {group?.announcement === null || group?.announcement === undefined
-              ? "Not available in the saved view."
-              : group.announcement || "No announcement."}
+              ? t("groupSettings.notAvailableSavedView")
+              : group.announcement || t("groupSettings.noAnnouncement")}
           </p>
           <button
             disabled={
@@ -393,7 +412,7 @@ export function GroupSettings({
             }
             onClick={() => edit("clear_announcement")}
           >
-            Clear announcement
+            {t("groupSettings.clearAnnouncement")}
           </button>
         </div>
         {operation.receipt && (
@@ -401,7 +420,7 @@ export function GroupSettings({
             className="secondary group-pending"
             onClick={() => setMode("result")}
           >
-            View last group change
+            {t("groupSettings.viewLastGroupChange")}
           </button>
         )}
         <button
@@ -409,7 +428,7 @@ export function GroupSettings({
           disabled={!enabled("leave") || refreshing}
           onClick={() => edit("leave")}
         >
-          Leave group
+          {t("groupSettings.leaveGroup")}
         </button>
         {error && (
           <p className="attachment-error" role="alert">
@@ -420,14 +439,14 @@ export function GroupSettings({
       <div className="detail-section group-settings">
         <div className="group-section-head">
           <div className="section-head">
-            Members <small>{members.length}</small>
+            {t("groupSettings.members")} <small>{members.length}</small>
           </div>
           <div className="group-member-actions">
             <button
               disabled={!enabled("add_members") || refreshing}
               onClick={() => edit("add_members")}
             >
-              Add
+              {t("groupSettings.add")}
             </button>
             <button
               disabled={
@@ -437,7 +456,7 @@ export function GroupSettings({
               }
               onClick={() => edit("remove_members")}
             >
-              Remove
+              {t("groupSettings.remove")}
             </button>
           </div>
         </div>
@@ -451,7 +470,7 @@ export function GroupSettings({
             />
             <span>
               {member.roomDisplayName || member.displayName || member.username}
-              {member.id === own && <small> (you)</small>}
+              {member.id === own && <small> {t("groupSettings.you")}</small>}
             </span>
           </div>
         ))}
@@ -463,7 +482,9 @@ export function GroupSettings({
             role="dialog"
             aria-modal="true"
             aria-label={
-              mode === "result" ? "Group change result" : labels[mode]
+              mode === "result"
+                ? t("groupSettings.groupChangeResult")
+                : groupLabel(mode)
             }
             onClick={(e) => e.stopPropagation()}
             onKeyDown={(e) => {
@@ -472,11 +493,13 @@ export function GroupSettings({
           >
             <div className="modal-head">
               <h2>
-                {mode === "result" ? "Group change result" : labels[mode]}
+                {mode === "result"
+                  ? t("groupSettings.groupChangeResult")
+                  : groupLabel(mode)}
               </h2>
               <Button
                 icon="close"
-                label="Close group settings"
+                label={t("groupSettings.closeGroupSettings")}
                 onClick={() => setMode(null)}
               />
             </div>
@@ -490,7 +513,7 @@ export function GroupSettings({
                       disabled={operation.busy}
                       onClick={() => void model.check()}
                     >
-                      Check status
+                      {t("groupSettings.checkStatus")}
                     </button>
                   )}
                   {operation.receipt.operation &&
@@ -500,7 +523,7 @@ export function GroupSettings({
                         disabled={operation.busy}
                         onClick={() => void model.cancel()}
                       >
-                        Cancel if not started
+                        {t("groupSettings.cancelIfNotStarted")}
                       </button>
                     )}
                   {canDismiss && (
@@ -511,7 +534,7 @@ export function GroupSettings({
                         setMode(null);
                       }}
                     >
-                      Done
+                      {t("groupSettings.done")}
                     </button>
                   )}
                 </div>
@@ -525,11 +548,15 @@ export function GroupSettings({
               >
                 {textMode && (
                   <label className="group-name">
-                    {mode === "rename" ? "Group name" : "My display name"}
+                    {mode === "rename"
+                      ? t("groupSettings.groupName")
+                      : t("groupSettings.myDisplayName")}
                     <input
                       autoFocus
                       aria-label={
-                        mode === "rename" ? "Group name" : "My display name"
+                        mode === "rename"
+                          ? t("groupSettings.groupName")
+                          : t("groupSettings.myDisplayName")
                       }
                       maxLength={512}
                       value={draft}
@@ -537,8 +564,8 @@ export function GroupSettings({
                     />
                     <small className="field-help">
                       {mode === "rename"
-                        ? "Everyone in the group can see this name."
-                        : "Leave blank to use your profile name."}
+                        ? t("groupSettings.everyoneGroupCanSeeName")
+                        : t("groupSettings.leaveBlankUseProfileName")}
                     </small>
                   </label>
                 )}
@@ -547,8 +574,8 @@ export function GroupSettings({
                     <label className="search">
                       <input
                         autoFocus
-                        aria-label="Find group contacts"
-                        placeholder="Find contacts"
+                        aria-label={t("groupSettings.findGroupContacts")}
+                        placeholder={t("groupSettings.findContacts")}
                         value={query}
                         onChange={(e) => setQuery(e.target.value)}
                       />
@@ -565,7 +592,7 @@ export function GroupSettings({
                           <span>{item.displayName || item.id}</span>
                           <input
                             type="checkbox"
-                            aria-label={`Select ${item.displayName || item.id}`}
+                            aria-label={t("groupSettings.select", { value: item.displayName || item.id })}
                             checked={selected.includes(item.id)}
                             disabled={
                               !selected.includes(item.id) &&
@@ -583,36 +610,33 @@ export function GroupSettings({
                       ))}
                       {!visible.length && (
                         <p className="no-results">
-                          No contacts available. Refresh the group or contact
-                          list.
+                          {t("groupSettings.noContactsAvailableRefreshGroup")}
                         </p>
                       )}
                     </div>
                     <p className="field-help member-picker-help">
-                      {selected.length} selected · WeChat checks who can be
-                      added or removed. Each member’s result will be shown.
+                      {t("groupSettings.selectedWechatChecksWhoCan", { count: selected.length })}
                     </p>
                   </div>
                 )}
                 {mode === "leave" && (
                   <p>
-                    Leave <strong>{title}</strong>?
-                    You’ll stop receiving new messages. Cached history will
-                    remain on this agent-wechat hub.
+                    {richText("groupSettings.leaveConfirm", { title: <strong>{title}</strong> })}
                   </p>
                 )}
                 {mode === "clear_announcement" && (
                   <p>
-                    Clear the announcement for everyone in this group? WeChat
-                    checks your permission to make this change.
+                    {t("groupSettings.clearAnnouncementEveryoneGroupWechat")}
                   </p>
                 )}
                 {mode === "mute" && (
                   <p>
-                    {group?.muted === true
-                      ? "Turn notifications on"
-                      : "Mute notifications"}{" "}
-                    for <strong>{title}</strong>?
+                    {richText(
+                      group?.muted === true
+                        ? "groupSettings.turnNotificationsOnFor"
+                        : "groupSettings.muteNotificationsFor",
+                      { title: <strong>{title}</strong> },
+                    )}
                   </p>
                 )}
                 <div className="group-edit-footer">
@@ -621,7 +645,7 @@ export function GroupSettings({
                     className="secondary"
                     onClick={() => setMode(null)}
                   >
-                    Cancel
+                    {t("groupSettings.cancel")}
                   </button>
                   <button
                     className={`primary ${
@@ -638,21 +662,21 @@ export function GroupSettings({
                     }
                   >
                     {mode === "leave"
-                      ? "Leave group"
+                      ? t("groupSettings.leaveGroup")
                       : mode === "clear_announcement"
-                      ? "Clear announcement"
+                      ? t("groupSettings.clearAnnouncement")
                       : memberMode
                       ? mode === "add_members"
-                        ? "Add members"
-                        : "Remove members"
-                      : "Save changes"}
+                        ? t("groupSettings.addMembers")
+                        : t("groupSettings.removeMembers")
+                      : t("groupSettings.saveChanges")}
                   </button>
                 </div>
               </form>
             )}
             {connection.simulator && (
               <p className="field-help">
-                Simulator account · No real WeChat group is changed.
+                {t("groupSettings.simulatorAccountNoRealWechat")}
               </p>
             )}
           </section>

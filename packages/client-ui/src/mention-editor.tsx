@@ -3,6 +3,7 @@ import type { NativeGroupMember } from "@agent-wechat/shared";
 import { isNativeTombstone } from "@agent-wechat/shared";
 import type { Connection } from "./connection.ts";
 import { HubAvatar } from "./avatars.tsx";
+import { t } from "./i18n.ts";
 import { Icon } from "./ui.tsx";
 import { readableError } from "./session.ts";
 import { mentionQuery, validMentionTokens, type MentionToken } from "./mentions.ts";
@@ -50,7 +51,7 @@ export function MentionEditor({ connection, account, thread, inputRef, value, to
     label: member.mentionName || member.roomDisplayName || member.username,
     secondary: member.displayName && member.displayName !== (member.mentionName || member.roomDisplayName || member.username) ? member.displayName : undefined,
   }));
-  if (canMentionAll && loadedQuery === query && !tokens.length && (!query || "everyone all".includes(query.toLocaleLowerCase()))) choices.push({ id: null, label: "all", secondary: "Everyone in this group" });
+  if (canMentionAll && loadedQuery === query && !tokens.length && (!query || "everyone all 所有人 全体".includes(query.toLocaleLowerCase()))) choices.push({ id: null, label: t("mentionEditor.all"), secondary: t("mentionEditor.everyoneGroup") });
   const current = choices[Math.min(active, Math.max(0, choices.length - 1))];
   function close() {
     setPicker(false); setLoadedQuery(null); queryRange.current = null;
@@ -65,7 +66,7 @@ export function MentionEditor({ connection, account, thread, inputRef, value, to
     const root = inputRef.current;
     if (!root) return;
     const draft = editorDraft(root);
-    if (!validMentionTokens(draft.text, draft.tokens)) { setError("Choose the mentioned members again."); return; }
+    if (!validMentionTokens(draft.text, draft.tokens)) { setError(t("mentionEditor.chooseMentionedMembersAgain")); return; }
     emitted.current = JSON.stringify(draft);
     if (commit) record(draft);
     selection.current = editorSelection(root) ?? selection.current;
@@ -77,7 +78,7 @@ export function MentionEditor({ connection, account, thread, inputRef, value, to
     const token = readEditor(root).tokens.find(token => token.node === node);
     if (!token) return;
     node.remove(); root.normalize(); focusEditor(root, token.start);
-    setError(""); close(); emit(); announce(`Removed mention of ${token.label}`);
+    setError(""); close(); emit(); announce(t("mentionEditor.removedMention", { label: token.label }));
   }
   useLayoutEffect(() => {
     const root = inputRef.current;
@@ -202,12 +203,12 @@ export function MentionEditor({ connection, account, thread, inputRef, value, to
   function choose(choice: Choice) {
     const root = inputRef.current;
     if (!root || props.current.disabled || !props.current.allowMentions) return;
-    if (choice.id === null && !props.current.canMentionAll) { setError("Mentioning everyone is unavailable. Choose a member instead."); return; }
+    if (choice.id === null && !props.current.canMentionAll) { setError(t("mentionEditor.mentioningEveryoneUnavailableChooseMember")); return; }
     const draft = readEditor(root), at = queryRange.current ?? selection.current;
-    if (draft.tokens.length >= 256 || (choice.id !== null && !draft.tokens.some(token => token.userId === choice.id) && new Set(draft.tokens.map(token => token.userId)).size >= 128)) { setError("Too many mentions in this message."); return; }
-    if ((choice.id === null && draft.tokens.length) || draft.tokens.some(token => token.userId === null)) { setError("Remove existing mentions before choosing Everyone."); return; }
+    if (draft.tokens.length >= 256 || (choice.id !== null && !draft.tokens.some(token => token.userId === choice.id) && new Set(draft.tokens.map(token => token.userId)).size >= 128)) { setError(t("mentionEditor.tooManyMentionsMessage")); return; }
+    if ((choice.id === null && draft.tokens.length) || draft.tokens.some(token => token.userId === null)) { setError(t("mentionEditor.removeExistingMentionsBeforeChoosing")); return; }
     insertMention(root, at.start, at.end, choice.id, choice.label, remove);
-    close(); dismissed.current = null; emit(); announce(`Mentioning ${choice.label}`);
+    close(); dismissed.current = null; emit(); announce(t("mentionEditor.mentioning", { label: choice.label }));
   }
   function dismiss() {
     dismissed.current = queryRange.current?.start ?? null; close();
@@ -239,29 +240,29 @@ export function MentionEditor({ connection, account, thread, inputRef, value, to
     if (cut) { range.deleteContents(); emit(); }
   }
   return <>
-    <div ref={inputRef} className="mention-editor" contentEditable={!disabled} suppressContentEditableWarning role="textbox" aria-label="Message" aria-multiline="true" aria-disabled={disabled} aria-invalid={hasAll && !canMentionAll || undefined} aria-haspopup="listbox" aria-expanded={picker} aria-controls={listId} aria-activedescendant={picker && current ? `${listId}-${Math.min(active, choices.length - 1)}` : undefined} data-placeholder={placeholder}
+    <div ref={inputRef} className="mention-editor" contentEditable={!disabled} suppressContentEditableWarning role="textbox" aria-label={t("mentionEditor.message")} aria-multiline="true" aria-disabled={disabled} aria-invalid={hasAll && !canMentionAll || undefined} aria-haspopup="listbox" aria-expanded={picker} aria-controls={listId} aria-activedescendant={picker && current ? `${listId}-${Math.min(active, choices.length - 1)}` : undefined} data-placeholder={placeholder}
       onFocus={onFocus} onClick={onFocus} onInput={() => { emit(!composing.current); detect(); }}
       onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; emit(); detect(); }} onBlur={() => { composing.current = false; }} onKeyDown={keyboard}
       onCopy={event => copy(event, false)} onCut={event => copy(event, true)}
-      onDrop={event => { event.preventDefault(); setError("Use the attachment button to add files."); }}
-      onPaste={event => { event.preventDefault(); if (composing.current || disabled) return; const text = event.clipboardData.getData("text/plain"); if (new TextEncoder().encode(text).length > 65536) { setError("Message is too long."); return; } const root = inputRef.current!, at = editorSelection(root) ?? selection.current; insertEditorText(root, at.start, at.end, text); emit(); detect(); }} />
+      onDrop={event => { event.preventDefault(); setError(t("mentionEditor.useAttachmentButtonAddFiles")); }}
+      onPaste={event => { event.preventDefault(); if (composing.current || disabled) return; const text = event.clipboardData.getData("text/plain"); if (new TextEncoder().encode(text).length > 65536) { setError(t("mentionEditor.messageTooLong")); return; } const root = inputRef.current!, at = editorSelection(root) ?? selection.current; insertEditorText(root, at.start, at.end, text); emit(); detect(); }} />
     {picker && <div ref={popup} className="mention-picker" onKeyDown={event => {
       if (event.key === "Escape" && !event.defaultPrevented && !composing.current && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) {
         event.preventDefault(); event.stopPropagation(); dismiss();
       }
     }}>
-      <div className="mention-picker-heading"><span>Mention someone</span><button type="button" className="icon-btn" aria-label="Close mentions" onClick={dismiss}><Icon name="close" /></button></div>
-      <label className="mention-search"><Icon name="search" /><input ref={search} role="combobox" aria-expanded={picker} aria-controls={listId} aria-activedescendant={current ? `${listId}-${Math.min(active, choices.length - 1)}` : undefined} aria-label="Search group members" value={query} placeholder="Find a group member" onChange={event => { setQuery(event.target.value); setActive(0); }} onKeyDown={keyboard} onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }} /></label>
-      <div id={listId} className="mention-options" role="listbox" aria-label="Group members" aria-busy={loading}>
+      <div className="mention-picker-heading"><span>{t("mentionEditor.mentionSomeone")}</span><button type="button" className="icon-btn" aria-label={t("mentionEditor.closeMentions")} onClick={dismiss}><Icon name="close" /></button></div>
+      <label className="mention-search"><Icon name="search" /><input ref={search} role="combobox" aria-expanded={picker} aria-controls={listId} aria-activedescendant={current ? `${listId}-${Math.min(active, choices.length - 1)}` : undefined} aria-label={t("mentionEditor.searchGroupMembers")} value={query} placeholder={t("mentionEditor.findGroupMember")} onChange={event => { setQuery(event.target.value); setActive(0); }} onKeyDown={keyboard} onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }} /></label>
+      <div id={listId} className="mention-options" role="listbox" aria-label={t("mentionEditor.groupMembers")} aria-busy={loading}>
         {choices.map((choice, index) => <button type="button" role="option" id={`${listId}-${index}`} key={choice.id ?? "@all"} aria-selected={current === choice} className={`mention-option ${current === choice ? "active" : ""} ${choice.id === null ? "all" : ""}`} onPointerDown={event => event.preventDefault()} onPointerEnter={() => setActive(index)} onClick={() => choose(choice)}>
           {choice.id ? <HubAvatar connection={connection} account={account} username={choice.id} name={choice.label} /> : <span className="mention-everyone" aria-hidden="true">@</span>}
-          <span><strong>{choice.id === null ? "Everyone" : choice.label}</strong>{choice.secondary && <small>{choice.secondary}</small>}</span>
+          <span><strong>{choice.id === null ? t("mentionEditor.everyone") : choice.label}</strong>{choice.secondary && <small>{choice.secondary}</small>}</span>
         </button>)}
-        {loading && <span className="mention-loading" role="status"><Icon name="refresh" /><span className="sr-only">Loading group members</span></span>}
-        {!loading && !error && !choices.length && <p className="mention-empty">{hasAll ? "Already mentioning everyone" : "No matching members"}</p>}
-        {next && <button type="button" className="mention-more" disabled={loading} onClick={() => void more()}>More members</button>}
+        {loading && <span className="mention-loading" role="status"><Icon name="refresh" /><span className="sr-only">{t("mentionEditor.loadingGroupMembers")}</span></span>}
+        {!loading && !error && !choices.length && <p className="mention-empty">{hasAll ? t("mentionEditor.alreadyMentioningEveryone") : t("mentionEditor.noMatchingMembers")}</p>}
+        {next && <button type="button" className="mention-more" disabled={loading} onClick={() => void more()}>{t("mentionEditor.moreMembers")}</button>}
       </div>
-      {error && <p className="mention-error" role="alert">{error} <button type="button" onClick={() => setRetry(value => value + 1)}>Retry</button></p>}
+      {error && <p className="mention-error" role="alert">{error} <button type="button" onClick={() => setRetry(value => value + 1)}>{t("mentionEditor.retry")}</button></p>}
     </div>}
     {!picker && error && <p className="mention-error" role="alert">{error}</p>}
     <span className="sr-only" aria-live="polite">{announcement}</span>
