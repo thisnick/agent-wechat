@@ -1,5 +1,7 @@
 # Agent WeChat
 
+English | [简体中文](README.zh-CN.md)
+
 **An open source WeChat client for people and AI agents.**
 
 Use an alternative WeChat desktop client, work from the terminal, or connect your
@@ -8,8 +10,6 @@ same API. Agent WeChat communicates directly with WeChat; its daemon does not
 need the official app running.
 
 [Get started](#get-started) · [Documentation](https://thisnick.github.io/agent-wechat/) · [OpenClaw](#openclaw) · [Downloads](https://github.com/thisnick/agent-wechat/releases)
-
-[简体中文文档](https://thisnick.github.io/agent-wechat/zh-cn/)
 
 ## See it in action
 
