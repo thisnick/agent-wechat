@@ -84,6 +84,9 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # The run for main is started by the dispatch job, so its actor is the
+          # github-actions bot. Bot pull requests never reach this job (see its if:).
+          allowed_bots: github-actions
           prompt: |
             Translate English text for agent-wechat. ${{ runner.temp }}/work.json lists the work per
             language tag: `ui` entries are keys of packages/client-ui/locales/<tag>.json (nested by the
