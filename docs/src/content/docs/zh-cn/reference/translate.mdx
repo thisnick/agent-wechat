@@ -1,0 +1,82 @@
+---
+title: 翻译
+description: 修正译文、保持译文最新，或为应用和这些文档添加新语言。
+banner:
+  content: "本页面由机器翻译，尚未经人工审核。"
+sourceHash: da16d878d3ed
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+桌面应用、Web 界面和这些文档均以英文编写，并翻译成其他语言。尚未翻译的内容会以英文显示，因此只翻译一部分也可以安全发布。
+
+| 内容 | 英文源文件 | 译文 |
+| --- | --- | --- |
+| 应用文本 | `packages/client-ui/locales/en.json` | `packages/client-ui/locales/<lang>.json` |
+| 文档页面 | `docs/src/content/docs/<page>.mdx` | `docs/src/content/docs/<folder>/<page>.mdx` |
+| 用词选择 | | `docs/i18n/glossary/<lang>.md` |
+
+命令行工具、HTTP API 错误信息和日志保持英文，因为脚本和智能体需要读取它们。
+
+## 修正译文 \{#fix-a-translation}
+
+1. 编辑译文文件中的文字。`{{placeholders}}` 占位符须与英文完全一致，并遵循该语言的术语表。
+2. 检查译文：
+
+   ```bash
+   pnpm i18n check
+   ```
+
+   ```text
+   Translations are consistent with English.
+   ```
+
+3. 提交拉取请求，并注明你以哪种语言的读者身份进行了检查。
+
+## 查看待翻译内容 \{#see-what-needs-translating}
+
+```bash
+pnpm i18n status
+```
+
+```text
+zh-CN
+  UI: 724 translated (0 by machine), 0 missing, 0 out of date, 0 unrecorded
+  Docs (zh-cn/): 35 current, 2 missing, 0 out of date, 0 unrecorded
+  Docs missing: how-it-works/translations.mdx, reference/translate.mdx
+```
+
+| 状态 | 含义 |
+| --- | --- |
+| 缺失 | 尚无译文；显示英文 |
+| 已过时 | 译文完成后英文发生了改动 |
+| 未记录 | 已翻译，但尚未与某个英文版本建立记录 |
+
+英文变动时，机器人会保持译文同步；参见[译文如何保持最新](/how-it-works/translations/)。
+
+更新已过时的译文后，请将其记录为与当前英文一致，并注明你检查过的键或页面：
+
+```bash
+pnpm i18n stamp zh-CN reference/translate.mdx
+```
+
+## 翻译文档页面 \{#translate-a-docs-page}
+
+将英文页面复制到语言目录中并翻译正文。保持结构不变，以便检查工具对比两者：
+
+- 代码保持原样；可以翻译注释和引号中的示例文字。
+- 链接须与英文完全一致，例如 `/setup/install/`。这些链接会自动以读者所用语言打开对应页面。
+- 每个标题末尾都要加上英文标题的 ID，例如 `## 安装 \{#install}`，以便 `#install` 链接在每种语言中都有效。MDX 中需要反斜杠。
+- 保留导入语句和组件（`<Aside>`、`<Steps>`、`<Tabs>`）。
+
+## 添加语言 \{#add-a-language}
+
+1. 应用：新增 `packages/client-ui/locales/<lang>.json`（以 `{}` 开头），并将语言标签加入 `packages/client-ui/src/i18n.ts` 中的 `languages`，以及 `packages/desktop/src-tauri/src/i18n.rs` 中的 `CATALOGS`。
+2. 文档：将该语言加入 `docs/locales.mjs`，并创建其目录，例如 `docs/src/content/docs/ja/`。
+3. 新增 `docs/i18n/glossary/<lang>.md`，列出该语言的微信官方术语。
+4. 运行 `pnpm i18n check`，然后提交拉取请求。
+
+<Aside title="使用提示">
+- `pnpm i18n check` 在 CI 中运行。它只会因读者能看到的问题而失败：未知的键、被改动的占位符、缺失的复数形式、空白文本，或代码、组件、链接、锚点与英文不一致的文档页面。缺失和已过时的译文永远不会导致检查失败。
+- 机器翻译的译文会被如实记录；一旦有人工编辑，它即被视为人工译文。
+</Aside>
