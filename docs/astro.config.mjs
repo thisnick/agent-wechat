@@ -64,6 +64,7 @@ export default defineConfig({
       customCss: ['./src/styles/custom.css'],
       components: {
         Head: './src/components/Head.astro',
+        MarkdownContent: './src/components/MarkdownContent.astro',
       },
       social: {
         github: 'https://github.com/thisnick/agent-wechat',

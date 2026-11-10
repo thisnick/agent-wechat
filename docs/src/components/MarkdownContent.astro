@@ -1,0 +1,23 @@
+---
+/**
+ * Starlight shows an untranslated page under a translation's URL using the English
+ * content (a "fallback" page). That content was rendered once for English, so its
+ * links point at English pages. On fallback pages only, keep root links in the
+ * reader's language: `/agent-wechat/setup/install/` becomes
+ * `/agent-wechat/zh-cn/setup/install/`, which shows the translation or, if there is
+ * none, the English content again under the translation's URL.
+ */
+import Default from '@astrojs/starlight/components/MarkdownContent.astro';
+import { translatedLocales } from '../../locales.mjs';
+
+const { isFallback, locale } = Astro.locals.starlightRoute;
+let html = await Astro.slots.render('default');
+if (isFallback && locale) {
+  const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+  // Already-localised links, built assets and preview images keep their paths.
+  const skip = [...translatedLocales, '_astro', 'og'].join('|');
+  html = html.replace(new RegExp(`href="${base}/(?!(?:${skip})(?:/|"))`, 'g'), `href="${base}/${locale}/`);
+}
+---
+
+<Default><Fragment set:html={html} /></Default>
