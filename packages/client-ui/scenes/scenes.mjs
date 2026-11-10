@@ -205,6 +205,38 @@ export const scenes = [
     mask: (page) => [row(page, "Neighborhood group").locator(".group-avatar img")],
   },
   {
+    name: "quoted-sender-names",
+    route: "chat",
+    description: "Quoted replies use supplied author names, cached names for older replies, and You for own messages.",
+    viewports: ["desktop", "narrow"],
+    setup: standardWorld,
+    target: (world) => ({ account: ACCOUNT.id, thread: world.group }),
+    prepare: async ({ page }) => {
+      // Synthetic API payloads exercise the browser's normal message-loading path.
+      await page.route(/\/threads\/[^/]+\/messages(?:\?.*)?$/, async (route) => {
+        const response = await route.fetch();
+        if (!response.ok()) return route.fulfill({ response });
+        const data = await response.json();
+        const samples = [
+          { senderId: "member@openim", senderName: "Example Member" },
+          { senderId: "sim_mei" },
+          { senderId: "sim_daniel", senderName: "Different supplied name", direction: "outgoing" },
+        ];
+        data.items = data.items.slice(0, 3).map((message, index) => ({
+          ...message, type: 49, appMessageType: 57, body: `Reply ${index + 1}`,
+          quote: { type: 1, state: "embedded", serverId: `9900${index}`, embeddedText: `Quoted excerpt ${index + 1}`, ...samples[index] },
+        }));
+        await route.fulfill({ response, json: data });
+      });
+    },
+    ready: async ({ page, expect }) => {
+      const authors = page.locator(".quote-preview > strong");
+      await expect(authors).toHaveCount(3);
+      for (const author of ["Example Member", "Mei Chen", "You"])
+        await expect(authors.filter({ hasText: new RegExp(`^${author}$`) })).toHaveCount(1);
+    },
+  },
+  {
     name: "message-highlight",
     route: "message",
     description: "A conversation opened at one message, which is highlighted.",

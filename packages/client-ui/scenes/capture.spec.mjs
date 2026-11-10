@@ -113,6 +113,7 @@ for (const scene of scenes) {
         const requests = trackRequests(page);
         const sim = seeder(stack);
         const world = await scene.setup(sim);
+        await scene.prepare?.({ page, world });
         const route = { name: scene.route, server: stack.hub.serverId, ...scene.target(world) };
         if (scene.start) {
           await page.goto(`${ui.origin}/${formatRoute({ name: scene.start, server: stack.hub.serverId, ...scene.target(world) })}`);
