@@ -446,7 +446,8 @@ conversation details, contacts, the new chat dialog, settings and the hub picker
 Each scene runs against a fresh simulator hub with a fixed account, a simulator
 clock that never advances on its own, a fixed browser clock, locale and time zone,
 frozen animations and no network beyond loopback. Screenshots are named
-`<scene>@<viewport>`; `desktop` is 1280x800 and `narrow` is 390x844.
+`<scene>@<viewport>`; `desktop` is 1280x800, `narrow` is 390x844 and
+`compact` is a 320x700 touch viewport.
 
 ```sh
 pnpm --filter @agent-wechat/client-ui scenes                  # run every scene

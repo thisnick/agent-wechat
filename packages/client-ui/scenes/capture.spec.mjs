@@ -106,14 +106,14 @@ async function settle(page, requests, avatarInitials) {
 for (const scene of scenes) {
   for (const viewport of scene.viewports) {
     test.describe(scene.name, () => {
-      test.use({ viewport: viewports[viewport] });
+      test.use({ viewport: viewports[viewport], hasTouch: viewport === "compact" });
       test(`${scene.name}@${viewport}`, async ({ page, ui, stack }, testInfo) => {
         const errors = [];
         page.on("pageerror", (error) => errors.push(error.message));
         const requests = trackRequests(page);
         const sim = seeder(stack);
         const world = await scene.setup(sim);
-        await scene.prepare?.({ page, world });
+        await scene.prepare?.({ page });
         const route = { name: scene.route, server: stack.hub.serverId, ...scene.target(world) };
         if (scene.start) {
           await page.goto(`${ui.origin}/${formatRoute({ name: scene.start, server: stack.hub.serverId, ...scene.target(world) })}`);

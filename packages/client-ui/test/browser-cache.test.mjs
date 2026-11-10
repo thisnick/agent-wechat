@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { IDBFactory } from "fake-indexeddb";
 import { BrowserCache } from "../src/browser-cache.ts";
+import { savedConversationCategories } from "../src/conversation-filters.ts";
 import { MediaPreviewCache } from "../src/media-preview-cache.ts";
 import { AvatarCache } from "../src/avatar-cache.ts";
 
@@ -77,6 +78,16 @@ test("restart reconstructs normalized history and preserves opaque and 64-bit ID
     undefined,
   );
   assert.equal(open("https://other.test").lastAccount(), undefined);
+});
+
+test("saved group filters carry over and an empty category selection takes precedence", (t) => {
+  const cache = setup(t).open();
+  cache.saveView("a", { filter: "groups" });
+  assert.deepEqual(savedConversationCategories(cache.view("a")), ["group"]);
+  cache.saveView("a", { categories: [] });
+  assert.deepEqual(savedConversationCategories(cache.view("a")), []);
+  cache.saveView("b", { filter: "unread" });
+  assert.deepEqual(savedConversationCategories(cache.view("b")), []);
 });
 
 test("an older tab cannot overwrite a newer atomic snapshot or rewind its cursor", async (t) => {

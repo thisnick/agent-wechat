@@ -9,10 +9,11 @@
 // baseline, so renaming a scene or a viewport shows up as removed plus added.
 import { ACCOUNT, SPARE } from "./accounts.mjs";
 
-/** The sizes a scene can be captured at. `narrow` is a phone, where the layout collapses to one pane. */
+/** Desktop, phone and compact phone sizes for visual review. */
 export const viewports = {
   desktop: { width: 1280, height: 800 },
   narrow: { width: 390, height: 844 },
+  compact: { width: 320, height: 700 },
 };
 
 /**
@@ -106,12 +107,118 @@ export const scenes = [
   {
     name: "chat-list",
     route: "chats",
-    description: "The chat list with unread counts on two conversations and the newest conversation open beside it.",
+    description: "The full inbox with category and conversation unread counts and the newest conversation open beside it.",
     viewports: ["desktop", "narrow"],
     setup: standardWorld,
     target: () => ({ account: ACCOUNT.id }),
     ready: async ({ page, expect }) => {
       for (const name of ["Mei Chen", "Daniel Park", "Weekend trip"]) await expect(row(page, name)).toBeVisible();
+      await expect(page.getByRole("button", { name: /^DMs.*6 unread$/ })).toBeVisible();
+    },
+  },
+  {
+    name: "chat-filters",
+    route: "chats",
+    description: "The conversation filter bar with All pinned beside the scrolling categories and unread badges for categories with new messages.",
+    viewports: ["desktop", "compact"],
+    setup: standardWorld,
+    target: () => ({ account: ACCOUNT.id }),
+    prepare: async ({ page }) => {
+      // The simulator has no official or service accounts. Add those rows at the
+      // thread-list boundary while keeping the simulator's DM and group rows.
+      await page.route(/\/threads(?:\?.*)?$/, async (route) => {
+        const response = await route.fetch();
+        if (!response.ok()) return route.fulfill({ response });
+        const threads = await response.json();
+        for (const [id, displayName, businessKind, businessType, unreadCount, text] of [
+          ["gh_scene_library", "City Library", "official_account", 0, 3, "New events this weekend"],
+          ["gh_scene_transit", "Metro Alerts", "service_account", 1, 12, "Your trip receipt is ready"],
+        ]) {
+          threads.items.push({
+            id, peerId: id, accountId: ACCOUNT.id, displayName, unreadCount,
+            kind: "direct", readStateVersion: "0", history: null,
+            classification: { category: "business", namespace: "wechat", businessKind, businessType, openIm: null },
+            lastMessage: { id: `${id}-1`, type: 1, text, senderId: id, senderName: displayName, direction: "incoming", createdAt: null },
+          });
+        }
+        await route.fulfill({ response, json: threads });
+      });
+    },
+    ready: async ({ page, expect }) => {
+      for (const name of ["Mei Chen", "Daniel Park", "Weekend trip", "City Library", "Metro Alerts"])
+        await expect(row(page, name)).toBeVisible();
+    },
+    actions: async ({ page, expect }) => {
+      const bar = page.getByRole("group", { name: "Conversation categories" });
+      const dm = bar.getByRole("button", { name: /^DMs/ });
+      const group = bar.getByRole("button", { name: /^Groups/ });
+      const official = bar.getByRole("button", { name: /^Official.*3 unread$/ });
+      const service = bar.getByRole("button", { name: /^Service.*12 unread$/ });
+      // The conversation initially open beside the list is marked read.
+      const all = bar.getByRole("button", { name: "All conversations 21 unread", exact: true });
+      await expect(all).toHaveAttribute("aria-pressed", "true");
+      const library = row(page, "City Library");
+      const metro = row(page, "Metro Alerts");
+      const mei = row(page, "Mei Chen");
+      const trip = row(page, "Weekend trip");
+
+      await dm.click();
+      await expect(all).toHaveAttribute("aria-pressed", "false");
+      await expect(mei).toBeVisible();
+      await expect(trip).toHaveCount(0);
+      await expect(library).toHaveCount(0);
+      await expect(metro).toHaveCount(0);
+      await group.click();
+      await expect(mei).toBeVisible();
+      await expect(trip).toBeVisible();
+      await page.reload();
+      await expect(dm).toHaveAttribute("aria-pressed", "true");
+      await expect(group).toHaveAttribute("aria-pressed", "true");
+      await expect(trip).toBeVisible();
+      await expect(library).toHaveCount(0);
+      await all.click();
+      await expect(dm).toHaveAttribute("aria-pressed", "false");
+      await expect(group).toHaveAttribute("aria-pressed", "false");
+      await expect(library).toBeVisible();
+      await group.click();
+      await group.click();
+      await expect(all).toHaveAttribute("aria-pressed", "true");
+      await expect(library).toBeVisible();
+      await expect(metro).toBeVisible();
+
+      const scroller = bar.locator(".filter-scroller");
+      const right = bar.getByRole("button", { name: "Scroll categories right" });
+      const left = bar.getByRole("button", { name: "Scroll categories left" });
+      if (page.viewportSize().width === viewports.compact.width) {
+        await expect(right).toBeHidden();
+        await expect.poll(() => scroller.evaluate((el) => el.scrollWidth - el.clientWidth)).toBeGreaterThan(0);
+      } else {
+        await page.setViewportSize({ ...viewports.desktop, width: 1100 });
+        await expect(left).toBeHidden();
+        await right.click();
+        await expect(right).toBeHidden();
+        await expect(left).toBeVisible();
+        await expect(service).toBeInViewport();
+        await page.setViewportSize(viewports.desktop);
+      }
+      await official.click();
+      await expect(library).toBeVisible();
+      await expect(metro).toHaveCount(0);
+      await expect(mei).toHaveCount(0);
+      await service.click();
+      await expect(metro).toBeVisible();
+      await expect(library).toBeVisible();
+      const search = page.getByRole("textbox", { name: "Search conversations" });
+      await search.fill("Metro");
+      await expect(library).toHaveCount(0);
+      await expect(metro).toBeVisible();
+      await expect(official).toHaveAttribute("aria-pressed", "true");
+      await expect(all).toHaveAttribute("aria-pressed", "false");
+      await expect(all).toBeInViewport();
+      await expect(bar.getByRole("button", { name: "Groups 0 unread", exact: true }).locator(".filter-unread")).toHaveCount(0);
+      await search.clear();
+      await search.blur();
+      await expect(library).toBeVisible();
     },
   },
   {
