@@ -38,7 +38,7 @@ WeChat client's Simplified Chinese so the app reads like WeChat.
 | AI agent | 智能体 | |
 | desktop app | 桌面应用 | |
 | simulator | 模拟器 | |
-| profile (WeChat data folder) | 配置 / 数据目录 | Match the surrounding text |
+| profile (WeChat data folder) | Profile | Keep the English word, as the docs do; 数据目录 for the folder itself. Not 配置, which reads as "configuration" |
 
 ## Keep in English
 
