@@ -265,6 +265,8 @@ descriptor and reuses an existing cache entry.
 2. Prepare a page with `POST /mini-programs/{appId}/launches`. Send `{"sourceMessageId":"…"}` to open the page from a saved card. Omit the ID for the default page.
 3. Fetch the selected archive from `GET /mini-programs/{appId}/packages/{version}/{packageId}`. Check the byte length and SHA-256 in the launch response before running it. The main archive appears first in `packages`. Staged subpackages of the same version include a `root` matching their path in the app configuration.
 
+Fetch a known program’s icon with `GET /mini-programs/{appId}/icon` or SDK `miniProgramIcon`. It requires `read`, `media`, and an online account; returns verified image bytes; and returns `404 mini_program_icon_unavailable` when no icon can be retrieved. It does not issue an app login code.
+
 The SDK methods are `listMiniPrograms`, `prepareMiniProgram`, and `getMiniProgramPackage`. Listing requires `read`. Preparing a launch and retrieving its archive require `mini-programs`. A launch with `sourceMessageId` also requires `read` for the selected account.
 
 When a launch reports `capabilities.login: true`, `issueMiniProgramLogin(accountId, appId, launchId, key)` posts `{"method":"wx.login"}` to `/mini-programs/{appId}/launches/{launchId}/ipc`. Use a UUID as the idempotency key and the access key with `mini-programs` that prepared the launch. Reuse the UUID only for the same invocation. Keep the app code private.

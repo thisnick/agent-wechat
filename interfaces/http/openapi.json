@@ -7958,6 +7958,62 @@
         ]
       }
     },
+    "/v1/accounts/{a}/mini-programs/{app}/icon": {
+      "get": {
+        "operationId": "getMiniProgramIcon",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Public Mini Program AppID.",
+            "in": "path",
+            "name": "app",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "image/*": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "read",
+              "media"
+            ]
+          }
+        ],
+        "summary": "Fetch a known program's advertised icon. Requires an online account; does not open the program or obtain a login code.",
+        "tags": [
+          "mini-programs"
+        ]
+      }
+    },
     "/v1/accounts/{a}/mini-programs/{app}/launches": {
       "post": {
         "description": "Scope: mini-programs, plus read when sourceMessageId identifies a saved chat card.",

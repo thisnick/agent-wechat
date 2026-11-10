@@ -808,6 +808,7 @@ route GET /v1/accounts/{a}/messages/{id} | scope read, response NativeMessage, s
 route GET /v1/accounts/{a}/messages/{id}/image | scope media, query MediaQuery, response image/* | Get a saved image message at the requested quality.
 route GET /v1/accounts/{a}/messages/{id}/media | scope media, response untyped, sdk response MediaAsset | List the media attached to a message and whether each file is available.
 route GET /v1/accounts/{a}/mini-programs | scope read, response NativeMiniPrograms, sdk response NativeMiniPrograms | List staged Mini Programs and programs seen in recent saved cards.
+route GET /v1/accounts/{a}/mini-programs/{app}/icon | scope read and media, response image/* | Fetch a known program's advertised icon. Requires an online account; does not open the program or obtain a login code.
 route GET /v1/accounts/{a}/mini-programs/{app}/packages/{version}/{package} | scope mini-programs, response application/octet-stream | Download an exact cached Mini Program archive.
 route GET /v1/accounts/{a}/operations/{id} | scope varies, response NativeOperation, sdk response NativeOperation | Show the state and result of a background operation. Scope: Needs read, login, media or send to look the operation up, then its kind decides: login, logout and forget_credentials need login; media-writeback needs media; message_recall needs send; sync and metadata need read; every other kind needs admin.
 route GET /v1/accounts/{a}/operations/{id}/qr | scope login, query QrQuery, response image/png | Get the current QR code of a login operation as a PNG image.

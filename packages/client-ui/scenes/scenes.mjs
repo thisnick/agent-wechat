@@ -97,7 +97,7 @@ export const scenes = [
   {
     name: "mini-program-list",
     route: "mini-programs",
-    description: "Programs from the account's staged cache and received cards.",
+    description: "Programs from the account cache and cards, with metadata icons independent of chat media.",
     viewports: ["desktop", "narrow"],
     setup: miniProgramWorld,
     target: () => ({ account: ACCOUNT.id }),
@@ -106,6 +106,22 @@ export const scenes = [
       await expect(page.getByText("Experimental", { exact: true })).toBeVisible();
       await expect(page.getByRole("button", { name: "Open Cafe" })).toBeEnabled();
       await expect(page.getByRole("button", { name: "Open Trail guide" })).toBeDisabled();
+    },
+    actions: async ({ page, expect }) => {
+      // Synthetic icon metadata fixture: this list item has no saved card icon.
+      await page.route("**/mini-programs", async route => {
+        const response = await route.fetch();
+        const data = await response.json();
+        for (const item of data.items) item.iconMessageId = null;
+        await route.fulfill({ response, json: data });
+      });
+      await page.route("**/mini-programs/*/icon", route => route.fulfill({
+        contentType: "image/png",
+        body: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l2sAAAAASUVORK5CYII=", "base64"),
+      }));
+      await page.getByRole("button", { name: "Refresh", exact: true }).click();
+      await expect(page.locator(".mini-program-list-art img")).toHaveCount(2);
+      await page.locator(".mini-program-list-art img").evaluateAll(images => Promise.all(images.map(image => image.decode())));
     },
   },
   {

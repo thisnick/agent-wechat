@@ -14,7 +14,7 @@ scene login-qr | route /{server}/{account}/login, viewports desktop+narrow | Sig
 scene media-viewer | route /{server}/{account}/chats/{thread}/media/{message}, viewports desktop+narrow | The photo viewer open over a conversation, on the photo Mei sent.
 scene message-highlight | route /{server}/{account}/chats/{thread}/message/{message}, viewports desktop | A conversation opened at one message, which is highlighted.
 scene mini-program-cards | route /{server}/{account}/chats/{thread}, viewports desktop+narrow | Mini Program cards with an available shared page and a missing package.
-scene mini-program-list | route /{server}/{account}/mini-programs, viewports desktop+narrow | Programs from the account's staged cache and received cards.
+scene mini-program-list | route /{server}/{account}/mini-programs, viewports desktop+narrow | Programs from the account cache and cards, with metadata icons independent of chat media.
 scene new-chat | route /{server}/{account}/new-chat, viewports desktop | The dialog for starting a direct conversation from the contact list.
 scene new-group | route /{server}/{account}/new-chat, viewports desktop | The new chat dialog on its New group tab, with two contacts chosen.
 scene new-group-avatar | route /{server}/{account}/chats, viewports desktop | A newly received group shows its room avatar while its member list is unavailable.

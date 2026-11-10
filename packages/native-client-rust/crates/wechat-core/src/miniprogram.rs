@@ -542,6 +542,48 @@ impl Core {
             && self.store.runtime(account, "desired")?.as_deref() == Some(b"connected"))
     }
 
+    /// Fetch a known Mini Program's advertised icon as verified image bytes.
+    ///
+    /// Reads metadata through the account owner, then downloads the public image
+    /// without account headers. It does not start an app or obtain a login code.
+    pub fn mini_program_icon(
+        &self,
+        account: &str,
+        app: &str,
+        authorize: impl Fn() -> bool,
+    ) -> Result<(Vec<u8>, String)> {
+        ensure!(valid_app_id(app), "invalid_mini_program_app");
+        let account = &self.store.account(account)?.id;
+        ensure!(
+            self.mini_programs(account)?
+                .iter()
+                .any(|item| item.app_id == app),
+            "mini_program_icon_unavailable"
+        );
+        let epoch = self.store.runtime(account, "logout-epoch")?;
+        let check = || {
+            ensure!(
+                authorize()
+                    && self.mini_program_login_available(account)?
+                    && self.store.runtime(account, "logout-epoch")? == epoch,
+                "mini_program_icon_unavailable"
+            );
+            Ok(())
+        };
+        check()?;
+        let url = self
+            .native_account(account, Default::default())?
+            .mini_program_icon_guarded(app, check)
+            .context("mini_program_icon_unavailable")?
+            .context("mini_program_icon_unavailable")?;
+        check()?;
+        let bytes = wechat_protocol::media::fetch_link_thumbnail(&url, |_, _| check())
+            .context("mini_program_icon_unavailable")?;
+        check()?;
+        let media_type = image::guess_format(&bytes)?.to_mime_type().to_owned();
+        Ok((bytes, media_type))
+    }
+
     /// Read this app's current server network policy through the account owner.
     ///
     /// This does not obtain a login code or retain a second copy of app attributes.

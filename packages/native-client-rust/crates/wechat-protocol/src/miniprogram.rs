@@ -126,6 +126,26 @@ impl NativeClient {
         decode_attributes(&reply)
     }
 
+    /// Read the app's advertised icon URL without issuing an app login code.
+    ///
+    /// Run on a blocking worker. The caller must validate and fetch the image
+    /// separately without forwarding account credentials to its host.
+    pub fn mini_program_icon_guarded(
+        &self,
+        app_id: &str,
+        before_submit: impl Fn() -> Result<()>,
+    ) -> Result<Option<String>> {
+        let reply = self.mini_program_exchange_guarded(
+            app_id,
+            ATTR_ROUTE,
+            1151,
+            MAX_ATTR_REPLY,
+            |base| prepare_attributes(base, app_id),
+            before_submit,
+        )?;
+        decode_icon(&reply)
+    }
+
     /// Download the current release's main Mini Program archive from WeChat.
     ///
     /// Run on a blocking worker. Each request checks the caller guard. The
@@ -378,6 +398,21 @@ fn decode_attributes(reply: &[u8]) -> Result<MiniProgramNetworkPolicy> {
 }
 
 fn attribute(reply: &[u8], key: &[u8]) -> Result<Vec<u8>> {
+    optional_attribute(reply, key)?.context("Mini Program attribute unavailable")
+}
+
+fn decode_icon(reply: &[u8]) -> Result<Option<String>> {
+    optional_attribute(reply, b"BrandIconURL")?
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            let url = String::from_utf8(value)?;
+            crate::media::validate_link_thumbnail_url(&url)?;
+            Ok(url)
+        })
+        .transpose()
+}
+
+fn optional_attribute(reply: &[u8], key: &[u8]) -> Result<Option<Vec<u8>>> {
     ensure!(
         reply.len() <= MAX_ATTR_REPLY,
         "Mini Program attribute reply too large"
@@ -398,7 +433,7 @@ fn attribute(reply: &[u8], key: &[u8]) -> Result<Vec<u8>> {
             value = Some(p::data(&entry, 2)?.to_vec());
         }
     }
-    value.context("Mini Program attribute unavailable")
+    Ok(value)
 }
 
 fn decode_package_version(reply: &[u8]) -> Result<u32> {
@@ -611,6 +646,52 @@ mod tests {
         }
         assert!(decode_login(
             &p::message(&[p::bytes(1, &p::int32(1, -1)), p::bytes(3, b"code")]).unwrap()
+        )
+        .is_err());
+    }
+    #[test]
+    fn icon_attributes_are_optional_exact_and_validated() {
+        let reply = |key: &[u8], value: &[u8]| {
+            p::message(&[
+                p::bytes(1, &p::message(&[p::int32(1, 0)]).unwrap()),
+                p::bytes(
+                    3,
+                    &p::message(&[p::bytes(1, key), p::bytes(2, value)]).unwrap(),
+                ),
+            ])
+            .unwrap()
+        };
+        let url = "https://example.invalid/app-icon.png";
+        assert_eq!(
+            decode_icon(&reply(b"BrandIconURL", url.as_bytes()))
+                .unwrap()
+                .as_deref(),
+            Some(url)
+        );
+        assert_eq!(
+            decode_icon(&reply(b"BrandIconUrl", url.as_bytes())).unwrap(),
+            None
+        );
+        assert_eq!(decode_icon(&reply(b"BrandIconURL", b"")).unwrap(), None);
+        for unsafe_url in [
+            b"http://127.0.0.1/icon".as_slice(),
+            b"https://name:secret@example.invalid/icon",
+            b"file:///icon",
+            &[255],
+        ] {
+            assert!(decode_icon(&reply(b"BrandIconURL", unsafe_url)).is_err());
+        }
+        let mut duplicate = reply(b"BrandIconURL", url.as_bytes());
+        duplicate.extend(
+            p::message(&[p::bytes(
+                3,
+                &p::message(&[p::bytes(1, b"BrandIconURL"), p::bytes(2, url.as_bytes())]).unwrap(),
+            )])
+            .unwrap(),
+        );
+        assert!(decode_icon(&duplicate).is_err());
+        assert!(decode_icon(
+            &p::message(&[p::bytes(1, &p::message(&[p::int32(1, -1)]).unwrap())]).unwrap()
         )
         .is_err());
     }

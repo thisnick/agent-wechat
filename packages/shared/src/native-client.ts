@@ -129,6 +129,16 @@ export class NativeWeChatClient {
   prepareMiniProgram(accountId: string, appId: string, options: NativeMiniProgramLaunchRequest = {}): Promise<NativeMiniProgramLaunch> {
     return this.request(`v1/accounts/${id(accountId)}/mini-programs/${id(appId)}/launches`, { method: "POST", body: JSON.stringify(options) });
   }
+  /** Fetch a known app's icon through the hub without opening the app or issuing a login code. Requires read and media. */
+  async miniProgramIcon(accountId: string, appId: string, signal?: AbortSignal): Promise<{ bytes: Uint8Array; contentType: string }> {
+    const response = await this.response(`v1/accounts/${id(accountId)}/mini-programs/${id(appId)}/icon`, { signal });
+    const contentType = response.headers.get("content-type") ?? "";
+    if (!["image/png", "image/jpeg", "image/gif", "image/webp"].includes(contentType)) {
+      await response.body?.cancel();
+      throw new Error("Mini Program icon is not a supported image");
+    }
+    return { bytes: await this.readBounded(response, 8 * 1024 * 1024), contentType };
+  }
   /** Download the package bytes selected by a launch. The runner verifies the digest. */
   async getMiniProgramPackage(accountId: string, appId: string, pkg: NativeMiniProgramPackage): Promise<Uint8Array> {
     if (!Number.isSafeInteger(pkg.sizeBytes) || pkg.sizeBytes < 18 || pkg.sizeBytes > 32 * 1024 * 1024) {

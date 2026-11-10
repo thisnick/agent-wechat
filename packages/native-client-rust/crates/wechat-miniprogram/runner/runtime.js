@@ -3,6 +3,7 @@ import * as initial from "./page.js";
 import { appConfig, componentConfigs, registerModules } from "./modules.js";
 import { createSelectorQuery, createIntersectionObserver, mountLegacy, needsPrivacyAuthorization, registerBehavior, navigateBuiltin } from "./legacy.js";
 import { applyGlassStyles } from "./styles.js";
+import { registerGlassImage } from "./images.js";
 
 const launchKey = window.location.hash.slice(1);
 if (initial.allowWasm) {
@@ -585,7 +586,7 @@ function mountGlass(view, module, query, setLoadingPage) {
   space.addCompiledTemplate(entry, {
     groupList: groups, content: groups[entry], fallbackListenerOnNativeNode: true,
   });
-  space.addComponentStaticConfig(entry, {});
+  space.addComponentStaticConfig(entry, { usingComponents: { image: "/" + registerGlassImage(space, entry) } });
   space.componentEnv(entry, ({ Page, Component, Behavior }) => loadPage(module, Page, Component, Behavior));
   if (!glassBackend) {
     glassBackend = new glassEasel.CurrentWindowBackendContext();

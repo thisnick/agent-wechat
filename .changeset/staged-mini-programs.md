@@ -44,3 +44,7 @@ property observers, and keep application error handlers from recursively
 reporting their own failures.
 Keep browser printing globals out of service modules so bundled libraries do
 not mistake them for JavaScript-shell logging.
+
+Retrieve list icons from WeChat app metadata when no saved card artwork is available.
+Render Glass-easel image components using the same package and credential-free image
+loader as Exparser, with image dimensions, aspect modes, and stale-load protection.

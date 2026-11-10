@@ -16,6 +16,7 @@ use uuid::Uuid;
 pub(super) fn routes() -> Router<App> {
     Router::new()
         .api_route("/v1/accounts/{a}/mini-programs", get(list))
+        .api_route("/v1/accounts/{a}/mini-programs/{app}/icon", get(icon))
         .api_route(
             "/v1/accounts/{a}/mini-programs/{app}/launches",
             post(launch),
@@ -40,6 +41,9 @@ pub(super) fn error(error: &anyhow::Error) -> Option<ApiError> {
             "invalid_mini_program_app" => (StatusCode::BAD_REQUEST, "invalid_mini_program_app"),
             "mini_program_package_unavailable" => {
                 (StatusCode::NOT_FOUND, "mini_program_package_unavailable")
+            }
+            "mini_program_icon_unavailable" => {
+                (StatusCode::NOT_FOUND, "mini_program_icon_unavailable")
             }
             "mini_program_launch_unavailable" => {
                 (StatusCode::NOT_FOUND, "mini_program_launch_unavailable")
@@ -105,6 +109,28 @@ async fn list(
             })
             .collect(),
     }))
+}
+
+async fn icon(
+    State(app): State<App>,
+    Extension(claims): Extension<Claims>,
+    Path((account, app_id)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    claims.require(Some(&account), "read")?;
+    claims.require(Some(&account), "media")?;
+    let (bytes, content_type) = work(move || {
+        app.core
+            .mini_program_icon(&account, &app_id, || claims.valid(&app.core.store))
+    })
+    .await?;
+    Ok((
+        [
+            (CONTENT_TYPE, content_type),
+            (CACHE_CONTROL, "private, no-store".into()),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 async fn fetch_package(

@@ -9,6 +9,69 @@ let retainedBytes = 0;
 let active = 0;
 const waiting = [];
 
+// Both template adapters resolve images through the same package/network policy.
+export async function imageSource(value, route) {
+  if (typeof value !== "string" || !value) throw new Error("Image source is empty");
+  if (value.startsWith("https://")) return remoteImage(value);
+  if (value.length <= 2 * 1024 * 1024
+    && /^data:image\/(?:png|jpeg|gif|webp|svg\+xml)(?:;[^,]*)?,/i.test(value)) return value;
+  if (/^[a-zA-Z0-9_.@/-]+$/.test(value) && !value.startsWith("//")) {
+    const url = new URL(value, new URL("/" + route, location.origin));
+    if (url.origin === location.origin) return url.href;
+  }
+  throw new Error("Unsupported image source");
+}
+
+// Glass-easel supplies component mechanics, not WeChat's native image component.
+// Register that component through the public adapter API instead of mutating DOM
+// produced by the template engine.
+export function registerGlassImage(space, route) {
+  const path = "__wx_builtin_image";
+  space.addCompiledTemplate(path, { groupList: imageTemplates, content: imageTemplates[path], fallbackListenerOnNativeNode: true });
+  space.addComponentStaticConfig(path, { component: true, styleIsolation: "shared" });
+  const jobs = new WeakMap();
+  const refresh = instance => {
+    const job = { alive: true };
+    jobs.set(instance, job);
+    instance.setData({ resolvedSrc: "" });
+    if (!instance.data.src) return;
+    void imageSource(instance.data.src, route).then(source => {
+      if (!job.alive || jobs.get(instance) !== job) return;
+      const probe = new Image();
+      probe.onload = () => {
+        if (!job.alive || jobs.get(instance) !== job) return;
+        job.size = { width: probe.naturalWidth, height: probe.naturalHeight };
+        instance.setData({ resolvedSrc: source });
+      };
+      probe.onerror = () => {
+        if (job.alive && jobs.get(instance) === job) instance.triggerEvent("error", { errMsg: "Image is unavailable" });
+      };
+      probe.src = source;
+    }, () => {
+      if (job.alive && jobs.get(instance) === job) instance.triggerEvent("error", { errMsg: "Image is unavailable" });
+    });
+  };
+  space.componentEnv(path, ({ Component }) => Component({
+    properties: {
+      src: { type: String, value: "", observer() { refresh(this); } },
+      mode: { type: String, value: "scaleToFill", observer(value) {
+        this.setData({ fit: ["aspectFit", "aspectFill", "widthFix", "heightFix", "top", "bottom", "center", "left", "right", "top left", "top right", "bottom left", "bottom right"].includes(value)
+          ? value.replaceAll(" ", "-") : "scaleToFill" });
+      } },
+    },
+    data: { resolvedSrc: "", fit: "scaleToFill" },
+    lifetimes: {
+      attached() { refresh(this); },
+      detached() { const job = jobs.get(this); if (job) job.alive = false; },
+    },
+    methods: {
+      loaded() { const job = jobs.get(this); if (job?.alive && job.size) this.triggerEvent("load", job.size); },
+      failed() { this.triggerEvent("error", { errMsg: "Image is unavailable" }); },
+    },
+  }));
+  return path;
+}
+
 async function acquire() {
   lifetime.signal.throwIfAborted();
   if (active < 3) { active++; return; }
@@ -79,3 +142,6 @@ window.addEventListener("pagehide", () => {
   images.clear();
   retainedBytes = 0;
 }, { once: true });
+
+// Synthetic <img> template compiled with glass-easel-template-compiler 1.2.1.
+const imageTemplates = (()=>{var G={};var R={};var X=function(a){return a==null?Object.create(null):a};var Y=function(a){return a==null?'':String(a)};var Z=function(a,b){if(a===true)return true;if(a)return a[b]};var P=function(a){return typeof a==='function'?a:()=>{}};var Q={a:function(a){for(var i=0;i<a.length;i++)if(a[i])return a},b:function(b){var a=Object.values(b);for(var i=0;i<a.length;i++)if(a[i])return a}};G["__wx_builtin_image"]=(()=>{var H={};var S;var I=(P)=>{if(!S)S=Object.assign({},H);return S[P]};H[""]=(R,C,D,U,A)=>{if(typeof R.setEventListenerWrapper==='function')R.setEventListenerWrapper(Q.C);var L=R.c,M=R.m,O=R.r,K=U===true,b,d=(C)=>{},c=(C,T,E)=>{if(b===1){E("img",{},(N,C)=>{if(C||K||U.fit)L(N,D.fit);if(C||K||U.resolvedSrc)O(N,"src",D.resolvedSrc);if(C)O(N,"bindload","loaded");if(C)O(N,"binderror","failed")},d)}},a=(C,T,E,B)=>{b=D.resolvedSrc?1:0;B(b,c);C=!1;U=Object.create(null);K=!1};A=A||{};return {C:a,B:A}};return Object.assign(function(R){return H[R]},{_:H})})();return G})();

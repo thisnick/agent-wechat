@@ -825,3 +825,7 @@ the local imports resolved for that unit. The main archive contains the default 
 | `packageWeStoreCoffee/pages/home/home` | `getApp`, `Page`, `wx.getMenuButtonBoundingClientRect`, `wx.getStorageSync`, `wx.getSystemInfoSync`, `wx.getWindowInfo`, `wx.navigateTo`, `wx.setStorageSync` | `image`, `input`, `scroll-view`, `text`, `view` | — | Page module unavailable (404) |
 | `packageWeStoreCoffee/pages/sku-picker/sku-picker` | `getApp`, `getCurrentPages`, `Page`, `wx.getMenuButtonBoundingClientRect`, `wx.getStorageSync`, `wx.getSystemInfoSync`, `wx.getWindowInfo`, `wx.navigateBack`, `wx.navigateTo`, `wx.reLaunch`, `wx.setStorageSync`, `wx.showToast` | `block`, `image`, `scroll-view`, `text`, `view` | `framework: glass-easel`, `renderer: skyline` | Page module unavailable (404) |
 | `packageWeStoreCoffee/pages/checkout/checkout` | `getApp`, `getCurrentPages`, `Page`, `wx.chooseAddress`, `wx.getMenuButtonBoundingClientRect`, `wx.getStorageSync`, `wx.getSystemInfoSync`, `wx.getWindowInfo`, `wx.navigateBack`, `wx.reLaunch`, `wx.removeStorageSync`, `wx.requestPayment`, `wx.setStorageSync`, `wx.showToast` | `image`, `scroll-view`, `text`, `view` | `framework: glass-easel`, `renderer: skyline` | Page module unavailable (404) |
+
+Glass-easel `image` components render package, embedded, and policy-checked HTTPS
+images through the shared image loader. Load events include image dimensions.
+Catalog icons can be retrieved through the hub independently of saved chat cards.

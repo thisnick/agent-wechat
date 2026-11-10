@@ -13,6 +13,23 @@ export function applyGlassStyles(view, route) {
   const scope = String(++glassViewId);
   view.dataset.miniGlass = scope;
   const owned = [];
+  const native = new CSSStyleSheet();
+  native.replaceSync(`@scope ([data-mini-glass="${scope}"]) {
+    image { display: inline-block; width: 320px; height: 240px; overflow: hidden; }
+    image > img { display: block; width: 100%; height: 100%; }
+    image > img.aspectFit { object-fit: contain; }
+    image > img.aspectFill { object-fit: cover; }
+    image:has(> img.widthFix) { height: auto; }
+    image > img.widthFix { height: auto; }
+    image:has(> img.heightFix) { width: auto; }
+    image > img.heightFix { width: auto; }
+    image > img:is(.top,.bottom,.center,.left,.right,.top-left,.top-right,.bottom-left,.bottom-right) { object-fit: none; }
+    image > img.top { object-position: top; } image > img.bottom { object-position: bottom; }
+    image > img.left { object-position: left; } image > img.right { object-position: right; }
+    image > img.top-left { object-position: top left; } image > img.top-right { object-position: top right; }
+    image > img.bottom-left { object-position: bottom left; } image > img.bottom-right { object-position: bottom right; }
+  }`);
+  owned.push(native);
   for (const name of ["app", route]) {
     const source = compiledStyles.get(name);
     if (source === undefined) continue;

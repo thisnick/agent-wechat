@@ -100,6 +100,15 @@ try {
   assert.deepEqual(launch.packages.map(({ id, root, version }) => [id, root ?? null, version]),
     [["main", null, "1"], ["utilities", "utilities", "1"]]);
   await assert.rejects(() => sim.client.prepareMiniProgram(ACCOUNT.id, app, { sourceMessageId: "bad" }));
+  const iconRoute = `v1/accounts/${ACCOUNT.id}/mini-programs/${app}/icon`;
+  for (const scopes of [["read"], ["media"], ["mini-programs"]]) {
+    const { token } = await sim.client.request("v1/tokens", { method: "POST", body: JSON.stringify({ name: "icon-scope", scopes, accounts: [ACCOUNT.id] }) });
+    const denied = await fetch(new URL(iconRoute, stack.hub.endpoint + "/"), { headers: { Authorization: "Bearer " + token } });
+    assert.equal(denied.status, 403);
+  }
+  // Synthetic accounts do not have WeChat metadata; absence stays a real 404.
+  const missingIcon = await fetch(new URL(iconRoute, stack.hub.endpoint + "/"), { headers: { Authorization: "Bearer " + stack.hub.token } });
+  assert.equal(missingIcon.status, 404);
   const apiKeyPath = join(stack.dataDir, "cli-test-key");
   const configPath = join(stack.dataDir, "cli-test.toml");
   await writeFile(apiKeyPath, stack.hub.token + "\n", { mode: 0o600 });
@@ -134,6 +143,9 @@ try {
   glassPage.on("console", message => { if (message.type() === "error") glassErrors.push(message.text()); });
   await glassPage.goto(glassHost.url);
   await glassPage.getByText("Count 0", { exact: true }).waitFor();
+  await glassPage.getByText("2x1", { exact: true }).waitFor();
+  assert.equal(await glassPage.locator("image img").evaluate(node => node.naturalWidth), 2);
+  assert.equal(await glassPage.locator("image img").evaluate(node => getComputedStyle(node).objectFit), "contain");
   const glassStyle = await glassPage.getByText("Count 0", { exact: true }).evaluate(node => ({
     color: getComputedStyle(node).color,
     padding: getComputedStyle(node.closest("mini-page")).paddingLeft,
@@ -681,6 +693,11 @@ try {
     contentType: "image/png",
     body: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l2sAAAAASUVORK5CYII=", "base64"),
   }));
+  const catalogIconRequests = [];
+  await desktop.route(`**/mini-programs/${glassApp}/icon`, route => {
+    catalogIconRequests.push(route.request().url());
+    return route.fulfill({ contentType: "image/png", body: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l2sAAAAASUVORK5CYII=", "base64") });
+  });
   await desktop.goto(base + "/chats/sim_mei");
   const openCard = desktop.getByRole("button", { name: "Open Seasonal menu" });
   await openCard.and(desktop.locator("button:enabled")).waitFor({ timeout: 15000 });
@@ -698,6 +715,10 @@ try {
   assert.equal(await desktop.locator(".sidebar").isVisible(), false);
   const listIcon = desktop.locator("li").filter({ has: desktop.getByRole("button", { name: "Open Cafe" }) }).locator(".mini-program-icon img");
   await listIcon.evaluate(image => image.decode());
+  const catalogIcon = desktop.locator("li").filter({ has: desktop.getByRole("button", { name: "Open Glass fixture" }) }).locator(".mini-program-icon img");
+  await catalogIcon.evaluate(image => image.decode());
+  assert.equal(await catalogIcon.evaluate(image => image.naturalWidth), 1);
+  assert.equal(catalogIconRequests.length, 1);
   const listRequest = desktop.waitForRequest(req => req.method() === "POST" && req.url().endsWith("/launches"));
   await desktop.getByRole("button", { name: "Open Cafe" }).click();
   assert.equal((await listRequest).postDataJSON().sourceMessageId, undefined);

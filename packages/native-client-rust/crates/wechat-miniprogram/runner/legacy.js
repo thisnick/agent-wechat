@@ -1,6 +1,6 @@
 import { createLegacyView, applyInlineStyle, clearInlineStyle } from "./styles.js";
 import { intersection } from "./intersection.js";
-import { remoteImage } from "./images.js";
+import { imageSource } from "./images.js";
 
 // Adapt compiled legacy virtual nodes to a small allowlist of browser elements.
 const tags = new Map([
@@ -411,9 +411,9 @@ function applyAttributes(element, tag, wxTag, attrs, route) {
     if (name === "class") element.className += " " + String(value);
     else if (["id", "title", "aria-label", "placeholder", "slot", "name"].includes(name)) element.setAttribute(name, String(value));
     else if (name === "style") applyInlineStyle(element, String(value), route);
-    else if (name === "src" && tag === "img" && typeof value === "string" && value.startsWith("https://")) {
+    else if (name === "src" && tag === "img") {
       element.dataset.imageState = "loading";
-      void remoteImage(value).then(source => {
+      void imageSource(value, route).then(source => {
         if (!element.isConnected || imageRequests.get(element) !== imageRequest) return;
         element.src = source;
         element.dataset.imageState = "loaded";
@@ -422,19 +422,6 @@ function applyAttributes(element, tag, wxTag, attrs, route) {
         element.dataset.imageState = "unavailable";
         element.dispatchEvent(new CustomEvent("error", { detail: { errMsg: "Image is unavailable" } }));
       });
-    }
-    else if (name === "src" && tag === "img" && typeof value === "string"
-      && value.length <= 2 * 1024 * 1024
-      && /^data:image\/(?:png|jpeg|gif|webp|svg\+xml)(?:;[^,]*)?,/i.test(value)) {
-      // Image-context decoding cannot execute SVG scripts. The host CSP keeps
-      // data URLs unavailable for scripts, frames and network connections.
-      element.src = value;
-    }
-    else if (name === "src" && tag === "img" && typeof value === "string"
-      && /^[a-zA-Z0-9_.@/-]+$/.test(value) && !value.startsWith("//")) {
-      const base = new URL("/" + route, location.origin);
-      const image = new URL(value, base);
-      if (image.origin === location.origin) element.src = image.href;
     }
     else if (name === "hidden" || name === "disabled") element.toggleAttribute(name, Boolean(value));
     else if (name === "value" && (tag === "input" || tag === "textarea")) element.value = String(value);

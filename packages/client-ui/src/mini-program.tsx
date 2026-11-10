@@ -131,8 +131,8 @@ export function MiniProgramsList() {
       : <ul>{items.map(program => <li key={program.appId}>
         <span className="mini-program-icon" aria-hidden="true">
           {program.iconMessageId
-            ? <ProgramIcon connection={connection} account={account} messageId={program.iconMessageId} />
-            : <AppWindow size={20} />}
+            ? <ProgramIcon connection={connection} account={account} messageId={program.iconMessageId} appId={program.appId} />
+            : <CatalogIcon connection={connection} account={account} appId={program.appId} />}
         </span>
         <div className="mini-program-name"><strong>{emojiText(program.title)}</strong>
           <small>{program.available ? t("miniPrograms.available") : t("miniPrograms.packageUnavailable")}</small></div>
@@ -169,15 +169,36 @@ function CardOpen({ card, title, message }: { card: Card; title: string; message
   return <OpenProgram appId={card.appId} source={message.id} title={title} windowTitle={card.displayName || undefined} unavailable={unavailable} />;
 }
 
-function ProgramIcon({ connection, account, messageId }: {
+function ProgramIcon({ connection, account, messageId, appId }: {
   connection: Connection;
   account: string;
   messageId: string;
+  appId: string;
 }) {
   const { element, visible } = useVisible<HTMLSpanElement>();
   const { icon } = useProgramArtwork(connection, account, messageId, visible);
   return <span ref={element} className="mini-program-list-art">
-    <ImageThumbnail asset={icon} connection={connection} fallback={<AppWindow size={20} />} />
+    <ImageThumbnail asset={icon} connection={connection} fallback={<CatalogIcon connection={connection} account={account} appId={appId} />} />
+  </span>;
+}
+
+function CatalogIcon({ connection, account, appId }: { connection: Connection; account: string; appId: string }) {
+  const { element, visible } = useVisible<HTMLSpanElement>();
+  const [image, setImage] = useState<{ connection: Connection; account: string; appId: string; url: string }>();
+  useEffect(() => {
+    if (!visible) return;
+    const abort = new AbortController();
+    let objectUrl: string | undefined;
+    void connection.session.client.miniProgramIcon(account, appId, abort.signal).then(({ bytes, contentType }) => {
+      if (abort.signal.aborted) return;
+      objectUrl = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: contentType }));
+      setImage({ connection, account, appId, url: objectUrl });
+    }, () => {});
+    return () => { abort.abort(); if (objectUrl) URL.revokeObjectURL(objectUrl); };
+  }, [connection, account, appId, visible]);
+  const url = image?.connection === connection && image.account === account && image.appId === appId ? image.url : undefined;
+  return <span ref={element} className="mini-program-list-art">
+    {url ? <img src={url} alt="" onError={() => setImage(undefined)} /> : <AppWindow size={20} />}
   </span>;
 }
 
