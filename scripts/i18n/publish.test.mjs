@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MACHINE_NOTICE, allowedPath, count, planWork, prBody, readAsCurrent, withNotice } from './publish.mjs';
+import { MACHINE_NOTICE, allowedPath, changedKeys, count, planWork, prBody, readAsCurrent, withNotice } from './publish.mjs';
 import { checkUi } from './index.mjs';
 import { frontmatter, hash } from './docs.mjs';
 
@@ -74,7 +74,24 @@ test('a re-translated stale string is checked as current, so a broken one is cau
   const config = { locales, code: ['src'], desktopCode: [], registries: { 'src/i18n.ts': /tag: "([^"]+)"/g } };
   // Read as recorded, the key is stale and its placeholder is not checked.
   assert.deepEqual(checkUi({ read, list, config }), []);
-  const work = { 'zh-CN': { ui: [{ key: 'app.hello' }], docs: [] } };
+  const work = { 'zh-CN': { ui: [{ key: 'app.hello', current: { 'app.hello': '你好 {{name}}' } }], docs: [] } };
   const problems = checkUi({ read: readAsCurrent(read, work, { 'app.hello': 'Hello {{who}}' }), list, config });
   assert.deepEqual(problems.map(problem => `${problem.key}: ${problem.message}`), ['app.hello: placeholders differ from English (missing {{who}})']);
+});
+
+test('only strings Claude changed are checked as current and recorded; untouched ones stay out of date', () => {
+  const entry = { ui: [
+    { key: 'app.hello', current: { 'app.hello': '你好' } },
+    { key: 'app.items', current: { 'app.items_other': '{{count}} 项' } },
+    { key: 'app.new', current: {} },
+  ] };
+  const catalog = { 'app.hello': '你好', 'app.items_other': '共 {{count}} 项', 'app.new': '新', 'app.other': '别的' };
+  assert.deepEqual(changedKeys(catalog, entry), ['app.items_other', 'app.new']);
+  // A stale key Claude left alone keeps its old record, so it stays exempt and is not dropped.
+  const read = path => ({
+    'packages/client-ui/locales/zh-CN.meta.json': JSON.stringify({ 'app.hello': { source: 'old' } }),
+    'packages/client-ui/locales/zh-CN.json': JSON.stringify({ app: { hello: '你好', new: '新' } }),
+  })[path] ?? (() => { throw new Error('no file'); })();
+  const meta = JSON.parse(readAsCurrent(read, { 'zh-CN': { ui: entry.ui } }, { 'app.new': 'New' })('packages/client-ui/locales/zh-CN.meta.json'));
+  assert.deepEqual(meta, { 'app.hello': { source: 'old' }, 'app.new': { source: hash('New') } });
 });

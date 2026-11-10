@@ -70,9 +70,17 @@ async function plan(file) {
 }
 
 /**
- * A file reader for `checkUi` that treats the work list's UI keys as up to date: their
- * meta entries record the current English. Without it, a key Claude re-translated would
- * still look stale and skip the placeholder and plural checks.
+ * Catalog keys (with plural suffixes) for the work list's UI items whose text Claude
+ * changed. An item it left alone keeps its old record: still missing or out of date.
+ */
+export function changedKeys(catalog, entry) {
+  return Object.keys(catalog).filter(name => entry.ui.some(item => baseKey(name) === item.key && item.current?.[name] !== catalog[name]));
+}
+
+/**
+ * A file reader for `checkUi` that treats the UI keys Claude changed as up to date:
+ * their meta entries record the current English. Without it, a key Claude re-translated
+ * would still look stale and skip the placeholder and plural checks.
  */
 export function readAsCurrent(read, work, en) {
   return path => {
@@ -90,10 +98,7 @@ export function readAsCurrent(read, work, en) {
     } catch {
       // A catalog that does not parse is reported by checkUi itself.
     }
-    for (const key of Object.keys(catalog)) {
-      if (!work[tag].ui.some(item => baseKey(key) === item.key)) continue;
-      meta[key] = { source: hash(en[key] ?? en[`${baseKey(key)}_other`] ?? '') };
-    }
+    for (const key of changedKeys(catalog, work[tag])) meta[key] = { source: hash(en[key] ?? en[`${baseKey(key)}_other`] ?? '') };
     return JSON.stringify(meta);
   };
 }
@@ -150,7 +155,7 @@ async function finish(file) {
   const notices = existsSync(join(process.env.RUNNER_TEMP ?? '/tmp', 'notices.json')) ? JSON.parse(readFileSync(join(process.env.RUNNER_TEMP ?? '/tmp', 'notices.json'), 'utf8')) : {};
   for (const [tag, entry] of Object.entries(work)) {
     const catalog = existsSync(join(root, `${ui.locales}/${tag}.json`)) ? flatten(JSON.parse(read(`${ui.locales}/${tag}.json`))) : {};
-    const keys = Object.keys(catalog).filter(name => entry.ui.some(item => baseKey(name) === item.key));
+    const keys = changedKeys(catalog, entry);
     const written = entry.docs.filter(item => existsSync(join(root, item.translation)) && git('status', '--porcelain', item.translation));
     for (const item of written) writeFileSync(join(root, item.translation), withNotice(read(item.translation), notices[tag] || MACHINE_NOTICE));
     const items = [...keys, ...written.map(item => item.page)];
