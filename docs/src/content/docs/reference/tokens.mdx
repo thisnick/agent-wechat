@@ -20,11 +20,11 @@ The new token is printed once, in the `token` field.
 | `read` | Chats, messages, contacts, groups, events |
 | `media` | Downloading attachments |
 | `send` | Sending and recalling messages |
-| `read-state` | Marking chats read |
+| `read-state` | Marking a whole chat read and notifying WeChat so other devices can clear the unread badge |
 | `login` | Logging in, connecting and disconnecting |
 | `admin` | Managing tokens and accounts, and editing groups. Group reads use `read`. |
 | `calls` | Reading [call state and events](/reference/calls/), registering readiness, controlling calls and exchanging the owner's call audio |
-| `mini-program-login` | Issuing temporary login codes for approved [Mini Program launches](/use/cli/#open-a-mini-program). Requires `read` as well. |
+| `mini-programs` | Using account-backed features in [Mini Programs](/use/cli/#open-a-mini-program). Currently this allows `wx.login` to issue a temporary app code. Requires `read` as well. |
 
 OpenClaw needs `read`, `media`, `send` and `login`, plus `read-state` unless `readPolicy` is `never`. Calling also needs the `calls` scope.
 

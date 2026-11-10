@@ -942,7 +942,7 @@ enum TokenCommand {
         /// Account ID the token may use, or * for all accounts; repeat for several.
         #[arg(long, required = true)]
         accounts: Vec<String>,
-        /// Permission to grant: read, media, send, read-state, login, admin, calls or mini-program-login; repeat.
+        /// Permission to grant: read, media, send, read-state, login, admin, calls or mini-programs; repeat.
         #[arg(long, required = true)]
         scopes: Vec<String>,
         /// Expire the token at this Unix time in seconds; it never expires if omitted.

@@ -625,7 +625,7 @@ pub(crate) const ROUTES: &[Route] = &[
         path: "/v1/accounts/{a}/mini-programs/{app}/launches/{id}/ipc",
         id: "invokeMiniProgramIpc",
         tag: "mini-programs",
-        scope: Scope::All(&["read", "mini-program-login"]),
+        scope: Scope::All(&["read", "mini-programs"]),
         idempotency: Idempotency::Required,
         request: Body::Type("NativeMiniProgramIpcRequest"),
         query: Body::None,

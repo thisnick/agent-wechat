@@ -90,7 +90,7 @@ impl Store {
                         | "login"
                         | "admin"
                         | "calls"
-                        | "mini-program-login"
+                        | "mini-programs"
                 )
             })
         {

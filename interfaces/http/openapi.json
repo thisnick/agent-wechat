@@ -8100,7 +8100,7 @@
           {
             "bearer": [
               "read",
-              "mini-program-login"
+              "mini-programs"
             ]
           }
         ],

@@ -521,7 +521,7 @@ wx tokens | - | Create and revoke API tokens for selected accounts
 wx tokens create | - | Create an API token with account and permission scopes
 wx tokens create --accounts | required, takes <ACCOUNTS>, repeatable | Account ID the token may use, or * for all accounts; repeat for several
 wx tokens create --expires-at | takes <EXPIRES_AT> | Expire the token at this Unix time in seconds; it never expires if omitted
-wx tokens create --scopes | required, takes <SCOPES>, repeatable | Permission to grant: read, media, send, read-state, login, admin, calls or mini-program-login; repeat
+wx tokens create --scopes | required, takes <SCOPES>, repeatable | Permission to grant: read, media, send, read-state, login, admin, calls or mini-programs; repeat
 wx tokens create <NAME> | position 1, required | Label for the new token
 wx tokens list | - | List API tokens without revealing their secret values
 wx tokens revoke | - | Revoke an API token by ID

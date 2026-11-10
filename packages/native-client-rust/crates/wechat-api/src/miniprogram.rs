@@ -133,7 +133,7 @@ async fn launch(
     input: Option<Json<NativeMiniProgramLaunchRequest>>,
 ) -> ApiResult<impl IntoResponse> {
     claims.require(Some(&account), "read")?;
-    let can_login = claims.require(Some(&account), "mini-program-login").is_ok();
+    let can_login = claims.require(Some(&account), "mini-programs").is_ok();
     let input = input.map(|Json(input)| input).unwrap_or_default();
     let (selected, network_policy) = work(move || {
         let selected = app.core.prepare_mini_program(
@@ -221,7 +221,7 @@ async fn ipc(
     Json(NativeMiniProgramIpcRequest::Login {}): Json<NativeMiniProgramIpcRequest>,
 ) -> ApiResult<impl IntoResponse> {
     claims.require(Some(&account), "read")?;
-    claims.require(Some(&account), "mini-program-login")?;
+    claims.require(Some(&account), "mini-programs")?;
     let id = Uuid::parse_str(&id)
         .map_err(|_| ApiError(StatusCode::NOT_FOUND, "mini_program_launch_unavailable"))?;
     let invocation_id = headers

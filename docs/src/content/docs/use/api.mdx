@@ -267,7 +267,7 @@ descriptor and reuses an existing cache entry.
 
 The SDK methods are `listMiniPrograms`, `prepareMiniProgram`, and `getMiniProgramPackage`. These operations require `read` access for the selected account.
 
-When a launch reports `capabilities.login: true`, `issueMiniProgramLogin(accountId, appId, launchId, key)` posts `{"method":"wx.login"}` to `/mini-programs/{appId}/launches/{launchId}/ipc`. Use a UUID as the idempotency key and a token with `read` and `mini-program-login` for the selected account. Reuse the UUID only for the same invocation. Keep the app code private.
+When a launch reports `capabilities.login: true`, `issueMiniProgramLogin(accountId, appId, launchId, key)` posts `{"method":"wx.login"}` to `/mini-programs/{appId}/launches/{launchId}/ipc`. Use a UUID as the idempotency key and a token with `read` and `mini-programs` for the selected account. Reuse the UUID only for the same invocation. Keep the app code private.
 
 ## Routes
 

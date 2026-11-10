@@ -1993,6 +1993,39 @@ mod tests {
         );
     }
     #[tokio::test]
+    async fn mini_program_ipc_requires_read_and_mini_program_scopes_for_the_account() {
+        let (_temp, core, app) = setup();
+        for (scopes, account, expected) in [
+            (&["read", "login"][..], "one", StatusCode::FORBIDDEN),
+            (&["mini-programs"], "one", StatusCode::FORBIDDEN),
+            (&["read", "mini-programs"], "two", StatusCode::FORBIDDEN),
+            (&["read", "mini-programs"], "one", StatusCode::NOT_FOUND),
+        ] {
+            let token = uuid::Uuid::new_v4().simple().to_string();
+            core.store
+                .issue_token(
+                    "mini-program-fixture",
+                    &format!("{:x}", Sha256::digest(token.as_bytes())),
+                    &["one".into()],
+                    &scopes.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                    None,
+                )
+                .unwrap();
+            // An invalid launch ID stops an authorized request before profile or network access.
+            let (status, _) = call(
+                app.clone(),
+                "POST",
+                &format!(
+                    "/v1/accounts/{account}/mini-programs/wx0123456789abcdef/launches/invalid/ipc"
+                ),
+                Some(&token),
+                Some(json!({"method":"wx.login"})),
+            )
+            .await;
+            assert_eq!(status, expected);
+        }
+    }
+    #[tokio::test]
     async fn quoted_text_requires_both_scopes_and_rejects_quote_on_other_send_kinds() {
         let (_temp, core, app) = setup();
         let read = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

@@ -154,7 +154,7 @@ wx miniprogram serve APP_ID \
 
 This optional restriction matches the scheme, host, port and path while allowing query parameters. It cannot expand a retrieved server policy. When the account is offline and no server policy is available, `wx.request` stays unavailable. A failed online policy lookup reports an error.
 
-For `wx.login`, the manifest must set `allowLogin` to `true`, the account must be online, and a scoped access key must include `mini-program-login` as well as `read`. Keep the printed URL private when it includes a launch key.
+For `wx.login`, the manifest must set `allowLogin` to `true`, the account must be online, and a scoped access key must include `mini-programs` as well as `read`. Keep the printed URL private when it includes a launch key.
 
 ## Use a daemon on another machine
 
