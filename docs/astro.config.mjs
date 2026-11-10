@@ -101,6 +101,7 @@ export default defineConfig({
           { label: 'Sends and recovery', translations: { 'zh-CN': '消息发送与恢复' }, slug: 'how-it-works/sends' },
           { label: 'Message types', translations: { 'zh-CN': '消息类型' }, slug: 'how-it-works/message-types' },
           { label: 'Storage and backups', translations: { 'zh-CN': '存储与备份' }, slug: 'how-it-works/storage' },
+          { label: 'Translations', translations: { 'zh-CN': '翻译如何保持更新' }, slug: 'how-it-works/translations' },
         ] },
         { label: 'Reference', translations: { 'zh-CN': '参考文档' }, items: [
           { label: 'CLI', translations: { 'zh-CN': 'CLI 命令' }, slug: 'reference/cli' },
