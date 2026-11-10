@@ -27,6 +27,7 @@ pub fn asset(path: &str) -> Option<(&'static str, &'static str)> {
             include_str!("../runner/style.css"),
         ),
         "/runtime.js" => (javascript, include_str!("../runner/runtime.js")),
+        "/bootstrap.js" => (javascript, include_str!("../runner/bootstrap.js")),
         "/intersection.js" => (javascript, include_str!("../runner/intersection.js")),
         "/styles.js" => (javascript, include_str!("../runner/styles.js")),
         "/images.js" => (javascript, include_str!("../runner/images.js")),
@@ -44,7 +45,8 @@ pub fn package_asset<'a>(archive: &'a Archive, path: &str) -> Option<(&'static s
         return None;
     }
     let bytes = archive.file(path).ok()?;
-    let mime = match path.rsplit('.').next()? {
+    let (_, extension) = path.rsplit_once('.')?;
+    let mime = match extension.to_ascii_lowercase().as_str() {
         "css" | "wxss" if bytes.len() <= 512 * 1024 && std::str::from_utf8(bytes).is_ok() => {
             "text/css; charset=utf-8"
         }
@@ -52,6 +54,7 @@ pub fn package_asset<'a>(archive: &'a Archive, path: &str) -> Option<(&'static s
         "jpg" | "jpeg" if bytes.starts_with(b"\xff\xd8\xff") => "image/jpeg",
         "webp" if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") => "image/webp",
         "gif" if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") => "image/gif",
+        "svg" if bytes.len() <= 512 * 1024 && std::str::from_utf8(bytes).is_ok() => "image/svg+xml",
         "wasm" if bytes.len() <= 16 * 1024 * 1024 && bytes.starts_with(b"\0asm\x01\0\0\0") => {
             "application/wasm"
         }

@@ -13,6 +13,10 @@ pub struct NativeMiniProgram {
     pub title: String,
     /// Whether the hub has a staged package for this program.
     pub available: bool,
+    /// Saved card whose media includes the program icon, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub icon_message_id: Option<String>,
 }
 
 /// Mini Programs known from recent saved cards and the selected account's cache.

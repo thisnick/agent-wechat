@@ -103,8 +103,8 @@ export function seeder(stack) {
     /** Moves the simulator clock, which stamps every message created afterwards. */
     advance: (seconds) => stack.control({ op: "advance", seconds }),
     /** Stage one app and deliver two cards, including a card without a cached package. */
-    async miniPrograms(peer) {
-      await stageMiniProgram(stack.dataDir, ACCOUNT.id);
+    async miniPrograms(peer, stagedTitle) {
+      await stageMiniProgram(stack.dataDir, ACCOUNT.id, stagedTitle);
       for (const available of [true, false]) {
         await stack.control({ op: "mini_program_card", account: ACCOUNT.id, peer, available });
         await sim.advance(1);

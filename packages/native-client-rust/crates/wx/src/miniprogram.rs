@@ -84,6 +84,23 @@ struct HostStart {
     source_message_id: Option<String>,
 }
 
+pub(super) fn host_error_code(error: &anyhow::Error) -> &'static str {
+    match super::outcome::classify(error).1.as_str() {
+        "forbidden" => "forbidden",
+        "endpoint_unavailable" => "endpoint_unavailable",
+        "mini_program_package_unavailable" => "mini_program_package_unavailable",
+        "mini_program_page_unsupported" => "mini_program_page_unsupported",
+        "mini_program_source_unavailable" => "mini_program_source_unavailable",
+        "mini_program_network_unavailable" => "mini_program_network_unavailable",
+        "mini_program_cache_invalid" => "mini_program_cache_invalid",
+        _ => match error.to_string().as_str() {
+            "mini_program_page_unsupported" => "mini_program_page_unsupported",
+            "mini_program_cache_invalid" => "mini_program_cache_invalid",
+            _ => "mini_program_start_failed",
+        },
+    }
+}
+
 pub(super) async fn machine_host() -> Result<()> {
     let mut stdin = BufReader::new(tokio::io::stdin());
     let mut input = Vec::new();
@@ -213,7 +230,8 @@ async fn serve(
         &launch.entry.service_path,
         &launch.entry.query,
         launch.capabilities.login,
-    )?;
+    )
+    .context("mini_program_page_unsupported")?;
     page.push_str(&format!(
         "export const appId = {};\nexport const subpackages = new Map({});\n",
         serde_json::to_string(&app)?,
@@ -230,7 +248,8 @@ async fn serve(
     if allow_wasm {
         page.push_str("export const allowWasm = true;\n");
     }
-    let modules = runner::module_registry(&archive, &launch.entry.service_path)?;
+    let modules = runner::module_registry(&archive, &launch.entry.service_path)
+        .context("mini_program_page_unsupported")?;
     let remote = Arc::new(remote);
     let login = if launch.capabilities.login {
         let id = Uuid::parse_str(&launch.launch_id).context("Invalid Mini Program launch ID")?;
@@ -304,8 +323,8 @@ async fn selected_archive(
     let response = remote.response(Method::GET, &path, None, None).await?;
     let size = package.size_bytes as usize;
     let bytes = bounded_bytes(response, size).await?;
-    ensure!(bytes.len() == size, "Mini Program package length mismatch");
-    Archive::open(app, bytes, &package.sha256)
+    ensure!(bytes.len() == size, "mini_program_cache_invalid");
+    Archive::open(app, bytes, &package.sha256).context("mini_program_cache_invalid")
 }
 
 async fn subpackage_module(runner: &Runner, id: &str) -> Response {
@@ -439,7 +458,15 @@ async fn handle(State(runner): State<Arc<Runner>>, request: Request) -> Response
         _ => StatusCode::NOT_FOUND.into_response(),
     };
     let mut response = response;
-    let policy = if runner.allow_wasm {
+    let policy = if response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .is_some_and(|mime| mime == "image/svg+xml")
+    {
+        // A direct navigation must not give packaged SVG documents the
+        // runner's script or network permissions.
+        "sandbox; default-src 'none'; style-src 'unsafe-inline'"
+    } else if runner.allow_wasm {
         "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
     } else if runner.key.is_some() {
         "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"

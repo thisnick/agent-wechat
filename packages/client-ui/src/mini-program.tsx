@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
 import { AppWindow, ArrowUpRight } from "lucide-react";
+import { NativeApiError } from "@agent-wechat/shared";
 import type { MiniProgramCard as Card, NativeMessage, NativeMiniProgram } from "@agent-wechat/shared";
 import type { Connection } from "./connection.ts";
 import { desktopInvoke } from "./desktop.ts";
@@ -19,6 +20,21 @@ type Programs = {
   load: () => void;
 };
 const ProgramsContext = createContext<Programs | null>(null);
+
+function launchError(error: unknown) {
+  const code = typeof error === "string" ? error : error instanceof NativeApiError ? error.code : "";
+  switch (code) {
+    case "forbidden": return t("miniPrograms.permissionRequired");
+    case "mini_program_package_unavailable": return t("miniPrograms.packageUnavailable");
+    case "mini_program_page_unsupported": return t("miniPrograms.pageUnsupported");
+    case "mini_program_source_unavailable": return t("miniPrograms.sharedPageUnavailable");
+    case "mini_program_network_unavailable": return t("miniPrograms.networkPolicyUnavailable");
+    case "mini_program_cache_invalid": return t("miniPrograms.packageInvalid");
+    case "endpoint_unavailable": return t("miniPrograms.hubUnreachable");
+    case "mini_program_start_timeout": return t("miniPrograms.startTimedOut");
+    default: return t("miniPrograms.couldNotOpen");
+  }
+}
 
 export function MiniProgramsProvider({ connection, account, accountName, active, children }: {
   connection: Connection;
@@ -79,8 +95,8 @@ function OpenProgram({ appId, title, windowTitle, source, unavailable, blocked =
         await connection.session.client.prepareMiniProgram(account, appId, { sourceMessageId: source });
         setNotice(t("miniPrograms.previewReady"));
       }
-    } catch {
-      setNotice(t("miniPrograms.couldNotOpen"));
+    } catch (error) {
+      setNotice(launchError(error));
     } finally {
       setOpening(false);
     }
@@ -97,7 +113,7 @@ function OpenProgram({ appId, title, windowTitle, source, unavailable, blocked =
 export function MiniProgramsList() {
   const programs = useContext(ProgramsContext);
   if (!programs) return null;
-  const { items, failed, refresh, accountName } = programs;
+  const { items, failed, refresh, accountName, account, connection } = programs;
   return <section className="mini-program-list" aria-labelledby="mini-programs-heading">
     <header className="mini-program-list-header">
       <div>
@@ -113,7 +129,11 @@ export function MiniProgramsList() {
       : failed ? <p role="status">{t("miniPrograms.couldNotLoad")}</p>
       : !items.length ? <p>{t("miniPrograms.empty")}</p>
       : <ul>{items.map(program => <li key={program.appId}>
-        <span className="mini-program-icon"><AppWindow size={20} aria-hidden="true" /></span>
+        <span className="mini-program-icon" aria-hidden="true">
+          {program.iconMessageId
+            ? <ProgramIcon connection={connection} account={account} messageId={program.iconMessageId} />
+            : <AppWindow size={20} />}
+        </span>
         <div className="mini-program-name"><strong>{emojiText(program.title)}</strong>
           <small>{program.available ? t("miniPrograms.available") : t("miniPrograms.packageUnavailable")}</small></div>
         <OpenProgram appId={program.appId} title={program.title} blocked={!program.available} />
@@ -149,28 +169,41 @@ function CardOpen({ card, title, message }: { card: Card; title: string; message
   return <OpenProgram appId={card.appId} source={message.id} title={title} windowTitle={card.displayName || undefined} unavailable={unavailable} />;
 }
 
-function SavedMiniProgram({ card, title, message, connection }: {
-  card: Card; title: string; message: NativeMessage; connection: Connection;
+function ProgramIcon({ connection, account, messageId }: {
+  connection: Connection;
+  account: string;
+  messageId: string;
 }) {
-  const { element, visible } = useVisible<HTMLDivElement>();
-  const model = connection.incomingMedia.get(message.accountId, message.id);
+  const { element, visible } = useVisible<HTMLSpanElement>();
+  const { icon } = useProgramArtwork(connection, account, messageId, visible);
+  return <span ref={element} className="mini-program-list-art">
+    <ImageThumbnail asset={icon} connection={connection} fallback={<AppWindow size={20} />} />
+  </span>;
+}
+
+function useProgramArtwork(connection: Connection, account: string, messageId: string, visible: boolean, includePreview = false) {
+  const model = connection.incomingMedia.get(account, messageId);
   const { assets } = useSyncExternalStore(model.subscribe, model.snapshot);
   const { opening } = useSyncExternalStore(connection.session.subscribe, connection.session.snapshot);
-  const loadPrograms = useContext(ProgramsContext)?.load;
   const icon = assets.find(asset => asset.filename === "mini-program-icon");
-  const thumbnail = assets.find(asset => asset.filename === "mini-program-preview");
-  useEffect(() => {
-    if (visible) {
-      loadPrograms?.();
-      void model.load();
-    }
-  }, [model, visible, loadPrograms]);
+  const thumbnail = includePreview ? assets.find(asset => asset.filename === "mini-program-preview") : undefined;
+  useEffect(() => { if (visible) void model.load(); }, [model, visible]);
   useEffect(() => {
     if (visible && !opening) {
       if (icon) model.ensure(icon);
       if (thumbnail) model.ensure(thumbnail);
     }
   }, [model, opening, icon, thumbnail, visible]);
+  return { icon, thumbnail };
+}
+
+function SavedMiniProgram({ card, title, message, connection }: {
+  card: Card; title: string; message: NativeMessage; connection: Connection;
+}) {
+  const { element, visible } = useVisible<HTMLDivElement>();
+  const { icon, thumbnail } = useProgramArtwork(connection, message.accountId, message.id, visible, true);
+  const loadPrograms = useContext(ProgramsContext)?.load;
+  useEffect(() => { if (visible) loadPrograms?.(); }, [visible, loadPrograms]);
   return <div ref={element} className="bubble mini-program-card">
     <div className="mini-program-card-label">
       <span className="mini-program-card-icon" aria-hidden="true">

@@ -3,6 +3,7 @@ body { margin: 0; background: #edf2f2; font: 16px system-ui, sans-serif; color: 
 main { min-height: calc(100dvh - 44px); margin: auto; background: white; padding: 0; }
 mini-page, view, .page-body-title, .page-body-text { display: block; }
 button { min-height: 36px; margin: 4px; padding: 6px 12px; }
+button:enabled, a[href] { cursor: pointer; }
 dialog { width: min(90%, 360px); border: 1px solid #576c69; border-radius: 12px; }
 dialog::backdrop { background: #18242070; }
 

@@ -65,6 +65,8 @@ pub struct MiniProgramSummary {
     pub title: String,
     /// Whether a package is present with a valid staging manifest.
     pub available: bool,
+    /// Saved card whose media includes this program’s icon.
+    pub icon_message_id: Option<String>,
 }
 
 /// Verified package selection and temporary login grant for one launch.
@@ -381,6 +383,7 @@ impl Core {
                             title: metadata.map_or_else(|| app_id.clone(), |item| item.title),
                             app_id,
                             available,
+                            icon_message_id: None,
                         },
                     );
                 }
@@ -394,7 +397,10 @@ impl Core {
                 else {
                     continue;
                 };
-                if items.contains_key(&card.card.app_id) {
+                if items.get(&card.card.app_id).is_some_and(|item| {
+                    (item.title != item.app_id || card.card.display_name.is_none())
+                        && (item.icon_message_id.is_some() || card.icon.is_none())
+                }) {
                     continue;
                 }
                 let id = crate::message_id(&message.id)?;
@@ -404,18 +410,26 @@ impl Core {
                 {
                     continue;
                 }
-                items.insert(
-                    card.card.app_id.clone(),
-                    MiniProgramSummary {
-                        title: card
-                            .card
-                            .display_name
-                            .or(card.card.title)
-                            .unwrap_or_else(|| card.card.app_id.clone()),
-                        app_id: card.card.app_id,
-                        available: false,
-                    },
-                );
+                let item =
+                    items
+                        .entry(card.card.app_id.clone())
+                        .or_insert_with(|| MiniProgramSummary {
+                            title: card
+                                .card
+                                .display_name
+                                .clone()
+                                .or(card.card.title)
+                                .unwrap_or_else(|| card.card.app_id.clone()),
+                            app_id: card.card.app_id,
+                            available: false,
+                            icon_message_id: None,
+                        });
+                if let Some(name) = card.card.display_name.filter(|_| item.title == item.app_id) {
+                    item.title = name;
+                }
+                if item.icon_message_id.is_none() && card.icon.is_some() {
+                    item.icon_message_id = Some(id);
+                }
             }
         }
         Ok(items.into_values().collect())

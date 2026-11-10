@@ -8,7 +8,7 @@ const EMBEDDED_IMAGE = "data:image/svg+xml," + encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="1"><path fill="#12503e" d="M0 0h2v1H0z"/></svg>',
 );
 
-function page(route, id, initial, alternate) {
+function page(route, id, initial, alternate, componentPage = false) {
   return `$gwx_${id}=function(_){return function(route){return function(data){
     if (route !== "./${route}.wxml") return;
     return {tag:"wx-page",children:[
@@ -18,7 +18,7 @@ function page(route, id, initial, alternate) {
       {tag:"wx-input",attr:{placeholder:"Add a note",bindinput:"input",value:data.note}},
       {tag:"wx-text",children:[data.note]},
       {tag:"wx-button",attr:{bindtap:"toggle"},children:["Change title"]},
-      {tag:"wx-button",attr:{bindtap:"navigate"},children:["Open next page"]},
+      {tag:"wx-view",attr:{id:"next-page",bindtap:"navigate","data-navigation":[["next",true]]},children:["Open next page"]},
       ...(data.privacyTest ? [{tag:"wx-button",attr:{openType:"agreePrivacyAuthorization",bindagreeprivacyauthorization:"acceptedPrivacy"},children:["Accept privacy terms"]}] : []),
       {tag:"wx-demo-counter",attr:{id:"counter",label:data.title,bindupdated:"countChanged"},
         children:[{tag:"wx-text",children:["Count reported: " + data.reported]}]}
@@ -27,9 +27,12 @@ function page(route, id, initial, alternate) {
   __wxAppCode__['${route}.json'] = {"usingComponents":{"demo-counter":"../../components/counter/index"}};
   define("${route}.js",function(require,module,exports){
     const greeting = require("../../util");
-    Page({
-      data:{title:${JSON.stringify(initial)},image:${JSON.stringify(EMBEDDED_IMAGE)},note:"",changed:false,reported:0},
+    const definition = {
+      data:{title:${JSON.stringify(initial)},image:${JSON.stringify(EMBEDDED_IMAGE)},note:"",changed:false,reported:0,
+        local:{ read() { return true; } }},
       onLoad(query){
+        if (!this.data.local.read()) throw new Error("Local data callback is missing");
+        if (${componentPage} && !this.viewModel) throw new Error("Component page loaded before attachment");
         wx.setStorageSync("loadingRoute", getCurrentPages().at(-1)?.route);
         if(query.menu) this.setData({title:greeting(query.menu)});
         if(query.privacyTest) this.setData({privacyTest:true});
@@ -40,8 +43,17 @@ function page(route, id, initial, alternate) {
       input(event){this.setData({note:event.detail.value});},
       countChanged(event){this.setData({reported:event.detail.count});},
       imageLoaded(event){this.loadedImage=event.detail;},
-      navigate(){return wx.navigateTo({url:"/${alternate}?menu=next"});}
-    });
+      navigate(event){
+        if (event.currentTarget.dataset.navigation?.[0]?.[1] !== true) throw new Error("Tap dataset lost its type");
+        return wx.navigateTo({url:"/${alternate}?menu=next"});
+      }
+    };
+    ${componentPage ? `const { data, ...methods } = definition;
+    Component({
+      data,
+      methods,
+      lifetimes:{ attached(){ this.viewModel = {}; } },
+    });` : "Page(definition);"}
   },{isPage:true,isComponent:true,currentFile:'${route}.js'});
   `;
 }
@@ -72,11 +84,13 @@ function archive(files) {
 }
 
 /** Stage a small two-page program for the disposable simulator account. */
-export async function stageMiniProgram(dataDir, account) {
+export async function stageMiniProgram(dataDir, account, title = "Cafe") {
   const directory = join(dataDir, "hub", "miniprograms", account, APP);
   const home = "pages/home/index";
   const menu = "pages/menu/index";
   const files = {
+    "icons/menu@2x.SVG": '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="1"><path fill="#12503e" d="M0 0h2v1H0z"/></svg>',
+    "icons/menu.PNG": Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l2sAAAAASUVORK5CYII=", "base64"),
     "utilities/value.wasm": Buffer.from("0061736d010000000105016000017f030201000709010576616c756500000a06010400412a0b", "hex"),
     "app-config.json": JSON.stringify({ pages: [home, menu], subPackages: [{ root: "utilities" }] }),
     [home + ".html"]: `$gwx_Home('./${home}.wxml')`,
@@ -104,7 +118,14 @@ export async function stageMiniProgram(dataDir, account) {
       } else {
         __wxAppCode__["components/counter/index.wxml"] = $gwx_Counter("./components/counter/index.wxml");
       }
-      define("util.js",function(require,module,exports){
+      define("util.js",function(require,module,exports,window,document,frames,self){
+        const root = self?.Object === Object ? self : Function("return this")();
+        if (root.Date !== Date || window !== undefined || document !== undefined || "fetch" in root) {
+          throw new Error("Unexpected service global");
+        }
+        if (!wx.getSystemInfoSync().SDKVersion.split(".").every(part => Number.isInteger(Number(part)))) {
+          throw new Error("Missing SDK version");
+        }
         if (typeof print === "function") console.error = print;
         module.exports = function(menu){return "Menu: " + menu;};
       },{isPage:false,isComponent:false,currentFile:'util.js'});
@@ -138,7 +159,7 @@ export async function stageMiniProgram(dataDir, account) {
         });
       },{isPage:false,isComponent:true,currentFile:'components/counter/index.js'});
       ${page(home, "Home", "Cafe home", menu)}
-      ${page(menu, "Menu", "Cafe menu", home)}
+      ${page(menu, "Menu", "Cafe menu", home, true)}
     `,
   };
   // The browser view contains full templates. The service can retain a reduced
@@ -150,7 +171,7 @@ export async function stageMiniProgram(dataDir, account) {
   const bytes = archive(files);
   await mkdir(directory, { recursive: true });
   await writeFile(join(directory, "manifest.json"), JSON.stringify({
-    title: "Cafe", version: "1", packageId: "main",
+    title, version: "1", packageId: "main",
     sha256: createHash("sha256").update(bytes).digest("hex"),
     entryPage: home, servicePath: "app-service.js",
   }));

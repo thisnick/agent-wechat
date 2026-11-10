@@ -24,10 +24,17 @@ pub struct OpenRequest {
 }
 
 #[derive(Deserialize)]
-struct Ready {
+struct HostReply {
     version: u8,
-    state: String,
-    url: reqwest::Url,
+    #[serde(flatten)]
+    outcome: HostOutcome,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "state", rename_all = "lowercase")]
+enum HostOutcome {
+    Ready { url: reqwest::Url },
+    Error { code: String },
 }
 
 struct MiniProgramHost {
@@ -55,7 +62,7 @@ impl MiniProgramHost {
         // Child::wait closes any stdin handle still owned by the child.
         // The window must retain the control pipe while also watching for exit.
         let mut control = child.stdin.take().context("Missing host input")?;
-        let ready = tokio::time::timeout(Duration::from_secs(30), async {
+        let url = tokio::time::timeout(Duration::from_secs(30), async {
             control.write_all(startup).await?;
             control.write_all(b"\n").await?;
             control.flush().await?;
@@ -65,28 +72,43 @@ impl MiniProgramHost {
                 .take(4096)
                 .read_until(b'\n', &mut line)
                 .await?;
-            let ready: Ready = serde_json::from_slice(&line)
+            let reply: HostReply = serde_json::from_slice(&line)
                 .context("The Mini Program host could not open this page")?;
+            ensure!(reply.version == 1, "Invalid Mini Program host response");
+            let url = match reply.outcome {
+                HostOutcome::Ready { url } => url,
+                HostOutcome::Error { code } => {
+                    let code = match code.as_str() {
+                        "forbidden"
+                        | "endpoint_unavailable"
+                        | "mini_program_package_unavailable"
+                        | "mini_program_page_unsupported"
+                        | "mini_program_source_unavailable"
+                        | "mini_program_network_unavailable"
+                        | "mini_program_cache_invalid" => code.as_str(),
+                        _ => "mini_program_start_failed",
+                    };
+                    anyhow::bail!("{code}");
+                }
+            };
             ensure!(
-                ready.version == 1
-                    && ready.state == "ready"
-                    && ready.url.scheme() == "http"
-                    && ready.url.host_str() == Some("127.0.0.1")
-                    && ready.url.port().is_some()
-                    && ready.url.username().is_empty()
-                    && ready.url.password().is_none()
-                    && ready.url.path() == "/"
-                    && ready.url.query().is_none(),
+                url.scheme() == "http"
+                    && url.host_str() == Some("127.0.0.1")
+                    && url.port().is_some()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.path() == "/"
+                    && url.query().is_none(),
                 "Invalid Mini Program host response"
             );
-            Ok::<_, anyhow::Error>(ready)
+            Ok::<_, anyhow::Error>(url)
         })
         .await
-        .context("The Mini Program host did not start in time")??;
+        .context("mini_program_start_timeout")??;
         Ok(Self {
             child,
             control: Some(control),
-            url: ready.url,
+            url,
         })
     }
 
@@ -123,12 +145,14 @@ async fn open(caller: WebviewWindow, state: &Desktop, request: OpenRequest) -> R
         state.quit.load(Ordering::Acquire) == 0,
         "AgentWechat is shutting down"
     );
+    let title = request.title.replace(['\n', '\t'], " ");
+    let account_name = request.account_name.replace(['\n', '\t'], " ");
     ensure!(
-        !request.title.is_empty()
-            && request.title.len() <= 1024
-            && !request.title.chars().any(char::is_control)
-            && request.account_name.len() <= 1024
-            && !request.account_name.chars().any(char::is_control),
+        !title.trim().is_empty()
+            && title.len() <= 1024
+            && !title.chars().any(char::is_control)
+            && account_name.len() <= 1024
+            && !account_name.chars().any(char::is_control),
         "Invalid Mini Program title"
     );
     let active = state
@@ -169,8 +193,8 @@ async fn open(caller: WebviewWindow, state: &Desktop, request: OpenRequest) -> R
     )
     .title(format!(
         "{} · {} · {}",
-        request.title,
-        request.account_name,
+        title,
+        account_name,
         crate::i18n::text("miniProgramExperimental")
     ))
     .inner_size(410.0, 776.0)

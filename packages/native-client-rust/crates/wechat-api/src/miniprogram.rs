@@ -101,6 +101,7 @@ async fn list(
                 app_id: item.app_id,
                 title: item.title,
                 available: item.available,
+                icon_message_id: item.icon_message_id,
             })
             .collect(),
     }))

@@ -17,6 +17,11 @@ const events = new Map([
 const behaviors = new Map();
 const roots = new WeakMap();
 const observers = new WeakMap();
+const datasets = new WeakMap();
+
+function elementDataset(element) {
+  return { ...element?.dataset, ...datasets.get(element) };
+}
 let privacyAccepted = false;
 
 export function needsPrivacyAuthorization() {
@@ -71,13 +76,13 @@ export function createSelectorQuery(instance) {
           const { top, left, right, bottom, width, height } = node?.getBoundingClientRect() ?? {
             top: 0, left: 0, right: innerWidth, bottom: innerHeight, width: innerWidth, height: innerHeight,
           };
-          return { id: node?.id ?? "", dataset: { ...node?.dataset }, top, left, right, bottom, width, height };
+          return { id: node?.id ?? "", dataset: elementDataset(node), top, left, right, bottom, width, height };
         }, callback);
       },
       scrollOffset(callback) {
         return queue(node => ({
           id: node?.id ?? "",
-          dataset: { ...node?.dataset },
+          dataset: elementDataset(node),
           scrollLeft: node?.scrollLeft ?? scrollX,
           scrollTop: node?.scrollTop ?? scrollY,
         }), callback);
@@ -121,6 +126,28 @@ function definitions(definition) {
   return ordered;
 }
 
+// Some component libraries attach callbacks to local data. Copy their plain
+// state per instance while retaining callable values.
+function copyLocalData(value, seen = new WeakMap()) {
+  if (value === null || typeof value !== "object") return value;
+  if (seen.has(value)) return seen.get(value);
+  const prototype = Object.getPrototypeOf(value);
+  const copy = Array.isArray(value) ? [...value]
+    : prototype === Object.prototype || prototype === null ? { ...value } : null;
+  if (!copy) return value;
+  seen.set(value, copy);
+  for (const key of Object.keys(copy)) copy[key] = copyLocalData(copy[key], seen);
+  return copy;
+}
+
+function clonePageData(data) {
+  try { return structuredClone(data); }
+  catch (error) {
+    if (error.name !== "DataCloneError") throw error;
+    return copyLocalData(data);
+  }
+}
+
 function writeData(data, path, value) {
   const keys = path.replace(/\[(\d+)\]/g, ".$1").split(".");
   if (keys.some(key => !key || ["__proto__", "constructor", "prototype"].includes(key))) return;
@@ -137,17 +164,21 @@ function writeData(data, path, value) {
 
 export function mountLegacy(main, module, query, loadPage, loadComponent, setLoadingPage) {
   let definition;
-  loadPage(value => { definition = value; });
+  let componentPage = false;
+  loadPage((value, isComponent = false) => {
+    definition = value;
+    componentPage = isComponent;
+  });
   if (!definition) throw new Error("Incomplete legacy page registration");
   const templates = new Map();
   function template(route) {
     if (!templates.has(route)) templates.set(route, module.templatesFactory(`./${route}.wxml`));
     return templates.get(route);
   }
-  return mountInstance(main, { route: module.entry, definition, query, template, loadComponent, setLoadingPage, depth: 0 });
+  return mountInstance(main, { route: module.entry, definition, query, template, loadComponent, setLoadingPage, componentPage, depth: 0 });
 }
 
-function mountInstance(main, { route, definition, query, template, loadComponent, setLoadingPage, depth, owner, attrs, slot, budget, styleContext }) {
+function mountInstance(main, { route, definition, query, template, loadComponent, setLoadingPage, depth, owner, attrs, slot, budget, styleContext, componentPage = false }) {
   const styled = createLegacyView(main, route, definition, styleContext);
   const view = styled.content;
   const generate = template(route);
@@ -156,7 +187,7 @@ function mountInstance(main, { route, definition, query, template, loadComponent
   const methods = Object.assign({}, ...sources.map(source => source.methods));
   const data = Object.assign({}, ...sources.map(source => source.data));
   const properties = Object.assign({}, ...sources.map(source => source.properties));
-  const page = { ...definition, ...methods, is: route, route, options: { ...query }, data: structuredClone(data) };
+  const page = { ...definition, ...methods, is: route, route, options: { ...query }, data: clonePageData(data) };
   page.properties = page.data;
   if (owner) page.selectOwnerComponent = () => owner;
   const children = new Map();
@@ -198,7 +229,7 @@ function mountInstance(main, { route, definition, query, template, loadComponent
 
   page.setData = (patch, callback) => {
     for (const [path, value] of Object.entries(patch)) writeData(page.data, path, value);
-    if (attached && !pending) {
+    if (attached && rendered && !pending) {
       pending = true;
       queueMicrotask(() => {
         pending = false;
@@ -319,10 +350,17 @@ function mountInstance(main, { route, definition, query, template, loadComponent
     setLoadingPage?.(page);
     lifetime("created");
     if (attrs) update(attrs, slot);
+    // Pages registered with Component can create their view model in attached.
+    if (componentPage) {
+      attached = true;
+      lifetime("attached");
+    }
     if (query) page.onLoad?.(query);
     render(budget);
-    attached = true;
-    lifetime("attached");
+    if (!attached) {
+      attached = true;
+      lifetime("attached");
+    }
     return lifecycle;
   } catch (error) {
     lifecycle.close();
@@ -334,6 +372,7 @@ function applyAttributes(element, tag, wxTag, attrs, route) {
   for (const attr of [...element.attributes]) element.removeAttribute(attr.name);
   element.className = wxTag === "wx-scroll-view" ? "mini-legacy-node mini-scroll" : "mini-legacy-node";
   element.setAttribute("data-wx-tag", wxTag ?? "wx-view");
+  const dataset = Object.create(null);
   for (const [name, value] of Object.entries(attrs)) {
     if (value == null) continue;
     if (name === "class") element.className += " " + String(value);
@@ -359,15 +398,20 @@ function applyAttributes(element, tag, wxTag, attrs, route) {
       element.src = value;
     }
     else if (name === "src" && tag === "img" && typeof value === "string"
-      && /^[a-zA-Z0-9_./-]+$/.test(value) && !value.startsWith("//")) {
+      && /^[a-zA-Z0-9_.@/-]+$/.test(value) && !value.startsWith("//")) {
       const base = new URL("/" + route, location.origin);
       const image = new URL(value, base);
       if (image.origin === location.origin) element.src = image.href;
     }
     else if (name === "hidden" || name === "disabled") element.toggleAttribute(name, Boolean(value));
     else if (name === "value" && (tag === "input" || tag === "textarea")) element.value = String(value);
-    else if (name.startsWith("data-") && /^[a-z0-9-]+$/.test(name)) element.setAttribute(name, String(value));
+    else if (/^data-[a-z0-9-]+$/.test(name)) {
+      element.setAttribute(name, String(value));
+      const key = name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+      dataset[key] = value;
+    }
   }
+  datasets.set(element, dataset);
 }
 
 function bindEvents(element, attrs, page, controller, custom) {
@@ -395,9 +439,10 @@ function bindEvents(element, attrs, page, controller, custom) {
     const caught = attrs["catch" + miniEvent] ?? attrs["catch:" + miniEvent];
     const handler = caught ?? attrs["bind" + miniEvent] ?? attrs["bind:" + miniEvent];
     if (typeof handler !== "string" || !Object.hasOwn(page, handler) || typeof page[handler] !== "function") continue;
+    if (miniEvent === "tap") element.classList.add("mini-tappable");
     element.addEventListener(event, ev => {
       if (caught) ev.stopPropagation();
-      const target = node => ({ id: node.id, dataset: { ...node.dataset } });
+      const target = node => ({ id: node.id, dataset: elementDataset(node) });
       page[handler]({
         type: miniEvent,
         currentTarget: target(element),

@@ -26,6 +26,9 @@ let app = { globalData: { theme: "light", hasLogin: false } };
 const getApp = () => app;
 const registerApp = value => { app = value; };
 const factories = registerModules(registerApp, getApp);
+// Compiled service factories shadow browser globals. Libraries that look
+// for a global object can use these built-ins without evaluating a string.
+const serviceSelf = Object.assign(Object.create(null), { Object, Date });
 const modules = new Map();
 const subpackageLoads = new Map();
 
@@ -52,13 +55,17 @@ function modulePaths(owner, name) {
   return paths.flatMap(path => [path, path + ".js", path + "/index.js"]);
 }
 
+function runFactory(factory, id, module) {
+  factory(requireFrom(id), module, module.exports, undefined, undefined, undefined, serviceSelf);
+}
+
 function loadModule(id) {
   if (!id) throw new Error("This Mini Program module is unavailable");
   if (modules.has(id)) return modules.get(id).exports;
   const module = { exports: {} };
   modules.set(id, module);
   try {
-    factories.get(id)(requireFrom(id), module, module.exports);
+    runFactory(factories.get(id), id, module);
     return module.exports;
   } catch (error) {
     modules.delete(id);
@@ -203,7 +210,8 @@ function getSystemInfoSync() {
 }
 
 function getAppBaseInfo() {
-  const info = { language: navigator.language, enableDebug: false, host: {} };
+  // Keep version comparisons safe without claiming an official base library.
+  const info = { SDKVersion: "0.0.0", language: navigator.language, enableDebug: false, host: {} };
   if (appConfig.darkmode) {
     info.theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   }
@@ -529,10 +537,8 @@ function withRegistration(next, load) {
 
 function loadPage(module, page, component, behavior) {
   return withRegistration({ page, component, behavior }, () => {
-    const current = { exports: {} };
-    module.pageFactory(value => globalThis.Page(value), getApp)(
-      requireFrom(module.entry + ".js"), current, current.exports,
-    );
+    const factory = module.pageFactory(value => globalThis.Page(value), getApp);
+    runFactory(factory, module.entry + ".js", { exports: {} });
   });
 }
 
@@ -617,7 +623,7 @@ function display(module, query, mode = "push") {
   let lifecycle;
   try {
     lifecycle = module.framework === "exparser"
-      ? mountLegacy(content, module, query, register => loadPage(module, register, register), loadComponent, setLoadingPage)
+      ? mountLegacy(content, module, query, register => loadPage(module, register, value => register(value, true)), loadComponent, setLoadingPage)
       : mountGlass(content, module, query, setLoadingPage);
   } catch (error) {
     view.remove();
@@ -788,11 +794,7 @@ window.addEventListener("pagehide", () => {
   for (const page of stack.reverse()) page.lifecycle.close();
 }, { once: true });
 
-try {
-  if (factories.has("app.js")) requireFrom("")("app.js");
-  app.onLaunch?.(structuredClone(launch));
-  setForeground(!document.hidden);
-  display(initial, launch.query);
-} catch {
-  main.textContent = "This Mini Program page could not be opened.";
-}
+if (factories.has("app.js")) requireFrom("")("app.js");
+app.onLaunch?.(structuredClone(launch));
+setForeground(!document.hidden);
+display(initial, launch.query);

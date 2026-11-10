@@ -1135,8 +1135,9 @@ async fn private_media_output(
 async fn main() {
     let arguments = std::env::args_os().collect::<Vec<_>>();
     if arguments.len() == 2 && arguments[1] == "__mini-program-host-v1" {
-        if miniprogram::machine_host().await.is_err() {
-            println!(r#"{{"version":1,"state":"error","code":"mini_program_start_failed"}}"#);
+        if let Err(error) = miniprogram::machine_host().await {
+            let code = miniprogram::host_error_code(&error);
+            println!("{}", json!({"version": 1, "state": "error", "code": code}));
             std::process::exit(1);
         }
         std::process::exit(0);

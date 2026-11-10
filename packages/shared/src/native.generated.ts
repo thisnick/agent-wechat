@@ -1289,7 +1289,11 @@ title: string,
 /**
  * Whether the hub has a staged package for this program.
  */
-available: boolean, };
+available: boolean, 
+/**
+ * Saved card whose media includes the program icon, when known.
+ */
+iconMessageId?: string, };
 export type NativeMiniPrograms = { 
 /**
  * Known apps and their package availability.

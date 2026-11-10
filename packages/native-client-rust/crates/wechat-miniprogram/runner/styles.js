@@ -67,6 +67,7 @@ defaults.replaceSync(`
   [hidden] { display: none !important; }
   [data-wx-tag="wx-scroll-view"] { overflow: auto; }
   button { min-height: 36px; padding: 6px 12px; }
+  button:enabled, a[href], .mini-tappable:not(:disabled) { cursor: pointer; }
 `);
 
 function sheet(route) {

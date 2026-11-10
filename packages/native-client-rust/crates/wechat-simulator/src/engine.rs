@@ -583,7 +583,7 @@ impl Engine {
                 } else {
                     ("wxfedcba9876543210", "Trail guide", "A weekend hike")
                 };
-                let body = format!("<msg><appmsg><type>36</type><title>{title}</title><sourcedisplayname>{name}</sourcedisplayname><weappinfo><appid>{app}</appid><pagepath>pages/menu/index?menu=seasonal</pagepath></weappinfo></appmsg></msg>");
+                let body = format!("<msg><appmsg><type>36</type><title>{title}</title><sourcedisplayname>{name}</sourcedisplayname><weappinfo><appid>{app}</appid><pagepath>pages/menu/index?menu=seasonal</pagepath><weappiconurl>https://example.invalid/mini-program-icon.png</weappiconurl></weappinfo></appmsg></msg>");
                 seed(&mut db, &account)?;
                 let tx = db.transaction()?;
                 let time = clock(&tx)?;

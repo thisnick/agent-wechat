@@ -23,13 +23,13 @@ const { startStack } = await import(join(worktree, "packages/client-ui/scenes/st
 const { seeder, ACCOUNT, SPARE } = await import(join(worktree, "packages/client-ui/scenes/seed.mjs"));
 const { startUiServer } = await import(join(worktree, "packages/client-ui/scenes/server.mjs"));
 const stack = await startStack();
-let browser, policyHub, ui;
+let browser, policyHub, ui, desktop;
 const hosts = [];
 const bin = process.env.WX_BINARY ?? join(process.env.CARGO_TARGET_DIR ?? join(repository, "packages/native-client-rust/target"), "debug", process.platform === "win32" ? "wx.exe" : "wx");
 const output = process.env.MINIPROGRAM_SCREENSHOTS ? resolve(process.env.MINIPROGRAM_SCREENSHOTS) : join(stack.dataDir, "screenshots");
 await mkdir(output, { recursive: true });
 const app = "wx0123456789abcdef";
-const childReady = async (args, config) => {
+const childReply = async (args, config) => {
   const child = spawn(bin, args, { stdio: [config ? "pipe" : "ignore", "pipe", "pipe"] });
   const exited = once(child, "exit");
   hosts.push({ child, exited });
@@ -41,10 +41,14 @@ const childReady = async (args, config) => {
     line, exited.then(([code]) => { throw new Error("Host exited " + code + " " + detail); }),
     new Promise((_, reject) => setTimeout(() => reject(new Error("Host readiness timed out")), 15000).unref()),
   ]);
-  const ready = JSON.parse(value);
-  assert.equal(ready.state, "ready");
-  assert.equal(ready.version, 1);
-  return { child, exited, url: ready.url };
+  const reply = JSON.parse(value);
+  assert.equal(reply.version, 1);
+  return { child, exited, reply };
+};
+const childReady = async (args, config) => {
+  const { child, exited, reply } = await childReply(args, config);
+  assert.equal(reply.state, "ready");
+  return { child, exited, url: reply.url };
 };
 try {
   const sim = seeder(stack);
@@ -72,7 +76,7 @@ try {
   }
   await sim.addAccount(ACCOUNT);
   await signIn(ACCOUNT);
-  await sim.miniPrograms("sim_mei");
+  await sim.miniPrograms("sim_mei", app);
   await sim.addAccount(SPARE);
   await signIn(SPARE);
   const cards = await sim.messages("sim_mei");
@@ -80,6 +84,11 @@ try {
   assert.equal(card?.miniProgram?.pagePath, "pages/menu/index?menu=seasonal");
   const listing = await sim.client.listMiniPrograms(ACCOUNT.id);
   assert.equal(listing.items.find(x => x.appId === app).available, true);
+  assert.equal(listing.items.find(x => x.appId === app).title, "Cafe");
+  assert.equal(listing.items.find(x => x.appId === app).iconMessageId, card.id);
+  const iconAssets = await sim.client.mediaAssets(ACCOUNT.id, card.id);
+  const icon = iconAssets.items.find(asset => asset.filename === "mini-program-icon");
+  assert.ok(icon);
   assert.equal(listing.items.find(x => x.title === "Trail guide").available, false);
   assert.deepEqual((await sim.client.listMiniPrograms(SPARE.id)).items, []);
   const launch = await sim.client.prepareMiniProgram(ACCOUNT.id, app, { sourceMessageId: card.id });
@@ -120,10 +129,6 @@ try {
   const pageErrors = [];
   page.on("pageerror", error => pageErrors.push(error.message));
   page.on("console", message => { if (message.type() === "error") pageErrors.push(message.text()); });
-  await page.route("**/runtime.js", async route => {
-    const response = await route.fetch();
-    await route.fulfill({ response, body: (await response.text()).replace('} catch {\n  main.textContent', '} catch (error) {\n  console.error(error.stack);\n  main.textContent') });
-  });
   await page.goto(host.url);
   await page.getByText("Menu: seasonal", { exact: true }).waitFor({ timeout: 8000 }).catch(async error => {
     console.error(JSON.stringify({ body: await page.locator("body").innerText(), errors: pageErrors }));
@@ -139,6 +144,23 @@ try {
   assert.equal(await page.getByText("Menu: seasonal: 0", { exact: true }).evaluate(n => getComputedStyle(n).color), "rgb(160, 40, 40)");
   await page.locator(".mini-toolbar").waitFor({ state: "visible" });
   console.log("PASS: compiled WXSS imports, responsive units, native selectors, isolated component styles and toolbar");
+  assert.equal(await page.locator("#next-page").evaluate(node => getComputedStyle(node).cursor), "pointer");
+  const failedPage = await browser.newPage();
+  const startupError = failedPage.waitForEvent("console", { predicate: message => message.text().includes("Mini Program startup failed") });
+  await failedPage.route("**/modules.js", route => route.abort());
+  await failedPage.goto(host.url);
+  await failedPage.getByText("This Mini Program page could not be opened.").waitFor();
+  await startupError;
+  await failedPage.close();
+  console.log("PASS: tap cursor and visible module startup failure");
+
+  const svg = await fetch(new URL("/icons/menu@2x.SVG", host.url));
+  assert.equal(svg.headers.get("content-type"), "image/svg+xml");
+  assert.match(svg.headers.get("content-security-policy"), /^sandbox; default-src 'none'/);
+  await svg.body.cancel();
+  const png = await fetch(new URL("/icons/menu.PNG", host.url));
+  assert.equal(png.headers.get("content-type"), "image/png");
+  await png.body.cancel();
   const embedded = page.locator("#embedded-image");
   await embedded.evaluate(image => image.decode());
   const imageResult = await embedded.evaluate(image => {
@@ -168,6 +190,11 @@ try {
   };
   page.on("request", trackExternal);
   const originalImage = await page.evaluate(() => getCurrentPages().at(-1).data.image);
+  await page.evaluate(() => getCurrentPages().at(-1).setData({ image: "../../icons/menu@2x.SVG" }));
+  assert.equal(await embedded.evaluate(async image => {
+    await image.decode();
+    return image.naturalWidth;
+  }), 2);
   for (const image of ["//example.invalid/image.png", "data:text/html,<script>1</script>", "javascript:void(0)"]) {
     await page.evaluate(image => getCurrentPages().at(-1).setData({ image }), image);
     assert.equal(await embedded.getAttribute("src"), null);
@@ -299,7 +326,7 @@ try {
   await page.getByPlaceholder("Add a note").pressSequentially("Lunch");
   await page.getByText("Lunch", { exact: true }).waitFor();
   await page.screenshot({ path: join(output, "cli-exparser.png") });
-  await page.getByRole("button", { name: "Open next page" }).click();
+  await page.locator("#next-page").click();
   await page.getByText("Menu: next", { exact: true }).waitFor();
   await page.getByRole("button", { name: "Back", exact: true }).click();
   await page.getByText("Menu updated", { exact: true }).waitFor();
@@ -377,8 +404,14 @@ try {
   // The simulator cannot retrieve WeChat's app attributes. Supply a synthetic
   // policy in the launch response over loopback to exercise the real CLI gate.
   const launchPath = `/v1/accounts/${ACCOUNT.id}/mini-programs/${app}/launches`;
+  let failPolicy = false;
   policyHub = createServer(async (request, response) => {
     try {
+      if (failPolicy && request.url === launchPath && request.method === "POST") {
+        response.writeHead(502, { "content-type": "application/json" });
+        response.end(JSON.stringify({ error: { code: "mini_program_network_unavailable" } }));
+        return;
+      }
       const chunks = [];
       for await (const chunk of request) chunks.push(chunk);
       const upstream = await fetch(stack.hub.endpoint + request.url, {
@@ -407,6 +440,14 @@ try {
   await once(policyHub, "listening");
   const policyArgs = [...args];
   policyArgs[policyArgs.indexOf("--server") + 1] = `http://127.0.0.1:${policyHub.address().port}`;
+  failPolicy = true;
+  const policyError = await childReply(["__mini-program-host-v1"], {
+    version: 1, endpoint: policyArgs[policyArgs.indexOf("--server") + 1], token: stack.hub.token,
+    accountId: ACCOUNT.id, appId: app,
+  });
+  assert.equal(policyError.reply.code, "mini_program_network_unavailable");
+  assert.equal((await policyError.exited)[0], 1);
+  failPolicy = false;
   const deniedHost = await childReady([...policyArgs, app, "--allow-request-url", "https://example.invalid/session"]);
   const localUrl = new URL(deniedHost.url);
   const requestUrl = new URL("/_wx/request", localUrl.origin);
@@ -533,6 +574,12 @@ try {
     "Failed to load resource: the server responded with a status of 403 (Forbidden)",
   ]);
   console.log("PASS: opt-in bridge origin/key checks, exact URL denials, and browser response callbacks using synthetic data");
+  const { reply: missingPackage, exited: missingExited } = await childReply(["__mini-program-host-v1"], {
+    version: 1, endpoint: stack.hub.endpoint, token: stack.hub.token,
+    accountId: ACCOUNT.id, appId: "wxfedcba9876543210",
+  });
+  assert.deepEqual(missingPackage, { version: 1, state: "error", code: "mini_program_package_unavailable" });
+  assert.equal((await missingExited)[0], 1);
   const machine = await childReady(["__mini-program-host-v1"], {
     version: 1, endpoint: stack.hub.endpoint, token: stack.hub.token,
     accountId: ACCOUNT.id, appId: app, sourceMessageId: card.id,
@@ -546,12 +593,30 @@ try {
   ui = await startUiServer();
   ui.attach(stack);
   const base = ui.origin + "/#/" + stack.hub.serverId + "/" + ACCOUNT.id;
-  const desktop = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  desktop = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   const uiErrors = [];
   desktop.on("pageerror", error => uiErrors.push(error.message));
+  await desktop.route("**/v1/accounts/*/media/lookup", async route => {
+    const response = await route.fetch();
+    const json = await response.json();
+    for (const item of json.items) {
+      for (const asset of item.assets) {
+        if (asset.id === icon.id) {
+          asset.state = "available";
+          asset.actualVariant = asset.variant;
+        }
+      }
+    }
+    await route.fulfill({ response, json });
+  });
+  await desktop.route(`**/media/${icon.id}/content*`, route => route.fulfill({
+    contentType: "image/png",
+    body: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l2sAAAAASUVORK5CYII=", "base64"),
+  }));
   await desktop.goto(base + "/chats/sim_mei");
   const openCard = desktop.getByRole("button", { name: "Open Seasonal menu" });
-  await openCard.waitFor({ timeout: 15000 });
+  await openCard.and(desktop.locator("button:enabled")).waitFor({ timeout: 15000 });
+  assert.equal(await openCard.evaluate(node => getComputedStyle(node).cursor), "pointer");
   await desktop.getByText("Package unavailable on this hub", { exact: true }).waitFor();
   assert.equal(await desktop.getByRole("button", { name: "Open A weekend hike" }).isDisabled(), true);
   await desktop.screenshot({ path: join(output, "desktop-preview-cards.png") });
@@ -563,6 +628,8 @@ try {
   await desktop.getByRole("heading", { name: "Mini Programs", exact: true }).waitFor();
   await desktop.getByText("Experimental", { exact: true }).waitFor();
   assert.equal(await desktop.locator(".sidebar").isVisible(), false);
+  const listIcon = desktop.locator("li").filter({ has: desktop.getByRole("button", { name: "Open Cafe" }) }).locator(".mini-program-icon img");
+  await listIcon.evaluate(image => image.decode());
   const listRequest = desktop.waitForRequest(req => req.method() === "POST" && req.url().endsWith("/launches"));
   await desktop.getByRole("button", { name: "Open Cafe" }).click();
   assert.equal((await listRequest).postDataJSON().sourceMessageId, undefined);
@@ -577,6 +644,7 @@ try {
   assert.deepEqual(uiErrors, []);
   console.log("PASS: desktop frontend preview, cards, list, account switch, and distinct launch requests");
 } finally {
+  await desktop?.unrouteAll({ behavior: "ignoreErrors" });
   await browser?.close();
   await ui?.close();
   for (const { child, exited } of hosts) {
