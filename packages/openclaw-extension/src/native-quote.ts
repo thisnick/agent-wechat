@@ -10,7 +10,7 @@ export function sameEmbeddedQuote(stored: NonNullable<NativeMessage["quote"]>, c
   const compared = { ...current };
   // Older queued inputs do not consume these additive display fields. Keep
   // comparing every field they did receive; never replace their saved excerpt.
-  for (const field of ["embeddedLink", "embeddedSticker"] as const) {
+  for (const field of ["embeddedLink", "embeddedSticker", "senderName"] as const) {
     if (!Object.hasOwn(stored, field)) delete compared[field];
   }
   return JSON.stringify(stored) === JSON.stringify(compared);
@@ -37,6 +37,9 @@ export function renderEmbeddedQuote(message: NativeMessage, permitted = true, im
   if (state === "embedded" && !image && !source.embeddedText) return unavailable("invalid");
   const content = state === "missing" ? "" : image ? imageBody ?? "[Image metadata embedded in quote; image not retrieved]" : source.embeddedText ?? "";
   const status = state === "unsupported" ? `[${label} attachment unavailable from embedded quote]` : state === "missing" ? "[Embedded quote content unavailable]" : "";
-  return { body: `${comment}${comment ? "\n\n" : ""}[Quoted ${label} from ${source.senderId ?? "unknown sender"}; embedded in reply]\n${[content, status].filter(Boolean).join("\n")}\n[/Quoted message]`,
+  const suppliedName = source.senderName;
+  const author = typeof suppliedName === "string" && suppliedName.trim() && suppliedName.length <= 4096
+    && !/[\u0000-\u001f\u007f-\u009f]/.test(suppliedName) ? suppliedName : source.senderId ?? "unknown sender";
+  return { body: `${comment}${comment ? "\n\n" : ""}[Quoted ${label} from ${author}; embedded in reply]\n${[content, status].filter(Boolean).join("\n")}\n[/Quoted message]`,
     image, quote: { state, type: source.type, senderId: source.senderId ?? undefined } };
 }

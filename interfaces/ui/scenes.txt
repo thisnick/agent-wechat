@@ -16,5 +16,6 @@ scene message-highlight | route /{server}/{account}/chats/{thread}/message/{mess
 scene new-chat | route /{server}/{account}/new-chat, viewports desktop | The dialog for starting a direct conversation from the contact list.
 scene new-group | route /{server}/{account}/new-chat, viewports desktop | The new chat dialog on its New group tab, with two contacts chosen.
 scene new-group-avatar | route /{server}/{account}/chats, viewports desktop | A newly received group shows its room avatar while its member list is unavailable.
+scene quoted-sender-names | route /{server}/{account}/chats/{thread}, viewports desktop+narrow | Quoted replies use supplied author names, cached names for older replies, and You for own messages.
 scene settings | route /{server}/{account}/settings, viewports desktop+narrow | Settings for the app, the hub and the signed-in account.
 scene unnamed-group-chat | route /{server}/{account}/chats/{thread}, viewports desktop+narrow | An unnamed group labeled with member names in the chat list and conversation header.
