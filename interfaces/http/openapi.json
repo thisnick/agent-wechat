@@ -2541,6 +2541,13 @@
               "null"
             ]
           },
+          "senderName": {
+            "description": "Sender's display name carried inside the reply, when supplied by WeChat.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "serverId": {
             "description": "WeChat's ID of the quoted message, as a string.",
             "type": "string"
@@ -3480,6 +3487,20 @@
         ],
         "type": "object"
       },
+      "RefreshAvatarRequest": {
+        "additionalProperties": false,
+        "description": "Optional group context for an OpenIM member's avatar lookup.",
+        "properties": {
+          "roomId": {
+            "description": "Group containing this known member, when context is required by WeChat.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "RoomQuery": {
         "additionalProperties": false,
         "description": "Options for looking up one group.",
@@ -4317,6 +4338,16 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshAvatarRequest"
+              }
+            }
+          },
+          "required": false
+        },
         "responses": {
           "202": {
             "content": {
@@ -4342,7 +4373,7 @@
             ]
           }
         ],
-        "summary": "Ask WeChat for the latest avatar of one contact. Poll the returned operation.",
+        "summary": "Ask WeChat for the latest avatar of one contact, with optional group context for an OpenIM member. Poll the returned operation.",
         "tags": [
           "contacts"
         ],
