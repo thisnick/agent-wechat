@@ -7,6 +7,7 @@ mod hub;
 mod i18n;
 #[cfg(target_os = "macos")]
 mod macos_notifications;
+mod miniprogram;
 mod notification_sound;
 mod notifications;
 mod transport;
@@ -616,9 +617,11 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -633,6 +636,7 @@ fn main() {
             desktop_copy_key,
             desktop_forget,
             desktop_install_cli,
+            miniprogram::desktop_open_mini_program,
             desktop_quit,
             notifications::notifications_context,
             notifications::notifications_take_target,

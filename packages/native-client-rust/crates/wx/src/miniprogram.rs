@@ -11,8 +11,10 @@ use axum::{
     Json, Router,
 };
 use clap::Subcommand;
+use serde::Deserialize;
 use serde_json::json;
 use std::{collections::BTreeMap, io::Write, sync::Arc};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 use wechat_api::contracts::{
@@ -25,12 +27,12 @@ const JS: &str = "text/javascript; charset=utf-8";
 
 #[derive(Subcommand)]
 pub(super) enum MiniProgramCommand {
-    /// Fetch a missing main package from WeChat into the hub's cache.
+    /// Fetch a missing main package from WeChat into the hub's cache (experimental).
     Fetch {
         /// Public AppID of the Mini Program to download.
         app: String,
     },
-    /// Print a local URL and serve a verified Mini Program until interrupted.
+    /// Print a local URL and serve a verified Mini Program until interrupted (experimental).
     Serve {
         /// Public AppID of the Mini Program in the hub's cache.
         app: String,
@@ -68,6 +70,50 @@ struct Runner {
 struct Subpackage {
     package: NativeMiniProgramPackage,
     modules: OnceCell<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostStart {
+    version: u8,
+    endpoint: String,
+    token: String,
+    certificate: Option<String>,
+    account_id: String,
+    app_id: String,
+    source_message_id: Option<String>,
+}
+
+pub(super) async fn machine_host() -> Result<()> {
+    let mut stdin = BufReader::new(tokio::io::stdin());
+    let mut input = Vec::new();
+    (&mut stdin)
+        .take(65536)
+        .read_until(b'\n', &mut input)
+        .await?;
+    ensure!(
+        input.ends_with(b"\n"),
+        "Invalid Mini Program host configuration"
+    );
+    let start: HostStart =
+        serde_json::from_slice(&input).context("Invalid Mini Program host configuration")?;
+    ensure!(start.version == 1, "Unsupported Mini Program host protocol");
+    let remote = Remote::with_connection(
+        wechat_config::ClientConfig {
+            schema_version: 1,
+            endpoint: start.endpoint,
+            token_file: Default::default(),
+            account: Some(start.account_id),
+        },
+        Some(start.token),
+        start.certificate.as_deref(),
+        true,
+    )?;
+    // The startup record is the only input. Any further byte or EOF closes the host.
+    tokio::select! {
+        outcome = serve(remote, start.app_id, start.source_message_id, Vec::new(), true) => outcome,
+        _ = stdin.read_u8() => Ok(()),
+    }
 }
 
 pub(super) async fn run(remote: Remote, command: MiniProgramCommand, json: bool) -> Result<()> {

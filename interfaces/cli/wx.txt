@@ -386,10 +386,10 @@ wx messages voice status | hidden alias | Alias of wx messages voice get
 wx messages watch | - | Stream message events, optionally saving a resume cursor
 wx messages watch --after | takes <AFTER>, default 0 | Start after this event cursor, such as the last one you processed
 wx messages watch --cursor-file | takes <CURSOR_FILE> | Save the last event cursor to this private file and resume from it next time
-wx miniprogram | - | Open a Mini Program from the selected account's verified package cache
-wx miniprogram fetch | - | Fetch a missing main package from WeChat into the hub's cache
+wx miniprogram | - | Open a Mini Program from the selected account's verified package cache (experimental)
+wx miniprogram fetch | - | Fetch a missing main package from WeChat into the hub's cache (experimental)
 wx miniprogram fetch <APP> | position 1, required | Public AppID of the Mini Program to download
-wx miniprogram serve | - | Print a local URL and serve a verified Mini Program until interrupted
+wx miniprogram serve | - | Print a local URL and serve a verified Mini Program until interrupted (experimental)
 wx miniprogram serve --allow-request-url | takes <HTTPS_URL>, repeatable | Restrict server-approved requests and display images to exact HTTPS URLs. Repeat and omit queries
 wx miniprogram serve --message | takes <MESSAGE> | Saved Mini Program card to open instead of the default page
 wx miniprogram serve <APP> | position 1, required | Public AppID of the Mini Program in the hub's cache

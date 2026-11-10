@@ -120,6 +120,7 @@
     "fileNotSaved": "The file could not be saved. Try downloading it again."
   },
   "desktopShell": {
+    "miniProgramExperimental": "Experimental",
     "actionFailedBody": "{{error}}. Click to open the chat.",
     "actionMarkRead": "Mark as Read",
     "actionMessage": "Message",
@@ -710,6 +711,28 @@
     "signWechatAgain": "Sign in to WeChat again.",
     "useNameMost512Utf": "Use a name of at most 512 UTF-8 bytes without control characters.",
     "you": "You"
+  },
+  "miniPrograms": {
+    "title": "Mini Programs",
+    "singular": "Mini Program",
+    "experimental": "Experimental",
+    "navigation": "Mini Programs (experimental)",
+    "availableFor": "Available on this hub for {{account}}",
+    "refresh": "Refresh",
+    "loading": "Loading Mini Programs…",
+    "couldNotLoad": "Could not load Mini Programs from this hub.",
+    "empty": "No Mini Programs available for this account.",
+    "available": "Available to open",
+    "packageUnavailable": "Package unavailable on this hub",
+    "openInDesktop": "Open in the desktop app",
+    "openNamed": "Open {{title}}",
+    "open": "Open",
+    "opening": "Opening…",
+    "previewReady": "Page is ready. AgentWechat opens it in a separate window.",
+    "couldNotOpen": "Could not open this Mini Program page.",
+    "sharedPageUnavailable": "Shared page unavailable",
+    "availabilityUnknown": "Program availability could not be checked",
+    "checkingAvailability": "Checking availability…"
   },
   "sharedLink": {
     "open": "Open {{title}} ({{host}})",

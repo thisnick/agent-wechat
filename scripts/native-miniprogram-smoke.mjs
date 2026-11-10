@@ -13,7 +13,6 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { createInterface } from "node:readline";
 import { promisify } from "node:util";
-import { stageMiniProgram } from "./fixtures/native-miniprogram.mjs";
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(join(repository, "packages/client-ui/package.json"));
 const { chromium } = process.env.PLAYWRIGHT_MODULE
@@ -22,20 +21,22 @@ const { chromium } = process.env.PLAYWRIGHT_MODULE
 const worktree = repository;
 const { startStack } = await import(join(worktree, "packages/client-ui/scenes/stack.mjs"));
 const { seeder, ACCOUNT, SPARE } = await import(join(worktree, "packages/client-ui/scenes/seed.mjs"));
+const { startUiServer } = await import(join(worktree, "packages/client-ui/scenes/server.mjs"));
 const stack = await startStack();
-let browser, policyHub;
+let browser, policyHub, ui;
 const hosts = [];
 const bin = process.env.WX_BINARY ?? join(process.env.CARGO_TARGET_DIR ?? join(repository, "packages/native-client-rust/target"), "debug", process.platform === "win32" ? "wx.exe" : "wx");
 const output = process.env.MINIPROGRAM_SCREENSHOTS ? resolve(process.env.MINIPROGRAM_SCREENSHOTS) : join(stack.dataDir, "screenshots");
 await mkdir(output, { recursive: true });
 const app = "wx0123456789abcdef";
-const childReady = async args => {
-  const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+const childReady = async (args, config) => {
+  const child = spawn(bin, args, { stdio: [config ? "pipe" : "ignore", "pipe", "pipe"] });
   const exited = once(child, "exit");
   hosts.push({ child, exited });
   let detail = "";
   child.stderr.on("data", data => { detail = (detail + data).slice(-300); });
   const line = once(createInterface({ input: child.stdout }), "line");
+  if (config) child.stdin.write(JSON.stringify(config) + "\n");
   const [value] = await Promise.race([
     line, exited.then(([code]) => { throw new Error("Host exited " + code + " " + detail); }),
     new Promise((_, reject) => setTimeout(() => reject(new Error("Host readiness timed out")), 15000).unref()),
@@ -71,12 +72,7 @@ try {
   }
   await sim.addAccount(ACCOUNT);
   await signIn(ACCOUNT);
-  await stageMiniProgram(stack.dataDir, ACCOUNT.id);
-  for (const available of [true, false]) {
-    await stack.control({ op: "mini_program_card", account: ACCOUNT.id, peer: "sim_mei", available });
-    await sim.advance(1);
-  }
-  await sim.settled("sim_mei", 2);
+  await sim.miniPrograms("sim_mei");
   await sim.addAccount(SPARE);
   await signIn(SPARE);
   const cards = await sim.messages("sim_mei");
@@ -524,8 +520,52 @@ try {
     "Failed to load resource: the server responded with a status of 403 (Forbidden)",
   ]);
   console.log("PASS: opt-in bridge origin/key checks, exact URL denials, and browser response callbacks using synthetic data");
+  const machine = await childReady(["__mini-program-host-v1"], {
+    version: 1, endpoint: stack.hub.endpoint, token: stack.hub.token,
+    accountId: ACCOUNT.id, appId: app, sourceMessageId: card.id,
+  });
+  await page.goto(machine.url);
+  await page.getByText("Menu: seasonal", { exact: true }).waitFor();
+  machine.child.stdin.end();
+  assert.equal((await machine.exited)[0], 0);
+  await assert.rejects(() => fetch(machine.url));
+  console.log("PASS: desktop host opens the shared page and stops when its control pipe closes");
+  ui = await startUiServer();
+  ui.attach(stack);
+  const base = ui.origin + "/#/" + stack.hub.serverId + "/" + ACCOUNT.id;
+  const desktop = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  const uiErrors = [];
+  desktop.on("pageerror", error => uiErrors.push(error.message));
+  await desktop.goto(base + "/chats/sim_mei");
+  const openCard = desktop.getByRole("button", { name: "Open Seasonal menu" });
+  await openCard.waitFor({ timeout: 15000 });
+  await desktop.getByText("Package unavailable on this hub", { exact: true }).waitFor();
+  assert.equal(await desktop.getByRole("button", { name: "Open A weekend hike" }).isDisabled(), true);
+  await desktop.screenshot({ path: join(output, "desktop-preview-cards.png") });
+  const cardRequest = desktop.waitForRequest(req => req.method() === "POST" && req.url().endsWith("/launches"));
+  await openCard.click();
+  assert.equal((await cardRequest).postDataJSON().sourceMessageId, card.id);
+  await desktop.getByText("Page is ready. AgentWechat opens it in a separate window.").waitFor();
+  await desktop.getByRole("button", { name: "Mini Programs", exact: true }).click();
+  await desktop.getByRole("heading", { name: "Mini Programs", exact: true }).waitFor();
+  await desktop.getByText("Experimental", { exact: true }).waitFor();
+  assert.equal(await desktop.locator(".sidebar").isVisible(), false);
+  const listRequest = desktop.waitForRequest(req => req.method() === "POST" && req.url().endsWith("/launches"));
+  await desktop.getByRole("button", { name: "Open Cafe" }).click();
+  assert.equal((await listRequest).postDataJSON().sourceMessageId, undefined);
+  await desktop.getByText("Page is ready. AgentWechat opens it in a separate window.").waitFor();
+  await desktop.screenshot({ path: join(output, "desktop-preview-list.png") });
+  await desktop.setViewportSize({ width: 390, height: 844 });
+  await desktop.screenshot({ path: join(output, "desktop-preview-narrow.png") });
+  await desktop.getByRole("button", { name: "Switch account" }).click();
+  await desktop.getByRole("button", { name: new RegExp(SPARE.alias) }).click();
+  await desktop.getByRole("button", { name: "Mini Programs", exact: true }).click();
+  await desktop.getByText("No Mini Programs available for this account.").waitFor();
+  assert.deepEqual(uiErrors, []);
+  console.log("PASS: desktop frontend preview, cards, list, account switch, and distinct launch requests");
 } finally {
   await browser?.close();
+  await ui?.close();
   for (const { child, exited } of hosts) {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
     await exited;

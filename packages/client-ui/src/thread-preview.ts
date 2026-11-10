@@ -49,6 +49,8 @@ export function messageSummary(
       ? message.body?.trim() || t("threadPreview.forwardedMessages")
       : ["text", "reply"].includes(kind)
       ? message.body || t("threadPreview.message")
+      : kind === "mini-program"
+      ? message.miniProgram?.title || t("miniPrograms.singular")
       : kind === "link"
       ? message.link?.title || t("threadPreview.link")
       : message.type === 48 && message.location

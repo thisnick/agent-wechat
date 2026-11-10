@@ -74,7 +74,40 @@ const qr = (page) => [page.locator("img.login-qr")];
 /** The hub address includes the port the scenes server happened to get. */
 const hubAddress = (page) => [page.locator("#hub-address")];
 
+async function miniProgramWorld(sim) {
+  await sim.addAccount(ACCOUNT);
+  await sim.signIn(ACCOUNT);
+  await sim.miniPrograms("sim_mei");
+  return { thread: "sim_mei" };
+}
+
 export const scenes = [
+  {
+    name: "mini-program-cards",
+    route: "chat",
+    description: "Mini Program cards with an available shared page and a missing package.",
+    viewports: ["desktop", "narrow"],
+    setup: miniProgramWorld,
+    target: (world) => ({ account: ACCOUNT.id, thread: world.thread }),
+    ready: async ({ page, expect }) => {
+      await expect(page.getByRole("button", { name: "Open Seasonal menu" })).toBeEnabled();
+      await expect(page.getByRole("button", { name: "Open A weekend hike" })).toBeDisabled();
+    },
+  },
+  {
+    name: "mini-program-list",
+    route: "mini-programs",
+    description: "Programs from the account's staged cache and received cards.",
+    viewports: ["desktop", "narrow"],
+    setup: miniProgramWorld,
+    target: () => ({ account: ACCOUNT.id }),
+    ready: async ({ page, expect }) => {
+      await expect(page.getByRole("heading", { name: "Mini Programs" })).toBeVisible();
+      await expect(page.getByText("Experimental", { exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Open Cafe" })).toBeEnabled();
+      await expect(page.getByRole("button", { name: "Open Trail guide" })).toBeDisabled();
+    },
+  },
   {
     name: "login-qr",
     route: "login",

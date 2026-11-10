@@ -4,6 +4,7 @@ import type { Connection } from "./connection.ts";
 import { t } from "./i18n.ts";
 import { embeddedQuotePreview, localQuote } from "./quote-preview.ts";
 import { MediaCard } from "./media.tsx";
+import { MiniProgramCard } from "./mini-program.tsx";
 import { SharedLink } from "./shared-link.tsx";
 import { useConversationNavigation } from "./conversation-navigation.tsx";
 import { emojiText } from "./emoji-text.ts";
@@ -60,7 +61,9 @@ export function QuotedReply({
           ? name(quote.senderId)
           : t("quotedReply.quotedMessage")}
       </strong>
-      {quote.content?.link ? (
+      {quote.miniProgram ? (
+        <MiniProgramCard card={quote.miniProgram} connection={connection} />
+      ) : quote.content?.link ? (
         <SharedLink message={quote.content} connection={connection} compact />
       ) : quote.content ? (
         <MediaCard

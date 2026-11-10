@@ -1,4 +1,5 @@
 import { ConversationRow } from "./conversation-row.tsx";
+import { AppWindow } from "lucide-react";
 import { ConversationFilterBar } from "./conversation-filter-bar.tsx";
 import { conversationCategory, conversationUnreadCounts, savedConversationCategories } from "./conversation-filters.ts";
 import { ThreadPinSwitch, useThreadPinPreview } from "./thread-pinning.tsx";
@@ -89,6 +90,7 @@ import "./style.css";
 import "./onboarding.css";
 import "./client.css";
 import { SharedLink } from "./shared-link.tsx";
+import { MiniProgramCard, MiniProgramsList, MiniProgramsProvider } from "./mini-program.tsx";
 import { LocationMessage } from "./location-message.tsx";
 import { SystemNotice } from "./system-notice.tsx";
 import { MentionEditor } from "./mention-editor.tsx";
@@ -944,7 +946,8 @@ function Chats({
   const view = isViewRoute(route) ? route : lastView.current;
   const section = view.name === "contacts" ? "contacts" : "chats";
   const routeThread = "thread" in view ? view.thread : null;
-  const mobile = routeThread !== null;
+  const programsView = view.name === "mini-programs";
+  const mobile = routeThread !== null || programsView;
   const details = view.name === "info";
   const settings = route.name === "settings";
   const newChat = route.name === "new-chat";
@@ -1232,13 +1235,16 @@ function Chats({
   });
   const firstPinned = threads.find((thread) => thread.pinned === true)?.id;
   return (
-    <div className={`shell ${mobile ? "mobile-chat" : ""}`}>
+    <MiniProgramsProvider key={JSON.stringify([here.server, here.account])}
+      connection={connection} account={here.account} accountName={account?.alias || here.account}
+      active={programsView}>
+    <div className={`shell ${mobile ? "mobile-chat" : ""} ${programsView ? "mini-programs-view" : ""}`}>
       <nav className="rail" aria-label={t("main.mainNavigation")}>
         <div className="brand" title="AgentWechat">
           <Logo />
         </div>
         <button
-          className={`nav-btn ${section === "chats" ? "active" : ""}`}
+          className={`nav-btn ${!programsView && section === "chats" ? "active" : ""}`}
           aria-label={t("main.chats")}
           onClick={() => router.push(listRoute)}
         >
@@ -1250,6 +1256,15 @@ function Chats({
           onClick={() => router.push({ name: "contacts", ...here })}
         >
           <Icon name="people" />
+        </button>
+        <button
+          className={`nav-btn ${programsView ? "active" : ""}`}
+          aria-label={t("miniPrograms.title")}
+          aria-current={programsView ? "page" : undefined}
+          title={t("miniPrograms.navigation")}
+          onClick={() => router.push({ name: "mini-programs", ...here })}
+        >
+          <AppWindow size={20} aria-hidden="true" />
         </button>
         <div className="rail-spacer" />
         <button
@@ -1383,6 +1398,7 @@ function Chats({
         </div>
       </aside>
       <main className="workspace">
+        {programsView ? <MiniProgramsList /> : <>
         <header className="chat-header">
           <Button
             icon="back"
@@ -1847,6 +1863,7 @@ function Chats({
             </PhotoViewer>
           </ReplyContext.Provider>
         </ConversationNavigation>
+        </>}
       </main>
       {accountMenu && (
         <div
@@ -1996,6 +2013,7 @@ function Chats({
         </div>
       )}
     </div>
+    </MiniProgramsProvider>
   );
 }
 function SearchResults({
@@ -2302,6 +2320,8 @@ function Message({
                       : t("main.forwardedContentUnavailable")))}
                 </p>
               </div>
+            ) : presentation === "mini-program" && m.miniProgram ? (
+              <MiniProgramCard card={m.miniProgram} message={m} connection={connection} />
             ) : presentation === "link" && m.link ? (
               <SharedLink message={m} connection={connection} />
             ) : presentation === "location" && m.location ? (

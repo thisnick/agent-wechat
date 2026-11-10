@@ -72,3 +72,11 @@ If no notifications appear, allow AgentWechat in **System Settings → Notificat
 <Aside title="Good to know">
 Once configured, the local hub starts whenever you open the app, even when the interface uses a remote hub. Closing the window keeps it running in the tray or menu bar. Choose **Quit AgentWechat** to stop it. Quitting does not sign out of WeChat or delete profiles. Linux desktops need an unlocked Secret Service keyring. A separately installed CLI does not read the desktop keyring; export a key for it or create a separate [API token](/reference/tokens/).
 </Aside>
+
+## Open a Mini Program
+
+Mini Programs are experimental.
+
+Select **Open** on a Mini Program card to open the shared page in a separate window. To open a program at its home page, select **Mini Programs** in the navigation and choose it from the selected account's list.
+
+The hub must have a compatible package staged for that account. Cards still show the title and available artwork when the package is missing. See [Open a Mini Program](/use/cli/#open-a-mini-program) for package setup. Close the program window to stop its local host.

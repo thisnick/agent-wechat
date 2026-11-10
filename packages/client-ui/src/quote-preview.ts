@@ -80,6 +80,7 @@ export function embeddedQuotePreview(
     : t("quotePreview.quotedMessageUnavailable");
   return {
     text,
+    miniProgram: !recalled && state === "embedded" ? quote?.embeddedMiniProgram : undefined,
     senderId: recalled ? undefined : quote?.senderId,
     senderName: !recalled && typeof quote?.senderName === "string"
       && quote.senderName.length <= 4096
@@ -113,6 +114,7 @@ export function quotedText(message: NativeMessage): string {
     );
   if (["text", "reply"].includes(kind))
     return message.body || t("quotePreview.messageTextUnavailable");
+  if (kind === "mini-program") return message.miniProgram?.title || t("miniPrograms.singular");
   if (kind === "link") return message.link?.title || t("quotePreview.link");
   if (message.type === 48 && message.location)
     return (

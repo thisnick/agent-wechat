@@ -1,10 +1,15 @@
 ---
 "@agent-wechat/cli": minor
 "@agent-wechat/rust-crates": minor
+"@agent-wechat/desktop": minor
+"@agent-wechat/client-ui": minor
 ---
 
 Open Mini Programs in a browser with `wx miniprogram serve APP_ID`.
 Use `--message MESSAGE_ID` to open the page from a saved chat card.
+In AgentWechat, open a card or pick an app from the Mini Programs list to
+launch it in a separate window. CLI help and the desktop app mark Mini
+Programs as experimental.
 The hub verifies staged archives and can issue login codes when the
 account, package and access key allow it. The runner supports local network
 status, app visibility events, window-scoped storage, feedback UI, and

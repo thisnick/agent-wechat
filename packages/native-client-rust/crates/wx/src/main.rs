@@ -117,7 +117,7 @@ enum Command {
         #[command(subcommand)]
         command: Option<calls_cli::CallsCommand>,
     },
-    /// Open a Mini Program from the selected account's verified package cache.
+    /// Open a Mini Program from the selected account's verified package cache (experimental).
     #[command(name = "miniprogram")]
     MiniProgram {
         #[command(subcommand)]
@@ -1134,6 +1134,13 @@ async fn private_media_output(
 #[tokio::main]
 async fn main() {
     let arguments = std::env::args_os().collect::<Vec<_>>();
+    if arguments.len() == 2 && arguments[1] == "__mini-program-host-v1" {
+        if miniprogram::machine_host().await.is_err() {
+            println!(r#"{{"version":1,"state":"error","code":"mini_program_start_failed"}}"#);
+            std::process::exit(1);
+        }
+        std::process::exit(0);
+    }
     let json = arguments.iter().any(|s| s == "--json");
     let cli = match cli_help::command()
         .try_get_matches_from(arguments)
@@ -1198,6 +1205,14 @@ impl Remote {
         Self::with_token(config, None)
     }
     fn with_token(config: wechat_config::ClientConfig, token: Option<String>) -> Result<Self> {
+        Self::with_connection(config, token, None, false)
+    }
+    fn with_connection(
+        config: wechat_config::ClientConfig,
+        token: Option<String>,
+        certificate: Option<&str>,
+        direct: bool,
+    ) -> Result<Self> {
         let base = reqwest::Url::parse(&format!("{}/", config.endpoint.trim_end_matches('/')))?;
         if !base.username().is_empty()
             || base.password().is_some()
@@ -1216,11 +1231,18 @@ impl Remote {
         {
             bail!("remote daemon endpoints require HTTPS");
         }
+        let mut http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(65));
+        if direct {
+            http = http.no_proxy();
+        }
+        if let Some(certificate) = certificate {
+            http =
+                http.add_root_certificate(reqwest::Certificate::from_pem(certificate.as_bytes())?);
+        }
         Ok(Self {
-            http: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(Duration::from_secs(65))
-                .build()?,
+            http: http.build()?,
             base,
             token: match token {
                 Some(value) => {

@@ -2,6 +2,7 @@
 // simulator's control port. Everything a scene sees is created here, in a fixed
 // order, on a simulator clock that only moves when a scene advances it.
 import { NativeWeChatClient } from "@agent-wechat/shared";
+import { stageMiniProgram } from "../../../scripts/fixtures/native-miniprogram.mjs";
 import { ACCOUNT, SPARE } from "./accounts.mjs";
 
 export { ACCOUNT, SPARE };
@@ -101,6 +102,15 @@ export function seeder(stack) {
     },
     /** Moves the simulator clock, which stamps every message created afterwards. */
     advance: (seconds) => stack.control({ op: "advance", seconds }),
+    /** Stage one app and deliver two cards, including a card without a cached package. */
+    async miniPrograms(peer) {
+      await stageMiniProgram(stack.dataDir, ACCOUNT.id);
+      for (const available of [true, false]) {
+        await stack.control({ op: "mini_program_card", account: ACCOUNT.id, peer, available });
+        await sim.advance(1);
+      }
+      await sim.settled(peer, 2);
+    },
     /**
      * A message from a contact; `self` makes it a message from the account itself. In a
      * group, `sender` names the contact who speaks.
