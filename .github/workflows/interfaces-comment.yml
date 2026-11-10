@@ -1,0 +1,59 @@
+name: Interface comment
+
+# The producer runs fork code with read-only permissions. This workflow executes
+# only default-branch code; the artifact is parsed as data, never imported or run.
+on:
+  workflow_run:
+    workflows: [Interfaces]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: write
+
+concurrency:
+  group: interface-comment-${{ github.event.workflow_run.head_repository.id }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  comment:
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Locate this attempt's report
+        id: report
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const run = context.payload.workflow_run;
+            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
+              ...context.repo, run_id: run.id, per_page: 100
+            });
+            const report = artifacts.find(a => a.name === `interface-report-${run.run_attempt}` && !a.expired);
+            if (report) {
+              if (report.size_in_bytes > 300000) throw new Error('Interface report artifact is oversized');
+              core.setOutput('id', String(report.id));
+            } else core.info('No report produced; leaving the existing comment unchanged.');
+      - uses: actions/download-artifact@v4
+        if: steps.report.outputs.id != ''
+        with:
+          artifact-ids: ${{ steps.report.outputs.id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/interface-comment
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - name: Validate source and update the PR comment
+        if: steps.report.outputs.id != ''
+        uses: actions/github-script@v8
+        env:
+          REPORT_PATH: ${{ runner.temp }}/interface-comment/interface-report.json
+        with:
+          script: |
+            const { publish } = await import(`${process.env.GITHUB_WORKSPACE}/scripts/interfaces/publish-comment.mjs`);
+            await publish({ github, context, core, path: process.env.REPORT_PATH });

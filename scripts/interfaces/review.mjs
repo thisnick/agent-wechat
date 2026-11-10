@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 // Compares the interface listings between a base commit and the working tree, classifies
 // each change (added, removed, changed, breaking, missing docs) and renders the PR comment.
-// Usage: node scripts/interfaces/review.mjs --base <ref> [--comment] [--fail-on-missing-docs]
+// Usage: node scripts/interfaces/review.mjs --base <ref> [--comment] [--report-file <path>] [--fail-on-missing-docs]
 import { execFileSync } from 'node:child_process';
-import { appendFile, readFile, readdir } from 'node:fs/promises';
+import { appendFile, readFile, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { upsertComment } from './github.mjs';
+import { pullRequestEvent, upsertComment } from './github.mjs';
 
 export const root = join(dirname(fileURLToPath(import.meta.url)), '../..');
 export const MARKER = '<!-- agent-wechat-interfaces -->';
@@ -444,7 +444,7 @@ export async function review(baseRef) {
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   const argv = process.argv.slice(2);
   const baseRef = argv[argv.indexOf('--base') + 1];
-  if (!argv.includes('--base') || !baseRef) throw new Error('Usage: review.mjs --base <ref> [--comment] [--fail-on-missing-docs]');
+  if (!argv.includes('--base') || !baseRef) throw new Error('Usage: review.mjs --base <ref> [--comment] [--report-file <path>] [--fail-on-missing-docs]');
   const outcome = await review(baseRef);
   const reportFile = argv.includes('--oasdiff') ? argv[argv.indexOf('--oasdiff') + 1] : undefined;
   const openapi = reportFile ? { report: await readFile(reportFile, 'utf8').catch(() => ''), breaking: argv.includes('--oasdiff-breaking') } : undefined;
@@ -452,6 +452,12 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   console.log(body);
   if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, `${body}\n`);
   const changed = outcome.reports.some(r => r.baseline || r.result.added.length || r.result.removed.length || r.result.changed.length);
+  if (argv.includes('--report-file')) {
+    const file = argv[argv.indexOf('--report-file') + 1];
+    if (!file || file.startsWith('--')) throw new Error('--report-file needs a path');
+    const pr = pullRequestEvent().pull_request;
+    await writeFile(file, JSON.stringify({ number: pr.number, head: pr.head.sha, changed, body }));
+  }
   if (argv.includes('--comment')) {
     await upsertComment({ marker: MARKER, body, createIfMissing: changed }).catch(error => {
       // Fork PRs get a read-only token; the job summary still carries the report.
