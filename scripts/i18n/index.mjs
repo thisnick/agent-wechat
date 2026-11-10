@@ -1,16 +1,28 @@
 #!/usr/bin/env node
-// Checks translations of the desktop UI.
+// Translations of the desktop UI and the docs.
 //
-//   pnpm i18n check      fail on English-side errors and broken translations
+//   pnpm i18n status [--json]                   what is missing or out of date, per language
+//   pnpm i18n check                             fail on English-side errors and broken translations
+//   pnpm i18n stamp <lang> [--machine] [items]  record that translations match the current English
 //
-// English (packages/client-ui/locales/en.json) is the source. A translation may be
-// incomplete: a missing key shows the English text, so missing keys never fail.
-// What fails: code using a key English lacks, English keys no code uses, and a
-// translation that would render wrongly (bad JSON, unknown keys, placeholders that
-// differ from English, missing plural forms, empty text).
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+// English is the source: packages/client-ui/locales/en.json for the UI and the pages in
+// docs/src/content/docs/ for the docs. A translation may be incomplete: a missing key
+// or page shows English, so missing never fails. What fails: code using a key English
+// lacks, English keys no code uses, and a translation that would render wrongly (bad
+// JSON, unknown keys, placeholders that differ from English, missing plural forms,
+// empty text, docs pages whose code, components, links or anchors differ from English).
+//
+// Each UI translation has a <lang>.meta.json recording, per key, a hash of the English
+// it was translated from (`source`) and, when a machine wrote it, a hash of what it
+// wrote (`machine`). A docs page records `sourceHash` in its frontmatter. When the
+// English changes, the translation is stale: reported, exempt from placeholder checks,
+// and due for an update. A machine translation a person has since edited counts as
+// the person's. `stamp` updates the records: with no items, only unrecorded ones;
+// name keys or pages to confirm stale translations are still right.
+import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { compareDocs, docs, frontmatter, hash, stamp as stampPage } from './docs.mjs';
 
 export const root = join(dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -108,18 +120,39 @@ export function desktopKeyLiterals(source) {
  * root, and `list(dir, extensions)` lists files; both are swappable for tests.
  * Returns a list of problems, each `{ file, key?, message }`.
  */
-export function checkUi({ read, list, config = ui }) {
+/** Reads every UI catalog and its meta file. Parse errors are returned as problems. */
+export function loadUi({ read, list, config = ui }) {
   const problems = [];
-  const localeFiles = list(config.locales, ['.json']).filter(file => !file.endsWith('.meta.json'));
   const catalogs = {};
-  for (const file of localeFiles) {
+  const metas = {};
+  for (const file of list(config.locales, ['.json']).filter(file => !file.endsWith('.meta.json'))) {
     const tag = basename(file, '.json');
     try {
       catalogs[tag] = flatten(JSON.parse(read(file)));
     } catch (error) {
       problems.push({ file, message: `does not parse: ${error.message}` });
+      continue;
+    }
+    if (tag === 'en') continue;
+    const metaFile = `${config.locales}/${tag}.meta.json`;
+    try {
+      metas[tag] = JSON.parse(read(metaFile));
+    } catch (error) {
+      metas[tag] = {};
+      if (!/no file|ENOENT/.test(error.message)) problems.push({ file: metaFile, message: `does not parse: ${error.message}` });
     }
   }
+  return { catalogs, metas, problems };
+}
+
+/** The English text a translated key was made from: plural forms compare with `_other`. */
+const sourceText = (en, key) => en[key] ?? en[`${baseKey(key)}_other`];
+
+/** Whether a translated key's recorded English differs from the current English. */
+const isStale = (meta, en, key) => meta?.[key]?.source !== undefined && meta[key].source !== hash(sourceText(en, key) ?? '');
+
+export function checkUi({ read, list, config = ui }) {
+  const { catalogs, metas, problems } = loadUi({ read, list, config });
   const en = catalogs.en;
   if (!en) return [...problems, { file: `${config.locales}/en.json`, message: 'English catalog is missing' }];
 
@@ -180,7 +213,9 @@ export function checkUi({ read, list, config = ui }) {
         problems.push({ file, key, message: 'empty text (remove the key to show English instead)' });
         continue;
       }
-      const source = isPlural ? (en[`${base}_other`] ?? en[key]) : en[key];
+      // A stale translation is reported by `status`, not failed: English may have renamed a placeholder.
+      if (isStale(metas[tag], en, key)) continue;
+      const source = sourceText(en, key);
       const expected = placeholders(source);
       const actual = placeholders(value);
       // A plural form may leave out {{count}}, as in "one item".
@@ -201,23 +236,153 @@ export function checkUi({ read, list, config = ui }) {
   return problems;
 }
 
+/**
+ * Per UI language: `missing` English keys with no translation, `stale` translations
+ * whose English changed, `unstamped` translations with no record, `machine` keys a
+ * machine wrote and no one has edited since. Keys are as code uses them (no plural suffix).
+ */
+export function statusUi({ read, list, config = ui }) {
+  const { catalogs, metas } = loadUi({ read, list, config });
+  const en = catalogs.en ?? {};
+  const bases = [...new Set(Object.keys(en).map(baseKey))];
+  const out = {};
+  for (const [tag, catalog] of Object.entries(catalogs)) {
+    if (tag === 'en') continue;
+    const meta = metas[tag] ?? {};
+    const keysFor = base => Object.keys(catalog).filter(key => baseKey(key) === base);
+    const entry = { translated: 0, missing: [], stale: [], unstamped: [], machine: [] };
+    for (const base of bases) {
+      const keys = keysFor(base);
+      if (!keys.length) {
+        entry.missing.push(base);
+        continue;
+      }
+      entry.translated++;
+      if (keys.some(key => isStale(meta, en, key))) entry.stale.push(base);
+      else if (keys.some(key => meta[key]?.source === undefined)) entry.unstamped.push(base);
+      if (keys.every(key => meta[key]?.machine && meta[key].machine === hash(catalog[key]))) entry.machine.push(base);
+    }
+    out[tag] = entry;
+  }
+  return out;
+}
+
+/** Docs languages from docs/locales.mjs: `{ folder: lang }`. */
+async function docsLocaleMap() {
+  const { locales, translatedLocales } = await import(pathToFileURL(join(root, 'docs/locales.mjs')).href);
+  return Object.fromEntries(translatedLocales.map(folder => [folder, locales[folder].lang]));
+}
+
+function readDocs(list, read) {
+  return Object.fromEntries(list(docs.content, ['.md', '.mdx']).map(path => [relative(docs.content, path).replaceAll('\\', '/'), read(path)]));
+}
+
 const fsRead = path => readFileSync(join(root, path), 'utf8');
 const fsList = (dir, extensions) => files(join(root, dir), extensions).map(path => relative(root, path));
+const print = ({ file, key, message }) => console.error(`${file}${key ? `: ${key}` : ''}: ${message}`);
 
-function main(argv) {
-  const [command] = argv;
-  if (command !== 'check') {
-    console.error('Usage: pnpm i18n check');
-    return 2;
-  }
+/** Status of every language, UI and docs, keyed by language tag. */
+export async function status({ read = fsRead, list = fsList } = {}) {
+  const folders = await docsLocaleMap();
+  const pages = readDocs(list, read);
+  const docsStatus = compareDocs(pages, Object.keys(folders)).status;
+  const uiStatus = statusUi({ read, list });
+  const tags = [...new Set([...Object.keys(uiStatus), ...Object.values(folders)])].sort();
+  return Object.fromEntries(tags.map(tag => {
+    const folder = Object.keys(folders).find(name => folders[name] === tag);
+    return [tag, { ui: uiStatus[tag] ?? null, docs: folder ? { folder, ...docsStatus[folder] } : null }];
+  }));
+}
+
+async function check() {
   const problems = checkUi({ read: fsRead, list: fsList });
-  for (const { file, key, message } of problems) console.error(`${file}${key ? `: ${key}` : ''}: ${message}`);
+  const folders = await docsLocaleMap();
+  problems.push(...compareDocs(readDocs(fsList, fsRead), Object.keys(folders)).problems);
+  problems.forEach(print);
   if (problems.length) {
-    console.error(`\n${problems.length} translation problem${problems.length === 1 ? '' : 's'}. Missing translations are fine; these are not.`);
+    console.error(`\n${problems.length} translation problem${problems.length === 1 ? '' : 's'}. Missing or out-of-date translations are fine; these are not.`);
     return 1;
   }
-  console.log('UI translations are consistent with English.');
+  console.log('Translations are consistent with English.');
   return 0;
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) process.exitCode = main(process.argv.slice(2));
+async function showStatus(json) {
+  const result = await status();
+  if (json) {
+    console.log(JSON.stringify(result, null, 2));
+    return 0;
+  }
+  const list = (label, items) => items.length && console.log(`  ${label}: ${items.join(', ')}`);
+  for (const [tag, { ui: u, docs: d }] of Object.entries(result)) {
+    console.log(`${tag}`);
+    if (u) {
+      console.log(`  UI: ${u.translated} translated (${u.machine.length} by machine), ${u.missing.length} missing, ${u.stale.length} out of date, ${u.unstamped.length} unrecorded`);
+      list('UI missing', u.missing);
+      list('UI out of date', u.stale);
+    }
+    if (d) {
+      console.log(`  Docs (${d.folder}/): ${d.current.length + d.unstamped.length} current, ${d.missing.length} missing, ${d.stale.length} out of date, ${d.unstamped.length} unrecorded`);
+      list('Docs missing', d.missing);
+      list('Docs out of date', d.stale);
+    }
+  }
+  return 0;
+}
+
+/**
+ * Records that translations match the current English. `items` are UI keys or docs
+ * pages (`setup/install.mdx`); with none, only translations with no record are stamped.
+ */
+export async function stampLanguage(tag, { machine = false, items = [] } = {}, { read = fsRead, list = fsList, write = (path, text) => writeFileSync(join(root, path), text) } = {}) {
+  const changed = [];
+  const { catalogs, metas } = loadUi({ read, list });
+  const catalog = catalogs[tag];
+  if (catalog) {
+    const en = catalogs.en;
+    const meta = { ...metas[tag] };
+    for (const key of Object.keys(catalog)) {
+      const named = items.includes(key) || items.includes(baseKey(key));
+      if (items.length ? !named : meta[key]?.source !== undefined) continue;
+      meta[key] = { source: hash(sourceText(en, key) ?? ''), ...(machine ? { machine: hash(catalog[key]) } : {}) };
+      changed.push(key);
+    }
+    for (const key of Object.keys(meta)) if (!(key in catalog)) delete meta[key];
+    const sorted = Object.fromEntries(Object.keys(meta).sort().map(key => [key, meta[key]]));
+    // One line per key keeps diffs readable.
+    const lines = Object.entries(sorted).map(([key, value]) => `  ${JSON.stringify(key)}: ${JSON.stringify(value)}`);
+    write(`${ui.locales}/${tag}.meta.json`, `{\n${lines.join(',\n')}\n}\n`);
+  }
+  const folders = await docsLocaleMap();
+  const folder = Object.keys(folders).find(name => folders[name] === tag);
+  if (folder) {
+    const pages = readDocs(list, read);
+    for (const [path, text] of Object.entries(pages)) {
+      if (!path.startsWith(`${folder}/`)) continue;
+      const page = path.slice(folder.length + 1);
+      if (!(page in pages)) continue;
+      const named = items.includes(page) || items.includes(path);
+      if (items.length ? !named : frontmatter(text).fields.sourceHash) continue;
+      write(`${docs.content}/${path}`, stampPage(text, hash(pages[page])));
+      changed.push(path);
+    }
+  }
+  if (!catalog && !folder) throw new Error(`No UI catalog or docs folder for ${tag}`);
+  return changed;
+}
+
+async function main(argv) {
+  const [command, ...rest] = argv;
+  if (command === 'check') return check();
+  if (command === 'status') return showStatus(rest.includes('--json'));
+  if (command === 'stamp' && rest[0] && !rest[0].startsWith('--')) {
+    const [tag, ...args] = rest;
+    const changed = await stampLanguage(tag, { machine: args.includes('--machine'), items: args.filter(arg => !arg.startsWith('--')) });
+    console.log(changed.length ? `Recorded ${changed.length} translation${changed.length === 1 ? '' : 's'} as matching the current English.` : 'Nothing to record.');
+    return 0;
+  }
+  console.error('Usage: pnpm i18n status [--json] | check | stamp <lang> [--machine] [keys or pages]');
+  return 2;
+}
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) process.exitCode = await main(process.argv.slice(2));

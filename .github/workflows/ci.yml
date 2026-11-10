@@ -101,6 +101,7 @@ jobs:
               - '.github/workflows/desktop.yml'
             docs:
               - 'docs/**'
+              - 'scripts/i18n/**'
               - '.node-version'
               - 'pnpm-lock.yaml'
               - '.github/workflows/ci.yml'
@@ -164,7 +165,7 @@ jobs:
       # Missing translations are fine; English-side errors and broken translations fail.
       - name: Check translations
         run: |
-          node --test scripts/i18n/index.test.mjs
+          node --test scripts/i18n/*.test.mjs
           pnpm i18n check
 
   helpers:
@@ -206,6 +207,16 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --filter @agent-wechat/docs
+
+      # Missing translations are fine; broken ones (code, links, anchors) fail.
+      - name: Check translations
+        run: |
+          node --test scripts/i18n/*.test.mjs
+          node scripts/i18n/index.mjs check
+
+      # Preview images for translated pages need CJK glyphs.
+      - name: Install fonts
+        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
 
       - name: Build docs
         run: pnpm --filter @agent-wechat/docs build

@@ -1,0 +1,81 @@
+---
+title: 语音通话
+description: CLI 语音通话、群语音会议控制与 OpenClaw 接入配置。
+sourceHash: fde01712b53e
+---
+
+使用 `wx` 通过本机的麦克风和扬声器进行单聊语音呼叫或群语音会议通话。OpenClaw 的接入配置请参考[配置语音通话](/openclaw/calling/)。
+
+## 检查可用性 \{#check-availability}
+
+1. 选择目标守护进程和账号，然后运行 `wx calls status`。当前尚未通过认证会话的账号会汇报 `capabilities: {}`。执行所需操作前必须确认服务端具备对应声明的能力。
+2. 运行 `wx calls devices` 列出本地的麦克风与扬声器设备。
+3. 按照下方说明发起或应答通话。在清理流程完成前请保持持有通话的终端打开；第二个客户端无法中途接管。
+
+## 单聊呼叫与通话监听 \{#direct-calls-and-monitoring}
+
+| 命令 | 行为说明 |
+| --- | --- |
+| `wx calls monitor --json` | 仅监听通话事件，不打开本地音频设备 |
+| `wx calls monitor` | 等待来电邀请；在确认接听时打开本地音频 |
+| `wx calls dial 联系人` | 使用本机的麦克风和扬声器参与通话 |
+| `wx calls answer [CALL_ID]` | 使用本地音频应答当前匹配的来电邀请 |
+
+在守护进程确认振铃后，监听终端会显示单聊来电提示。对于群语音会议邀请，输入 `j 序号` 即可加入。退出通话后会返回监听状态；独立的发起/加入命令在通话结束后直接退出。JSON 监听模式绝不会自动应答或自动加入。
+
+## 群语音会议通话 \{#conference-calls}
+
+1. 发起群聊通话需要具备 `conferenceCreate` 与 `conferenceAudio` 能力；加入已有群聊通话需要具备 `conferenceJoin` 与 `conferenceAudio` 能力。
+2. 在既有群聊中携带联系人 ID 发起会议：
+
+   ```sh
+   wx calls conference start GROUP_ID --invite CONTACT_A --invite CONTACT_B
+   ```
+
+   或者加入当前的群聊通话邀请：
+
+   ```sh
+   wx calls conference join GROUP_ID
+   ```
+
+   若当前群内无通话邀请，则加入操作失败；该命令绝不会擅自新建会议房间。
+3. 连接成功后即可开始讲话。接收到的所有音轨会自动混音后输出播放：
+
+   ```text
+   Connected. Microphone and mixed speakers active; 2 receive tracks.
+   ```
+
+## 音频与通话中控制 \{#audio-and-in-call-controls}
+
+建议先运行 `wx calls devices`，然后通过选项指定端点设备：
+`wx calls dial CONTACT --input-device INPUT_ID --output-device OUTPUT_ID`。
+若省略这些选项，将默认使用操作系统设备。Linux 支持 PulseAudio 或 PipeWire-Pulse 设备名；Windows 支持端点 ID。在 macOS 上，请在“系统设置”中选择默认设备；当前适配器不支持自定义端点 ID。
+
+交互式通话会在下方展示控制指令与音频电平表。按下按键后请按回车确认；输入 `l` 或 `h` 可退出通话并在 `monitor` 模式下返回监听。Ctrl-C 会在短暂等待清理后退出通话并结束命令。
+
+```text
+m + Enter    麦克风控制          s + Enter    扬声器控制
+i + Enter    邀请参会人          p + Enter    参会人列表
+d + Enter    音频设备选择        ? + Enter    帮助说明
+l/h + Enter  退出当前通话        Ctrl-C       退出通话并结束
+Mic [#######...] -18dB  Speaker [########..] -10dB
+Alice [######....] -24dB joined mic on
+Bob   [..........] -60dB joined mic off
+>
+```
+
+电平柱状图测量的是数字 PCM 信号；`0 dB` 为满幅失真线，`!` 标记近期接近削波的瞬时峰值。Mic 电平反映外发信号；Speaker 电平测量的是送入播放的混音后数据，而非硬件物理旋钮音量。各参会人电平表在混音前测量各自音源，即使关闭本地播放也会测量。静音并不等同于挂断离开。未关联身份的音源显示为音轨标签。JSON 模式或重定向输出时不会输出电平表；按 `p` 可查看完整的参会人名单。
+
+使用 `i` 可搜索联系人或直接输入 `invite CONTACT_ID OTHER_ID` 发送邀请。提交邀请并不代表对方一定会加入。邀请仅在群语音会议中有效；无法将单聊通话升级为会议。输入 `d` 后，可输入 `d input 序号`、`d output 序号` 或 `d default` 切换设备。设备准备过程会保持当前音频持续运行，但在实际切换瞬间可能会有短暂静音。输入 `cancel` 可关闭选择菜单。
+
+关于鉴权认证、所有权模型与 PCM 载荷规范，请参考[通话控制 API](../calls-api/) 与[媒体参考规范](../calls-media/)。
+
+:::note[使用提示]
+当前构建将原生通话时长限制为 20 分钟；更长时间的通话仍需进一步验证。视频通话与单聊转群聊升级功能暂不可用。退出通话仅代表本机离会，不会解散整个会议房间。若通话以未决状态结束，在发起下一通呼叫前请先核实状态。
+
+旧版微信中继节点可能会跨发送方复用音频 Nonce 随机数。为了兼容性，守护进程会继续保持通话，这在一定程度上削弱了音频的机密性与完整性。
+
+源码构建与正式发布版构建均内置了音频支持；参见[构建先决条件](../build/#included-features)。Linux 本地音频需要 `libpulse0` 以及正常运行的 PulseAudio 或 PipeWire-Pulse。守护进程、帮助文档与 JSON 监控无需本地音频硬件或声音服务。运行 `wx calls --help` 不会发起网络连接或执行登录。
+
+执行 `WX_CALL_DEBUG=1 wx calls monitor` 可以在 stderr 打印带时间戳的事件跟踪日志（已剔除媒体所有者令牌）、首帧音频写入详情以及 WebSocket 关闭状态。
+:::

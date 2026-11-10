@@ -80,3 +80,32 @@ test('helpers', () => {
   assert.deepEqual([...keyLiterals('t("a.b"); event.kind === "media.ready"; t(c ? "x.y" : "x.z")')], ['a.b', 'x.y', 'x.z']);
   assert.deepEqual([...desktopKeyLiterals('action_failed(&id, &p, "replyNotSent", &e); label("previewPhoto")')].sort(), ['previewPhoto', 'replyNotSent']);
 });
+
+test('a stale translation is exempt from placeholder checks; status reports it', async () => {
+  const { statusUi, stampLanguage } = await import('./index.mjs');
+  const { hash } = await import('./docs.mjs');
+  const renamed = { ...en, app: { ...en.app, hello: 'Hello {{who}}' } };
+  const zh = { app: { hello: '你好 {{name}}', items_other: '{{count}} 项' } };
+  const meta = { 'app.hello': { source: hash('Hello {{name}}') }, 'app.items_other': { source: hash('{{count}} items'), machine: hash('{{count}} 项') } };
+  const tree = {
+    ...base,
+    'src/main.ts': 'const a = t("app.hello", { who }); const b = t("app.items", { count });',
+    'locales/en.json': JSON.stringify(renamed),
+    'locales/zh-CN.json': JSON.stringify(zh),
+    'locales/zh-CN.meta.json': JSON.stringify(meta),
+  };
+  assert.deepEqual(run(tree), []);
+  const read = path => tree[path] ?? (() => { throw new Error(`no file ${path}`); })();
+  const list = (dir, extensions) => Object.keys(tree).filter(path => path.startsWith(`${dir}/`) && extensions.some(extension => path.endsWith(extension)));
+  const status = statusUi({ read, list, config })['zh-CN'];
+  assert.deepEqual(status.stale, ['app.hello']);
+  assert.deepEqual(status.machine, ['app.items']);
+  assert.deepEqual(status.missing, ['desktopShell.trayOpen']);
+  // Stamping with no items leaves stale entries alone; naming the key records it.
+  const real = { 'packages/client-ui/locales/en.json': tree['locales/en.json'], 'packages/client-ui/locales/zh-CN.json': tree['locales/zh-CN.json'], 'packages/client-ui/locales/zh-CN.meta.json': tree['locales/zh-CN.meta.json'] };
+  const written = {};
+  const io = { read: path => real[path] ?? (() => { throw new Error(`no file ${path}`); })(), list: (dir, ext) => Object.keys(real).filter(p => p.startsWith(`${dir}/`) && ext.some(e => p.endsWith(e))), write: (path, text) => { written[path] = text; } };
+  assert.deepEqual(await stampLanguage('zh-CN', {}, io), []);
+  assert.deepEqual(await stampLanguage('zh-CN', { items: ['app.hello'] }, io), ['app.hello']);
+  assert.equal(JSON.parse(written['packages/client-ui/locales/zh-CN.meta.json'])['app.hello'].source, hash('Hello {{who}}'));
+});
