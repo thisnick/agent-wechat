@@ -53,8 +53,8 @@ export const codeSkeleton = code => code.split('\n').map(line => line
 /** Mermaid diagrams and blocks with no language (or `text`) hold prose such as labelled trees and key tables. */
 const proseBlock = info => ['', 'text', 'txt', 'mermaid'].includes(info.split(/\s/)[0]);
 
-/** The body with code blocks removed, so prose checks ignore code. */
-const prose = body => body.replace(fence, '');
+/** The body with code blocks and inline code removed, so prose checks ignore code. */
+const prose = body => body.replace(fence, '').replace(/`[^`\n]*`/g, '``');
 
 /** `import` lines, with relative paths reduced to their target so `../` depth does not matter. */
 export const imports = body => prose(body).split('\n').filter(line => /^import\s/.test(line))
