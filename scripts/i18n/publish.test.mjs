@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MACHINE_NOTICE, allowedPath, count, planWork, prBody, withNotice } from './publish.mjs';
-import { frontmatter } from './docs.mjs';
+import { MACHINE_NOTICE, allowedPath, count, planWork, prBody, readAsCurrent, withNotice } from './publish.mjs';
+import { checkUi } from './index.mjs';
+import { frontmatter, hash } from './docs.mjs';
 
 test('the bot may change only translation files of the languages it is translating', () => {
   const scope = { tags: ['zh-CN'], folders: ['zh-cn'] };
@@ -52,4 +53,28 @@ test('the pull request body lists counts, dropped items and the back-translation
   assert.match(body, /- `README.md`/);
   assert.match(body, /<summary>Back-translation/);
   assert.ok(MACHINE_NOTICE.length > 0);
+});
+
+test('a re-translated stale string is checked as current, so a broken one is caught', () => {
+  const locales = 'packages/client-ui/locales';
+  const en = { app: { hello: 'Hello {{who}}' } };
+  const tree = {
+    [`${locales}/en.json`]: JSON.stringify(en),
+    // Claude's update dropped the placeholder; the meta file still records the old English.
+    [`${locales}/zh-CN.json`]: JSON.stringify({ app: { hello: '你好' } }),
+    [`${locales}/zh-CN.meta.json`]: JSON.stringify({ 'app.hello': { source: hash('Hello {{name}}') } }),
+    'src/main.ts': 't("app.hello", { who })',
+    'src/i18n.ts': 'tag: "en" tag: "zh-CN"',
+  };
+  const read = path => {
+    if (!(path in tree)) throw new Error(`no file ${path}`);
+    return tree[path];
+  };
+  const list = (dir, extensions) => Object.keys(tree).filter(path => path.startsWith(`${dir}/`) && extensions.some(extension => path.endsWith(extension)));
+  const config = { locales, code: ['src'], desktopCode: [], registries: { 'src/i18n.ts': /tag: "([^"]+)"/g } };
+  // Read as recorded, the key is stale and its placeholder is not checked.
+  assert.deepEqual(checkUi({ read, list, config }), []);
+  const work = { 'zh-CN': { ui: [{ key: 'app.hello' }], docs: [] } };
+  const problems = checkUi({ read: readAsCurrent(read, work, { 'app.hello': 'Hello {{who}}' }), list, config });
+  assert.deepEqual(problems.map(problem => `${problem.key}: ${problem.message}`), ['app.hello: placeholders differ from English (missing {{who}})']);
 });

@@ -69,6 +69,35 @@ async function plan(file) {
   console.log(count(work));
 }
 
+/**
+ * A file reader for `checkUi` that treats the work list's UI keys as up to date: their
+ * meta entries record the current English. Without it, a key Claude re-translated would
+ * still look stale and skip the placeholder and plural checks.
+ */
+export function readAsCurrent(read, work, en) {
+  return path => {
+    const tag = path.startsWith(`${ui.locales}/`) && path.endsWith('.meta.json') ? path.slice(ui.locales.length + 1, -'.meta.json'.length) : null;
+    if (!tag || !work[tag]) return read(path);
+    let meta = {};
+    try {
+      meta = JSON.parse(read(path));
+    } catch {
+      // No record yet.
+    }
+    let catalog = {};
+    try {
+      catalog = flatten(JSON.parse(read(`${ui.locales}/${tag}.json`)));
+    } catch {
+      // A catalog that does not parse is reported by checkUi itself.
+    }
+    for (const key of Object.keys(catalog)) {
+      if (!work[tag].ui.some(item => baseKey(key) === item.key)) continue;
+      meta[key] = { source: hash(en[key] ?? en[`${baseKey(key)}_other`] ?? '') };
+    }
+    return JSON.stringify(meta);
+  };
+}
+
 /** Adds the machine-translation notice to a docs page's frontmatter (Starlight's `banner`). */
 export function withNotice(text, notice) {
   const match = text.match(/^---\n([\s\S]*?)\n---\n?/);
@@ -89,7 +118,8 @@ async function finish(file) {
     report.restored.push(path);
   }
   // 2. Drop translations that would render wrongly; English shows instead.
-  const problems = checkUi({ read, list: listExt });
+  const en = loadUi({ read, list: listExt }).catalogs.en ?? {};
+  const problems = checkUi({ read: readAsCurrent(read, work, en), list: listExt });
   for (const { file: path, key } of problems) {
     const tag = path.match(/([^/]+)\.json$/)?.[1];
     if (!key || !tags.includes(tag)) continue;
