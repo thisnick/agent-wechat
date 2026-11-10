@@ -13,6 +13,9 @@ name: Translations
 # anything else and drops translations that fail `pnpm i18n check`, so English
 # shows instead. Fork pull requests are skipped (no secrets), as are drafts, bot
 # pull requests and the translation branches themselves.
+#
+# claude-code-action does not accept push events, so a push to main only starts
+# a workflow_dispatch run of this workflow on main, which does the translating.
 on:
   pull_request:
     types: [opened, reopened, ready_for_review, synchronize]
@@ -26,12 +29,28 @@ on:
       - 'packages/client-ui/locales/en.json'
       - 'docs/src/content/docs/**'
       - 'docs/locales.mjs'
+      # A change to the bot itself runs it once on main.
+      - '.github/workflows/i18n-translate.yml'
+      - 'scripts/i18n/**'
   workflow_dispatch:
 
 jobs:
+  # Hands a push to main over to a workflow_dispatch run (see above).
+  dispatch:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run i18n-translate.yml --repo "${{ github.repository }}" --ref main
+
   translate:
     if: >-
-      github.event_name != 'pull_request' || (
+      github.event_name == 'workflow_dispatch' || (
+        github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
         !github.event.pull_request.draft &&
         github.event.pull_request.user.type != 'Bot' &&
