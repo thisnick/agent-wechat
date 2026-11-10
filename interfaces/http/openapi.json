@@ -2441,6 +2441,13 @@
             "description": "Whether the hub has a staged package for this program.",
             "type": "boolean"
           },
+          "iconMessageId": {
+            "description": "Saved card whose media includes the program icon, when known.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "title": {
             "description": "Name shown in the known-app list.",
             "type": "string"

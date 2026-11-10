@@ -635,6 +635,7 @@ response NativeMiniPrograms.items | array of object, required | Known apps and t
 response NativeMiniPrograms.items[] | object | A Mini Program known to the selected account.
 response NativeMiniPrograms.items[].appId | string, required | Public Mini Program AppID.
 response NativeMiniPrograms.items[].available | boolean, required | Whether the hub has a staged package for this program.
+response NativeMiniPrograms.items[].iconMessageId | string, nullable | Saved card whose media includes the program icon, when known.
 response NativeMiniPrograms.items[].title | string, required | Name shown in the known-app list.
 response NativeOperation | object | A background operation such as signing in or out, refreshing contacts or changing a group. Poll it by ID until it finishes.
 response NativeOperation.accountId | string, required | ID of the account the operation belongs to.
