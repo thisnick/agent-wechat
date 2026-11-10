@@ -53,6 +53,8 @@ export function QuotedReply({
       <strong>
         {quote.own
           ? "You"
+          : quote.senderName
+          ? quote.senderName
           : quote.senderId
           ? name(quote.senderId)
           : "Quoted message"}

@@ -192,7 +192,8 @@ the language in your app.
   employment or account permissions.
 - Cached avatar bytes use `GET /avatars/{username}` with `media` scope. Fetching a
   new avatar through `POST /avatars/{username}/refresh` needs `read` and `media`;
-  poll its operation before rereading.
+  poll its operation before rereading. The optional body `{"roomId":"group@chatroom"}`
+  supplies group context when looking up an OpenIM member.
 </Aside>
 
 ## Send

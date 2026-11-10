@@ -57,6 +57,7 @@ payloads! {
     "OfficialProfileRequest" => wechat_core::OfficialProfileRequest,
     "OfficialProfileSelection" => wechat_core::OfficialProfileSelection,
     "LoginRequest" => wechat_core::LoginRequest,
+    "RefreshAvatarRequest" => crate::actions::RefreshAvatarRequest,
     "MediaTransferRequest" => wechat_core::MediaTransferRequest,
     "MediaSendRequest" => wechat_core::MediaSendRequest,
     "ShareSendRequest" => wechat_core::ShareSendRequest,

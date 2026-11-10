@@ -35,6 +35,30 @@ impl AccountRequest<'_> {
         self.state
     }
 
+    /// Read one exact OpenIM contact using optional group context and a supplied ticket.
+    pub fn lookup_openim_contact(
+        &mut self,
+        username: &str,
+        room: Option<&str>,
+        ticket: Option<&str>,
+    ) -> Result<crate::OpenImContact> {
+        self.admit()?;
+        self.transport
+            .openim_contact_snapshot(self.state, username, room, ticket)
+    }
+
+    /// Return the authenticated OpenIM reply bytes for caller-owned receipt storage and decoding.
+    pub fn lookup_openim_contact_raw(
+        &mut self,
+        username: &str,
+        room: Option<&str>,
+        ticket: Option<&str>,
+    ) -> Result<Vec<u8>> {
+        self.admit()?;
+        self.transport
+            .openim_contact_raw_snapshot(self.state, username, room, ticket)
+    }
+
     operation!(sync(cursor: &[u8]) -> crate::SyncBatch => sync_snapshot);
     operation!(sync_scene(cursor: &[u8], scene: u32) -> crate::SyncBatch => sync_scene_snapshot);
     operation!(heartbeat(cursor: &[u8]) -> crate::Heartbeat => heartbeat_snapshot);

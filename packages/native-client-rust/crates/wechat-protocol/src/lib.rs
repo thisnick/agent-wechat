@@ -70,6 +70,8 @@ pub mod media;
 pub mod media_send;
 pub mod mmtls;
 mod notice;
+pub mod openim;
+pub use openim::{OpenImContact, OpenImServiceError};
 pub mod protobuf;
 pub mod push;
 pub mod quote_send;
