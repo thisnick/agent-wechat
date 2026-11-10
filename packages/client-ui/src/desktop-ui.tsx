@@ -7,13 +7,30 @@ import {
   type DesktopSettings,
 } from "./desktop.ts";
 import type { Connection } from "./connection.ts";
+import { richText, t } from "./i18n.ts";
 import { Welcome } from "./ui.tsx";
 const message = (error: unknown) =>
   typeof error === "string"
     ? error
     : error instanceof Error
     ? error.message
-    : "The operation could not be completed.";
+    : t("desktopUi.operationCouldNotCompleted");
+function translateNotificationStatus(status?: string): string {
+  switch (status) {
+    case "Listening for new messages":
+      return t("desktopUi.listeningNewMessages");
+    case "Waiting for the hub":
+      return t("desktopUi.waitingHub");
+    case "Connect to a hub to receive notifications":
+      return t("desktopUi.connectHubReceiveNotifications");
+    case "Notifications off":
+      return t("desktopUi.notificationsOff");
+    default:
+      return (
+        status || t("desktopUi.newMessagesUnmutedChats")
+      );
+  }
+}
 export function DesktopWelcome({
   onConnect,
   error: initialError,
@@ -70,11 +87,11 @@ export function DesktopWelcome({
     return (
       <Welcome simulator={false}>
         <div className="welcome-heading">
-          <h1>Desktop settings</h1>
+          <h1>{t("desktopUi.desktopSettings")}</h1>
         </div>
         <DesktopPreferences onConnection={onConnect} manageLocal />
         <button className="secondary" onClick={() => setMode("choose")}>
-          Back
+          {t("desktopUi.back")}
         </button>
       </Welcome>
     );
@@ -82,12 +99,14 @@ export function DesktopWelcome({
     <Welcome simulator={false}>
       <div className="welcome-heading">
         <h1>
-          {mode === "remote" ? "Connect to a hub" : "Welcome to AgentWechat"}
+          {mode === "remote"
+            ? t("desktopUi.connectHub")
+            : t("desktopUi.welcomeAgentwechat")}
         </h1>
         <p>
           {mode === "remote"
-            ? "Save this connection in your system keyring."
-            : "Use this device, or connect to an existing agent-wechat hub."}
+            ? t("desktopUi.saveConnectionSystemKeyring")
+            : t("desktopUi.useDeviceConnectExistingAgent")}
         </p>
       </div>
       {mode === "choose" ? (
@@ -97,14 +116,14 @@ export function DesktopWelcome({
             disabled={busy}
             onClick={() => void open("desktop_local")}
           >
-            {busy ? "Opening…" : "Use this device"}
+            {busy ? t("desktopUi.opening") : t("desktopUi.useDevice")}
           </button>
           <button
             className="secondary"
             disabled={busy}
             onClick={() => setMode("remote")}
           >
-            Connect to another hub
+            {t("desktopUi.connectAnotherHub")}
           </button>
           {settings?.connections
             .filter((connection) => !connection.local)
@@ -122,13 +141,13 @@ export function DesktopWelcome({
               </button>
             ))}
           <button className="text-button" onClick={() => setMode("settings")}>
-            Desktop settings
+            {t("desktopUi.desktopSettings")}
           </button>
         </div>
       ) : (
         <form onSubmit={remote} className="desktop-form">
           <label>
-            Connection name
+            {t("desktopUi.connectionName")}
             <input
               required
               value={name}
@@ -137,7 +156,7 @@ export function DesktopWelcome({
             />
           </label>
           <label>
-            Hub address
+            {t("desktopUi.hubAddress")}
             <input
               required
               type="url"
@@ -147,7 +166,7 @@ export function DesktopWelcome({
             />
           </label>
           <label>
-            Access key
+            {t("desktopUi.accessKey")}
             <input
               required
               type="password"
@@ -158,13 +177,12 @@ export function DesktopWelcome({
           </label>
           {https && (
             <details className="desktop-certificate">
-              <summary>Advanced</summary>
+              <summary>{t("desktopUi.advanced")}</summary>
               <p>
-                Most hubs need no extra certificate. For a hub using a private
-                certificate, paste the PEM certificate supplied by its owner.
+                {t("desktopUi.mostHubsNeedNoExtra")}
               </p>
               <label>
-                Private certificate (optional)
+                {t("desktopUi.privateCertificateOptional")}
                 <textarea
                   value={certificate}
                   onChange={(event) => setCertificate(event.target.value)}
@@ -175,7 +193,7 @@ export function DesktopWelcome({
             </details>
           )}
           <button className="continue-button" disabled={busy}>
-            {busy ? "Connecting…" : "Connect"}
+            {busy ? t("desktopUi.connecting") : t("desktopUi.connect")}
           </button>
           <button
             type="button"
@@ -187,7 +205,7 @@ export function DesktopWelcome({
               setMode("choose");
             }}
           >
-            Back
+            {t("desktopUi.back")}
           </button>
         </form>
       )}
@@ -251,7 +269,7 @@ export function DesktopPreferences({
         { settings: { localPort, networkPort, networkEnabled: network } },
       );
       await refresh();
-      setNotice("Saved");
+      setNotice(t("desktopUi.saved"));
       if (session && onConnection) onConnection(await desktopConnect(session));
     });
   }
@@ -265,14 +283,14 @@ export function DesktopPreferences({
       <DesktopUpdates />
       <div className="setting">
         <span>
-          Message notifications
+          {t("desktopUi.messageNotifications")}
           <small>
-            {settings?.notificationStatus || "New messages in unmuted chats."}
+            {translateNotificationStatus(settings?.notificationStatus)}
           </small>
         </span>
         <input
           type="checkbox"
-          aria-label="Message notifications"
+          aria-label={t("desktopUi.messageNotifications")}
           checked={settings?.notificationsEnabled ?? true}
           disabled={busy || !settings}
           onChange={(event) => {
@@ -286,10 +304,10 @@ export function DesktopPreferences({
         />
       </div>
       <div className="setting">
-        <span>Notification sound</span>
+        <span>{t("desktopUi.notificationSound")}</span>
         <input
           type="checkbox"
-          aria-label="Notification sound"
+          aria-label={t("desktopUi.notificationSound")}
           checked={settings?.notificationSoundEnabled ?? true}
           disabled={busy || !settings}
           onChange={(event) => {
@@ -302,7 +320,7 @@ export function DesktopPreferences({
         />
       </div>
       <div className="setting">
-        <span>Open at login</span>
+        <span>{t("desktopUi.openLogin")}</span>
         <input
           type="checkbox"
           checked={autostart}
@@ -322,8 +340,10 @@ export function DesktopPreferences({
         <form className="desktop-form" onSubmit={save}>
           <div className="setting">
             <span>
-              Allow network connections
-              <small>HTTPS access for other devices using an access key.</small>
+              {t("desktopUi.allowNetworkConnections")}
+              <small>
+                {t("desktopUi.httpsAccessOtherDevicesUsing")}
+              </small>
             </span>
             <input
               type="checkbox"
@@ -333,10 +353,10 @@ export function DesktopPreferences({
             />
           </div>
           <details>
-            <summary>Connection ports</summary>
+            <summary>{t("desktopUi.connectionPorts")}</summary>
             <div className="desktop-port-fields">
               <label>
-                Local
+                {t("desktopUi.local")}
                 <input
                   type="number"
                   min={1024}
@@ -347,7 +367,7 @@ export function DesktopPreferences({
                 />
               </label>
               <label>
-                Network
+                {t("desktopUi.network")}
                 <input
                   type="number"
                   min={1024}
@@ -362,7 +382,7 @@ export function DesktopPreferences({
             </div>
           </details>
           <button className="secondary" disabled={busy}>
-            {busy ? "Applying…" : "Apply"}
+            {busy ? t("desktopUi.applying") : t("desktopUi.apply")}
           </button>
         </form>
       )}
@@ -375,20 +395,22 @@ export function DesktopPreferences({
             className="text-button"
             onClick={() => setShowCertificate(!showCertificate)}
           >
-            {showCertificate ? "Hide certificate" : "Show certificate"}
+            {showCertificate
+              ? t("desktopUi.hideCertificate")
+              : t("desktopUi.showCertificate")}
           </button>
           {showCertificate && (
             <textarea
               readOnly
               value={settings.certificate ?? ""}
-              aria-label="Hub certificate"
+              aria-label={t("desktopUi.hubCertificate")}
             />
           )}
         </div>
       )}
       {credentialId && (
         <div className="setting desktop-access-key">
-          <span>Access key</span>
+          <span>{t("desktopUi.accessKey")}</span>
           <button
             className="secondary"
             disabled={busy}
@@ -404,14 +426,14 @@ export function DesktopPreferences({
                 );
             }}
           >
-            {revealed ? "Hide" : "Show"}
+            {revealed ? t("desktopUi.hide") : t("desktopUi.show")}
           </button>
           {revealed && (
             <>
               <input
                 readOnly
                 value={revealed}
-                aria-label="Access key"
+                aria-label={t("desktopUi.accessKey")}
                 autoComplete="off"
               />
               <button
@@ -421,11 +443,11 @@ export function DesktopPreferences({
                     await desktopInvoke("desktop_copy_key", {
                       id: credentialId,
                     });
-                    setNotice("Copied");
+                    setNotice(t("desktopUi.copied"));
                   })
                 }
               >
-                Copy
+                {t("desktopUi.copy")}
               </button>
             </>
           )}
@@ -442,16 +464,19 @@ export function DesktopPreferences({
                   id: credentialId,
                 })
               )
-                setNotice("Exported a protected token file");
+                setNotice(
+                  t("desktopUi.exportedProtectedTokenFile"),
+                );
             })
           }
         >
-          Export key for CLI
+          {t("desktopUi.exportKeyCli")}
         </button>
       )}
       <div className="setting">
         <span>
-          Command-line tool<small>{settings?.cliPath}</small>
+          {t("desktopUi.commandLineTool")}
+          <small>{settings?.cliPath}</small>
         </span>
         <button
           className="secondary"
@@ -462,12 +487,13 @@ export function DesktopPreferences({
             )
           }
         >
-          Install wx
+          {t("desktopUi.installWx")}
         </button>
       </div>
       <p className="desktop-help">
-        Independent CLI connections use a protected token file. Copy an access
-        key and configure the server with <code>wx config servers add</code>.
+        {richText("desktopUi.cliConnectionsHelp", {
+          command: <code>wx config server add</code>,
+        })}
       </p>
       {settings?.connections
         .filter((connection) => !connection.local)
@@ -488,7 +514,7 @@ export function DesktopPreferences({
                 })
               }
             >
-              Forget
+              {t("desktopUi.forget")}
             </button>
           </div>
         ))}

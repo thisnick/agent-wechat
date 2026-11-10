@@ -1,0 +1,95 @@
+---
+title: Translate
+description: Fix a translation, keep one up to date or add a language to the app and these docs.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The desktop app, the web UI and these docs are written in English and translated into
+other languages. Anything not yet translated shows in English, so a partial
+translation is always safe to ship.
+
+| What | English source | Translation |
+| --- | --- | --- |
+| App text | `packages/client-ui/locales/en.json` | `packages/client-ui/locales/<lang>.json` |
+| Docs page | `docs/src/content/docs/<page>.mdx` | `docs/src/content/docs/<folder>/<page>.mdx` |
+| Word choices | | `docs/i18n/glossary/<lang>.md` |
+
+The CLI, HTTP API errors and logs stay in English, because scripts and agents read them.
+
+## Fix a translation
+
+1. Edit the text in the translation file. Keep `{{placeholders}}` exactly as in
+   English and follow the language's glossary.
+2. Check it:
+
+   ```bash
+   pnpm i18n check
+   ```
+
+   ```text
+   Translations are consistent with English.
+   ```
+
+3. Open a pull request. Mention which language you checked it as a reader of.
+
+## See what needs translating
+
+```bash
+pnpm i18n status
+```
+
+```text
+zh-CN
+  UI: 724 translated (0 by machine), 0 missing, 0 out of date, 0 unrecorded
+  Docs (zh-cn/): 35 current, 2 missing, 0 out of date, 0 unrecorded
+  Docs missing: how-it-works/translations.mdx, reference/translate.mdx
+```
+
+| Status | Meaning |
+| --- | --- |
+| Missing | No translation yet; English is shown |
+| Out of date | The English changed after it was translated |
+| Unrecorded | Translated, but not yet recorded against an English version |
+
+A bot keeps translations up to date when English changes; see
+[How translations stay up to date](/how-it-works/translations/).
+
+After you update an out-of-date translation, record it as matching the current
+English, naming the keys or pages you checked:
+
+```bash
+pnpm i18n stamp zh-CN reference/translate.mdx
+```
+
+## Translate a docs page
+
+Copy the English page to the language folder and translate the prose. Keep the
+structure so the check can compare the two:
+
+- Keep code as it is; you may translate comments and quoted example text.
+- Keep links exactly as in English, such as `/setup/install/`. They open the
+  page in the reader's language automatically.
+- End every heading with the English heading's ID, for example
+  `## 安装 \{#install}`, so links to `#install` work in every language. The
+  backslash is needed in MDX.
+- Keep the imports and components (`<Aside>`, `<Steps>`, `<Tabs>`).
+
+## Add a language
+
+1. App: add `packages/client-ui/locales/<lang>.json` (start with `{}`) and list the
+   tag in `languages` in `packages/client-ui/src/i18n.ts` and `CATALOGS` in
+   `packages/desktop/src-tauri/src/i18n.rs`.
+2. Docs: add the language to `docs/locales.mjs` and create its folder, for example
+   `docs/src/content/docs/ja/`.
+3. Add `docs/i18n/glossary/<lang>.md` with the official WeChat terms in that language.
+4. Run `pnpm i18n check` and open a pull request.
+
+<Aside title="Good to know">
+- `pnpm i18n check` runs in CI. It fails only for problems a reader would see:
+  unknown keys, changed placeholders, missing plural forms, empty text, or a docs
+  page whose code, components, links or anchors differ from English. Missing and
+  out-of-date translations never fail it.
+- A translation a machine wrote is recorded as such; once a person edits it, it
+  counts as theirs.
+</Aside>

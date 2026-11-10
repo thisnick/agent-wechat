@@ -164,27 +164,31 @@ fn live(event: &Value) -> bool {
                     <= 120
             })
 }
+#[cfg(test)]
 fn preview(message: &Value) -> Option<String> {
+    preview_in(message, "en")
+}
+fn preview_in(message: &Value, language: &str) -> Option<String> {
+    let label = |key| crate::i18n::text_in(language, key);
     if !message["recall"].is_null() || message["direction"] != "incoming" {
         return None;
     }
     let text = match message["type"].as_u64()? {
         1 => message["body"].as_str()?.to_owned(),
-        3 => "Photo".into(),
-        34 => "Voice message".into(),
-        43 => "Video".into(),
-        47 => "Sticker".into(),
+        3 => label("previewPhoto"),
+        34 => label("previewVoiceMessage"),
+        43 => label("previewVideo"),
+        47 => label("previewSticker"),
         49 if message["appMessageType"] == 57 || message["quote"].is_object() => message["body"]
             .as_str()
             .filter(|body| !body.trim().is_empty())
-            .unwrap_or("Reply")
-            .into(),
+            .map(str::to_owned)
+            .unwrap_or_else(|| label("previewReply")),
         49 => match message["appMessageType"].as_u64() {
-            Some(5) => "Shared link",
-            Some(6) => "File",
-            _ => "Attachment",
-        }
-        .into(),
+            Some(5) => label("previewSharedLink"),
+            Some(6) => label("previewFile"),
+            _ => label("previewAttachment"),
+        },
         _ => return None,
     };
     Some(
@@ -269,15 +273,25 @@ async fn group_sender(
     sender_label(&lookup["member"]["displayName"], sender)
         .or_else(|| sender_label(&lookup["member"]["roomDisplayName"], sender))
 }
+#[cfg(test)]
 fn notification_heading(
     thread: &Value,
     message: &Value,
     sender: Option<&str>,
 ) -> (String, Option<String>) {
+    notification_heading_in(thread, message, sender, "en")
+}
+fn notification_heading_in(
+    thread: &Value,
+    message: &Value,
+    sender: Option<&str>,
+    language: &str,
+) -> (String, Option<String>) {
+    let fallback = crate::i18n::text_in(language, "newMessage");
     let name: String = thread["displayName"]
         .as_str()
         .filter(|name| !name.trim().is_empty())
-        .unwrap_or("New message")
+        .unwrap_or(&fallback)
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -286,7 +300,10 @@ fn notification_heading(
         .take(100)
         .collect();
     if group_message(thread, message) {
-        (sender.unwrap_or("Member").into(), Some(name))
+        (
+            sender.map_or_else(|| crate::i18n::text_in(language, "member"), str::to_owned),
+            Some(name),
+        )
     } else {
         (name, None)
     }
@@ -556,7 +573,8 @@ async fn alert(
     if message["id"] != id || message["accountId"] != account || message["threadId"] != thread_id {
         bail!("Notification message identity mismatch");
     }
-    let Some(body) = preview(&message) else {
+    let language = crate::i18n::language();
+    let Some(body) = preview_in(&message, language) else {
         return Ok(());
     };
     let thread = get(
@@ -568,7 +586,7 @@ async fn alert(
         return Ok(());
     }
     let sender = group_sender(active, account, thread_id, &thread, &message).await;
-    let (title, subtitle) = notification_heading(&thread, &message, sender.as_deref());
+    let (title, subtitle) = notification_heading_in(&thread, &message, sender.as_deref(), language);
     let target = Target {
         connection_id: active.connection.id.clone(),
         server_id: active
@@ -830,7 +848,7 @@ fn install_macos(app: &tauri::AppHandle) {
                     tauri::async_runtime::spawn(async move {
                         match send_reply(&app, &request_id, &payload, &text).await {
                             Err(error) => {
-                                action_failed(&request_id, &payload, "Reply not sent", &error)
+                                action_failed(&request_id, &payload, "replyNotSent", &error)
                             }
                             // Replying means the chat was read, as when replying on a phone.
                             Ok(true) => {
@@ -838,7 +856,7 @@ fn install_macos(app: &tauri::AppHandle) {
                                     action_failed(
                                         &request_id,
                                         &payload,
-                                        "Replied, but not marked as read",
+                                        "repliedNotMarkedRead",
                                         &error,
                                     );
                                 }
@@ -850,7 +868,7 @@ fn install_macos(app: &tauri::AppHandle) {
                 Action::MarkRead => {
                     tauri::async_runtime::spawn(async move {
                         if let Err(error) = mark_read(&app, &payload).await {
-                            action_failed(&request_id, &payload, "Not marked as read", &error);
+                            action_failed(&request_id, &payload, "notMarkedRead", &error);
                         }
                     });
                 }
@@ -1012,7 +1030,9 @@ async fn connected(app: &tauri::AppHandle, target: &Target) -> Result<Arc<Active
 }
 /// Tells the user an action on an alert failed. Clicking it opens the chat.
 #[cfg(target_os = "macos")]
+/// Posts a failure alert; `title` is a `desktopShell.*` text key.
 fn action_failed(request_id: &str, payload: &Payload, title: &str, error: &anyhow::Error) {
+    let title = crate::i18n::text(title);
     let failed = Payload {
         target: payload.target.clone(),
         server_id: None,
@@ -1023,9 +1043,9 @@ fn action_failed(request_id: &str, payload: &Payload, title: &str, error: &anyho
     crate::macos_notifications::post(&crate::macos_notifications::Alert {
         request_id: &format!("{request_id}|failed"),
         thread_key: &payload.target.thread_key(),
-        title,
+        title: &title,
         subtitle: None,
-        body: &format!("{error}. Click to open the chat."),
+        body: &crate::i18n::text_with("actionFailedBody", &[("error", &error.to_string())]),
         sound: None,
         payload: &json,
         reply: false,

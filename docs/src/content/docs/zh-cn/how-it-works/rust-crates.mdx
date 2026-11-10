@@ -1,0 +1,80 @@
+---
+title: Rust Crate 架构
+description: Rust 工作区的职责划分、依赖关系及客户端适配器。
+sourceHash: 3c2042b4d7c2
+---
+
+Rust 工作区分离了微信底层传输、官方 Profile 访问、账号编排以及客户端适配器。五个核心库公开发布在 crates.io 上；守护进程、CLI 以及支撑运行时 Crate 保持私有内部使用。
+
+## Package 依赖关系 \{#package-dependencies}
+
+下方箭头表示“依赖于”。`wechat-protocol` **不**依赖 `wechat-calls`、`wechat-audio` 或 `wechat-profile`。
+
+```mermaid
+flowchart TD
+  WX["wx-native: 守护进程与 CLI"] --> API["wechat-api: HTTP 与 WebSockets"]
+  WX --> AUDIO["wechat-audio: 本地音频设备"]
+  WX --> CFG["wechat-config: 配置解析"]
+  WX --> CORE["wechat-core: 账号运行时与协调"]
+  API --> CORE
+  CORE --> CALLS["wechat-calls: 通话准入、会话与媒体"]
+  CALLS --> PROTOCOL
+  CORE --> PROTOCOL["wechat-protocol: 账号持有者与传输"]
+  CORE --> PROFILE["wechat-profile: 官方 Profile"]
+  CORE --> STORE["wechat-store: 操作与回执记录"]
+  PROFILE --> MEDIA["wechat-media: 消息媒体检查"]
+  PROTOCOL --> MEDIA
+  MEDIA --> PLATFORM["wechat-platform: 操作系统原语"]
+  CFG --> PLATFORM
+  STORE --> PLATFORM
+  DEV["wechat-simulator: 开发测试固件"] --> API
+  DEV --> CORE
+  PROFILE --> PLATFORM
+  PROTOCOL --> PLATFORM
+```
+
+此处省略了通用工具库依赖。Core 负责守护进程内部的 PCM 信封封装；API 与 CLI 复用 `wechat-calls` 的音频格式类型。通话 Socket 使用带 Base64 PCM 的 JSON 消息，而守护进程负责组装与控制音频帧时钟步调。
+
+| Package | 职责与功能 | 是否公开发布? |
+| --- | --- | --- |
+| `wechat-platform` | 操作系统与文件系统原语 | 是 |
+| `wechat-media` | 消息图像与媒体格式检查 | 是 |
+| `wechat-profile` | 受支持的官方 Profile 读取器与写入器 | 是 |
+| `wechat-protocol` | 拥有账号状态的 `NativeClient`、认证请求、信令与加密传输协议 | 是 |
+| `wechat-calls` | 单账号通话准入、会话、媒体 Worker、音源追踪、PCM、时序步调、混音与 Opus | 是 |
+| `wechat-audio` | 麦克风/扬声器适配器与重采样 | 否 |
+| `wechat-core` | 守护进程权限管理、Profile 集成、操作日志与通话编排 | 否 |
+| `wechat-api` | HTTP 路由、认证控制/媒体 WebSocket 及数据契约 | 否 |
+| `wechat-store` | 挂起的操作与故障恢复收据 | 否 |
+| `wechat-config` | CLI 与守护进程配置文件解析 | 否 |
+| `wechat-simulator` | 合成测试后端与开发测试夹具 | 否 |
+| `wx-native` | `wx` 命令行程序、守护进程入口及 CLI 交互 | 否 |
+
+`NativeClient` 拥有账号状态以及认证请求的生命周期。克隆该客户端将共享该账号，而不是创建另一个可变副本。Core 使用同一个客户端，并保留守护进程的权限管控与操作日志。
+
+`wechat-calls` 中的通话准入模块决定由哪个控制器拥有呼叫尝试，并判定请求是全新的、重复的还是过期的。Core 复用这套相同的状态机。未决的呼叫提交会一直保留该账号的通话槽位，直至清理完毕；单纯的超时并不会自动授权发起另一次呼叫邀请。
+
+权威的聊天数据始终保存在官方 Profile 中。通话操作记录不会额外创建平行的历史数据库。通话会话直接消费 protocol crate 的编解码器以及账号拥有的底层传输。
+[Rust 开发库](../../zh-cn/reference/rust-libraries/)详细介绍了它们独立的 API。
+
+## 媒体适配层 \{#media-adapters}
+
+客户端发送的 PCM 音频依次经过 API 与 Core 适配器进入 `wechat-calls` 媒体 Worker。这些 Worker 使用 `wechat-protocol` 数据包编解码器处理时序步调与 Opus 编解码；接收音频则沿反向流动。Core 负责提供守护进程权限、打断检查与事件派发；calls crate 本身不依赖 Core、HTTP、持久化存储或底层硬件设备。
+
+| 依赖项 | 用途与位置 |
+| --- | --- |
+| `opusic-c = 1.6.1` | 包含在原生 `wechat-calls` 构建中；使用 libopus 进行音频编解码 |
+| `rubato` | 在 `wechat-audio` 中负责设备采样率与通话采样率之间的重采样 |
+| `libpulse-binding` | Linux 平台的音频捕获与播放 |
+| `coreaudio-rs` / `coreaudio-sys` | macOS 平台的音频捕获与播放（包含 VoiceProcessingIO 语音处理） |
+| `wasapi` | Windows 平台的音频捕获与播放 |
+
+`wechat-audio` 是我们对 sys-voice 和 acpfx 分支的内部适配实现，在 [第三方来源文件](https://github.com/thisnick/agent-wechat/blob/main/packages/native-client-rust/crates/wechat-audio/THIRD-PARTY.md) 中完整保留了上游许可证与源码锁定。音频设备就绪并不代表具备已实测验证的回声消除质量。
+
+私有的 TypeScript HTTP/WebSocket SDK 以及 OpenClaw 插件通过网络与守护进程通信；二者在 Node.js 环境下均无需 libopus 或操作系统底层音频绑定。Rust 守护进程仍包含原生二进制依赖。项目不提供纯 JavaScript 实现的微信传输协议。
+
+<span id="build-features"></span>
+
+## 源码构建 \{#building}
+
+[源码构建](../../zh-cn/reference/build/) 介绍了工作区编译及各系统先决条件。[实时通话](../../zh-cn/reference/calls/) 详细介绍了守护进程、CLI 与 OpenClaw 的使用；[通话控制 API](../../zh-cn/reference/calls-api/) 则列出了具体的控制载荷与事件格式。

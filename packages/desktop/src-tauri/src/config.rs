@@ -41,6 +41,9 @@ pub struct Config {
     pub automatic_updates: bool,
     #[serde(default)]
     pub update_prereleases: Option<bool>,
+    /// UI language for tray and notification text; `None` until the UI reports one.
+    #[serde(default)]
+    pub language: Option<String>,
 }
 fn enabled() -> bool {
     true
@@ -60,6 +63,7 @@ impl Default for Config {
             notification_sound_enabled: true,
             automatic_updates: true,
             update_prereleases: None,
+            language: None,
         }
     }
 }
@@ -157,6 +161,11 @@ impl Config {
                 .is_some_and(|value| value.len() > 64 * 1024)
             {
                 bail!("Certificate is too large");
+            }
+        }
+        if let Some(language) = &self.language {
+            if crate::i18n::supported(language).is_none() {
+                bail!("Unsupported display language");
             }
         }
         Ok(())

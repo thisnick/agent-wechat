@@ -1,5 +1,6 @@
 import type { NativeOperation } from "@agent-wechat/shared";
 import { GroupMutations, groupEnded } from "./group-creation.ts";
+import { subscribeLanguage, t } from "./i18n.ts";
 import { readableError, type HubSession } from "./session.ts";
 
 type Field = "pinned" | "muted";
@@ -69,6 +70,7 @@ export class ThreadPreference<K extends Field> {
     this.stop = [
       session.subscribe(this.update),
       mutations.subscribe(this.update),
+      subscribeLanguage(this.update),
     ];
     this.update();
   }
@@ -128,38 +130,36 @@ export class ThreadPreference<K extends Field> {
       error =
         change.admissionStatus === 403
           ? isPin
-            ? "This access key can’t change pins. Use a key with account management permission."
-            : "This access key can’t change notifications. Use a key with account management permission."
+            ? t("threadPinning.accessKeyCanTChange")
+            : t("threadPinning.accessKeyCanTChange2")
           : change.admissionStatus === 409
           ? isPin
-            ? "Pinning is unavailable. Refresh this chat and check again."
-            : "Notifications are unavailable. Refresh this chat and check again."
+            ? t("threadPinning.pinningUnavailableRefreshChatCheck")
+            : t("threadPinning.notificationsUnavailableRefreshChatCheck")
           : isPin
-          ? "Couldn’t pin this chat. Refresh and try again."
-          : "Couldn’t change notifications. Refresh and try again.";
+          ? t("threadPinning.couldnTPinChatRefresh")
+          : t("threadPinning.couldnTChangeNotificationsRefresh");
     } else if (
       change?.operation &&
       ["rejected", "failed", "cancelled"].includes(change.operation.state)
     )
-      error = `${
-        isPin ? "Pin" : "Notification"
-      } change wasn’t applied. Refresh and try again.`;
+      error = isPin ? t("threadPinning.pinChangeNotApplied") : t("threadPinning.notificationChangeNotApplied");
     else if (operation.error && change && !uncertain && !confirmed)
       error = operation.error;
     const announcement = saving
-      ? `Saving ${noun}`
+      ? isPin ? t("threadPinning.savingPin") : t("threadPinning.savingNotification")
       : uncertain
-      ? `${isPin ? "Pin" : "Notification"} change needs a status check`
+      ? isPin ? t("threadPinning.pinChangeNeedsCheck") : t("threadPinning.notificationChangeNeedsCheck")
       : error ||
         (enabled === null
-          ? `${isPin ? "Pin" : "Notification"} state unavailable`
+          ? isPin ? t("threadPinning.pinStateUnavailable") : t("threadPinning.notificationStateUnavailable")
           : enabled
           ? isPin
-            ? "Chat pinned"
-            : "Notifications muted"
+            ? t("threadPinning.chatPinned")
+            : t("threadPinning.notificationsMuted")
           : isPin
-          ? "Chat unpinned"
-          : "Notifications unmuted");
+          ? t("threadPinning.chatUnpinned")
+          : t("threadPinning.notificationsUnmuted"));
     return {
       [this.field]: enabled,
       preview:
@@ -228,9 +228,7 @@ export class ThreadPreference<K extends Field> {
         );
         if (key) this.synced = key;
       } catch (error) {
-        this.syncError = `Couldn’t refresh ${
-          this.field === "pinned" ? "pins" : "notifications"
-        }. ${readableError(error)}`;
+        this.syncError = t(this.field === "pinned" ? "threadPinning.couldntRefreshPins" : "threadPinning.couldntRefreshNotifications", { error: readableError(error) });
       } finally {
         this.syncing = false;
         this.reconciling = undefined;

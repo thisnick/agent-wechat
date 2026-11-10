@@ -4,6 +4,7 @@ import { connect, type Connection } from "./connection.ts";
 import type { NativeStatus } from "@agent-wechat/shared";
 import { desktopMultipart } from "./desktop-multipart.ts";
 import type { Route } from "./routes.ts";
+import { t } from "./i18n.ts";
 export const desktop = isTauri();
 export type DesktopSession = { id: string; endpoint: string; local: boolean; status?: NativeStatus };
 export type DesktopSettings = {
@@ -210,7 +211,7 @@ export function installDesktopLinks(): () => void {
       void saveDesktopBlob(link.href, link.download || "download").catch(() => {
         globalThis.dispatchEvent(
           new CustomEvent("desktop-error", {
-            detail: "The file could not be saved. Try downloading it again.",
+            detail: t("desktop.fileNotSaved"),
           }),
         );
       });

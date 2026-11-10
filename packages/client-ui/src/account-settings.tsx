@@ -6,6 +6,7 @@ import { AccountNotifications } from "./account-notifications.tsx";
 import { Icon } from "./ui.tsx";
 import { canRemoveProfile, profileRemovalName } from "./profile-removal.ts";
 import type { Connection } from "./connection.ts";
+import { richText, t } from "./i18n.ts";
 import type { Account } from "./session.ts";
 import { pause, readableError } from "./session.ts";
 
@@ -69,7 +70,8 @@ export function AccountSettings({
         alias: alias.trim(),
       });
       await connection.session.accounts();
-      if (!lifetime.current.signal.aborted) setNotice("Account name saved.");
+      if (!lifetime.current.signal.aborted)
+        setNotice(t("accountSettings.accountNameSaved"));
     } catch (error) {
       if (!lifetime.current.signal.aborted) setNotice(readableError(error));
     } finally {
@@ -78,7 +80,7 @@ export function AccountSettings({
   }
   async function logout() {
     setBusy(true);
-    setNotice("Signing out…");
+    setNotice(t("accountSettings.signingOut"));
     try {
       const operation = await connection.logout(account.id);
       const deadline = Date.now() + 90000;
@@ -102,7 +104,7 @@ export function AccountSettings({
         ) {
           setUncertain(true);
           setNotice(
-            "Sign-out could not be fully confirmed. Check its status before trying again.",
+            t("accountSettings.signOutCouldNotFully"),
           );
           return;
         }
@@ -110,7 +112,9 @@ export function AccountSettings({
       }
       if (!lifetime.current.signal.aborted) {
         setUncertain(true);
-        setNotice("Sign-out is still pending. Check its status.");
+        setNotice(
+          t("accountSettings.signOutStillPendingCheck"),
+        );
       }
     } catch (error) {
       if (!lifetime.current.signal.aborted) {
@@ -122,14 +126,17 @@ export function AccountSettings({
     }
   }
   return (
-    <section className="account-settings" aria-label="Account settings">
+    <section
+      className="account-settings"
+      aria-label={t("accountSettings.accountSettings")}
+    >
       <form
         onSubmit={(event) => {
           event.preventDefault();
           void rename();
         }}
       >
-        <label htmlFor="account-alias">Account name</label>
+        <label htmlFor="account-alias">{t("accountSettings.accountName")}</label>
         <div className="account-name">
           <input
             id="account-alias"
@@ -144,10 +151,12 @@ export function AccountSettings({
             className="secondary"
             disabled={busy || alias.trim() === (account.alias || account.id)}
           >
-            Save
+            {t("accountSettings.save")}
           </button>
         </div>
-        <small>Letters, numbers, hyphens and underscores.</small>
+        <small>
+          {t("accountSettings.lettersNumbersHyphensUnderscores")}
+        </small>
       </form>
       <MediaDownloadSettings connection={connection} account={account.id} />
       <AccountNotifications key={JSON.stringify([connection.desktopId, connection.cache.namespace[1], account.id])} connection={connection} account={account.id} />
@@ -155,8 +164,9 @@ export function AccountSettings({
         (confirm ? (
           <div className="signout-confirm">
             <p>
-              Sign out of <strong>{account.alias || account.id}</strong>? Chat
-              history stays on this agent-wechat hub.
+              {richText("accountSettings.signOutConfirm", {
+                name: <strong>{account.alias || account.id}</strong>,
+              })}
             </p>
             <div className="attachment-actions">
               <button
@@ -164,7 +174,7 @@ export function AccountSettings({
                 disabled={busy}
                 onClick={() => setConfirm(false)}
               >
-                Keep signed in
+                {t("accountSettings.keepSigned")}
               </button>
               <button
                 className="primary"
@@ -172,10 +182,10 @@ export function AccountSettings({
                 onClick={() => void logout()}
               >
                 {busy
-                  ? "Signing out…"
+                  ? t("accountSettings.signingOut")
                   : uncertain
-                  ? "Check sign-out status"
-                  : "Sign out"}
+                  ? t("accountSettings.checkSignOutStatus")
+                  : t("accountSettings.signOut2")}
               </button>
             </div>
           </div>
@@ -185,12 +195,12 @@ export function AccountSettings({
             disabled={busy}
             onClick={() => setConfirm(true)}
           >
-            Sign out of WeChat
+            {t("accountSettings.signOutWechat")}
           </button>
         ))}
       {!account.authenticated && signedIn && !removing && (
         <button className="primary" disabled={busy} onClick={signedIn}>
-          Sign in to WeChat
+          {t("accountSettings.signWechat")}
         </button>
       )}
       <div className="profile-removal">
@@ -201,13 +211,16 @@ export function AccountSettings({
               void remove();
             }}
           >
-            <h3>Remove {profileRemovalName(account)}?</h3>
+            <h3>
+              {t("accountSettings.remove", { name: profileRemovalName(account) })}
+            </h3>
             <p>
-              This removes the profile from this agent-wechat hub. Local files
-              are retained.
+              {t("accountSettings.removesProfileAgentWechatHub")}
             </p>
             <label htmlFor="remove-profile-confirm">
-              Type <strong>{profileRemovalName(account)}</strong> to confirm
+              {richText("accountSettings.typeToConfirm", {
+                name: <strong>{profileRemovalName(account)}</strong>,
+              })}
             </label>
             <input
               id="remove-profile-confirm"
@@ -228,13 +241,15 @@ export function AccountSettings({
                   setConfirmation("");
                 }}
               >
-                Cancel
+                {t("accountSettings.cancel")}
               </button>
               <button
                 className="danger"
                 disabled={busy || !canRemoveProfile(account, confirmation)}
               >
-                {busy ? "Removing…" : "Remove profile"}
+                {busy
+                  ? t("accountSettings.removing")
+                  : t("accountSettings.removeProfile")}
               </button>
             </div>
           </form>
@@ -249,10 +264,12 @@ export function AccountSettings({
                 setNotice("");
               }}
             >
-              Remove profile
+              {t("accountSettings.removeProfile")}
             </button>
             {(account.authenticated || signOutRequired) && (
-              <small>Sign out before removing this profile.</small>
+              <small>
+                {t("accountSettings.signOutBeforeRemovingProfile")}
+              </small>
             )}
           </>
         )}
@@ -305,12 +322,16 @@ export function ProfileDialog({
       <header>
         <div>
           <h2 id={title}>{profileRemovalName(account)}</h2>
-          <p>{account.authenticated ? "Signed in" : "Signed out"}</p>
+          <p>
+            {account.authenticated
+              ? t("accountSettings.signed")
+              : t("accountSettings.signedOut")}
+          </p>
         </div>
         <button
           autoFocus
           className="profile-close"
-          aria-label="Close profile settings"
+          aria-label={t("accountSettings.closeProfileSettings")}
           onClick={close}
         >
           <Icon name="close" />

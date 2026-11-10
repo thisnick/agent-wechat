@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
+import { t } from "./i18n.ts";
 import { Icon } from "./ui.tsx";
 import {
+  categoryLabel,
   conversationCategories,
   type ConversationCategory,
 } from "./conversation-filters.ts";
@@ -8,7 +10,7 @@ import {
 function UnreadCount({ count }: { count: number }) {
   return (
     <>
-      <span className="sr-only">{count} unread</span>
+      <span className="sr-only">{t("conversationFilterBar.unread", { count })}</span>
       {count > 0 && (
         <span className="filter-unread" aria-hidden="true">{count > 99 ? "99+" : count}</span>
       )}
@@ -62,14 +64,14 @@ export function ConversationFilterBar({
   }
 
   return (
-    <div className="conversation-filters" role="group" aria-label="Conversation categories">
+    <div className="conversation-filters" role="group" aria-label={t("conversationFilterBar.conversationCategories")}>
       <button
         type="button"
         className="filter-chip"
         aria-pressed={selected.length === 0}
         onClick={() => onChange([])}
       >
-        All<span className="sr-only">conversations</span>
+        {t("conversationFilterBar.all")}<span className="sr-only"> {t("conversationFilterBar.conversations")}</span>
         <UnreadCount count={counts.total} />
       </button>
       <div className="filter-track" ref={track}>
@@ -77,7 +79,7 @@ export function ConversationFilterBar({
           <button
             type="button"
             className="filter-scroll previous"
-            aria-label="Scroll categories left"
+            aria-label={t("conversationFilterBar.scrollCategoriesLeft")}
             disabled={edges.start}
             onClick={() => scroll(-1)}
           >
@@ -92,7 +94,7 @@ export function ConversationFilterBar({
           onScroll={updateEdges}
         >
           <div className="filter-chips" ref={chips}>
-            {conversationCategories.map(({ id, label }) => {
+            {conversationCategories.map(({ id }) => {
               const pressed = selected.includes(id);
               return (
                 <button
@@ -102,7 +104,7 @@ export function ConversationFilterBar({
                   aria-pressed={pressed}
                   onClick={() => onChange(pressed ? selected.filter((item) => item !== id) : [...selected, id])}
                 >
-                  {label}<UnreadCount count={counts[id]} />
+                  {categoryLabel(id)}<UnreadCount count={counts[id]} />
                 </button>
               );
             })}
@@ -112,7 +114,7 @@ export function ConversationFilterBar({
           <button
             type="button"
             className="filter-scroll"
-            aria-label="Scroll categories right"
+            aria-label={t("conversationFilterBar.scrollCategoriesRight")}
             disabled={edges.end}
             onClick={() => scroll(1)}
           >

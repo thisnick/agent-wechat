@@ -9,13 +9,27 @@ Open **Settings** in the app. Settings apply to the device, the desktop app or t
 
 | Setting | Applies to |
 | --- | --- |
-| Appearance and temporary storage | This device |
+| Appearance, language and temporary storage | This device |
 | Local hub, network access and opening at login | Desktop app |
 | Message notifications and notification sound | Desktop app |
 | Desktop connection keys | System keyring |
 | Automatic downloads | Selected account on the hub |
 
 See [Desktop app](/setup/desktop/) for local/network connections, certificates and CLI setup. Independent CLI clients keep their own protected token files.
+
+## Language
+
+The app is available in English and Simplified Chinese (简体中文). Choose
+**Language** in Settings, or use the language menu at the bottom of the sign-in
+screen:
+
+| Choice | Shows the app in |
+| --- | --- |
+| System (default) | Your system language if the app has it, otherwise English |
+| English, 简体中文 | That language |
+
+The desktop app's tray menu and message notifications follow the same choice.
+Text the app has no translation for yet appears in English.
 
 ## Notifications
 
@@ -96,7 +110,10 @@ Media responses expose `advertisedByteLength` when the sender provided a size an
 verified downloaded bytes. A missing advertised size does not mean an empty file.
 
 <Aside title="Good to know">
-- Settings are stored in the hub's account registry, outside the official WeChat profile.
+- Automatic download settings are stored in the hub's account registry, outside the official WeChat profile.
+- The language is saved in this browser or desktop app, not on the hub. Message
+  text, contact names and CLI output are never translated. On macOS, the Reply and
+  Mark as Read notification buttons change language after the app restarts.
 - This is hub download policy, separate from the official app's behavior. Existing
   profile imports and local repairs do not start automatic network transfers.
 - The limit uses advertised sizes before transfer. Actual bytes are checked by

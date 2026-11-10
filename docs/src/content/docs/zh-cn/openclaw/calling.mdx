@@ -1,0 +1,253 @@
+---
+title: 配置语音通话
+description: 配置语音通话、对话模式、认证凭据与智能体协同咨询。
+sourceHash: bf46bbdae2f4
+---
+
+在 `channels.agent-wechat.calls` 下配置通话功能。语音与视频功能默认均为禁用状态。语音通话支持单聊呼叫以及独立配置的群语音会议。
+两种通话均支持[实时语音交互或“智能体+TTS”对话模式](#models-and-behavior)。
+
+## 连接守护进程 \{#connect-the-daemon}
+
+1. 完成[快速接入](../setup/)并执行 `wx calls status`。对于单聊呼叫，守护进程必须声明 `directAudio: true`；对于群语音会议，必须声明对应的 `conferenceJoin`、`conferenceCreate`、`conferenceInvite` 与 `conferenceAudio` 能力；参见[实时通话](/reference/calls/)。
+2. 为通道令牌赋予 `calls` 权限作用域（与现有消息收发作用域并列）：
+
+   ```bash
+   wx tokens create openclaw-calling --accounts ACCOUNT_ID \
+     --scopes read --scopes media --scopes send --scopes login \
+     --scopes read-state --scopes calls
+   ```
+
+   将返回的令牌填入通道现有的 `native.token` SecretRef 中。缺少 `calls` 作用域的令牌将无法访问通话接口端点。
+
+## 配置语音与访问权限 \{#configure-speech-and-access}
+
+将以下实时语音示例合并到现有的通道与智能体配置中。请替换示例中的联系人 ID 与管理员 ID。
+在 **Gateway 进程环境变量** 中设置 `OPENAI_API_KEY`。
+`wechat_call` 工具是可选的：即使语音自动接听已经可用，若要允许智能体控制通话，仍需在 `tools.alsoAllow` 中添加该工具条目。请保留已有的其他工具条目。全局授权示例请参见[智能体工具](../tools/#calling)。
+
+```json
+{
+  "secrets": {
+    "providers": {
+      "voiceenv": {
+        "source": "env",
+        "allowlist": ["OPENAI_API_KEY"]
+      }
+    }
+  },
+  "agents": {
+    "entries": {
+      "main": {
+        "tools": {
+          "alsoAllow": ["wechat_call"]
+        }
+      }
+    }
+  },
+  "channels": {
+    "agent-wechat": {
+      "calls": {
+        "voice": {
+          "enabled": true,
+          "agentId": "main",
+          "inboundPolicy": "allowlist",
+          "inboundAllowFrom": ["allowed-contact-id"],
+          "outboundPolicy": "allowlist",
+          "outboundAllowTo": ["allowed-contact-id"],
+          "outboundToolAllowFrom": ["owner-id"],
+          "maxDurationSeconds": 3600,
+          "realtime": {
+            "provider": "openai",
+            "voice": "marin",
+            "instructions": "Keep spoken replies concise.",
+            "agentContext": { "enabled": true },
+            "providers": {
+              "openai": {
+                "apiKey": {
+                  "source": "env",
+                  "provider": "voiceenv",
+                  "id": "OPENAI_API_KEY"
+                }
+              }
+            }
+          },
+          "toolPolicy": "none"
+        },
+        "video": {
+          "enabled": false
+        }
+      }
+    }
+  }
+}
+```
+
+`apiKey` 还支持通过 OpenClaw 文件/可执行命令/密钥存储形式的 SecretRef，或直接传入字符串密钥。若省略，OpenClaw 将取用选定智能体的 OpenAI 认证或 Gateway 环境变量。仅拥有普通文本智能体订阅并不一定具备实时语音 API (Realtime) 的访问权限。守护进程 Token 与 OpenAI Key 属于完全隔离的两种凭据。
+
+`wechat_call` 工具是可选的：上述示例将其授权给 `main` 智能体用于查看状态、发起外呼或挂断通话。将其授权给任何需要为你拨打电话的智能体（例如负责群聊回复的智能体）；通话本身始终以 `calls.voice.agentId` 身份运行。自动接听呼入电话并不强制要求智能体具备该工具。
+
+保存配置文件后重启 OpenClaw Gateway。当守护进程空闲时，已就绪的语音服务会汇报为 `available`；若提供商异常或能力不匹配则会汇报为 `unavailable`，此时呼入电话将保持不予接听状态。
+
+对于单聊呼入通话，当 `inboundPolicy` 为 `"allowlist"` 时，`inboundAllowFrom: ["*"]` 会接听任何呼入者的电话。可通过配置具体的联系人 ID 限制呼叫者。空列表表示拒绝所有来电。该设置不会向其授予管理员所有者工具权限。
+
+## 群语音会议通话 \{#conference-calls}
+
+在 `calls.voice.conferences.groups` 下添加群聊 ID。使用 `"*"` 作为其他群聊的回退通配规则：
+
+```json
+{
+  "conferences": {
+    "groups": {
+      "test-group@chatroom": {
+        "autoJoin": true,
+        "autoJoinAllowFrom": ["trusted-inviter"],
+        "toolPolicy": "safe-read-only"
+      },
+      "*": {
+        "autoJoin": true,
+        "autoJoinAllowFrom": ["trusted-inviter"],
+        "toolPolicy": "safe-read-only"
+      },
+      "quiet-group@chatroom": {
+        "autoJoin": false
+      }
+    }
+  }
+}
+```
+
+确切匹配的群聊规则会完全替换通配符规则（包含 `autoJoin: false`）；两者规则不会进行合并。上述示例在各个群聊中均接受 `trusted-inviter` 的通话邀请，但明确排除了 `quiet-group@chatroom`。
+
+若配置映射为空，则不会开启任何群语音会议自动化或会议工具目标。`autoJoin` 默认处于 `false` 状态；开启后，插件会在加入当前邀请前提前就绪语音链路。`autoJoinAllowFrom` 用于列出符合自动参会资格的邀请人：
+
+| 配置值 | 符合条件的邀请 |
+| --- | --- |
+| `["trusted-inviter"]` | 仅限该联系人发出的邀请。 |
+| `["*"]` | 任何联系人发出的邀请。 |
+| `[]` | 不接受任何邀请。 |
+| 省略 | 精确群聊规则下接受任何邀请人；通配符自动加入规则下省略无效。 |
+
+在实际加入会议前，插件会重新校验邀请人与当前规则。单聊呼叫白名单保持完全独立。通配符不适用于外发联系人列表、工具调用者或管理员所有者授权；每个群聊若需开启管理员咨询仍需单独精确配置所有者授权。
+
+这些会议规则独立于常规群文字聊天权限。文字聊天通配符为 `channels.agent-wechat.groups["*"]`；配置其中一个通配符不会自动启用另一个。关于群聊文本回复权限请参见[响应权限控制](../access/)。
+
+可选的 `wechat_call` 工具支持以下附加动作：
+
+| 动作 | 参数说明 |
+| --- | --- |
+| `conference_start` | `groupId`, `contactIds: ["contact-a", "contact-b"]` |
+| `conference_join` | `groupId`；必须群内存在当前邀请，绝不会新建房间 |
+| `invite` | `contactIds`；必须当前插件已连接到该会议 |
+| `hangup` | 使本机退出会议，其他参会成员仍可继续通话 |
+
+工具调用者仍需具备管理员所有者授权与 `outboundToolAllowFrom` 权限。发起会议或邀请他人参会还要求 `outboundPolicy: "allowlist"` 且所有受邀人均在 `outboundAllowTo` 白名单中。提交邀请并不代表受邀人已经入会；`status` 状态信息中包含名册与最新的单个邀请结果。
+
+语音模型会听到各接收音轨的时序混音数据，并发送单一的房间上行音频。它无需前置特定称呼或 @ 提醒门禁即可进行自然交流，且不会声称已确切识别发言人身份。缺失的音源视作静音；迟到的音频将被直接丢弃而不是堆积延迟。现有的打断处理与外发静音填充依然有效。
+
+语音智能体能够感知单聊呼叫者的身份，或群语音会议的邀请人与当前参会人名册。它会在音频接通后致意，并可在人员进出会议时打招呼或道别。显示名称取自本地缓存的联系人或群内成员昵称，当不可用时回退到账号 ID。群聊普通成员资格不被视作参会出勤，邀请人亦不一定是房间创建者。单聊对端即为对话伙伴。在群语音会议中如果仅有另一名参会者，智能体可正常与该参会人对话。在多人参会时，名册能够指示谁在房间内，而混音音频本身无法确切区分具体是谁在发言。机器人在统计参会人数时会排除自身账号；暂不可用的出勤数据并不代表房间内只有单一呼叫者。
+显示名称与名册变动不赋予任何额外权限。
+稍后获取到的成员名称会直接刷新名册，而不会重复触发入会播报。
+最新名册的优先级高于旧通话摘要；在启用最近上下文回顾时，之前的通话摘要与最近聊天片段依然可用。
+即使混音音频无法告知是谁在说话，智能体依然可以使用名册说明当前谁在场。Gateway 的 `context` 日志会记录观察到的更新、名称查询结果以及语音桥接提交情况（仅记录计数与消息摘要，略去具体姓名、ID 与消息文本）。提交给语音桥接器不代表大模型已经收到。
+
+协同咨询默认处于只读状态，且需要像单聊一样显式开启会话持久化。管理员所有者咨询需要满足以下全部三项配置：
+
+1. `calls.voice.toolPolicy: "owner"`。
+2. 对应群聊的 `toolPolicy: "owner"`。
+3. OpenClaw 的 `commands.ownerAllowFrom` 中包含精确的 `agent-wechat:test-group@chatroom` 条目。
+
+这意味着将整个群聊作为一个独立主体进行信任，而非信任群内的单个具体发言人。常规的智能体工具与授权审批依然生效；群权限变更会取消挂起的咨询。插件在通话期间不会修改所有者白名单。会话按账号、群聊与权限级别进行隔离。可选的群 `sessionKey` 仅从该群自身的路由初始化新会话；工具调用者的私聊单聊会话绝不会被带入群聊房间中。
+
+若仅在管理员邀请机器人时才启用管理员工具，可保持群默认的只读策略，并添加 `ownerInviterToolPolicy`：
+
+```json
+{
+  "autoJoin": true,
+  "toolPolicy": "safe-read-only",
+  "ownerInviterToolPolicy": "owner"
+}
+```
+
+经过认证的邀请人必须在 `commands.ownerAllowFrom` 中拥有确切的 `agent-wechat:CONTACT_ID` 条目；同时还需要语音级别的所有者策略与宿主群聊的所有者授权。其他邀请则沿用默认的 `toolPolicy`。省略 `autoJoinAllowFrom` 表示允许该配置群内的任何邀请人。该策略覆盖会信任该通话中的所有人员（包含稍后加入者），并在邀请人离开后依然生效。通话期间权限只降不升；提升权限需要重新发起通话。状态接口会汇报邀请人与生效策略。所有者通话与只读通话使用相互隔离的会话与摘要回顾；缺少明确权限等级的旧通话摘要不会被复用。
+
+由机器人主动发起的群会议使用群聊自身的 `toolPolicy`。`ownerInviterToolPolicy` 覆盖仅适用于呼入的邀请；发起请求的智能体会话的所有者权限不会转移到新通话中。
+
+## 模型配置与运行行为 \{#models-and-behavior}
+
+以下所有配置路径均相对于 `calls.voice`。
+
+| 配置项 | 行为 / 默认值 |
+| --- | --- |
+| `mode` | `bidi`（默认）使用 Realtime/Live 双向实时语音；`agent` 使用语音识别、常规智能体轮次与 OpenClaw TTS。适用于单聊与群会议。 |
+| `transcription` | 智能体模式下的转录提供商、可选模型/语言及可选的 API-key SecretRef。 |
+| `realtime.provider` | `bidi` 模式下的必填项；目前支持的适配器为 `openai`。 |
+| `realtime.model`, `realtime.voice` | 可选语音模型/声音角色；若未指定则使用提供商默认值。 |
+| `realtime.instructions` | 可选的对话系统提示词引导，最长 4,000 字符。 |
+| `realtime.agentContext.enabled` | 默认为 `false`。设为 `true` 可通过 OpenClaw 语音上下文解析器自动注入所选智能体 `IDENTITY.md`、`USER.md` 与 `SOUL.md` 的片段（适用于单聊与群聊）。 |
+| `agentId` | 必填项。用于确定声音角色、提供商鉴权以及被允许协同咨询的对应智能体。 |
+| `toolPolicy` | 可设为 `none`、`safe-read-only` 或 `owner`。开启会话持久化时默认为 `safe-read-only`。 |
+| `allowConsultSessionPersistence` | 设为 `true` 允许在通话期间使用 OpenClaw 会话进行协同咨询。 |
+| `sessionScope` | `per-contact`（每个联系人保持一个会话，使智能体能够记住过往通话）或 `per-call`。参见[记忆过往通话](../call-memory/)。 |
+| `consultation.summary`, `consultation.recentMessages`, `realtime.recentContext` | 为每次已接听的通话生成摘要，并与智能体共享最近的聊天记录（默认开启）；为下一次通话提供简要回顾（默认关闭）。参见[记忆过往通话](../call-memory/)。 |
+| `realtime.consultPolicy` | `auto` 由模型自主决定何时咨询；`substantive` 要求其就事实与上下文发起咨询；`always` 在模型漏查时由呼叫方轮次强制触发咨询。 |
+| `realtime.consultThinkingLevel`, `realtime.consultFastMode` | 可选的 OpenClaw 推理级别与咨询极速模式覆盖。 |
+| `consultation.inboundSessionKey` | 可选的选定智能体已有会话，在首次接听来电时用来初始化新的通话会话。 |
+| `consultation.timeoutMs` | 默认 30,000 毫秒；有效区间 1,000–120,000 毫秒。 |
+| `maxDurationSeconds` | 默认 3,600 秒（1 小时）；有效区间 30–3,600 秒。达到该上限时插件将自动挂断。Native 守护进程当前最多支持持续通话 20 分钟。 |
+
+在 `bidi` 模式下，语音实时模型负责自然语音对话；选定的 OpenClaw 智能体负责处理委托的复杂提问与允许的工具调用。呼入/呼出策略默认处于 `disabled`；白名单必须使用确切的联系人 ID，不支持 `*` 通配符。文字聊天工具调用者还必须被列入 `outboundToolAllowFrom` 授权列表；所有者通话协同咨询则直接使用当前通话权限。普通文字消息收发权限不代表通话权限。
+
+将 `realtime.model` 设置为以下 OpenAI 模型之一。若省略则使用提供商默认值 `gpt-realtime-2.1`。
+
+| 模型 | 对话机制 | 智能体协同咨询 | 登录认证 |
+| --- | --- | --- | --- |
+| `gpt-realtime-2.1`, `gpt-realtime-2.1-mini`, `gpt-realtime-2` | 轮流发言；当呼叫方打断时立即停止。 | 通过工具调用。 | OpenAI API 密钥。 |
+| `gpt-live-1-codex` (声音角色 `cove`) | 边听边说并自主处理打断。自我介绍为 ChatGPT：此路由不使用智能体的名称或人设角色。 | 委托给智能体。不支持 `consultPolicy: "always"`。 | OpenClaw 中智能体的 ChatGPT 登录（2026.10.10 或更新版本），其次为 API 密钥。 |
+| `gpt-live-1` (声音角色 `marin`) | 边听边说并自主处理打断。使用智能体的名称与人设角色。 | 同 `gpt-live-1-codex`。 | OpenAI API 密钥。 |
+
+语音模型会继承选定智能体已配置的身份。当开启工作区上下文 (`agentContext`) 时，实时提供商还会接收来自 `IDENTITY.md`、`USER.md` 与 `SOUL.md` 有边界的人设摘录内容（最多 6,000 字符）。`USER.md` 用于提供用户基本背景，并不意味着所有呼叫方都是该用户。常规咨询智能体接收其标准工作区指令，包括 `AGENTS.md`。
+
+### 使用现有智能体与 TTS 模式 \{#use-your-agent-and-tts}
+
+1. 在常规 Gateway 设置中配置好 OpenClaw TTS 提供商。
+2. 将以下字段合并到现有的 `calls.voice` 配置中：
+
+   ```json
+   {
+     "enabled": true,
+     "mode": "agent",
+     "agentId": "main",
+     "allowConsultSessionPersistence": true,
+     "toolPolicy": "safe-read-only",
+     "transcription": {
+       "provider": "openai"
+     }
+   }
+   ```
+
+3. 保留呼入、呼出与会议白名单。在测试通话前，检查 `wechat_call` 状态中的 `mode: "agent"` 与所选 `agentId`。
+
+`transcription.apiKey` 支持传入 API Key 或 SecretRef；若省略则使用转录提供商配置的默认凭据。这些凭据独立于实时语音凭据。
+
+在智能体模式下，`toolPolicy: "none"` 允许在独立会话中进行无工具对话。会话持久化依然需要显式开启，因为智能体模式即使禁用工具也会创建 OpenClaw 会话。
+
+### 协同咨询与会话管理 \{#consultation-and-sessions}
+
+使用 `wechat_call` 发起的呼叫在启用协同咨询且该会话归属于 `calls.voice.agentId` 时，会使用发起请求的会话作为上下文。配置 `consultation.inboundSessionKey` 可在呼入时实现相同效果。OpenClaw 会在通话会话首次创建时，将该会话的上下文复制到通话会话中。请确保所选会话的历史记录适合呼入者。
+
+当设置 `toolPolicy: "owner"` 时，如果通话参与者的微信 ID 与 `commands.ownerAllowFrom` 中的 `agent-wechat:<WeChat ID>` 条目完全一致，该所有者可以按照智能体的常规工具策略进行协同咨询。所有者可以使用针对相同微信对端和通道账号的绑定会话。其他被允许的参与者则在独立会话中获得只读咨询权限。请单独将呼入者添加到 `inboundAllowFrom` 中。
+
+经过所有者授权的通话协同咨询可以使用 `wechat_call` 工具，无需受限于额外的文字聊天请求者白名单。该授权绑定于当前通话，在通话结束或失去所有者咨询权限时自动撤销。只读咨询无法控制通话。已配置的发送目标/群聊以及常规宿主限制依然生效。群语音会议挂断仅移出智能体自身。
+
+协同咨询的运行方式与智能体的普通聊天轮次相同。它们使用智能体所配置的模型（包括 `claude-cli` 等 CLI 运行时）及其回退模型。
+
+:::note[使用提示]
+模式变更在通道重新加载后对新通话生效。
+未启用的通话类型将直接被忽略，既不主动接听也不主动拒绝。开启视频权限并不代表具备视频通话能力：即使设置 `video.enabled: true`，当前后端也无法处理视频画面，亦无法将其自动转为语音。无论哪种对话模式，都不支持将单聊呼叫直接升级为群语音会议。
+
+语音桥接器在等待呼叫方说话时发送静音数据。对于实时模型，如果呼叫方打断回复，桥接器会清空已排队的音频，并向语音模型上报预估的播放位置。GPT-Live 模型则自主处理打断。Realtime 最多可排队 10 分钟的回复；达到该上限时会取消回复并上报播放位置，而不是静默截断尾部音频。Live 模型保持 3 秒的音频队列以降低延迟。
+无论采用哪种方式，语音智能体都可以在 OpenClaw 智能体进行协同咨询的同时继续与呼叫方对话。它会对查询确认一次，安静地等待结果，并在查询进行期间回答状态问题。
+在智能体模式下，相近的转录片段会合并为一个对话轮次。在推理思考与 TTS 合成期间音频输入持续流入；打断操作会清空排队的语音，并丢弃迟到的智能体或 TTS 结果，而不会重复执行操作。
+该适配器不会录制通话音频。协同咨询记录以及智能体在通话结束后总结的转录内容在开启会话持久化时会保存在 OpenClaw 中；适配器本身仅保留简短的通话摘要。其他提供商适配器若预检失败将报错退出，不会自动静默降级。
+:::

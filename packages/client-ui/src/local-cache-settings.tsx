@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Connection } from "./connection.ts";
+import { t } from "./i18n.ts";
 
 export function LocalCacheSettings({
   connection,
@@ -28,17 +29,15 @@ export function LocalCacheSettings({
   return (
     <div className="setting local-cache-setting">
       <span>
-        On this device
-        <small>
+        {t("localCacheSettings.device")}
+        <small className="cache-usage">
           {usage?.available === false
-            ? "Browser storage unavailable"
+            ? t("localCacheSettings.browserStorageUnavailable")
             : usage
-              ? `${(usage.bytes / 1024 / 1024).toFixed(1)} MB · ${
-                  usage.chats
-                } chats · ${usage.messages} messages`
-              : "Checking storage…"}
+              ? t("localCacheSettings.mbChatsMessages", { size: (usage.bytes / 1024 / 1024).toFixed(1), chats: usage.chats, messages: usage.messages })
+              : t("localCacheSettings.checkingStorage")}
         </small>
-        <small>Media limit: 256 MB</small>
+        <small>{t("localCacheSettings.mediaLimit256Mb")}</small>
       </span>
       <button
         className="secondary"
@@ -48,13 +47,17 @@ export function LocalCacheSettings({
           try {
             await connection.clearCache(account);
             setUsage(await connection.cache.stats(account));
-            setNotice("Temporary data cleared. Drafts and pending sends kept.");
+            setNotice(
+              t("localCacheSettings.temporaryDataClearedDraftsPending"),
+            );
           } finally {
             setBusy(false);
           }
         }}
       >
-        {busy ? "Clearing…" : "Clear temporary data"}
+        {busy
+          ? t("localCacheSettings.clearing")
+          : t("localCacheSettings.clearTemporaryData")}
       </button>
       {notice && (
         <small className="local-cache-notice" role="status">

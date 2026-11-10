@@ -1,0 +1,114 @@
+name: Translations
+
+# When English text changes, Claude (Haiku) translates the new and changed UI
+# strings and docs pages into every language, and the result is opened as a pull
+# request for review:
+#
+# - For a pull request that changes English, the translations go to `i18n/pr-<n>`,
+#   a pull request stacked on that branch. Merge it into the branch first.
+# - For English that reaches main another way (a fork's pull request, a direct
+#   push, or a stacked pull request that was not merged), they go to `i18n/sync`.
+#
+# Claude may only edit translation files; scripts/i18n/publish.mjs discards
+# anything else and drops translations that fail `pnpm i18n check`, so English
+# shows instead. Fork pull requests are skipped (no secrets), as are drafts, bot
+# pull requests and the translation branches themselves.
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+    paths:
+      - 'packages/client-ui/locales/en.json'
+      - 'docs/src/content/docs/**'
+      - 'docs/locales.mjs'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/client-ui/locales/en.json'
+      - 'docs/src/content/docs/**'
+      - 'docs/locales.mjs'
+  workflow_dispatch:
+
+jobs:
+  translate:
+    if: >-
+      github.event_name != 'pull_request' || (
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        !github.event.pull_request.draft &&
+        github.event.pull_request.user.type != 'Bot' &&
+        !startsWith(github.event.pull_request.head.ref, 'i18n/'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # A newer push supersedes a run still in progress.
+    concurrency:
+      group: i18n-translate-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Translate on top of the branch itself, not the merge preview.
+          ref: ${{ github.event.pull_request.head.ref || github.ref }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+
+      - name: Find what needs translating
+        id: plan
+        run: echo "count=$(node scripts/i18n/publish.mjs plan "$RUNNER_TEMP/work.json")" >> "$GITHUB_OUTPUT"
+
+      - name: Translate
+        if: steps.plan.outputs.count != '0'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Translate English text for agent-wechat. ${{ runner.temp }}/work.json lists the work per
+            language tag: `ui` entries are keys of packages/client-ui/locales/<tag>.json (nested by the
+            dots in the key) with their English text and any current translation; `docs` entries name an
+            English page and the translation file to write.
+
+            First read docs/i18n/glossary/<tag>.md if it exists, and the "Translate a docs page" section of
+            docs/src/content/docs/reference/translate.mdx. Then:
+
+            - UI, state "missing": add the key. State "stale": English changed; update the translation to
+              match. Keep {{placeholders}} exactly. When English has plural forms (`_one`, `_other`), write
+              every plural form the language uses (Chinese and Japanese: `_other` only).
+            - Docs, state "missing": create the translation file from the English page. State "stale":
+              update the existing translation to match the current English, changing only what differs.
+              Keep code exactly (translate only comments and quoted example text), keep every link target
+              exactly as in English, keep imports and components, and end every heading with the English
+              heading's ID as `\{#id}`. Translate `title` and `description`; do not add `sourceHash` or
+              `banner`.
+            - Use natural, plain language. Where WeChat has its own wording, use the official WeChat
+              client's wording in that language.
+            - Edit only the files named in work.json.
+
+            Finally write two files in ${{ runner.temp }}:
+            - back-translation.md: for each language, a `### <tag>` heading, then each new or changed UI
+              string as "- `key`: <your translation, translated back into English>", and for each docs
+              page "- `page`: <two sentences in English on what the translation says, noting anything
+              that differs in meaning from the English>".
+            - notices.json: {"<tag>": "<'This page was translated by machine and not yet reviewed by a
+              person.' in that language>"} for each language with docs pages.
+          claude_args: |
+            --model claude-haiku-5-5
+            --add-dir ${{ runner.temp }}
+            --allowedTools "Read" "Edit" "Write" "Glob" "Grep"
+
+      - name: Keep valid translations and record them
+        if: steps.plan.outputs.count != '0'
+        run: node scripts/i18n/publish.mjs finish "$RUNNER_TEMP/work.json"
+
+      - name: Open or update the translations pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_PR: ${{ github.event.pull_request.number }}
+          SOURCE_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          # With nothing to translate, publish closes a translations pull request that is no longer needed.
+          if [ "${{ steps.plan.outputs.count }}" = "0" ]; then echo '{"restored":[],"dropped":[]}' > "$RUNNER_TEMP/work.report.json"; fi
+          node scripts/i18n/publish.mjs publish "$RUNNER_TEMP/work.json"

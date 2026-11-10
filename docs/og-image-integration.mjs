@@ -3,13 +3,91 @@ import sharp from 'sharp';
 import { readFileSync, readdirSync, statSync, mkdirSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { resolve, dirname } from 'path';
+import { translatedLocales } from './locales.mjs';
 
 export const OG_WIDTH = 1200;
 export const OG_HEIGHT = 630;
 
-const fontRegular = readFileSync('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf');
-const fontBold = readFileSync('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf');
-const fontMono = readFileSync('/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf');
+function findFont(candidates) {
+  for (const p of candidates) {
+    try {
+      return readFileSync(p);
+    } catch {}
+  }
+  return null;
+}
+
+const fontRegular = findFont([
+  '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+  '/System/Library/Fonts/Supplemental/Arial.ttf',
+]);
+const fontBold = findFont([
+  '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+  '/System/Library/Fonts/Supplemental/Arial Bold.ttf',
+]);
+const fontMono = findFont([
+  '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf',
+  '/System/Library/Fonts/Supplemental/Courier New.ttf',
+]);
+// Chinese, Japanese and Korean titles need a CJK font. Linux packages ship these as
+// collections (.ttc), which satori cannot read, so one face is extracted below.
+const fontCJKFile = findFont([
+  '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+  '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
+  '/usr/share/fonts/truetype/wqy/wqy-microhei.ttc',
+  '/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc',
+  '/Library/Fonts/Arial Unicode.ttf',
+  '/System/Library/Fonts/Supplemental/Arial Unicode.ttf',
+  '/System/Library/Fonts/Hiragino Sans GB.ttc',
+]);
+
+/**
+ * One font out of a TrueType/OpenType collection, preferring the face whose family
+ * name ends in "SC" (Simplified Chinese), as a standalone font file.
+ */
+export function collectionFace(buffer) {
+  if (buffer.toString('latin1', 0, 4) !== 'ttcf') return buffer;
+  const count = buffer.readUInt32BE(8);
+  const offsets = Array.from({ length: count }, (_, i) => buffer.readUInt32BE(12 + i * 4));
+  const tables = (offset) => Array.from({ length: buffer.readUInt16BE(offset + 4) }, (_, i) => {
+    const record = offset + 12 + i * 16;
+    return { tag: buffer.toString('latin1', record, record + 4), checksum: buffer.readUInt32BE(record + 4), offset: buffer.readUInt32BE(record + 8), length: buffer.readUInt32BE(record + 12) };
+  });
+  const family = (offset) => {
+    const name = tables(offset).find((table) => table.tag === 'name');
+    if (!name) return '';
+    const records = buffer.readUInt16BE(name.offset + 2);
+    const strings = name.offset + buffer.readUInt16BE(name.offset + 4);
+    for (let i = 0; i < records; i++) {
+      const record = name.offset + 6 + i * 12;
+      if (buffer.readUInt16BE(record) === 3 && buffer.readUInt16BE(record + 6) === 1) {
+        const start = strings + buffer.readUInt16BE(record + 10);
+        return buffer.subarray(start, start + buffer.readUInt16BE(record + 8)).swap16().toString('utf16le');
+      }
+    }
+    return '';
+  };
+  const chosen = offsets.find((offset) => / SC$/.test(family(offset))) ?? offsets[0];
+  const list = tables(chosen);
+  const header = 12 + list.length * 16;
+  const sizes = list.map((table) => (table.length + 3) & ~3);
+  const out = Buffer.alloc(header + sizes.reduce((sum, size) => sum + size, 0));
+  buffer.copy(out, 0, chosen, chosen + 12);
+  let at = header;
+  list.forEach((table, i) => {
+    const record = 12 + i * 16;
+    out.write(table.tag, record, 'latin1');
+    out.writeUInt32BE(table.checksum, record + 4);
+    out.writeUInt32BE(at, record + 8);
+    out.writeUInt32BE(table.length, record + 12);
+    buffer.copy(out, at, table.offset, table.offset + table.length);
+    at += sizes[i];
+  });
+  return out;
+}
+
+let fontCJK;
+const cjk = /[\u2E80-\u9FFF\uAC00-\uD7AF\uF900-\uFAFF\uFF00-\uFFEF]/;
 
 function ogTemplate(title, description, isRoot = false) {
   return {
@@ -62,7 +140,7 @@ function ogTemplate(title, description, isRoot = false) {
                     letterSpacing: '-1.5px',
                     lineHeight: 1.1,
                     marginBottom: isRoot ? '24px' : '12px',
-                    fontFamily: 'DejaVu Sans',
+                    fontFamily: 'DejaVu Sans, CJK',
                   },
                   children: isRoot ? title : 'agent-wechat',
                 },
@@ -79,7 +157,7 @@ function ogTemplate(title, description, isRoot = false) {
                           color: '#CCCCCC',
                           lineHeight: 1.2,
                           marginBottom: '16px',
-                          fontFamily: 'DejaVu Sans',
+                          fontFamily: 'DejaVu Sans, CJK',
                         },
                         children: title,
                       },
@@ -96,7 +174,7 @@ function ogTemplate(title, description, isRoot = false) {
                           fontSize: '22px',
                           color: '#888888',
                           lineHeight: 1.4,
-                          fontFamily: 'DejaVu Sans',
+                          fontFamily: 'DejaVu Sans, CJK',
                           maxWidth: '800px',
                         },
                         children: description,
@@ -124,7 +202,7 @@ function ogTemplate(title, description, isRoot = false) {
                   style: {
                     fontSize: '18px',
                     color: '#444444',
-                    fontFamily: 'DejaVu Sans Mono',
+                    fontFamily: 'DejaVu Sans Mono, CJK',
                   },
                   children: 'agent-wechat',
                 },
@@ -135,7 +213,7 @@ function ogTemplate(title, description, isRoot = false) {
                   style: {
                     fontSize: '16px',
                     color: '#bd5721',
-                    fontFamily: 'DejaVu Sans Mono',
+                    fontFamily: 'DejaVu Sans Mono, CJK',
                   },
                   children: 'docs',
                 },
@@ -162,6 +240,14 @@ function parseFrontmatter(content) {
   return fm;
 }
 
+/** The CJK font, loaded on first use, only for images whose text needs it. */
+function cjkFonts(text) {
+  if (!fontCJKFile || !cjk.test(text)) return [];
+  fontCJK ??= collectionFace(fontCJKFile);
+  // A family of its own: satori falls back to it only for glyphs DejaVu lacks.
+  return [400, 700].map((weight) => ({ name: 'CJK', data: fontCJK, weight, style: 'normal' }));
+}
+
 async function renderOgImage(title, description, isRoot = false) {
   const svg = await satori(ogTemplate(title, description, isRoot), {
     width: OG_WIDTH,
@@ -170,6 +256,7 @@ async function renderOgImage(title, description, isRoot = false) {
       { name: 'DejaVu Sans', data: fontRegular, weight: 400, style: 'normal' },
       { name: 'DejaVu Sans', data: fontBold, weight: 700, style: 'normal' },
       { name: 'DejaVu Sans Mono', data: fontMono, weight: 400, style: 'normal' },
+      ...cjkFonts(`${title} ${description}`),
     ],
   });
   return sharp(Buffer.from(svg)).png().toBuffer();
@@ -185,6 +272,11 @@ export function ogImage() {
     name: 'og-image',
     hooks: {
       'astro:config:setup': async ({ config }) => {
+        if (!fontRegular || !fontBold || !fontMono) {
+          console.warn('[og-image] Skipping OG image generation: required fonts not found');
+          return;
+        }
+
         const dir = fileURLToPath(config.root);
         const contentDir = resolve(dir, 'src/content/docs');
         const outDir = resolve(dir, 'public/og');
@@ -223,7 +315,7 @@ export function ogImage() {
           mkdirSync(dirname(pngPath), { recursive: true });
 
           try {
-            const png = await renderOgImage(title, description, slug === 'index');
+            const png = await renderOgImage(title, description, slug === 'index' || translatedLocales.includes(slug));
             await sharp(png).toFile(pngPath);
             generated++;
           } catch (err) {

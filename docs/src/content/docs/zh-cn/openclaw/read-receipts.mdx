@@ -1,0 +1,52 @@
+---
+title: 已读回执
+description: OpenClaw 何时将微信会话标记为已读，以及如何调整回执策略。
+sourceHash: 47e392dedd3c
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+通过设置 `native.readPolicy` 可精确控制会话被标记为已读的时机：
+
+| `readPolicy` 策略 | 触发已读的时机 |
+| --- | --- |
+| `on_inbound` (默认) | 当 OpenClaw 完成该消息的处理之后：即消息顺利通过[权限检查](/openclaw/access/)且智能体完成了回复，或由内置指令完成了应答 |
+| `never` | 绝不标记已读。手机端将始终保持红点未读状态。 |
+| `on_model_dispatch` | 仅在 OpenClaw 为该消息启动模型运行后标记已读。比 `on_inbound` 更严格（见下文）。 |
+
+标记已读会覆盖 **整个会话**（直至最新的一条消息）。同时会通知微信服务端，以便你的手机和其他登录设备同步消除红点未读徽标。
+
+```json
+"native": {
+  "readPolicy": "on_inbound"
+}
+```
+
+## 严格模式 \{#strict-mode}
+
+`on_model_dispatch` 会一直等待，直到 OpenClaw 报告已为包含该消息的请求准备好模型运行。内置命令、被忽略的消息以及尚未就绪的媒体保持未读状态，通道状态中会显示 `handoffUnconfirmed`。
+
+| OpenClaw 版本 | 消息确认依据 | 是否需要 `allowConversationAccess` |
+| --- | --- | --- |
+| 2026.11.2 及更新版本 | 该消息的 OpenClaw 运行启动通知 | 否 |
+| 较早版本 | 包含确切图片字节校验的模型请求本身 | 是 |
+
+在较早版本上，按如下方式配置权限：
+
+```json
+"plugins": {
+  "entries": {
+    "agent-wechat": { "hooks": { "allowConversationAccess": true } }
+  }
+}
+```
+
+对于常规聊天机器人，推荐使用 `on_inbound`。
+
+<Aside title="使用提示">
+- **被拦截忽略的消息将保持未读，** 附件正在下载中或处理失败的消息同样保持未读。
+- **包含更早的旧消息。** 标记当前会话已读时，会连带消除智能体此前未曾处理过的更早旧消息未读提示。
+- **标记已读不代表完全理解。** 即使智能体处理了一个它无法打开的文件，处理完毕后该会话依然可能被标记为已读。在 OpenClaw 2026.11.2 及更新版本中，若模型仅支持文本而无法查看图片，该图片同样会被视为已确认。
+- **杜绝重复已读通知。** 若发送给微信服务端的已读确认网络响应丢失，将标记为 `needs_review`，绝不盲目重复发送。挂起的已读状态在 Gateway 重启后仍会继续保留。
+- 除非 `readPolicy` 设为 `never`，否则访问令牌必须包含 `read-state` 权限范围。
+</Aside>

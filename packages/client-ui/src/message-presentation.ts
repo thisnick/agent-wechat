@@ -1,4 +1,5 @@
 import type { NativeMessage } from "@agent-wechat/shared";
+import { t } from "./i18n.ts";
 import { sharedLinkTarget } from "./shared-link-target.ts";
 
 export function textMessageLink(message: NativeMessage) {
@@ -10,7 +11,10 @@ export function textMessageLink(message: NativeMessage) {
 
 export function recallText(message: NativeMessage) {
   // The original author controls placement, not the wording of who recalled it.
-  return message.recall?.replacementText || "Message recalled";
+  const replacement = message.recall?.replacementText;
+  if (replacement === "Message recalled")
+    return t("messagePresentation.messageRecalled");
+  return replacement || t("messagePresentation.messageRecalled");
 }
 
 // WeChat's application-message envelope also carries replies and shared cards.

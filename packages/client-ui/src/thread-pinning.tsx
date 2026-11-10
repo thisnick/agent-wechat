@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useSyncExternalStore } from "react";
 import type { NativeThread } from "@agent-wechat/shared";
 import type { Connection } from "./connection.ts";
+import { t } from "./i18n.ts";
 import type { ThreadPreference } from "./thread-pinning.ts";
 import { Icon } from "./ui.tsx";
 
@@ -56,14 +57,18 @@ export function PinFeedback<K extends "pinned" | "muted">({
       {(state.uncertain || state.error) && (
         <div className="pin-feedback" role={state.error ? "alert" : undefined}>
           <span>
-            {state.uncertain ? `Couldn’t confirm ${kind} change.` : state.error}
+            {state.uncertain
+              ? kind === "pin" ? t("threadPinning.couldntConfirmPin") : t("threadPinning.couldntConfirmNotification")
+              : state.error}
           </span>
           <button
             className="text-button"
             disabled={state.busy}
             onClick={() => void model.check()}
           >
-            {state.uncertain ? "Check status" : "Refresh"}
+            {state.uncertain
+              ? t("threadPinning.checkStatus")
+              : t("threadPinning.refresh")}
           </button>
         </div>
       )}
@@ -92,13 +97,21 @@ export function ThreadPinSwitch({
           className="group-toggle"
           role={known ? "switch" : undefined}
           aria-checked={known ? displayed! : undefined}
-          aria-label={known ? "Pin chat" : "Pin chat: state unavailable"}
+          aria-label={
+            known
+              ? t("threadPinning.pinChat")
+              : t("threadPinning.pinChatStateUnavailable")
+          }
           aria-busy={state.busy}
           disabled={state.disabled}
-          title={known ? "Keep this chat at the top" : "Pin state unavailable"}
+          title={
+            known
+              ? t("threadPinning.keepChatTop")
+              : t("threadPinning.pinStateUnavailable")
+          }
           onClick={() => void model.toggle()}
         >
-          <span>Pin chat</span>
+          <span>{t("threadPinning.pinChat")}</span>
           {state.saving && <span className="pin-spinner" aria-hidden="true" />}
           <span
             className={`toggle-track ${displayed ? "on" : ""} ${
@@ -112,8 +125,8 @@ export function ThreadPinSwitch({
         {!known && (
           <button
             className="icon-btn"
-            aria-label="Refresh pin state"
-            title="Refresh pin state"
+            aria-label={t("threadPinning.refreshPinState")}
+            title={t("threadPinning.refreshPinState")}
             disabled={state.busy}
             onClick={() => void model.check()}
           >

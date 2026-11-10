@@ -1,0 +1,212 @@
+---
+title: 通话媒体 API
+description: 通过鉴权的 WebSocket 在带版本号的 JSON 消息中收发 PCM 音频。
+sourceHash: 2456df0d807e
+---
+
+在 JSON `audio.chunk` 消息中收发 PCM16 Little-Endian 采样点数据。
+每个音频数据块都会标明所属的音轨 ID 与代际（generation）；`pcmBase64` 包含标准补齐的 Base64 编码数据。守护进程负责对外发音频进行分帧与时钟步调控制，完成编码并处理微信底层网络连接。
+
+为了兼容旧版对端节点，单聊与群语音会议均容忍经过认证的接收端 Nonce 随机数复用。守护进程会统计复用次数、过滤重复数据包并在接纳音频前验证受保护的发送方。外发计数器严格受限，耗尽时需要建立新的密钥代际。
+
+## 附加通道并交换音频 \{#attach-and-exchange-audio}
+
+1. 在[控制 Socket](../calls-api/#protocol-version) 上协商版本 2，认领通话，并等待 `call.state` 汇报 `state: "connected"`。保持拥有所有权的控制 Socket 处于开启状态。
+2. 以相同账号携带 `calls` Bearer 鉴权请求头打开 `/v1/accounts/{account}/calls/{callId}/media`。必须在 5 秒内发送以下初始握手 JSON：
+
+   ```json
+   {
+     "type": "media.attach",
+     "supportedProtocolVersions": [2],
+     "clientId": "example-client",
+     "ownerToken": "<保密的所有者令牌 ownerToken>"
+   }
+   ```
+
+3. 等待 `media.ready` 响应。方向（direction）相对于你的应用程序。`receiveTracks` 为音轨数组（单聊通话同样使用数组）：
+
+   ```json
+   {
+     "type": "media.ready",
+     "protocolVersion": 2,
+     "sendTrack": {
+       "id": 1,
+       "generation": 1,
+       "direction": "send",
+       "format": {"sampleRate": 16000, "channels": 1, "frameMs": 20}
+     },
+     "receiveTracks": [{
+       "id": 2,
+       "generation": 1,
+       "direction": "receive",
+       "format": {"sampleRate": 16000, "channels": 1, "frameMs": 20}
+     }]
+   }
+   ```
+
+4. 启动声明的外发音轨，随后发送音频：
+
+   ```json
+   {"type": "audio.start", "trackId": 1, "generation": 1}
+   ```
+
+   ```json
+   {"type": "audio.chunk", "trackId": 1, "generation": 1, "pcmBase64": "AID/f///"}
+   ```
+
+   该数据块解码后的字节为 `00 80 ff 7f ff ff`，对应的采样点为 `-32768`、`32767` 与 `-1`。接收到的数据块使用对应接收音轨的 ID。
+   接收音频并不要求必须先启动外发音轨。
+   守护进程在接收到的数据块中还会提供 `sequence` 与 `sampleOffset`；参见[接收音轨与时序](#receive-tracks-and-timing)。
+
+| 属性 | 当前规格值 |
+| --- | --- |
+| 编码格式 | PCM16 Little-Endian，标准补齐 Base64 |
+| 采样率 / 声道 | 16,000 Hz / 单声道 (Mono) |
+| 守护进程音频帧长 | 20 ms：320 个采样点 / 解码后 640 字节 |
+| 应用程序数据块 | 非空完整采样点，解码后最多 65,536 字节 |
+| 最大 Base64 长度 | 87,384 字符 |
+| 守护进程外发队列 | 最长缓存 8 秒音频 |
+
+数据块无需与编解码器帧边界严格对齐。守护进程会自动合并较小的数据块并拆分较大的数据块。二进制 WebSocket 消息将被直接拒绝。
+
+## 接收音轨与时序 \{#receive-tracks-and-timing}
+
+在具备 `conferenceAudio` 能力时，群语音会议拥有一个外发房间音轨与多个相互独立的接收音轨。守护进程不对其进行混音。例如：
+
+```json
+{
+  "type": "media.ready",
+  "protocolVersion": 2,
+  "sendTrack": {
+    "id": 1,
+    "generation": 1,
+    "direction": "send",
+    "format": {"sampleRate": 16000, "channels": 1, "frameMs": 20}
+  },
+  "receiveTracks": [
+    {
+      "id": 6,
+      "generation": 1,
+      "direction": "receive",
+      "participantId": "member-4",
+      "format": {"sampleRate": 16000, "channels": 1, "frameMs": 20}
+    },
+    {
+      "id": 7,
+      "generation": 1,
+      "direction": "receive",
+      "participantId": "member-5",
+      "format": {"sampleRate": 16000, "channels": 1, "frameMs": 20}
+    }
+  ]
+}
+```
+
+可选的 `participantId` 将音轨与名单中的参会人相关联。请使用该关联关系，而不要尝试通过声音或音轨编号推测发言人身份。音源在通话过程中可能会出现或消失：
+
+```json
+{
+  "type": "track.added",
+  "callId": "example-conference",
+  "track": {
+    "id": 8,
+    "generation": 1,
+    "direction": "receive",
+    "participantId": "member-6",
+    "format": {"sampleRate": 16000, "channels": 1, "frameMs": 20}
+  }
+}
+```
+
+```json
+{
+  "type": "track.removed",
+  "callId": "example-conference",
+  "trackId": 6,
+  "generation": 1,
+  "reason": "source_unavailable"
+}
+```
+
+接收音轨事件会同时推送给控制与媒体两个 Socket。请将媒体 Socket 收到的有序事件应用到其音频上：新增音轨必定先于该音源的数据块到达，而移除音轨会立即停止该代际的音频投递。重新发言的音源会拥有更高的代际号；音源替换会先收到移除事件再收到新增事件。每个音源拥有独立的缓冲队列。仅凭静音无法证明参会人已静音或离会。
+
+以下接收到的数据块包含一帧 20 ms 的静音数据（解码后 640 字节）：
+
+```json
+{
+  "type": "audio.chunk",
+  "trackId": 7,
+  "generation": 1,
+  "sequence": 50,
+  "sampleOffset": 16000,
+  "pcmBase64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+}
+```
+
+`sequence` 用于单音源内部的数据块保序。`sampleOffset` 是在共享通话时间轴上以单声道采样点为单位的位置：在 16,000 Hz 采样率下，偏移量 16,000 代表整一秒。来自不同音轨但偏移量相同的数据块对应于相同的播放时间区间（即使它们各自的序列号不同）。在对齐或混音各音轨时请注意保留时间空隙。应用程序不得主动发送这两个时钟字段。
+
+## 直接使用 Node.js 的调用示例 \{#direct-nodejs-example}
+
+通过 `npm install ws` 安装依赖。从控制连接中获取 URL 与所有者凭据；切勿在 URL 中直接放置 Bearer 令牌凭据。
+
+```js
+import WebSocket from "ws";
+
+const media = new WebSocket(process.env.WX_MEDIA_URL, {
+  headers: {Authorization: `Bearer ${process.env.WX_TOKEN}`},
+  maxPayload: 88408,
+});
+media.on("open", () => media.send(JSON.stringify({
+  type: "media.attach", supportedProtocolVersions: [2],
+  clientId: process.env.WX_CLIENT_ID,
+  ownerToken: process.env.WX_OWNER_TOKEN,
+})));
+media.on("message", (data, isBinary) => {
+  if (isBinary) throw new Error("Unexpected binary media");
+  const event = JSON.parse(data.toString());
+  if (event.type === "protocol.error") {
+    throw new Error(`Unsupported call protocol: ${event.code}`);
+  }
+  if (event.type === "media.ready") {
+    if (event.protocolVersion !== 2) throw new Error("Unsupported call protocol");
+    const {id: trackId, generation} = event.sendTrack;
+    media.send(JSON.stringify({type: "audio.start", trackId, generation}));
+    media.send(JSON.stringify({
+      type: "audio.chunk", trackId, generation,
+      pcmBase64: Buffer.alloc(640).toString("base64"),
+    }));
+  } else if (event.type === "audio.chunk") {
+    const pcm = Buffer.from(event.pcmBase64, "base64");
+    console.log("Audio", event.trackId, event.generation,
+      event.sequence, event.sampleOffset, pcm.length);
+  }
+});
+```
+
+## 静音与打断机制 \{#mute-and-interrupt}
+
+通过控制 Socket 发送 `call.mute` 或 `call.clear_audio`。清空音频或变更静音状态会触发带有外发音轨新代际的 `track.updated` 事件：
+
+```json
+{
+  "type": "track.updated",
+  "callId": "example-conference",
+  "track": {
+    "id": 1,
+    "generation": 2,
+    "direction": "send",
+    "format": {"sampleRate": 16000, "channels": 1, "frameMs": 20}
+  }
+}
+```
+
+停止旧的音频生产，针对新代际发送 `audio.start`，随后发送全新的音频数据块。
+旧代际的数据块会被自动丢弃；未来或未知的音轨 ID 会被拒绝。在整个通话期间，请持续处理来自持有所有权的控制 Socket 的音轨更新事件。
+会议静音同时会向房间请求我们的麦克风状态；它不会使其他参会人静音，亦不会结束参会资格。
+
+## 使用提示 \{#good-to-know}
+
+- 省略 `supportedProtocolVersions` 默认为版本 1。当前守护进程仅支持版本 2，会在以状态码 1002 关闭连接前返回 `protocol.error`。空列表、null 或格式错误的列表均属无效。
+- 在附加会议媒体前请先检查 `conferenceAudio` 能力。视频与单聊转会议功能暂不可用。原生通话目前具有 20 分钟的安全时长限制。
+- PCM 队列溢出时将保留最新的呼入音频。读取缓慢的控制端消费连接会被服务端主动关闭。失去拥有所有权的连接将触发通话清理。
+- 远端麦克风更新仅反映该参会人的硬件麦克风状态。它不会改变 PCM 格式，亦不代表该参会人已离会。

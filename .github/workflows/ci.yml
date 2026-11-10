@@ -19,6 +19,7 @@ on:
       - '.github/workflows/native-distribution.yml'
       - '.github/workflows/desktop.yml'
       - 'scripts/client-ui-smoke.mjs'
+      - 'scripts/i18n/**'
       - 'scripts/native-release-notes*.mjs'
       - 'scripts/native-release-policy*.mjs'
       - 'scripts/native-release-orchestration*.mjs'
@@ -88,6 +89,7 @@ jobs:
               - 'packages/shared/**'
               - 'packages/client-ui/**'
               - 'scripts/client-ui-smoke.mjs'
+              - 'scripts/i18n/**'
               - 'packages/openclaw-extension/**'
               - '.node-version'
               - 'pnpm-lock.yaml'
@@ -99,6 +101,7 @@ jobs:
               - '.github/workflows/desktop.yml'
             docs:
               - 'docs/**'
+              - 'scripts/i18n/**'
               - '.node-version'
               - 'pnpm-lock.yaml'
               - '.github/workflows/ci.yml'
@@ -159,6 +162,12 @@ jobs:
       - name: Test (all packages)
         run: pnpm -r --if-present test
 
+      # Missing translations are fine; English-side errors and broken translations fail.
+      - name: Check translations
+        run: |
+          node --test scripts/i18n/*.test.mjs
+          pnpm i18n check
+
   helpers:
     needs: changes
     if: needs.changes.outputs.helpers == 'true'
@@ -198,6 +207,16 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --filter @agent-wechat/docs
+
+      # Missing translations are fine; broken ones (code, links, anchors) fail.
+      - name: Check translations
+        run: |
+          node --test scripts/i18n/*.test.mjs
+          node scripts/i18n/index.mjs check
+
+      # Preview images for translated pages need CJK glyphs.
+      - name: Install fonts
+        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
 
       - name: Build docs
         run: pnpm --filter @agent-wechat/docs build

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { desktopInvoke } from "./desktop.ts";
+import { t } from "./i18n.ts";
 type UpdateSettings = {
   currentVersion: string;
   automatic: boolean;
@@ -34,9 +35,9 @@ export function DesktopUpdates({ notice = false }: { notice?: boolean }) {
   const available = status.phase === "available";
   const description =
     status.phase === "checking"
-      ? "Checking…"
+      ? t("desktopUpdates.checking")
       : status.phase === "downloading"
-      ? `Downloading${
+      ? `${t("desktopUpdates.downloading")}${
           status.total
             ? ` · ${Math.min(
                 100,
@@ -45,18 +46,22 @@ export function DesktopUpdates({ notice = false }: { notice?: boolean }) {
             : "…"
         }`
       : status.phase === "installing"
-      ? "Installing…"
+      ? t("desktopUpdates.installing")
       : available
-      ? `Version ${status.version} is ready`
+      ? t("desktopUpdates.versionReady", { version: status.version })
       : status.phase === "current"
-      ? "You’re up to date"
-      : `Version ${settings.currentVersion}`;
+      ? t("desktopUpdates.reUpDate")
+      : t("desktopUpdates.version", { currentVersion: settings.currentVersion });
   async function action(command: string, args?: Record<string, unknown>) {
     setError("");
     try {
       await desktopInvoke(command, args);
     } catch (e) {
-      setError(typeof e === "string" ? e : "Could not complete the update.");
+      setError(
+        typeof e === "string"
+          ? e
+          : t("desktopUpdates.couldNotCompleteUpdate"),
+      );
     }
     await refresh().catch(() => {});
   }
@@ -68,41 +73,50 @@ export function DesktopUpdates({ notice = false }: { notice?: boolean }) {
     )
       return null;
     return (
-      <aside className="desktop-update-notice" aria-label="App update">
+      <aside
+        className="desktop-update-notice"
+        aria-label={t("desktopUpdates.appUpdate")}
+      >
         <span>{description}</span>
         <button className="secondary" disabled={busy} onClick={install}>
-          {busy ? "Updating…" : "Install and restart"}
+          {busy ? t("desktopUpdates.updating") : t("desktopUpdates.installRestart")}
         </button>
         {available && (
           <button
             className="text-button"
-            aria-label="Dismiss update notice"
+            aria-label={t("desktopUpdates.dismissUpdateNotice")}
             onClick={() => setDismissed(status.version || "")}
           >
-            Later
+            {t("desktopUpdates.later")}
           </button>
         )}
-        <small>The local hub will restart.</small>
+        <small>{t("desktopUpdates.localHubWillRestart")}</small>
         {error && <small role="alert">{error}</small>}
       </aside>
     );
   }
   return (
-    <section className="desktop-update-settings" aria-label="App updates">
+    <section
+      className="desktop-update-settings"
+      aria-label={t("desktopUpdates.appUpdates")}
+    >
       <div className="setting">
         <span>
-          App updates<small>{description}</small>
+          {t("desktopUpdates.appUpdates")}
+          <small>{description}</small>
         </span>
         <button
           className="secondary"
           disabled={busy}
           onClick={() => void action("updates_check")}
         >
-          Check for updates
+          {t("desktopUpdates.checkUpdates")}
         </button>
       </div>
       <div className="setting">
-        <label htmlFor="automatic-updates">Check automatically</label>
+        <label htmlFor="automatic-updates">
+          {t("desktopUpdates.checkAutomatically")}
+        </label>
         <input
           id="automatic-updates"
           type="checkbox"
@@ -119,7 +133,9 @@ export function DesktopUpdates({ notice = false }: { notice?: boolean }) {
         />
       </div>
       <div className="setting">
-        <label htmlFor="prerelease-updates">Include prereleases</label>
+        <label htmlFor="prerelease-updates">
+          {t("desktopUpdates.includePrereleases")}
+        </label>
         <input
           id="prerelease-updates"
           type="checkbox"
@@ -139,17 +155,17 @@ export function DesktopUpdates({ notice = false }: { notice?: boolean }) {
         <div className="setting">
           <span>
             <small>
-              The app and local hub will restart. Profiles stay on this device.
+              {t("desktopUpdates.appLocalHubWillRestart")}
             </small>
           </span>
           <button className="secondary" onClick={install}>
-            Install and restart
+            {t("desktopUpdates.installRestart")}
           </button>
         </div>
       )}
       {status.phase === "downloading" && (
         <progress
-          aria-label="Update download"
+          aria-label={t("desktopUpdates.updateDownload")}
           value={status.total ? status.downloaded : undefined}
           max={status.total || undefined}
         />

@@ -4,6 +4,7 @@ mod credentials;
 mod emoji;
 mod files;
 mod hub;
+mod i18n;
 #[cfg(target_os = "macos")]
 mod macos_notifications;
 mod notification_sound;
@@ -474,6 +475,35 @@ fn install_cli(binaries: &std::path::Path) -> Result<String> {
 fn desktop_quit(app: tauri::AppHandle) {
     request_quit(app);
 }
+/// Tray items whose labels follow the UI language.
+struct TrayMenu {
+    show: tauri::menu::MenuItem<tauri::Wry>,
+    quit: tauri::menu::MenuItem<tauri::Wry>,
+}
+/// Records the language the UI shows, for tray and notification text.
+#[tauri::command]
+async fn desktop_language(
+    app: tauri::AppHandle,
+    state: State<'_, Desktop>,
+    language: String,
+) -> Result<(), String> {
+    let language = i18n::supported(language.trim()).ok_or("Unsupported display language")?;
+    let mut inner = state.inner.lock().await;
+    if inner.config.language.as_deref() != Some(language) {
+        let mut next = inner.config.clone();
+        next.language = Some(language.into());
+        next.save(&state.config_file)
+            .map_err(|error| error.to_string())?;
+        inner.config = next;
+    }
+    drop(inner);
+    i18n::set_language(language);
+    if let Some(tray) = app.try_state::<TrayMenu>() {
+        let _ = tray.show.set_text(i18n::text("trayOpen"));
+        let _ = tray.quit.set_text(i18n::text("trayQuit"));
+    }
+    Ok(())
+}
 fn request_quit(app: tauri::AppHandle) {
     let state = app.state::<Desktop>();
     if state
@@ -493,7 +523,7 @@ fn request_quit(app: tauri::AppHandle) {
             Err(_) => {
                 state.quit.store(0, Ordering::Release);
                 app.dialog()
-                    .message("The hub is still stopping. Wait and try Quit again.")
+                    .message(i18n::text("quitStillStopping"))
                     .title("AgentWechat")
                     .show(|_| {});
                 if let Some(window) = app.get_webview_window("main") {
@@ -525,6 +555,7 @@ fn main() {
             let config_file = app.path().app_config_dir()?.join("settings/desktop.json");
             let config = Config::load(&config_file)?;
             config.save(&config_file)?;
+            i18n::set_language(config.language.as_deref().unwrap_or("en"));
             let data = app.path().app_local_data_dir()?.join("hub");
             #[cfg(target_os = "linux")]
             let binaries = app.path().resource_dir()?.join("bin");
@@ -553,18 +584,22 @@ fn main() {
             let show = tauri::menu::MenuItem::with_id(
                 app,
                 "show",
-                "Open AgentWechat",
+                i18n::text("trayOpen"),
                 true,
                 None::<&str>,
             )?;
             let quit = tauri::menu::MenuItem::with_id(
                 app,
                 "quit",
-                "Quit AgentWechat",
+                i18n::text("trayQuit"),
                 true,
                 None::<&str>,
             )?;
             let menu = tauri::menu::Menu::with_items(app, &[&show, &quit])?;
+            app.manage(TrayMenu {
+                show: show.clone(),
+                quit: quit.clone(),
+            });
             tauri::tray::TrayIconBuilder::new()
                 .icon(
                     app.default_window_icon()
@@ -592,6 +627,7 @@ fn main() {
             desktop_remote,
             desktop_select,
             desktop_settings,
+            desktop_language,
             desktop_save_local,
             desktop_reveal,
             desktop_copy_key,

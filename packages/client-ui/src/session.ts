@@ -16,6 +16,7 @@ import {
 import { allMentionProblem, canMentionAll, mentionOptions, type MentionToken } from "./mentions.ts";
 import type { BrowserCache } from "./browser-cache.ts";
 import { HISTORY_TTL_MS, HistoryCache } from "./history-cache.ts";
+import { t } from "./i18n.ts";
 import { messageSummary } from "./thread-preview.ts";
 import { canReply } from "./reply.ts";
 import { quotedText, quoteTargetMatches } from "./quote-preview.ts";
@@ -94,63 +95,45 @@ export function readableError(error: unknown): string {
     return (
       (
         {
-          unauthorized: "The agent-wechat hub access key wasn't accepted.",
-          forbidden: "This access key doesn't allow that action.",
-          auth_required: "Sign in to WeChat again.",
-          operation_in_progress:
-            "This profile has an operation in progress. Wait for it to finish, then try again.",
-          account_sign_out_required: "Sign out before removing this profile.",
-          account_confirmation_mismatch:
-            "The profile confirmation does not match.",
-          read_state_conflict:
-            "The conversation changed. Refresh it and try again.",
-          idempotency_conflict: "This send key is already in use.",
-          invalid_mentions: "Choose the mentioned members again.",
-          invalid_mention_text: "The message or its mention positions are invalid. Edit it and try again.",
-          mentions_require_group: "Mentions are available in groups only.",
-          mention_member_unavailable: "A mentioned member is unavailable. Remove the mention or choose them again.",
-          mention_group_membership_unavailable: "Refresh the group’s members before sending mentions.",
-          mention_all_forbidden: "You can’t mention everyone in this group.",
-          mention_all_permission_unavailable: "Group permissions are unavailable. Refresh the group before mentioning everyone.",
-          quote_mentions_unsupported: "This hub cannot combine mentions with quoted replies. Update the hub or remove one.",
-          quote_target_unavailable:
-            "That message is no longer available to quote.",
-          quote_target_mismatch: "The quoted message changed. Select it again.",
-          quote_target_ambiguous:
-            "That message cannot be identified reliably. Choose another message.",
-          quote_content_unavailable:
-            "The content of that message cannot be quoted.",
-          quote_sender_unavailable:
-            "The sender of that message is unavailable.",
-          unsupported_quote_type: "This message type cannot be quoted yet.",
-          invalid_quote_reference:
-            "Select the message you want to reply to again.",
-          invalid_quote_request:
-            "Select the message you want to reply to again.",
-          unsupported_simulator_operation:
-            "This action isn't available on the simulator.",
-          unsupported_application_media:
-            "This message doesn't contain a supported downloadable attachment.",
-          unsupported_group_creation:
-            "Group creation isn't available on this agent-wechat hub yet.",
-          invalid_group_members:
-            "Choose distinct contacts; group creation needs at least two.",
-          ordinary_contact_required:
-            "One of these contacts cannot be added to an ordinary group.",
-          ordinary_group_required:
-            "Refresh this group and check that you are still a member.",
-          group_state_incomplete:
-            "Refresh the group before changing its settings.",
-          operation_cannot_cancel:
-            "This change has started and can no longer be cancelled.",
-          invalid_group_text:
-            "Use a name of at most 512 UTF-8 bytes without control characters.",
-          pagination_cursor_expired:
-            "This history view expired. Reopen the conversation.",
+          unauthorized: t("session.agentWechatHubAccessKey"),
+          forbidden: t("session.accessKeyDoesnTAllow"),
+          auth_required: t("session.signWechatAgain"),
+          operation_in_progress: t("session.profileHasOperationProgressWait"),
+          account_sign_out_required: t("session.signOutBeforeRemovingProfile"),
+          account_confirmation_mismatch: t("session.profileConfirmationDoesNotMatch"),
+          read_state_conflict: t("session.conversationChangedRefreshTryAgain"),
+          idempotency_conflict: t("session.sendKeyAlreadyUse"),
+          invalid_mentions: t("session.chooseMentionedMembersAgain"),
+          invalid_mention_text: t("session.messageMentionPositionsInvalidEdit"),
+          mentions_require_group: t("session.mentionsAvailableGroupsOnly"),
+          mention_member_unavailable: t("session.mentionedMemberUnavailableRemoveMention"),
+          mention_group_membership_unavailable: t("session.refreshGroupSMembersBefore"),
+          mention_all_forbidden: t("session.canTMentionEveryoneGroup"),
+          mention_all_permission_unavailable: t("session.groupPermissionsUnavailableRefreshGroup"),
+          quote_mentions_unsupported: t("session.hubCannotCombineMentionsQuoted"),
+          quote_target_unavailable: t("session.messageNoLongerAvailableQuote"),
+          quote_target_mismatch: t("session.quotedMessageChangedSelectAgain"),
+          quote_target_ambiguous: t("session.messageCannotIdentifiedReliablyChoose"),
+          quote_content_unavailable: t("session.contentMessageCannotQuoted"),
+          quote_sender_unavailable: t("session.senderMessageUnavailable"),
+          unsupported_quote_type: t("session.messageTypeCannotQuotedYet"),
+          invalid_quote_reference: t("session.selectMessageWantReplyAgain"),
+          invalid_quote_request: t("session.selectMessageWantReplyAgain"),
+          unsupported_simulator_operation: t("session.actionIsnTAvailableSimulator"),
+          unsupported_application_media: t("session.messageDoesnTContainSupported"),
+          unsupported_group_creation: t("session.groupCreationIsnTAvailable"),
+          invalid_group_members: t("session.chooseDistinctContactsGroupCreation"),
+          ordinary_contact_required: t("session.oneTheseContactsCannotAdded"),
+          ordinary_group_required: t("session.refreshGroupCheckStillMember"),
+          group_state_incomplete: t("session.refreshGroupBeforeChangingSettings"),
+          operation_cannot_cancel: t("session.changeHasStartedCanNo"),
+          invalid_group_text: t("session.useNameMost512Utf"),
+          pagination_cursor_expired: t("session.historyViewExpiredReopenConversation"),
         } as Record<string, string>
-      )[error.code] ?? `agent-wechat hub request failed (${error.code}).`
+      )[error.code] ??
+      t("session.agentWechatHubRequestFailed", { code: error.code })
     );
-  return "Couldn't reach the agent-wechat hub. Check the connection and try again.";
+  return t("session.couldnTReachAgentWechat");
 }
 function timestamp(value: string | null): number {
   return value && /^\d+$/.test(value)
@@ -851,7 +834,7 @@ export class HubSession {
           )
             continue;
           this.publish({
-            error: `Couldn’t clear unread status. ${readableError(error)}`,
+            error: t("session.couldnTClearUnreadStatus", { name: readableError(error) }),
           });
           return;
         }
@@ -1092,7 +1075,7 @@ export class HubSession {
         )
       )
         this.publish({
-          error: `Couldn’t clear unread status. ${readableError(error)}`,
+          error: t("session.couldnTClearUnreadStatus", { name: readableError(error) }),
         });
     } finally {
       if (this.current(account, generation))
@@ -1342,7 +1325,7 @@ export class HubSession {
         ...sends,
         {
           key: `observed:${intent.id}`,
-          text: "Message from another client",
+          text: t("session.messageAnotherClient"),
           threadId: intent.destination,
           intent,
         },
@@ -1556,9 +1539,9 @@ export class HubSession {
     if (!account || !threadId || !text.trim()) return false;
     let mentions: TextMentions | undefined;
     try { mentions = mentionOptions(text, tokens); }
-    catch (error) { this.publish({ error: error instanceof Error ? error.message : "Choose the mentioned members again." }); return false; }
+    catch (error) { this.publish({ error: error instanceof Error ? error.message : t("session.chooseMentionedMembersAgain") }); return false; }
     if (mentions && (!threadId.endsWith("@chatroom") || this.value.capabilities.inlineTextMentions !== true)) {
-      this.publish({ error: "This hub cannot send inline mentions. Remove them or update the hub." });
+      this.publish({ error: t("session.hubCannotSendInlineMentions") });
       return false;
     }
     if (mentions?.all && !canMentionAll(this.value.selectedGroup, threadId)) {
@@ -1567,8 +1550,7 @@ export class HubSession {
     }
     if (this.value.selectedGroup?.isInGroup === false) {
       this.publish({
-        error:
-          "You are no longer in this group. Cached history is still available.",
+        error: t("session.noLongerGroupCachedHistory"),
       });
       return false;
     }
@@ -1587,8 +1569,7 @@ export class HubSession {
         this.value.capabilities.quotedTextSend !== true)
     ) {
       this.publish({
-        error:
-          "This message can’t be quoted. Choose another message or remove the reply.",
+        error: t("session.messageCanTQuotedChoose"),
       });
       return false;
     }
@@ -1599,7 +1580,7 @@ export class HubSession {
       ? messageSummary(
           target,
           target.direction === "outgoing"
-            ? "You"
+            ? t("session.you")
             : this.value.contacts.find(
                 (contact) => contact.id === target.senderId,
               )?.displayName ?? target.senderId,

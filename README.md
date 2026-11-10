@@ -9,6 +9,8 @@ need the official app running.
 
 [Get started](#get-started) · [Documentation](https://thisnick.github.io/agent-wechat/) · [OpenClaw](#openclaw) · [Downloads](https://github.com/thisnick/agent-wechat/releases)
 
+[简体中文文档](https://thisnick.github.io/agent-wechat/zh-cn/)
+
 ## See it in action
 
 https://github.com/user-attachments/assets/969f95ef-c17a-4e22-bda0-ec9e08af4ad3

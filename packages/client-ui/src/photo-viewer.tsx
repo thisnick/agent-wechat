@@ -18,6 +18,7 @@ import {
 } from "react-zoom-pan-pinch";
 import type { NativeMessage } from "@agent-wechat/shared";
 import type { Connection } from "./connection.ts";
+import { formatLocale, t } from "./i18n.ts";
 import { conversationMedia, videoAsset } from "./media-variants.ts";
 import { mergeMessage } from "./session.ts";
 import { MediaCard, MediaDownload } from "./media.tsx";
@@ -185,7 +186,10 @@ export function PhotoViewer({
           return;
         }
         if (after.nextMessages === before.nextMessages) {
-          setError(after.error || "Couldn’t load earlier media.");
+          setError(
+            after.error ||
+              t("photoViewer.couldnTLoadEarlierMedia"),
+          );
           break;
         }
       }
@@ -210,7 +214,7 @@ export function PhotoViewer({
           <dialog
             ref={dialog}
             className="photo-viewer"
-            aria-label="Media viewer"
+            aria-label={t("photoViewer.mediaViewer")}
             onCancel={(event) => {
               event.preventDefault();
               route.close();
@@ -261,23 +265,25 @@ export function PhotoViewer({
                 <div className="photo-viewer-info">
                   <strong>
                     {current.direction === "outgoing"
-                      ? "You"
+                      ? t("photoViewer.you")
                       : state.contacts.find(
                           (contact) => contact.id === current.senderId,
                         )?.displayName ||
                         current.senderId ||
-                        (current.type === 43 ? "Video" : "Photo")}
+                        (current.type === 43
+                          ? t("photoViewer.video")
+                          : t("photoViewer.photo"))}
                   </strong>
                   <span aria-live="polite">
                     {loading
-                      ? "Finding earlier media…"
+                      ? t("photoViewer.findingEarlierMedia")
                       : `${index + 1} / ${photos.length}`}
                     {current.createdAt &&
                       ` · ${new Date(
                         /^\d+$/.test(current.createdAt)
                           ? Number(current.createdAt) * 1000
                           : current.createdAt,
-                      ).toLocaleString([], {
+                      ).toLocaleString(formatLocale(), {
                         month: "short",
                         day: "numeric",
                         hour: "numeric",
@@ -285,7 +291,7 @@ export function PhotoViewer({
                       })}`}
                     {navigation && (
                       <button onClick={() => route.showMessage(current.id)}>
-                        Show message
+                        {t("photoViewer.showMessage")}
                       </button>
                     )}
                   </span>
@@ -295,7 +301,7 @@ export function PhotoViewer({
                     <PhotoZoomControls animationTime={animationTime} />
                   )}
                   <PhotoDownload message={current} connection={connection} />
-                  <Button icon="close" label="Close viewer" onClick={route.close} />
+                  <Button icon="close" label={t("photoViewer.closeViewer")} onClick={route.close} />
                 </div>
               </div>
               <div className="photo-viewer-body">
@@ -313,14 +319,14 @@ export function PhotoViewer({
                 </PhotoCanvas>
                 <Button
                   icon="back"
-                  label="Previous item"
+                  label={t("photoViewer.previousItem")}
                   disabled={!previous || loading}
                   onClick={() => void move(-1)}
                   className="photo-previous"
                 />
                 <Button
                   icon="chevron"
-                  label="Next item"
+                  label={t("photoViewer.nextItem")}
                   disabled={!next || loading}
                   onClick={() => void move(1)}
                   className="photo-next"
@@ -329,7 +335,7 @@ export function PhotoViewer({
               <div
                 ref={thumbnails}
                 className="photo-thumbnails"
-                aria-label="Media thumbnails"
+                aria-label={t("photoViewer.mediaThumbnails")}
               >
                 {state.nextMessages && (
                   <button
@@ -339,16 +345,18 @@ export function PhotoViewer({
                       void earlier(photos[0]);
                     }}
                   >
-                    Earlier media
+                    {t("photoViewer.earlierMedia")}
                   </button>
                 )}
                 {photos.map((photo, position) => (
                   <button
                     key={photo.id}
                     className="photo-thumbnail"
-                    aria-label={`${photo.type === 43 ? "Video" : "Photo"} ${
-                      position + 1
-                    }`}
+                    aria-label={`${
+                      photo.type === 43
+                        ? t("photoViewer.video")
+                        : t("photoViewer.photo")
+                    } ${position + 1}`}
                     aria-current={photo.id === current.id ? "true" : undefined}
                     onClick={() => route.move(photo.id)}
                   >
@@ -384,21 +392,24 @@ function PhotoZoomControls({ animationTime }: { animationTime: number }) {
     <>
       <Button
         icon="reset-zoom"
-        label="Reset zoom"
+        label={t("photoViewer.resetZoom")}
         onClick={() => void resetTransform(animationTime)}
       />
       <Button
         icon="zoom-out"
-        label="Zoom out"
+        label={t("photoViewer.zoomOut")}
         disabled={scale <= 1.001}
         onClick={() => void zoomOut(0.5, animationTime)}
       />
-      <span className="photo-zoom-level" aria-label="Zoom level">
+      <span
+        className="photo-zoom-level"
+        aria-label={t("photoViewer.zoomLevel")}
+      >
         {Math.round(scale * 100)}%
       </span>
       <Button
         icon="zoom-in"
-        label="Zoom in"
+        label={t("photoViewer.zoom")}
         disabled={scale >= 3.999}
         onClick={() => void zoomIn(0.5, animationTime)}
       />
@@ -460,7 +471,7 @@ function PhotoCanvas({
       contentClass="photo-transform"
       wrapperProps={{
         tabIndex: image ? 0 : undefined,
-        "aria-label": image ? "Image canvas" : undefined,
+        "aria-label": image ? t("photoViewer.imageCanvas") : undefined,
         onPointerDown: (event) => {
           // Leave native video controls, buttons and links to their own gestures.
           if (

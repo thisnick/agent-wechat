@@ -17,6 +17,7 @@
     "@agent-wechat/shared": "workspace:*",
     "@shadcn/react": "^0.3.1",
     "@tauri-apps/api": "^2.10.0",
+    "i18next": "^26.5.11",
     "lucide-react": "^1.61.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

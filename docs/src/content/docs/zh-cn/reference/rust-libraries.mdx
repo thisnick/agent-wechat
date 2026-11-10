@@ -1,0 +1,103 @@
+---
+title: Rust 开发库
+description: 在 Rust 中直接使用原生的微信协议与官方 Profile 存储库。
+sourceHash: 33c22b49705c
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+通过这些底层库，可以直接执行受支持的微信服务端操作并读写官方 Profile 存储。它们在没有后台守护进程或官方可执行程序的情况下即可独立运行。若应用程序连接到已有的守护进程，请参考 [HTTP API](/use/api/)。
+
+| Crate | 职责与用途 |
+| --- | --- |
+| [wechat-protocol](https://docs.rs/wechat-protocol) | NativeClient、认证请求、信令与加密传输协议 |
+| [wechat-calls](https://docs.rs/wechat-calls) | 通话准入、会话、媒体 Worker、音源追踪、PCM 与 Opus 编解码 |
+| [wechat-profile](https://docs.rs/wechat-profile) | Profile 密钥、历史记录、联系人、媒体缓存及安全写入器 |
+| [wechat-media](https://docs.rs/wechat-media) | 共享的图像检查与解码支持 |
+| [wechat-platform](https://docs.rs/wechat-platform) | 私有文件与操作系统级支撑 |
+
+## 添加依赖 \{#add-dependencies}
+
+1. 引入开发库；`1.3.0` 是其在 crates.io 上的首个正式发布版本：
+
+   ```bash
+   cargo add wechat-protocol@=1.3.0 wechat-profile@=1.3.0
+   ```
+
+2. 使用 Rust 1.93.1+、C 编译器、Make 与 Perl 进行构建。四个 Crate 均与原生发布版本保持一致；Cargo 会自动解析依赖的支撑库。
+
+## 读取已停止的 Profile \{#read-a-stopped-profile}
+
+停止 Profile 的写入进程或提供一致性快照副本，然后加载受保护的密钥文件。快照标志表明调用方保证了这一前提；该函数不会主动终止外部进程。
+
+```rust
+use wechat_profile::{KeyFile, ListQuery, ProfileLocation, ProfileReader, ReadOptions};
+
+fn contacts(profile: &str, keys_path: &str) -> wechat_profile::Result<()> {
+    let reader = ProfileReader::open(
+        ProfileLocation::new(profile)?, KeyFile::load(keys_path)?, ReadOptions {
+            stopped_or_consistent_snapshot: true,
+            ..Default::default()
+        },
+    )?;
+    println!("{} contacts", reader.contacts(&ListQuery::default())?.items.len());
+    Ok(())
+}
+```
+
+读取本地缓存的媒体绝不会发起网络下载。已经独占拥有 Profile 访问权的应用可以使用附带自身并发同步协调的 `OwnedReaderCache`。
+
+## 发送单条文本消息 \{#send-one-text-message}
+
+服务端操作大多是 `NativeClient` 上的方法。应用程序自行负责凭据存储、故障恢复与 Profile 数据回写。
+
+1. 调用 `start_qr_login`，轮询直至 `LoginStatus::Approved`，然后调用 `complete_login`。将返回的 `AccountState` 传入 `NativeClient::from_account(state, options)`。克隆句柄将共享同一个账号所有者。操作不再接受独立的可变账号状态。
+2. 在提交前保存计划执行的操作、唯一任务 ID 以及 Unix 秒级时间戳。传入接收方的确切微信号：
+
+   ```rust
+   use wechat_protocol::{wire, NativeClient, TextSendOptions, TextSendResult};
+
+   async fn send_once(
+       client: &NativeClient,
+       recipient: &str,
+       text: &str,
+       task_id: &str,
+       created_at: u32,
+   ) -> anyhow::Result<TextSendResult> {
+       let client_id = wire::client_message_id(task_id.as_bytes());
+       anyhow::ensure!(client_id != 0, "Choose another task ID");
+       client.send_text(recipient, text, TextSendOptions {
+           created_at, client_message_id: client_id, source: None,
+       }).await
+   }
+   ```
+
+3. 检查回执中的 `accepted`、`returned_destination_matches` 与 `returned_client_id_matches`。已被接受的回执包含十进制字符串格式的 `server_message_id`；这并不代表接收方已打开播放或本地历史已完成回写。
+
+在本地代码仓库中直接运行可执行示例，将展示全新的登录二维码并提交一次消息：
+
+```bash
+cargo run --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol --example send_text -- RECIPIENT UNIQUE_TASK_ID "Hello from Rust"
+```
+
+若服务端接收则输出 `"accepted": true`。运行 `--help` 不会发起任何网络请求。`qr_login`、`sync_once` 与 `protobuf` 演示登录、汇总一页同步消息以及本地编解码操作。`sync_once` 不保存游标；长连接接收方必须先保留同步命令，然后再推进游标。
+
+## 使用通话媒体 \{#use-calling-media}
+
+引入相同 Rust 库版本的 `wechat-calls`。它不打开任何底层硬件设备或 Tokio 运行时。具体示例请参考其 [Crate 指南](https://docs.rs/crate/wechat-calls/latest)。
+
+| 特性标志 (Features) | 用途说明 |
+| --- | --- |
+| 默认 `native-runtime` | 原生会话/媒体集成、protocol 支持与 Opus 编解码 |
+| 禁用默认特性 + `native-opus` | 无需账号依赖的独立编解码器与 PCM 工具集 |
+| 禁用所有默认特性 | 可移植的 PCM、队列、时钟步调与混音支持（支持 WebAssembly） |
+
+高级 `client.calls()` 门面接口仍在完善中。目前完整的通话操作请使用[通话控制 API](../calls-api/)。[Crate 架构](../../zh-cn/how-it-works/rust-crates/) 详细介绍了各模块分工与依赖。
+
+## Profile 写入操作 \{#profile-writes}
+
+`stage_*` 准备数据字节，`apply_*` 应用逻辑 Profile 记录更新，`publish_*` 将数据安装到 Profile 既有物理路径中。这些是 API 的方法命名，而非官方客户端的原生名称；`apply_*` 与 `publish_*` 存在交集，且不保证跨操作的全局原子性。MMKV 暂存会生成加密数据与匹配的 `.crc` 元数据。发布阶段通过临时文件写入。`WriteOptions::durable_intent_id` 引用预先保存的持久化恢复记录；本库无法自动证明该记录是否存在。
+
+<Aside title="使用提示">
+账号拥有的异步方法使用底层传输 Worker 线程。在异步应用中调用阻塞引导方法时需要使用阻塞 Worker 线程。使用新的测试账号登录可能会顶掉已有的其他桌面端会话；示例代码仅在内存中保留凭据。持久化保存凭据时请务必加密，并在重试前复核状态存疑的发送。Profile 写入操作需要独占所有权、匹配的密钥和受支持的数据架构。对 Linux Profile 的支持并不代表已兼容官方 Windows/macOS 布局。部分音视频路径需要系统安装 FFmpeg。建议锁定依赖版本并在升级前评估 API 变更。
+</Aside>

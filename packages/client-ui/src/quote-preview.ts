@@ -1,4 +1,5 @@
 import type { NativeMessage } from "@agent-wechat/shared";
+import { t } from "./i18n.ts";
 import { messagePresentation } from "./message-presentation.ts";
 
 export function localQuote(
@@ -57,26 +58,26 @@ export function embeddedQuotePreview(
       ? quote.embeddedLink
       : undefined;
   const text = recalled
-    ? "Message recalled"
+    ? t("quotePreview.messageRecalled")
     : valid && state !== "missing" && quote?.embeddedText
     ? quote.embeddedText
     : quote?.type === 3
-    ? "Image unavailable"
+    ? t("quotePreview.imageUnavailable")
     : quote?.type === 34
-    ? "Voice message unavailable"
+    ? t("quotePreview.voiceMessageUnavailable")
     : [43, 62].includes(quote?.type ?? 0)
-    ? "Video unavailable"
+    ? t("quotePreview.videoUnavailable")
     : quote?.type === 47 || (quote?.type === 49 && quote.appMessageType === 8)
-    ? "Sticker unavailable"
+    ? t("quotePreview.stickerUnavailable")
     : quote?.type === 49 && quote.appMessageType === 6
-    ? "File unavailable"
+    ? t("quotePreview.fileUnavailable")
     : quote?.type === 48
-    ? "Location unavailable"
+    ? t("quotePreview.locationUnavailable")
     : quote?.type === 42
-    ? "Shared contact unavailable"
+    ? t("quotePreview.sharedContactUnavailable")
     : quote?.type === 49 && quote.appMessageType === 19
-    ? "Forwarded messages unavailable"
-    : "Quoted message unavailable";
+    ? t("quotePreview.forwardedMessagesUnavailable")
+    : t("quotePreview.quotedMessageUnavailable");
   return {
     text,
     senderId: recalled ? undefined : quote?.senderId,
@@ -102,27 +103,37 @@ export function embeddedQuotePreview(
 }
 export function quotedText(message: NativeMessage): string {
   const kind = messagePresentation(message);
-  if (kind === "recalled") return "Message recalled";
+  if (kind === "recalled") return t("quotePreview.messageRecalled");
   if (kind === "forwarded")
-    return message.body?.split(/\r\n|\r|\n/).map(line => line.trim()).find(Boolean) || "Forwarded messages";
+    return (
+      message.body
+        ?.split(/\r\n|\r|\n/)
+        .map((line) => line.trim())
+        .find(Boolean) || t("quotePreview.forwardedMessages")
+    );
   if (["text", "reply"].includes(kind))
-    return message.body || "Message text unavailable";
-  if (kind === "link") return message.link?.title || "Link";
+    return message.body || t("quotePreview.messageTextUnavailable");
+  if (kind === "link") return message.link?.title || t("quotePreview.link");
   if (message.type === 48 && message.location)
-    return message.location.name || message.location.address || "Location";
-  if (message.type === 42) return "Shared contact";
-  if (message.type === 49 && message.appMessageType === 8) return "Sticker";
+    return (
+      message.location.name ||
+      message.location.address ||
+      t("quotePreview.location")
+    );
+  if (message.type === 42) return t("quotePreview.sharedContact");
+  if (message.type === 49 && message.appMessageType === 8)
+    return t("quotePreview.sticker");
   return (
     (
       {
-        3: "Image",
-        34: "Voice message",
-        43: "Video",
-        47: "Sticker",
-        48: "Location",
-        49: "Attachment",
-        62: "Video",
+        3: t("quotePreview.image"),
+        34: t("quotePreview.voiceMessage"),
+        43: t("quotePreview.video"),
+        47: t("quotePreview.sticker"),
+        48: t("quotePreview.location"),
+        49: t("quotePreview.attachment"),
+        62: t("quotePreview.video"),
       } as Record<number, string>
-    )[message.type] || "Message preview unavailable"
+    )[message.type] || t("quotePreview.messagePreviewUnavailable")
   );
 }
