@@ -114,6 +114,7 @@ struct AccountCalls {
 
 #[doc(hidden)]
 pub struct CoreShared {
+    pub(crate) mini_program_launches: crate::miniprogram::Launches,
     account_calls: Mutex<AccountCalls>,
     native_accounts: Mutex<BTreeMap<String, Option<wechat_protocol::NativeClient>>>,
 
@@ -349,6 +350,7 @@ impl Core {
             snapshot_reader: None,
             live_store: None,
             shared: Arc::new(CoreShared {
+                mini_program_launches: Default::default(),
                 account_calls: Mutex::new(AccountCalls::default()),
                 native_accounts: Mutex::new(BTreeMap::new()),
 

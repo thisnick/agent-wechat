@@ -568,6 +568,38 @@ impl Engine {
                 }
                 tx.commit()?;
             }
+            Control::MiniProgramCard {
+                account,
+                peer,
+                available,
+            } => {
+                validate_peer(&peer)?;
+                ensure!(
+                    !peer.ends_with("@chatroom"),
+                    "mini_program_fixture_requires_direct_chat"
+                );
+                let (app, name, title) = if available {
+                    ("wx0123456789abcdef", "Cafe", "Seasonal menu")
+                } else {
+                    ("wxfedcba9876543210", "Trail guide", "A weekend hike")
+                };
+                let body = format!("<msg><appmsg><type>36</type><title>{title}</title><sourcedisplayname>{name}</sourcedisplayname><weappinfo><appid>{app}</appid><pagepath>pages/menu/index?menu=seasonal</pagepath></weappinfo></appmsg></msg>");
+                seed(&mut db, &account)?;
+                let tx = db.transaction()?;
+                let time = clock(&tx)?;
+                let (_, command) = store_message(
+                    &tx,
+                    &account,
+                    49,
+                    &peer,
+                    &own(&account),
+                    (body.as_bytes(), "<msgsource/>"),
+                    time,
+                )?;
+                append(&tx, &account, &command)?;
+                notify(&tx, &account, 1)?;
+                tx.commit()?;
+            }
             Control::SendFault { account, fault } => {
                 seed(&mut db, &account)?;
                 db.execute(

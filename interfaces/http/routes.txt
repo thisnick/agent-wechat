@@ -61,6 +61,10 @@ request NativeMediaJobRetryRequest | object, rejects unknown fields | Options fo
 request NativeMediaJobRetryRequest.reuseCompletedUpload | boolean, nullable | True to reuse the upload a send job already finished instead of uploading again. The retry-completed-upload route requires true here.
 request NativeMediaWritebackRequest | object, rejects unknown fields | Request to repair saved media records from bytes the daemon already holds. It never downloads or sends anything.
 request NativeMediaWritebackRequest.limit | integer, required, min 0, format uint | How many saved media records to repair in this request, from 1 to 100.
+request NativeMiniProgramIpcRequest | object | A hub operation requested by a running Mini Program.
+request NativeMiniProgramIpcRequest.method | string, required, values wx.login | wx.login: Issue or replay the code for this app's login invocation
+request NativeMiniProgramLaunchRequest | object, rejects unknown fields | Select a default entry or resolve a saved card on the selected account.
+request NativeMiniProgramLaunchRequest.sourceMessageId | string, nullable, default null | Saved card message ID. Omit to use the program's default page.
 request NativeReadRequest | object, rejects unknown fields | Request to mark a chat as read.
 request NativeReadRequest.expectedVersion | string, required | The chat's `readStateVersion` from when you read it. The request is refused if the chat has changed since.
 request NativeRecallRequest | object, rejects unknown fields | Request to recall a message this account sent.
@@ -489,6 +493,11 @@ response NativeMessage.mentions.self | boolean, required, nullable | True when t
 response NativeMessage.mentions.source | string, required, nullable | Where the mentions were read from, currently `msgsource.atuserlist`. Null when there is no source, for example when `state` is `unknown`.
 response NativeMessage.mentions.state | string, required | `known` when the mention list was read, `unknown` when it is missing or cannot be parsed. When unknown, `userIds` is empty and the flags are null.
 response NativeMessage.mentions.userIds | array of string, required | IDs of the members mentioned by name, not counting the mention-everyone marker (see `all`).
+response NativeMessage.miniProgram | object, nullable | Mini Program card read from the saved message.
+response NativeMessage.miniProgram.appId | string, required | Public Mini Program AppID.
+response NativeMessage.miniProgram.displayName | string, required, nullable | Program name, when supplied by the card.
+response NativeMessage.miniProgram.pagePath | string, required, nullable | Page route and query carried in the card.
+response NativeMessage.miniProgram.title | string, required, nullable | Shared page title.
 response NativeMessage.quote | object, required, nullable | The message this one replies to, when it is a quote reply. Null otherwise.
 response NativeMessage.quote.appMessageType | integer, required, nullable, format int32 | App subtype of the quoted message when it is an app message (type 49), such as 5 for a link. Null for other messages.
 response NativeMessage.quote.direction | string, required, nullable | `outgoing` when the quoted message was sent by this account and `incoming` when someone else sent it. Null when that cannot be told.
@@ -498,6 +507,11 @@ response NativeMessage.quote.embeddedLink.description | string, required, nullab
 response NativeMessage.quote.embeddedLink.sourceName | string, required, nullable | Name of the site or account that published the card, such as a Channels account. Null when there is none.
 response NativeMessage.quote.embeddedLink.title | string, required, nullable | Card title. Null when there is none.
 response NativeMessage.quote.embeddedLink.url | string, required, nullable | Address the card opens. Null when the card has none or it is not a valid http or https address.
+response NativeMessage.quote.embeddedMiniProgram | object, nullable | Mini Program metadata retained by the reply.
+response NativeMessage.quote.embeddedMiniProgram.appId | string, required | Public Mini Program AppID.
+response NativeMessage.quote.embeddedMiniProgram.displayName | string, required, nullable | Program name, when supplied by the card.
+response NativeMessage.quote.embeddedMiniProgram.pagePath | string, required, nullable | Page route and query carried in the card.
+response NativeMessage.quote.embeddedMiniProgram.title | string, required, nullable | Shared page title.
 response NativeMessage.quote.embeddedSticker | boolean, nullable | True when the quoted message is a sticker. Omitted otherwise.
 response NativeMessage.quote.embeddedText | string, required, nullable | Readable text of the quoted message, taken from the reply. Null when there is none.
 response NativeMessage.quote.senderId | string, required, nullable | ID of the quoted message's sender, when the reply says who it was.
@@ -547,6 +561,11 @@ response NativeMessagePage.items[]<NativeMessage>.mentions.self | boolean, requi
 response NativeMessagePage.items[]<NativeMessage>.mentions.source | string, required, nullable | Where the mentions were read from, currently `msgsource.atuserlist`. Null when there is no source, for example when `state` is `unknown`.
 response NativeMessagePage.items[]<NativeMessage>.mentions.state | string, required | `known` when the mention list was read, `unknown` when it is missing or cannot be parsed. When unknown, `userIds` is empty and the flags are null.
 response NativeMessagePage.items[]<NativeMessage>.mentions.userIds | array of string, required | IDs of the members mentioned by name, not counting the mention-everyone marker (see `all`).
+response NativeMessagePage.items[]<NativeMessage>.miniProgram | object, nullable | Mini Program card read from the saved message.
+response NativeMessagePage.items[]<NativeMessage>.miniProgram.appId | string, required | Public Mini Program AppID.
+response NativeMessagePage.items[]<NativeMessage>.miniProgram.displayName | string, required, nullable | Program name, when supplied by the card.
+response NativeMessagePage.items[]<NativeMessage>.miniProgram.pagePath | string, required, nullable | Page route and query carried in the card.
+response NativeMessagePage.items[]<NativeMessage>.miniProgram.title | string, required, nullable | Shared page title.
 response NativeMessagePage.items[]<NativeMessage>.quote | object, required, nullable | The message this one replies to, when it is a quote reply. Null otherwise.
 response NativeMessagePage.items[]<NativeMessage>.quote.appMessageType | integer, required, nullable, format int32 | App subtype of the quoted message when it is an app message (type 49), such as 5 for a link. Null for other messages.
 response NativeMessagePage.items[]<NativeMessage>.quote.direction | string, required, nullable | `outgoing` when the quoted message was sent by this account and `incoming` when someone else sent it. Null when that cannot be told.
@@ -556,6 +575,11 @@ response NativeMessagePage.items[]<NativeMessage>.quote.embeddedLink.description
 response NativeMessagePage.items[]<NativeMessage>.quote.embeddedLink.sourceName | string, required, nullable | Name of the site or account that published the card, such as a Channels account. Null when there is none.
 response NativeMessagePage.items[]<NativeMessage>.quote.embeddedLink.title | string, required, nullable | Card title. Null when there is none.
 response NativeMessagePage.items[]<NativeMessage>.quote.embeddedLink.url | string, required, nullable | Address the card opens. Null when the card has none or it is not a valid http or https address.
+response NativeMessagePage.items[]<NativeMessage>.quote.embeddedMiniProgram | object, nullable | Mini Program metadata retained by the reply.
+response NativeMessagePage.items[]<NativeMessage>.quote.embeddedMiniProgram.appId | string, required | Public Mini Program AppID.
+response NativeMessagePage.items[]<NativeMessage>.quote.embeddedMiniProgram.displayName | string, required, nullable | Program name, when supplied by the card.
+response NativeMessagePage.items[]<NativeMessage>.quote.embeddedMiniProgram.pagePath | string, required, nullable | Page route and query carried in the card.
+response NativeMessagePage.items[]<NativeMessage>.quote.embeddedMiniProgram.title | string, required, nullable | Shared page title.
 response NativeMessagePage.items[]<NativeMessage>.quote.embeddedSticker | boolean, nullable | True when the quoted message is a sticker. Omitted otherwise.
 response NativeMessagePage.items[]<NativeMessage>.quote.embeddedText | string, required, nullable | Readable text of the quoted message, taken from the reply. Null when there is none.
 response NativeMessagePage.items[]<NativeMessage>.quote.senderId | string, required, nullable | ID of the quoted message's sender, when the reply says who it was.
@@ -578,6 +602,40 @@ response NativeMessagePage.items[]<NativeTombstone>.id | string, required | ID o
 response NativeMessagePage.items[]<NativeTombstone>.version | string, required | Fingerprint of the saved profile data in which the resource is missing, the same value as `sourceGeneration` on the page.
 response NativeMessagePage.nextCursor | string, required, nullable | Pass it as `cursor` with the same query to get the next page. Null on the last page.
 response NativeMessagePage.sourceGeneration | string, required | Fingerprint of the saved profile data the page was read from. It changes when the profile files change.
+response NativeMiniProgramLaunch | object | Package and entry selection for one Mini Program launch.
+response NativeMiniProgramLaunch.capabilities | object, required | Operations the runner can request for this launch.
+response NativeMiniProgramLaunch.capabilities.login | boolean, required | Whether the runner may request app login codes.
+response NativeMiniProgramLaunch.capabilities.shareToChat | boolean, required | Whether this launch can share its current page to a chat.
+response NativeMiniProgramLaunch.entry | object, required | Page selected for the local runner.
+response NativeMiniProgramLaunch.entry.framework | string, required | Compiled component framework selected by the runner.
+response NativeMiniProgramLaunch.entry.path | string, required | Page route within the package.
+response NativeMiniProgramLaunch.entry.query | string, required | Query string of the shared entry, without its leading question mark.
+response NativeMiniProgramLaunch.entry.renderer | string, required | Renderer used by the local runner.
+response NativeMiniProgramLaunch.entry.servicePath | string, required | Archive path of the compiled page's service module.
+response NativeMiniProgramLaunch.launchId | string, required | Temporary launch ID bound to the initiating account and token.
+response NativeMiniProgramLaunch.networkPolicy | object, required, nullable | Current server policy, or null when the account is offline.
+response NativeMiniProgramLaunch.networkPolicy.requestDomains | array of string, required | Domain patterns used by the host's request-domain check.
+response NativeMiniProgramLaunch.packages | array of object, required | Verified archives to download before execution.
+response NativeMiniProgramLaunch.packages[] | object | One verified archive selected for a Mini Program launch.
+response NativeMiniProgramLaunch.packages[].id | string, required | Package ID to use when downloading this archive.
+response NativeMiniProgramLaunch.packages[].root | string, nullable | Declared root for a cached subpackage. Omitted for the main archive.
+response NativeMiniProgramLaunch.packages[].sha256 | string, required | SHA-256 of the original archive, in lowercase hex.
+response NativeMiniProgramLaunch.packages[].sizeBytes | integer, required, min 0, format uint32 | Byte length of the original archive.
+response NativeMiniProgramLaunch.packages[].version | string, required | Exact cached version to request.
+response NativeMiniProgramLogin | object | Temporary app-specific code returned to the authorized local runner.
+response NativeMiniProgramLogin.code | string, required | WeChat code for the selected app's backend. Treat it as sensitive.
+response NativeMiniProgramPackage | object | One verified archive selected for a Mini Program launch.
+response NativeMiniProgramPackage.id | string, required | Package ID to use when downloading this archive.
+response NativeMiniProgramPackage.root | string, nullable | Declared root for a cached subpackage. Omitted for the main archive.
+response NativeMiniProgramPackage.sha256 | string, required | SHA-256 of the original archive, in lowercase hex.
+response NativeMiniProgramPackage.sizeBytes | integer, required, min 0, format uint32 | Byte length of the original archive.
+response NativeMiniProgramPackage.version | string, required | Exact cached version to request.
+response NativeMiniPrograms | object | Mini Programs known from recent saved cards and the selected account's cache.
+response NativeMiniPrograms.items | array of object, required | Known apps and their package availability.
+response NativeMiniPrograms.items[] | object | A Mini Program known to the selected account.
+response NativeMiniPrograms.items[].appId | string, required | Public Mini Program AppID.
+response NativeMiniPrograms.items[].available | boolean, required | Whether the hub has a staged package for this program.
+response NativeMiniPrograms.items[].title | string, required | Name shown in the known-app list.
 response NativeOperation | object | A background operation such as signing in or out, refreshing contacts or changing a group. Poll it by ID until it finishes.
 response NativeOperation.accountId | string, required | ID of the account the operation belongs to.
 response NativeOperation.createdAt | string, required | When the operation was created, as an RFC 3339 time.
@@ -748,6 +806,8 @@ route GET /v1/accounts/{a}/messages | scope read, query PageQuery, response Nati
 route GET /v1/accounts/{a}/messages/{id} | scope read, response NativeMessage, sdk response NativeMessage | Show one saved message.
 route GET /v1/accounts/{a}/messages/{id}/image | scope media, query MediaQuery, response image/* | Get a saved image message at the requested quality.
 route GET /v1/accounts/{a}/messages/{id}/media | scope media, response untyped, sdk response MediaAsset | List the media attached to a message and whether each file is available.
+route GET /v1/accounts/{a}/mini-programs | scope read, response NativeMiniPrograms, sdk response NativeMiniPrograms | List staged Mini Programs and programs seen in recent saved cards.
+route GET /v1/accounts/{a}/mini-programs/{app}/packages/{version}/{package} | scope read, response application/octet-stream | Download an exact cached Mini Program archive.
 route GET /v1/accounts/{a}/operations/{id} | scope varies, response NativeOperation, sdk response NativeOperation | Show the state and result of a background operation. Scope: Needs read, login, media or send to look the operation up, then its kind decides: login, logout and forget_credentials need login; media-writeback needs media; message_recall needs send; sync and metadata need read; every other kind needs admin.
 route GET /v1/accounts/{a}/operations/{id}/qr | scope login, query QrQuery, response image/png | Get the current QR code of a login operation as a PNG image.
 route GET /v1/accounts/{a}/schema | scope read, response untyped | Describe the layout of the account's saved WeChat profile.
@@ -791,6 +851,9 @@ route POST /v1/accounts/{a}/media-writeback/repair | scope media, request Native
 route POST /v1/accounts/{a}/media/lookup | scope media, request NativeMediaBatchRequest, response untyped, sdk response NativeMediaBatch | List the media of up to 40 messages in one request, without downloading anything.
 route POST /v1/accounts/{a}/messages/{id}/media-transfers | scope media, request MediaTransferRequest, response untyped, status 202, sdk request MediaTransferRequest, sdk response MediaJob | Start downloading one media file of a message. Poll the returned job.
 route POST /v1/accounts/{a}/messages/{id}/recall | scope send, idempotency key required, request NativeRecallRequest, response NativeOperation, status 202, sdk response NativeOperation | Recall a message you sent, identified by its exact server ID. Poll the returned operation.
+route POST /v1/accounts/{a}/mini-programs/{app}/launches | scope read, request NativeMiniProgramLaunchRequest (optional), response NativeMiniProgramLaunch, status 201, sdk request NativeMiniProgramLaunchRequest, sdk response NativeMiniProgramLaunch | Verify the cached package and prepare the local runner's entry page and login grant.
+route POST /v1/accounts/{a}/mini-programs/{app}/launches/{id}/ipc | scope read and mini-program-login, idempotency key required, request NativeMiniProgramIpcRequest, response NativeMiniProgramLogin, sdk request NativeMiniProgramIpcRequest, sdk response NativeMiniProgramLogin | Run a supported Mini Program IPC method. wx.login issues or replays one sensitive app code.
+route POST /v1/accounts/{a}/mini-programs/{app}/packages | scope admin, response NativeMiniProgramPackage | Fetch and verify the release's main archive from WeChat, or reuse the staged package.
 route POST /v1/accounts/{a}/projection/recover | scope admin, response untyped | Repair the account profile from records the daemon already holds. It never resends messages or starts transfers.
 route POST /v1/accounts/{a}/sends | scope varies, idempotency key required, request untyped, response untyped, status 202, sdk request NativeTextSendRequest|ShareSendRequest|MediaSendRequest, sdk response NativeSendIntent|MediaJob | Send a text, share card or staged media message. The body shape follows its kind; the same Idempotency-Key returns the original send. Scope: send, plus read when a text send quotes a message.
 route POST /v1/accounts/{a}/sends/{id}/cancel | scope send, response untyped, sdk response NativeSendIntent|MediaJob | Cancel a send that has not gone out yet.

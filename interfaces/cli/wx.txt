@@ -386,6 +386,13 @@ wx messages voice status | hidden alias | Alias of wx messages voice get
 wx messages watch | - | Stream message events, optionally saving a resume cursor
 wx messages watch --after | takes <AFTER>, default 0 | Start after this event cursor, such as the last one you processed
 wx messages watch --cursor-file | takes <CURSOR_FILE> | Save the last event cursor to this private file and resume from it next time
+wx miniprogram | - | Open a Mini Program from the selected account's verified package cache
+wx miniprogram fetch | - | Fetch a missing main package from WeChat into the hub's cache
+wx miniprogram fetch <APP> | position 1, required | Public AppID of the Mini Program to download
+wx miniprogram serve | - | Print a local URL and serve a verified Mini Program until interrupted
+wx miniprogram serve --allow-request-url | takes <HTTPS_URL>, repeatable | Restrict server-approved requests and display images to exact HTTPS URLs. Repeat and omit queries
+wx miniprogram serve --message | takes <MESSAGE> | Saved Mini Program card to open instead of the default page
+wx miniprogram serve <APP> | position 1, required | Public AppID of the Mini Program in the hub's cache
 wx operations | - | Inspect, cancel or retry account operations
 wx operations cancel | - | Request cancellation of an item by ID
 wx operations cancel <ID> | position 1, required | ID printed when the job, operation or login attempt was started
@@ -514,7 +521,7 @@ wx tokens | - | Create and revoke API tokens for selected accounts
 wx tokens create | - | Create an API token with account and permission scopes
 wx tokens create --accounts | required, takes <ACCOUNTS>, repeatable | Account ID the token may use, or * for all accounts; repeat for several
 wx tokens create --expires-at | takes <EXPIRES_AT> | Expire the token at this Unix time in seconds; it never expires if omitted
-wx tokens create --scopes | required, takes <SCOPES>, repeatable | Permission to grant: read, media, send, read-state, login, admin or calls; repeat
+wx tokens create --scopes | required, takes <SCOPES>, repeatable | Permission to grant: read, media, send, read-state, login, admin, calls or mini-program-login; repeat
 wx tokens create <NAME> | position 1, required | Label for the new token
 wx tokens list | - | List API tokens without revealing their secret values
 wx tokens revoke | - | Revoke an API token by ID

@@ -108,6 +108,52 @@ wx messages recall MESSAGE_ID --server-id SERVER_ID
 
 Reading marks the whole chat read and tells your other devices. Recall needs the full `id` and `serverId` from `wx messages list CHAT_ID --json`.
 
+## Open a Mini Program
+
+Run `wx miniprogram serve APP_ID` and open the URL it prints in a browser on the same machine. Press Ctrl-C in the terminal to close it.
+
+```text
+Mini Program ready at http://127.0.0.1:49152/
+Press Ctrl-C to stop.
+```
+
+If the package is missing, use a hub admin key and an online account to fetch the main release archive from WeChat:
+
+```bash
+wx miniprogram fetch APP_ID
+wx miniprogram serve APP_ID
+```
+
+Fetch verifies the archive and saves it in the selected account's hub cache. It reuses an existing verified package. The hub operator can also stage a trusted package in `<dataDir>/miniprograms/<account-id>/<app-id>/` as `package.wxapkg` and describe it in `manifest.json`. The manifest contains `title`, `version` (a decimal string), `packageId`, `sha256`, `entryPage` and `servicePath`.
+
+The runner opens supported compiled Glass-easel and Exparser pages. Exparser pages use the package’s view templates and styles, including shared stylesheet imports and responsive sizes. Packaged and embedded images can display; remote HTTPS images load through a separate image-only connection. It supports app visibility events, storage for the current window, window measurements, element visibility observation, and basic dialogs and loading indicators. Network status APIs report the browser’s connection state. Apps that need native UI, plugins, or additional packages may stop during startup.
+
+The runner can load JavaScript dependencies through `require.async` from a staged subpackage. Place the archive in `subpackages/<package-id>/package.wxapkg` under the app’s cache directory, alongside a `manifest.json` with `root`, `version` and `sha256`. Use a root declared in the main archive and the same release version. Fetch downloads the main archive. Cloud Gateway calls fail so apps can use their own `wx.request` fallback under the same request-domain policy.
+
+The runner can instantiate uncompressed WebAssembly files from the verified main archive. On supported Exparser pages, a Mini Program’s privacy button opens a confirmation in the runner. Your choice applies to the current window only.
+
+To open the page from a saved chat card, use its message ID:
+
+```bash
+wx miniprogram serve APP_ID --message MESSAGE_ID
+```
+
+For an online account, the hub retrieves the app’s request-domain policy from WeChat. The local runner checks `wx.request` against that policy automatically, including supported subdomain patterns. You do not need to list each API endpoint.
+
+The browser reaches external services through the local runner, not through the hub. Only public HTTPS destinations are supported; local/private addresses and redirects are blocked. Display images and CSS backgrounds use a separate credential-free GET connection, with image-content checks, a 4 MiB limit per image and a 32 MiB cache for the window.
+
+For diagnostics, you can restrict a launch to particular URLs:
+
+```bash
+wx miniprogram serve APP_ID \
+  --allow-request-url https://api.example.com/session \
+  --allow-request-url https://cdn.example.com/banner.png
+```
+
+This optional restriction matches the scheme, host, port and path while allowing query parameters. It cannot expand a retrieved server policy. When the account is offline and no server policy is available, `wx.request` stays unavailable. A failed online policy lookup reports an error.
+
+For `wx.login`, the manifest must set `allowLogin` to `true`, the account must be online, and a scoped access key must include `mini-program-login` as well as `read`. Keep the printed URL private when it includes a launch key.
+
 ## Use a daemon on another machine
 
 ```bash

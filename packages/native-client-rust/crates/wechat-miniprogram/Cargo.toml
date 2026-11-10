@@ -1,0 +1,15 @@
+[package]
+name = "wechat-miniprogram"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+openssl.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tree-sitter = "0.25.10"
+tree-sitter-javascript = "0.25.0"

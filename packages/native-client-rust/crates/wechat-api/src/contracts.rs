@@ -3,6 +3,122 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use ts_rs::TS;
 
+/// A Mini Program known to the selected account.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeMiniProgram {
+    /// Public Mini Program AppID.
+    pub app_id: String,
+    /// Name shown in the known-app list.
+    pub title: String,
+    /// Whether the hub has a staged package for this program.
+    pub available: bool,
+}
+
+/// Mini Programs known from recent saved cards and the selected account's cache.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
+pub struct NativeMiniPrograms {
+    /// Known apps and their package availability.
+    pub items: Vec<NativeMiniProgram>,
+}
+
+/// Compiled entry page selected for a Mini Program launch.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeMiniProgramEntry {
+    /// Page route within the package.
+    pub path: String,
+    /// Archive path of the compiled page's service module.
+    pub service_path: String,
+    /// Query string of the shared entry, without its leading question mark.
+    pub query: String,
+    /// Compiled component framework selected by the runner.
+    pub framework: String,
+    /// Renderer used by the local runner.
+    pub renderer: String,
+}
+
+/// One verified archive selected for a Mini Program launch.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeMiniProgramPackage {
+    /// Package ID to use when downloading this archive.
+    pub id: String,
+    /// Exact cached version to request.
+    pub version: String,
+    /// Byte length of the original archive.
+    pub size_bytes: u32,
+    /// SHA-256 of the original archive, in lowercase hex.
+    pub sha256: String,
+    /// Declared root for a cached subpackage. Omitted for the main archive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub root: Option<String>,
+}
+
+/// Account and app permissions available to the local runner for this launch.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeMiniProgramCapabilities {
+    /// Whether the runner may request app login codes.
+    pub login: bool,
+    /// Whether this launch can share its current page to a chat.
+    #[serde(default)]
+    pub share_to_chat: bool,
+}
+
+/// Select a default entry or resolve a saved card on the selected account.
+#[derive(Default, Deserialize, Serialize, TS, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeMiniProgramLaunchRequest {
+    /// Saved card message ID. Omit to use the program's default page.
+    #[serde(default)]
+    #[ts(optional)]
+    pub source_message_id: Option<String>,
+}
+
+/// Server-provided request policy for the selected Mini Program.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeMiniProgramNetworkPolicy {
+    /// Domain patterns used by the host's request-domain check.
+    pub request_domains: Vec<String>,
+}
+
+/// Package and entry selection for one Mini Program launch.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeMiniProgramLaunch {
+    /// Temporary launch ID bound to the initiating account and token.
+    pub launch_id: String,
+    /// Page selected for the local runner.
+    pub entry: NativeMiniProgramEntry,
+    /// Verified archives to download before execution.
+    pub packages: Vec<NativeMiniProgramPackage>,
+    /// Operations the runner can request for this launch.
+    pub capabilities: NativeMiniProgramCapabilities,
+    /// Current server policy, or null when the account is offline.
+    #[serde(default)]
+    pub network_policy: Option<NativeMiniProgramNetworkPolicy>,
+}
+
+/// A hub operation requested by a running Mini Program.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
+#[serde(tag = "method")]
+#[serde(deny_unknown_fields)]
+pub enum NativeMiniProgramIpcRequest {
+    /// Issue or replay the code for this app's login invocation.
+    #[serde(rename = "wx.login")]
+    Login {},
+}
+
+/// Temporary app-specific code returned to the authorized local runner.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
+pub struct NativeMiniProgramLogin {
+    /// WeChat code for the selected app's backend. Treat it as sensitive.
+    pub code: String,
+}
+
 /// Who a message mentions, read from the mention list saved with the message.
 #[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -57,6 +173,10 @@ pub struct NativeMessage {
     #[serde(default)]
     #[ts(optional)]
     pub link: Option<wechat_core::LinkCard>,
+    /// Mini Program card read from the saved message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mini_program: Option<wechat_core::MiniProgramCard>,
     /// Pin details when the message is a static location. Omitted for other messages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -147,6 +267,10 @@ pub struct NativeQuoteReference {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub embedded_link: Option<wechat_core::LinkCard>,
+    /// Mini Program metadata retained by the reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub embedded_mini_program: Option<wechat_core::MiniProgramCard>,
     /// True when the quoted message is a sticker. Omitted otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -742,6 +866,17 @@ pub fn typescript() -> String {
         NativeTombstone::decl(),
         NativePageItem::<String>::decl(),
         NativePage::<String>::decl(),
+        wechat_core::MiniProgramCard::decl(),
+        NativeMiniProgram::decl(),
+        NativeMiniPrograms::decl(),
+        NativeMiniProgramEntry::decl(),
+        NativeMiniProgramPackage::decl(),
+        NativeMiniProgramCapabilities::decl(),
+        NativeMiniProgramLaunchRequest::decl(),
+        NativeMiniProgramLaunch::decl(),
+        NativeMiniProgramNetworkPolicy::decl(),
+        NativeMiniProgramIpcRequest::decl(),
+        NativeMiniProgramLogin::decl(),
         NativeOperation::decl(),
         NativeSendIntent::decl(),
         NativeEvent::decl(),

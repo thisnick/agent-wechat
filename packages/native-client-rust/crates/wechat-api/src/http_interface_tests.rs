@@ -73,6 +73,12 @@ payloads! {
     "NativeReadRequest" => crate::contracts::NativeReadRequest,
     "NativeMediaBatchRequest" => crate::contracts::NativeMediaBatchRequest,
     "NativeMediaBatch" => crate::contracts::NativeMediaBatch,
+    "NativeMiniPrograms" => crate::contracts::NativeMiniPrograms,
+    "NativeMiniProgramLaunchRequest" => crate::contracts::NativeMiniProgramLaunchRequest,
+    "NativeMiniProgramLaunch" => crate::contracts::NativeMiniProgramLaunch,
+    "NativeMiniProgramPackage" => crate::contracts::NativeMiniProgramPackage,
+    "NativeMiniProgramIpcRequest" => crate::contracts::NativeMiniProgramIpcRequest,
+    "NativeMiniProgramLogin" => crate::contracts::NativeMiniProgramLogin,
     "NativeMediaJobRetryRequest" => crate::contracts::NativeMediaJobRetryRequest,
     "NativeMediaWritebackRequest" => crate::contracts::NativeMediaWritebackRequest,
     "NativeGroupCreateRequest" => crate::contracts::NativeGroupCreateRequest,
@@ -242,6 +248,9 @@ fn param_doc(path: &str, name: &str) -> String {
         "consumer" => "Name that identifies the event consumer.",
         "username" => "Contact ID of the group member.",
         "call" => "Call ID.",
+        "app" => "Public Mini Program AppID.",
+        "version" => "Exact cached package version from the launch response.",
+        "package" => "Package ID from the launch response.",
         "id" => {
             let before = path.split("/{id}").next().unwrap_or("");
             match before.rsplit('/').next().unwrap_or("") {
@@ -255,6 +264,7 @@ fn param_doc(path: &str, name: &str) -> String {
                 "media" => "Media asset ID.",
                 "jobs" => "Job ID.",
                 "groups" => "Group ID.",
+                "launches" => "Mini Program launch ID.",
                 other => panic!("describe the {{id}} parameter after /{other}/"),
             }
         }
@@ -453,6 +463,10 @@ const TAGS: &[(&str, &str)] = &[
     ("groups", "Saved groups, their members and group changes."),
     ("media", "Uploads, media assets, downloads and jobs."),
     ("messages", "Saved messages, sending and recall."),
+    (
+        "mini-programs",
+        "Staged Mini Program packages, launches and app login codes.",
+    ),
     ("system", "Daemon health, status and shutdown."),
     ("threads", "Chats, read state and chat settings."),
     (
@@ -620,6 +634,7 @@ fn http_interface_routes_are_registered_through_the_recording_helper() {
         ("groups.rs", include_str!("groups.rs")),
         ("actions.rs", include_str!("actions.rs")),
         ("calls.rs", include_str!("calls.rs")),
+        ("miniprogram.rs", include_str!("miniprogram.rs")),
     ];
     for (file, source) in sources {
         for (number, line) in source.lines().enumerate() {
@@ -686,5 +701,47 @@ async fn http_interface_table_methods_match_the_router() {
             .filter(|m| *m != "HEAD")
             .collect();
         assert_eq!(served, by_path[path], "methods of {path}");
+    }
+}
+
+#[tokio::test]
+async fn mini_program_ipc_admits_only_typed_requests_with_an_invocation_key() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    let (app, _, _temp) = built_router();
+    let route = "/v1/accounts/one/mini-programs/wx0123456789abcdef/launches/00000000-0000-4000-8000-000000000001/ipc";
+    for (body, key, expected) in [
+        (r#"{"method":"wx.login"}"#, None, 400),
+        (
+            r#"{"method":"wx.pay"}"#,
+            Some("00000000-0000-4000-8000-000000000002"),
+            422,
+        ),
+        (
+            r#"{"method":"wx.login","appId":"other"}"#,
+            Some("00000000-0000-4000-8000-000000000002"),
+            422,
+        ),
+        (
+            r#"{"method":"wx.login"}"#,
+            Some("00000000-0000-4000-8000-000000000002"),
+            404,
+        ),
+    ] {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(route)
+            .header("authorization", format!("Bearer {OWNER}"))
+            .header("content-type", "application/json");
+        if let Some(key) = key {
+            request = request.header("idempotency-key", key);
+        }
+        let response = app
+            .clone()
+            .oneshot(request.body(Body::from(body)).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected, "{body}");
     }
 }

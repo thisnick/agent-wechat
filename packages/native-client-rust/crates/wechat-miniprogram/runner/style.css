@@ -1,0 +1,48 @@
+* { box-sizing: border-box; }
+body { margin: 0; background: #edf2f2; font: 16px system-ui, sans-serif; color: #182420; }
+main { min-height: calc(100dvh - 44px); margin: auto; background: white; padding: 0; }
+mini-page, view, .page-body-title, .page-body-text { display: block; }
+button { min-height: 36px; margin: 4px; padding: 6px 12px; }
+dialog { width: min(90%, 360px); border: 1px solid #576c69; border-radius: 12px; }
+dialog::backdrop { background: #18242070; }
+
+.mini-toolbar {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 10px;
+  background: #f9fbfb;
+  border-bottom: 1px solid #d4dfdd;
+}
+.mini-toolbar-actions { display: flex; gap: 6px; margin-left: auto; }
+.mini-toolbar button {
+  min-height: 30px;
+  margin: 0;
+  border: 1px solid #d4dfdd;
+  border-radius: 5px;
+  background: white;
+  color: inherit;
+}
+.mini-scroll { overflow: auto; }
+
+#mini-feedback:not([hidden]) {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+}
+#mini-feedback:not([data-mask]) { pointer-events: none; }
+#mini-feedback span {
+  max-width: min(80vw, 320px);
+  padding: 12px 16px;
+  border-radius: 8px;
+  color: white;
+  background: #182420eb;
+  overflow-wrap: anywhere;
+}
+#mini-feedback[data-icon="success"] span::before { content: "✓ "; }
+#mini-feedback[data-icon="error"] span::before { content: "× "; }
+#mini-feedback[data-icon="loading"] span::before { content: "… "; }

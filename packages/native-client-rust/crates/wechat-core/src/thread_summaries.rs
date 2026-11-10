@@ -105,6 +105,11 @@ fn message_summary(message: &Value, sender_name: Option<&str>) -> Value {
             .as_str()
             .filter(|text| !text.is_empty())
             .unwrap_or("Message recalled")
+    } else if let Some(program) = message["miniProgram"].as_object() {
+        program
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("Mini Program")
     } else {
         match (kind, app) {
             (1, _) | (49, Some(1 | 17 | 57 | 74 | 87)) => {

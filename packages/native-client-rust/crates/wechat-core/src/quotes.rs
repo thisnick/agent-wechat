@@ -11,6 +11,7 @@ pub(crate) struct AppMessage {
     pub sender_id: Option<String>,
     pub sender_name: Option<String>,
     pub link: Option<crate::links::ParsedLink>,
+    pub mini_program: Option<crate::miniprogram::ParsedMiniProgram>,
     pub sticker: Option<crate::stickers::SharedSticker>,
 }
 
@@ -204,6 +205,7 @@ pub(crate) fn app_message(content: &str) -> Option<AppMessage> {
     Some(AppMessage {
         subtype,
         link: crate::links::parse(app, subtype),
+        mini_program: crate::miniprogram::parse_card(app, subtype),
         sticker: crate::stickers::parse(app, subtype),
         title,
         text,
@@ -326,14 +328,16 @@ pub(crate) fn embedded_quote(app: &AppMessage, own: Option<&str>) -> Option<Valu
             .and_then(crate::stickers::ordinary)
             .is_some())
         || card.as_ref().is_some_and(|c| c.sticker.is_some());
+    let mini_program = card.as_ref().and_then(|card| card.mini_program.as_ref());
     let supported = matches!(*kind, 1 | 3 | 42 | 47 | 48)
+        || mini_program.is_some()
         || sticker
         || card
             .as_ref()
             .is_some_and(|c| matches!(c.subtype, 1 | 3..=5 | 19 | 51 | 74 | 87));
     let state = if !supported {
         "unsupported"
-    } else if text.is_some() || image || sticker {
+    } else if text.is_some() || image || sticker || mini_program.is_some() {
         "embedded"
     } else {
         "missing"
@@ -345,6 +349,9 @@ pub(crate) fn embedded_quote(app: &AppMessage, own: Option<&str>) -> Option<Valu
         "embeddedText":text,"embeddedImage":image});
     if let Some(name) = &app.sender_name {
         quote["senderName"] = json!(name);
+    }
+    if let Some(program) = mini_program {
+        quote["embeddedMiniProgram"] = json!(&program.card);
     }
     if sticker {
         quote["embeddedSticker"] = json!(true);

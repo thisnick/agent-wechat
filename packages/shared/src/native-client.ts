@@ -11,6 +11,7 @@ export type * from "./native.generated.js";
 export { NATIVE_MAX_SOURCE_BYTES, NATIVE_MAX_ORDINARY_SOURCE_BYTES, NATIVE_MAX_VIDEO_SOURCE_BYTES } from "./native.generated.ts";
 import { NATIVE_MAX_SOURCE_BYTES } from "./native.generated.ts";
 import type { NativeGroupCreateRequest, NativeGroupMemberLookup } from "./native.generated.js";
+import type { NativeMiniProgramIpcRequest, NativeMiniProgramLaunch, NativeMiniProgramLaunchRequest, NativeMiniProgramLogin, NativeMiniProgramPackage, NativeMiniPrograms } from "./native.generated.js";
 export type NativeListOptions = { cursor?: string; limit?: number; query?: string; kind?: string };
 export function isNativeTombstone(value: unknown): value is NativeTombstone { const item = value as Partial<NativeTombstone> | null; return item?.deleted === true && typeof item.id === "string" && typeof item.version === "string"; }
 /** Validate a derived official notice without interpreting it as identity metadata. */
@@ -120,6 +121,38 @@ export class NativeWeChatClient {
   status(): Promise<NativeStatus> { return this.request("v1/status"); }
   accounts(): Promise<{ items: Record<string, unknown>[] }> { return this.request("v1/accounts"); }
   account(accountId: string): Promise<Record<string, unknown>> { return this.request(`v1/accounts/${id(accountId)}`); }
+  /** List Mini Programs known to the selected account's cache. */
+  listMiniPrograms(accountId: string): Promise<NativeMiniPrograms> {
+    return this.request(`v1/accounts/${id(accountId)}/mini-programs`);
+  }
+  /** Select a verified package and prepare its local launch. */
+  prepareMiniProgram(accountId: string, appId: string, options: NativeMiniProgramLaunchRequest = {}): Promise<NativeMiniProgramLaunch> {
+    return this.request(`v1/accounts/${id(accountId)}/mini-programs/${id(appId)}/launches`, { method: "POST", body: JSON.stringify(options) });
+  }
+  /** Download the package bytes selected by a launch. The runner verifies the digest. */
+  async getMiniProgramPackage(accountId: string, appId: string, pkg: NativeMiniProgramPackage): Promise<Uint8Array> {
+    if (!Number.isSafeInteger(pkg.sizeBytes) || pkg.sizeBytes < 18 || pkg.sizeBytes > 32 * 1024 * 1024) {
+      throw new Error("Invalid Mini Program package size");
+    }
+    const reply = await this.response(`v1/accounts/${id(accountId)}/mini-programs/${id(appId)}/packages/${id(pkg.version)}/${id(pkg.id)}`);
+    const bytes = await this.readBounded(reply, pkg.sizeBytes);
+    if (bytes.length !== pkg.sizeBytes) throw new Error("Mini Program package length mismatch");
+    return bytes;
+  }
+  /** Issue one sensitive app code. A failed request can have an uncertain outcome. */
+  async issueMiniProgramLogin(accountId: string, appId: string, launchId: string, idempotencyKey: string): Promise<NativeMiniProgramLogin> {
+    try {
+      const request: NativeMiniProgramIpcRequest = { method: "wx.login" };
+      return await this.request(`v1/accounts/${id(accountId)}/mini-programs/${id(appId)}/launches/${id(launchId)}/ipc`, {
+        method: "POST",
+        headers: { "Idempotency-Key": idempotencyKey },
+        body: JSON.stringify(request),
+      });
+    } catch (error) {
+      if (error instanceof NativeApiError) throw new NativeApiError(error.status, error.code);
+      throw error;
+    }
+  }
   createAccount(input: string | { id?: string; alias?: string }): Promise<Record<string, unknown>> { const body = typeof input === "string" ? { id: input } : input; if (!body.id && !body.alias) throw new Error("Account ID or alias is required"); return this.request("v1/accounts", { method: "POST", body: JSON.stringify(body) }); }
   removeAccount(accountId: string, confirmAccountId: string): Promise<NativeAccountRemoval> { if (accountId !== confirmAccountId) throw new Error("Account confirmation does not match"); return this.request(`v1/accounts/${id(accountId)}`, { method: "DELETE", body: JSON.stringify({ confirmAccountId }) }); }
   updateAccount(accountId: string, options: { alias?: string; autoConnect?: boolean }): Promise<Record<string, unknown>> { return this.request(`v1/accounts/${id(accountId)}`, { method: "PATCH", body: JSON.stringify(options) }); }

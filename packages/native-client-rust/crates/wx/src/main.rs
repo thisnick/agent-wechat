@@ -16,6 +16,7 @@ mod client_actions;
 mod daemon;
 mod events;
 mod login;
+mod miniprogram;
 mod outcome;
 mod output;
 mod profile_cli;
@@ -115,6 +116,12 @@ enum Command {
     Calls {
         #[command(subcommand)]
         command: Option<calls_cli::CallsCommand>,
+    },
+    /// Open a Mini Program from the selected account's verified package cache.
+    #[command(name = "miniprogram")]
+    MiniProgram {
+        #[command(subcommand)]
+        command: miniprogram::MiniProgramCommand,
     },
     /// Look up known contact IDs on the selected account.
     #[command(hide = true)]
@@ -935,7 +942,7 @@ enum TokenCommand {
         /// Account ID the token may use, or * for all accounts; repeat for several.
         #[arg(long, required = true)]
         accounts: Vec<String>,
-        /// Permission to grant: read, media, send, read-state, login, admin or calls; repeat.
+        /// Permission to grant: read, media, send, read-state, login, admin, calls or mini-program-login; repeat.
         #[arg(long, required = true)]
         scopes: Vec<String>,
         /// Expire the token at this Unix time in seconds; it never expires if omitted.
@@ -1411,7 +1418,7 @@ async fn run(cli: Cli) -> Result<()> {
     }
     if matches!(cli.command, Command::Licenses) {
         return output.print(
-            &json!({"silkProject":include_str!("../../wechat-protocol/vendor/silk/LICENSE-MIT"),"silkSdk":include_str!("../../wechat-protocol/vendor/silk/LICENSE-SDK"),"protocol":include_str!("../../wechat-protocol/NOTICE")}),
+            &json!({"silkProject":include_str!("../../wechat-protocol/vendor/silk/LICENSE-MIT"),"silkSdk":include_str!("../../wechat-protocol/vendor/silk/LICENSE-SDK"),"protocol":include_str!("../../wechat-protocol/NOTICE"),"glassEasel":wechat_miniprogram::runner::GLASS_EASEL_LICENSE,"cssTree":wechat_miniprogram::runner::CSS_TREE_LICENSE}),
         );
     }
     if matches!(cli.command, Command::Version) {
@@ -1714,6 +1721,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Calls { command } => {
             return calls_cli::run(&r, command.context("choose a calls command")?, cli.json).await;
         }
+        Command::MiniProgram { command } => return miniprogram::run(r, command, cli.json).await,
         Command::LookupContacts { ids }
         | Command::Contacts {
             command: Some(ContactCommand::Lookup { ids }),

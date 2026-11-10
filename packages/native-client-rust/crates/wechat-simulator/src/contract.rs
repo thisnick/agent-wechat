@@ -193,6 +193,12 @@ pub enum Control {
         #[serde(default)]
         sender: Option<String>,
     },
+    /// Deliver an independently authored Mini Program card fixture.
+    MiniProgramCard {
+        account: String,
+        peer: String,
+        available: bool,
+    },
     GroupFault {
         account: String,
         fault: GroupFault,

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mini Program</title>
+<link rel="stylesheet" href="/style.css">
+<header class="mini-toolbar">
+  <button id="mini-back" type="button" hidden>Back</button>
+  <div class="mini-toolbar-actions">
+    <button id="mini-reload" type="button">Reload</button>
+    <button id="mini-about" type="button">About</button>
+  </div>
+</header>
+<main></main>
+<div id="mini-feedback" role="status" hidden><span></span></div>
+<dialog id="mini-details">
+  <h2>About this Mini Program</h2>
+  <p></p>
+  <form method="dialog"><button>Close</button></form>
+</dialog>
+<dialog id="mini-modal">
+  <h2></h2>
+  <p></p>
+  <form method="dialog">
+    <button value="cancel">Cancel</button>
+    <button value="confirm">Confirm</button>
+  </form>
+</dialog>
+<dialog id="mini-privacy">
+  <h2>Continue in this Mini Program?</h2>
+  <p>Only continue after reviewing the app’s privacy terms. This choice applies to this window.</p>
+  <form method="dialog">
+    <button value="cancel" autofocus>Cancel</button>
+    <button value="confirm">Continue</button>
+  </form>
+</dialog>
+<script type="module" src="/runtime.js"></script>
+</html>

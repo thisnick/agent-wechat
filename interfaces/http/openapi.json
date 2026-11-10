@@ -1456,6 +1456,43 @@
           }
         ]
       },
+      "MiniProgramCard": {
+        "description": "Public display and routing metadata derived from a saved Mini Program card.",
+        "properties": {
+          "appId": {
+            "description": "Public Mini Program AppID.",
+            "type": "string"
+          },
+          "displayName": {
+            "description": "Program name, when supplied by the card.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pagePath": {
+            "description": "Page route and query carried in the card.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "description": "Shared page title.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "appId",
+          "displayName",
+          "title",
+          "pagePath"
+        ],
+        "type": "object"
+      },
       "NativeAccountRemoval": {
         "description": "Result of removing an account.",
         "properties": {
@@ -2270,6 +2307,17 @@
             "$ref": "#/components/schemas/NativeMentions",
             "description": "Which members the message mentions."
           },
+          "miniProgram": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MiniProgramCard"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Mini Program card read from the saved message."
+          },
           "quote": {
             "anyOf": [
               {
@@ -2379,6 +2427,236 @@
           "coverage",
           "sourceGeneration",
           "asOfEventCursor"
+        ],
+        "type": "object"
+      },
+      "NativeMiniProgram": {
+        "description": "A Mini Program known to the selected account.",
+        "properties": {
+          "appId": {
+            "description": "Public Mini Program AppID.",
+            "type": "string"
+          },
+          "available": {
+            "description": "Whether the hub has a staged package for this program.",
+            "type": "boolean"
+          },
+          "title": {
+            "description": "Name shown in the known-app list.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "appId",
+          "title",
+          "available"
+        ],
+        "type": "object"
+      },
+      "NativeMiniProgramCapabilities": {
+        "description": "Account and app permissions available to the local runner for this launch.",
+        "properties": {
+          "login": {
+            "description": "Whether the runner may request app login codes.",
+            "type": "boolean"
+          },
+          "shareToChat": {
+            "default": false,
+            "description": "Whether this launch can share its current page to a chat.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "login",
+          "shareToChat"
+        ],
+        "type": "object"
+      },
+      "NativeMiniProgramEntry": {
+        "description": "Compiled entry page selected for a Mini Program launch.",
+        "properties": {
+          "framework": {
+            "description": "Compiled component framework selected by the runner.",
+            "type": "string"
+          },
+          "path": {
+            "description": "Page route within the package.",
+            "type": "string"
+          },
+          "query": {
+            "description": "Query string of the shared entry, without its leading question mark.",
+            "type": "string"
+          },
+          "renderer": {
+            "description": "Renderer used by the local runner.",
+            "type": "string"
+          },
+          "servicePath": {
+            "description": "Archive path of the compiled page's service module.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "servicePath",
+          "query",
+          "framework",
+          "renderer"
+        ],
+        "type": "object"
+      },
+      "NativeMiniProgramIpcRequest": {
+        "additionalProperties": false,
+        "description": "A hub operation requested by a running Mini Program.",
+        "properties": {
+          "method": {
+            "const": "wx.login",
+            "type": "string"
+          }
+        },
+        "required": [
+          "method"
+        ],
+        "type": "object"
+      },
+      "NativeMiniProgramLaunch": {
+        "description": "Package and entry selection for one Mini Program launch.",
+        "properties": {
+          "capabilities": {
+            "$ref": "#/components/schemas/NativeMiniProgramCapabilities",
+            "description": "Operations the runner can request for this launch."
+          },
+          "entry": {
+            "$ref": "#/components/schemas/NativeMiniProgramEntry",
+            "description": "Page selected for the local runner."
+          },
+          "launchId": {
+            "description": "Temporary launch ID bound to the initiating account and token.",
+            "type": "string"
+          },
+          "networkPolicy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NativeMiniProgramNetworkPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Current server policy, or null when the account is offline."
+          },
+          "packages": {
+            "description": "Verified archives to download before execution.",
+            "items": {
+              "$ref": "#/components/schemas/NativeMiniProgramPackage"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "launchId",
+          "entry",
+          "packages",
+          "capabilities",
+          "networkPolicy"
+        ],
+        "type": "object"
+      },
+      "NativeMiniProgramLaunchRequest": {
+        "additionalProperties": false,
+        "description": "Select a default entry or resolve a saved card on the selected account.",
+        "properties": {
+          "sourceMessageId": {
+            "default": null,
+            "description": "Saved card message ID. Omit to use the program's default page.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "NativeMiniProgramLogin": {
+        "description": "Temporary app-specific code returned to the authorized local runner.",
+        "properties": {
+          "code": {
+            "description": "WeChat code for the selected app's backend. Treat it as sensitive.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
+      "NativeMiniProgramNetworkPolicy": {
+        "description": "Server-provided request policy for the selected Mini Program.",
+        "properties": {
+          "requestDomains": {
+            "description": "Domain patterns used by the host's request-domain check.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "requestDomains"
+        ],
+        "type": "object"
+      },
+      "NativeMiniProgramPackage": {
+        "description": "One verified archive selected for a Mini Program launch.",
+        "properties": {
+          "id": {
+            "description": "Package ID to use when downloading this archive.",
+            "type": "string"
+          },
+          "root": {
+            "description": "Declared root for a cached subpackage. Omitted for the main archive.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sha256": {
+            "description": "SHA-256 of the original archive, in lowercase hex.",
+            "type": "string"
+          },
+          "sizeBytes": {
+            "description": "Byte length of the original archive.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "version": {
+            "description": "Exact cached version to request.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "version",
+          "sizeBytes",
+          "sha256"
+        ],
+        "type": "object"
+      },
+      "NativeMiniPrograms": {
+        "description": "Mini Programs known from recent saved cards and the selected account's cache.",
+        "properties": {
+          "items": {
+            "description": "Known apps and their package availability.",
+            "items": {
+              "$ref": "#/components/schemas/NativeMiniProgram"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
         ],
         "type": "object"
       },
@@ -2517,6 +2795,17 @@
               }
             ],
             "description": "Link card of the quoted message when it was a shared link, with the same fields as `link` on\na message."
+          },
+          "embeddedMiniProgram": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MiniProgramCard"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Mini Program metadata retained by the reply."
           },
           "embeddedSticker": {
             "description": "True when the quoted message is a sticker. Omitted otherwise.",
@@ -7612,6 +7901,352 @@
         ]
       }
     },
+    "/v1/accounts/{a}/mini-programs": {
+      "get": {
+        "operationId": "listMiniPrograms",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeMiniPrograms"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "read"
+            ]
+          }
+        ],
+        "summary": "List staged Mini Programs and programs seen in recent saved cards.",
+        "tags": [
+          "mini-programs"
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/NativeMiniPrograms"
+          }
+        ]
+      }
+    },
+    "/v1/accounts/{a}/mini-programs/{app}/launches": {
+      "post": {
+        "operationId": "prepareMiniProgram",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Public Mini Program AppID.",
+            "in": "path",
+            "name": "app",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NativeMiniProgramLaunchRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeMiniProgramLaunch"
+                }
+              }
+            },
+            "description": "Created."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "read"
+            ]
+          }
+        ],
+        "summary": "Verify the cached package and prepare the local runner's entry page and login grant.",
+        "tags": [
+          "mini-programs"
+        ],
+        "x-agent-wechat-sdk-request": [
+          {
+            "$ref": "#/components/schemas/NativeMiniProgramLaunchRequest"
+          }
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/NativeMiniProgramLaunch"
+          }
+        ]
+      }
+    },
+    "/v1/accounts/{a}/mini-programs/{app}/launches/{id}/ipc": {
+      "post": {
+        "operationId": "invokeMiniProgramIpc",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Public Mini Program AppID.",
+            "in": "path",
+            "name": "app",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Mini Program launch ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Repeating a request with the same key returns the original result instead of repeating the work.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NativeMiniProgramIpcRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeMiniProgramLogin"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "read",
+              "mini-program-login"
+            ]
+          }
+        ],
+        "summary": "Run a supported Mini Program IPC method. wx.login issues or replays one sensitive app code.",
+        "tags": [
+          "mini-programs"
+        ],
+        "x-agent-wechat-sdk-request": [
+          {
+            "$ref": "#/components/schemas/NativeMiniProgramIpcRequest"
+          }
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/NativeMiniProgramLogin"
+          }
+        ]
+      }
+    },
+    "/v1/accounts/{a}/mini-programs/{app}/packages": {
+      "post": {
+        "operationId": "fetchMiniProgramPackage",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Public Mini Program AppID.",
+            "in": "path",
+            "name": "app",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeMiniProgramPackage"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "Fetch and verify the release's main archive from WeChat, or reuse the staged package.",
+        "tags": [
+          "mini-programs"
+        ]
+      }
+    },
+    "/v1/accounts/{a}/mini-programs/{app}/packages/{version}/{package}": {
+      "get": {
+        "operationId": "getMiniProgramPackage",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Public Mini Program AppID.",
+            "in": "path",
+            "name": "app",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Exact cached package version from the launch response.",
+            "in": "path",
+            "name": "version",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Package ID from the launch response.",
+            "in": "path",
+            "name": "package",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "read"
+            ]
+          }
+        ],
+        "summary": "Download an exact cached Mini Program archive.",
+        "tags": [
+          "mini-programs"
+        ]
+      }
+    },
     "/v1/accounts/{a}/operations/{id}": {
       "delete": {
         "description": "Scope: Needs read, login, media or send to look the operation up, then its kind decides: login, logout and forget_credentials need login; media-writeback needs media; message_recall needs send; sync and metadata need read; every other kind needs admin.",
@@ -9081,6 +9716,10 @@
     {
       "description": "Saved messages, sending and recall.",
       "name": "messages"
+    },
+    {
+      "description": "Staged Mini Program packages, launches and app login codes.",
+      "name": "mini-programs"
     },
     {
       "description": "Daemon health, status and shutdown.",

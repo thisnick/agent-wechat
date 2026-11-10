@@ -741,6 +741,10 @@ embeddedImage?: boolean,
  */
 embeddedLink?: LinkCard, 
 /**
+ * Mini Program metadata retained by the reply.
+ */
+embeddedMiniProgram?: MiniProgramCard, 
+/**
  * True when the quoted message is a sticker. Omitted otherwise.
  */
 embeddedSticker?: boolean, };
@@ -853,6 +857,10 @@ quote?: NativeQuoteReference,
  * Channels post. Null otherwise.
  */
 link?: LinkCard, 
+/**
+ * Mini Program card read from the saved message.
+ */
+miniProgram?: MiniProgramCard, 
 /**
  * Pin details when the message is a static location. Omitted for other messages.
  */
@@ -1252,6 +1260,129 @@ sourceGeneration: string,
  * to catch changes made after the read.
  */
 asOfEventCursor?: string, };
+export type MiniProgramCard = { 
+/**
+ * Public Mini Program AppID.
+ */
+appId: string, 
+/**
+ * Program name, when supplied by the card.
+ */
+displayName: string | null, 
+/**
+ * Shared page title.
+ */
+title: string | null, 
+/**
+ * Page route and query carried in the card.
+ */
+pagePath: string | null, };
+export type NativeMiniProgram = { 
+/**
+ * Public Mini Program AppID.
+ */
+appId: string, 
+/**
+ * Name shown in the known-app list.
+ */
+title: string, 
+/**
+ * Whether the hub has a staged package for this program.
+ */
+available: boolean, };
+export type NativeMiniPrograms = { 
+/**
+ * Known apps and their package availability.
+ */
+items: Array<NativeMiniProgram>, };
+export type NativeMiniProgramEntry = { 
+/**
+ * Page route within the package.
+ */
+path: string, 
+/**
+ * Archive path of the compiled page's service module.
+ */
+servicePath: string, 
+/**
+ * Query string of the shared entry, without its leading question mark.
+ */
+query: string, 
+/**
+ * Compiled component framework selected by the runner.
+ */
+framework: string, 
+/**
+ * Renderer used by the local runner.
+ */
+renderer: string, };
+export type NativeMiniProgramPackage = { 
+/**
+ * Package ID to use when downloading this archive.
+ */
+id: string, 
+/**
+ * Exact cached version to request.
+ */
+version: string, 
+/**
+ * Byte length of the original archive.
+ */
+sizeBytes: number, 
+/**
+ * SHA-256 of the original archive, in lowercase hex.
+ */
+sha256: string, 
+/**
+ * Declared root for a cached subpackage. Omitted for the main archive.
+ */
+root?: string, };
+export type NativeMiniProgramCapabilities = { 
+/**
+ * Whether the runner may request app login codes.
+ */
+login: boolean, 
+/**
+ * Whether this launch can share its current page to a chat.
+ */
+shareToChat: boolean, };
+export type NativeMiniProgramLaunchRequest = { 
+/**
+ * Saved card message ID. Omit to use the program's default page.
+ */
+sourceMessageId?: string, };
+export type NativeMiniProgramLaunch = { 
+/**
+ * Temporary launch ID bound to the initiating account and token.
+ */
+launchId: string, 
+/**
+ * Page selected for the local runner.
+ */
+entry: NativeMiniProgramEntry, 
+/**
+ * Verified archives to download before execution.
+ */
+packages: Array<NativeMiniProgramPackage>, 
+/**
+ * Operations the runner can request for this launch.
+ */
+capabilities: NativeMiniProgramCapabilities, 
+/**
+ * Current server policy, or null when the account is offline.
+ */
+networkPolicy: NativeMiniProgramNetworkPolicy | null, };
+export type NativeMiniProgramNetworkPolicy = { 
+/**
+ * Domain patterns used by the host's request-domain check.
+ */
+requestDomains: Array<string>, };
+export type NativeMiniProgramIpcRequest = { "method": "wx.login", };
+export type NativeMiniProgramLogin = { 
+/**
+ * WeChat code for the selected app's backend. Treat it as sensitive.
+ */
+code: string, };
 export type NativeOperation = { 
 /**
  * Operation ID.

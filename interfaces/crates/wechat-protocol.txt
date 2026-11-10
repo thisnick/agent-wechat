@@ -182,6 +182,10 @@ field wechat_protocol::MessageRecallReply::accepted | bool | MISSING DOC
 field wechat_protocol::MessageRecallReply::service_code | i32 | MISSING DOC
 field wechat_protocol::MetadataReply::raw | alloc::vec::Vec<u8> | MISSING DOC
 field wechat_protocol::MetadataReply::value | T | MISSING DOC
+field wechat_protocol::MiniProgramNetworkPolicy::download_domains | alloc::vec::Vec<alloc::string::String> | Domains checked for `wx.downloadFile`.
+field wechat_protocol::MiniProgramNetworkPolicy::request_domains | alloc::vec::Vec<alloc::string::String> | Domains checked for `wx.request`.
+field wechat_protocol::MiniProgramNetworkPolicy::upload_domains | alloc::vec::Vec<alloc::string::String> | Domains checked for `wx.uploadFile`.
+field wechat_protocol::MiniProgramNetworkPolicy::websocket_domains | alloc::vec::Vec<alloc::string::String> | Domains checked for WebSocket connections.
 field wechat_protocol::NativeOptions::long_host | alloc::string::String | MISSING DOC
 field wechat_protocol::NativeOptions::receive_budget | usize | MISSING DOC
 field wechat_protocol::NativeOptions::short_host | alloc::string::String | MISSING DOC
@@ -721,6 +725,9 @@ fn wechat_protocol::NativeClient::lookup_contacts_receipt | async fn(&self, user
 fn wechat_protocol::NativeClient::lookup_room | async fn(&self, room_id: &str, version: u32) -> anyhow::Result<wechat_protocol::wire::RoomRoster> | MISSING DOC
 fn wechat_protocol::NativeClient::lookup_room_raw | async fn(&self, room_id: &str, version: u32) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
 fn wechat_protocol::NativeClient::lookup_room_receipt | async fn(&self, room_id: &str, version: u32) -> anyhow::Result<wechat_protocol::client::group_inventory::MetadataReply<wechat_protocol::wire::RoomRoster>> | MISSING DOC
+fn wechat_protocol::NativeClient::mini_program_download_guarded | fn(&self, app_id: &str, before_submit: impl core::ops::function::Fn() -> anyhow::Result<()>) -> anyhow::Result<(u32, alloc::vec::Vec<u8>)> | Download the current release's main Mini Program archive from WeChat.
+fn wechat_protocol::NativeClient::mini_program_login_guarded | fn(&self, app_id: &str, before_submit: impl core::ops::function::Fn() -> anyhow::Result<()>) -> anyhow::Result<zeroize::Zeroizing<alloc::string::String>> | Request one Mini Program login code for the selected account and AppID.
+fn wechat_protocol::NativeClient::mini_program_network_policy_guarded | fn(&self, app_id: &str, before_submit: impl core::ops::function::Fn() -> anyhow::Result<()>) -> anyhow::Result<wechat_protocol::miniprogram::MiniProgramNetworkPolicy> | Fetch the app's network domains without issuing an app login code.
 fn wechat_protocol::NativeClient::new | fn(options: wechat_protocol::client::NativeOptions) -> anyhow::Result<Self> | Validate transport options. Construction itself makes no network request.
 fn wechat_protocol::NativeClient::notify_read_session | async fn(&self, notification: &wechat_protocol::client::status_notify::SessionReadNotification) -> anyhow::Result<wechat_protocol::client::status_notify::SessionReadReply> | MISSING DOC
 fn wechat_protocol::NativeClient::open_push_connection_blocking | fn(&self) -> anyhow::Result<wechat_protocol::client::account::push::AccountPushConnection> | Open an authenticated notification transport on the caller's blocking worker. Creating the transport does not start a hidden executor or loop.
@@ -1074,6 +1081,7 @@ impl core::clone::Clone for wechat_protocol::LogoutReply | impl | -
 impl core::clone::Clone for wechat_protocol::MessageRecall | impl | -
 impl core::clone::Clone for wechat_protocol::MessageRecallReply | impl | -
 impl core::clone::Clone for wechat_protocol::MetadataReply | impl<T: core::clone::Clone> | -
+impl core::clone::Clone for wechat_protocol::MiniProgramNetworkPolicy | impl | -
 impl core::clone::Clone for wechat_protocol::NativeClient | impl | -
 impl core::clone::Clone for wechat_protocol::NativeOptions | impl | -
 impl core::clone::Clone for wechat_protocol::OpenImContact | impl | -
@@ -1158,6 +1166,7 @@ impl core::cmp::Eq for wechat_protocol::LoginStatus | impl | -
 impl core::cmp::Eq for wechat_protocol::LogoutReply | impl | -
 impl core::cmp::Eq for wechat_protocol::MessageRecall | impl | -
 impl core::cmp::Eq for wechat_protocol::MessageRecallReply | impl | -
+impl core::cmp::Eq for wechat_protocol::MiniProgramNetworkPolicy | impl | -
 impl core::cmp::Eq for wechat_protocol::OpenImContact | impl | -
 impl core::cmp::Eq for wechat_protocol::OpenImServiceError | impl | -
 impl core::cmp::Eq for wechat_protocol::Service | impl | -
@@ -1202,6 +1211,7 @@ impl core::cmp::PartialEq for wechat_protocol::LoginStatus | impl | -
 impl core::cmp::PartialEq for wechat_protocol::LogoutReply | impl | -
 impl core::cmp::PartialEq for wechat_protocol::MessageRecall | impl | -
 impl core::cmp::PartialEq for wechat_protocol::MessageRecallReply | impl | -
+impl core::cmp::PartialEq for wechat_protocol::MiniProgramNetworkPolicy | impl | -
 impl core::cmp::PartialEq for wechat_protocol::OpenImContact | impl | -
 impl core::cmp::PartialEq for wechat_protocol::OpenImServiceError | impl | -
 impl core::cmp::PartialEq for wechat_protocol::Service | impl | -
@@ -1266,6 +1276,7 @@ impl core::fmt::Debug for wechat_protocol::LoginAttempt | impl | -
 impl core::fmt::Debug for wechat_protocol::LoginStatus | impl | -
 impl core::fmt::Debug for wechat_protocol::LogoutReply | impl | -
 impl core::fmt::Debug for wechat_protocol::MessageRecallReply | impl | -
+impl core::fmt::Debug for wechat_protocol::MiniProgramNetworkPolicy | impl | -
 impl core::fmt::Debug for wechat_protocol::NativeOptions | impl | -
 impl core::fmt::Debug for wechat_protocol::NativeRequestNotSubmitted | impl | -
 impl core::fmt::Debug for wechat_protocol::OpenImContact | impl | -
@@ -1360,6 +1371,7 @@ impl core::marker::StructuralPartialEq for wechat_protocol::LoginStatus | impl |
 impl core::marker::StructuralPartialEq for wechat_protocol::LogoutReply | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::MessageRecall | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::MessageRecallReply | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::MiniProgramNetworkPolicy | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::OpenImContact | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::OpenImServiceError | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::Service | impl | -
@@ -1577,6 +1589,7 @@ struct wechat_protocol::LogoutReply | struct { public fields } | MISSING DOC
 struct wechat_protocol::MessageRecall | struct { public fields } | MISSING DOC
 struct wechat_protocol::MessageRecallReply | struct { public fields } | MISSING DOC
 struct wechat_protocol::MetadataReply | struct<T> { public fields } | MISSING DOC
+struct wechat_protocol::MiniProgramNetworkPolicy | struct { public fields } | Server-provided network domains for one Mini Program.
 struct wechat_protocol::NativeClient | struct { private fields } | Native account client and login bootstrap for supported WeChat operations.
 struct wechat_protocol::NativeOptions | struct { public fields } | MISSING DOC
 struct wechat_protocol::NativeRequestNotSubmitted | struct unit | The operation stopped before business bytes were handed to transport. This marker is never attached to a timeout, rejected reply or post-handoff fence.

@@ -11,6 +11,7 @@ mod http_interface_tests;
 #[cfg(test)]
 mod http_route_table;
 mod media;
+mod miniprogram;
 #[cfg(test)]
 mod schema_listing;
 use anyhow::{bail, Context, Result};
@@ -78,6 +79,7 @@ pub fn version() -> Version {
             "events",
             "scoped-tokens",
             "config",
+            "mini-programs",
         ]
         .into_iter()
         .filter(|capability| *capability != "official-profile-login" || cfg!(target_os = "linux"))
@@ -130,6 +132,9 @@ impl IntoResponse for ApiError {
 }
 impl From<anyhow::Error> for ApiError {
     fn from(error: anyhow::Error) -> Self {
+        if let Some(mapped) = miniprogram::error(&error) {
+            return mapped;
+        }
         let message = error.to_string();
         if message == "mention_all_forbidden" {
             return Self(StatusCode::FORBIDDEN, "mention_all_forbidden");
@@ -1296,6 +1301,7 @@ pub fn router(core: Arc<Core>, token: &str) -> Router {
         .merge(actions::routes())
         .merge(groups::routes())
         .merge(call_routes())
+        .merge(miniprogram::routes())
         .with_state(app.clone());
     // Resolve aliases before route matching so scope checks and vault AAD always
     // use the canonical account identifier.

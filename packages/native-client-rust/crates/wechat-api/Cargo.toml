@@ -30,6 +30,7 @@ wechat-profile = { path = "../wechat-profile" }
 futures-util = "0.3"
 async-stream = "0.3"
 ts-rs = { version = "10", features = ["no-serde-warnings"] }
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

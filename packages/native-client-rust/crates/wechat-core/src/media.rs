@@ -631,14 +631,37 @@ impl Core {
             .context("media_metadata_unavailable")?;
         let quoted_image = crate::quotes::quoted_image_content(&msg);
         let quoted_sticker = crate::quotes::quoted_sticker_content(&msg);
-        let link = crate::quotes::message_app(&msg)
-            .and_then(|app| crate::quotes::quoted_link(&app).or(app.link));
+        let app = crate::quotes::message_app(&msg);
+        let sidecar_card = app.as_ref().is_some_and(|app| app.sticker.is_some());
+        let program = app
+            .as_ref()
+            .and_then(|app| app.mini_program.as_ref())
+            .map(|p| (p.preview.clone(), p.icon.clone()));
+        let link = app.and_then(|app| crate::quotes::quoted_link(&app).or(app.link));
         let sidecar_only = quoted_image.is_some()
             || quoted_sticker.is_some()
             || link.is_some()
-            || crate::quotes::message_app(&msg).is_some_and(|app| app.sticker.is_some());
+            || program.is_some()
+            || sidecar_card;
         let mut quoted = msg.clone();
-        let mut plans = if let Some(link) = link {
+        let mut plans = if let Some((preview, icon)) = program {
+            [
+                ("mini-program-preview", preview),
+                ("mini-program-icon", icon),
+            ]
+            .into_iter()
+            .filter_map(|(role, source)| {
+                source.map(|source| {
+                    (
+                        MediaKind::Image,
+                        MediaVariant::Thumbnail,
+                        DownloadPlan::LinkThumbnail { source },
+                        Some(role.into()),
+                    )
+                })
+            })
+            .collect()
+        } else if let Some(link) = link {
             link.thumbnail
                 .into_iter()
                 .map(|source| {
@@ -701,13 +724,25 @@ impl Core {
             .auto_download_max_bytes;
         let mut out = vec![];
         for (kind, variant, plan, filename) in plans {
-            let identity = digest(&serde_json::to_vec(&(
-                "bound-source-v1",
-                account,
-                &binding,
-                variant,
-                content,
-            ))?);
+            let identity = if let Some(role @ ("mini-program-preview" | "mini-program-icon")) =
+                filename.as_deref()
+            {
+                digest(&serde_json::to_vec(&(
+                    "mini-program-source-v1",
+                    account,
+                    &binding,
+                    role,
+                    content,
+                ))?)
+            } else {
+                digest(&serde_json::to_vec(&(
+                    "bound-source-v1",
+                    account,
+                    &binding,
+                    variant,
+                    content,
+                ))?)
+            };
             let id = format!("asset_{}", &identity[..40]);
             let expires = match &plan {
                 DownloadPlan::Cdn { descriptor } => descriptor.expires_at,
