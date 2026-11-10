@@ -291,9 +291,7 @@ export function PhotoViewer({
                         minute: "2-digit",
                       })}`}
                     {navigation && (
-                      <button
-                        <button onClick={() => route.showMessage(current.id)}>
-                      >
+                      <button onClick={() => route.showMessage(current.id)}>
                         {t("Show message", "定位到消息")}
                       </button>
                     )}
