@@ -81,6 +81,10 @@ export function embeddedQuotePreview(
   return {
     text,
     senderId: recalled ? undefined : quote?.senderId,
+    senderName: !recalled && typeof quote?.senderName === "string"
+      && quote.senderName.length <= 4096
+      && !/[\u0000-\u001f\u007f-\u009f]/.test(quote.senderName)
+      ? quote.senderName.trim() || undefined : undefined,
     own: !recalled && quote?.direction === "outgoing",
     // Assets belong to the reply carrying the embedded descriptor. Changing
     // the renderer does not change the account/message sent to the media API.

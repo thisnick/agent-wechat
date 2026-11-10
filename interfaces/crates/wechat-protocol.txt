@@ -183,6 +183,12 @@ field wechat_protocol::NativeOptions::long_host | alloc::string::String | MISSIN
 field wechat_protocol::NativeOptions::receive_budget | usize | MISSING DOC
 field wechat_protocol::NativeOptions::short_host | alloc::string::String | MISSING DOC
 field wechat_protocol::NativeOptions::timeout | core::time::Duration | MISSING DOC
+field wechat_protocol::OpenImContact::large_avatar_url | core::option::Option<alloc::string::String> | Server-advertised large-avatar source. Validate it before any download.
+field wechat_protocol::OpenImContact::nickname | core::option::Option<alloc::string::String> | Contact's nickname, preserving absent and present-empty values.
+field wechat_protocol::OpenImContact::remark | core::option::Option<alloc::string::String> | Saved remark supplied by the service, when present.
+field wechat_protocol::OpenImContact::small_avatar_url | core::option::Option<alloc::string::String> | Server-advertised small-avatar source. Validate it before any download.
+field wechat_protocol::OpenImContact::username | alloc::string::String | Exact OpenIM username returned for the requested identity.
+field wechat_protocol::OpenImServiceError::service_code | i32 | Signed `ret` returned by the OpenIM service.
 field wechat_protocol::RoomMember::flags | u32 | MISSING DOC
 field wechat_protocol::RoomMember::nickname | core::option::Option<alloc::string::String> | MISSING DOC
 field wechat_protocol::RoomMember::opaque | core::option::Option<alloc::vec::Vec<u8>> | MISSING DOC
@@ -528,6 +534,12 @@ field wechat_protocol::mmtls::Ticket::lifetime | u32 | MISSING DOC
 field wechat_protocol::mmtls::Ticket::nonce | alloc::vec::Vec<u8> | MISSING DOC
 field wechat_protocol::mmtls::Ticket::opaque | alloc::vec::Vec<u8> | MISSING DOC
 field wechat_protocol::mmtls::Ticket::reserved | u32 | MISSING DOC
+field wechat_protocol::openim::OpenImContact::large_avatar_url | core::option::Option<alloc::string::String> | Server-advertised large-avatar source. Validate it before any download.
+field wechat_protocol::openim::OpenImContact::nickname | core::option::Option<alloc::string::String> | Contact's nickname, preserving absent and present-empty values.
+field wechat_protocol::openim::OpenImContact::remark | core::option::Option<alloc::string::String> | Saved remark supplied by the service, when present.
+field wechat_protocol::openim::OpenImContact::small_avatar_url | core::option::Option<alloc::string::String> | Server-advertised small-avatar source. Validate it before any download.
+field wechat_protocol::openim::OpenImContact::username | alloc::string::String | Exact OpenIM username returned for the requested identity.
+field wechat_protocol::openim::OpenImServiceError::service_code | i32 | Signed `ret` returned by the OpenIM service.
 field wechat_protocol::protobuf::Field::number | u32 | MISSING DOC
 field wechat_protocol::protobuf::Field::value | wechat_protocol::protobuf::Value | MISSING DOC
 field wechat_protocol::protobuf::Value::Bytes::0 | alloc::vec::Vec<u8> | -
@@ -643,6 +655,8 @@ fn wechat_protocol::AccountRequest::large_cdn_config | fn(&mut self, route: wech
 fn wechat_protocol::AccountRequest::lookup_contacts | fn(&mut self, ids: &[alloc::string::String]) -> anyhow::Result<wechat_protocol::wire::ContactLookup> | MISSING DOC
 fn wechat_protocol::AccountRequest::lookup_contacts_raw | fn(&mut self, ids: &[alloc::string::String]) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
 fn wechat_protocol::AccountRequest::lookup_contacts_receipt | fn(&mut self, ids: &[alloc::string::String]) -> anyhow::Result<wechat_protocol::client::group_inventory::MetadataReply<wechat_protocol::wire::ContactLookup>> | MISSING DOC
+fn wechat_protocol::AccountRequest::lookup_openim_contact | fn(&mut self, username: &str, room: core::option::Option<&str>, ticket: core::option::Option<&str>) -> anyhow::Result<wechat_protocol::openim::OpenImContact> | Read one exact OpenIM contact using optional group context and a supplied ticket.
+fn wechat_protocol::AccountRequest::lookup_openim_contact_raw | fn(&mut self, username: &str, room: core::option::Option<&str>, ticket: core::option::Option<&str>) -> anyhow::Result<alloc::vec::Vec<u8>> | Return the authenticated OpenIM reply bytes for caller-owned receipt storage and decoding.
 fn wechat_protocol::AccountRequest::lookup_room | fn(&mut self, room: &str, version: u32) -> anyhow::Result<wechat_protocol::wire::RoomRoster> | MISSING DOC
 fn wechat_protocol::AccountRequest::lookup_room_raw | fn(&mut self, room: &str, version: u32) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
 fn wechat_protocol::AccountRequest::lookup_room_receipt | fn(&mut self, room: &str, version: u32) -> anyhow::Result<wechat_protocol::client::group_inventory::MetadataReply<wechat_protocol::wire::RoomRoster>> | MISSING DOC
@@ -962,6 +976,8 @@ fn wechat_protocol::mmtls::short_exchange | fn(session: &wechat_protocol::mmtls:
 fn wechat_protocol::mmtls::unpack_longlink | fn(input: &[u8]) -> anyhow::Result<wechat_protocol::mmtls::Longlink> | MISSING DOC
 fn wechat_protocol::mmtls::validate_host | fn(name: &str) -> anyhow::Result<()> | MISSING DOC
 fn wechat_protocol::observed_created_group | fn(raw: &[u8]) -> core::option::Option<alloc::string::String> | Recover a valid create identity even when another success field is malformed. This is evidence for review, never permission to repeat the creation.
+fn wechat_protocol::openim::decode_response | fn(bytes: &[u8], requested_username: &str) -> anyhow::Result<wechat_protocol::openim::OpenImContact> | Decode an authenticated OpenIM response and require the exact requested contact identity.
+fn wechat_protocol::openim::request | fn(username: &str, room: core::option::Option<&str>, ticket: core::option::Option<&str>) -> anyhow::Result<alloc::vec::Vec<u8>> | Encode an exact OpenIM lookup with optional ordinary/OpenIM group context and ticket.
 fn wechat_protocol::ordinary_identity | fn(value: &str) -> anyhow::Result<()> | MISSING DOC
 fn wechat_protocol::protobuf::base_code | fn(fields: &[wechat_protocol::protobuf::Field]) -> anyhow::Result<i32> | MISSING DOC
 fn wechat_protocol::protobuf::buffer | fn(value: &[u8]) -> alloc::vec::Vec<u8> | MISSING DOC
@@ -1044,6 +1060,8 @@ impl core::clone::Clone for wechat_protocol::MessageRecallReply | impl | -
 impl core::clone::Clone for wechat_protocol::MetadataReply | impl<T: core::clone::Clone> | -
 impl core::clone::Clone for wechat_protocol::NativeClient | impl | -
 impl core::clone::Clone for wechat_protocol::NativeOptions | impl | -
+impl core::clone::Clone for wechat_protocol::OpenImContact | impl | -
+impl core::clone::Clone for wechat_protocol::OpenImServiceError | impl | -
 impl core::clone::Clone for wechat_protocol::RoomMember | impl | -
 impl core::clone::Clone for wechat_protocol::RoomRoster | impl | -
 impl core::clone::Clone for wechat_protocol::SessionReadNotification | impl | -
@@ -1094,6 +1112,8 @@ impl core::clone::Clone for wechat_protocol::media_send::SendStatus | impl | -
 impl core::clone::Clone for wechat_protocol::mmtls::Record | impl | -
 impl core::clone::Clone for wechat_protocol::mmtls::ShortSession | impl | -
 impl core::clone::Clone for wechat_protocol::mmtls::Ticket | impl | -
+impl core::clone::Clone for wechat_protocol::openim::OpenImContact | impl | -
+impl core::clone::Clone for wechat_protocol::openim::OpenImServiceError | impl | -
 impl core::clone::Clone for wechat_protocol::protobuf::Field | impl | -
 impl core::clone::Clone for wechat_protocol::protobuf::Value | impl | -
 impl core::clone::Clone for wechat_protocol::push::Notification | impl | -
@@ -1119,6 +1139,8 @@ impl core::cmp::Eq for wechat_protocol::LoginStatus | impl | -
 impl core::cmp::Eq for wechat_protocol::LogoutReply | impl | -
 impl core::cmp::Eq for wechat_protocol::MessageRecall | impl | -
 impl core::cmp::Eq for wechat_protocol::MessageRecallReply | impl | -
+impl core::cmp::Eq for wechat_protocol::OpenImContact | impl | -
+impl core::cmp::Eq for wechat_protocol::OpenImServiceError | impl | -
 impl core::cmp::Eq for wechat_protocol::SessionReadNotification | impl | -
 impl core::cmp::Eq for wechat_protocol::SessionReadReply | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::app_session::AppAuthority | impl | -
@@ -1143,6 +1165,8 @@ impl core::cmp::Eq for wechat_protocol::media::MediaQuality | impl | -
 impl core::cmp::Eq for wechat_protocol::media::SourceEvidence | impl | -
 impl core::cmp::Eq for wechat_protocol::media::VideoRepresentationMismatch | impl | -
 impl core::cmp::Eq for wechat_protocol::media_send::SendStatus | impl | -
+impl core::cmp::Eq for wechat_protocol::openim::OpenImContact | impl | -
+impl core::cmp::Eq for wechat_protocol::openim::OpenImServiceError | impl | -
 impl core::cmp::Eq for wechat_protocol::protobuf::Field | impl | -
 impl core::cmp::Eq for wechat_protocol::protobuf::Value | impl | -
 impl core::cmp::Eq for wechat_protocol::push::Notification | impl | -
@@ -1156,6 +1180,8 @@ impl core::cmp::PartialEq for wechat_protocol::LoginStatus | impl | -
 impl core::cmp::PartialEq for wechat_protocol::LogoutReply | impl | -
 impl core::cmp::PartialEq for wechat_protocol::MessageRecall | impl | -
 impl core::cmp::PartialEq for wechat_protocol::MessageRecallReply | impl | -
+impl core::cmp::PartialEq for wechat_protocol::OpenImContact | impl | -
+impl core::cmp::PartialEq for wechat_protocol::OpenImServiceError | impl | -
 impl core::cmp::PartialEq for wechat_protocol::SessionReadNotification | impl | -
 impl core::cmp::PartialEq for wechat_protocol::SessionReadReply | impl | -
 impl core::cmp::PartialEq for wechat_protocol::calls::app_session::AppAuthority | impl | -
@@ -1180,6 +1206,8 @@ impl core::cmp::PartialEq for wechat_protocol::media::MediaQuality | impl | -
 impl core::cmp::PartialEq for wechat_protocol::media::SourceEvidence | impl | -
 impl core::cmp::PartialEq for wechat_protocol::media::VideoRepresentationMismatch | impl | -
 impl core::cmp::PartialEq for wechat_protocol::media_send::SendStatus | impl | -
+impl core::cmp::PartialEq for wechat_protocol::openim::OpenImContact | impl | -
+impl core::cmp::PartialEq for wechat_protocol::openim::OpenImServiceError | impl | -
 impl core::cmp::PartialEq for wechat_protocol::protobuf::Field | impl | -
 impl core::cmp::PartialEq for wechat_protocol::protobuf::Value | impl | -
 impl core::cmp::PartialEq for wechat_protocol::push::Notification | impl | -
@@ -1193,10 +1221,12 @@ impl core::default::Default for wechat_protocol::calls::signaling::CommonRequest
 impl core::default::Default for wechat_protocol::calls::signaling::CommonResponse | impl | -
 impl core::error::Error for wechat_protocol::AccountPersistenceFailed | impl | -
 impl core::error::Error for wechat_protocol::NativeRequestNotSubmitted | impl | -
+impl core::error::Error for wechat_protocol::OpenImServiceError | impl | -
 impl core::error::Error for wechat_protocol::calls::host_transport::CallHostRpcError | impl | -
 impl core::error::Error for wechat_protocol::calls::host_transport::CallLiveSyncInterrupted | impl | -
 impl core::error::Error for wechat_protocol::media::LargeFileDownloadError | impl | -
 impl core::error::Error for wechat_protocol::media::VideoRepresentationMismatch | impl | -
+impl core::error::Error for wechat_protocol::openim::OpenImServiceError | impl | -
 impl core::fmt::Debug for wechat_protocol::AccountIdentity | impl | -
 impl core::fmt::Debug for wechat_protocol::AccountLifecycle | impl | -
 impl core::fmt::Debug for wechat_protocol::AccountPersistenceFailed | impl | -
@@ -1211,6 +1241,8 @@ impl core::fmt::Debug for wechat_protocol::LogoutReply | impl | -
 impl core::fmt::Debug for wechat_protocol::MessageRecallReply | impl | -
 impl core::fmt::Debug for wechat_protocol::NativeOptions | impl | -
 impl core::fmt::Debug for wechat_protocol::NativeRequestNotSubmitted | impl | -
+impl core::fmt::Debug for wechat_protocol::OpenImContact | impl | -
+impl core::fmt::Debug for wechat_protocol::OpenImServiceError | impl | -
 impl core::fmt::Debug for wechat_protocol::SessionReadNotification | impl | -
 impl core::fmt::Debug for wechat_protocol::SessionReadReply | impl | -
 impl core::fmt::Debug for wechat_protocol::TextSendOptions | impl | -
@@ -1242,18 +1274,23 @@ impl core::fmt::Debug for wechat_protocol::media::SourceEvidence | impl | -
 impl core::fmt::Debug for wechat_protocol::media::VideoRepresentationMismatch | impl | -
 impl core::fmt::Debug for wechat_protocol::media_send::MediaSendResult | impl | -
 impl core::fmt::Debug for wechat_protocol::media_send::SendStatus | impl | -
+impl core::fmt::Debug for wechat_protocol::openim::OpenImContact | impl | -
+impl core::fmt::Debug for wechat_protocol::openim::OpenImServiceError | impl | -
 impl core::fmt::Debug for wechat_protocol::push::Notification | impl | -
 impl core::fmt::Debug for wechat_protocol::quote_send::QuoteReference | impl | -
 impl core::fmt::Debug for wechat_protocol::wire::Heartbeat | impl | -
 impl core::fmt::Debug for wechat_protocol::wire::TextSendResult | impl | -
 impl core::fmt::Display for wechat_protocol::AccountPersistenceFailed | impl | -
 impl core::fmt::Display for wechat_protocol::NativeRequestNotSubmitted | impl | -
+impl core::fmt::Display for wechat_protocol::OpenImServiceError | impl | -
 impl core::fmt::Display for wechat_protocol::calls::host_transport::CallHostRpcError | impl | -
 impl core::fmt::Display for wechat_protocol::calls::host_transport::CallLiveSyncInterrupted | impl | -
 impl core::fmt::Display for wechat_protocol::media::LargeFileDownloadError | impl | -
 impl core::fmt::Display for wechat_protocol::media::VideoRepresentationMismatch | impl | -
+impl core::fmt::Display for wechat_protocol::openim::OpenImServiceError | impl | -
 impl core::marker::Copy for wechat_protocol::AccountLifecycle | impl | -
 impl core::marker::Copy for wechat_protocol::LoginStatus | impl | -
+impl core::marker::Copy for wechat_protocol::OpenImServiceError | impl | -
 impl core::marker::Copy for wechat_protocol::calls::app_session::AppAuthority | impl | -
 impl core::marker::Copy for wechat_protocol::calls::audio_packet::MediaContext | impl | -
 impl core::marker::Copy for wechat_protocol::calls::audio_packet::MediaEpoch | impl | -
@@ -1275,6 +1312,7 @@ impl core::marker::Copy for wechat_protocol::media::LargeFileDownloadError | imp
 impl core::marker::Copy for wechat_protocol::media::MediaQuality | impl | -
 impl core::marker::Copy for wechat_protocol::media::SourceEvidence | impl | -
 impl core::marker::Copy for wechat_protocol::media::VideoRepresentationMismatch | impl | -
+impl core::marker::Copy for wechat_protocol::openim::OpenImServiceError | impl | -
 impl core::marker::Copy for wechat_protocol::push::Notification | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::AccountIdentity | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::AccountLifecycle | impl | -
@@ -1285,6 +1323,8 @@ impl core::marker::StructuralPartialEq for wechat_protocol::LoginStatus | impl |
 impl core::marker::StructuralPartialEq for wechat_protocol::LogoutReply | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::MessageRecall | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::MessageRecallReply | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::OpenImContact | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::OpenImServiceError | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::SessionReadNotification | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::SessionReadReply | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::app_session::AppAuthority | impl | -
@@ -1309,6 +1349,8 @@ impl core::marker::StructuralPartialEq for wechat_protocol::media::MediaQuality 
 impl core::marker::StructuralPartialEq for wechat_protocol::media::SourceEvidence | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::media::VideoRepresentationMismatch | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::media_send::SendStatus | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::openim::OpenImContact | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::openim::OpenImServiceError | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::protobuf::Field | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::protobuf::Value | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::push::Notification | impl | -
@@ -1344,6 +1386,7 @@ impl serde_core::de::Deserialize<'de> for wechat_protocol::LoginAttempt | impl<'
 impl serde_core::de::Deserialize<'de> for wechat_protocol::LoginStatus | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::MessageRecall | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::MetadataReply | impl<'de, T> where T: serde_core::de::Deserialize<'de> | -
+impl serde_core::de::Deserialize<'de> for wechat_protocol::OpenImContact | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::RoomMember | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::RoomRoster | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::SessionReadNotification | impl<'de> | -
@@ -1369,6 +1412,7 @@ impl serde_core::de::Deserialize<'de> for wechat_protocol::media_send::MediaSend
 impl serde_core::de::Deserialize<'de> for wechat_protocol::media_send::SendStatus | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::mmtls::ShortSession | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::mmtls::Ticket | impl<'de> | -
+impl serde_core::de::Deserialize<'de> for wechat_protocol::openim::OpenImContact | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::quote_send::QuoteReference | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::wire::AddMessage | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::wire::AvatarBytes | impl<'de> | -
@@ -1403,6 +1447,7 @@ impl serde_core::ser::Serialize for wechat_protocol::LoginAttempt | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::LoginStatus | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::MessageRecall | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::MetadataReply | impl<T> where T: serde_core::ser::Serialize | -
+impl serde_core::ser::Serialize for wechat_protocol::OpenImContact | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::RoomMember | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::RoomRoster | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::SessionReadNotification | impl | -
@@ -1428,6 +1473,7 @@ impl serde_core::ser::Serialize for wechat_protocol::media_send::MediaSendResult
 impl serde_core::ser::Serialize for wechat_protocol::media_send::SendStatus | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::mmtls::ShortSession | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::mmtls::Ticket | impl | -
+impl serde_core::ser::Serialize for wechat_protocol::openim::OpenImContact | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::quote_send::QuoteReference | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::wire::AddMessage | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::wire::AvatarBytes | impl | -
@@ -1461,6 +1507,7 @@ mod wechat_protocol::file_upload | - | File-upload message reservation. This aut
 mod wechat_protocol::media | - | Bounded native CDN transport. This uses the observed HTTP carrier on port 443, not HTTPS. Media encryption and advertised size/digests are checked separately.
 mod wechat_protocol::media_send | - | Final media-message metadata. CDN upload and message submission are separate steps; persist source bytes, generated keys and intent before either step.
 mod wechat_protocol::mmtls | - | Fresh pinned MMTLS handshake and authenticated shortlink exchange.
+mod wechat_protocol::openim | - | Read one exact OpenIM contact through the supported native contact operation.
 mod wechat_protocol::protobuf | - | Bounded numbered protobuf primitives. Unknown fields and full u64 values survive.
 mod wechat_protocol::push | - | Persistent authenticated incoming notifications. The outer longlink command is distinct from the encrypted business CGI: heartbeat 238/518, sync 121/138.
 mod wechat_protocol::quote_send | - | Quoted app-message metadata. Callers resolve the selected message and persist this reference and the final XML before submitting a send attempt.
@@ -1494,6 +1541,8 @@ struct wechat_protocol::MetadataReply | struct<T> { public fields } | MISSING DO
 struct wechat_protocol::NativeClient | struct { private fields } | Native account client and login bootstrap for supported WeChat operations.
 struct wechat_protocol::NativeOptions | struct { public fields } | MISSING DOC
 struct wechat_protocol::NativeRequestNotSubmitted | struct unit | The operation stopped before business bytes were handed to transport. This marker is never attached to a timeout, rejected reply or post-handoff fence.
+struct wechat_protocol::OpenImContact | struct { public fields } | Supplied contact fields for one accepted OpenIM identity.
+struct wechat_protocol::OpenImServiceError | struct { public fields } | A service rejection retaining the signed OpenIM response code.
 struct wechat_protocol::PendingLogout | struct { private fields } | One reserved terminal operation. Reservation stops account admission without sending anything. An embedding daemon can commit local logout inhibition before consuming this token to submit its optional remote logout. Dropping the token leaves the account stopped and sends no request.
 struct wechat_protocol::RoomMember | struct { public fields } | MISSING DOC
 struct wechat_protocol::RoomRoster | struct { public fields } | MISSING DOC
@@ -1571,6 +1620,8 @@ struct wechat_protocol::mmtls::Record | struct { public fields } | MISSING DOC
 struct wechat_protocol::mmtls::Session | struct { private fields } | MISSING DOC
 struct wechat_protocol::mmtls::ShortSession | struct { public fields } | MISSING DOC
 struct wechat_protocol::mmtls::Ticket | struct { public fields } | MISSING DOC
+struct wechat_protocol::openim::OpenImContact | struct { public fields } | Supplied contact fields for one accepted OpenIM identity.
+struct wechat_protocol::openim::OpenImServiceError | struct { public fields } | A service rejection retaining the signed OpenIM response code.
 struct wechat_protocol::protobuf::Field | struct { public fields } | MISSING DOC
 struct wechat_protocol::push::Notification | struct { public fields } | MISSING DOC
 struct wechat_protocol::quote_send::QuoteReference | struct { public fields } | A reference to the immediate selected message. App messages retain raw type 49 here; their application subtype belongs in their serialized content.

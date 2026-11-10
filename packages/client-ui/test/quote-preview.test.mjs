@@ -324,3 +324,13 @@ test("ordinary and shared sticker quotes reuse sticker rendering without looking
   }
   assert.equal(quotedText({ type: 49, appMessageType: 8 }), "Sticker");
 });
+
+
+test("quoted author labels come from the reply and disappear on recall", () => {
+  const reply = { ...parent, quote: { ...parent.quote, state: "embedded", senderId: "member@openim", senderName: " Example Member ", embeddedText: "Excerpt" } };
+  assert.equal(embeddedQuotePreview(reply).senderName, "Example Member");
+  for (const senderName of [undefined, "", "  ", "Bad\nName", "x".repeat(4097)])
+    assert.equal(embeddedQuotePreview({ ...reply, quote: { ...reply.quote, senderName } }).senderName, undefined);
+  assert.equal(embeddedQuotePreview({ ...reply, quote: { ...reply.quote, state: "recalled" } }).senderName, undefined);
+  assert.equal(embeddedQuotePreview({ ...reply, recall: {} }).senderName, undefined);
+});

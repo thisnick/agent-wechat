@@ -93,6 +93,8 @@ request PageQuery.limit | integer, nullable, min 0, format uint | Items per page
 request PageQuery.search | string, nullable | Text to search for, up to 256 characters. The name `query` is accepted too.
 request QrQuery | object, rejects unknown fields | Options for fetching a login QR code.
 request QrQuery.generation | integer, nullable, min 0, format uint64 | Only return the QR code if it is still this generation. A newer code fails with `login_challenge_superseded`.
+request RefreshAvatarRequest | object, rejects unknown fields | Optional group context for an OpenIM member's avatar lookup.
+request RefreshAvatarRequest.roomId | string, nullable | Group containing this known member, when context is required by WeChat.
 request RoomQuery | object, rejects unknown fields | Options for looking up one group.
 request RoomQuery.version | integer, min 0, format uint32, default 0 | The member-list version you already know. Defaults to 0.
 request SendKeyQuery | object, rejects unknown fields | Options for finding a send by its idempotency key.
@@ -499,6 +501,7 @@ response NativeMessage.quote.embeddedLink.url | string, required, nullable | Add
 response NativeMessage.quote.embeddedSticker | boolean, nullable | True when the quoted message is a sticker. Omitted otherwise.
 response NativeMessage.quote.embeddedText | string, required, nullable | Readable text of the quoted message, taken from the reply. Null when there is none.
 response NativeMessage.quote.senderId | string, required, nullable | ID of the quoted message's sender, when the reply says who it was.
+response NativeMessage.quote.senderName | string, nullable | Sender's display name carried inside the reply, when supplied by WeChat.
 response NativeMessage.quote.serverId | string, required | WeChat's ID of the quoted message, as a string.
 response NativeMessage.quote.state | string, required, nullable | How much of the quote could be shown: `embedded` when the reply carries readable content, `missing` when it carries none, `unsupported` for a kind of message that cannot be shown as a quote, and `recalled` when the original was recalled and its content is hidden.
 response NativeMessage.quote.type | integer, required, format int32 | WeChat's numeric type of the quoted message, with the same values as `type` on a message.
@@ -556,6 +559,7 @@ response NativeMessagePage.items[]<NativeMessage>.quote.embeddedLink.url | strin
 response NativeMessagePage.items[]<NativeMessage>.quote.embeddedSticker | boolean, nullable | True when the quoted message is a sticker. Omitted otherwise.
 response NativeMessagePage.items[]<NativeMessage>.quote.embeddedText | string, required, nullable | Readable text of the quoted message, taken from the reply. Null when there is none.
 response NativeMessagePage.items[]<NativeMessage>.quote.senderId | string, required, nullable | ID of the quoted message's sender, when the reply says who it was.
+response NativeMessagePage.items[]<NativeMessage>.quote.senderName | string, nullable | Sender's display name carried inside the reply, when supplied by WeChat.
 response NativeMessagePage.items[]<NativeMessage>.quote.serverId | string, required | WeChat's ID of the quoted message, as a string.
 response NativeMessagePage.items[]<NativeMessage>.quote.state | string, required, nullable | How much of the quote could be shown: `embedded` when the reply carries readable content, `missing` when it carries none, `unsupported` for a kind of message that cannot be shown as a quote, and `recalled` when the original was recalled and its content is hidden.
 response NativeMessagePage.items[]<NativeMessage>.quote.type | integer, required, format int32 | WeChat's numeric type of the quoted message, with the same values as `type` on a message.
@@ -763,7 +767,7 @@ route POST /v1/accounts | scope admin, request CreateAccountRequest, response un
 route POST /v1/accounts/{a}/auth/disconnect | scope login, response untyped | Close the connection to WeChat but keep the saved login trust.
 route POST /v1/accounts/{a}/auth/login | scope login, idempotency key optional, request LoginRequest, response NativeOperation, status 202, sdk request LoginRequest, sdk response NativeOperation | Start signing the account in with a saved device or a QR code. Poll the returned operation.
 route POST /v1/accounts/{a}/auth/logout-local | scope login, response untyped | Sign the account out on this daemon only, without asking WeChat to revoke the login.
-route POST /v1/accounts/{a}/avatars/{id}/refresh | scope media and read, response untyped, status 202, sdk response NativeOperation | Ask WeChat for the latest avatar of one contact. Poll the returned operation.
+route POST /v1/accounts/{a}/avatars/{id}/refresh | scope media and read, request RefreshAvatarRequest (optional), response untyped, status 202, sdk response NativeOperation | Ask WeChat for the latest avatar of one contact, with optional group context for an OpenIM member. Poll the returned operation.
 route POST /v1/accounts/{a}/connect | scope login, response untyped, status 202, sdk response NativeOperation | Connect the signed-in account to WeChat. Poll the returned operation.
 route POST /v1/accounts/{a}/consumers/{consumer}/ack | scope read, request EventAckRequest, response untyped | Record how far a named consumer has read the event stream. It never marks messages read.
 route POST /v1/accounts/{a}/contact-sync | scope read, response untyped, status 202, sdk response NativeOperation | Start syncing the contact catalog from WeChat. Poll the returned operation.

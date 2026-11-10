@@ -9,6 +9,7 @@ pub(crate) struct AppMessage {
     pub reference: Option<(String, i32)>,
     pub embedded: Option<String>,
     pub sender_id: Option<String>,
+    pub sender_name: Option<String>,
     pub link: Option<crate::links::ParsedLink>,
     pub sticker: Option<crate::stickers::SharedSticker>,
 }
@@ -225,6 +226,9 @@ pub(crate) fn app_message(content: &str) -> Option<AppMessage> {
                     && s.len() <= 256
                     && !s.chars().any(|c| c.is_control() || c.is_whitespace())
             }),
+        sender_name: child(app, "refermsg")
+            .and_then(|r| crate::links::text(r, "displayname", 4096))
+            .filter(|s| !s.chars().any(char::is_control)),
     })
 }
 
@@ -339,6 +343,9 @@ pub(crate) fn embedded_quote(app: &AppMessage, own: Option<&str>) -> Option<Valu
             .map(|(sender, own)| if sender == own { "outgoing" } else { "incoming" }),
         "appMessageType":card.as_ref().map(|c| c.subtype),
         "embeddedText":text,"embeddedImage":image});
+    if let Some(name) = &app.sender_name {
+        quote["senderName"] = json!(name);
+    }
     if sticker {
         quote["embeddedSticker"] = json!(true);
     }
@@ -396,6 +403,47 @@ mod tests {
     use super::*;
     use crate::Core;
     const LINK: &str = "<msg><appmsg><type>5</type><title><![CDATA[Article <title>]]></title><des>A &amp; B</des><url>https://example.com/article?a=1&amp;b=2</url><appattach><cdnattachurl>private-transport</cdnattachurl></appattach></appmsg></msg>";
+
+    #[test]
+    fn quoted_sender_name_uses_only_the_received_display_name() {
+        for (from, member, expected_sender) in [
+            (
+                "room@chatroom",
+                "<chatusr>123456@openim</chatusr>",
+                "123456@openim",
+            ),
+            ("direct_sender", "", "direct_sender"),
+        ] {
+            let app = app_message(&format!("<msg><appmsg><type>57</type><title>Reply</title><refermsg><type>1</type><svrid>123</svrid><fromusr>{from}</fromusr>{member}<displayname><![CDATA[ Example & <member> ]]></displayname><content>Quoted excerpt</content></refermsg></appmsg></msg>")).unwrap();
+            let quote = embedded_quote(&app, Some(expected_sender)).unwrap();
+            assert_eq!(quote["senderName"], "Example & <member>");
+            assert_eq!(quote["senderId"], expected_sender);
+            assert_eq!(quote["direction"], "outgoing");
+            assert_eq!(quote["embeddedText"], "Quoted excerpt");
+        }
+    }
+
+    #[test]
+    fn missing_or_invalid_quoted_sender_names_do_not_replace_identity_or_content() {
+        for name in [
+            "".to_string(),
+            "<displayname/>".to_string(),
+            "<displayname>  </displayname>".to_string(),
+            "<displayname>One</displayname><displayname>Two</displayname>".to_string(),
+            "<displayname><nested>One</nested></displayname>".to_string(),
+            "<x:displayname xmlns:x='foreign'>One</x:displayname>".to_string(),
+            "<displayname>One&#x7f;Two</displayname>".to_string(),
+            "<displayname>One\nTwo</displayname>".to_string(),
+            format!("<displayname>{}</displayname>", "x".repeat(4097)),
+        ] {
+            let app = app_message(&format!("<msg><appmsg><type>57</type><title>Reply</title><refermsg><type>1</type><svrid>123</svrid><fromusr>sender</fromusr>{name}<content>Quoted excerpt</content></refermsg></appmsg></msg>")).unwrap();
+            let quote = embedded_quote(&app, Some("another_sender")).unwrap();
+            assert!(quote.get("senderName").is_none());
+            assert_eq!(quote["senderId"], "sender");
+            assert_eq!(quote["direction"], "incoming");
+            assert_eq!(quote["embeddedText"], "Quoted excerpt");
+        }
+    }
 
     #[test]
     fn forwarded_summary_uses_outer_description_when_nested_record_has_only_private_items() {

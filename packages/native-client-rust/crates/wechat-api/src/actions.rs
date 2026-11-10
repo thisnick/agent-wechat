@@ -332,17 +332,66 @@ async fn refresh_members(
         },
     )
 }
+/// Optional group context for an OpenIM member's avatar lookup.
+#[derive(Default, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct RefreshAvatarRequest {
+    /// Group containing this known member, when context is required by WeChat.
+    room_id: Option<String>,
+}
+impl RefreshAvatarRequest {
+    fn from_body(body: &[u8]) -> std::result::Result<Self, serde_json::Error> {
+        if body.is_empty() {
+            Ok(Self::default())
+        } else {
+            serde_json::from_slice(body)
+        }
+    }
+}
+#[cfg(test)]
+mod avatar_request_tests {
+    use super::*;
+
+    #[test]
+    fn avatar_body_keeps_legacy_empty_requests_and_optional_group_context() {
+        assert!(RefreshAvatarRequest::from_body(b"")
+            .unwrap()
+            .room_id
+            .is_none());
+        assert!(serde_json::from_str::<RefreshAvatarRequest>("{}")
+            .unwrap()
+            .room_id
+            .is_none());
+        let body: RefreshAvatarRequest =
+            serde_json::from_value(serde_json::json!({"roomId":"group@chatroom"})).unwrap();
+        assert_eq!(body.room_id.as_deref(), Some("group@chatroom"));
+        assert!(
+            serde_json::from_value::<RefreshAvatarRequest>(serde_json::json!({"roomId":3}))
+                .is_err()
+        );
+        assert!(serde_json::from_value::<RefreshAvatarRequest>(
+            serde_json::json!({"url":"https://example.com"})
+        )
+        .is_err());
+    }
+}
 async fn refresh_avatar(
     State(app): State<App>,
     Extension(c): Extension<Claims>,
     Path((a, id)): Path<(String, String)>,
+    body: axum::body::Bytes,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     c.require(Some(&a), "media")?;
+    let input = RefreshAvatarRequest::from_body(&body)
+        .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_avatar_request"))?;
     metadata(
         app,
         c,
         a,
-        wechat_core::MetadataAction::Avatar { contact_id: id },
+        wechat_core::MetadataAction::Avatar {
+            contact_id: id,
+            room_id: input.room_id,
+        },
     )
 }
 async fn sync_contacts(

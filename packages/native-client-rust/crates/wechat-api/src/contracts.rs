@@ -119,6 +119,10 @@ pub struct NativeQuoteReference {
     #[serde(default)]
     #[ts(optional)]
     pub sender_id: Option<String>,
+    /// Sender's display name carried inside the reply, when supplied by WeChat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub sender_name: Option<String>,
     /// `outgoing` when the quoted message was sent by this account and `incoming` when someone else
     /// sent it. Null when that cannot be told.
     #[serde(default)]
@@ -897,6 +901,22 @@ mod tests {
             serde_json::json!({"id":"x","deleted":false,"version":"1"})
         )
         .is_err());
+    }
+    #[test]
+    fn quoted_sender_name_is_optional_and_preserved_in_contracts() {
+        let mut value = serde_json::json!({"serverId":"123","type":1,"senderId":"123456@openim"});
+        let without_name: NativeQuoteReference = serde_json::from_value(value.clone()).unwrap();
+        assert!(serde_json::to_value(without_name)
+            .unwrap()
+            .get("senderName")
+            .is_none());
+        value["senderName"] = serde_json::json!("Example member");
+        let with_name: NativeQuoteReference = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            serde_json::to_value(with_name).unwrap()["senderName"],
+            "Example member"
+        );
+        assert!(typescript().contains("senderName?: string"));
     }
     #[test]
     fn generated_contract_uses_lossless_strings_and_nullable_metadata() {

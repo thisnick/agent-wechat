@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { sameEmbeddedQuote } from "./native-quote.ts";
+import { sameEmbeddedQuote, renderEmbeddedQuote } from "./native-quote.ts";
 
 test("new quote display fields do not invalidate an older queued excerpt", () => {
   const stored = { serverId: "42", type: 49, appMessageType: 5, state: "embedded",
@@ -29,4 +29,22 @@ test("a quote saved as unsupported stays valid once the daemon can read it", () 
   for (const state of ["recalled", "unavailable"])
     assert.equal(sameEmbeddedQuote(stored, { ...current, state }), false);
   assert.equal(sameEmbeddedQuote({ ...stored, state: "embedded", embeddedText: "Saved" }, current), false);
+});
+
+test("additive author labels preserve old queued quotes and remain checked for new inputs", () => {
+  const stored = { serverId: "42", type: 1, state: "embedded", senderId: "200001@openim", embeddedText: "Original" };
+  const current = { ...stored, senderName: "Example Member" };
+  assert.equal(sameEmbeddedQuote(stored, current), true);
+  assert.equal(sameEmbeddedQuote(current, { ...current, senderName: "Changed" }), false);
+  assert.equal(sameEmbeddedQuote(stored, { ...current, senderId: "other@openim" }), false);
+  assert.equal(sameEmbeddedQuote(stored, { ...current, embeddedText: "Changed" }), false);
+});
+
+test("quote rendering uses a supplied name while retaining the actual author ID", () => {
+  const message = { body: "Reply", quote: { type: 1, state: "embedded", senderId: "200001@openim", senderName: "Example Member", embeddedText: "Original" } } as any;
+  const rendered = renderEmbeddedQuote(message);
+  assert.match(rendered.body, /from Example Member;/);
+  assert.equal(rendered.quote.senderId, "200001@openim");
+  const malformed = renderEmbeddedQuote({ ...message, quote: { ...message.quote, senderName: "Invalid\nName" } });
+  assert.match(malformed.body, /from 200001@openim;/);
 });

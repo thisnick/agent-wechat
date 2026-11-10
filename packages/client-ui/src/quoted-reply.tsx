@@ -54,6 +54,8 @@ export function QuotedReply({
       <strong>
         {quote.own
           ? t("quotedReply.you")
+          : quote.senderName
+          ? quote.senderName
           : quote.senderId
           ? name(quote.senderId)
           : t("quotedReply.quotedMessage")}

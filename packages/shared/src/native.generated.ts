@@ -713,6 +713,10 @@ state?: string,
  */
 senderId?: string, 
 /**
+ * Sender's display name carried inside the reply, when supplied by WeChat.
+ */
+senderName?: string, 
+/**
  * `outgoing` when the quoted message was sent by this account and `incoming` when someone else
  * sent it. Null when that cannot be told.
  */
