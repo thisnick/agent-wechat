@@ -1,8 +1,10 @@
 // Independently authored legacy page fixture. No third-party package bytes.
 import { createHash } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import glassTemplates from "./native-miniprogram-glass.mjs";
+import reactiveTemplates from "./native-miniprogram-reactive.mjs";
+import extraTemplates from "./native-miniprogram-extra.mjs";
 
 const APP = "wx0123456789abcdef";
 const EMBEDDED_IMAGE = "data:image/svg+xml," + encodeURIComponent(
@@ -66,12 +68,28 @@ export async function stageGlassMiniProgram(dataDir, account) {
   const directory = join(dataDir, "hub", "miniprograms", account, appId);
   const home = "pages/glass/index";
   const second = "pages/glass/second";
-  const service = `
+  const libraryModules = [["libraries/computed.js", "computed"], ["mobx-miniprogram.js", "mobx"], ["libraries/bindings.js", "bindings"], ["rfdc.js", "rfdc"], ["fast-deep-equal.js", "fast-deep-equal"]];
+  const libraries = await Promise.all(libraryModules.map(([,name]) => readFile(new URL("./mini-libraries/"+name+".js", import.meta.url), "utf8")));
+  const service = libraries.map((source, index) => {
+    const id = libraryModules[index][0];
+    return `define(${JSON.stringify(id)},function(require,module,exports){${source}\n},{isPage:false,isComponent:false,currentFile:${JSON.stringify(id)}});`;
+  }).join("\n") + `
     __wxCodeSpace__.batchAddCompiledTemplate(${glassTemplates});
     __wxCodeSpace__.addComponentStaticConfig("${home}", {"usingComponents":{
+      "reactive-state":"/components/reactive/index",
       "mp-cell":"weui-miniprogram/cell/cell", "mp-cells":"weui-miniprogram/cells/cells",
       "mp-badge":"weui-miniprogram/badge/badge", "mp-dialog":"weui-miniprogram/dialog/dialog"
     }});
+    __wxCodeSpace__.addComponentStaticConfig("components/reactive/index", {"component":true,"styleIsolation":"isolated"});
+    define("components/reactive/index.js",function(require,module,exports){
+      const computed = require("/libraries/computed");
+      const {observable, action} = require("mobx-miniprogram");
+      const {storeBindingsBehavior} = require("/libraries/bindings");
+      const store = observable({value:2, increment:action(function(){this.value++;})});
+      Component({behaviors:[computed.behavior,storeBindingsBehavior],data:{a:1,b:2},
+        computed:{sum:data=>data.a+data.b},storeBindings:{store,fields:["value"]},
+        methods:{change(){this.setData({a:this.data.a+1});store.increment();}}});
+    },{isPage:false,isComponent:true,currentFile:"components/reactive/index.js"});
     define("${home}.js",function(require,module,exports){
       Page({ data:{count:0,image:"/icons/test.svg",imageState:"",dialog:false,buttons:[{text:"Done"}],result:""}, showDialog(){this.setData({dialog:true});}, dialogTap(e){this.setData({dialog:false,result:"Button " + e.detail.index});}, increment(){this.setData({count:this.data.count+1});}, imageLoaded(e){this.setData({imageState:e.detail.width+"x"+e.detail.height});} });
     },{isPage:true,isComponent:false,currentFile:"${home}.js"});
@@ -80,12 +98,14 @@ export async function stageGlassMiniProgram(dataDir, account) {
     },{isPage:true,isComponent:false,currentFile:"${second}.js"});
   `;
   const bytes = archive({
+    "components/reactive/index.appservice.js": `__wxCodeSpace__.batchAddCompiledTemplate(${reactiveTemplates});`,
     "icons/test.svg": '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="1"><path fill="#12503e" d="M0 0h2v1H0z"/></svg>',
-    "app-config.json": JSON.stringify({ pages: [home, second], useExtendedLib: {weui:"1.5.6"} }),
+    "app-config.json": JSON.stringify({ pages: [home, second], subPackages:[{root:"extras"}], useExtendedLib: {weui:"1.5.6"} }),
     "app-service.js": service,
     "app-wxss.js": `
       setCssToHead(["wx-text{color:rgb(18,80,62)}.mini-toolbar{display:none}"])();
       __wxAppCode__['${home}.wxss']=setCssToHead(["page{padding:30rpx}.card{background:rgb(230,240,250)}"]);
+      __wxAppCode__['components/reactive/index.wxss']=setCssToHead([".reactive-panel{border:1px solid rgb(90,30,150)}"]);
       __wxAppCode__['${second}.wxss']=setCssToHead(["page{padding:60rpx}.second{background:rgb(250,240,230)}"]);
     `,
   });
@@ -96,6 +116,17 @@ export async function stageGlassMiniProgram(dataDir, account) {
     entryPage: home, servicePath: "app-service.js",
   }));
   await writeFile(join(directory, "package.wxapkg"), bytes);
+  const extra = join(directory, "subpackages", "extras");
+  const extraBytes = archive({
+    "extras/app-service.js": `
+      __wxCodeSpace__.batchAddCompiledTemplate(${extraTemplates});
+      __wxCodeSpace__.addComponentStaticConfig("extras/pages/index", {"usingComponents":{"reactive-state":"/components/reactive/index"}});
+      define("extras/pages/index.js",function(require,module,exports){Page({back(){wx.navigateBack();}});}, {isPage:true,isComponent:false,currentFile:"extras/pages/index.js"});`,
+    "extras/app-wxss.js": `__wxAppCode__['extras/pages/index.wxss']=setCssToHead(["page{padding:20rpx}.extra{background:rgb(240,220,250)}"]);`,
+  });
+  await mkdir(extra,{recursive:true});
+  await writeFile(join(extra,"manifest.json"),JSON.stringify({root:"extras",version:"1",sha256:createHash("sha256").update(extraBytes).digest("hex")}));
+  await writeFile(join(extra,"package.wxapkg"),extraBytes);
   return appId;
 }
 
@@ -222,7 +253,12 @@ export async function stageMiniProgram(dataDir, account, title = "Cafe") {
     "utilities/app-service.js": `define("utilities/value.js",function(require,module,exports){
       if (typeof print === "function") console.error = print;
       module.exports = {value: 42};
-    },{isPage:false,isComponent:false,currentFile:'utilities/value.js'});`,
+    },{isPage:false,isComponent:false,currentFile:'utilities/value.js'});
+    if(this&&this.__g===undefined)Object.defineProperty(this,"__g",{value:{aa:0}});
+    ${page("utilities/pages/index", "Utility", "Utility page", home).replace('if(query.menu)', 'this.setData({image:"/utilities/icon.svg"});if(query.menu)')}`,
+    "utilities/pages/index.html": "$gwx_Utility('./utilities/pages/index.wxml')",
+    "utilities/app-wxss.js": `__wxAppCode__['utilities/pages/index.wxss']=setCssToHead(["wx-text{color:rgb(90,30,150)}"]);`,
+    "utilities/icon.svg": '<svg xmlns="http://www.w3.org/2000/svg" width="3" height="2"><path fill="#12503e" d="M0 0h3v2H0z"/></svg>',
   });
   await mkdir(utilities, { recursive: true });
   await writeFile(join(utilities, "manifest.json"), JSON.stringify({

@@ -1,6 +1,7 @@
 import { MiniProgramEnv, glassEasel } from "./adapter.js";
 import * as initial from "./page.js";
-import { appConfig, compiledStyles, componentConfigs, componentTemplateFactories, registerModules } from "./modules.js";
+import * as mainRegistry from "./modules.js";
+const { appConfig, compiledStyles, componentConfigs, componentTemplateFactories, registerModules } = mainRegistry;
 import { createSelectorQuery, createIntersectionObserver, mountLegacy, needsPrivacyAuthorization, registerBehavior, navigateBuiltin } from "./legacy.js";
 import { applyGlassStyles } from "./styles.js";
 import { registerGlassImage } from "./images.js";
@@ -47,6 +48,7 @@ if (appConfig.useExtendedLib?.weui) {
 const serviceSelf = Object.assign(Object.create(null), { Object, Date });
 const modules = new Map();
 const subpackageLoads = new Map();
+const subpackageRegistries = new Map();
 
 function resolvePath(owner, name) {
   if (typeof name !== "string") throw new Error("Invalid module reference");
@@ -91,18 +93,53 @@ function loadModule(id) {
 
 function loadSubpackage(root, id) {
   if (!subpackageLoads.has(id)) {
-    const load = import("/_wx/subpackages/" + id + ".js").then(({ registerModules }) => {
-      const entries = registerModules(registerApp, getApp);
+    const declared = (appConfig.subPackages ?? appConfig.subpackages ?? []).find(item => item.root?.replace(/\/$/, "") === root);
+    if (declared?.independent) return Promise.reject(new Error("Independent Mini Program subpackages are unavailable"));
+    const load = import("/_wx/subpackages/" + id + ".js").then(registry => {
+      const entries = registry.registerModules(registerApp, getApp);
+      const styles = new Map([...registry.compiledStyles].filter(([path]) => path !== "app"));
+      const configs = registry.componentConfigs;
+      const templates = Object.entries(registry.componentTemplateFactories);
+      // Validate the full registration before installing any of it.
       for (const path of entries.keys()) {
-        if (!path.startsWith(root + "/") || factories.has(path)) {
-          throw new Error("Mini Program subpackage module conflicts with the current package");
+        if (!path.startsWith(root + "/") || factories.has(path)) throw new Error("Mini Program subpackage module conflicts with the current package");
+      }
+      for (const [source, target] of [[styles, compiledStyles], [configs, componentConfigs]]) {
+        for (const [path, value] of source) {
+          if (!path.startsWith(root + "/")) throw new Error("Mini Program subpackage registration escapes its root");
+          if (target.has(path) && JSON.stringify(target.get(path)) !== JSON.stringify(value)) throw new Error("Mini Program subpackage registration conflicts with the current package");
         }
       }
+      for (const [path, value] of templates) {
+        if (!path.startsWith(root + "/") || Object.hasOwn(componentTemplateFactories, path)
+          && componentTemplateFactories[path].toString() !== value.toString()) throw new Error("Mini Program subpackage template conflicts with the current package");
+      }
       for (const [path, factory] of entries) factories.set(path, factory);
+      for (const [path, value] of styles) compiledStyles.set(path, value);
+      for (const [path, value] of configs) {
+        componentConfigs.set(path, value);
+        globalThis.__wxAppCode__[path + ".json"] = value;
+      }
+      Object.assign(componentTemplateFactories, registry.componentTemplateFactories);
+      subpackageRegistries.set(root, registry);
     });
-    subpackageLoads.set(id, load);
+    // A failed request may be retried; successful modules remain singletons.
+    const tracked = load.catch(error => { subpackageLoads.delete(id); throw error; });
+    subpackageLoads.set(id, tracked);
   }
   return subpackageLoads.get(id);
+}
+
+function subpackageForPath(path) {
+  return [...(initial.subpackages ?? [])].filter(([root]) => path.startsWith(root + "/"))
+    .sort(([a], [b]) => b.length - a.length)[0];
+}
+
+function legacyTemplateForRoute(module, route) {
+  if (route === "./" + module.entry + ".wxml") return module.templatesFactory(route);
+  const path = route.replace(/^\.\//, "");
+  const selected = subpackageForPath(path);
+  return (selected ? subpackageRegistries.get(selected[0]) : mainRegistry)?.legacyTemplate?.(route);
 }
 
 function requireFrom(owner) {
@@ -639,6 +676,19 @@ function registerGlassComponents(entry, groups, pageModule) {
   }
   register(entry);
 }
+function glassPageScopes(entry) {
+  const selected = new Map();
+  function visit(route) {
+    if (selected.has(route) || !glassRegistered.has(route)) return;
+    selected.set(route, glassScopes.get(route));
+    for (const target of Object.values(componentConfigs.get(route)?.usingComponents ?? {})) {
+      if (typeof target === "string" && !target.includes(":")) visit(resolvePath(route, target));
+    }
+  }
+  visit(entry);
+  return selected;
+}
+
 function mountGlass(view, module, query, setLoadingPage) {
   const { entry, templatesFactory } = module;
   const object = value => value ?? Object.create(null);
@@ -691,9 +741,9 @@ function display(module, query, mode = "push") {
   let lifecycle;
   try {
     lifecycle = module.framework === "exparser"
-      ? mountLegacy(content, module, query, register => loadPage(module, register, value => register(value, true)), loadComponent, setLoadingPage)
+      ? mountLegacy(content, { ...module, templatesFactory: route => legacyTemplateForRoute(module, route) }, query, register => loadPage(module, register, value => register(value, true)), loadComponent, setLoadingPage)
       : mountGlass(content, module, query, setLoadingPage);
-    if (module.framework !== "exparser") releaseStyles = applyGlassStyles(view, module.entry, glassScopes);
+    if (module.framework !== "exparser") releaseStyles = applyGlassStyles(view, module.entry, glassPageScopes(module.entry));
   } catch (error) {
     releaseStyles();
     view.remove();
@@ -734,6 +784,8 @@ async function navigate(options, mode = "push") {
   )) throw new Error("Invalid Mini Program page");
   pending = true;
   try {
+    const subpackage = subpackageForPath(path);
+    if (subpackage) await loadSubpackage(...subpackage);
     const module = await import("/_wx/pages/" + path);
     display(module, parseQuery(separator < 0 ? "" : raw.slice(separator + 1)), mode);
     return {};

@@ -80,6 +80,46 @@ pub fn page_module(
     query: &str,
     allow_login: bool,
 ) -> Result<String> {
+    page_module_at(archive, entry, service, query, allow_login, "/modules.js")
+}
+
+/// Build a page module from a verified subpackage using its own template registry.
+pub fn subpackage_page_module(
+    archive: &Archive,
+    root: &str,
+    entry: &str,
+    registry: &str,
+    allow_login: bool,
+) -> Result<String> {
+    ensure!(
+        valid_path(root) && entry.starts_with(&format!("{root}/")),
+        "Page is outside its subpackage"
+    );
+    ensure!(
+        registry.starts_with("/_wx/subpackages/")
+            && registry.ends_with(".js")
+            && valid_path(&registry[1..]),
+        "Invalid subpackage registry"
+    );
+    page_module_at(
+        archive,
+        entry,
+        &format!("{root}/app-service.js"),
+        "",
+        allow_login,
+        registry,
+    )
+}
+
+fn page_module_at(
+    archive: &Archive,
+    entry: &str,
+    service: &str,
+    query: &str,
+    allow_login: bool,
+    registry: &str,
+) -> Result<String> {
+    let registry = serde_json::to_string(registry)?;
     let route = serde_json::to_string(entry)?;
     let query = serde_json::to_string(query)?;
     let framework = archive.framework(entry, service)?;
@@ -107,7 +147,7 @@ pub fn page_module(
             let path = serde_json::to_string(&format!("./{entry}.wxml"))?;
             module.push_str(&format!(
                 r#"
-import {{ legacyTemplate }} from "/modules.js";
+import {{ legacyTemplate }} from {registry};
 export const pageFactory = (Page, getApp) => ({definition});
 export const templatesFactory = (route = {path}) => legacyTemplate(route, {generator});
 "#,
@@ -195,12 +235,7 @@ pub fn module_registry(archive: &Archive, service: &str) -> Result<String> {
 /// Generate the factories for one verified subpackage without executing its scripts.
 pub fn subpackage_module_registry(archive: &Archive, root: &str) -> Result<String> {
     ensure!(valid_path(root), "Invalid subpackage root");
-    let prefix = format!("{root}/");
-    let (source, index) = archive.service(&format!("{prefix}app-service.js"))?;
-    let mut output =
-        format!("{SERVICE_GLOBALS}export const registerModules = (App, getApp) => new Map([\n");
-    append_module_factories(&mut output, source, index, &prefix)?;
-    Ok(output)
+    module_registry(archive, &format!("{root}/app-service.js"))
 }
 
 fn append_module_factories(

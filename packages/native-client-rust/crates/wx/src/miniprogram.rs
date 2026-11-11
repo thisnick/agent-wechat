@@ -70,6 +70,7 @@ struct Runner {
 struct Subpackage {
     package: NativeMiniProgramPackage,
     modules: OnceCell<String>,
+    archive: OnceCell<Arc<Archive>>,
 }
 
 #[derive(Deserialize)]
@@ -220,6 +221,7 @@ async fn serve(
             Subpackage {
                 package: subpackage,
                 modules: OnceCell::new(),
+                archive: OnceCell::new(),
             },
         );
     }
@@ -327,6 +329,38 @@ async fn selected_archive(
     Archive::open(app, bytes, &package.sha256).context("mini_program_cache_invalid")
 }
 
+async fn subpackage_archive<'a>(
+    runner: &'a Runner,
+    subpackage: &'a Subpackage,
+) -> Result<&'a Arc<Archive>> {
+    subpackage
+        .archive
+        .get_or_try_init(|| async {
+            selected_archive(
+                &runner.remote,
+                &runner.root,
+                &runner.app,
+                &subpackage.package,
+            )
+            .await
+            .map(Arc::new)
+        })
+        .await
+}
+
+fn matching_subpackage<'a>(runner: &'a Runner, path: &str) -> Option<(&'a str, &'a Subpackage)> {
+    runner
+        .subpackages
+        .iter()
+        .filter_map(|(id, package)| {
+            let root = package.package.root.as_deref()?;
+            path.strip_prefix(root)?
+                .starts_with('/')
+                .then_some((id.as_str(), package))
+        })
+        .max_by_key(|(_, package)| package.package.root.as_deref().map_or(0, str::len))
+}
+
 async fn subpackage_module(runner: &Runner, id: &str) -> Response {
     let Some(subpackage) = runner.subpackages.get(id) else {
         return StatusCode::NOT_FOUND.into_response();
@@ -334,13 +368,7 @@ async fn subpackage_module(runner: &Runner, id: &str) -> Response {
     match subpackage
         .modules
         .get_or_try_init(|| async {
-            let archive = selected_archive(
-                &runner.remote,
-                &runner.root,
-                &runner.app,
-                &subpackage.package,
-            )
-            .await?;
+            let archive = subpackage_archive(runner, subpackage).await?.clone();
             let root = subpackage
                 .package
                 .root
@@ -354,6 +382,54 @@ async fn subpackage_module(runner: &Runner, id: &str) -> Response {
         Ok(modules) => asset(JS, modules),
         Err(_) => StatusCode::BAD_GATEWAY.into_response(),
     }
+}
+
+async fn page_module(runner: &Runner, entry: &str) -> Response {
+    let result = if let Some((id, subpackage)) = matching_subpackage(runner, entry) {
+        match subpackage_archive(runner, subpackage).await {
+            Ok(archive) => {
+                let root = subpackage.package.root.as_deref().unwrap_or_default();
+                runner::subpackage_page_module(
+                    archive,
+                    root,
+                    entry,
+                    &format!("/_wx/subpackages/{id}.js"),
+                    runner.login.is_some(),
+                )
+            }
+            Err(error) => Err(error),
+        }
+    } else {
+        runner::page_module(
+            &runner.archive,
+            entry,
+            &runner.service,
+            "",
+            runner.login.is_some(),
+        )
+    };
+    match result {
+        Ok(page) => asset(JS, &page),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn packaged_asset(runner: &Runner, path: &str) -> Response {
+    if let Some((mime, data)) = runner::package_asset(&runner.archive, path) {
+        return ([(header::CONTENT_TYPE, mime)], data.to_vec()).into_response();
+    }
+    let archive = if let Some((_, subpackage)) = matching_subpackage(runner, path) {
+        match subpackage_archive(runner, subpackage).await {
+            Ok(archive) => archive.as_ref(),
+            Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+        }
+    } else {
+        &runner.archive
+    };
+    runner::package_asset(archive, path).map_or_else(
+        || StatusCode::NOT_FOUND.into_response(),
+        |(mime, data)| ([(header::CONTENT_TYPE, mime)], data.to_vec()).into_response(),
+    )
 }
 
 async fn handle(State(runner): State<Arc<Runner>>, request: Request) -> Response {
@@ -373,16 +449,7 @@ async fn handle(State(runner): State<Arc<Runner>>, request: Request) -> Response
         }
         (&Method::GET, path) if path.starts_with("/_wx/pages/") => {
             let entry = &path["/_wx/pages/".len()..];
-            match runner::page_module(
-                &runner.archive,
-                entry,
-                &runner.service,
-                "",
-                runner.login.is_some(),
-            ) {
-                Ok(page) => asset(JS, &page),
-                Err(_) => StatusCode::NOT_FOUND.into_response(),
-            }
+            page_module(&runner, entry).await
         }
         (&Method::POST, "/_wx/ipc") => {
             let Some(login) = runner.login.as_ref() else {
@@ -449,11 +516,7 @@ async fn handle(State(runner): State<Arc<Runner>>, request: Request) -> Response
         }
         (&Method::GET, path) => match runner::asset(path) {
             Some((mime, content)) => asset(mime, content),
-            None => runner::package_asset(&runner.archive, path.trim_start_matches('/'))
-                .map_or_else(
-                    || StatusCode::NOT_FOUND.into_response(),
-                    |(mime, data)| ([(header::CONTENT_TYPE, mime)], data.to_vec()).into_response(),
-                ),
+            None => packaged_asset(&runner, path.trim_start_matches('/')).await,
         },
         _ => StatusCode::NOT_FOUND.into_response(),
     };

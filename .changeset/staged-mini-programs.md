@@ -52,3 +52,8 @@ loader as Exparser, with image dimensions, aspect modes, and stale-load protecti
 Load declared Glass-easel custom components and their scoped styles, including
 separately packaged component templates. Supply pinned WeUI 1.5.6 for declared
 Glass-easel extensions, retaining app-bundled module versions.
+
+Load staged subpackage pages, component registrations, styles and images through
+the shared runner before navigation. Keep subpackage versions and namespaces
+separate from the main package. Add compatibility coverage using the official
+computed and MobX component libraries.

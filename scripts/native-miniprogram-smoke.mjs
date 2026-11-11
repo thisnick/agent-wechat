@@ -167,6 +167,19 @@ try {
   assert.equal(await glassPage.evaluate(() => document.adoptedStyleSheets.length), glassSheets);
   await glassPage.getByRole("button", { name: "Increment", exact: true }).click();
   await glassPage.getByText("Count 2", { exact: true }).waitFor();
+  await glassPage.getByText("Computed 3", {exact:true}).waitFor();
+  await glassPage.getByText("Store 2", {exact:true}).waitFor();
+  await glassPage.getByRole("button", {name:"Update reactive state",exact:true}).click();
+  await glassPage.getByText("Computed 4", {exact:true}).waitFor();
+  await glassPage.getByText("Store 3", {exact:true}).waitFor();
+  await glassPage.evaluate(()=>wx.navigateTo({url:"/extras/pages/index"}));
+  await glassPage.getByText("Subpackage Glass page",{exact:true}).waitFor();
+  await glassPage.getByText("Computed 3",{exact:true}).filter({visible:true}).waitFor();
+  const extraStyle=await glassPage.getByText("Subpackage Glass page",{exact:true}).evaluate(node=>({padding:getComputedStyle(node.closest("mini-page")).paddingLeft,background:getComputedStyle(node.closest("view")).backgroundColor}));
+  assert.ok(Math.abs(parseFloat(extraStyle.padding)-410*20/750)<0.1);
+  assert.equal(extraStyle.background,"rgb(240, 220, 250)");
+  await glassPage.getByRole("button",{name:"Return from subpackage",exact:true}).click();
+  await glassPage.getByText("Computed 4",{exact:true}).waitFor();
   await glassPage.getByText("Room", { exact: true }).waitFor();
   await glassPage.getByText("Available", { exact: true }).waitFor();
   const cellStyle = await glassPage.getByText("Room", { exact: true }).evaluate(node => getComputedStyle(node.closest("view[class~=weui-cell]")).paddingLeft);
@@ -423,6 +436,16 @@ try {
     return [first.value, first === second];
   }), [42, true]);
   assert.equal(subpackageRequests, 1);
+  await page.evaluate(() => wx.navigateTo({url:"/utilities/pages/index"}));
+  await page.getByText("Utility page", {exact:true}).waitFor();
+  const subpageStyle = await page.getByText("Utility page", {exact:true}).evaluate(node=>getComputedStyle(node).color);
+  assert.equal(subpageStyle,"rgb(90, 30, 150)");
+  assert.equal(await page.locator("img#embedded-image").filter({visible:true}).evaluate(node=>node.naturalWidth),3);
+  await page.getByRole("button", {name:"Add one",exact:true}).click();
+  await page.getByText("Count reported: 1", {exact:true}).waitFor();
+  await page.getByRole("button", {name:"Back",exact:true}).click();
+  await page.getByText("Cafe home", {exact:true}).waitFor();
+  assert.equal(subpackageRequests,1);
   assert.equal(await page.evaluate(() => console.error === window.print), false);
   assert.equal(await page.evaluate(() => typeof window.print), "function");
   assert.deepEqual(await page.evaluate(async () => {
