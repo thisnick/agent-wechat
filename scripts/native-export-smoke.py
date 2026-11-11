@@ -88,8 +88,8 @@ with tempfile.TemporaryDirectory(prefix="native-export-smoke-") as temporary:
         ("accepted-text", "pendingTextProjections", [("INSERT INTO outbox VALUES(?,?,?,?,?,?,?,?,?,?)", ("text", "key", "hash", "filehelper", b"sealed", "accepted", "1", "18446744073709551615", None, "fixture"))]),
         ("accepted-media", "pendingMediaProjections", [("INSERT INTO media_jobs(id,idempotency_key,request_hash,kind,state,phase,data_json,payload,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)", ("media", "media-key", "hash", "send", "accepted", "accepted", '{"result":{"profileProjection":"pending"}}', b"sealed", "fixture", "fixture"))]),
         ("media-history-complete-cache-partial", "incompleteMediaWriteback", [("INSERT INTO media_jobs(id,idempotency_key,request_hash,kind,state,phase,data_json,payload,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)", ("media", "media-key", "hash", "send", "accepted", "completed", '{"result":{"profileProjection":"complete","officialMediaWriteback":"partial"}}', b"sealed", "fixture", "fixture"))]),
-        ("available-cache-partial", "incompleteMediaWriteback", [("INSERT INTO media_assets VALUES(?,?,?,?,?,?,?,?)", ("asset", "message", "original", "file", '{"state":"available","officialWriteback":"partial"}', b"sealed-plan", b"sealed-bytes", "fixture"))]),
-        ("available-cache-legacy", "incompleteMediaWriteback", [("INSERT INTO media_assets VALUES(?,?,?,?,?,?,?,?)", ("asset", "message", "original", "file", '{"state":"available"}', b"sealed-plan", b"sealed-bytes", "fixture"))]),
+        ("available-cache-partial", "incompleteMediaWriteback", [("INSERT INTO media_assets(id,message_id,variant,kind,metadata_json,plan,payload,updated_at) VALUES(?,?,?,?,?,?,?,?)", ("asset", "message", "original", "file", '{"state":"available","officialWriteback":"partial"}', b"sealed-plan", b"sealed-bytes", "fixture"))]),
+        ("available-cache-legacy", "incompleteMediaWriteback", [("INSERT INTO media_assets(id,message_id,variant,kind,metadata_json,plan,payload,updated_at) VALUES(?,?,?,?,?,?,?,?)", ("asset", "message", "original", "file", '{"state":"available"}', b"sealed-plan", b"sealed-bytes", "fixture"))]),
         ("partial-voice-cache", "incompleteMediaWriteback", [("INSERT INTO media_jobs(id,idempotency_key,request_hash,kind,state,phase,data_json,payload,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)", ("voice", "voice-key", "hash", "send", "failed", "completed", '{"result":{"profileProjection":"complete","officialMediaWriteback":"partial","chunks":[{"state":"accepted"},{"state":"failed"}]}}', b"sealed", "fixture", "fixture"))]),
     ]
     for name, field, statements in cases:
@@ -125,7 +125,7 @@ with tempfile.TemporaryDirectory(prefix="native-export-smoke-") as temporary:
     export("stale-receipt", "--source-stopped", code=9)
     partial = export("stale-receipt-partial", "--source-stopped", "--allow-incomplete")
     assert not partial["syncCheckpointProjected"] and partial["pendingCursorProjection"]
-    seed([("INSERT INTO media_assets VALUES(?,?,?,?,?,?,?,?)", ("asset", "message", "original", "image", '{"state":"available","officialWriteback":"complete"}', b"sealed-plan", b"sealed-bytes", "fixture"))])
+    seed([("INSERT INTO media_assets(id,message_id,variant,kind,metadata_json,plan,payload,updated_at) VALUES(?,?,?,?,?,?,?,?)", ("asset", "message", "original", "image", '{"state":"available","officialWriteback":"complete"}', b"sealed-plan", b"sealed-bytes", "fixture"))])
     complete_cache = export("complete-cache", "--source-stopped")
     assert not complete_cache["incompleteMediaWriteback"]
     seed([("INSERT INTO media_jobs(id,idempotency_key,request_hash,kind,state,phase,data_json,payload,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)", ("failed", "failed-key", "hash", "send", "failed", "completed", '{"result":{"profileProjection":"not_applicable"}}', b"sealed", "fixture", "fixture"))])
