@@ -1,7 +1,9 @@
 ---
 title: 数据存储与备份
-description: agent-wechat 数据文件的存储分布结构，以及如何进行备份与迁移。
-sourceHash: 6a63375bf68c
+description: agent-wechat 的文件存放位置，以及需要备份哪些内容。
+banner:
+  content: "本页面由机器翻译，尚未经过人工审校。"
+sourceHash: 0d29d714260b
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -10,17 +12,29 @@ import { Aside } from '@astrojs/starlight/components';
 ~/.config/agent-wechat/
 ├── server/config.toml              服务端配置 (可选)
 └── client.toml                     CLI 客户端：已保存的服务器列表与默认账号
-~/.local/share/agent-wechat/        核心数据目录
+~/.local/share/agent-wechat/        数据目录
 ├── api-token                       管理员所有者 API 访问令牌
 └── accounts/<id>/
-    ├── profile/                    微信原生数据目录：聊天记录、联系人、媒体缓存
-    └── agent/                      Daemon 专有数据：登录凭据、任务队列、事件日志
-$TMPDIR                             离线审查专用临时只读快照
+    ├── profile/                    微信 Profile：聊天记录、联系人、媒体文件
+    └── agent/
+        ├── control.sqlite          登录凭据、任务、事件日志
+        └── media/                  加密的附件与上传文件
+$TMPDIR                             离线检查用的临时只读快照
 ```
 
 在 Windows 上，配置文件位于 `%APPDATA%\agent-wechat`，数据文件位于 `%LOCALAPPDATA%\agent-wechat`。macOS 采用与 Linux 一致的路径标准。
 
-如果你是通过 `--official` 登录的，则不会生成内部的 `profile/` 文件夹：Daemon 会直接使用宿主机上的 Linux 版微信目录（即 `~/xwechat_files` 与 `~/.xwechat`），核心数据目录下仅保留 Daemon 专属的运行时凭证与状态。
+如果你是通过 `--official` 登录的，则不会生成 `profile/` 文件夹：Daemon 会直接使用 Linux 版微信所在的 `~/xwechat_files` 与 `~/.xwechat`（位于它们原本的位置），数据目录中只保留 Daemon 自己的文件。
+
+## 附件存放位置 \{#where-attachments-are-kept}
+
+| 附件 | 存放位置 |
+| --- | --- |
+| 图片、文件、视频和语音消息 | 仅保存在微信 Profile 中，Daemon 从该处读取。 |
+| 表情、链接缩略图，以及引用消息中的图片和表情 | `agent/media/`，每个文件单独加密。Profile 中没有对应的位置。 |
+| 待发送的文件 | `agent/media/`，直到使用它们的所有发送任务完成后一天。 |
+
+如果删除了附件的文件，获取该附件时将返回 `media_not_cached`。Daemon 不会自行重新下载。
 
 ## 数据备份方案 \{#back-up}
 
@@ -37,10 +51,12 @@ tar -czf wechat-backup.tgz -C ~ .local/share/agent-wechat
 可以在 `~/.config/agent-wechat/server/config.toml` 中配置 `dataDir`，或在启动命令中显式传递 `--data-dir` 参数。详见[配置选项](/reference/configuration/)。
 
 <Aside title="使用提示">
-- **运行中的 Daemon 直接并发只读访问其掌控的 Profile。** 它复用只读数据库连接与轻量事务。离线数据审查会创建独立的数据库私有快照（单库最多 2 GiB，总体最多 8 GiB），请确保 `$TMPDIR` 所在磁盘分区空间充足，且严禁将临时目录直接指向 Profile 目录。
-- **未知格式的 Profile 绝不擅自修改。** Daemon 在向数据库写入前会严格检验其 schema 表结构，一旦发现未适配的未知版本将立即熔断拒绝写入。建议备份数据并等待官方更新，切勿强行覆盖。
-- **损坏的数据库文件会完整保留。** 若 Daemon 自身的数据库发生校验异常，系统会完整保留原始文件并生成一份灾后修复副本作比对存证。
-- **升级 `wx` 二进制程序绝不会自动清除数据。** 但注意回滚旧版本二进制文件无法逆向撤销已执行的高版本数据迁移，因此在重大升级前请务必留存冷备份。
-- **消息撤回标记保存在数据目录下。** 单独导出 Profile 目录并不包含撤回的审计元数据。
-- OpenClaw 将消费进度存储在 `consumerStateDir` 中，该目录同样需要纳入定期备份范围。
+- **运行中的 Daemon 直接读取它管理的 Profile。** 它复用只读数据库连接，并使用短时读事务。离线检查会创建数据库的私有副本（每个最多 2 GiB，总计最多 8 GiB），因此请确保 `$TMPDIR` 所在磁盘有足够的空间，切勿将其指向 Profile。
+- **不会改动未知格式的 Profile。** Daemon 在写入前会检查每个数据库的结构，无法识别时即停止写入。请先备份并等待更新，不要强行写入。
+- **损坏的数据库会被保留。** 如果 Daemon 自身的数据库未通过检查，它会保留原始文件，并在旁边保存一份恢复副本。
+- **启动时可能留下临时副本。** 在打开需要升级或未正常关闭的数据库之前，Daemon 会先在该数据库旁边的 `.sqlite-admission-*` 文件夹中检查一份副本。如果检查期间 Daemon 被停止，该文件夹会一直保留，直到该数据库下次成功打开，之后才会被删除。
+- **旧版数据目录会在启动后转换。** 早期版本把所有附件都存放在 `control.sqlite` 中。Daemon 会在后台将它们移出，删除没有任何记录引用的文件，然后缩小数据库。在完成之前，数据目录可能会短暂需要额外空间，用于存放 Profile 中没有的附件。
+- **升级 `wx` 不会删除数据。** 回滚二进制文件并不会撤销数据迁移，因此请在升级前保留一份备份。
+- **撤回标记保存在数据目录中。** 导出 Profile 时不会包含它们。
+- OpenClaw 将自己的处理进度保存在 `consumerStateDir` 中，也请一并备份。
 </Aside>
