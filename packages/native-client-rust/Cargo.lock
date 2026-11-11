@@ -2806,7 +2806,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-api"
-version = "2.3.0"
+version = "2.3.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2835,7 +2835,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-audio"
-version = "2.3.0"
+version = "2.3.1"
 dependencies = [
  "coreaudio-rs",
  "coreaudio-sys",
@@ -2858,7 +2858,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-config"
-version = "2.3.0"
+version = "2.3.1"
 dependencies = [
  "anyhow",
  "serde",
@@ -2869,7 +2869,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-core"
-version = "2.3.0"
+version = "2.3.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2973,7 +2973,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-simulator"
-version = "2.3.0"
+version = "2.3.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3001,7 +3001,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-store"
-version = "2.3.0"
+version = "2.3.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3274,7 +3274,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "wx-native"
-version = "2.3.0"
+version = "2.3.1"
 dependencies = [
  "anyhow",
  "axum",

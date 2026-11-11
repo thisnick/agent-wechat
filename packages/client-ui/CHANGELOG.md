@@ -1,5 +1,11 @@
 # @agent-wechat/client-ui
 
+## 0.4.1
+
+### Patch Changes
+
+- [#453](https://github.com/thisnick/agent-wechat/pull/453) [`0cfedb4`](https://github.com/thisnick/agent-wechat/commit/0cfedb40c49b4899f47bd26ac4266ca6e541930b) Thanks [@thisnick](https://github.com/thisnick)! - Chinese: call a WeChat profile 账号数据 throughout the app, instead of a mix of 配置 and 资料.
+
 ## 0.4.0
 
 ### Minor Changes
