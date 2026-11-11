@@ -11,7 +11,8 @@ const packages = [
   ...publicPackages.map(([directory, name]) => ({ directory, name, private: false })),
   { directory: 'packages/desktop', name: '@agent-wechat/desktop', private: true },
   // The Rust libraries share the application version, so a library-only change still has notes.
-  { ...cratePackage, private: true },
+  // Library versions cut before they joined the fixed group differ and have no entry for this release.
+  { ...cratePackage, private: true, optional: true },
 ];
 
 const start = '<!-- agent-wechat:changesets:start -->';
@@ -53,9 +54,13 @@ export async function renderReleaseNotes({ root = process.cwd(), version, existi
   version ??= cli.version;
   if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version ?? '')) throw new Error('Invalid release notes version');
   const sections = [];
-  for (const { directory, name, private: privatePackage } of packages) {
+  for (const { directory, name, private: privatePackage, optional } of packages) {
     const pkg = JSON.parse(await readFile(join(root, directory, 'package.json'), 'utf8'));
-    if (pkg.name !== name || Boolean(pkg.private) !== privatePackage || pkg.version !== version) throw new Error('Release notes package/version mismatch');
+    if (pkg.name !== name || Boolean(pkg.private) !== privatePackage) throw new Error('Release notes package/version mismatch');
+    if (pkg.version !== version) {
+      if (optional) continue;
+      throw new Error('Release notes package/version mismatch');
+    }
     const entry = changelogEntry(await readFile(join(root, directory, 'CHANGELOG.md'), 'utf8'), version);
     if (entry) sections.push(`## ${name} ${version}\n\n${entry}`);
   }

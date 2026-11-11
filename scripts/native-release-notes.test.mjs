@@ -35,13 +35,18 @@ test('desktop-only changes produce release notes when both npm packages have emp
   assert.doesNotMatch(notes, /Old release|## @agent-wechat\/cli|## @agent-wechat\/agent-wechat/);
   assert.equal(await renderReleaseNotes({ root, existing: notes }), notes);
 });
-test('a library-only change produces release notes and its version must match the release', async t => {
+test('a library-only change produces release notes; a library version from before the shared version is left out', async t => {
   const root = await fixture(t, '', '', '', '### Patch Changes\n\n- Typed errors.');
   const notes = await renderReleaseNotes({ root });
   assert.match(notes, /## @agent-wechat\/rust-crates 1\.0\.0\n\n### Patch Changes\n\n- Typed errors\./);
   assert.doesNotMatch(notes, /Old release|## @agent-wechat\/cli|## @agent-wechat\/desktop/);
   await writeFile(join(root, 'packages/rust-crates/package.json'), JSON.stringify({ name: '@agent-wechat/rust-crates', version: '0.9.0', private: true }));
-  await assert.rejects(renderReleaseNotes({ root }), /package\/version mismatch/);
+  await assert.rejects(renderReleaseNotes({ root }), /no release notes/);
+  const mixed = await fixture(t, undefined, undefined, '', '- Typed errors.');
+  await writeFile(join(mixed, 'packages/rust-crates/package.json'), JSON.stringify({ name: '@agent-wechat/rust-crates', version: '0.9.0', private: true }));
+  assert.doesNotMatch(await renderReleaseNotes({ root: mixed }), /rust-crates|Typed errors/);
+  await writeFile(join(mixed, 'packages/rust-crates/package.json'), JSON.stringify({ name: '@agent-wechat/other', version: '1.0.0', private: true }));
+  await assert.rejects(renderReleaseNotes({ root: mixed }), /package\/version mismatch/);
 });
 test('desktop release notes remain alongside CLI and plugin changes', async t => {
   const root = await fixture(t, undefined, undefined, '- Desktop settings.');
