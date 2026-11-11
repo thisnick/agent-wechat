@@ -15,6 +15,7 @@ mod logout;
 mod revoke;
 #[path = "status_notify.rs"]
 mod status_notify;
+use crate::errors::{Service, ServiceRejected};
 pub use crate::wire::{
     AddMessage, AvatarBytes, ContactLookup, ContactRecord, Heartbeat, InitContactPage, RoomMember,
     RoomRoster, SyncBatch, SyncCommand, TextSendResult, VoiceChunk,
@@ -571,11 +572,7 @@ impl NativeClient {
             self.options.timeout,
         )?;
         let envelope = business::split(&reply)?;
-        ensure!(
-            envelope.return_code == 0,
-            "Native envelope returned {}",
-            envelope.return_code
-        );
+        ServiceRejected::check(Service::NativeEnvelope, envelope.return_code)?;
         ensure!(
             envelope.cgi == cgi as u64 && envelope.encryption == 12,
             "Unexpected prelogin response policy"
@@ -863,7 +860,7 @@ impl NativeClient {
                 cookie = next_cookie;
                 continue;
             }
-            ensure!(code == 0, "Account authentication returned {code}");
+            ServiceRejected::check(Service::AccountAuthentication, code)?;
             let mut state = reduce_auth(&reply, None, &inner, &attempt.device, &next_cookie)?;
             state.long_host = long_host;
             state.short_host = short_host;
@@ -924,7 +921,7 @@ impl NativeClient {
                 cookie = next_cookie;
                 continue;
             }
-            ensure!(code == 0, "Automatic authentication returned {code}");
+            ServiceRejected::check(Service::AutomaticAuthentication, code)?;
             let mut next = reduce_auth(
                 &reply,
                 Some(previous),

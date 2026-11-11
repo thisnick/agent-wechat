@@ -1,6 +1,7 @@
 # Public API of the wechat-protocol crate (default features, x86_64-unknown-linux-gnu). Generated from rustdoc JSON; do not edit.
 # Run `pnpm interfaces` after changing the crate. Format: ITEM | SIGNATURE | DOC SUMMARY
 const wechat_protocol::MAX_MESSAGE_BYTES | usize | MISSING DOC
+const wechat_protocol::ServiceRejected::SESSION_REJECTED | i32 | Code the session boundaries return when they no longer accept the account's credentials.
 const wechat_protocol::calls::app_session::AUTH_COMMAND | u16 | MISSING DOC
 const wechat_protocol::calls::app_session::AUTH_PATH | &str | MISSING DOC
 const wechat_protocol::calls::signaling::MAX_SIGNALING_BYTES | usize | Local budget for a complete encoded signaling message, including its body.
@@ -23,9 +24,11 @@ const wechat_protocol::silk::MAX_NOTE_MS | u32 | Longest single voice note: the 
 const wechat_protocol::silk::MAX_SAMPLES | usize | MISSING DOC
 const wechat_protocol::silk::MAX_STREAM_BYTES | usize | Largest stream accepted by framing validation and decoding.
 const wechat_protocol::silk::SAMPLE_RATE | u32 | MISSING DOC
+enum wechat_protocol::AccountInterrupted | #[non_exhaustive] enum | Why the account owner ended a request or a notification wait. This says nothing about whether bytes were sent; check [`NativeRequestNotSubmitted`](crate::NativeRequestNotSubmitted) for that.
 enum wechat_protocol::AccountLifecycle | enum | MISSING DOC
 enum wechat_protocol::GroupMutation | enum | MISSING DOC
 enum wechat_protocol::LoginStatus | enum | MISSING DOC
+enum wechat_protocol::Service | #[non_exhaustive] enum | The response boundary that reported a non-zero service code.
 enum wechat_protocol::calls::audio_packet::TransmitScope | enum | The owner must establish a fresh media generation before authorizing sends. The legacy relay scope trades cross-direction audio nonce uniqueness for interoperability with peers that share media key material. It also permits authenticated receive nonce reuse, with bounded ciphertext replay filtering.
 enum wechat_protocol::calls::host_policy::CallHostPolicy | enum | MISSING DOC
 enum wechat_protocol::calls::host_policy::CallHostRoute | enum | Fixed host CGI/path pairs for the selected call service. Cloud operation IDs remain inside the transfer envelope, never substituted for a host CGI.
@@ -201,6 +204,8 @@ field wechat_protocol::RoomRoster::members | alloc::vec::Vec<wechat_protocol::wi
 field wechat_protocol::RoomRoster::owner | core::option::Option<alloc::string::String> | MISSING DOC
 field wechat_protocol::RoomRoster::room_id | alloc::string::String | MISSING DOC
 field wechat_protocol::RoomRoster::version | u32 | MISSING DOC
+field wechat_protocol::ServiceRejected::code | i32 | Signed code returned by that boundary.
+field wechat_protocol::ServiceRejected::service | wechat_protocol::errors::Service | Response boundary that reported the code.
 field wechat_protocol::SessionReadNotification::client_message_id | alloc::string::String | A stable request identity retained with the durable frozen boundary.
 field wechat_protocol::SessionReadNotification::last_message_create_time | u32 | MISSING DOC
 field wechat_protocol::SessionReadNotification::last_message_server_id | alloc::string::String | MISSING DOC
@@ -633,6 +638,7 @@ field wechat_protocol::wire::VoiceChunk::next_offset | u32 | MISSING DOC
 field wechat_protocol::wire::VoiceChunk::offset | u32 | MISSING DOC
 field wechat_protocol::wire::VoiceChunk::offset_matches | bool | MISSING DOC
 field wechat_protocol::wire::VoiceChunk::total_length | u32 | MISSING DOC
+fn wechat_protocol::AccountInterrupted::find | fn(error: &anyhow::Error) -> core::option::Option<Self> | Find this reason anywhere in an error and its causes.
 fn wechat_protocol::AccountLease::current | fn(&self) -> bool | MISSING DOC
 fn wechat_protocol::AccountPersistence::persist | required fn(&self, previous: &wechat_protocol::client::AccountState, accepted: &wechat_protocol::client::AccountState) -> anyhow::Result<()> | MISSING DOC
 fn wechat_protocol::AccountPushConnection::heartbeat | fn(&mut self, cursor: &[u8]) -> anyhow::Result<wechat_protocol::wire::Heartbeat> | MISSING DOC
@@ -708,6 +714,7 @@ fn wechat_protocol::NativeClient::init_contacts | async fn(&self, contact_sequen
 fn wechat_protocol::NativeClient::init_contacts_receipt | async fn(&self, contact_sequence: u32, room_sequence: u32) -> anyhow::Result<wechat_protocol::client::group_inventory::MetadataReply<wechat_protocol::wire::InitContactPage>> | MISSING DOC
 fn wechat_protocol::NativeClient::large_cdn_config | async fn(&self, route: wechat_protocol::media::large_cdn_config::LargeCdnRoute) -> anyhow::Result<wechat_protocol::media::CdnConfig> | MISSING DOC
 fn wechat_protocol::NativeClient::logout | async fn(&self) -> anyhow::Result<wechat_protocol::client::logout::LogoutReply> | Fence admission, drain prior requests, then submit logout at most once. The owner stays stopped after rejection, cancellation or uncertainty; this operation does not revoke remembered-device trust or delete profiles.
+fn wechat_protocol::NativeClient::logout_blocking | fn(&self) -> anyhow::Result<wechat_protocol::client::logout::LogoutReply> | As [`Self::logout`], on the caller's blocking worker. No Tokio runtime is needed. Logout is submitted at most once and the owner stays stopped after rejection or uncertainty.
 fn wechat_protocol::NativeClient::lookup_contacts | async fn(&self, usernames: &[alloc::string::String]) -> anyhow::Result<wechat_protocol::wire::ContactLookup> | MISSING DOC
 fn wechat_protocol::NativeClient::lookup_contacts_raw | async fn(&self, usernames: &[alloc::string::String]) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
 fn wechat_protocol::NativeClient::lookup_contacts_receipt | async fn(&self, usernames: &[alloc::string::String]) -> anyhow::Result<wechat_protocol::client::group_inventory::MetadataReply<wechat_protocol::wire::ContactLookup>> | MISSING DOC
@@ -736,6 +743,7 @@ fn wechat_protocol::NativeClient::send_text_guarded | async fn<F>(&self, destina
 fn wechat_protocol::NativeClient::send_video | async fn(&self, destination: &str, client_id: &str, upload: &wechat_protocol::media::UploadedVideo, play_seconds: u32) -> anyhow::Result<wechat_protocol::media_send::MediaSendResult> | MISSING DOC
 fn wechat_protocol::NativeClient::send_voice | async fn(&self, destination: &str, client_id: &str, created_at: u32, duration_ms: u32, encoded: &[u8]) -> anyhow::Result<wechat_protocol::media_send::MediaSendResult> | MISSING DOC
 fn wechat_protocol::NativeClient::shutdown | async fn(&self) -> anyhow::Result<()> | Stop account-bound admission and wait for admitted network workers to finish. Cancelling this future does not reopen admission.
+fn wechat_protocol::NativeClient::shutdown_blocking | fn(&self) -> anyhow::Result<()> | As [`Self::shutdown`], on the caller's blocking worker. Do not call it from inside an account request: it waits for every request to finish.
 fn wechat_protocol::NativeClient::start_profile_qr_login | fn(&self, device: wechat_protocol::client::DeviceProfile, computer_name: &str, key_info: &[u8]) -> anyhow::Result<wechat_protocol::client::LoginAttempt> | QR approval for an existing installation retains its selected key-info. This neither bypasses phone approval nor imports active authorization.
 fn wechat_protocol::NativeClient::start_profile_saved_device_login | fn(&self, device: &wechat_protocol::client::DeviceProfile, username: &str, auto_auth_key: &[u8], cookie: &[u8], key_info: &[u8], computer_name: &str) -> anyhow::Result<wechat_protocol::client::LoginAttempt> | Use remembered official-profile trust without inventing active session keys.
 fn wechat_protocol::NativeClient::start_qr_login | fn(&self, device: wechat_protocol::client::DeviceProfile, computer_name: &str) -> anyhow::Result<wechat_protocol::client::LoginAttempt> | Request one QR challenge for the supplied device. Display [`LoginAttempt::qr_png`] privately, poll for phone approval, then call [`Self::complete_login`]. This does not grant authorization by itself.
@@ -745,8 +753,14 @@ fn wechat_protocol::NativeClient::stopped | async fn(&self) -> anyhow::Result<()
 fn wechat_protocol::NativeClient::sync | async fn(&self, cursor: &[u8]) -> anyhow::Result<wechat_protocol::wire::SyncBatch> | Fetch one sync page using the owned account. The application still owns command retention, projection and committing the returned cursor.
 fn wechat_protocol::NativeClient::sync_scene | async fn(&self, cursor: &[u8], scene: u32) -> anyhow::Result<wechat_protocol::wire::SyncBatch> | MISSING DOC
 fn wechat_protocol::NativeClient::with_request_options | fn(&self, options: wechat_protocol::client::NativeOptions) -> anyhow::Result<Self> | Change transport deadlines/budgets for a handle while retaining the same account owner and admission rules. This never imports credential state.
-fn wechat_protocol::PendingLogout::submit | async fn(self) -> anyhow::Result<wechat_protocol::client::logout::LogoutReply> | MISSING DOC
+fn wechat_protocol::PendingLogout::submit | async fn(self) -> anyhow::Result<wechat_protocol::client::logout::LogoutReply> | Wait for requests admitted before the reservation, then submit the logout once on Tokio's blocking pool.
+fn wechat_protocol::PendingLogout::submit_blocking | fn(self) -> anyhow::Result<wechat_protocol::client::logout::LogoutReply> | As [`Self::submit`], on the caller's blocking worker. No Tokio runtime is needed. Do not call it on an async executor thread or from inside an account request: it waits for every earlier request to finish.
 fn wechat_protocol::PendingLogout::submit_guarded | async fn<F>(self, before_submit: F) -> anyhow::Result<wechat_protocol::client::logout::LogoutReply> where F: core::ops::function::FnOnce() -> anyhow::Result<()> + core::marker::Send + 'static | Recheck the embedding application's committed logout operation immediately before business handoff. This token is consumed even on failure; neither a cancelled waiter nor an uncertain response permits automatic resubmission.
+fn wechat_protocol::PendingLogout::submit_guarded_blocking | fn<F>(self, before_submit: F) -> anyhow::Result<wechat_protocol::client::logout::LogoutReply> where F: core::ops::function::FnOnce() -> anyhow::Result<()> + core::marker::Send + 'static | As [`Self::submit_guarded`], on the caller's blocking worker. The token is consumed even on failure, and an uncertain response never permits automatic resubmission.
+fn wechat_protocol::Service::label | fn(self) -> &'static str | Label used at the start of the error message.
+fn wechat_protocol::ServiceRejected::find | fn(error: &anyhow::Error) -> core::option::Option<&Self> | Find this error anywhere in an error and its causes.
+fn wechat_protocol::ServiceRejected::is_session_rejected | fn(&self) -> bool | True when a session boundary returned [`Self::SESSION_REJECTED`]. The account needs a new login or renewal; repeating the request cannot help. The same code from another boundary, such as the CDN, is not included.
+fn wechat_protocol::ServiceRejected::new | fn(service: wechat_protocol::errors::Service, code: i32) -> Self | Build the error for one boundary and code.
 fn wechat_protocol::business::AuthenticatedPacket::decode_verified_transport_reply | fn(&self, input: &[u8]) -> anyhow::Result<(alloc::vec::Vec<u8>, alloc::vec::Vec<u8>)> | Call only on the plaintext returned by the authenticated MMTLS transport.
 fn wechat_protocol::business::AuthenticatedPacket::prepare | fn(state: &wechat_protocol::client::AccountState, cgi: u16, plain: &[u8]) -> anyhow::Result<Self> | MISSING DOC
 fn wechat_protocol::business::Prelogin::decrypt_reply | fn(&self, reply: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
@@ -900,6 +914,7 @@ fn wechat_protocol::group_detail_request | fn(state: &wechat_protocol::client::A
 fn wechat_protocol::group_inventory_request | fn(state: &wechat_protocol::client::AccountState, cursor: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
 fn wechat_protocol::group_mutation_requests | fn(state: &wechat_protocol::client::AccountState, action: &wechat_protocol::client::group_mutation::GroupMutation, minimized: bool) -> anyhow::Result<alloc::vec::Vec<wechat_protocol::client::group_mutation::GroupRpc>> | Steps are separate requests. An uncertain step must stop the entire flow. A known cleanup rejection can be retained while a later quit is attempted.
 fn wechat_protocol::is_retryable_login_poll_error | fn(error: &anyhow::Error) -> bool | Polling an issued login challenge is repeatable. This does not authorize retrying QR creation, credential exchange, sends or rejected authentication.
+fn wechat_protocol::is_session_rejected | fn(error: &anyhow::Error) -> bool | True when the error shows that the service no longer accepts the account's session: a [`ServiceRejected`] for which [`ServiceRejected::is_session_rejected`] holds, or an [`OpenImServiceError`](crate::OpenImServiceError) with the same code.
 fn wechat_protocol::login_lan_error_reason | fn(error: &anyhow::Error) -> core::option::Option<&'static str> | MISSING DOC
 fn wechat_protocol::media::CdnClient::download | fn(&self, descriptor: &wechat_protocol::media::MediaDescriptor) -> anyhow::Result<wechat_protocol::media::DownloadedMedia> | MISSING DOC
 fn wechat_protocol::media::CdnClient::download_with_progress | fn(&self, descriptor: &wechat_protocol::media::MediaDescriptor, progress: impl core::ops::function::FnMut(u64, core::option::Option<u64>) -> anyhow::Result<()>) -> anyhow::Result<wechat_protocol::media::DownloadedMedia> | MISSING DOC
@@ -1034,6 +1049,7 @@ fn wechat_protocol::wire::text_send_request_with_source | fn(destination: &str, 
 fn wechat_protocol::wire::unix_time | fn() -> anyhow::Result<u32> | MISSING DOC
 fn wechat_protocol::wire::voice_request | fn(state: &wechat_protocol::client::AccountState, server_id: u64, total: u32, offset: u32) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
 impl core::clone::Clone for wechat_protocol::AccountIdentity | impl | -
+impl core::clone::Clone for wechat_protocol::AccountInterrupted | impl | -
 impl core::clone::Clone for wechat_protocol::AccountLease | impl | -
 impl core::clone::Clone for wechat_protocol::AccountLifecycle | impl | -
 impl core::clone::Clone for wechat_protocol::AccountState | impl | -
@@ -1064,6 +1080,8 @@ impl core::clone::Clone for wechat_protocol::OpenImContact | impl | -
 impl core::clone::Clone for wechat_protocol::OpenImServiceError | impl | -
 impl core::clone::Clone for wechat_protocol::RoomMember | impl | -
 impl core::clone::Clone for wechat_protocol::RoomRoster | impl | -
+impl core::clone::Clone for wechat_protocol::Service | impl | -
+impl core::clone::Clone for wechat_protocol::ServiceRejected | impl | -
 impl core::clone::Clone for wechat_protocol::SessionReadNotification | impl | -
 impl core::clone::Clone for wechat_protocol::SessionReadReply | impl | -
 impl core::clone::Clone for wechat_protocol::SyncBatch | impl | -
@@ -1131,6 +1149,7 @@ impl core::clone::Clone for wechat_protocol::wire::SyncCommand | impl | -
 impl core::clone::Clone for wechat_protocol::wire::TextSendResult | impl | -
 impl core::clone::Clone for wechat_protocol::wire::VoiceChunk | impl | -
 impl core::cmp::Eq for wechat_protocol::AccountIdentity | impl | -
+impl core::cmp::Eq for wechat_protocol::AccountInterrupted | impl | -
 impl core::cmp::Eq for wechat_protocol::AccountLifecycle | impl | -
 impl core::cmp::Eq for wechat_protocol::AccountStatus | impl | -
 impl core::cmp::Eq for wechat_protocol::GroupMemberResult | impl | -
@@ -1141,6 +1160,8 @@ impl core::cmp::Eq for wechat_protocol::MessageRecall | impl | -
 impl core::cmp::Eq for wechat_protocol::MessageRecallReply | impl | -
 impl core::cmp::Eq for wechat_protocol::OpenImContact | impl | -
 impl core::cmp::Eq for wechat_protocol::OpenImServiceError | impl | -
+impl core::cmp::Eq for wechat_protocol::Service | impl | -
+impl core::cmp::Eq for wechat_protocol::ServiceRejected | impl | -
 impl core::cmp::Eq for wechat_protocol::SessionReadNotification | impl | -
 impl core::cmp::Eq for wechat_protocol::SessionReadReply | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::app_session::AppAuthority | impl | -
@@ -1172,6 +1193,7 @@ impl core::cmp::Eq for wechat_protocol::protobuf::Value | impl | -
 impl core::cmp::Eq for wechat_protocol::push::Notification | impl | -
 impl core::cmp::Eq for wechat_protocol::quote_send::QuoteReference | impl | -
 impl core::cmp::PartialEq for wechat_protocol::AccountIdentity | impl | -
+impl core::cmp::PartialEq for wechat_protocol::AccountInterrupted | impl | -
 impl core::cmp::PartialEq for wechat_protocol::AccountLifecycle | impl | -
 impl core::cmp::PartialEq for wechat_protocol::AccountStatus | impl | -
 impl core::cmp::PartialEq for wechat_protocol::GroupMemberResult | impl | -
@@ -1182,6 +1204,8 @@ impl core::cmp::PartialEq for wechat_protocol::MessageRecall | impl | -
 impl core::cmp::PartialEq for wechat_protocol::MessageRecallReply | impl | -
 impl core::cmp::PartialEq for wechat_protocol::OpenImContact | impl | -
 impl core::cmp::PartialEq for wechat_protocol::OpenImServiceError | impl | -
+impl core::cmp::PartialEq for wechat_protocol::Service | impl | -
+impl core::cmp::PartialEq for wechat_protocol::ServiceRejected | impl | -
 impl core::cmp::PartialEq for wechat_protocol::SessionReadNotification | impl | -
 impl core::cmp::PartialEq for wechat_protocol::SessionReadReply | impl | -
 impl core::cmp::PartialEq for wechat_protocol::calls::app_session::AppAuthority | impl | -
@@ -1219,15 +1243,18 @@ impl core::default::Default for wechat_protocol::NativeOptions | impl | -
 impl core::default::Default for wechat_protocol::calls::signaling::CloudRequest | impl | -
 impl core::default::Default for wechat_protocol::calls::signaling::CommonRequest | impl | -
 impl core::default::Default for wechat_protocol::calls::signaling::CommonResponse | impl | -
+impl core::error::Error for wechat_protocol::AccountInterrupted | impl | -
 impl core::error::Error for wechat_protocol::AccountPersistenceFailed | impl | -
 impl core::error::Error for wechat_protocol::NativeRequestNotSubmitted | impl | -
 impl core::error::Error for wechat_protocol::OpenImServiceError | impl | -
+impl core::error::Error for wechat_protocol::ServiceRejected | impl | -
 impl core::error::Error for wechat_protocol::calls::host_transport::CallHostRpcError | impl | -
 impl core::error::Error for wechat_protocol::calls::host_transport::CallLiveSyncInterrupted | impl | -
 impl core::error::Error for wechat_protocol::media::LargeFileDownloadError | impl | -
 impl core::error::Error for wechat_protocol::media::VideoRepresentationMismatch | impl | -
 impl core::error::Error for wechat_protocol::openim::OpenImServiceError | impl | -
 impl core::fmt::Debug for wechat_protocol::AccountIdentity | impl | -
+impl core::fmt::Debug for wechat_protocol::AccountInterrupted | impl | -
 impl core::fmt::Debug for wechat_protocol::AccountLifecycle | impl | -
 impl core::fmt::Debug for wechat_protocol::AccountPersistenceFailed | impl | -
 impl core::fmt::Debug for wechat_protocol::AccountState | impl | -
@@ -1243,6 +1270,8 @@ impl core::fmt::Debug for wechat_protocol::NativeOptions | impl | -
 impl core::fmt::Debug for wechat_protocol::NativeRequestNotSubmitted | impl | -
 impl core::fmt::Debug for wechat_protocol::OpenImContact | impl | -
 impl core::fmt::Debug for wechat_protocol::OpenImServiceError | impl | -
+impl core::fmt::Debug for wechat_protocol::Service | impl | -
+impl core::fmt::Debug for wechat_protocol::ServiceRejected | impl | -
 impl core::fmt::Debug for wechat_protocol::SessionReadNotification | impl | -
 impl core::fmt::Debug for wechat_protocol::SessionReadReply | impl | -
 impl core::fmt::Debug for wechat_protocol::TextSendOptions | impl | -
@@ -1280,17 +1309,24 @@ impl core::fmt::Debug for wechat_protocol::push::Notification | impl | -
 impl core::fmt::Debug for wechat_protocol::quote_send::QuoteReference | impl | -
 impl core::fmt::Debug for wechat_protocol::wire::Heartbeat | impl | -
 impl core::fmt::Debug for wechat_protocol::wire::TextSendResult | impl | -
+impl core::fmt::Display for wechat_protocol::AccountInterrupted | impl | -
 impl core::fmt::Display for wechat_protocol::AccountPersistenceFailed | impl | -
 impl core::fmt::Display for wechat_protocol::NativeRequestNotSubmitted | impl | -
 impl core::fmt::Display for wechat_protocol::OpenImServiceError | impl | -
+impl core::fmt::Display for wechat_protocol::ServiceRejected | impl | -
 impl core::fmt::Display for wechat_protocol::calls::host_transport::CallHostRpcError | impl | -
 impl core::fmt::Display for wechat_protocol::calls::host_transport::CallLiveSyncInterrupted | impl | -
 impl core::fmt::Display for wechat_protocol::media::LargeFileDownloadError | impl | -
 impl core::fmt::Display for wechat_protocol::media::VideoRepresentationMismatch | impl | -
 impl core::fmt::Display for wechat_protocol::openim::OpenImServiceError | impl | -
+impl core::hash::Hash for wechat_protocol::AccountInterrupted | impl | -
+impl core::hash::Hash for wechat_protocol::Service | impl | -
+impl core::marker::Copy for wechat_protocol::AccountInterrupted | impl | -
 impl core::marker::Copy for wechat_protocol::AccountLifecycle | impl | -
 impl core::marker::Copy for wechat_protocol::LoginStatus | impl | -
 impl core::marker::Copy for wechat_protocol::OpenImServiceError | impl | -
+impl core::marker::Copy for wechat_protocol::Service | impl | -
+impl core::marker::Copy for wechat_protocol::ServiceRejected | impl | -
 impl core::marker::Copy for wechat_protocol::calls::app_session::AppAuthority | impl | -
 impl core::marker::Copy for wechat_protocol::calls::audio_packet::MediaContext | impl | -
 impl core::marker::Copy for wechat_protocol::calls::audio_packet::MediaEpoch | impl | -
@@ -1315,6 +1351,7 @@ impl core::marker::Copy for wechat_protocol::media::VideoRepresentationMismatch 
 impl core::marker::Copy for wechat_protocol::openim::OpenImServiceError | impl | -
 impl core::marker::Copy for wechat_protocol::push::Notification | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::AccountIdentity | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::AccountInterrupted | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::AccountLifecycle | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::AccountStatus | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::GroupMemberResult | impl | -
@@ -1325,6 +1362,8 @@ impl core::marker::StructuralPartialEq for wechat_protocol::MessageRecall | impl
 impl core::marker::StructuralPartialEq for wechat_protocol::MessageRecallReply | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::OpenImContact | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::OpenImServiceError | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::Service | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::ServiceRejected | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::SessionReadNotification | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::SessionReadReply | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::app_session::AppAuthority | impl | -
@@ -1546,6 +1585,7 @@ struct wechat_protocol::OpenImServiceError | struct { public fields } | A servic
 struct wechat_protocol::PendingLogout | struct { private fields } | One reserved terminal operation. Reservation stops account admission without sending anything. An embedding daemon can commit local logout inhibition before consuming this token to submit its optional remote logout. Dropping the token leaves the account stopped and sends no request.
 struct wechat_protocol::RoomMember | struct { public fields } | MISSING DOC
 struct wechat_protocol::RoomRoster | struct { public fields } | MISSING DOC
+struct wechat_protocol::ServiceRejected | struct { public fields } | A verified response carried a non-zero service code. The request reached the service, so this error never shows that an operation was not submitted.
 struct wechat_protocol::SessionReadNotification | struct { public fields } | MISSING DOC
 struct wechat_protocol::SessionReadReply | struct { public fields } | MISSING DOC
 struct wechat_protocol::SyncBatch | struct { public fields } | MISSING DOC
@@ -1643,6 +1683,9 @@ trait wechat_protocol::AccountPersistence | trait: core::marker::Send + core::ma
 type wechat_protocol::media::CdnFields | type = alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::vec::Vec<u8>> | MISSING DOC
 use wechat_protocol::media::ImageInspection | re-export wechat_media::ImageInspection | -
 use wechat_protocol::media::inspect_image | re-export wechat_media::inspect_image | -
+variant wechat_protocol::AccountInterrupted::CredentialsSuperseded | - | A renewal accepted newer credentials. Open a new notification connection, or repeat a request that was not submitted.
+variant wechat_protocol::AccountInterrupted::Stopped | - | The account was stopped, shut down or reserved for logout. A background loop should end quietly.
+variant wechat_protocol::AccountInterrupted::Transferred | - | The credentials were moved out with `quiesce_and_export`. This client can no longer be used.
 variant wechat_protocol::AccountLifecycle::Active | - | MISSING DOC
 variant wechat_protocol::AccountLifecycle::Stopped | - | MISSING DOC
 variant wechat_protocol::AccountLifecycle::Transferred | - | MISSING DOC
@@ -1662,6 +1705,26 @@ variant wechat_protocol::LoginStatus::Expired | - | MISSING DOC
 variant wechat_protocol::LoginStatus::Pending | - | MISSING DOC
 variant wechat_protocol::LoginStatus::Rejected | - | MISSING DOC
 variant wechat_protocol::LoginStatus::Scanned | - | MISSING DOC
+variant wechat_protocol::Service::AccountAuthentication | - | Credential exchange that completes a login.
+variant wechat_protocol::Service::AutomaticAuthentication | - | Session renewal with saved credentials.
+variant wechat_protocol::Service::Avatar | - | Avatar lookup.
+variant wechat_protocol::Service::CdnBootstrap | - | CDN credential bootstrap.
+variant wechat_protocol::Service::CdnDownload | - | CDN download.
+variant wechat_protocol::Service::CdnUpload | - | CDN upload.
+variant wechat_protocol::Service::Contact | - | Contact lookup.
+variant wechat_protocol::Service::ContactBootstrap | - | Initial contact catalog.
+variant wechat_protocol::Service::ContactSync | - | Contact catalog sync.
+variant wechat_protocol::Service::FileUploadReservation | - | File upload reservation.
+variant wechat_protocol::Service::GroupMetadata | - | Group catalog page.
+variant wechat_protocol::Service::Heartbeat | - | Persistent-connection heartbeat.
+variant wechat_protocol::Service::LargeFileUpload | - | Large-file upload.
+variant wechat_protocol::Service::LoginPoll | - | Polling an issued login challenge.
+variant wechat_protocol::Service::NativeEnvelope | - | Outer response envelope of an authenticated or prelogin request.
+variant wechat_protocol::Service::QrLogin | - | QR challenge creation.
+variant wechat_protocol::Service::Room | - | Group member roster.
+variant wechat_protocol::Service::SavedDeviceLogin | - | Confirmation push for a saved device.
+variant wechat_protocol::Service::Sync | - | Message sync.
+variant wechat_protocol::Service::Voice | - | Voice chunk download.
 variant wechat_protocol::calls::audio_packet::TransmitScope::IsolatedCompatibilityTest | { public fields } | MISSING DOC
 variant wechat_protocol::calls::audio_packet::TransmitScope::LegacyRelayAudio | { public fields } | MISSING DOC
 variant wechat_protocol::calls::audio_packet::TransmitScope::VerifiedGeneration | { public fields } | MISSING DOC

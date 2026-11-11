@@ -132,7 +132,7 @@ fn validate_reply(reply: &CdnFields, sequence: u32, version: u32) -> Result<()> 
         "Large-file reply sequence mismatch"
     );
     let code = integer(reply, "retcode")?;
-    ensure!(code == 0, "Large-file upload returned {code}");
+    ServiceRejected::check_wide(Service::LargeFileUpload, code)?;
     for key in ["isretry", "retrysec", "isoverload", "isgetcdn"] {
         ensure!(
             integer(reply, key)? == 0,

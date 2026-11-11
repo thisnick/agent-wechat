@@ -37,6 +37,43 @@ Both share the same credentials, shutdown and response-ordering checks as async
 methods. `account_lease()` supplies a credential-free generation check for media
 workers; it does not replace a request's final submission guard.
 
+`logout_blocking`, `shutdown_blocking`, `PendingLogout::submit_blocking` and
+`PendingLogout::submit_guarded_blocking` do the same work as their async
+counterparts on the caller's worker, without a Tokio runtime. Logout is still
+submitted at most once. Do not call them from inside an account request: they
+wait for every earlier request to finish.
+
+### Typed errors
+
+Errors are `anyhow::Error`. These types say what happened without parsing the
+message; each has a `find` function that looks through the whole error.
+
+| Type | Meaning | Typical handling |
+| --- | --- | --- |
+| `ServiceRejected { service, code }` | A verified response carried a non-zero service code | Report it; `is_session_rejected(&error)` means the account needs a new login or renewal |
+| `AccountInterrupted::Stopped` | The account was stopped, shut down or reserved for logout | End the loop quietly |
+| `AccountInterrupted::CredentialsSuperseded` | A renewal accepted newer credentials | Open a new notification connection |
+| `AccountInterrupted::Transferred` | Credentials were moved out with `quiesce_and_export` | Stop using this client |
+| `NativeRequestNotSubmitted` | Nothing was handed to transport | Safe to submit again later |
+
+```rust
+match connection.poll(timeout) {
+    Ok(notification) => handle(notification),
+    Err(error) => match wechat_protocol::AccountInterrupted::find(&error) {
+        Some(wechat_protocol::AccountInterrupted::Stopped) => return Ok(()),
+        Some(wechat_protocol::AccountInterrupted::CredentialsSuperseded) => reconnect()?,
+        _ if wechat_protocol::is_session_rejected(&error) => sign_in_again()?,
+        _ => return Err(error),
+    },
+}
+```
+
+`AccountInterrupted` gives the reason only. Whether bytes were sent is a
+separate question answered by `NativeRequestNotSubmitted`: an interruption
+without that marker has an unknown outcome and must not be resent blindly.
+`is_session_rejected` covers the session boundaries only; the same code from a
+CDN request does not count.
+
 From a repository checkout, run one of these examples:
 
 ```bash

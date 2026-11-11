@@ -1,13 +1,14 @@
 //! Account data owned by NativeClient. Network workers take temporary snapshots;
 //! they never hold the state lock while waiting for transport.
 use super::{AccountState, NativeClient, NativeOptions};
+use crate::errors::AccountInterrupted;
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     future::Future,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex, MutexGuard,
+        Arc, Condvar, Mutex, MutexGuard,
     },
     time::Duration,
 };
@@ -114,6 +115,8 @@ pub struct PendingLogout {
 }
 
 impl PendingLogout {
+    /// Wait for requests admitted before the reservation, then submit the logout
+    /// once on Tokio's blocking pool.
     pub async fn submit(self) -> Result<super::LogoutReply> {
         self.submit_guarded(|| Ok(())).await
     }
@@ -128,40 +131,82 @@ impl PendingLogout {
         self.exchange.account.drain_to(1).await?;
         let cancellation = Arc::new(AtomicBool::new(false));
         let _cancel_on_drop = CancelOnDrop(cancellation.clone());
-        tokio::task::spawn_blocking(move || {
-            let Self {
-                exchange,
-                mut state,
-                options,
-            } = self;
-            let mut transport = NativeClient::new(options)?;
-            let before_submit = Mutex::new(Some(before_submit));
-            transport.submission_guard = Some(Arc::new(move || {
-                let check = (|| {
-                    ensure!(
-                        !cancellation.load(Ordering::Acquire),
-                        "Account logout cancelled before submission"
-                    );
-                    exchange.check_logout()
-                })();
-                check.map_err(|error| error.context(NativeRequestNotSubmitted))?;
-                let guard = before_submit
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("Logout guard unavailable"))?
-                    .take()
-                    .context("Logout already submitted")?;
-                guard().map_err(|error| error.context(NativeRequestNotSubmitted))
-            }));
-            transport.logout_snapshot(&mut state)
-        })
-        .await
-        .context("Account logout worker failed")?
+        tokio::task::spawn_blocking(move || self.submit_on_worker(cancellation, before_submit))
+            .await
+            .context("Account logout worker failed")?
     }
+
+    /// As [`Self::submit`], on the caller's blocking worker. No Tokio runtime is
+    /// needed. Do not call it on an async executor thread or from inside an
+    /// account request: it waits for every earlier request to finish.
+    pub fn submit_blocking(self) -> Result<super::LogoutReply> {
+        self.submit_guarded_blocking(|| Ok(()))
+    }
+
+    /// As [`Self::submit_guarded`], on the caller's blocking worker. The token
+    /// is consumed even on failure, and an uncertain response never permits
+    /// automatic resubmission.
+    pub fn submit_guarded_blocking<F>(self, before_submit: F) -> Result<super::LogoutReply>
+    where
+        F: FnOnce() -> Result<()> + Send + 'static,
+    {
+        self.exchange.account.drain_to_blocking(1)?;
+        self.submit_on_worker(Arc::new(AtomicBool::new(false)), before_submit)
+    }
+
+    fn submit_on_worker<F>(
+        self,
+        cancellation: Arc<AtomicBool>,
+        before_submit: F,
+    ) -> Result<super::LogoutReply>
+    where
+        F: FnOnce() -> Result<()> + Send + 'static,
+    {
+        let Self {
+            exchange,
+            mut state,
+            options,
+        } = self;
+        let mut transport = NativeClient::new(options)?;
+        transport.submission_guard = Some(logout_guard(exchange, cancellation, before_submit));
+        transport.logout_snapshot(&mut state)
+    }
+}
+
+/// Final check before the logout bytes are handed to transport. It passes at
+/// most once; every refusal is marked as not submitted.
+fn logout_guard<F>(
+    exchange: Arc<Exchange>,
+    cancellation: Arc<AtomicBool>,
+    before_submit: F,
+) -> Arc<dyn Fn() -> Result<()> + Send + Sync>
+where
+    F: FnOnce() -> Result<()> + Send + 'static,
+{
+    let before_submit = Mutex::new(Some(before_submit));
+    Arc::new(move || {
+        let check = (|| {
+            ensure!(
+                !cancellation.load(Ordering::Acquire),
+                "Account logout cancelled before submission"
+            );
+            exchange.check_logout()
+        })();
+        check.map_err(|error| error.context(NativeRequestNotSubmitted))?;
+        let guard = before_submit
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Logout guard unavailable"))?
+            .take()
+            .context("Logout already submitted")?;
+        guard().map_err(|error| error.context(NativeRequestNotSubmitted))
+    })
 }
 
 pub(super) struct OwnedAccount {
     data: Mutex<AccountData>,
     changed: Notify,
+    // Wakes blocking waiters for the same changes as `changed`.
+    changed_blocking: Condvar,
     authority: Arc<Authority>,
     components: components::AccountComponents,
 }
@@ -173,6 +218,28 @@ struct AccountData {
     lifecycle: AccountLifecycle,
     in_flight: usize,
     persistence: Option<Arc<dyn AccountPersistence>>,
+}
+
+impl AccountData {
+    /// Reason a request cannot use this account in its current lifecycle.
+    fn interruption(&self) -> AccountInterrupted {
+        match self.lifecycle {
+            AccountLifecycle::Transferred => AccountInterrupted::Transferred,
+            AccountLifecycle::Active | AccountLifecycle::Stopped => AccountInterrupted::Stopped,
+        }
+    }
+
+    fn ensure_active(&self, message: &'static str) -> Result<()> {
+        if self.lifecycle == AccountLifecycle::Active {
+            Ok(())
+        } else {
+            Err(self.interruption().because(message))
+        }
+    }
+}
+
+fn transferred() -> anyhow::Error {
+    AccountInterrupted::Transferred.because("Account state transferred")
 }
 
 struct Exchange {
@@ -197,22 +264,23 @@ impl OwnedAccount {
             .map_err(|_| anyhow::anyhow!("Account state lock poisoned"))
     }
 
+    /// Call after releasing the data lock, once lifecycle or `in_flight` changed.
+    fn notify_changed(&self) {
+        self.changed.notify_waiters();
+        self.changed_blocking.notify_all();
+    }
+
     fn begin(self: &Arc<Self>) -> Result<(Exchange, AccountState)> {
         self.begin_with_terminal(false)
     }
 
     fn begin_with_terminal(self: &Arc<Self>, terminal: bool) -> Result<(Exchange, AccountState)> {
         let mut data = self.lock()?;
-        ensure!(
-            data.lifecycle == AccountLifecycle::Active
-                && self.authority.active.load(Ordering::Acquire),
-            "Account is stopped"
-        );
-        let state = data
-            .state
-            .as_ref()
-            .context("Account state transferred")?
-            .clone();
+        if !self.authority.active.load(Ordering::Acquire) {
+            return Err(data.interruption().because("Account is stopped"));
+        }
+        data.ensure_active("Account is stopped")?;
+        let state = data.state.as_ref().ok_or_else(transferred)?.clone();
         let non_cookie = non_cookie_digest(&state)?;
         data.in_flight = data
             .in_flight
@@ -230,7 +298,7 @@ impl OwnedAccount {
         }
         drop(data);
         if terminal {
-            self.changed.notify_waiters();
+            self.notify_changed();
         }
         Ok((exchange, state))
     }
@@ -243,7 +311,7 @@ impl OwnedAccount {
                 data.lifecycle = AccountLifecycle::Stopped;
             }
         }
-        self.changed.notify_waiters();
+        self.notify_changed();
         Ok(())
     }
 
@@ -280,6 +348,26 @@ impl OwnedAccount {
     }
 }
 
+impl OwnedAccount {
+    /// Blocking form of `drain_to`. Counts only change under the data lock, so
+    /// a waiter cannot miss the wakeup that follows a change.
+    fn drain_to_blocking(&self, remaining: usize) -> Result<()> {
+        let mut data = self.lock()?;
+        while data.in_flight != remaining {
+            data = self
+                .changed_blocking
+                .wait(data)
+                .map_err(|_| anyhow::anyhow!("Account state lock poisoned"))?;
+        }
+        Ok(())
+    }
+
+    fn stop_and_drain_blocking(&self) -> Result<()> {
+        self.stop()?;
+        self.drain_to_blocking(0)
+    }
+}
+
 impl Exchange {
     fn check_logout(&self) -> Result<()> {
         let data = self.account.lock()?;
@@ -287,7 +375,7 @@ impl Exchange {
             data.lifecycle == AccountLifecycle::Stopped && data.in_flight == 1,
             "Logout is not the exclusive account operation"
         );
-        let current = data.state.as_ref().context("Account state transferred")?;
+        let current = data.state.as_ref().ok_or_else(transferred)?;
         ensure!(
             data.credential_generation == self.credential_generation
                 && non_cookie_digest(current)? == self.non_cookie,
@@ -299,16 +387,14 @@ impl Exchange {
     /// already handed off cannot be recalled by a later shutdown.
     fn check(&self) -> Result<()> {
         let data = self.account.lock()?;
-        ensure!(
-            data.lifecycle == AccountLifecycle::Active,
-            "Account stopped during request"
-        );
-        let current = data.state.as_ref().context("Account state transferred")?;
-        ensure!(
-            data.credential_generation == self.credential_generation
-                && non_cookie_digest(current)? == self.non_cookie,
-            "Account credentials changed during request"
-        );
+        data.ensure_active("Account stopped during request")?;
+        let current = data.state.as_ref().ok_or_else(transferred)?;
+        if data.credential_generation != self.credential_generation
+            || non_cookie_digest(current)? != self.non_cookie
+        {
+            return Err(AccountInterrupted::CredentialsSuperseded
+                .because("Account credentials changed during request"));
+        }
         Ok(())
     }
 
@@ -319,16 +405,14 @@ impl Exchange {
             "Unexpected account credential change"
         );
         let mut data = self.account.lock()?;
-        ensure!(
-            data.lifecycle == AccountLifecycle::Active,
-            "Account stopped during request"
-        );
-        let current = data.state.as_ref().context("Account state transferred")?;
-        ensure!(
-            data.credential_generation == self.credential_generation
-                && non_cookie_digest(current)? == self.non_cookie,
-            "Account credentials changed during request"
-        );
+        data.ensure_active("Account stopped during request")?;
+        let current = data.state.as_ref().ok_or_else(transferred)?;
+        if data.credential_generation != self.credential_generation
+            || non_cookie_digest(current)? != self.non_cookie
+        {
+            return Err(AccountInterrupted::CredentialsSuperseded
+                .because("Account credentials changed during request"));
+        }
         // A concurrent response already adopted a newer cookie. Preserve that
         // whole accepted state rather than overwriting it with a stale snapshot.
         if data.revision == self.revision && current.cookie != returned.cookie {
@@ -343,7 +427,7 @@ impl Exchange {
             }
             data.state
                 .as_mut()
-                .context("Account state transferred")?
+                .ok_or_else(transferred)?
                 .cookie
                 .clone_from(&returned.cookie);
             data.revision = revision;
@@ -354,16 +438,14 @@ impl Exchange {
     fn accept_credentials(&self, returned: AccountState) -> Result<()> {
         returned.validate()?;
         let mut data = self.account.lock()?;
-        ensure!(
-            data.lifecycle == AccountLifecycle::Active,
-            "Account stopped during authentication"
-        );
-        let current = data.state.as_ref().context("Account state transferred")?;
-        ensure!(
-            data.credential_generation == self.credential_generation
-                && non_cookie_digest(current)? == self.non_cookie,
-            "Account authentication superseded"
-        );
+        data.ensure_active("Account stopped during authentication")?;
+        let current = data.state.as_ref().ok_or_else(transferred)?;
+        if data.credential_generation != self.credential_generation
+            || non_cookie_digest(current)? != self.non_cookie
+        {
+            return Err(AccountInterrupted::CredentialsSuperseded
+                .because("Account authentication superseded"));
+        }
         ensure!(
             current.uin == returned.uin
                 && current.own_username == returned.own_username
@@ -407,7 +489,7 @@ impl Drop for Exchange {
             .unwrap_or_else(|error| error.into_inner());
         data.in_flight -= 1;
         drop(data);
-        self.account.changed.notify_waiters();
+        self.account.notify_changed();
     }
 }
 
@@ -449,6 +531,7 @@ impl NativeClient {
                 persistence: None,
             }),
             changed: Notify::new(),
+            changed_blocking: Condvar::new(),
             authority: Arc::new(Authority {
                 active: AtomicBool::new(true),
                 credential_generation: AtomicU64::new(0),
@@ -489,7 +572,7 @@ impl NativeClient {
 
     pub fn account_identity(&self) -> Result<AccountIdentity> {
         let data = self.owned_account()?.lock()?;
-        let state = data.state.as_ref().context("Account state transferred")?;
+        let state = data.state.as_ref().ok_or_else(transferred)?;
         Ok(AccountIdentity {
             uin: state.uin,
             own_username: state.own_username.clone(),
@@ -499,11 +582,10 @@ impl NativeClient {
     pub fn account_lease(&self) -> Result<AccountLease> {
         let account = self.owned_account()?;
         let data = account.lock()?;
-        ensure!(
-            data.lifecycle == AccountLifecycle::Active
-                && account.authority.active.load(Ordering::Acquire),
-            "Account is stopped"
-        );
+        if !account.authority.active.load(Ordering::Acquire) {
+            return Err(data.interruption().because("Account is stopped"));
+        }
+        data.ensure_active("Account is stopped")?;
         Ok(AccountLease {
             authority: account.authority.clone(),
             credential_generation: data.credential_generation,
@@ -518,7 +600,7 @@ impl NativeClient {
             .state
             .as_ref()
             .cloned()
-            .context("Account state transferred")
+            .ok_or_else(transferred)
     }
 
     /// Stop account-bound admission and wait for admitted network workers to

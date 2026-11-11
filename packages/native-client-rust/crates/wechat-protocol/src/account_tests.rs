@@ -567,3 +567,130 @@ async fn verified_reply_survives_when_no_cancellation_is_ready() {
     .await;
     assert_eq!(result.unwrap(), vec![1, 2, 3]);
 }
+
+// The envelope header follows the same independent fixture as `call_reply`,
+// with a non-zero return code and no payload.
+fn rejected_envelope(state: &AccountState, code: i32) -> Vec<u8> {
+    let mut tail = Vec::new();
+    for value in [7994, 0, 0, 0, 0] {
+        tail.extend(crate::protobuf::varint(value));
+    }
+    let size = 10 + tail.len();
+    let flags = (5u16 << 12) | ((size as u16) << 2) | 2;
+    let mut reply = flags.to_le_bytes().to_vec();
+    reply.extend(code.to_be_bytes());
+    reply.extend(state.uin.to_be_bytes());
+    reply.extend(tail);
+    reply
+}
+
+#[test]
+fn heartbeat_sync_and_envelope_rejections_carry_a_typed_session_error() {
+    use crate::{protobuf as p, Service, ServiceRejected};
+    let base = p::bytes(1, &p::int32(1, -13));
+    let heartbeat = crate::wire::decode_heartbeat(&base).unwrap_err();
+    let sync = crate::wire::decode_sync(&p::int32(1, -13), &[])
+        .err()
+        .unwrap();
+    let state = client().export_account_state().unwrap();
+    let envelope = crate::business::AuthenticatedPacket::prepare(&state, 7994, b"synthetic")
+        .unwrap()
+        .decode_verified_transport_reply(&rejected_envelope(&state, -13))
+        .unwrap_err();
+    for (error, service, message) in [
+        (heartbeat, Service::Heartbeat, "Heartbeat returned -13"),
+        (sync, Service::Sync, "Sync service returned -13"),
+        (
+            envelope,
+            Service::NativeEnvelope,
+            "Native envelope returned -13",
+        ),
+    ] {
+        let error = error.context("request failed");
+        assert_eq!(
+            ServiceRejected::find(&error),
+            Some(&ServiceRejected::new(service, -13))
+        );
+        assert!(crate::is_session_rejected(&error));
+        assert_eq!(error.root_cause().to_string(), message);
+    }
+}
+
+#[test]
+fn blocking_shutdown_waits_for_admitted_requests() {
+    let client = client();
+    let (prior, _) = client.owned_account().unwrap().begin().unwrap();
+    let waiter = client.clone();
+    let shutdown = std::thread::spawn(move || waiter.shutdown_blocking());
+    while client.account_status().unwrap().lifecycle == AccountLifecycle::Active {
+        std::thread::yield_now();
+    }
+    std::thread::sleep(Duration::from_millis(20));
+    assert!(!shutdown.is_finished());
+    drop(prior);
+    shutdown.join().unwrap().unwrap();
+    let status = client.account_status().unwrap();
+    assert_eq!(status.lifecycle, AccountLifecycle::Stopped);
+    assert_eq!(status.in_flight, 0);
+}
+
+#[test]
+fn blocking_logout_waits_until_it_is_the_only_operation() {
+    let client = client();
+    let account = client.owned_account().unwrap().clone();
+    let (prior, _) = account.begin().unwrap();
+    let pending = client.prepare_logout().unwrap();
+    assert!(pending.exchange.check_logout().is_err());
+    let waiting = account.clone();
+    let drained = std::thread::spawn(move || waiting.drain_to_blocking(1));
+    std::thread::sleep(Duration::from_millis(20));
+    assert!(!drained.is_finished());
+    drop(prior);
+    drained.join().unwrap().unwrap();
+    pending.exchange.check_logout().unwrap();
+    // No runtime exists on this thread: reservation and the wait need none.
+    assert!(tokio::runtime::Handle::try_current().is_err());
+    assert!(client.logout_blocking().is_err(), "one reservation only");
+    drop(pending);
+    assert_eq!(client.account_status().unwrap().in_flight, 0);
+}
+
+#[test]
+fn logout_guard_passes_once_and_marks_every_refusal_as_not_submitted() {
+    let guard_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let reserve = |client: &NativeClient| client.prepare_logout().unwrap().exchange;
+    let counted = |calls: &Arc<std::sync::atomic::AtomicUsize>| {
+        let calls = calls.clone();
+        move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    };
+    let idle = || Arc::new(AtomicBool::new(false));
+
+    let client = client();
+    let guard = logout_guard(reserve(&client), idle(), counted(&guard_calls));
+    guard().unwrap();
+    let second = guard().unwrap_err();
+    assert!(!second.is::<NativeRequestNotSubmitted>());
+    assert_eq!(guard_calls.load(Ordering::SeqCst), 1);
+
+    let client = self::client();
+    let refused = logout_guard(reserve(&client), idle(), || anyhow::bail!("local refusal"));
+    assert!(refused().unwrap_err().is::<NativeRequestNotSubmitted>());
+
+    let client = self::client();
+    let (prior, _) = client.owned_account().unwrap().begin().unwrap();
+    let busy = logout_guard(reserve(&client), idle(), counted(&guard_calls));
+    assert!(busy().unwrap_err().is::<NativeRequestNotSubmitted>());
+    drop(prior);
+
+    let client = self::client();
+    let cancelled = logout_guard(
+        reserve(&client),
+        Arc::new(AtomicBool::new(true)),
+        counted(&guard_calls),
+    );
+    assert!(cancelled().unwrap_err().is::<NativeRequestNotSubmitted>());
+    assert_eq!(guard_calls.load(Ordering::SeqCst), 1);
+}
