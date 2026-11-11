@@ -2512,6 +2512,30 @@
         ],
         "type": "object"
       },
+      "NativeMiniProgramFetchRequest": {
+        "additionalProperties": false,
+        "description": "Fetch a missing declared subpackage without changing the launch's app version.",
+        "properties": {
+          "mainSha256": {
+            "description": "SHA-256 of that main archive. A changed selection requires a new launch.",
+            "type": "string"
+          },
+          "root": {
+            "description": "Declared relative subpackage root, without surrounding slashes.",
+            "type": "string"
+          },
+          "version": {
+            "description": "Exact version of the launch's main archive.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "mainSha256",
+          "root"
+        ],
+        "type": "object"
+      },
       "NativeMiniProgramIpcRequest": {
         "additionalProperties": false,
         "description": "A hub operation requested by a running Mini Program.",
@@ -8186,6 +8210,7 @@
     },
     "/v1/accounts/{a}/mini-programs/{app}/packages": {
       "post": {
+        "description": "Scope: mini-programs for an exact-version subpackage body; admin when no body requests the main archive.",
         "operationId": "fetchMiniProgramPackage",
         "parameters": [
           {
@@ -8207,6 +8232,16 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NativeMiniProgramFetchRequest"
+              }
+            }
+          },
+          "required": false
+        },
         "responses": {
           "200": {
             "content": {
@@ -8228,13 +8263,24 @@
         "security": [
           {
             "bearer": [
-              "admin"
+              "mini-programs"
             ]
           }
         ],
-        "summary": "Fetch and verify the release's main archive from WeChat, or reuse the staged package.",
+        "summary": "Fetch the main archive, or a declared subpackage at the selected main version and digest. Reuse verified cache entries.",
         "tags": [
           "mini-programs"
+        ],
+        "x-agent-wechat-scope": "depends on the request",
+        "x-agent-wechat-sdk-request": [
+          {
+            "$ref": "#/components/schemas/NativeMiniProgramFetchRequest"
+          }
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/NativeMiniProgramPackage"
+          }
         ]
       }
     },

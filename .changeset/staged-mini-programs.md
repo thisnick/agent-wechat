@@ -54,6 +54,10 @@ separately packaged component templates. Supply pinned WeUI 1.5.6 for declared
 Glass-easel extensions, retaining app-bundled module versions.
 
 Load staged subpackage pages, component registrations, styles and images through
-the shared runner before navigation. Keep subpackage versions and namespaces
-separate from the main package. Add compatibility coverage using the official
+the shared runner before navigation. Validate subpackage versions and module paths against the main package. Add compatibility coverage using the official
 computed and MobX component libraries.
+
+Download missing declared subpackages on navigation or `require.async()` through
+the hub at the launch's exact main version and digest. Reuse verified archives,
+share concurrent downloads, and reject changed sources and independent runtimes.
+Share legacy template imports between the main archive and its subpackages.

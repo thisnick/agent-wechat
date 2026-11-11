@@ -127,6 +127,74 @@ pub struct Archive {
     entries: BTreeMap<String, Option<Member>>,
 }
 
+impl Archive {
+    /// Read normalized subpackage roots and their independent-runtime flags.
+    /// Roots come from the verified app configuration, never from navigation input.
+    pub fn subpackage_roots(&self) -> Result<BTreeMap<String, bool>> {
+        let config: serde_json::Value = serde_json::from_slice(self.file("app-config.json")?)?;
+        let Some(declared) = config
+            .get("subPackages")
+            .or_else(|| config.get("subpackages"))
+        else {
+            return Ok(BTreeMap::new());
+        };
+        let declared = declared
+            .as_array()
+            .context("Invalid subpackage declarations")?;
+        ensure!(declared.len() <= 256, "Too many subpackages");
+        let mut roots = BTreeMap::new();
+        for item in declared {
+            let root = item["root"].as_str().context("Missing subpackage root")?;
+            let root = root.strip_prefix('/').unwrap_or(root);
+            let root = root.strip_suffix('/').unwrap_or(root);
+            ensure!(
+                valid_path(root) && root != "__APP__",
+                "Invalid subpackage root"
+            );
+            ensure!(
+                roots
+                    .insert(root.to_owned(), item["independent"] == true)
+                    .is_none(),
+                "Duplicate subpackage root"
+            );
+        }
+        Ok(roots)
+    }
+}
+
+#[cfg(test)]
+mod subpackage_tests {
+    use super::*;
+
+    fn declared(config: &str) -> Result<BTreeMap<String, bool>> {
+        Archive {
+            bytes: config.as_bytes().to_vec(),
+            entries: BTreeMap::from([(
+                "app-config.json".into(),
+                Some(Member {
+                    range: 0..config.len(),
+                    service: OnceLock::new(),
+                }),
+            )]),
+        }
+        .subpackage_roots()
+    }
+
+    #[test]
+    fn roots_are_normalized_and_independent_runtimes_stay_distinct() {
+        assert_eq!(declared(r#"{"subPackages":[{"root":"/feature/pages/"},{"root":"isolated","independent":true}]}"#).unwrap(),
+            BTreeMap::from([("feature/pages".into(), false), ("isolated".into(), true)]));
+        for config in [
+            r#"{"subPackages":[{"root":"../feature"}]}"#,
+            r#"{"subPackages":[{"root":"feature//pages"}]}"#,
+            r#"{"subPackages":[{"root":"__APP__"}]}"#,
+            r#"{"subPackages":[{"root":"feature"},{"root":"/feature/"}]}"#,
+        ] {
+            assert!(declared(config).is_err(), "{config}");
+        }
+    }
+}
+
 struct Member {
     range: Range<usize>,
     service: OnceLock<Result<Box<compiled::ServiceIndex>, String>>,

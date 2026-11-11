@@ -60,6 +60,18 @@ pub struct NativeMiniProgramPackage {
     pub root: Option<String>,
 }
 
+/// Fetch a missing declared subpackage without changing the launch's app version.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeMiniProgramFetchRequest {
+    /// Exact version of the launch's main archive.
+    pub version: String,
+    /// SHA-256 of that main archive. A changed selection requires a new launch.
+    pub main_sha256: String,
+    /// Declared relative subpackage root, without surrounding slashes.
+    pub root: String,
+}
+
 /// Account and app permissions available to the local runner for this launch.
 #[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -875,6 +887,7 @@ pub fn typescript() -> String {
         NativeMiniPrograms::decl(),
         NativeMiniProgramEntry::decl(),
         NativeMiniProgramPackage::decl(),
+        NativeMiniProgramFetchRequest::decl(),
         NativeMiniProgramCapabilities::decl(),
         NativeMiniProgramLaunchRequest::decl(),
         NativeMiniProgramLaunch::decl(),

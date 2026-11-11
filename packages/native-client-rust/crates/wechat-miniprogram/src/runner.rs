@@ -265,22 +265,18 @@ fn append_legacy_templates(
     let routes = serde_json::to_string(&serde_json::to_string(&index.legacy)?)?;
     output.push_str(&format!(
         r#"
-import {{ compiler, compilerState as __WXML_GLOBAL__ }} from "/legacy.js";
+import {{ compiler, compilerState as __WXML_GLOBAL__, compilerGlobal as __GWX_GLOBAL__, compilerRoot }} from "/legacy.js";
 const legacyRoutes = new Map(Object.entries(JSON.parse({routes})));
-const legacyGenerators = new Map();
-let legacyFactories;
-
-export function legacyTemplate(route, fallback) {{
-    if (!legacyFactories) {{
+const legacyGenerators = (function() {{
         const outerGlobal = globalThis;
-        const __GWX_GLOBAL__ = {{}};
         const __wxAppCode__ = {{}};
         const __vd_version_info__ = {{ globalThis, delayedGwx: false }};
         (function() {{ {prelude} }}).call(compiler);
         const __g = compiler.__g;
         const $gaic = Object.create(null);
         let g = "", $gwxc = 0;
-        legacyFactories = new Map([
+        const $gwx = (path, global) => compilerRoot.generator?.(path, global);
+        const legacyFactories = new Map([
 "#
     ));
     for (name, span) in &index.generators {
@@ -290,10 +286,17 @@ export function legacyTemplate(route, fallback) {{
     }
     output.push_str(
         r#"        ]);
-    }
+        return new Map([...legacyFactories].map(([name, factory]) => [name, factory()]));
+})();
+// Subpackage templates initialize their main archive's shared imports through
+// $gwx('init', global). Register its generator before any page is requested.
+compilerRoot.generator ??= legacyGenerators.get("$gwx");
+for (const [name, generator] of legacyGenerators) {
+    if (/^\$gwx\d*$/.test(name)) generator("init", __GWX_GLOBAL__);
+}
+export function legacyTemplate(route, fallback) {
     const key = legacyRoutes.get(route) ?? fallback;
-    if (!legacyGenerators.has(key)) legacyGenerators.set(key, legacyFactories.get(key)?.());
-    return legacyGenerators.get(key)?.(route);
+    return legacyGenerators.get(key)?.(route, __GWX_GLOBAL__);
 }
 "#,
     );

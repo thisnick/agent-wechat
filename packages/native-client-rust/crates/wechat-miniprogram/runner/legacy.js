@@ -71,6 +71,9 @@ export function createIntersectionObserver(instance, options) {
 
 // The legacy prelude installs WXS helpers on this document's JS prototypes once.
 export const compiler = {};
+// One compiled-template namespace per app window, shared across its archives.
+export const compilerGlobal = {};
+export const compilerRoot = { generator: undefined };
 export const compilerState = { entrys: {}, defines: {}, modules: {}, ops: [], total_ops: 0 };
 
 export function createSelectorQuery(instance) {

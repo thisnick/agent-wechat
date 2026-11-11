@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:http";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile, rename } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
@@ -107,6 +107,20 @@ try {
     const denied = await fetch(new URL(iconRoute, stack.hub.endpoint + "/"), { headers: { Authorization: "Bearer " + token } });
     assert.equal(denied.status, 403);
   }
+  const selectedSource = { version: "1", mainSha256: launch.packages[0].sha256, root: "utilities" };
+  assert.deepEqual(await sim.client.fetchMiniProgramSubpackage(ACCOUNT.id, app, selectedSource), launch.packages[1]);
+  const packageRoute = `v1/accounts/${ACCOUNT.id}/mini-programs/${app}/packages`;
+  const fetchPackage = (body, token = stack.hub.token) => fetch(new URL(packageRoute, stack.hub.endpoint + "/"), {
+    method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  for (const body of [
+    { ...selectedSource, version: "2" }, { ...selectedSource, mainSha256: "0".repeat(64) },
+    { ...selectedSource, root: "../utilities" }, { ...selectedSource, root: "undeclared" },
+    { ...selectedSource, root: "isolated" }, { ...selectedSource, root: "missing" },
+  ]) assert.equal((await fetchPackage(body)).status, 409);
+  const { token: readOnly } = await sim.client.request("v1/tokens", { method: "POST", body: JSON.stringify({ name: "package-read", scopes: ["read"], accounts: [ACCOUNT.id] }) });
+  assert.equal((await fetchPackage(selectedSource, readOnly)).status, 403);
+  assert.equal((await fetchPackage({ ...selectedSource, root: "utilities", extra: true })).status, 422);
   // Synthetic accounts do not have WeChat metadata; absence stays a real 404.
   const missingIcon = await fetch(new URL(iconRoute, stack.hub.endpoint + "/"), { headers: { Authorization: "Bearer " + stack.hub.token } });
   assert.equal(missingIcon.status, 404);
@@ -502,7 +516,9 @@ try {
   // The simulator cannot retrieve WeChat's app attributes. Supply a synthetic
   // policy in the launch response over loopback to exercise the real CLI gate.
   const launchPath = `/v1/accounts/${ACCOUNT.id}/mini-programs/${app}/launches`;
-  let failPolicy = false;
+  let failPolicy = false, coldCache = false, coldRequests = 0, subEntry = false;
+  const stagedUtilities = join(stack.dataDir, "hub", "miniprograms", ACCOUNT.id, app, "subpackages", "utilities");
+  const hiddenUtilities = join(stack.dataDir, "download-fixture");
   policyHub = createServer(async (request, response) => {
     try {
       if (failPolicy && request.url === launchPath && request.method === "POST") {
@@ -512,6 +528,19 @@ try {
       }
       const chunks = [];
       for await (const chunk of request) chunks.push(chunk);
+      if (coldCache && request.url === "/" + packageRoute && request.method === "POST") {
+        assert.deepEqual(JSON.parse(Buffer.concat(chunks).toString()), selectedSource);
+        coldRequests++;
+        if (coldRequests === 1) {
+          response.writeHead(502, { "content-type": "application/json" });
+          response.end(JSON.stringify({ error: { code: "mini_program_download_failed" } }));
+          return;
+        }
+        // Simulate the CDN completing into the real hub's verified cache. The
+        // transport codec has separate tests; this exercises browser recovery.
+        await rename(hiddenUtilities, stagedUtilities);
+        coldCache = false;
+      }
       const upstream = await fetch(stack.hub.endpoint + request.url, {
         method: request.method,
         headers: {
@@ -524,6 +553,7 @@ try {
       response.setHeader("content-type", upstream.headers.get("content-type") ?? "application/octet-stream");
       if (request.url === launchPath && request.method === "POST" && upstream.ok) {
         const launch = await upstream.json();
+        if (subEntry) launch.entry.path = "utilities/pages/index";
         launch.networkPolicy = { requestDomains: ["https://example.invalid"] };
         response.end(JSON.stringify(launch));
       } else {
@@ -546,6 +576,31 @@ try {
   assert.equal(policyError.reply.code, "mini_program_network_unavailable");
   assert.equal((await policyError.exited)[0], 1);
   failPolicy = false;
+  await rename(stagedUtilities, hiddenUtilities);
+  coldCache = true;
+  const coldHost = await childReady([...policyArgs, app]);
+  const coldPage = await browser.newPage();
+  await coldPage.goto(coldHost.url);
+  await coldPage.getByText("Cafe home", { exact: true }).waitFor();
+  assert.equal(await coldPage.evaluate(() => getCurrentPages().at(-1).loadUtilities().then(() => false, () => true)), true);
+  assert.deepEqual(await coldPage.evaluate(async () => {
+    const [one, two] = await getCurrentPages().at(-1).loadUtilities();
+    return [one.value, one === two];
+  }), [42, true]);
+  assert.equal(coldRequests, 2);
+  await coldPage.evaluate(() => wx.navigateTo({ url: "/utilities/pages/index" }));
+  await coldPage.getByText("Utility page", { exact: true }).waitFor();
+  assert.equal(coldRequests, 2);
+  await coldPage.screenshot({ path: join(output, "cold-subpackage.png") });
+  await coldPage.close();
+  subEntry = true;
+  const entryHost = await childReady([...policyArgs, app]);
+  const entryPage = await browser.newPage();
+  await entryPage.goto(entryHost.url);
+  await entryPage.getByText("Utility page", { exact: true }).waitFor();
+  await entryPage.close();
+  subEntry = false;
+  console.log("PASS: missing subpackage request, failed-download retry, shared module identity and subpackage entry");
   const deniedHost = await childReady([...policyArgs, app, "--allow-request-url", "https://example.invalid/session"]);
   const localUrl = new URL(deniedHost.url);
   const requestUrl = new URL("/_wx/request", localUrl.origin);

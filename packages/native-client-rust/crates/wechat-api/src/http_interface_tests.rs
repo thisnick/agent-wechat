@@ -77,6 +77,7 @@ payloads! {
     "NativeMiniProgramLaunchRequest" => crate::contracts::NativeMiniProgramLaunchRequest,
     "NativeMiniProgramLaunch" => crate::contracts::NativeMiniProgramLaunch,
     "NativeMiniProgramPackage" => crate::contracts::NativeMiniProgramPackage,
+    "NativeMiniProgramFetchRequest" => crate::contracts::NativeMiniProgramFetchRequest,
     "NativeMiniProgramIpcRequest" => crate::contracts::NativeMiniProgramIpcRequest,
     "NativeMiniProgramLogin" => crate::contracts::NativeMiniProgramLogin,
     "NativeMediaJobRetryRequest" => crate::contracts::NativeMediaJobRetryRequest,

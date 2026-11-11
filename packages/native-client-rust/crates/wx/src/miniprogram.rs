@@ -18,8 +18,8 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 use wechat_api::contracts::{
-    NativeMiniProgramIpcRequest, NativeMiniProgramLaunch, NativeMiniProgramLogin,
-    NativeMiniProgramPackage,
+    NativeMiniProgramFetchRequest, NativeMiniProgramIpcRequest, NativeMiniProgramLaunch,
+    NativeMiniProgramLogin, NativeMiniProgramPackage,
 };
 use wechat_miniprogram::{runner, valid_app_id, Archive, MAX_PACKAGE_BYTES};
 
@@ -64,11 +64,13 @@ struct Runner {
     remote: Arc<Remote>,
     app: String,
     root: String,
+    main: NativeMiniProgramPackage,
     subpackages: BTreeMap<String, Subpackage>,
 }
 
 struct Subpackage {
-    package: NativeMiniProgramPackage,
+    root: String,
+    package: OnceCell<NativeMiniProgramPackage>,
     modules: OnceCell<String>,
     archive: OnceCell<Arc<Archive>>,
 }
@@ -93,6 +95,7 @@ pub(super) fn host_error_code(error: &anyhow::Error) -> &'static str {
         "mini_program_page_unsupported" => "mini_program_page_unsupported",
         "mini_program_source_unavailable" => "mini_program_source_unavailable",
         "mini_program_network_unavailable" => "mini_program_network_unavailable",
+        "mini_program_package_changed" => "mini_program_package_changed",
         "mini_program_cache_invalid" => "mini_program_cache_invalid",
         _ => match error.to_string().as_str() {
             "mini_program_page_unsupported" => "mini_program_page_unsupported",
@@ -191,7 +194,7 @@ async fn serve(
         allowed_requests,
     )?;
     ensure!(
-        launch.packages.len() <= 65,
+        launch.packages.len() <= 257,
         "Too many Mini Program packages"
     );
     let mut packages = launch.packages.into_iter();
@@ -215,25 +218,56 @@ async fn serve(
                 && !roots.contains_key(subroot),
             "Invalid Mini Program subpackage selection"
         );
-        roots.insert(subroot.to_owned(), subpackage.id.clone());
+        let subroot = subroot.to_owned();
+        roots.insert(subroot.clone(), subpackage.id.clone());
         subpackages.insert(
             subpackage.id.clone(),
             Subpackage {
-                package: subpackage,
+                root: subroot,
+                package: OnceCell::new_with(Some(subpackage)),
                 modules: OnceCell::new(),
                 archive: OnceCell::new(),
             },
         );
     }
     let archive = selected_archive(&remote, &root, &app, &package).await?;
-    let mut page = runner::page_module(
-        &archive,
-        &launch.entry.path,
-        &launch.entry.service_path,
-        &launch.entry.query,
-        launch.capabilities.login,
-    )
-    .context("mini_program_page_unsupported")?;
+    for (index, (subroot, independent)) in archive.subpackage_roots()?.into_iter().enumerate() {
+        if independent || roots.contains_key(&subroot) {
+            continue;
+        }
+        let id = format!("pending-{index}");
+        ensure!(
+            !subpackages.contains_key(&id),
+            "Invalid Mini Program subpackage selection"
+        );
+        roots.insert(subroot.clone(), id.clone());
+        subpackages.insert(
+            id,
+            Subpackage {
+                root: subroot,
+                package: OnceCell::new(),
+                modules: OnceCell::new(),
+                archive: OnceCell::new(),
+            },
+        );
+    }
+    let deferred = roots
+        .keys()
+        .any(|root| launch.entry.path.starts_with(&format!("{root}/")));
+    let mut page = if deferred {
+        format!("export const deferred = true;\nexport const entry = {};\nexport const queryString = {};\nexport const framework = {};\nexport const allowLogin = {};\n",
+            serde_json::to_string(&launch.entry.path)?, serde_json::to_string(&launch.entry.query)?,
+            serde_json::to_string(&launch.entry.framework)?, launch.capabilities.login)
+    } else {
+        runner::page_module(
+            &archive,
+            &launch.entry.path,
+            &launch.entry.service_path,
+            &launch.entry.query,
+            launch.capabilities.login,
+        )
+        .context("mini_program_page_unsupported")?
+    };
     page.push_str(&format!(
         "export const appId = {};\nexport const subpackages = new Map({});\n",
         serde_json::to_string(&app)?,
@@ -265,7 +299,8 @@ async fn serve(
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let host = listener.local_addr()?.to_string();
     let origin = format!("http://{host}");
-    let key = (login.is_some() || network.is_some()).then(|| Uuid::new_v4().simple().to_string());
+    let key = (login.is_some() || network.is_some() || !subpackages.is_empty())
+        .then(|| Uuid::new_v4().simple().to_string());
     let url = match &key {
         Some(key) => format!("{origin}/#{key}"),
         None => format!("{origin}/"),
@@ -284,6 +319,7 @@ async fn serve(
         remote,
         app: app.clone(),
         root,
+        main: package,
         subpackages,
     }));
     if json {
@@ -340,7 +376,10 @@ async fn subpackage_archive<'a>(
                 &runner.remote,
                 &runner.root,
                 &runner.app,
-                &subpackage.package,
+                subpackage
+                    .package
+                    .get()
+                    .context("Mini Program subpackage is not loaded")?,
             )
             .await
             .map(Arc::new)
@@ -348,17 +387,54 @@ async fn subpackage_archive<'a>(
         .await
 }
 
+async fn prepare_subpackage(runner: &Runner, id: &str) -> Result<()> {
+    let subpackage = runner
+        .subpackages
+        .get(id)
+        .context("Unknown Mini Program subpackage")?;
+    subpackage
+        .package
+        .get_or_try_init(|| async {
+            let input = NativeMiniProgramFetchRequest {
+                root: subpackage.root.clone(),
+                version: runner.main.version.clone(),
+                main_sha256: runner.main.sha256.clone(),
+            };
+            let reply = runner
+                .remote
+                .response(
+                    Method::POST,
+                    &format!("{}/packages", runner.root),
+                    Some(serde_json::to_value(input)?),
+                    None,
+                )
+                .await?;
+            let package: NativeMiniProgramPackage =
+                serde_json::from_slice(&bounded_bytes(reply, 8192).await?)?;
+            validate_package(&package)?;
+            ensure!(
+                package.version == runner.main.version
+                    && package.root.as_deref() == Some(&subpackage.root),
+                "Mini Program subpackage does not match the launch"
+            );
+            Ok::<_, anyhow::Error>(package)
+        })
+        .await?;
+    subpackage_archive(runner, subpackage).await?;
+    Ok(())
+}
+
 fn matching_subpackage<'a>(runner: &'a Runner, path: &str) -> Option<(&'a str, &'a Subpackage)> {
     runner
         .subpackages
         .iter()
         .filter_map(|(id, package)| {
-            let root = package.package.root.as_deref()?;
+            let root = package.root.as_str();
             path.strip_prefix(root)?
                 .starts_with('/')
                 .then_some((id.as_str(), package))
         })
-        .max_by_key(|(_, package)| package.package.root.as_deref().map_or(0, str::len))
+        .max_by_key(|(_, package)| package.root.len())
 }
 
 async fn subpackage_module(runner: &Runner, id: &str) -> Response {
@@ -369,11 +445,7 @@ async fn subpackage_module(runner: &Runner, id: &str) -> Response {
         .modules
         .get_or_try_init(|| async {
             let archive = subpackage_archive(runner, subpackage).await?.clone();
-            let root = subpackage
-                .package
-                .root
-                .clone()
-                .context("Missing Mini Program subpackage root")?;
+            let root = subpackage.root.clone();
             tokio::task::spawn_blocking(move || runner::subpackage_module_registry(&archive, &root))
                 .await?
         })
@@ -388,7 +460,7 @@ async fn page_module(runner: &Runner, entry: &str) -> Response {
     let result = if let Some((id, subpackage)) = matching_subpackage(runner, entry) {
         match subpackage_archive(runner, subpackage).await {
             Ok(archive) => {
-                let root = subpackage.package.root.as_deref().unwrap_or_default();
+                let root = &subpackage.root;
                 runner::subpackage_page_module(
                     archive,
                     root,
@@ -439,6 +511,29 @@ async fn handle(State(runner): State<Arc<Runner>>, request: Request) -> Response
     }
     let path = request.uri().path();
     let response = match (request.method(), path) {
+        (&Method::POST, "/_wx/package") => {
+            if let Err(status) = authorize_post(&runner, headers) {
+                return status.into_response();
+            }
+            let Ok(bytes) = axum::body::to_bytes(request.into_body(), 1024).await else {
+                return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+            };
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Input {
+                id: String,
+            }
+            let Ok(input) = serde_json::from_slice::<Input>(&bytes) else {
+                return StatusCode::UNPROCESSABLE_ENTITY.into_response();
+            };
+            match prepare_subpackage(&runner, &input.id).await {
+                Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                Err(error) if host_error_code(&error) == "mini_program_package_changed" => {
+                    StatusCode::CONFLICT.into_response()
+                }
+                Err(_) => StatusCode::BAD_GATEWAY.into_response(),
+            }
+        }
         (&Method::GET, "/page.js") => asset(JS, &runner.page),
         (&Method::GET, "/modules.js") => asset(JS, &runner.modules),
         (&Method::GET, path) if path.starts_with("/_wx/subpackages/") => {

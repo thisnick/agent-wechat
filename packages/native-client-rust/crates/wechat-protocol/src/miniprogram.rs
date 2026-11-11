@@ -174,14 +174,59 @@ impl NativeClient {
             PACKAGE_ROUTE,
             1713,
             MAX_REPLY,
-            |base| prepare_package(base, app_id, version),
+            |base| prepare_package(base, app_id, version, "__APP__"),
             check,
         )?;
-        let (url, digest) = decode_package_reply(&reply, app_id, version)?;
+        let (url, digest) = decode_package_reply(&reply, app_id, version, "__APP__")?;
         check()?;
         let bytes = download_package(url, &digest)?;
         check()?;
         Ok((version, bytes))
+    }
+
+    /// Download one subpackage at the caller's exact main-package version.
+    ///
+    /// `root` is a relative path without surrounding slashes. The caller must
+    /// verify that the selected main archive declares it. Run on a blocking
+    /// worker; account authority and the caller guard fence every submission.
+    pub fn mini_program_subpackage_download_guarded(
+        &self,
+        app_id: &str,
+        version: u32,
+        root: &str,
+        before_submit: impl Fn() -> Result<()>,
+    ) -> Result<Vec<u8>> {
+        ensure!(
+            version != 0
+                && (1..=240).contains(&root.len())
+                && root != "__APP__"
+                && root.split('/').all(|part| {
+                    !matches!(part, "" | "." | "..")
+                        && part
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"._-@".contains(&b))
+                }),
+            "Invalid Mini Program subpackage selection"
+        );
+        let name = format!("/{root}/");
+        let lease = self.account_lease()?;
+        let check = || {
+            ensure!(lease.current(), "Account authority changed");
+            before_submit()
+        };
+        let reply = self.mini_program_exchange_guarded(
+            app_id,
+            PACKAGE_ROUTE,
+            1713,
+            MAX_REPLY,
+            |base| prepare_package(base, app_id, version, &name),
+            check,
+        )?;
+        let (url, digest) = decode_package_reply(&reply, app_id, version, &name)?;
+        check()?;
+        let bytes = download_package(url, &digest)?;
+        check()?;
+        Ok(bytes)
     }
 
     fn mini_program_exchange_guarded(
@@ -447,10 +492,10 @@ fn decode_package_version(reply: &[u8]) -> Result<u32> {
     Ok(info.version)
 }
 
-fn prepare_package(base: &[u8], app_id: &str, version: u32) -> Result<Vec<u8>> {
+fn prepare_package(base: &[u8], app_id: &str, version: u32, name: &str) -> Result<Vec<u8>> {
     let selector = p::message(&[
         p::bytes(1, app_id.as_bytes()),
-        p::bytes(3, b"__APP__"),
+        p::bytes(3, name.as_bytes()),
         p::uint(4, 4),
         p::uint(5, 0),
     ])?;
@@ -463,7 +508,7 @@ fn prepare_package(base: &[u8], app_id: &str, version: u32) -> Result<Vec<u8>> {
         if let Some(encoding) = encoding {
             fields.push(p::uint(6, encoding));
         }
-        // Main archive selector used by the supported Linux runtime profile.
+        // Preserve the supported runtime's value for both main and subpackages.
         fields.push(p::uint(7, 0xadfe7485));
         p::message(&fields)
     };
@@ -478,6 +523,7 @@ fn decode_package_reply(
     reply: &[u8],
     app_id: &str,
     version: u32,
+    name: &str,
 ) -> Result<(reqwest::Url, [u8; 16])> {
     let fields = p::decode(reply)?;
     ensure!(p::base_code(&fields)? == 0, "Package lookup rejected");
@@ -493,7 +539,7 @@ fn decode_package_reply(
         let selector = p::decode(p::data(&result, 20)?)?;
         ensure!(
             p::data(&selector, 1)? == app_id.as_bytes()
-                && p::data(&selector, 3)? == b"__APP__"
+                && p::data(&selector, 3)? == name.as_bytes()
                 && p::scalar(&selector, 4)? == 4
                 && p::scalar(&selector, 5)? == 0
                 && p::scalar(&result, 5)? == u64::from(version)
@@ -515,7 +561,7 @@ fn decode_package_reply(
         ensure!(package.is_none(), "Duplicate Mini Program package result");
         package = Some((url, digest));
     }
-    package.context("No supported Mini Program main archive")
+    package.context("No supported Mini Program archive")
 }
 
 fn download_package(url: reqwest::Url, digest: &[u8; 16]) -> Result<Vec<u8>> {
@@ -556,6 +602,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn subpackage_request_preserves_exact_name_version_and_both_encodings() {
+        let request =
+            prepare_package(b"base", "wx0123456789abcdef", 37, "/feature/pages/").unwrap();
+        let fields = p::decode(&request).unwrap();
+        assert_eq!(p::data(&fields, 1).unwrap(), b"base");
+        let items: Vec<_> = fields.iter().filter(|field| field.number == 2).collect();
+        assert_eq!(items.len(), 2);
+        for (index, field) in items.iter().enumerate() {
+            let p::Value::Bytes(bytes) = &field.value else {
+                panic!("item must be length-delimited");
+            };
+            let item = p::decode(bytes).unwrap();
+            let selector = p::decode(p::data(&item, 1).unwrap()).unwrap();
+            assert_eq!(p::data(&selector, 1).unwrap(), b"wx0123456789abcdef");
+            assert_eq!(p::data(&selector, 3).unwrap(), b"/feature/pages/");
+            assert_eq!(p::scalar(&selector, 4).unwrap(), 4);
+            assert_eq!(p::scalar(&selector, 5).unwrap(), 0);
+            assert_eq!(p::scalar(&item, 4).unwrap(), 37);
+            assert_eq!(p::scalar(&item, 5).unwrap(), 0);
+            assert_eq!(p::scalar(&item, 7).unwrap(), 0xadfe7485);
+            if index == 0 {
+                assert!(p::optional(&item, 6).unwrap().is_none());
+            } else {
+                assert_eq!(p::scalar(&item, 6).unwrap(), 1);
+            }
+        }
+    }
+
+    #[test]
     fn package_reply_selects_only_the_requested_raw_release_archive() {
         let app = "wx0123456789abcdef";
         let selector = p::message(&[
@@ -587,13 +662,14 @@ mod tests {
             .unwrap()
         };
         let good = reply(b"https://launchwxacode.wxqcloud.qq.com.cn/package");
-        let (url, digest) = decode_package_reply(&good, app, 7).unwrap();
+        let (url, digest) = decode_package_reply(&good, app, 7, "__APP__").unwrap();
         assert_eq!(url.path(), "/package");
         assert_eq!(digest[15], 255);
-        assert!(decode_package_reply(&good, app, 8).is_err());
-        assert!(decode_package_reply(&good, "wx1111111111111111", 7).is_err());
+        assert!(decode_package_reply(&good, app, 8, "__APP__").is_err());
+        assert!(decode_package_reply(&good, app, 7, "/feature/").is_err());
+        assert!(decode_package_reply(&good, "wx1111111111111111", 7, "__APP__").is_err());
         let wrong_origin = reply(b"https://launchwxacode.wxqcloud.qq.com.cn.example.org/package");
-        assert!(decode_package_reply(&wrong_origin, app, 7).is_err());
+        assert!(decode_package_reply(&wrong_origin, app, 7, "__APP__").is_err());
     }
 
     #[test]

@@ -164,7 +164,7 @@ export async function stageMiniProgram(dataDir, account, title = "Cafe") {
     "icons/menu@2x.SVG": '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="1"><path fill="#12503e" d="M0 0h2v1H0z"/></svg>',
     "icons/menu.PNG": Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l2sAAAAASUVORK5CYII=", "base64"),
     "utilities/value.wasm": Buffer.from("0061736d010000000105016000017f030201000709010576616c756500000a06010400412a0b", "hex"),
-    "app-config.json": JSON.stringify({ pages: [home, menu], subPackages: [{ root: "utilities" }] }),
+    "app-config.json": JSON.stringify({ pages: [home, menu], subPackages: [{ root: "utilities" }, { root: "missing" }, { root: "isolated", independent: true }] }),
     [home + ".html"]: `$gwx_Home('./${home}.wxml')`,
     [menu + ".html"]: `$gwx_Menu('./${menu}.wxml')`,
     "app-wxss.js": `
@@ -177,6 +177,7 @@ export async function stageMiniProgram(dataDir, account, title = "Cafe") {
     "app-service.js": `
       if(this&&this.__g===undefined)Object.defineProperty(this,"__g",{value:{aa:0}});
       Object.freeze(__g);
+      $gwx = function(_) { return function(route, shared) { shared.utilityLabel = "Utility page"; }; }(0,__g.aa);
       $gwx_Counter = function(_) { return function(route) {
         if (route !== "./components/counter/index.wxml") return;
         return function(data) { return {tag:"wx-view",children:[
@@ -255,7 +256,9 @@ export async function stageMiniProgram(dataDir, account, title = "Cafe") {
       module.exports = {value: 42};
     },{isPage:false,isComponent:false,currentFile:'utilities/value.js'});
     if(this&&this.__g===undefined)Object.defineProperty(this,"__g",{value:{aa:0}});
-    ${page("utilities/pages/index", "Utility", "Utility page", home).replace('if(query.menu)', 'this.setData({image:"/utilities/icon.svg"});if(query.menu)')}`,
+    ${page("utilities/pages/index", "Utility", "Utility page", home)
+      .replace('return function(route){return function(data){', 'return function(route,shared){$gwx("init",shared);if(shared.utilityLabel!=="Utility page")throw new Error("Missing main template imports");return function(data){')
+      .replace('if(query.menu)', 'this.setData({image:"/utilities/icon.svg"});if(query.menu)')}`,
     "utilities/pages/index.html": "$gwx_Utility('./utilities/pages/index.wxml')",
     "utilities/app-wxss.js": `__wxAppCode__['utilities/pages/index.wxss']=setCssToHead(["wx-text{color:rgb(90,30,150)}"]);`,
     "utilities/icon.svg": '<svg xmlns="http://www.w3.org/2000/svg" width="3" height="2"><path fill="#12503e" d="M0 0h3v2H0z"/></svg>',

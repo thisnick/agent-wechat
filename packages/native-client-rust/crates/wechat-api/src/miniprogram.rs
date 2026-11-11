@@ -7,9 +7,9 @@ use axum::{
 };
 use contracts::{
     NativeMiniProgram, NativeMiniProgramCapabilities, NativeMiniProgramEntry,
-    NativeMiniProgramIpcRequest, NativeMiniProgramLaunch, NativeMiniProgramLaunchRequest,
-    NativeMiniProgramLogin, NativeMiniProgramNetworkPolicy, NativeMiniProgramPackage,
-    NativeMiniPrograms,
+    NativeMiniProgramFetchRequest, NativeMiniProgramIpcRequest, NativeMiniProgramLaunch,
+    NativeMiniProgramLaunchRequest, NativeMiniProgramLogin, NativeMiniProgramNetworkPolicy,
+    NativeMiniProgramPackage, NativeMiniPrograms,
 };
 use uuid::Uuid;
 
@@ -49,6 +49,12 @@ pub(super) fn error(error: &anyhow::Error) -> Option<ApiError> {
                 (StatusCode::NOT_FOUND, "mini_program_launch_unavailable")
             }
             "mini_program_cache_invalid" => (StatusCode::CONFLICT, "mini_program_cache_invalid"),
+            "mini_program_package_changed" => {
+                (StatusCode::CONFLICT, "mini_program_package_changed")
+            }
+            "mini_program_subpackage_unsupported" => {
+                (StatusCode::CONFLICT, "mini_program_subpackage_unsupported")
+            }
             "mini_program_page_unsupported" => {
                 (StatusCode::CONFLICT, "mini_program_page_unsupported")
             }
@@ -137,7 +143,31 @@ async fn fetch_package(
     State(app): State<App>,
     Extension(claims): Extension<Claims>,
     Path((account, app_id)): Path<(String, String)>,
+    input: Option<Json<NativeMiniProgramFetchRequest>>,
 ) -> ApiResult<Json<NativeMiniProgramPackage>> {
+    if let Some(Json(input)) = input {
+        claims.require(Some(&account), "mini-programs")?;
+        let package = work(move || {
+            app.core
+                .fetch_mini_program_subpackage(
+                    &account,
+                    &app_id,
+                    &input.version,
+                    &input.main_sha256,
+                    &input.root,
+                    || claims.valid(&app.core.store),
+                )
+                .map(|package| NativeMiniProgramPackage {
+                    id: package.id,
+                    version: input.version,
+                    sha256: package.sha256,
+                    size_bytes: package.size_bytes as u32,
+                    root: Some(package.root),
+                })
+        })
+        .await?;
+        return Ok(Json(package));
+    }
     claims.require(Some(&account), "admin")?;
     let (package, size) = work(move || {
         app.core

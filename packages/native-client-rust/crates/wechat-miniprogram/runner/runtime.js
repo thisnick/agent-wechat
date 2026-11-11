@@ -95,7 +95,15 @@ function loadSubpackage(root, id) {
   if (!subpackageLoads.has(id)) {
     const declared = (appConfig.subPackages ?? appConfig.subpackages ?? []).find(item => item.root?.replace(/\/$/, "") === root);
     if (declared?.independent) return Promise.reject(new Error("Independent Mini Program subpackages are unavailable"));
-    const load = import("/_wx/subpackages/" + id + ".js").then(registry => {
+    const load = fetch("/_wx/package", {
+      method: "POST", credentials: "omit", redirect: "error",
+      headers: { "Content-Type": "application/json", "x-wx-launch": launchKey },
+      body: JSON.stringify({ id }),
+    }).then(response => {
+      if (response.status === 409) throw new Error("Mini Program package changed; close and reopen the app");
+      if (!response.ok) throw new Error("Mini Program subpackage download failed (" + response.status + ")");
+      return import("/_wx/subpackages/" + id + ".js");
+    }).then(registry => {
       const entries = registry.registerModules(registerApp, getApp);
       const styles = new Map([...registry.compiledStyles].filter(([path]) => path !== "app"));
       const configs = registry.componentConfigs;
@@ -925,4 +933,11 @@ window.addEventListener("pagehide", () => {
 if (factories.has("app.js")) requireFrom("")("app.js");
 app.onLaunch?.(structuredClone(launch));
 setForeground(!document.hidden);
-display(initial, launch.query);
+if (initial.deferred) {
+  const selected = subpackageForPath(initial.entry);
+  if (!selected) throw new Error("Mini Program entry subpackage is unavailable");
+  await loadSubpackage(...selected);
+  display(await import("/_wx/pages/" + initial.entry), launch.query);
+} else {
+  display(initial, launch.query);
+}

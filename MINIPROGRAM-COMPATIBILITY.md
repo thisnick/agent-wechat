@@ -33,7 +33,7 @@ These checks cover startup. Booking, ordering, payment, and complete signed-in f
 
 | Requirement | Runner behavior |
 | --- | --- |
-| Main archive and subpackage loading | Verified main archive and same-release staged subpackages. Navigation and asynchronous module imports load staged modules, page templates, component registrations, styles and images. Automatic subpackage download, independent subpackages and preload rules remain unavailable. |
+| Main archive and subpackage loading | Verified main archive and declared same-release subpackages. Navigation and asynchronous module imports load modules, page templates, component registrations, styles and images. An online hub downloads missing non-independent roots at the selected main version and digest; cached archives work offline. Independent subpackages and preload rules remain unavailable. |
 | Compiled templates and styles | Glass-easel and selected Exparser pages. Both paths adapt compiled app/page WXSS and responsive units; styles stay outside the host toolbar. Exparser also supports selected component styles. Native Skyline, XR and Mini Game renderers are unavailable. |
 | Page navigation and app lifecycle | Main-archive page stack and browser visibility. App tab bar, custom route builders, app bar, and native split frames are unavailable. |
 | WeUI extended library and plugins | Glass-easel can load the pinned WeUI 1.5.6 extension when declared with `useExtendedLib.weui` (`true` or `"1.5.6"`). App-bundled components retain their code. Native plugins, Exparser extensions, and controls requiring unavailable host APIs remain unsupported. |
@@ -58,7 +58,7 @@ browser implementations. The other two probes are unavailable.
 | `getApp` | 226 | Partial | Page and component lifecycles through the Exparser adapter or Glass-easel. Host-specific features vary. |
 | `getCurrentPages` | 8 | Partial | Page and component lifecycles through the Exparser adapter or Glass-easel. Host-specific features vary. |
 | `Page` | 312 | Partial | Page and component lifecycles through the Exparser adapter or Glass-easel. Host-specific features vary. |
-| `require.async` | 1 | Partial | Loads JavaScript from verified same-release staged subpackages. Missing archives need staging. |
+| `require.async` | 1 | Partial | Loads JavaScript from verified same-release subpackages, fetching missing declared roots through an online hub. |
 | `wx.addPhoneContact` | 1 | Unavailable | The runner does not expose this capability. |
 | `wx.arrayBufferToBase64` | 23 | Unavailable | The runner does not expose this capability. |
 | `wx.canIUse` | 7 | Partial | Returns the data or feature detection the runner can provide. |
@@ -300,7 +300,7 @@ by renderer even where a basic tag can be displayed.
 | `match-media` | 1 | Unavailable | No dedicated native behavior. Generic rendering does not establish compatibility. |
 | `movable-area` | 2 | Unavailable | No dedicated native behavior. Generic rendering does not establish compatibility. |
 | `movable-view` | 2 | Unavailable | No dedicated native behavior. Generic rendering does not establish compatibility. |
-| `navigator` | 137 | Partial | Clicks open supported local pages through the existing page stack. Exparser links also support Enter and success/failure events. Tab switching, cross-program navigation and unstaged subpackage pages are unavailable. |
+| `navigator` | 137 | Partial | Clicks open supported local pages through the existing page stack. Exparser links also support Enter and success/failure events. Declared subpackage pages load on demand. Tab switching and cross-program navigation are unavailable. |
 | `open-container` | 1 | Unavailable | No dedicated native behavior. Generic rendering does not establish compatibility. |
 | `open-data` | 1 | Unavailable | No dedicated native behavior. Generic rendering does not establish compatibility. |
 | `open-data-item` | 1 | Unavailable | No dedicated native behavior. Generic rendering does not establish compatibility. |

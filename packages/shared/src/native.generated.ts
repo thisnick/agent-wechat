@@ -1341,6 +1341,19 @@ sha256: string,
  * Declared root for a cached subpackage. Omitted for the main archive.
  */
 root?: string, };
+export type NativeMiniProgramFetchRequest = { 
+/**
+ * Exact version of the launch's main archive.
+ */
+version: string, 
+/**
+ * SHA-256 of that main archive. A changed selection requires a new launch.
+ */
+mainSha256: string, 
+/**
+ * Declared relative subpackage root, without surrounding slashes.
+ */
+root: string, };
 export type NativeMiniProgramCapabilities = { 
 /**
  * Whether the runner may request app login codes.

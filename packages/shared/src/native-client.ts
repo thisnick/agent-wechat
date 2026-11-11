@@ -11,7 +11,7 @@ export type * from "./native.generated.js";
 export { NATIVE_MAX_SOURCE_BYTES, NATIVE_MAX_ORDINARY_SOURCE_BYTES, NATIVE_MAX_VIDEO_SOURCE_BYTES } from "./native.generated.ts";
 import { NATIVE_MAX_SOURCE_BYTES } from "./native.generated.ts";
 import type { NativeGroupCreateRequest, NativeGroupMemberLookup } from "./native.generated.js";
-import type { NativeMiniProgramIpcRequest, NativeMiniProgramLaunch, NativeMiniProgramLaunchRequest, NativeMiniProgramLogin, NativeMiniProgramPackage, NativeMiniPrograms } from "./native.generated.js";
+import type { NativeMiniProgramIpcRequest, NativeMiniProgramLaunch, NativeMiniProgramLaunchRequest, NativeMiniProgramLogin, NativeMiniProgramPackage, NativeMiniProgramFetchRequest, NativeMiniPrograms } from "./native.generated.js";
 export type NativeListOptions = { cursor?: string; limit?: number; query?: string; kind?: string };
 export function isNativeTombstone(value: unknown): value is NativeTombstone { const item = value as Partial<NativeTombstone> | null; return item?.deleted === true && typeof item.id === "string" && typeof item.version === "string"; }
 /** Validate a derived official notice without interpreting it as identity metadata. */
@@ -138,6 +138,10 @@ export class NativeWeChatClient {
       throw new Error("Mini Program icon is not a supported image");
     }
     return { bytes: await this.readBounded(response, 8 * 1024 * 1024), contentType };
+  }
+  /** Fetch a declared subpackage at the launch's exact main version and digest. Requires mini-programs. */
+  fetchMiniProgramSubpackage(accountId: string, appId: string, options: NativeMiniProgramFetchRequest): Promise<NativeMiniProgramPackage> {
+    return this.request(`v1/accounts/${id(accountId)}/mini-programs/${id(appId)}/packages`, { method: "POST", body: JSON.stringify(options) });
   }
   /** Download the package bytes selected by a launch. The runner verifies the digest. */
   async getMiniProgramPackage(accountId: string, appId: string, pkg: NativeMiniProgramPackage): Promise<Uint8Array> {

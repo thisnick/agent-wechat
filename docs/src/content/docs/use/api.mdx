@@ -267,7 +267,15 @@ descriptor and reuses an existing cache entry.
 
 Fetch a known program’s icon with `GET /mini-programs/{appId}/icon` or SDK `miniProgramIcon`. It requires `read`, `media`, and an online account; returns verified image bytes; and returns `404 mini_program_icon_unavailable` when no icon can be retrieved. It does not issue an app login code.
 
-The SDK methods are `listMiniPrograms`, `prepareMiniProgram`, and `getMiniProgramPackage`. Listing requires `read`. Preparing a launch and retrieving its archive require `mini-programs`. A launch with `sourceMessageId` also requires `read` for the selected account.
+For a missing declared subpackage, SDK `fetchMiniProgramSubpackage` posts to the same `/mini-programs/{appId}/packages` route with the `mini-programs` scope:
+
+```json
+{"version":"37","mainSha256":"<main archive SHA-256>","root":"feature/pages"}
+```
+
+The hub checks the main archive, downloads that root at the selected version and returns a verified package descriptor. Use `getMiniProgramPackage` to retrieve its bytes. A changed main selection returns `409 mini_program_package_changed`; start a new launch. Unknown roots and independent subpackages are rejected. Existing verified archives are reused offline.
+
+The other SDK methods are `listMiniPrograms`, `prepareMiniProgram`, and `getMiniProgramPackage`. Listing requires `read`. Preparing a launch and retrieving its archive require `mini-programs`. A launch with `sourceMessageId` also requires `read` for the selected account.
 
 When a launch reports `capabilities.login: true`, `issueMiniProgramLogin(accountId, appId, launchId, key)` posts `{"method":"wx.login"}` to `/mini-programs/{appId}/launches/{launchId}/ipc`. Use a UUID as the idempotency key and the access key with `mini-programs` that prepared the launch. Reuse the UUID only for the same invocation. Keep the app code private.
 

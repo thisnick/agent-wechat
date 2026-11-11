@@ -9,7 +9,7 @@ use std::{
     fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock, Weak},
     time::{Duration, Instant},
 };
 use uuid::Uuid;
@@ -99,16 +99,21 @@ pub struct MiniProgramSubpackage {
     pub size_bytes: usize,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SubpackageManifest {
     root: String,
     version: String,
     sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    main_sha256: Option<String>,
 }
 
 #[derive(Default)]
-pub(crate) struct Launches(Mutex<BTreeMap<Uuid, Grant>>);
+pub(crate) struct Launches {
+    grants: Mutex<BTreeMap<Uuid, Grant>>,
+    downloads: Mutex<BTreeMap<String, Weak<Mutex<()>>>>,
+}
 
 struct Grant {
     account: String,
@@ -163,7 +168,12 @@ fn valid_package_id(id: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
-fn subpackage_metadata(dir: &Path, id: &str, version: &str) -> Result<MiniProgramSubpackage> {
+fn subpackage_metadata(
+    dir: &Path,
+    id: &str,
+    version: &str,
+    main_sha256: &str,
+) -> Result<MiniProgramSubpackage> {
     ensure!(valid_package_id(id), "mini_program_package_unavailable");
     let parent = dir.join("subpackages");
     let path = parent.join(id);
@@ -175,7 +185,11 @@ fn subpackage_metadata(dir: &Path, id: &str, version: &str) -> Result<MiniProgra
         serde_json::from_slice(&file(&path.join("manifest.json"), 8192)?)
             .context("mini_program_cache_invalid")?;
     ensure!(
-        metadata.version == version,
+        metadata.version == version
+            && metadata
+                .main_sha256
+                .as_deref()
+                .is_none_or(|digest| digest == main_sha256),
         "mini_program_package_unavailable"
     );
     let root = metadata.root;
@@ -211,22 +225,17 @@ fn staged_subpackages(
     if !directory(&parent)? {
         return Ok(Vec::new());
     }
-    let config: serde_json::Value = serde_json::from_slice(archive.file("app-config.json")?)
+    let declared = archive
+        .subpackage_roots()
         .context("mini_program_cache_invalid")?;
-    let declared = config
-        .get("subPackages")
-        .or_else(|| config.get("subpackages"))
-        .and_then(serde_json::Value::as_array);
     let mut packages = Vec::<MiniProgramSubpackage>::new();
     for (count, entry) in fs::read_dir(parent)?.enumerate() {
-        ensure!(count < 64, "mini_program_cache_limit");
+        ensure!(count < 256, "mini_program_cache_limit");
         let id = entry?.file_name().to_string_lossy().into_owned();
         ensure!(id != package.package_id, "mini_program_cache_invalid");
-        let subpackage = subpackage_metadata(dir, &id, &package.version)?;
+        let subpackage = subpackage_metadata(dir, &id, &package.version, &package.sha256)?;
         ensure!(
-            declared.is_some_and(|items| items.iter().any(|item| item["root"]
-                .as_str()
-                .is_some_and(|root| root.trim_end_matches('/') == subpackage.root)))
+            declared.contains_key(&subpackage.root)
                 && !packages.iter().any(|item| item.root == subpackage.root),
             "mini_program_cache_invalid"
         );
@@ -247,6 +256,136 @@ fn write_cache_file(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 impl Core {
+    /// Fetch a declared subpackage for the exact main archive selected by a launch.
+    /// Concurrent requests for the same root share one download; unrelated account
+    /// operations do not wait on its lock. Existing verified archives are reused.
+    pub fn fetch_mini_program_subpackage(
+        &self,
+        account: &str,
+        app: &str,
+        version: &str,
+        main_sha256: &str,
+        root: &str,
+        authorize: impl Fn() -> bool,
+    ) -> Result<MiniProgramSubpackage> {
+        ensure!(authorize(), "mini_program_download_forbidden");
+        let account = &self.store.account(account)?.id;
+        let (dir, main) = self.cached_mini_program(account, app)?;
+        ensure!(
+            main.version == version && main.sha256 == main_sha256,
+            "mini_program_package_changed"
+        );
+        let archive = Archive::open(
+            app,
+            file(&dir.join("package.wxapkg"), MAX_PACKAGE_BYTES)?,
+            main_sha256,
+        )
+        .context("mini_program_cache_invalid")?;
+        ensure!(
+            archive.subpackage_roots()?.get(root) == Some(&false),
+            "mini_program_subpackage_unsupported"
+        );
+        let key = format!("{account}:{app}:{version}:{main_sha256}:{root}");
+        let gate = {
+            let mut gates = self
+                .mini_program_launches
+                .downloads
+                .lock()
+                .map_err(|_| anyhow::anyhow!("mini_program_download_failed"))?;
+            gates.retain(|_, gate| gate.strong_count() > 0);
+            if let Some(gate) = gates.get(&key).and_then(Weak::upgrade) {
+                gate
+            } else {
+                ensure!(gates.len() < 128, "mini_program_cache_limit");
+                let gate = Arc::new(Mutex::new(()));
+                gates.insert(key, Arc::downgrade(&gate));
+                gate
+            }
+        };
+        let _download = gate
+            .lock()
+            .map_err(|_| anyhow::anyhow!("mini_program_download_failed"))?;
+        let same_source = || -> Result<()> {
+            ensure!(authorize(), "mini_program_download_forbidden");
+            let current = manifest(&dir)?;
+            ensure!(
+                current.version == version && current.sha256 == main_sha256,
+                "mini_program_package_changed"
+            );
+            Ok(())
+        };
+        same_source()?;
+        let cached = || -> Result<Option<MiniProgramSubpackage>> {
+            let selected = staged_subpackages(&dir, &archive, &main)?
+                .into_iter()
+                .find(|item| item.root == root);
+            if let Some(selected) = &selected {
+                self.mini_program_package(account, app, version, &selected.id)?;
+            }
+            Ok(selected)
+        };
+        if let Some(selected) = cached()? {
+            return Ok(selected);
+        }
+        let epoch = self.store.runtime(account, "logout-epoch")?;
+        let check = || -> Result<()> {
+            same_source()?;
+            ensure!(
+                self.mini_program_login_available(account)?
+                    && self.store.runtime(account, "logout-epoch")? == epoch,
+                "mini_program_download_offline"
+            );
+            Ok(())
+        };
+        check()?;
+        let bytes = self
+            .native_account(account, Default::default())?
+            .mini_program_subpackage_download_guarded(app, version.parse()?, root, check)
+            .context("mini_program_download_failed")?;
+        check()?;
+        let size_bytes = bytes.len();
+        let sha256 = format!("{:x}", Sha256::digest(&bytes));
+        let subarchive =
+            Archive::open(app, bytes.clone(), &sha256).context("mini_program_cache_invalid")?;
+        subarchive
+            .file(&format!("{root}/app-service.js"))
+            .context("mini_program_subpackage_unsupported")?;
+        drop(subarchive);
+        let id = format!(
+            "sub-{}",
+            &format!("{:x}", Sha256::digest(root.as_bytes()))[..24]
+        );
+        let parent = dir.join("subpackages");
+        if !directory(&parent)? {
+            wechat_platform::private_dir(&parent)?;
+        }
+        let staged = wechat_platform::private_tempdir_in(&dir, ".sub-fetch-")?;
+        write_cache_file(&staged.path().join("package.wxapkg"), &bytes)?;
+        write_cache_file(
+            &staged.path().join("manifest.json"),
+            &serde_json::to_vec(&SubpackageManifest {
+                root: root.into(),
+                version: version.into(),
+                sha256: sha256.clone(),
+                main_sha256: Some(main_sha256.into()),
+            })?,
+        )?;
+        wechat_platform::sync_dir(staged.path())?;
+        check()?;
+        match wechat_platform::publish_directory(staged.path(), &parent.join(&id)) {
+            Ok(()) => Ok(MiniProgramSubpackage {
+                id,
+                root: root.into(),
+                sha256,
+                size_bytes,
+            }),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                cached()?.context("mini_program_cache_invalid")
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Fetch a missing release archive from WeChat and publish its cache entry.
     /// An existing staged package is verified and reused.
     pub fn fetch_mini_program(
@@ -466,8 +605,9 @@ impl Core {
         let size_bytes = bytes.len();
         let archive =
             Archive::open(app, bytes, &package.sha256).context("mini_program_cache_invalid")?;
+        let default_entry = manifest(&dir)?.entry_page;
         let framework = archive
-            .framework(&package.entry_page, &package.service_path)
+            .framework(&default_entry, &package.service_path)
             .context("mini_program_page_unsupported")?;
         let subpackages = staged_subpackages(&dir, &archive, &package)?;
         let id = Uuid::new_v4();
@@ -476,7 +616,7 @@ impl Core {
             let now = Instant::now();
             let mut grants = self
                 .mini_program_launches
-                .0
+                .grants
                 .lock()
                 .map_err(|_| anyhow::anyhow!("mini_program_launch_unavailable"))?;
             grants.retain(|_, grant| grant.expires > now);
@@ -521,7 +661,7 @@ impl Core {
         let (path, digest) = if metadata.package_id == id {
             (dir.join("package.wxapkg"), metadata.sha256)
         } else {
-            let subpackage = subpackage_metadata(&dir, id, version)?;
+            let subpackage = subpackage_metadata(&dir, id, version, &metadata.sha256)?;
             (
                 dir.join("subpackages").join(id).join("package.wxapkg"),
                 subpackage.sha256,
@@ -644,7 +784,7 @@ impl Core {
         let (invocation, expires) = {
             let mut grants = self
                 .mini_program_launches
-                .0
+                .grants
                 .lock()
                 .map_err(|_| anyhow::anyhow!("mini_program_launch_unavailable"))?;
             let grant = grants
