@@ -9,7 +9,7 @@ import { once } from 'node:events';
 import { createServer } from 'node:http';
 import { mkdtemp, mkdir, writeFile, readFile, copyFile, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 
 const root = resolve(dirname(new URL(import.meta.url).pathname), '..');
 const { build } = createRequire(join(root, 'packages/openclaw-extension/package.json'))('esbuild');
@@ -90,7 +90,9 @@ console.log('Synthetic local transcript');
 `, {mode:0o600});
     const config = { gateway: { mode: 'local', bind: 'loopback', port, auth: { mode: 'token', token: 'synthetic-gateway-token-'.repeat(3) }, controlUi: { enabled: false } }, browser: { enabled: false }, cron: { enabled: false }, discovery: { mdns: { mode: 'off' } }, update: { checkOnStart: false },
       session: { dmScope }, messages: { queue: { mode: 'collect' } },
-      models: { mode: 'merge', catalogRefresh: { enabled: false }, providers: { fixture: { baseUrl: `http://127.0.0.1:${nativePort}/model/v1`, api: 'openai-completions', apiKey: 'synthetic-model-key', models: [{ id: 'fixture-model', name: 'Fixture', reasoning: false, input: name === 'text-only' ? ['text'] : ['text', 'image'], contextWindow: 32768, maxTokens: 256, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } },
+      // The group transcript (every scenario in one session, with attachment notes)
+      // must fit without unrelated auto-compaction.
+      models: { mode: 'merge', catalogRefresh: { enabled: false }, providers: { fixture: { baseUrl: `http://127.0.0.1:${nativePort}/model/v1`, api: 'openai-completions', apiKey: 'synthetic-model-key', models: [{ id: 'fixture-model', name: 'Fixture', reasoning: false, input: name === 'text-only' ? ['text'] : ['text', 'image'], contextWindow: 65536, maxTokens: 256, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } },
       tools: { media: { models: [{type:'cli',command:process.execPath,args:[transcriber,'{{MediaPath}}',join(temporary,'transcriptions.jsonl')],capabilities:['audio']}], audio: { enabled: true }, image: { enabled: false }, video: { enabled: false } } }, agents: { defaults: { workspace: join(temporary, 'workspace'), model: { primary: 'fixture/fixture-model', fallbacks: [] } } },
       plugins: { allow: ['agent-wechat'], load: { paths: [join(temporary, 'plugin')] }, entries: { 'agent-wechat': { enabled: true, hooks: { allowConversationAccess: conversationAccess }, config: { backend: 'native', native: { mode: 'external', accountId: 'a', endpoint: `http://127.0.0.1:${nativePort}`, token: { source: 'env', provider: 'default', id: 'AGENT_WECHAT_TOKEN' }, consumerStateDir: join(temporary, 'consumer'), readPolicy } } } } },
       logging: { file: join(temporary, 'gateway.log') }, channels: { 'agent-wechat': { enabled: true, dmPolicy: 'open', allowFrom: ['*'], groupPolicy: 'open', groupAllowFrom: ['*'] } } };
@@ -113,7 +115,10 @@ console.log('Synthetic local transcript');
     const items = new Map(result.items.map(item => [item.id, item]));
     const hooks = (await readFile(join(temporary, 'hooks.jsonl'), 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line));
     const transcriptions = name === 'text-only' ? [] : (await readFile(join(temporary,'transcriptions.jsonl'),'utf8')).split('\n').filter(Boolean).map(line=>JSON.parse(line));
-    if (name !== 'text-only') { assert.equal(transcriptions.length,2); assert.ok(transcriptions.every(item=>item.sha256===assets.get('voice').asset.sha256)); }
+    // The plugin transcribes both voice notes. The one it couldn't transcribe stays
+    // an untranscribed attachment, so OpenClaw tries it once more (and fails too).
+    if (name !== 'text-only') { assert.equal(transcriptions.length,3); assert.ok(transcriptions.every(item=>item.sha256===assets.get('voice').asset.sha256));
+      assert.equal(transcriptions.filter(item=>item.path.includes('voice-failed')).length,2); }
     const evidence = process.env.NATIVE_MODEL_MEDIA_PROOF_DIR;
     if (evidence) {
       const destination = join(evidence, name + '-' + Date.now()); await mkdir(destination, { recursive: true, mode: 0o700 });
@@ -155,7 +160,9 @@ console.log('Synthetic local transcript');
         else { assert.equal(images.length,1); const image=/^data:([^;]+);base64,(.+)$/.exec(images[0].image_url.url); assert.ok(image); assert.equal(image[1],asset.mime); assert.equal(createHash('sha256').update(Buffer.from(image[2],'base64')).digest('hex'),asset.sha256); }
         if(id==='image-large') { assert.notEqual(asset.sourceSha256,asset.sha256); assert.match(JSON.stringify(current),/prepared still preview/); }
         if(id==='link-preview') { assert.match(JSON.stringify(current),/Synthetic shared title/); assert.match(JSON.stringify(current),/https:\/\/example.invalid\/article/); }
-      } else assert.ok(JSON.stringify(current).includes(asset.path));
+      } else if (id !== 'voice') assert.ok(JSON.stringify(current).includes(`media://inbound/${basename(asset.path)}`), `Missing ${id} attachment`);
+      // Attachments are media facts; a gateway path never appears in the model's text.
+      assert.ok(!JSON.stringify(current).includes(asset.path), `Gateway path in ${id} text`);
       if(id==='voice') assert.match(JSON.stringify(current),/Synthetic local transcript/);
       if(id==='voice-failed') assert.match(JSON.stringify(current),/Voice transcription unavailable/);
     }

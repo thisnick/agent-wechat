@@ -420,10 +420,11 @@ test("group attachments buffered before a mention survive restart and retain ori
     if (message.type === 1) return { body: message.body, pending: false };
     const kind = message.type === 3 ? "image" : message.type === 34 ? "audio" : message.type === 43 ? "video" : "file";
     const path = `/managed/${message.id}.original`, preview = kind === "image" ? `/managed/${message.id}.preview.jpg` : path;
+    const mime = kind === "file" ? "application/pdf" : kind === "video" ? "video/mp4" : "audio/mpeg";
     return { body: `<media:${kind}>`, pending: false, attachment: { kind, status: "ready", filename: message.id, path, mime: kind === "image" ? "image/jpeg" : "application/octet-stream" },
       mediaPath: ["image", "video"].includes(kind) ? preview : undefined, mediaMime: "image/jpeg",
-      suppliedAssets: [{ id: message.id, sha256: "0".repeat(64), byteLength: 10, mime: "image/jpeg", path: preview,
-        sourcePath: path, sourceSha256: "1".repeat(64), sourceByteLength: 20, sourceMime: "image/png", role: kind === "image" ? "model_image" : "file_reference", kind, runtimeMedia: ["image", "video"].includes(kind), contextRole: "trigger" }] };
+      suppliedAssets: [{ id: message.id, sha256: "0".repeat(64), byteLength: 10, mime: kind === "image" ? "image/jpeg" : mime, path: preview,
+        sourcePath: path, sourceSha256: "1".repeat(64), sourceByteLength: 20, sourceMime: kind === "image" ? "image/png" : mime, role: kind === "image" ? "model_image" : "file_reference", kind, runtimeMedia: ["image", "video"].includes(kind), contextRole: "trigger" }] };
   };
   for (const [index, type] of [3, 3, 49, 43, 34].entries()) {
     const message = index === 0 ? value.message : { ...value.message, id: `history-${index}` };

@@ -11,7 +11,7 @@ import { once } from 'node:events';
 import { createServer } from 'node:http';
 import { mkdtemp, mkdir, writeFile, readFile, copyFile, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 const root = resolve(dirname(new URL(import.meta.url).pathname), '..');
 const { build } = createRequire(join(root, 'packages/openclaw-extension/package.json'))('esbuild');
 const sdk = await realpath(join(root, 'packages/openclaw-extension/node_modules/openclaw'));
@@ -195,12 +195,14 @@ try {
   assert.deepEqual(transfers,[{messageId:'history-image',assetId:null,quality:'best'}]);
   const group=result.contexts.find(ctx=>ctx.MessageSid.startsWith('wechat-native:a:trigger:')),direct=result.contexts.find(ctx=>ctx.MessageSid.startsWith('wechat-native:a:dm-image:'));
   assert.equal(group.Attachments.length,6);assert.equal(group.InboundHistory.length,8);assert.match(group.BodyForAgent,/pending/);assert.match(group.BodyForAgent,/historical voice transcript/);assert.equal(group.WasMentioned,true);
-  for(const attachment of group.Attachments)assert.ok(JSON.stringify(requests[0].messages).includes(attachment.path),`Missing group ${attachment.kind} path`);
-  const trigger=result.items.find(item=>item.message.id==='trigger'),selected=trigger.dispatchManifest.assets.find(asset=>asset.role==='model_image');assert.equal(selected.messageId,'image-b');assert.equal(selected.contextRole,'history');assert.notEqual(selected.sha256,selected.sourceSha256);assert.equal(group.MediaPath,selected.path);
+  // Every attachment reaches OpenClaw as a media fact; the transcribed voice note is shown by its transcript.
+  for(const attachment of group.Attachments){assert.ok(!JSON.stringify(requests[0].messages).includes(attachment.path),`Gateway ${attachment.kind} path in text`);
+    if(attachment.kind!=='audio')assert.ok(JSON.stringify(requests[0].messages).includes(`media://inbound/${basename(attachment.path)}`),`Missing group ${attachment.kind} attachment`);}
+  const trigger=result.items.find(item=>item.message.id==='trigger'),selected=trigger.dispatchManifest.assets.find(asset=>asset.role==='model_image');assert.equal(selected.messageId,'image-b');assert.equal(selected.contextRole,'history');assert.notEqual(selected.sha256,selected.sourceSha256);assert.equal(group.MediaPath,undefined);assert.deepEqual(group.media.filter(fact=>fact.kind==='image'&&!fact.hydrationSuppressed).map(fact=>fact.path),[selected.path]);
   const images=request=>request.messages.flatMap(message=>Array.isArray(message.content)?message.content.filter(block=>block.type==='image_url'):[]);
   assert.equal(images(requests[0]).length,1);const image=/^data:([^;]+);base64,(.+)$/.exec(images(requests[0])[0].image_url.url);assert.equal(createHash('sha256').update(Buffer.from(image[2],'base64')).digest('hex'),selected.sha256);
   const directRequest=requests[toolSteps.length+1];
-  assert.equal(direct.Attachments.length,1);assert.ok(JSON.stringify(directRequest.messages).includes(direct.Attachments[0].path));assert.equal(images(directRequest).length,1);
+  assert.equal(direct.Attachments.length,1);assert.ok(JSON.stringify(directRequest.messages).includes(`media://inbound/${basename(direct.Attachments[0].path)}`));assert.equal(images(directRequest).length,1);
   assert.equal(images(requests[5]).length,2);const retrieved=/^data:([^;]+);base64,(.+)$/.exec(images(requests[5])[1].image_url.url);assert.ok(retrieved);assert.equal(createHash('sha256').update(Buffer.from(retrieved[2],'base64')).digest('hex'),assets.get('history-image').asset.sha256);
   for(let index=0;index<quoteScenarios.length;index++) {
     const scenario=quoteScenarios[index],request=requests[toolSteps.length+2+index];
@@ -212,7 +214,7 @@ try {
     if(['quote-voice','quote-video','quote-file'].includes(scenario.id))assert.ok(providerText.includes('attachment unavailable'),'Quoted media must retain its comment and explicit attachment status');
     const isImage=['quote-image','quote-embedded-image'].includes(scenario.id);
     const context=result.contexts.find(ctx=>ctx.MessageSid.startsWith(`wechat-native:a:${scenario.id}:`));
-    assert.equal(!!context.MediaPath,isImage);
+    assert.equal(!!context.media?.some(fact=>fact.kind==='image'&&!fact.hydrationSuppressed),isImage);
     if(isImage) {
       const sourceAsset=assets.get(scenario.id).asset;
       const expected=sourceAsset.preview?.sha256??sourceAsset.sha256;
