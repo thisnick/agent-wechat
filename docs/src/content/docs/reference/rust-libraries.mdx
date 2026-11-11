@@ -29,9 +29,10 @@ connecting to a running daemon can use the [HTTP API](/use/api/).
 2. Build with Rust 1.93.1+, a C compiler, Make and Perl. Cargo resolves supporting
    crates automatically. Native Opus also needs CMake and a C++ compiler.
 
-Rust libraries are versioned together, independently of the CLI, daemon and
-OpenClaw plugin. Choose a version listed on crates.io; application version numbers
-do not select library versions.
+From the release after 2.3.2, the Rust libraries have the same version number as
+the CLI, daemon and OpenClaw plugin, and every release publishes all five. Earlier
+library versions (up to 2.2.0) were numbered separately; choose a version listed
+on crates.io.
 
 ## Read a stopped profile
 

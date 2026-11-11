@@ -4,11 +4,14 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { cratePackage } from './native-crates-version.mjs';
 import { publicPackages } from './native-release-policy.mjs';
 
 const packages = [
   ...publicPackages.map(([directory, name]) => ({ directory, name, private: false })),
   { directory: 'packages/desktop', name: '@agent-wechat/desktop', private: true },
+  // The Rust libraries share the application version, so a library-only change still has notes.
+  { ...cratePackage, private: true },
 ];
 
 const start = '<!-- agent-wechat:changesets:start -->';

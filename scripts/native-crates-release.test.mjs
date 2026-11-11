@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { crateReleaseTrigger, prepareCrateRelease, finishCrateRelease } from './native-crates-release.mjs';
+import { crateReleaseNotes, crateReleaseTrigger, prepareCrateRelease, finishCrateRelease } from './native-crates-release.mjs';
 import { cratePackage } from './native-crates-version.mjs';
 
 const sourceCommit = 'a'.repeat(40), version = '2.0.1';
@@ -98,7 +98,14 @@ test('stable and beta library release notes never take over the latest applicati
   }
 });
 
-test('a missing or empty versioned changelog fails before any release write', async t => {
+test('an application-only release still has library release notes', async t => {
+  const options = await fixture(t);
+  await writeFile(join(options.root, cratePackage.directory, 'CHANGELOG.md'), `# Rust libraries\n\n## ${version}\n\n## 0.0.1\n\nOld entry.\n`);
+  const notes = await crateReleaseNotes(options);
+  assert.match(notes, /No library changes/); assert.doesNotMatch(notes, /Old entry/);
+});
+
+test('a missing versioned changelog fails before any release write', async t => {
   const options = await fixture(t);
   await writeFile(join(options.root, cratePackage.directory, 'CHANGELOG.md'), '# Rust libraries\n\n## 0.0.1\n\nOld entry.\n');
   await assert.rejects(prepareCrateRelease({ ...options, fetchImpl: () => assert.fail('must not write') }), /exact changelog/);

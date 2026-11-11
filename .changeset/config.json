@@ -11,7 +11,8 @@
     [
       "@agent-wechat/cli",
       "@agent-wechat/agent-wechat",
-      "@agent-wechat/desktop"
+      "@agent-wechat/desktop",
+      "@agent-wechat/rust-crates"
     ]
   ],
   "linked": [],

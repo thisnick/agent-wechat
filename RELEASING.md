@@ -37,8 +37,11 @@ pnpm changeset
 
    Releases skip the development-only `wx-dev` upstream simulator and its smoke
    checks. PR validation runs the simulator on Linux x64, Windows x64 and macOS
-   ARM64. Production Rust tests, native platform/media checks, packaged CLI
-   checks and desktop acceptance still gate publication.
+   ARM64. Native platform/media checks, packaged CLI checks and desktop
+   acceptance still gate publication. The Linux Rust lint and test jobs
+   (`checks`) run in the same workflow for information only: no build, publish
+   or Rust library job waits for them, and their failure does not stop a
+   release. Read their result before announcing a release.
 
 5. Successful native asset publication calls **Publish native runtime image** for
    the same commit/version. Each Linux architecture packages its published `wx`
@@ -47,13 +50,12 @@ pnpm changeset
    the embedded executable's checksum by image digest before combining the images
    into the versioned multi-architecture tag. Stable versions also update `latest`.
 
-6. When the Version Packages PR changes `@agent-wechat/rust-crates`, the same
-   `native-release.yml` workflow independently tests, packages and publishes the
-   five Rust libraries under the protected `native-release` environment. All five
-   use the library package version and exact version-PR source, with dependencies
-   published before consumers. Library-only releases skip application assets,
-   images and npm. Application-only releases skip Rust publication. Unpublished
-   workspace crates retain the application version and `publish = false`.
+6. The same `native-release.yml` run packages and publishes the five Rust
+   libraries under the protected `native-release` environment. They carry the
+   same version as the applications, so every release publishes all five, from
+   the exact version-PR source and with dependencies published before
+   consumers. The library job does not wait for the application jobs, and the
+   reverse. Unpublished workspace crates keep `publish = false`.
 
 7. The same run automatically starts **Publish npm packages** once native
    assets and the multi-architecture image succeed. Rust publication is independent.
@@ -75,18 +77,23 @@ Use the repository's protocol-evidence and official-state rules when behavior
 changes; incomplete analysis is not a reason to invent replacement behavior.
 
 The private Changesets package `@agent-wechat/rust-crates` owns the version and
-changelog for all five published crates. It is outside the application fixed
-version group and is never published to npm. Add it to a changeset for a library
-change; also select affected application packages when their behavior changes.
-Use patch/minor/major according to the public Rust API change. Run
+changelog for all five published crates. It is in the same fixed version group
+as the CLI, OpenClaw extension and desktop app, so one release gives the crates
+and the release artifacts the same version; it is never published to npm. Add it
+to a changeset for a library change; also select affected application packages
+when their behavior changes. Use patch/minor/major according to the public Rust
+API change: the whole group takes the largest bump, so a breaking library change
+also raises the application major version. A release without library changes
+publishes the crates again under the new version with an empty changelog entry. Run
 `pnpm version-packages` to update public manifests, exact internal dependencies
 and Cargo lockfiles. See [the package guide](packages/rust-crates/README.md).
 
-A merged version PR that changes this package starts library checks and archive
-verification even when the CLI version is unchanged. Publication uses an
-immutable `crates-vVERSION` tag at that merge commit. Once all five registry
-versions pass source/checksum verification, the workflow publishes the library
-changelog as a separate GitHub release; it never replaces the latest app release.
+A merged version PR starts library packaging and archive verification.
+Publication uses an immutable `crates-vVERSION` tag at that merge commit, next
+to the application's `vVERSION` tag. Once all five registry versions pass
+source/checksum verification, the workflow publishes the library changelog as a
+separate GitHub release; it never replaces the latest app release. Library
+changes also appear in the application release notes.
 The existing `native-release.yml` caller and `native-release` environment retain
 the configured crates.io trusted-publisher identity.
 
@@ -252,7 +259,7 @@ A merged version-package PR starts `native-release.yml`, which also calls `deskt
 
 Native distribution validation runs only on PRs; ordinary main-branch pushes do not repeat those builds. Linux Rust PR checks also use x64, while release checks retain both Linux architectures. Complete CLI manifest verification runs during release preparation.
 
-Production signing runs only on trusted release refs; pull requests cannot use production signing. Existing `native-release` approval and source/version checks remain in effect. Publication waits for the Rust checks on the release commit, the complete CLI matrix, and successful desktop signing and notarization.
+Production signing runs only on trusted release refs; pull requests cannot use production signing. Existing `native-release` approval and source/version checks remain in effect. Publication waits for the complete CLI matrix and successful desktop signing and notarization. It does not wait for the Linux Rust `checks` job, which reports separately.
 
 Windows uses the reusable workflow introduced in PR #278, with GitHub OIDC and the existing `windows-signing` environment. Keep its main/v* environment restrictions and profile-scoped Certificate Profile Signer identity. The environment supplies `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_SIGNING_ENDPOINT`, `AZURE_SIGNING_ACCOUNT` and `AZURE_SIGNING_PROFILE`. Application binaries, bundled CLI and media helpers are signed first; installers built from those signed inputs are signed in a second pass. Both passes use an x64 runner, including ARM64 builds, and require the expected publisher, valid signatures and verified timestamps. Installer packaging disables binary patching so it preserves the already signed application payloads, then verifies their signatures again.
 
