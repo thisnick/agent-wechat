@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Changesets versions applications and published Rust libraries independently.
+// Changesets gives applications and published Rust libraries one shared version; copy it into the manifests.
 import { readFile, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { syncCrateVersions } from './native-crates.mjs';

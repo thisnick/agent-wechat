@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Independent library releases keep the existing trusted-publishing workflow identity.
+// Library releases share the application version and keep the existing trusted-publishing workflow identity.
 import { execFileSync } from 'node:child_process';
 import { appendFile, readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
@@ -36,8 +36,9 @@ async function github(path, { token, fetchImpl = fetch, method = 'GET', body } =
 
 export async function crateReleaseNotes({ root = process.cwd(), version, sourceCommit }) {
   const entry = changelogEntry(await readFile(join(root, cratePackage.directory, 'CHANGELOG.md'), 'utf8'), version);
-  if (!entry) throw new Error('Rust library changelog entry is empty');
-  return `# Rust libraries ${version}\n\n${entry}\n\nSource: ${sourceCommit}\n\nAll five Rust libraries use this version. Application versions are independent.\n`;
+  // A release with only application changes leaves the fixed-group library entry empty.
+  const changes = entry || 'No library changes. The version follows the application release.';
+  return `# Rust libraries ${version}\n\n${changes}\n\nSource: ${sourceCommit}\n\nAll five Rust libraries use this version, which matches the application release.\n`;
 }
 
 export async function prepareCrateRelease({ root, version, sourceCommit, token, fetchImpl = fetch }) {

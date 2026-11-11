@@ -173,7 +173,7 @@ test('reruns verify checksum, exact packaged bytes and source before skipping pu
   await assert.rejects(publicationPlan({ ...options, fetchImpl: async url => url.startsWith('https://static.') ? new Response('changed') : registry(url) }), /checksum mismatch/);
 });
 
-test('release guards require the library tag at the exact source, independently of app releases', async () => {
+test('release guards require the library tag at the exact source, next to the app release tag', async () => {
   const options = { version, sourceCommit, token: 'synthetic-token', fetchImpl: async (url, init) => {
     assert.equal(init.headers.Authorization, 'Bearer synthetic-token');
     assert.equal(url, `https://api.github.com/repos/thisnick/agent-wechat/git/ref/tags/crates-v${version}`);
