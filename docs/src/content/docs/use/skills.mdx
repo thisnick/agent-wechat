@@ -1,0 +1,73 @@
+---
+title: Agent skills
+description: Teach AI coding assistants and autonomous agents to manage WeChat using the wx skill.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The `agent-wechat` skill enables AI coding assistants and autonomous agents to interact with WeChat through the native `wx` CLI and background daemon. It gives agents instructions, parameter conventions and guardrails for messaging, group management, contact search, and daemon lifecycle control.
+
+## Install the skill
+
+1. Provide this prompt to your AI coding assistant:
+
+   ```text
+   install skill agent-wechat from github repo: https://github.com/atorber/agent-wechat.git skill name is agent-wechat
+   ```
+
+   You can also clone or symlink `packages/skills/agent-wechat` into your workspace `.agents/skills/agent-wechat` or global `~/.gemini/config/skills/agent-wechat`.
+
+2. Verify that the skill files and permissions are ready:
+
+   ```bash
+   bash packages/skills/agent-wechat/scripts/test-skill.sh
+   ```
+
+   ```text
+   🧪 agent-wechat Skill check
+   👉 SKILL.md and frontmatter ... passed
+   👉 References and runbooks ... passed
+   👉 Scripts and helper ... passed
+   👉 Workspace and global links ... passed
+   🎉 All checks passed.
+   ```
+
+## Core capabilities
+
+| Task | Command | Description |
+| --- | --- | --- |
+| Daemon status | `wx daemon status` | Inspect background daemon health, PID and listening port |
+| Account list | `wx accounts list` | View configured accounts, aliases and sign-in status |
+| List chats | `wx chats list --limit 20` | Read recent conversations with unread counts and previews |
+| Send message | `wx messages send CHAT_ID --text "Hello"` | Send text, images, files, videos or voice notes |
+| Recall message | `wx messages recall CHAT_ID MSG_ID` | Recall a recently sent message within the time limit |
+| Search contacts | `wx contacts find "Alice"` | Look up contacts by nickname, alias or ID |
+
+## Agent rules
+
+When an AI agent runs `wx` commands, follow these conventions:
+
+1. **Always use `--json` for automation.** Machine-readable JSON output prevents parsing errors across CLI updates:
+
+   ```bash
+   wx --json chats list --limit 10
+   wx --json messages send CHAT_ID --text "Report ready" --idempotency-key "task-101"
+   ```
+
+2. **One-writer rule.** When logging in with `--official`, ensure the official desktop client is completely closed before starting. Two programs must never write to the same profile simultaneously.
+
+3. **Check before retrying.** If a send command returns exit code `8` (`needs_review`), the send was submitted but the final outcome is uncertain. Do not resend immediately; inspect the receipt or chat history first.
+
+## Helper script
+
+The skill includes `wx-helper.sh`, a wrapper that automatically finds the active `wx` binary (installed globally or built locally in `packages/native-client-rust/target/`) and passes arguments:
+
+```bash
+bash packages/skills/agent-wechat/scripts/wx-helper.sh --json daemon status
+```
+
+<Aside title="Good to know">
+- **Multi-account setups.** Pass `--account <ID_OR_ALIAS>` when multiple profiles are registered, or set a default with `wx accounts default <ID>`.
+- **Token scopes.** The daemon requires appropriate token scopes (`read-state`, `message-send`, `admin`).
+- **Detailed runbooks.** See `packages/skills/agent-wechat/examples/runbooks.md` for end-to-end task flows and `references/cli-reference.md` for the complete command reference.
+</Aside>

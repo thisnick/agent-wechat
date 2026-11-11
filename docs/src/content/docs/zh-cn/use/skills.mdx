@@ -1,0 +1,74 @@
+---
+title: Agent Skills
+description: 让 AI 编程助手与自主智能体通过 wx Skill 管理和操作微信。
+sourceHash: 81b80eb561cd
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+`agent-wechat` Skill 让 AI 编程助手与自主智能体能够直接通过原生的 `wx` CLI 和后台守护进程与微信进行交互。它为智能体提供了操作指令规范、参数约定以及安全准则，涵盖消息收发、群聊管理、联系人检索和守护进程生命周期控制。
+
+## 安装 Skill
+
+1. 在支持 Skill 的 AI 助手对话框中提供以下提示词进行安装：
+
+   ```text
+   install skill agent-wechat from github repo: https://github.com/atorber/agent-wechat.git skill name is agent-wechat
+   ```
+
+   你也可以直接将 `packages/skills/agent-wechat` 克隆或软链接至工作区的 `.agents/skills/agent-wechat`，或者全局的 `~/.gemini/config/skills/agent-wechat` 目录。
+
+2. 验证 Skill 文件完整性与运行权限：
+
+   ```bash
+   bash packages/skills/agent-wechat/scripts/test-skill.sh
+   ```
+
+   ```text
+   🧪 agent-wechat Skill check
+   👉 SKILL.md and frontmatter ... passed
+   👉 References and runbooks ... passed
+   👉 Scripts and helper ... passed
+   👉 Workspace and global links ... passed
+   🎉 All checks passed.
+   ```
+
+## 核心功能
+
+| 操作目标 | 命令示例 | 功能说明 |
+| --- | --- | --- |
+| 守护进程状态 | `wx daemon status` | 查看后台守护进程的运行状态、PID 及监听端口 |
+| 账号列表 | `wx accounts list` | 查看已配置的账号、别名及登录状态 |
+| 查看会话 | `wx chats list --limit 20` | 查看最近会话列表、未读消息数及最新预览 |
+| 发送消息 | `wx messages send CHAT_ID --text "Hello"` | 发送文本、图片、文件、视频或语音条 |
+| 撤回消息 | `wx messages recall CHAT_ID MSG_ID` | 在时间限制内撤回已发送的消息 |
+| 检索联系人 | `wx contacts find "Alice"` | 根据昵称、备注或微信号检索联系人 |
+
+## 智能体准则
+
+当 AI 智能体执行 `wx` 命令时，需遵循以下准则：
+
+1. **自动化调用始终添加 `--json` 参数。** 结构化的 JSON 输出可避免因 CLI 输出格式更新而导致解析异常：
+
+   ```bash
+   wx --json chats list --limit 10
+   wx --json messages send CHAT_ID --text "Report ready" --idempotency-key "task-101"
+   ```
+
+2. **官方 Profile 单写入者铁律。** 使用 `--official` 接管官方微信数据目录前，必须确保官方微信客户端已彻底关闭。绝不能两个程序同时写入同一 Profile。
+
+3. **重试前核实回执状态。** 若发送命令返回退出码 `8`（状态为 `needs_review`），表示请求已提交但结果尚未最终确认。切勿盲目立即重发，应先查询回执状态或会话历史核实。
+
+## 辅助脚本
+
+Skill 内置了 `wx-helper.sh` 脚本，可自动定位当前环境中可用的 `wx` 可执行文件（优先使用全局已安装版本，或本地 `packages/native-client-rust/target/` 构建版本）并转发参数：
+
+```bash
+bash packages/skills/agent-wechat/scripts/wx-helper.sh --json daemon status
+```
+
+<Aside title="使用提示">
+- **多账号环境。** 若注册了多个账号，请通过 `--account <ID_OR_ALIAS>` 指定目标账号，或通过 `wx accounts default <ID>` 设置默认账号。
+- **令牌权限范围。** 守护进程需要匹配的令牌权限范围（如 `read-state`、`message-send`、`admin`）。
+- **完整操作手册。** 详细任务流程请参阅 `packages/skills/agent-wechat/examples/runbooks.md`，全量命令规范见 `references/cli-reference.md`。
+</Aside>
