@@ -3,6 +3,7 @@ import { basename, isAbsolute } from "node:path";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import { NATIVE_MAX_SOURCE_BYTES, type NativeMessage } from "@agent-wechat/shared";
 import type { NativeDispatchManifest, NativeSuppliedAsset } from "./native-consumer-state.ts";
+import { nativeMediaFacts, type NativeMediaFact } from "./native-media-facts.ts";
 
 type Proof = { sessionId: string; provider: string; model: string };
 type Pending = { manifest: NativeDispatchManifest; record: (runId: string) => unknown; expires: number; proof?: Proof; started?: boolean };
@@ -31,6 +32,7 @@ export function nativeDispatchManifest(params: {
       || !["image", "audio", "video", "file"].includes(asset.kind) || !["model_image", "file_reference"].includes(asset.role)
       || (asset.role === "model_image" && (asset.kind !== "image" || !asset.mime.startsWith("image/") || !asset.runtimeMedia))
       || !["trigger", "history"].includes(asset.contextRole)
+      || (asset.fileName != null && (typeof asset.fileName !== "string" || !asset.fileName || asset.fileName.length > 4096))
       || (asset.sourceMessageId != null && (typeof asset.sourceMessageId !== "string" || !asset.sourceMessageId || asset.sourceMessageId.length > 8192
         || ![params.message, ...history].some(message => message.id === asset.messageId && message.type === 49 && message.appMessageType === 57 && message.quote?.type === 3)))
       || (asset.contextRole === "history" && !history.some(message => message.id === asset.messageId))) throw Error("Invalid native supplied asset manifest");
@@ -79,19 +81,57 @@ function promptMatches(prompt: unknown, manifest: NativeDispatchManifest): boole
   return candidates.some(text => normalizedPromptMatches(text, manifest));
 }
 function normalizedPromptMatches(text: string, manifest: NativeDispatchManifest): boolean {
-  const runtimeAssets = manifest.assets.filter(asset => asset.runtimeMedia);
-  if (runtimeAssets.length) {
-    if (runtimeAssets.length !== 1) return false;
-    const asset = runtimeAssets[0];
-    const header = /^\[media attached: ([^\r\n]+) \(([^)\r\n]+)\) \| (media:\/\/inbound\/[^\]\r\n]+)\]\n/.exec(text);
-    if (!header || !isAbsolute(header[1]) || basename(header[1]) !== `input-${basename(asset.path)}`
-      || header[2] !== asset.mime || header[3] !== `media://inbound/${basename(asset.path)}`) return false;
-    text = text.slice(header[0].length);
-    // This pinned, explicit status is supplemental host context. Arbitrary
-    // descriptions, transformed/merged input and unknown additions fail closed.
-    if (asset.kind === "video") text = text.replace(/\n\n\[Video attachment not analyzed: video understanding is disabled\]$/, "");
-  }
+  const facts = nativeMediaFacts(manifest.assets);
+  const rest = stripMediaNote(text, facts);
+  if (rest === undefined) return false;
+  // This pinned, explicit status is supplemental host context. Arbitrary
+  // descriptions, extracted file contents, transformed/merged input and unknown
+  // additions fail closed.
+  text = facts.some(fact => fact.kind === "video") ? rest.replace(/\n\n\[Video attachment not analyzed: video understanding is disabled\]$/, "") : rest;
   return digest(text) === manifest.inputBodySha256;
+}
+/** Removes OpenClaw's leading attachment note when it lists exactly these facts,
+ * in order. Only voice notes may be absent: OpenClaw hides transcribed audio. */
+function stripMediaNote(text: string, facts: readonly NativeMediaFact[]): string | undefined {
+  if (!facts.length) return text;
+  const lines = text.split("\n");
+  const summary = /^\[media attached: (\d{1,3}) files\]$/.exec(lines[0] ?? "");
+  const count = summary ? Number(summary[1]) : lines[0]?.startsWith("[media attached: ") ? 1 : 0;
+  if ((summary && count < 2) || count > facts.length) return undefined;
+  let line = summary ? 1 : 0, next = 0;
+  for (let index = 1; index <= count; index++, line++) {
+    const prefix = count > 1 ? `[media attached ${index}/${count}: ` : "[media attached: ";
+    const value = lines[line];
+    if (!value?.startsWith(prefix) || !value.endsWith("]")) return undefined;
+    for (;;) {
+      const fact = facts[next++];
+      if (!fact) return undefined;
+      if (mediaLineMatches(value.slice(prefix.length, -1), fact)) break;
+      if (fact.kind !== "audio") return undefined;
+    }
+  }
+  return facts.slice(next).every(fact => fact.kind === "audio") ? lines.slice(line).join("\n") : undefined;
+}
+/** OpenClaw renders `<path> (<type>)[ | <url>][ "<name>"]`, and a managed path reads
+ * as its media:// reference. Staging replaces the path with a workspace copy named
+ * `input-…` (relative inside a sandbox, possibly shortened), so a staged line is
+ * identified by its original reference. */
+function mediaLineMatches(line: string, fact: NativeMediaFact): boolean {
+  const name = basename(fact.path), ref = `media://inbound/${name}`, type = ` (${fact.contentType})`;
+  let shown = fact.fileName ? basename(fact.fileName).replace(/[\p{Cc}\]]+/gu, " ").replace(/\s+/g, " ").trim().slice(0, 256) : "";
+  if (/[\uD800-\uDBFF]$/.test(shown)) shown = shown.slice(0, -1);
+  const suffix = shown ? ` ${JSON.stringify(shown)}` : "";
+  if (!line.endsWith(suffix)) return false;
+  const value = suffix ? line.slice(0, -suffix.length) : line;
+  if (value === `${ref}${type}` || value === `${fact.path}${type}`) return true;
+  const staged = (path: string) => !!path && !path.split("/").includes("..") && basename(path).startsWith("input-");
+  for (const origin of [ref, fact.path]) {
+    const tail = `${type} | ${origin}`;
+    if (value.endsWith(tail) && staged(value.slice(0, -tail.length))) return true;
+  }
+  // A staged copy whose reference was not a managed path keeps only its own name.
+  const path = value.endsWith(type) ? value.slice(0, -type.length) : "";
+  return staged(path) && basename(path) === `input-${name}`;
 }
 function currentMessageFacts(messages: unknown): Array<{ messageId: string; chatId: string }> {
   if (!Array.isArray(messages) || messages.length > 1000) return [];
@@ -158,7 +198,6 @@ export function observeNativeAgentEnd(event: any, ctx: any): void {
     const bytes = Buffer.from(image.data, "base64");
     if (bytes.length !== asset.byteLength || digest(bytes) !== asset.sha256) return;
   }
-  if (m.assets.some(asset => asset.role === "file_reference" && !text.includes(asset.path))) return;
   item.record(m.runId); pending.delete(m.runId);
 }
 

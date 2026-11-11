@@ -56,7 +56,7 @@ test("PDF attachments preserve exact source bytes as file references without ima
   assert.equal(result.pending, false); assert.equal(result.attachment?.status, "ready"); assert.equal(result.attachment.kind, "file");
   assert.deepEqual(await readFile(result.attachment.path!), original);
   assert.equal(result.mediaPath, undefined); assert.equal(result.mediaMime, "application/octet-stream");
-  assert.match(result.body, /\[Local file: </); assert.ok(result.body.includes(`<${result.attachment.path}>`));
+  assert.match(result.body, /^\[File: [^\]\n]+\]$/); assert.ok(!result.body.includes(result.attachment.path!));
   assert.equal(result.suppliedAssets?.length, 1);
   const supplied = result.suppliedAssets![0];
   assert.equal(supplied.role, "file_reference"); assert.equal(supplied.kind, "file"); assert.equal(supplied.runtimeMedia, false);
@@ -413,7 +413,8 @@ test("large model image has a separately bound preview while original bytes rema
   const supplied = result.suppliedAssets![0]; assert.equal(supplied.sourceSha256, originalHash); assert.notEqual(supplied.sha256, originalHash);
   assert.equal(supplied.mime, "image/jpeg"); assert.equal(supplied.role, "model_image"); assert.notEqual(supplied.path, supplied.sourcePath);
   assert.equal(createHash("sha256").update(await readFile(supplied.path)).digest("hex"), supplied.sha256);
-  assert.equal(result.mediaPath, supplied.path); assert.match(result.body, /prepared still preview/); assert.ok(result.body.includes(`[Image file: <${supplied.sourcePath}>]`));
+  assert.equal(result.mediaPath, supplied.path); assert.match(result.body, /prepared still preview; original attached separately/);
+  assert.ok(!result.body.includes(supplied.sourcePath!)); assert.ok(!result.body.includes(supplied.path));
 });
 
 test("WXGF images and stickers keep original bytes while supplying a source-bound still preview", async t => {

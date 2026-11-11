@@ -309,8 +309,8 @@ async function prepareNativeAttachmentInput(params: NativePrepareMediaParams): P
       const normalized = await saveManagedAttachment({ data: representation.bytes.toString("base64"), mime: representation.mime,
         filename: `${filename}.model.${extension}`, maxBytes: 5 * 1024 * 1024, saveMediaBuffer: core.channel.media.saveMediaBuffer });
       suppliedPath = normalized.path; suppliedMime = representation.mime; suppliedHash = normalized.sha256; suppliedLength = normalized.size;
-      body += wxgf ? `\n[Model image: WXGF still preview; original retained separately; animation and transparency are not represented]`
-        : `\n[Model image: prepared still preview; original retained separately]`;
+      body += wxgf ? `\n[Model image: WXGF still preview; original attached separately; animation and transparency are not represented]`
+        : `\n[Model image: prepared still preview; original attached separately]`;
     }
   }
   guard();

@@ -342,13 +342,44 @@ test("incoming download status failures recover after ten minutes and media.read
 test("verified native media path is included in the correlated prepared model input",async t=>{
   const value=fixture(t,{readPolicy:"on_model_dispatch"});value.message.type=3;value.message.body='<private transport XML>';
   assert.equal(await dispatchNativeMessage({...value,prepareAttachment:async()=>({body:'<media:image>',pending:false,mediaPath:'/managed/fixture.png',mediaMime:'image/png',attachment:{kind:'image',status:'ready',filename:'fixture.png',path:'/managed/fixture.png',mime:'image/png'},suppliedAssets:[{id:"asset",sha256:"0".repeat(64),byteLength:10,mime:"image/png",path:"/managed/fixture.png",role:"model_image",kind:"image",runtimeMedia:true,contextRole:"trigger"}]} )}),'completed');
-  assert.equal(value.runs[0].ctx.MediaPath,'/managed/fixture.png');assert.equal(value.runs[0].ctx.BodyForAgent,'<media:image>');assert.equal(value.state.get('m1')?.readPending,true);assert.equal(value.state.get('m1')?.runId,'run_1');
+  assert.equal(value.runs[0].ctx.MediaPath,undefined);assert.equal(value.runs[0].ctx.BodyForAgent,'<media:image>');
+  assert.deepEqual(value.runs[0].ctx.media.map((fact:any)=>[fact.path,fact.url,fact.contentType,fact.kind,fact.fileName,fact.messageId,fact.hydrationSuppressed]),[['/managed/fixture.png','/managed/fixture.png','image/png','image','fixture.png','m1',undefined]]);assert.equal(value.state.get('m1')?.readPending,true);assert.equal(value.state.get('m1')?.runId,'run_1');
+});
+test("a received document reaches OpenClaw as a media fact and is named, not pathed, in the text", async t => {
+  const value = fixture(t); value.message.type = 49; value.message.appMessageType = 6; value.message.body = "招标文件.doc";
+  const source = Buffer.from("synthetic word document"), sha256 = createHash("sha256").update(source).digest("hex");
+  Object.assign(value.client, {
+    mediaAssets: async () => ({ items: [{ id: "doc-asset", accountId: "a", messageId: "m1", kind: "file", variant: "original", actualVariant: "original",
+      state: "available", byteLength: source.length, sha256, filename: "招标文件.doc", jobId: null }] }),
+    mediaContent: async () => ({ bytes: source, contentType: "application/msword" }),
+  });
+  value.core.channel.media = { saveMediaBuffer: async () => ({ path: "/managed/招标文件---1.doc" }) };
+  assert.equal(await dispatchNativeMessage(value), "completed");
+  const ctx = value.runs[0].ctx;
+  assert.equal(ctx.BodyForAgent, "[File: 招标文件.doc]"); assert.equal(ctx.MediaPath, undefined);
+  assert.deepEqual(ctx.media.map((fact: any) => [fact.path, fact.url, fact.contentType, fact.kind, fact.fileName, fact.messageId, fact.hydrationSuppressed]),
+    [["/managed/招标文件---1.doc", "/managed/招标文件---1.doc", "application/msword", "document", "招标文件.doc", "m1", undefined]]);
+});
+test("a voice note is marked transcribed only when its transcript is in the text", async t => {
+  for (const transcript of ["synthetic transcript", ""]) {
+    const value = fixture(t); value.message.type = 34; value.message.body = null;
+    value.core.mediaUnderstanding = { transcribeAudioFile: async () => ({ text: transcript }) };
+    const prepareAttachment: any = async () => ({ body: "<media:audio>", pending: false,
+      attachment: { kind: "audio", status: "ready", filename: "voice.mp3", path: "/managed/voice.mp3", mime: "audio/mpeg" },
+      suppliedAssets: [{ id: "voice", sha256: "0".repeat(64), byteLength: 10, mime: "audio/mpeg", path: "/managed/voice.mp3",
+        role: "file_reference", kind: "audio", runtimeMedia: false, contextRole: "trigger" }] });
+    assert.equal(await dispatchNativeMessage({ ...value, prepareAttachment }), "completed");
+    const ctx = value.runs[0].ctx;
+    assert.equal(ctx.BodyForAgent, `<media:audio>\n${transcript ? `[Voice transcript: ${transcript}]` : "[Voice transcription unavailable]"}`);
+    // Without a transcript OpenClaw keeps the voice note listed and may transcribe it itself.
+    assert.deepEqual(ctx.media.map((fact: any) => [fact.kind, fact.transcribed, fact.path]), [["audio", !!transcript, "/managed/voice.mp3"]]);
+  }
 });
 test("512 MiB file metadata reaches correlated dispatch and one excess byte stops before model handoff", async t => {
   for (const excess of [0, 1]) {
     const value = fixture(t, { readPolicy: "on_model_dispatch" }); value.message.type = 49; value.message.appMessageType = 6; value.message.body = null;
     const byteLength = 512 * 1024 * 1024 + excess;
-    const result = await dispatchNativeMessage({ ...value, prepareAttachment: async () => ({ body: "[Local file: </managed/large.pdf>]", pending: false,
+    const result = await dispatchNativeMessage({ ...value, prepareAttachment: async () => ({ body: "[File: large.pdf]", pending: false,
       attachment: { kind: "file", status: "ready", filename: "large.pdf", path: "/managed/large.pdf", mime: "application/pdf" },
       suppliedAssets: [{ id: "large-file-asset", sha256: "0".repeat(64), byteLength, mime: "application/pdf", path: "/managed/large.pdf",
         role: "file_reference", kind: "file", runtimeMedia: false, contextRole: "trigger" }] }) });
@@ -389,10 +420,11 @@ test("group attachments buffered before a mention survive restart and retain ori
     if (message.type === 1) return { body: message.body, pending: false };
     const kind = message.type === 3 ? "image" : message.type === 34 ? "audio" : message.type === 43 ? "video" : "file";
     const path = `/managed/${message.id}.original`, preview = kind === "image" ? `/managed/${message.id}.preview.jpg` : path;
-    return { body: `[${kind} file: ${path}]`, pending: false, attachment: { kind, status: "ready", filename: message.id, path, mime: kind === "image" ? "image/jpeg" : "application/octet-stream" },
+    const mime = kind === "file" ? "application/pdf" : kind === "video" ? "video/mp4" : "audio/mpeg";
+    return { body: `<media:${kind}>`, pending: false, attachment: { kind, status: "ready", filename: message.id, path, mime: kind === "image" ? "image/jpeg" : "application/octet-stream" },
       mediaPath: ["image", "video"].includes(kind) ? preview : undefined, mediaMime: "image/jpeg",
-      suppliedAssets: [{ id: message.id, sha256: "0".repeat(64), byteLength: 10, mime: "image/jpeg", path: preview,
-        sourcePath: path, sourceSha256: "1".repeat(64), sourceByteLength: 20, sourceMime: "image/png", role: kind === "image" ? "model_image" : "file_reference", kind, runtimeMedia: ["image", "video"].includes(kind), contextRole: "trigger" }] };
+      suppliedAssets: [{ id: message.id, sha256: "0".repeat(64), byteLength: 10, mime: kind === "image" ? "image/jpeg" : mime, path: preview,
+        sourcePath: path, sourceSha256: "1".repeat(64), sourceByteLength: 20, sourceMime: kind === "image" ? "image/png" : mime, role: kind === "image" ? "model_image" : "file_reference", kind, runtimeMedia: ["image", "video"].includes(kind), contextRole: "trigger" }] };
   };
   for (const [index, type] of [3, 3, 49, 43, 34].entries()) {
     const message = index === 0 ? value.message : { ...value.message, id: `history-${index}` };
@@ -407,9 +439,18 @@ test("group attachments buffered before a mention survive restart and retain ori
   state.accept("6", trigger, "live");
   assert.equal(await dispatchNativeMessage({ ...value, state, message: trigger, prepareAttachment }), "completed");
   const ctx = value.runs[0].ctx; assert.equal(ctx.WasMentioned, true); assert.equal(ctx.Attachments.length, 5); assert.equal(ctx.InboundHistory.length, 5);
-  for (const attachment of ctx.Attachments) assert.ok(ctx.BodyForAgent.includes(attachment.path));
+  // Every attachment is a media fact (staged for sandboxed agents); none is a path in the text.
+  assert.ok(!ctx.BodyForAgent.includes("/managed/")); assert.equal(ctx.MediaPath, undefined);
   assert.match(ctx.BodyForAgent, /Historical voice transcript/); assert.ok(!ctx.BodyForAgent.includes("private transport XML"));
-  assert.equal(ctx.MediaPath, "/managed/history-1.preview.jpg");
+  assert.deepEqual(ctx.media.map((fact: any) => [fact.messageId, fact.path, fact.kind, fact.hydrationSuppressed ?? false, fact.transcribed]), [
+    ["m1", "/managed/m1.original", "image", true, false],
+    // The selected image is the one native image input; its original follows as a file.
+    ["history-1", "/managed/history-1.preview.jpg", "image", false, false],
+    ["history-1", "/managed/history-1.original", "image", true, false],
+    ["history-2", "/managed/history-2.original", "document", false, false],
+    ["history-3", "/managed/history-3.original", "video", false, false],
+    ["history-4", "/managed/history-4.original", "audio", false, true],
+  ]);
   const manifest = state.get("trigger")!.dispatchManifest!;
   assert.deepEqual(manifest.newInputs.map(input => input.id), ["trigger"]); assert.equal(manifest.historyInputs?.length, 5);
   assert.equal(manifest.assets.filter(asset => asset.runtimeMedia).length, 1); assert.equal(manifest.assets.filter(asset => asset.role === "model_image").length, 1);
@@ -436,7 +477,7 @@ test("a pending historical attachment stays explicit without blocking the curren
   const value = fixture(t, { group: true }); value.message.type = 3; await dispatchNativeMessage(value);
   const trigger = { ...value.message, id: "trigger", type: 1, body: "mention", mentions: { ...value.message.mentions, state: "known" as const, self: true } }; value.state.accept("2", trigger, "live");
   assert.equal(await dispatchNativeMessage({ ...value, message: trigger, prepareAttachment: async ({ message }) => ({ body: message.type === 3 ? "[image pending]" : "current", pending: message.type === 3 }) }), "completed");
-  assert.match(value.runs[0].ctx.BodyForAgent, /image pending/); assert.deepEqual(value.runs[0].ctx.Attachments, []); assert.equal(value.runs[0].ctx.MediaPath, undefined);
+  assert.match(value.runs[0].ctx.BodyForAgent, /image pending/); assert.deepEqual(value.runs[0].ctx.Attachments, []); assert.equal(value.runs[0].ctx.media, undefined);
 });
 
 function deferred<T>() { let resolve!: (value: T) => void, reject!: (reason?: unknown) => void; const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; }); return { promise, resolve, reject }; }
@@ -458,7 +499,7 @@ test("a recall during attachment preparation cannot deliver a late file or start
   const work = dispatchNativeMessage({ ...value, prepareAttachment: async () => { started.resolve(); return pending.promise; } });
   await started.promise;
   await acceptNativeEvent(value.client, "a", value.state, recallEvent(value.message));
-  pending.resolve({ body: "[Local file: /private/late.png]", mediaPath: "/private/late.png", pending: false });
+  pending.resolve({ body: "<media:image>", mediaPath: "/private/late.png", pending: false });
   assert.equal(await work, "ignored"); assert.equal(value.runs.length, 0); assert.equal(value.state.get(value.message.id)?.dispatchManifest, undefined);
 });
 test("a recall during voice transcription discards the late transcript", async t => {
@@ -482,7 +523,7 @@ test("a historical recall during media work lets the triggering mention retry wi
     : (started.resolve(), pending.promise);
   const work = dispatchNativeMessage({ ...value, message: trigger, prepareAttachment });
   await started.promise; await acceptNativeEvent(value.client, "a", value.state, recallEvent(value.message, "3"));
-  pending.resolve({ body: "[Local file: /private/recalled-history.png]", pending: false });
+  pending.resolve({ body: "<media:image>", pending: false });
   assert.equal(await work, "pending"); assert.equal(value.runs.length, 0);
   assert.equal(await dispatchNativeMessage({ ...value, message: trigger, prepareAttachment }), "completed");
   assert.equal(value.runs.length, 1); assert.equal(value.runs[0].ctx.InboundHistory, undefined);
@@ -536,7 +577,7 @@ test("a delayed recalled attachment cannot discard a new exact message reusing i
   const b: NativeMessage = { ...value.message, serverId: "9007199254741000", type: 1, body: "New exact message" };
   value.client.message = async () => b;
   await acceptNativeEvent(value.client, "a", value.state, { cursor: "3", kind: "message.committed", data: { messageId: b.id, threadId: b.threadId, origin: "live" }, createdAt: "2026-10-21T12:00:00Z" });
-  lateMedia.resolve({ body: "[Local file: /private/old-source.png]", pending: false }); assert.equal(await workA, "ignored");
+  lateMedia.resolve({ body: "<media:image>", pending: false }); assert.equal(await workA, "ignored");
   assert.equal(value.state.get(b.id)?.state, "received"); assert.equal(value.state.get(b.id)?.message.body, b.body);
   assert.equal(await dispatchNativeMessage({ ...value, message: b }), "completed");
   value.state.accept("4", b, "live"); assert.equal(await dispatchNativeMessage({ ...value, message: b }), "needs_review");

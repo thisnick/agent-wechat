@@ -9,19 +9,21 @@ import { NativeConsumerState, type NativeSuppliedAsset } from "./native-consumer
 import { nativeDispatchManifest, observeNativeAgentEnd, observeNativeModelCall, observeNativePreparedInput, registerNativePreparedBoundary, trackNativePreparedInput } from "./native-prepared-boundary.ts";
 const bytes = readFileSync(new URL("../test/fixtures/native-model.png", import.meta.url));
 const hash = createHash("sha256").update(bytes).digest("hex");
-function fixture(t: any, kind: "image" | "file" | "video" = "image", group = false) {
+type FixtureOptions = { asset?: Partial<NativeSuppliedAsset>; body?: string; note?: string };
+function fixture(t: any, kind: "image" | "file" | "video" | "audio" = "image", group = false, options: FixtureOptions = {}) {
   const directory = mkdtempSync(join(tmpdir(), "native-media-boundary-"));
   const stop = registerNativePreparedBoundary({ config: { plugins: { entries: { "agent-wechat": { hooks: { allowConversationAccess: true } } } } }, on: () => {} } as any);
   t.after(() => { stop(); rmSync(directory, { recursive: true, force: true }); });
   const threadId = group ? "room@chatroom" : "u";
-  const message = { id: "m", accountId: "a", threadId, senderId: "sender", version: "v1", type: kind === "image" ? 3 : kind === "file" ? 49 : 43, body: null } as NativeMessage;
-  const asset: NativeSuppliedAsset = { id: "asset", sha256: hash, byteLength: bytes.length, mime: kind === "image" ? "image/png" : kind === "video" ? "video/mp4" : "text/plain",
-    path: "/managed/owned.png", kind, role: kind === "image" ? "model_image" : "file_reference", runtimeMedia: kind !== "file", contextRole: "trigger" };
-  const body = kind === "image" ? "<media:image>" : `[Local file: ${asset.path}]`;
+  const message = { id: "m", accountId: "a", threadId, senderId: "sender", version: "v1", type: kind === "image" ? 3 : kind === "file" ? 49 : kind === "audio" ? 34 : 43, body: null } as NativeMessage;
+  const asset: NativeSuppliedAsset = { id: "asset", sha256: hash, byteLength: bytes.length, mime: kind === "image" ? "image/png" : kind === "video" ? "video/mp4" : kind === "audio" ? "audio/mpeg" : "text/plain",
+    path: "/managed/owned.png", kind, role: kind === "image" ? "model_image" : "file_reference", runtimeMedia: kind === "image" || kind === "video", contextRole: "trigger", ...options.asset };
+  const body = options.body ?? (kind === "file" ? "[File: owned.txt]" : `<media:${kind}>`);
   const manifest = nativeDispatchManifest({ message, inputBody: body, sessionKey: "session", agentId: "main", channelAccountId: "default", policy: { admitted: true }, assets: [asset] });
   const state = new NativeConsumerState(directory, "server", "a"); state.accept("1", message, "live"); state.update("m", { state: "dispatching", dispatchManifest: manifest });
   let receipts = 0; const record = state.preparedCallback(["m"], "on_model_dispatch"); trackNativePreparedInput(manifest, run => { receipts++; return record(run); });
-  const header = asset.runtimeMedia ? `[media attached: /tmp/stage/input-owned.png (${asset.mime}) | media://inbound/owned.png]\n` : "";
+  // OpenClaw's note for one staged attachment; a transcribed voice note has none.
+  const header = options.note ?? (kind === "audio" ? "" : `[media attached: /tmp/stage/input-owned.png (${asset.mime}) | media://inbound/owned.png]\n`);
   const prepared = header + body;
   const ctx: any = { runId: manifest.runId, sessionId: "transcript", sessionKey: "session", agentId: "main", accountId: "default", channel: "agent-wechat", chatId: group ? threadId : "wechat:u", modelProviderId: "fixture", modelId: "local" };
   const input: any = { runId: manifest.runId, sessionId: "transcript", provider: "fixture", model: "local", prompt: `[Tue 2026-10-20 18:00 PDT] ${group ? 'Conversation info: ⟦openclaw:ctx⟧\n```json\n{"sender":{"id":"sender"}}\n```\n\n' : ""}${prepared}`, imagesCount: kind === "image" ? 1 : 0,
@@ -78,4 +80,39 @@ test("pinned group sender context and raw room identity bind the exact media tur
   observeNativePreparedInput({ ...f.input, prompt: f.input.prompt.replace('"sender"}}', '"other"}}') }, f.ctx); observeNativeModelCall(f.model, f.ctx); observeNativeAgentEnd(f.end, f.ctx); assert.equal(f.receipts(), 0);
   observeNativePreparedInput(f.input, { ...f.ctx, chatId: "other@chatroom" }); observeNativeModelCall(f.model, f.ctx); observeNativeAgentEnd(f.end, f.ctx); assert.equal(f.receipts(), 0);
   f.start(); observeNativeAgentEnd(f.end, f.ctx); assert.equal(f.state.get("m")?.runId, f.manifest.runId); assert.equal(f.receipts(), 1);
+});
+
+function receiptFor(t: any, kind: "image" | "file" | "video" | "audio", options: FixtureOptions): number {
+  const f = fixture(t, kind, false, options); f.start(); observeNativeAgentEnd(f.end, f.ctx); return f.receipts();
+}
+test("documents are proven by OpenClaw's attachment note, staged or not, with their file name", t => {
+  const asset = { fileName: "招标 文件.txt" }, body = "[File: 招标 文件.txt]";
+  assert.equal(receiptFor(t, "file", { asset, body, note: '[media attached: /tmp/stage/input-owned.png (text/plain) | media://inbound/owned.png "招标 文件.txt"]\n' }), 1);
+  assert.equal(receiptFor(t, "file", { asset, body, note: '[media attached: /managed/owned.png (text/plain) "招标 文件.txt"]\n' }), 1);
+  // Inside an SSH sandbox the copy is relative to the workspace, and long names are shortened.
+  assert.equal(receiptFor(t, "file", { asset, body, note: '[media attached: media/inbound/openclaw-staged-1/input-own (text/plain) | media://inbound/owned.png "招标 文件.txt"]\n' }), 1);
+  assert.equal(receiptFor(t, "file", { asset, body, note: '[media attached: ../input-owned.png (text/plain) | media://inbound/owned.png "招标 文件.txt"]\n' }), 0);
+  for (const note of ["", "[media attached: /tmp/stage/input-owned.png (text/plain) | media://inbound/owned.png]\n",
+    '[media attached: /tmp/stage/input-owned.png (text/plain) | media://inbound/owned.png "other.txt"]\n',
+    '[media attached: /tmp/stage/input-owned.png (text/plain) | media://inbound/other.png "招标 文件.txt"]\n',
+    '[media attached: /tmp/stage/owned.png (text/plain) | media://inbound/owned.png "招标 文件.txt"]\n',
+    '[media attached: /tmp/stage/input-owned.png (application/pdf) | media://inbound/owned.png "招标 文件.txt"]\n',
+    '[media attached: 2 files]\n[media attached 1/2: /tmp/stage/input-owned.png (text/plain) | media://inbound/owned.png "招标 文件.txt"]\n[media attached 2/2: /tmp/stage/input-foreign.txt (text/plain)]\n']) {
+    assert.equal(receiptFor(t, "file", { asset, body, note }), 0, note);
+  }
+});
+test("a prepared model image is proven with its original listed as a second attachment", t => {
+  const asset = { sourcePath: "/managed/original.wxgf", sourceMime: "image/x-wxgf", sourceSha256: "1".repeat(64), sourceByteLength: 99 };
+  const first = "[media attached 1/2: /tmp/stage/input-owned.png (image/png) | media://inbound/owned.png]\n";
+  const second = "[media attached 2/2: /tmp/stage/input-original.wxgf (image/x-wxgf) | media://inbound/original.wxgf]\n";
+  assert.equal(receiptFor(t, "image", { asset, note: `[media attached: 2 files]\n${first}${second}` }), 1);
+  assert.equal(receiptFor(t, "image", { asset, note: "[media attached: /tmp/stage/input-owned.png (image/png) | media://inbound/owned.png]\n" }), 0);
+  assert.equal(receiptFor(t, "image", { asset, note: `[media attached: 2 files]\n${second.replace("2/2", "1/2")}${first.replace("1/2", "2/2")}` }), 0);
+});
+test("a transcribed voice note may be omitted from the note; other attachments may not", t => {
+  const body = "<media:audio>\n[Voice transcript: synthetic]";
+  assert.equal(receiptFor(t, "audio", { body, note: "" }), 1);
+  assert.equal(receiptFor(t, "audio", { body, note: "[media attached: /tmp/stage/input-owned.png (audio/mpeg) | media://inbound/owned.png]\n" }), 1);
+  assert.equal(receiptFor(t, "audio", { body, note: "[media attached: /tmp/stage/input-owned.png (audio/mpeg) | media://inbound/owned.png]\n[unproven description]\n" }), 0);
+  assert.equal(receiptFor(t, "file", { note: "" }), 0);
 });
