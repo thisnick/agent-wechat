@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { isNativeTombstone, NativeApiError, type NativeEvent, type NativeMessage, type NativeWeChatClient } from "@agent-wechat/shared";
 import { createChannelMessageReplyPipeline } from "openclaw/plugin-sdk/channel-outbound";
 import { resolveStableChannelMessageIngress } from "openclaw/plugin-sdk/channel-ingress-runtime";
+import { toInboundMediaFacts } from "openclaw/plugin-sdk/channel-inbound";
 import { normalizeWeChatCommandBody, resolveWeChatIngress, resolveWeChatPolicyContext } from "./access-control.ts";
 import { ensureNativeHost } from "./native-host.ts";
 import { NativeConsumerState } from "./native-consumer-state.ts";
@@ -187,7 +188,9 @@ async function dispatchNativeMessageInput(params: NativeDispatchParams, revision
     Attachments: context.attachments, InboundHistory: context.history,
     CommandAuthorized: core.channel.commands.shouldComputeCommandAuthorized(commandBody, cfg) ? ingress.commandAccess.authorized : undefined,
     OriginatingChannel: "agent-wechat", OriginatingTo: `wechat:${message.threadId}`,
-    ...(context.mediaPath ? { MediaPath: context.mediaPath, MediaUrl: context.mediaPath, MediaType: context.mediaMime } : {}),
+    // OpenClaw's media contract: it lists each attachment for the agent, stages
+    // it into a sandboxed workspace and hydrates only unsuppressed images/video.
+    ...(context.media.length ? { media: toInboundMediaFacts(context.media) } : {}),
   });
   await core.channel.session.recordInboundSession({ storePath, sessionKey: route.sessionKey, ctx });
   await recheck([message, ...admitted]);

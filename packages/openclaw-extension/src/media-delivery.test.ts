@@ -1,25 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  applyCatchupAttachmentPolicy,
   attachmentFallbackFilename,
   attachmentSourceBody,
-  buildMediaSegments,
   mediaRequestQuality,
   renderAttachmentBody,
-  type MessageWithAttachment,
   type WeChatAttachment,
 } from "./media-delivery.ts";
-
-function message(rawBody: string, attachment?: WeChatAttachment): MessageWithAttachment {
-  return {
-    rawBody,
-    attachment,
-    mediaPath: attachment?.status === "ready" && attachment.kind !== "file" ? attachment.path : undefined,
-    mediaMime: attachment?.mime,
-    hasMedia: !!attachment,
-  };
-}
 
 const ready = (kind: WeChatAttachment["kind"], filename: string, path: string): WeChatAttachment => ({
   kind,
@@ -29,35 +16,18 @@ const ready = (kind: WeChatAttachment["kind"], filename: string, path: string): 
   status: "ready",
 });
 
-test("catch-up retains all file paths and selects only the latest image", () => {
-  const result = applyCatchupAttachmentPolicy([
-    message(renderAttachmentBody("", ready("file", "brief.pdf", "/managed/brief.pdf")), ready("file", "brief.pdf", "/managed/brief.pdf")),
-    message("<media:image>", ready("image", "a.png", "/managed/a.png")),
-    message(renderAttachmentBody("", ready("file", "sheet.xlsx", "/managed/sheet.xlsx")), ready("file", "sheet.xlsx", "/managed/sheet.xlsx")),
-    message("<media:image>", ready("image", "b.png", "/managed/b.png")),
-    message("@bot summarize"),
-  ]);
-
-  assert.match(result[0].rawBody, /\/managed\/brief\.pdf/);
-  assert.match(result[2].rawBody, /\/managed\/sheet\.xlsx/);
-  assert.match(result[1].rawBody, /Image file: <\/managed\/a\.png>/);
-  assert.equal(result[1].mediaPath, undefined);
-  assert.equal(result[3].mediaPath, "/managed/b.png");
-  assert.equal(result.filter((item) => item.mediaPath).length, 1);
-  assert.deepEqual(buildMediaSegments(result).map((segment) => segment.length), [5]);
-});
-
-test("files do not consume the model media slot", () => {
-  const file = ready("file", "data.zip", "/managed/data.zip");
-  const firstImage = ready("image", "one.png", "/managed/one.png");
-  const secondImage = ready("image", "two.png", "/managed/two.png");
-  const result = buildMediaSegments([
-    message("one", firstImage),
-    message(renderAttachmentBody("file", file), file),
-    message("two", secondImage),
-  ]);
-  assert.deepEqual(result.map((segment) => segment.length), [2, 1]);
-  assert.match(result[0][1].rawBody, /Local file/);
+test("ready attachments are named in the text without a local path", () => {
+  // The file itself reaches OpenClaw as a media fact; a gateway path in the text
+  // would point a sandboxed agent at a file it cannot open.
+  assert.equal(renderAttachmentBody("", ready("file", "招标文件.doc", "/managed/doc---1.doc")), "[File: 招标文件.doc]");
+  assert.equal(renderAttachmentBody("brief.pdf", ready("file", "brief.pdf", "/managed/brief.pdf")), "[File: brief.pdf]");
+  assert.equal(renderAttachmentBody("see attached", ready("file", "brief.pdf", "/managed/brief.pdf")), "see attached\n[File: brief.pdf]");
+  assert.equal(renderAttachmentBody("", ready("image", "a.png", "/managed/a.png")), "<media:image>");
+  assert.equal(renderAttachmentBody("", ready("audio", "v.mp3", "/managed/v.mp3")), "<media:audio>");
+  assert.equal(renderAttachmentBody("", ready("video", "c.mp4", "/managed/c.mp4")), "<media:video>");
+  for (const kind of ["file", "image", "audio", "video"] as const) {
+    assert.doesNotMatch(renderAttachmentBody("", ready(kind, "x", "/managed/x")), /\/managed|Local file/);
+  }
 });
 
 test("unavailable attachments expose status without a fake path", () => {
@@ -100,6 +70,6 @@ test("a delivered thumbnail is labeled as a preview for the model", () => {
     ...ready("image", "photo.jpg", "/managed/photo.jpg"),
     quality: "thumbnail",
   };
-  assert.equal(renderAttachmentBody("", preview), "<media:image>\n[Image file: </managed/photo.jpg>]\n[Image preview only: thumbnail quality]");
-  assert.equal(renderAttachmentBody("", { ...preview, quality: "standard" }), "<media:image>\n[Image file: </managed/photo.jpg>]");
+  assert.equal(renderAttachmentBody("", preview), "<media:image>\n[Image preview only: thumbnail quality]");
+  assert.equal(renderAttachmentBody("", { ...preview, quality: "standard" }), "<media:image>");
 });

@@ -12,14 +12,6 @@ export type WeChatAttachment = {
   expiresAt?: number;
 };
 
-export type MessageWithAttachment = {
-  rawBody: string;
-  attachment?: WeChatAttachment;
-  mediaPath?: string;
-  mediaMime?: string;
-  hasMedia: boolean;
-};
-
 const MIME_BY_FORMAT: Record<string, string> = {
   jpeg: "image/jpeg",
   jpg: "image/jpeg",
@@ -98,10 +90,14 @@ export function attachmentSourceBody(originalBody: string, kind: AttachmentKind 
   return originalBody.trimStart().startsWith("<") ? "" : originalBody;
 }
 
+/**
+ * Text that stands in for an attachment in the agent's message. Ready files are
+ * passed to OpenClaw separately as media facts, so this text names them but never
+ * includes a local path: a gateway path is meaningless inside a sandboxed agent.
+ */
 export function renderAttachmentBody(
   originalBody: string,
   attachment: WeChatAttachment | undefined,
-  exposeNonVisualPath = true,
 ): string {
   if (!attachment) return originalBody;
   const name = safeDisplayName(attachment.filename);
@@ -119,98 +115,11 @@ export function renderAttachmentBody(
   }
   if (attachment.kind === "file") {
     const prefix = originalBody.trim() === name ? "" : originalBody;
-    return appendReference(prefix, `[File: ${name}]\n[Local file: <${attachment.path}>]`);
+    return appendReference(prefix, `[File: ${name}]`);
   }
-  if (exposeNonVisualPath) {
-    if (attachment.kind === "audio") {
-      return appendReference(originalBody || "<media:audio>", `[Voice message file: <${attachment.path}>]`);
-    }
-    if (attachment.kind === "video") {
-      return appendReference(originalBody || "<media:video>", `[Video file: <${attachment.path}>]`);
-    }
-  }
-  let body = originalBody || (attachment.kind === "image" ? "<media:image>" : originalBody);
-  // OpenClaw scans bare local image paths for automatic vision hydration.
-  // Angle brackets keep this original as a file reference; MediaPath selects
-  // the separately verified representation actually attached to this turn.
-  if (attachment.kind === "image") body = appendReference(body, `[Image file: <${attachment.path}>]`);
+  const body = originalBody || `<media:${attachment.kind}>`;
   if (attachment.kind === "image" && attachment.quality === "thumbnail") {
     return appendReference(body, "[Image preview only: thumbnail quality]");
   }
   return body;
-}
-
-export function applyLiveAttachment<T extends MessageWithAttachment>(
-  message: T,
-  originalBody: string,
-  attachment: WeChatAttachment | undefined,
-): T {
-  const attachable = attachment?.status === "ready" && attachment.path && attachment.kind !== "file";
-  return {
-    ...message,
-    rawBody: renderAttachmentBody(originalBody, attachment),
-    attachment,
-    mediaPath: attachable ? attachment.path : undefined,
-    mediaMime: attachable ? attachment.mime : undefined,
-    hasMedia: attachment !== undefined,
-  };
-}
-
-/**
- * Catch-up has one model media slot. Keep every file path in text and select
- * only the latest ready image for that slot. Earlier images and audio/video
- * remain available through explicit local-path references.
- */
-export function applyCatchupAttachmentPolicy<T extends MessageWithAttachment>(messages: T[]): T[] {
-  let latestImage = -1;
-  for (let index = messages.length - 1; index >= 0; index--) {
-    const attachment = messages[index].attachment;
-    if (attachment?.kind === "image" && attachment.status === "ready" && attachment.path) {
-      latestImage = index;
-      break;
-    }
-  }
-
-  return messages.map((message, index) => {
-    const attachment = message.attachment;
-    if (!attachment) return { ...message, mediaPath: undefined, mediaMime: undefined };
-    const selectImage = index === latestImage;
-    let rawBody = renderAttachmentBody(message.rawBody, undefined);
-    if (attachment.kind === "file") {
-      // File paths were already rendered when the message was prepared.
-      rawBody = message.rawBody;
-    } else if (!selectImage && attachment.status === "ready" && attachment.path) {
-      const label = attachment.kind === "image" ? "Image file" :
-        attachment.kind === "audio" ? "Voice message file" : "Video file";
-      const reference = `[${label}: <${attachment.path}>]`;
-      rawBody = message.rawBody.includes(reference)
-        ? message.rawBody
-        : appendReference(message.rawBody, reference);
-    }
-    return {
-      ...message,
-      rawBody,
-      mediaPath: selectImage ? attachment.path : undefined,
-      mediaMime: selectImage ? attachment.mime : undefined,
-      hasMedia: attachment !== undefined,
-    };
-  });
-}
-
-export function buildMediaSegments<T extends MessageWithAttachment>(messages: T[]): T[][] {
-  const segments: T[][] = [];
-  let batch: T[] = [];
-  let hasAttachedMedia = false;
-  for (const message of messages) {
-    if (message.mediaPath && hasAttachedMedia) {
-      segments.push(batch);
-      batch = [message];
-      hasAttachedMedia = true;
-    } else {
-      batch.push(message);
-      if (message.mediaPath) hasAttachedMedia = true;
-    }
-  }
-  if (batch.length > 0) segments.push(batch);
-  return segments;
 }

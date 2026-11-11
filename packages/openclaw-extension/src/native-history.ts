@@ -1,9 +1,10 @@
 import type { NativeMessage } from "@agent-wechat/shared";
 import { buildHistoryContextFromEntries, buildInboundHistoryFromEntries, DEFAULT_GROUP_HISTORY_LIMIT } from "openclaw/plugin-sdk/reply-history";
 import type { NativeSuppliedAsset } from "./native-consumer-state.ts";
+import { nativeMediaFacts } from "./native-media-facts.ts";
 import type { prepareNativeAttachment } from "./native-media.ts";
 
-export type NativePreparedAttachment = Awaited<ReturnType<typeof prepareNativeAttachment>>;
+export type NativePreparedAttachment = Awaited<ReturnType<typeof prepareNativeAttachment>> & { transcribed?: boolean };
 export function nativeGroupHistoryLimit(cfg: any): number {
   const limit = cfg?.messages?.groupChat?.historyLimit;
   return Number.isInteger(limit) && limit >= 0 ? Math.min(limit, 200) : DEFAULT_GROUP_HISTORY_LIMIT;
@@ -13,7 +14,8 @@ export async function transcribeNativeAttachment(prepared: NativePreparedAttachm
   if (attachment?.kind !== "audio" || attachment.status !== "ready" || !attachment.path) return prepared;
   let transcript = "";
   try { transcript = (await core.mediaUnderstanding.transcribeAudioFile({ filePath: attachment.path, cfg, mime: attachment.mime })).text?.trim() ?? ""; } catch { /* The verified voice file remains available without transcription. */ }
-  return { ...prepared, body: `${prepared.body}\n${transcript ? `[Voice transcript: ${transcript.slice(0, 10000)}]` : "[Voice transcription unavailable]"}` };
+  return { ...prepared, body: `${prepared.body}\n${transcript ? `[Voice transcript: ${transcript.slice(0, 10000)}]` : "[Voice transcription unavailable]"}`,
+    ...(transcript ? { transcribed: true } : {}) };
 }
 
 /** Prepare only sender-admitted context, after the triggering mention gate.
@@ -37,13 +39,14 @@ export async function prepareNativeHistory(messages: NativeMessage[], prepare: (
 export function buildNativeContext(history: Array<{ message: NativeMessage; prepared: NativePreparedAttachment }>, message: NativeMessage, prepared: NativePreparedAttachment) {
   const all = [...history, { message, prepared }];
   // Catch-up has one vision slot. Keep the prepared representation of the last
-  // ready image; every original (including earlier images) remains a text path.
+  // ready image; every other attachment is passed as a non-hydrated media fact.
   const image = history.length ? [...all].reverse().find(item => item.prepared.attachment?.kind === "image" && item.prepared.attachment.status === "ready" && item.prepared.mediaPath) : undefined;
   const selected = history.length ? image : all.at(-1);
   const assets: NativeSuppliedAsset[] = all.flatMap(item => (item.prepared.suppliedAssets ?? []).map(asset => {
     const contextRole = item.message.id === message.id ? "trigger" as const : "history" as const;
-    if (item === selected) return { ...asset, contextRole, messageId: item.message.id };
-    return { ...asset, contextRole, messageId: item.message.id, runtimeMedia: false, role: "file_reference" as const,
+    const fileName = item.prepared.attachment?.filename ? { fileName: item.prepared.attachment.filename } : {};
+    if (item === selected) return { ...asset, ...fileName, contextRole, messageId: item.message.id };
+    return { ...asset, ...fileName, contextRole, messageId: item.message.id, runtimeMedia: false, role: "file_reference" as const,
       path: asset.sourcePath ?? asset.path, sha256: asset.sourceSha256 ?? asset.sha256,
       byteLength: asset.sourceByteLength ?? asset.byteLength, mime: asset.sourceMime ?? asset.mime };
   }));
@@ -56,6 +59,7 @@ export function buildNativeContext(history: Array<{ message: NativeMessage; prep
     return attachment?.status === "ready" && attachment.path ? [{ path: attachment.path, filename: attachment.filename,
       kind: attachment.kind, messageId: item.message.id, sender: item.message.senderId }] : [];
   });
+  const transcribed = new Set(all.flatMap(item => item.prepared.transcribed ? [item.message.id] : []));
   return { inputBody, attachments, assets, history: buildInboundHistoryFromEntries({ entries, limit: entries.length }),
-    mediaPath: selected?.prepared.mediaPath, mediaMime: selected?.prepared.mediaMime };
+    media: nativeMediaFacts(assets, transcribed) };
 }

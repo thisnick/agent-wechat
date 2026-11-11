@@ -56,6 +56,15 @@ test("released host needs both exact prepared input and correlated model start",
   observeNativePreparedInput(f.input, f.context); assert.equal(f.state.get("m")?.runId, undefined);
   observeNativeModelCall(f.model, f.context); assert.equal(f.state.get("m")?.runId, f.manifest.runId); assert.equal(f.state.get("m")?.readPending, true);
 });
+test("text that looks like an attachment note is ordinary input when nothing is attached", t => {
+  const f = fixture(t); const text = "[media attached: not a file]";
+  const manifest = nativeDispatchManifest({ message: { id: "m", accountId: "a", threadId: "peer", type: 1, body: text } as NativeMessage, inputBody: text, sessionKey: "session", agentId: "agent", channelAccountId: "default" });
+  f.state.update("m", { dispatchManifest: manifest }); trackNativePreparedText(manifest, f.state.preparedCallback(["m"], "on_model_dispatch"));
+  const context = { ...f.context, runId: manifest.runId }, fact = f.input.historyMessages[0].details.fragments[0];
+  const historyMessages = [{ ...f.input.historyMessages[0], details: { ...f.input.historyMessages[0].details, fragments: [{ ...fact, text: fact.text.replace(f.manifest.messageSid, manifest.messageSid) }] } }];
+  observeNativePreparedInput({ ...f.input, runId: manifest.runId, prompt: text, historyMessages }, context); observeNativeModelCall({ ...f.model, runId: manifest.runId }, context);
+  assert.equal(f.state.get("m")?.runId, manifest.runId);
+});
 test("foreign channel/account/session cannot reuse an issued run identity", t => {
   const f = fixture(t);
   for (const change of [{ channel: "other" }, { accountId: "other" }, { sessionKey: "other" }, { agentId: "other" }, { chatId: "wechat:other" }]) {
