@@ -1093,10 +1093,16 @@ fn validate_large_download_reply(
             integer(reply, key)?;
         }
     }
-    ensure!(
-        u64::try_from(integer(reply, "rawfilesize")?)? == descriptor.expected_bytes.unwrap_or(0),
-        "Large-file download source size mismatch"
-    );
+    // File replies can omit this redundant source size. The transfer still
+    // checks the encrypted length and the final decrypted length against the
+    // message descriptor. Reject conflicting metadata when it is supplied.
+    if reply.contains_key("rawfilesize") {
+        ensure!(
+            u64::try_from(integer(reply, "rawfilesize")?)?
+                == descriptor.expected_bytes.unwrap_or(0),
+            "Large-file download source size mismatch"
+        );
+    }
     let raw = reply
         .get("rawfilemd5")
         .ok_or_else(|| anyhow::anyhow!("Missing CDN source checksum"))?;
@@ -1819,6 +1825,35 @@ mod tests {
         assert_eq!(downloaded.advertised_size_matches, Some(true));
     }
     #[test]
+    fn large_download_accepts_missing_size_but_checks_supplied_size() {
+        let (descriptor, raw, ciphertext) =
+            download_fixture(512 * 1024 + 17, MediaQuality::LargeFile);
+        let downloaded = client()
+            .download_with_transport(
+                &descriptor,
+                |_, _| Ok(()),
+                |_, fields| {
+                    let mut reply = download_reply(fields, &descriptor, &ciphertext);
+                    reply.remove("rawfilesize");
+                    Ok(reply)
+                },
+            )
+            .unwrap();
+        assert_eq!(downloaded.bytes, raw);
+        for value in ["", "invalid", "-1", "1"] {
+            let result = client().download_with_transport(
+                &descriptor,
+                |_, _| Ok(()),
+                |_, fields| {
+                    let mut reply = download_reply(fields, &descriptor, &ciphertext);
+                    reply.insert("rawfilesize".into(), value.as_bytes().to_vec());
+                    Ok(reply)
+                },
+            );
+            assert!(result.is_err(), "Accepted invalid source size {value}");
+        }
+    }
+    #[test]
     fn large_download_rejections_expose_only_typed_static_control_details() {
         use LargeFileDownloadControl as Control;
         let (descriptor, _, ciphertext) =
@@ -2129,74 +2164,84 @@ mod tests {
     }
     #[test]
     fn large_download_checks_padding_actual_size_and_digest_independently() {
-        let (descriptor, _, ciphertext) =
-            download_fixture(512 * 1024 + 17, MediaQuality::LargeFile);
-        let mut invalid_padding = ciphertext.clone();
-        let mut encoder = openssl::symm::Crypter::new(
-            Cipher::aes_128_ecb(),
-            openssl::symm::Mode::Encrypt,
-            &descriptor.aes_key,
-            None,
-        )
-        .unwrap();
-        encoder.pad(false);
-        let mut block = [0u8; 32];
-        let written = encoder.update(&[0u8; 16], &mut block).unwrap();
-        assert_eq!(
-            written + encoder.finalize(&mut block[written..]).unwrap(),
-            16
-        );
-        let last = invalid_padding.len() - 16;
-        invalid_padding[last..].copy_from_slice(&block[..16]);
-        assert!(client()
-            .download_with_transport(
-                &descriptor,
-                |_, _| Ok(()),
-                |_, fields| Ok(download_reply(fields, &descriptor, &invalid_padding))
+        for omit_source_size in [false, true] {
+            let reply_for_test =
+                |fields: &CdnFields, descriptor: &MediaDescriptor, bytes: &[u8]| {
+                    let mut reply = download_reply(fields, descriptor, bytes);
+                    if omit_source_size {
+                        reply.remove("rawfilesize");
+                    }
+                    reply
+                };
+            let (descriptor, _, ciphertext) =
+                download_fixture(512 * 1024 + 17, MediaQuality::LargeFile);
+            let mut invalid_padding = ciphertext.clone();
+            let mut encoder = openssl::symm::Crypter::new(
+                Cipher::aes_128_ecb(),
+                openssl::symm::Mode::Encrypt,
+                &descriptor.aes_key,
+                None,
             )
-            .is_err());
-        let mut without_advertised_md5 = descriptor.clone();
-        without_advertised_md5.expected_md5 = None;
-        for change_later in [false, true] {
-            let mut requests = 0;
+            .unwrap();
+            encoder.pad(false);
+            let mut block = [0u8; 32];
+            let written = encoder.update(&[0u8; 16], &mut block).unwrap();
+            assert_eq!(
+                written + encoder.finalize(&mut block[written..]).unwrap(),
+                16
+            );
+            let last = invalid_padding.len() - 16;
+            invalid_padding[last..].copy_from_slice(&block[..16]);
             assert!(client()
                 .download_with_transport(
-                    &without_advertised_md5,
+                    &descriptor,
                     |_, _| Ok(()),
-                    |_, fields| {
-                        requests += 1;
-                        let mut reply = download_reply(fields, &descriptor, &ciphertext);
-                        if !change_later || requests == 2 {
-                            reply.insert(
-                                "rawfilemd5".into(),
-                                b"0123456789abcdef0123456789abcdef".to_vec(),
-                            );
-                        }
-                        Ok(reply)
-                    }
+                    |_, fields| Ok(reply_for_test(fields, &descriptor, &invalid_padding))
                 )
                 .is_err());
-            assert_eq!(requests, 2);
+            let mut without_advertised_md5 = descriptor.clone();
+            without_advertised_md5.expected_md5 = None;
+            for change_later in [false, true] {
+                let mut requests = 0;
+                assert!(client()
+                    .download_with_transport(
+                        &without_advertised_md5,
+                        |_, _| Ok(()),
+                        |_, fields| {
+                            requests += 1;
+                            let mut reply = reply_for_test(fields, &descriptor, &ciphertext);
+                            if !change_later || requests == 2 {
+                                reply.insert(
+                                    "rawfilemd5".into(),
+                                    b"0123456789abcdef0123456789abcdef".to_vec(),
+                                );
+                            }
+                            Ok(reply)
+                        }
+                    )
+                    .is_err());
+                assert_eq!(requests, 2);
+            }
+            let mut wrong_source = ciphertext.clone();
+            wrong_source[0] ^= 1;
+            assert!(client()
+                .download_with_transport(
+                    &descriptor,
+                    |_, _| Ok(()),
+                    |_, fields| Ok(reply_for_test(fields, &descriptor, &wrong_source))
+                )
+                .is_err());
+            let mut wrong_size = descriptor.clone();
+            wrong_size.expected_bytes = Some(descriptor.expected_bytes.unwrap() + 1);
+            wrong_size.strict_size = false;
+            assert!(client()
+                .download_with_transport(
+                    &wrong_size,
+                    |_, _| Ok(()),
+                    |_, fields| Ok(reply_for_test(fields, &wrong_size, &ciphertext))
+                )
+                .is_err());
         }
-        let mut wrong_source = ciphertext.clone();
-        wrong_source[0] ^= 1;
-        assert!(client()
-            .download_with_transport(
-                &descriptor,
-                |_, _| Ok(()),
-                |_, fields| Ok(download_reply(fields, &descriptor, &wrong_source))
-            )
-            .is_err());
-        let mut wrong_size = descriptor.clone();
-        wrong_size.expected_bytes = Some(descriptor.expected_bytes.unwrap() + 1);
-        wrong_size.strict_size = false;
-        assert!(client()
-            .download_with_transport(
-                &wrong_size,
-                |_, _| Ok(()),
-                |_, fields| Ok(download_reply(fields, &wrong_size, &ciphertext))
-            )
-            .is_err());
     }
     #[test]
     fn cancellation_and_transport_failure_never_start_another_download_request() {
