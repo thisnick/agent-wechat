@@ -1,8 +1,13 @@
 //! Account-scoped durable media jobs. Payloads are opaque vault ciphertext;
 //! status/metadata never include URLs, native file IDs or encryption keys.
+//!
+//! Attachment and upload bytes are kept as files (`media_files`), not in the
+//! database. Rows written by earlier versions still carry a BLOB and are read
+//! from it until `externalize_media_payload` moves them.
 use crate::*;
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use ts_rs::TS;
 
 /// A file uploaded to the daemon, ready to be sent.
@@ -186,6 +191,9 @@ pub(crate) fn cancel_queued_media_for_logout(tx: &Connection, account: &str) -> 
     Ok(ids.len())
 }
 impl Store {
+    fn media_directory(&self, account: &str) -> Result<PathBuf> {
+        Ok(media_files::directory(&self.account_dir(account)?))
+    }
     #[allow(clippy::too_many_arguments)]
     pub fn create_media_source(
         &self,
@@ -197,6 +205,7 @@ impl Store {
         sha256: &str,
         payload: &[u8],
     ) -> Result<OwnedMediaSource> {
+        let files = self.media_directory(account)?;
         self.control(account, |db| {
             if id.is_empty()
                 || id.len() > 100
@@ -210,10 +219,22 @@ impl Store {
                 bail!("invalid media source");
             }
             let now = chrono::Utc::now().to_rfc3339();
-            db.execute(
-                "INSERT INTO media_sources VALUES(?1,?2,?3,?4,?5,?6,?7)",
-                params![id, name, media_type, byte_length, sha256, payload, now],
+            let exists: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM media_sources WHERE id=?1)",
+                [id],
+                |r| r.get(0),
             )?;
+            if exists {
+                bail!("media source already exists");
+            }
+            let file = media_files::write(&files, payload)?;
+            if let Err(error) = db.execute(
+                "INSERT INTO media_sources(id,name,media_type,byte_length,sha256,payload,created_at,payload_file) VALUES(?1,?2,?3,?4,?5,x'',?6,?7)",
+                params![id, name, media_type, byte_length, sha256, now, file],
+            ) {
+                media_files::remove(&files, &file);
+                return Err(error.into());
+            }
             Ok(OwnedMediaSource {
                 id: id.into(),
                 name: name.into(),
@@ -224,8 +245,77 @@ impl Store {
             })
         })
     }
+    /// The upload's metadata and encrypted bytes. A deleted file is an error.
     pub fn media_source(&self, account: &str, id: &str) -> Result<(OwnedMediaSource, Vec<u8>)> {
-        self.control(account,|db|{Ok(db.query_row("SELECT name,media_type,byte_length,sha256,payload,created_at FROM media_sources WHERE id=?1",[id],|r|Ok((OwnedMediaSource{id:id.into(),name:r.get(0)?,media_type:r.get(1)?,byte_length:r.get(2)?,sha256:r.get(3)?,created_at:r.get(5)?},r.get(4)?)))?)})
+        let files = self.media_directory(account)?;
+        self.control(account, |db| {
+            let (source, file): (OwnedMediaSource, Option<String>) = db.query_row(
+                "SELECT name,media_type,byte_length,sha256,created_at,payload_file FROM media_sources WHERE id=?1",
+                [id],
+                |r| {
+                    Ok((
+                        OwnedMediaSource {
+                            id: id.into(),
+                            name: r.get(0)?,
+                            media_type: r.get(1)?,
+                            byte_length: r.get(2)?,
+                            sha256: r.get(3)?,
+                            created_at: r.get(4)?,
+                        },
+                        r.get(5)?,
+                    ))
+                },
+            )?;
+            let sealed = match file {
+                Some(file) => media_files::read(&files, &file)?,
+                None => db.query_row(
+                    "SELECT payload FROM media_sources WHERE id=?1",
+                    [id],
+                    |r| r.get(0),
+                )?,
+            };
+            Ok((source, sealed))
+        })
+    }
+    /// Delete an upload and its file. Returns false when it does not exist.
+    pub fn delete_media_source(&self, account: &str, id: &str) -> Result<bool> {
+        let files = self.media_directory(account)?;
+        self.control(account, |db| {
+            let file: Option<Option<String>> = db
+                .query_row(
+                    "SELECT payload_file FROM media_sources WHERE id=?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(file) = file else {
+                return Ok(false);
+            };
+            db.execute("DELETE FROM media_sources WHERE id=?1", [id])?;
+            if let Some(file) = file {
+                media_files::remove(&files, &file);
+            }
+            Ok(true)
+        })
+    }
+    /// IDs of uploads whose ID starts with `prefix`, at most `limit`.
+    pub fn media_source_ids_with_prefix(
+        &self,
+        account: &str,
+        prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        anyhow::ensure!(
+            !prefix.is_empty() && (1..=1000).contains(&limit),
+            "invalid_limit"
+        );
+        self.control(account, |db| {
+            let mut q = db.prepare(
+                "SELECT id FROM media_sources WHERE substr(id,1,length(?1))=?1 ORDER BY id LIMIT ?2",
+            )?;
+            let rows = q.query_map(params![prefix, limit], |r| r.get(0))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
     }
     pub fn media_source_metadata(&self, account: &str, id: &str) -> Result<OwnedMediaSource> {
         self.control(account,|db|{Ok(db.query_row("SELECT name,media_type,byte_length,sha256,created_at FROM media_sources WHERE id=?1",[id],|r|Ok(OwnedMediaSource{id:id.into(),name:r.get(0)?,media_type:r.get(1)?,byte_length:r.get(2)?,sha256:r.get(3)?,created_at:r.get(4)?}))?)})
@@ -450,19 +540,122 @@ impl Store {
         account: &str,
         asset: &MediaAssetRecord,
     ) -> Result<MediaAssetRecord> {
-        self.control(account,|db|{db.execute("INSERT INTO media_assets VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(id) DO NOTHING",params![asset.id,asset.message_id,asset.variant,asset.kind,serde_json::to_string(&asset.metadata)?,asset.plan,asset.payload,chrono::Utc::now().to_rfc3339()])?;read_asset(db,&asset.id)})
+        let files = self.media_directory(account)?;
+        self.control(account, |db| {
+            let exists: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM media_assets WHERE id=?1)",
+                [&asset.id],
+                |r| r.get(0),
+            )?;
+            if !exists {
+                let file = asset
+                    .payload
+                    .as_deref()
+                    .map(|sealed| media_files::write(&files, sealed))
+                    .transpose()?;
+                if let Err(error) = db.execute(
+                    "INSERT INTO media_assets(id,message_id,variant,kind,metadata_json,plan,updated_at,payload_file) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                    params![
+                        asset.id,
+                        asset.message_id,
+                        asset.variant,
+                        asset.kind,
+                        serde_json::to_string(&asset.metadata)?,
+                        asset.plan,
+                        chrono::Utc::now().to_rfc3339(),
+                        file
+                    ],
+                ) {
+                    if let Some(file) = &file {
+                        media_files::remove(&files, file);
+                    }
+                    return Err(error.into());
+                }
+            }
+            read_asset(db, &asset.id)
+        })
     }
     pub fn media_asset(&self, account: &str, id: &str) -> Result<MediaAssetRecord> {
         self.control(account, |db| read_asset(db, id))
     }
     /// Fetch cached bytes only for content reads or local writeback repair.
+    /// `payload` is `None` when this store keeps no copy, which includes an
+    /// attachment read from the official profile. A deleted file is an error.
     pub fn media_asset_with_payload(&self, account: &str, id: &str) -> Result<MediaAssetRecord> {
+        let files = self.media_directory(account)?;
         self.control(account, |db| {
             let mut row = read_asset(db, id)?;
-            row.payload =
-                db.query_row("SELECT payload FROM media_assets WHERE id=?1", [id], |r| {
-                    r.get(0)
-                })?;
+            let file: Option<String> = db.query_row(
+                "SELECT payload_file FROM media_assets WHERE id=?1",
+                [id],
+                |r| r.get(0),
+            )?;
+            row.payload = match file {
+                Some(file) => Some(media_files::read(&files, &file)?),
+                None => {
+                    db.query_row("SELECT payload FROM media_assets WHERE id=?1", [id], |r| {
+                        r.get(0)
+                    })?
+                }
+            };
+            Ok(row)
+        })
+    }
+    /// The official-profile lookup key recorded when this attachment's own copy
+    /// was released, or `None` while its bytes are kept by this store.
+    pub fn media_asset_profile_key(&self, account: &str, id: &str) -> Result<Option<String>> {
+        self.control(account, |db| {
+            Ok(db.query_row(
+                "SELECT profile_key FROM media_assets WHERE id=?1",
+                [id],
+                |r| r.get(0),
+            )?)
+        })
+    }
+    /// Save metadata for an attachment whose bytes are read from the official
+    /// profile, and remove any copy kept here. The caller has verified that the
+    /// profile returns the same bytes.
+    pub fn save_media_asset_in_profile(
+        &self,
+        account: &str,
+        id: &str,
+        metadata: &Value,
+        profile_key: &str,
+    ) -> Result<MediaAssetRecord> {
+        anyhow::ensure!(
+            !profile_key.is_empty() && profile_key.len() <= 255,
+            "invalid media profile key"
+        );
+        let files = self.media_directory(account)?;
+        self.control(account, |db| {
+            let tx = db.transaction()?;
+            let old = read_asset(&tx, id)?;
+            let file: Option<String> = tx.query_row(
+                "SELECT payload_file FROM media_assets WHERE id=?1",
+                [id],
+                |r| r.get(0),
+            )?;
+            tx.execute(
+                "UPDATE media_assets SET metadata_json=?2,payload=NULL,payload_file=NULL,profile_key=?3,updated_at=?4 WHERE id=?1",
+                params![
+                    id,
+                    serde_json::to_string(metadata)?,
+                    profile_key,
+                    chrono::Utc::now().to_rfc3339()
+                ],
+            )?;
+            let row = read_asset(&tx, id)?;
+            if old.metadata["state"] != "available" && metadata["state"] == "available" {
+                media_event(
+                    &tx,
+                    "media.ready",
+                    &json!({"assetId":id,"jobId":metadata["jobId"],"accountId":account}),
+                )?;
+            }
+            tx.commit()?;
+            if let Some(file) = file {
+                media_files::remove(&files, &file);
+            }
             Ok(row)
         })
     }
@@ -483,16 +676,168 @@ impl Store {
         metadata: &Value,
         payload: Option<&[u8]>,
     ) -> Result<MediaAssetRecord> {
-        self.control(account,|db|{
-            let tx=db.transaction()?;let old=read_asset(&tx,id)?;
-            if metadata["state"]=="available" && payload.is_none() {
-                let cached:bool=tx.query_row("SELECT payload IS NOT NULL FROM media_assets WHERE id=?1",[id],|r|r.get(0))?;
-                if !cached {bail!("media_bytes_missing");}
+        let files = self.media_directory(account)?;
+        self.control(account, |db| {
+            let tx = db.transaction()?;
+            let old = read_asset(&tx, id)?;
+            if metadata["state"] == "available" && payload.is_none() {
+                let cached: bool = tx.query_row(
+                    "SELECT payload IS NOT NULL OR payload_file IS NOT NULL OR profile_key IS NOT NULL FROM media_assets WHERE id=?1",
+                    [id],
+                    |r| r.get(0),
+                )?;
+                if !cached {
+                    bail!("media_bytes_missing");
+                }
             }
-            tx.execute("UPDATE media_assets SET metadata_json=?2,payload=COALESCE(?3,payload),updated_at=?4 WHERE id=?1",params![id,serde_json::to_string(metadata)?,payload,chrono::Utc::now().to_rfc3339()])?;
-            let row=read_asset(&tx,id)?;
-            if old.metadata["state"]!="available" && metadata["state"]=="available" {media_event(&tx,"media.ready",&json!({"assetId":id,"jobId":metadata["jobId"],"accountId":account}))?;}
-            tx.commit()?;Ok(row)
+            let now = chrono::Utc::now().to_rfc3339();
+            let mut replaced = None;
+            let mut written = None;
+            let saved = (|| -> Result<MediaAssetRecord> {
+                if let Some(sealed) = payload {
+                    replaced = tx.query_row(
+                        "SELECT payload_file FROM media_assets WHERE id=?1",
+                        [id],
+                        |r| r.get::<_, Option<String>>(0),
+                    )?;
+                    let file = media_files::write(&files, sealed)?;
+                    written = Some(file.clone());
+                    tx.execute(
+                        "UPDATE media_assets SET metadata_json=?2,payload=NULL,payload_file=?3,profile_key=NULL,updated_at=?4 WHERE id=?1",
+                        params![id, serde_json::to_string(metadata)?, file, now],
+                    )?;
+                } else {
+                    tx.execute(
+                        "UPDATE media_assets SET metadata_json=?2,updated_at=?3 WHERE id=?1",
+                        params![id, serde_json::to_string(metadata)?, now],
+                    )?;
+                }
+                let row = read_asset(&tx, id)?;
+                if old.metadata["state"] != "available" && metadata["state"] == "available" {
+                    media_event(
+                        &tx,
+                        "media.ready",
+                        &json!({"assetId":id,"jobId":metadata["jobId"],"accountId":account}),
+                    )?;
+                }
+                Ok(row)
+            })();
+            let committed = saved.and_then(|row| {
+                tx.commit()?;
+                Ok(row)
+            });
+            match committed {
+                Ok(row) => {
+                    if let Some(file) = replaced {
+                        media_files::remove(&files, &file);
+                    }
+                    Ok(row)
+                }
+                Err(error) => {
+                    if let Some(file) = written {
+                        media_files::remove(&files, &file);
+                    }
+                    Err(error)
+                }
+            }
+        })
+    }
+    /// Rows that still carry a payload BLOB written by an earlier version, as
+    /// `(family, id)` with family `asset` or `source`, at most `limit`.
+    pub fn embedded_media_payloads(
+        &self,
+        account: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>> {
+        anyhow::ensure!((1..=1000).contains(&limit), "invalid_limit");
+        self.control(account, |db| {
+            let mut q = db.prepare(
+                "SELECT family,id FROM (SELECT 'asset' AS family,id FROM media_assets WHERE payload IS NOT NULL UNION ALL SELECT 'source' AS family,id FROM media_sources WHERE payload_file IS NULL) ORDER BY family,id LIMIT ?1",
+            )?;
+            let rows = q.query_map([limit], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+    }
+    /// Move one earlier payload BLOB into a file without changing its bytes.
+    /// Returns false when the row has no BLOB left to move.
+    pub fn externalize_media_payload(&self, account: &str, family: &str, id: &str) -> Result<bool> {
+        let (table, embedded, cleared) = match family {
+            "asset" => ("media_assets", "payload IS NOT NULL", "NULL"),
+            "source" => ("media_sources", "payload_file IS NULL", "x''"),
+            _ => bail!("invalid media payload family"),
+        };
+        let files = self.media_directory(account)?;
+        self.control(account, |db| {
+            let sealed: Option<Vec<u8>> = db
+                .query_row(
+                    &format!("SELECT payload FROM {table} WHERE id=?1 AND {embedded}"),
+                    [id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(sealed) = sealed else {
+                return Ok(false);
+            };
+            let file = media_files::write(&files, &sealed)?;
+            if let Err(error) = db.execute(
+                &format!("UPDATE {table} SET payload={cleared},payload_file=?2 WHERE id=?1"),
+                params![id, file],
+            ) {
+                media_files::remove(&files, &file);
+                return Err(error.into());
+            }
+            Ok(true)
+        })
+    }
+    /// Delete payload files that no row names, such as one written just before
+    /// a crash. Returns how many were removed.
+    pub fn sweep_media_files(&self, account: &str) -> Result<usize> {
+        let files = self.media_directory(account)?;
+        self.control(account, |db| {
+            let mut q = db.prepare(
+                "SELECT payload_file FROM media_assets WHERE payload_file IS NOT NULL UNION ALL SELECT payload_file FROM media_sources WHERE payload_file IS NOT NULL",
+            )?;
+            let referenced = q
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+            media_files::sweep(&files, &referenced)
+        })
+    }
+    /// Return the space freed by moved or deleted payloads to the file system
+    /// once at least 16 MiB and a quarter of the database is unused. Returns
+    /// whether the database was rewritten.
+    pub fn compact_control(&self, account: &str) -> Result<bool> {
+        if self.is_read_snapshot() {
+            return Ok(false);
+        }
+        self.control(account, |db| {
+            let pages: i64 = db.pragma_query_value(None, "page_count", |r| r.get(0))?;
+            let free: i64 = db.pragma_query_value(None, "freelist_count", |r| r.get(0))?;
+            let size: i64 = db.pragma_query_value(None, "page_size", |r| r.get(0))?;
+            if free.saturating_mul(size) < 16 * 1024 * 1024 || free < pages / 4 {
+                return Ok(false);
+            }
+            db.execute_batch("VACUUM")?;
+            Ok(true)
+        })
+    }
+    /// Send jobs to consider when deleting uploads that are no longer needed, as
+    /// `(job ID, finished)`. A finished job ended at least `settled_seconds` ago
+    /// with nothing left to retry, review or write to the profile, and its
+    /// upload still exists. Every other send job is listed as unfinished.
+    pub fn send_jobs_for_source_release(
+        &self,
+        account: &str,
+        settled_seconds: i64,
+    ) -> Result<Vec<(String, bool)>> {
+        anyhow::ensure!(settled_seconds >= 0, "invalid_limit");
+        let before = (chrono::Utc::now() - chrono::Duration::seconds(settled_seconds)).to_rfc3339();
+        self.control(account, |db| {
+            let mut q = db.prepare(
+                "SELECT id,finished FROM (SELECT j.id AS id,(j.retryable=0 AND j.updated_at<=?1 AND (j.state IN ('failed','cancelled') OR (j.state='accepted' AND coalesce(json_extract(j.data_json,'$.result.profileProjection'),'') IN ('complete','not_applicable') AND coalesce(json_extract(j.data_json,'$.result.officialMediaWriteback'),'') IN ('complete','not_applicable')))) AS finished,json_extract(j.data_json,'$.sourceId') AS source FROM media_jobs j WHERE j.kind='send') WHERE finished=0 OR EXISTS(SELECT 1 FROM media_sources s WHERE s.id=source) ORDER BY id",
+            )?;
+            let rows = q.query_map([before], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
         })
     }
     pub fn media_sync_receipts(&self, account: &str) -> Result<Vec<(String, Vec<u8>)>> {
@@ -514,6 +859,54 @@ mod tests {
         let s = Store::open(&t.path().join("data")).unwrap();
         s.create_account("test").unwrap();
         (t, s)
+    }
+    #[test]
+    fn compaction_returns_space_once_embedded_payloads_have_moved_to_files() {
+        let (dir, s) = setup();
+        let database = dir.path().join("data/accounts/test/agent/control.sqlite");
+        let payload = vec![7_u8; 24 * 1024 * 1024];
+        // A row as written before payload files existed.
+        s.control("test", |db| {
+            db.execute(
+                "INSERT INTO media_sources(id,name,media_type,byte_length,sha256,payload,created_at) VALUES('old','old.bin','application/octet-stream',1,?1,?2,'2020-01-01T00:00:00+00:00')",
+                params!["a".repeat(64), payload],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let before = fs::metadata(&database).unwrap().len();
+        assert!(before > payload.len() as u64);
+        assert_eq!(s.media_source("test", "old").unwrap().1, payload);
+        assert!(!s.compact_control("test").unwrap());
+        assert_eq!(
+            s.embedded_media_payloads("test", 10).unwrap(),
+            [("source".to_string(), "old".to_string())]
+        );
+        assert!(s
+            .externalize_media_payload("test", "source", "old")
+            .unwrap());
+        assert!(!s
+            .externalize_media_payload("test", "source", "old")
+            .unwrap());
+        assert!(s.externalize_media_payload("test", "other", "old").is_err());
+        assert!(s.embedded_media_payloads("test", 10).unwrap().is_empty());
+        // The pages are free but the file has not shrunk until it is compacted.
+        assert_eq!(fs::metadata(&database).unwrap().len(), before);
+        assert!(s.compact_control("test").unwrap());
+        assert!(fs::metadata(&database).unwrap().len() < 1024 * 1024);
+        assert!(!s.compact_control("test").unwrap());
+        assert_eq!(s.media_source("test", "old").unwrap().1, payload);
+        drop(s);
+        let s = Store::open_existing(&dir.path().join("data")).unwrap();
+        assert_eq!(s.media_source("test", "old").unwrap().1, payload);
+        assert!(s.delete_media_source("test", "old").unwrap());
+        assert!(!s.delete_media_source("test", "old").unwrap());
+        assert_eq!(
+            fs::read_dir(dir.path().join("data/accounts/test/agent/media"))
+                .unwrap()
+                .count(),
+            0
+        );
     }
     #[test]
     fn completed_upload_retry_cas_rejects_job_source_and_authorization_races() {

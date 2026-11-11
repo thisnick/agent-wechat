@@ -134,6 +134,7 @@ pub struct CoreShared {
     pub(crate) profile_format_key: Mutex<Option<zeroize::Zeroizing<Vec<u8>>>>,
     pub(crate) bootstrap_leases: Mutex<std::collections::BTreeSet<String>>,
     pub(crate) startup_profiles_recovered: AtomicBool,
+    pub(crate) media_storage_maintained: AtomicBool,
     pub(crate) gates: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
     text_send_gates: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
     pub(crate) media_gates: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
@@ -396,6 +397,7 @@ impl Core {
                 profile_format_key: Mutex::new(Some(crate::format::global_mmkv_format_key())),
                 bootstrap_leases: Mutex::new(bootstrap_leases),
                 startup_profiles_recovered: AtomicBool::new(false),
+                media_storage_maintained: AtomicBool::new(false),
                 ownership_generation: uuid::Uuid::new_v4().to_string(),
                 gates: Mutex::new(BTreeMap::new()),
                 media_gates: Mutex::new(BTreeMap::new()),
@@ -655,6 +657,18 @@ impl Core {
         } else {
             self.store.save_active_authorization(account, &sealed)
         }
+    }
+    /// Test accounts that need a managed official profile accepting writes.
+    #[cfg(test)]
+    pub(crate) fn test_managed_profile(
+        &self,
+        account: &str,
+        state: &wechat_protocol::AccountState,
+    ) -> Result<()> {
+        self.configure_profile_format_key(&[9; 16])?;
+        self.install_login_state(account, state, None)?;
+        self.ensure_managed_profile(account, state)?;
+        Ok(())
     }
     #[cfg(test)]
     fn install_login_state(
@@ -2134,6 +2148,7 @@ impl Core {
             }
         }
         self.resume_media_jobs()?;
+        self.spawn_media_storage_maintenance()?;
         for account in self.store.accounts()? {
             if !self
                 .workers

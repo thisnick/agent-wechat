@@ -3,7 +3,7 @@ use crate::upstream::{media::MediaTransport, Upstream, UpstreamKind};
 use std::sync::{atomic::AtomicUsize, Condvar, Mutex};
 use wechat_protocol::media::DownloadedMedia;
 
-struct PausedDownloads {
+pub(super) struct PausedDownloads {
     starts: std::sync::mpsc::Sender<String>,
     release: Arc<(Mutex<bool>, Condvar)>,
     count: Arc<AtomicUsize>,
@@ -68,7 +68,7 @@ impl MediaTransport for PausedCdn {
         bail!("unexpected upload")
     }
 }
-fn fixture() -> (
+pub(super) fn fixture() -> (
     tempfile::TempDir,
     Arc<Core>,
     Arc<PausedDownloads>,

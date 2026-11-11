@@ -17,7 +17,8 @@ migration account/V009__call_actions.sql | sha256 e8bb5d5e20c7bd44 | -
 migration account/V010__call_request_context.sql | sha256 e4e966151a7cdaf9 | -
 migration account/V011__call_non_submission.sql | sha256 6b7fb82dbc0894e0 | -
 migration account/V012__call_local_closure.sql | sha256 0f638990f3baa99e | -
-schema version | 12 | -
+migration account/V013__media_files.sql | sha256 c70edfdce0f3e860 | -
+schema version | 13 | -
 table apply_intents | CREATE TABLE apply_intents(id TEXT PRIMARY KEY,payload BLOB NOT NULL,state TEXT NOT NULL,created_at TEXT NOT NULL, stream TEXT NOT NULL DEFAULT 'message') | -
 table apply_intents.created_at | TEXT, not null | -
 table apply_intents.id | TEXT, primary key 1 | -
@@ -61,13 +62,15 @@ table group_mutations.operation_id foreign key #0 | references operations(id), o
 table group_mutations.phase | TEXT, not null | -
 table group_mutations.request_hash | TEXT, not null | -
 table group_mutations.step | INTEGER, not null, default 0 | -
-table media_assets | CREATE TABLE media_assets(id TEXT PRIMARY KEY,message_id TEXT,variant TEXT NOT NULL,kind TEXT NOT NULL,metadata_json TEXT NOT NULL,plan BLOB NOT NULL,payload BLOB,updated_at TEXT NOT NULL) | -
+table media_assets | CREATE TABLE media_assets(id TEXT PRIMARY KEY,message_id TEXT,variant TEXT NOT NULL,kind TEXT NOT NULL,metadata_json TEXT NOT NULL,plan BLOB NOT NULL,payload BLOB,updated_at TEXT NOT NULL, payload_file TEXT, profile_key TEXT) | -
 table media_assets.id | TEXT, primary key 1 | -
 table media_assets.kind | TEXT, not null | -
 table media_assets.message_id | TEXT | -
 table media_assets.metadata_json | TEXT, not null | -
 table media_assets.payload | BLOB | -
+table media_assets.payload_file | TEXT | -
 table media_assets.plan | BLOB, not null | -
+table media_assets.profile_key | TEXT | -
 table media_assets.updated_at | TEXT, not null | -
 table media_assets.variant | TEXT, not null | -
 table media_jobs | CREATE TABLE media_jobs(id TEXT PRIMARY KEY,idempotency_key TEXT NOT NULL UNIQUE,request_hash TEXT NOT NULL,kind TEXT NOT NULL,state TEXT NOT NULL,phase TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,cancel_requested INTEGER NOT NULL DEFAULT 0,retryable INTEGER NOT NULL DEFAULT 0,error_code TEXT,data_json TEXT NOT NULL,payload BLOB NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL) | -
@@ -85,13 +88,14 @@ table media_jobs.request_hash | TEXT, not null | -
 table media_jobs.retryable | INTEGER, not null, default 0 | -
 table media_jobs.state | TEXT, not null | -
 table media_jobs.updated_at | TEXT, not null | -
-table media_sources | CREATE TABLE media_sources(id TEXT PRIMARY KEY,name TEXT NOT NULL,media_type TEXT NOT NULL,byte_length INTEGER NOT NULL,sha256 TEXT NOT NULL,payload BLOB NOT NULL,created_at TEXT NOT NULL) | -
+table media_sources | CREATE TABLE media_sources(id TEXT PRIMARY KEY,name TEXT NOT NULL,media_type TEXT NOT NULL,byte_length INTEGER NOT NULL,sha256 TEXT NOT NULL,payload BLOB NOT NULL,created_at TEXT NOT NULL, payload_file TEXT) | -
 table media_sources.byte_length | INTEGER, not null | -
 table media_sources.created_at | TEXT, not null | -
 table media_sources.id | TEXT, primary key 1 | -
 table media_sources.media_type | TEXT, not null | -
 table media_sources.name | TEXT, not null | -
 table media_sources.payload | BLOB, not null | -
+table media_sources.payload_file | TEXT | -
 table media_sources.sha256 | TEXT, not null | -
 table message_recalls | CREATE TABLE message_recalls( thread_id TEXT NOT NULL, server_id TEXT NOT NULL, message_id TEXT, source_created_at INTEGER, observed_at TEXT NOT NULL, recalled_at INTEGER, origin TEXT NOT NULL, projection_state TEXT NOT NULL DEFAULT 'pending', PRIMARY KEY(thread_id,server_id) ) | -
 table message_recalls.message_id | TEXT | -

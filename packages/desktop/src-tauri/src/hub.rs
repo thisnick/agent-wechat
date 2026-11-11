@@ -96,6 +96,8 @@ pub fn executable(resource: &Path, name: &str) -> Result<PathBuf> {
     }
     Ok(path)
 }
+/// How long a hub that is still running may take to start listening.
+const STARTUP_LIMIT: Duration = Duration::from_secs(10 * 60);
 pub async fn start(
     config: &Config,
     data: &Path,
@@ -164,7 +166,10 @@ pub async fn start(
     input.write_all(key.as_bytes()).await?;
     input.shutdown().await?;
     drop(input);
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    // Before it listens, the hub checks its databases, and a first start after
+    // an update can copy a large one. Stopping it part-way only makes the next
+    // start repeat that work, so keep waiting while the process is alive.
+    let deadline = tokio::time::Instant::now() + STARTUP_LIMIT;
     loop {
         if child.try_wait()?.is_some() {
             bail!("The local hub stopped during startup; existing profiles were preserved");

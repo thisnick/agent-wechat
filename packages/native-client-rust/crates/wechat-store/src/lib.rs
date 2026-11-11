@@ -8,6 +8,7 @@ mod checkpoint;
 pub mod copy;
 mod group_mutations;
 mod media;
+mod media_files;
 mod metadata;
 mod operations;
 mod outbox;
@@ -144,6 +145,9 @@ pub struct Account {
     pub schema_compatibility: String,
 }
 
+/// The `registry.sqlite` schema version after every migration.
+const REGISTRY_SCHEMA_VERSION: i64 = 4;
+
 pub struct Store {
     pub root: PathBuf,
     pub server_id: String,
@@ -181,7 +185,9 @@ impl Store {
             bail!("registry must be an owner-only regular file");
         }
         let (db, server_id) =
-            admission::open_prepared(&db_path, None, |db| Self::prepare_registry(db, initialize))?;
+            admission::open_prepared(&db_path, None, REGISTRY_SCHEMA_VERSION, |db| {
+                Self::prepare_registry(db, initialize)
+            })?;
         Ok(Self {
             root,
             server_id,
@@ -194,7 +200,7 @@ impl Store {
     fn prepare_registry(db: &mut Connection, initialize: bool) -> Result<String> {
         db.pragma_update(None, "foreign_keys", true)?;
         let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if !(0..=4).contains(&version) {
+        if !(0..=REGISTRY_SCHEMA_VERSION).contains(&version) {
             bail!("unsupported registry schema version");
         }
         if version == 0 {

@@ -17,8 +17,12 @@ impl Store {
             .admitted
             .lock()
             .map_err(|_| anyhow::anyhow!("database admission lock poisoned"))?;
-        let (control, ()) =
-            admission::open_prepared(&path, Some(&admitted), Self::prepare_account)?;
+        let (control, ()) = admission::open_prepared(
+            &path,
+            Some(&admitted),
+            operations::ACCOUNT_SCHEMA_VERSION,
+            Self::prepare_account,
+        )?;
         let signed_in: bool = control.query_row("SELECT EXISTS(SELECT 1 FROM runtime WHERE key='account-state') AND NOT EXISTS(SELECT 1 FROM runtime WHERE key='logged-out')", [], |r| r.get(0))?;
         if signed_in {
             bail!("account_sign_out_required");

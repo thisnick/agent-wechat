@@ -444,7 +444,7 @@ mod tests {
                 let store = Store::open(&root).unwrap();
                 store.create_account("a").unwrap();
                 store.control("a", |db| {
-                    db.execute_batch("DROP TABLE call_actions; DROP TABLE call_sessions;")?;
+                    db.execute_batch("ALTER TABLE media_assets DROP COLUMN payload_file;ALTER TABLE media_assets DROP COLUMN profile_key;ALTER TABLE media_sources DROP COLUMN payload_file;DROP TABLE call_actions; DROP TABLE call_sessions;")?;
                     db.execute_batch(include_str!("../migrations/account/V009__call_actions.sql"))?;
                     if version == 10 {
                         db.execute_batch(include_str!("../migrations/account/V010__call_request_context.sql"))?;
@@ -478,7 +478,7 @@ mod tests {
                 .control("a", |db| {
                     assert_eq!(
                         db.pragma_query_value::<u32, _>(None, "user_version", |r| r.get(0))?,
-                        12
+                        13
                     );
                     let rows = db
                         .prepare("SELECT rowid FROM call_actions ORDER BY rowid")?
