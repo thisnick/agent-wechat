@@ -134,8 +134,10 @@ export function MiniProgramsList() {
             ? <ProgramIcon connection={connection} account={account} messageId={program.iconMessageId} appId={program.appId} />
             : <CatalogIcon connection={connection} account={account} appId={program.appId} />}
         </span>
-        <div className="mini-program-name"><strong>{emojiText(program.title)}</strong>
-          <small>{program.available ? t("miniPrograms.available") : t("miniPrograms.packageUnavailable")}</small></div>
+        <div className="mini-program-name">
+          <strong>{emojiText(program.title)}</strong>
+          {!program.available && <small>{t("miniPrograms.packageUnavailable")}</small>}
+        </div>
         <OpenProgram appId={program.appId} title={program.title} blocked={!program.available} />
       </li>)}</ul>}
   </section>;

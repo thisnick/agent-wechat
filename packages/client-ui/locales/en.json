@@ -722,7 +722,6 @@
     "loading": "Loading Mini Programs…",
     "couldNotLoad": "Could not load Mini Programs from this hub.",
     "empty": "No Mini Programs available for this account.",
-    "available": "Package cached",
     "packageUnavailable": "Package unavailable on this hub",
     "openInDesktop": "Open in the desktop app",
     "openNamed": "Open {{title}}",
