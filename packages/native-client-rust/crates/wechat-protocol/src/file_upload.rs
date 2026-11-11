@@ -1,6 +1,7 @@
 //! File-upload message reservation. This authenticated request can affect the
 //! account's message state; callers must persist its receipt and never retry an
 //! uncertain response automatically.
+use crate::errors::{Service, ServiceRejected};
 use crate::{protobuf as p, wire::base_request, AccountState};
 use anyhow::{ensure, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -121,11 +122,12 @@ pub fn decode_file_upload_reservation(input: &[u8]) -> Result<FileUploadReservat
     let fields = p::decode(input)?;
     let base = p::decode(p::data(&fields, 1)?)?;
     let code = p::scalar(&base, 1)?;
-    ensure!(
-        code == 0,
-        "File upload reservation returned {}",
-        code as u32 as i32
-    );
+    if code != 0 {
+        // The untruncated value decides; the signed 32-bit form is reported.
+        return Err(
+            ServiceRejected::new(Service::FileUploadReservation, code as u32 as i32).into(),
+        );
+    }
     let receipt = FileUploadReservation {
         file_upload_token: std::str::from_utf8(p::data(&fields, 2)?)?.to_owned(),
         overwrite_newmsgid: p::scalar(&fields, 3)?,

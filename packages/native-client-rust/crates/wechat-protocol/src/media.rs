@@ -1,5 +1,6 @@
 //! Bounded native CDN transport. This uses the observed HTTP carrier on port 443,
 //! not HTTPS. Media encryption and advertised size/digests are checked separately.
+use crate::errors::{Service, ServiceRejected};
 use crate::{
     crypto::{md5, random, sha256},
     protobuf as p, AccountState,
@@ -93,7 +94,7 @@ impl CdnConfig {
 pub fn decode_cdn_config(input: &[u8], account: &AccountState) -> Result<CdnConfig> {
     let f = p::decode(input)?;
     let code = p::base_code(&f)?;
-    ensure!(code == 0, "CDN bootstrap returned {code}");
+    ServiceRejected::check(Service::CdnBootstrap, code)?;
     let group = p::decode(p::data(&f, 2)?)?;
     let version = u32::try_from(p::scalar(&group, 1)?)?;
     let uin = p::scalar(&group, 2)?;
@@ -633,7 +634,7 @@ impl CdnClient {
             fields.insert("fileid".into(), descriptor.file_id.as_bytes().to_vec());
             let reply = post(if large { "/downloadbig" } else { "/download" }, &fields)?;
             let code = integer(&reply, "retcode")?;
-            ensure!(code == 0, "CDN download returned {code}");
+            ServiceRejected::check_wide(Service::CdnDownload, code)?;
             if strict_transfer || reply.contains_key("seq") {
                 ensure!(
                     integer(&reply, "seq")? == i64::from(sequence),
@@ -1200,7 +1201,7 @@ fn validate_upload_reply(
     file_id: &mut Option<String>,
 ) -> Result<()> {
     let code = integer(reply, "retcode")?;
-    ensure!(code == 0, "CDN upload returned {code}");
+    ServiceRejected::check_wide(Service::CdnUpload, code)?;
     for (key, expected) in [
         ("seq", sequence as u64),
         ("rangestart", start as u64),

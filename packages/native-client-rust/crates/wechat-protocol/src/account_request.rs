@@ -219,6 +219,19 @@ impl NativeClient {
         let accepted = transport.renew_session_snapshot(&state, computer_name)?;
         exchange.accept_credentials(accepted)
     }
+
+    /// As [`Self::logout`], on the caller's blocking worker. No Tokio runtime
+    /// is needed. Logout is submitted at most once and the owner stays stopped
+    /// after rejection or uncertainty.
+    pub fn logout_blocking(&self) -> Result<crate::LogoutReply> {
+        self.prepare_logout()?.submit_blocking()
+    }
+
+    /// As [`Self::shutdown`], on the caller's blocking worker. Do not call it
+    /// from inside an account request: it waits for every request to finish.
+    pub fn shutdown_blocking(&self) -> Result<()> {
+        self.owned_account()?.stop_and_drain_blocking()
+    }
 }
 
 #[cfg(test)]

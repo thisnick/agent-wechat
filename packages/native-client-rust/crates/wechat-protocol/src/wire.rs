@@ -1,4 +1,5 @@
 //! Typed numbered business messages for the supported native profile.
+use crate::errors::{Service, ServiceRejected};
 use crate::{crypto::random, protobuf as p, AccountState, DeviceProfile};
 use anyhow::{bail, ensure, Result};
 use serde::{Deserialize, Serialize};
@@ -63,7 +64,7 @@ pub struct QrResponse {
 pub fn decode_qr(input: &[u8]) -> Result<QrResponse> {
     let f = p::decode(input)?;
     let code = p::base_code(&f)?;
-    ensure!(code == 0, "QR service returned {code}");
+    ServiceRejected::check(Service::QrLogin, code)?;
     let image = p::unbuffer(p::data(&f, 2)?)?;
     let identifier = p::data(&f, 3)?.to_vec();
     p::scalar(&f, 4)?;
@@ -102,7 +103,7 @@ pub struct PollResponse {
 pub fn decode_poll(input: &[u8], notify_key: &[u8]) -> Result<PollResponse> {
     let f = p::decode(input)?;
     let code = p::base_code(&f)?;
-    ensure!(code == 0, "Login poll returned {code}");
+    ServiceRejected::check(Service::LoginPoll, code)?;
     let Some(pkg) = p::optional_data(&f, 3)? else {
         return Ok(PollResponse {
             status: None,
@@ -260,7 +261,7 @@ pub fn push_login(
 pub fn decode_push(input: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
     let f = p::decode(input)?;
     let code = p::base_code(&f)?;
-    ensure!(code == 0, "Saved-device login returned {code}");
+    ServiceRejected::check(Service::SavedDeviceLogin, code)?;
     let id = p::data(&f, 2)?.to_vec();
     let key = p::unbuffer(p::data(&f, 3)?)?;
     ensure!(
@@ -300,7 +301,9 @@ pub fn sync_request(cursor: &[u8], device_type: &str, scene: u32) -> Result<Vec<
 pub fn decode_sync(input: &[u8], prior: &[u8]) -> Result<SyncBatch> {
     let f = p::decode(input)?;
     let code = p::scalar(&f, 1)? as u32 as i32;
-    ensure!(code == 0 || code == -2006, "Sync service returned {code}");
+    if code != -2006 {
+        ServiceRejected::check(Service::Sync, code)?;
+    }
     let list = p::decode(p::data(&f, 2)?)?;
     let flags = u32::try_from(p::scalar(&f, 3)?)?;
     let incoming = p::unbuffer(p::data(&f, 4)?)?;
@@ -489,7 +492,7 @@ pub fn heartbeat_request(state: &AccountState, cursor: &[u8]) -> Result<Vec<u8>>
 pub fn decode_heartbeat(input: &[u8]) -> Result<Heartbeat> {
     let f = p::decode(input)?;
     let code = p::base_code(&f)?;
-    ensure!(code == 0, "Heartbeat returned {code}");
+    ServiceRejected::check(Service::Heartbeat, code)?;
     Ok(Heartbeat {
         next_interval: u32::try_from(p::scalar(&f, 2)?)?,
         selector: u32::try_from(p::scalar(&f, 3)?)?,
@@ -702,7 +705,7 @@ pub fn decode_contacts(input: &[u8], requested: &[String]) -> Result<ContactLook
     );
     let f = p::decode(input)?;
     let code = p::base_code(&f)?;
-    ensure!(code == 0, "Contact service returned {code}");
+    ServiceRejected::check(Service::Contact, code)?;
     let mut slots = vec![];
     let mut results = vec![];
     for field in &f {
@@ -799,7 +802,7 @@ pub fn room_request(state: &AccountState, room_id: &str, version: u32) -> Result
 pub fn decode_room(input: &[u8], room_id: &str) -> Result<RoomRoster> {
     let f = p::decode(input)?;
     let code = p::base_code(&f)?;
-    ensure!(code == 0, "Room service returned {code}");
+    ServiceRejected::check(Service::Room, code)?;
     if let Some(echo) = p::optional_data(&f, 2)? {
         ensure!(echo == room_id.as_bytes(), "Foreign room reply");
     }
@@ -923,7 +926,7 @@ pub fn init_contacts_request(
 pub fn decode_init_contacts(input: &[u8]) -> Result<InitContactPage> {
     let f = p::decode(input)?;
     let code = p::base_code(&f)?;
-    ensure!(code == 0, "Contact bootstrap returned {code}");
+    ServiceRejected::check(Service::ContactBootstrap, code)?;
     let optional_scalar = |n| -> Result<u32> {
         match p::optional(&f, n)? {
             Some(p::Value::Varint(v)) => Ok(u32::try_from(*v)?),
@@ -981,7 +984,7 @@ pub fn avatar_request(state: &AccountState, usernames: &[String]) -> Result<Vec<
 pub fn decode_avatars(input: &[u8], requested: &[String]) -> Result<Vec<AvatarBytes>> {
     let f = p::decode(input)?;
     let code = p::base_code(&f)?;
-    ensure!(code == 0, "Avatar service returned {code}");
+    ServiceRejected::check(Service::Avatar, code)?;
     let mut out = vec![];
     let mut seen = HashSet::new();
     for field in f.iter().filter(|f| f.number == 3) {
@@ -1046,7 +1049,7 @@ pub fn decode_voice(input: &[u8], server_id: u64, total: u32, offset: u32) -> Re
     let f = p::decode(input)?;
     let base = p::decode(p::data(&f, 9)?)?;
     let code = p::scalar(&base, 1)? as u32 as i32;
-    ensure!(code == 0, "Voice service returned {code}");
+    ServiceRejected::check(Service::Voice, code)?;
     for n in [1, 2, 3, 5, 8] {
         u32::try_from(p::scalar(&f, n)?)?;
     }

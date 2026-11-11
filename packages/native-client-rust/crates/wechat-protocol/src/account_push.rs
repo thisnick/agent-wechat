@@ -1,6 +1,6 @@
 //! Persistent notifications share the account owner, not a saved credential copy.
 use super::*;
-use crate::{push, wire};
+use crate::{errors::AccountInterrupted, push, wire};
 use std::time::Instant;
 
 /// Persistent account connection for callers that already own blocking workers.
@@ -83,22 +83,38 @@ impl AccountPushConnection {
             "Invalid account notification timeout"
         );
         self.request(|connection, _, check| {
-            let deadline = Instant::now() + timeout;
-            loop {
-                check()?;
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    return Ok(None);
-                }
-                let notification = connection.poll(remaining.min(Duration::from_secs(1)))?;
-                // After waiting, this is an observed operation, not proof that
-                // a business request was never submitted. Preserve uncertainty.
-                check().map_err(|_| anyhow::anyhow!("Account notification session superseded"))?;
-                if notification.is_some() {
-                    return Ok(notification);
-                }
-            }
+            wait_for_notification(timeout, check, |slice| connection.poll(slice))
         })
+    }
+}
+
+/// Wait in one-second slices so a stop or renewal ends the wait promptly. The
+/// reason for an interruption stays attached as [`AccountInterrupted`].
+fn wait_for_notification<T>(
+    timeout: Duration,
+    check: &dyn Fn() -> Result<()>,
+    mut wait: impl FnMut(Duration) -> Result<Option<T>>,
+) -> Result<Option<T>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        check()?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(None);
+        }
+        let notification = wait(remaining.min(Duration::from_secs(1)))?;
+        // After waiting, this is an observed operation, not proof that
+        // a business request was never submitted. Preserve uncertainty.
+        check().map_err(|error| {
+            let message = "Account notification session superseded";
+            match AccountInterrupted::find(&error) {
+                Some(reason) => reason.because(message),
+                None => anyhow::anyhow!(message),
+            }
+        })?;
+        if notification.is_some() {
+            return Ok(notification);
+        }
     }
 }
 
@@ -107,10 +123,10 @@ fn begin_push_request(client: &NativeClient, connected: u64) -> Result<(Exchange
         .owned_account()?
         .begin()
         .map_err(|error| error.context(NativeRequestNotSubmitted))?;
-    ensure!(
-        exchange.credential_generation == connected,
-        "Account notification credentials superseded"
-    );
+    if exchange.credential_generation != connected {
+        return Err(AccountInterrupted::CredentialsSuperseded
+            .because("Account notification credentials superseded"));
+    }
     Ok((exchange, state))
 }
 
@@ -126,12 +142,104 @@ mod tests {
         let (renewal, same_credentials) = client.owned_account().unwrap().begin().unwrap();
         renewal.accept_credentials(same_credentials).unwrap();
         drop(renewal);
-        assert!(begin_push_request(&client, 0).is_err());
+        let error = begin_push_request(&client, 0).err().unwrap();
+        assert_eq!(
+            AccountInterrupted::find(&error),
+            Some(AccountInterrupted::CredentialsSuperseded)
+        );
+        assert_eq!(
+            error.to_string(),
+            "Account notification credentials superseded"
+        );
         let (current, _) = begin_push_request(&client, 1).unwrap();
         drop(current);
         client.stop().unwrap();
         let error = begin_push_request(&client, 1).err().unwrap();
         assert!(error.is::<NativeRequestNotSubmitted>());
+        assert_eq!(
+            AccountInterrupted::find(&error),
+            Some(AccountInterrupted::Stopped)
+        );
         assert_eq!(client.account_status().unwrap().in_flight, 0);
+    }
+
+    fn renew(client: &NativeClient) {
+        let (renewal, same_credentials) = client.owned_account().unwrap().begin().unwrap();
+        renewal.accept_credentials(same_credentials).unwrap();
+    }
+
+    /// Run the notification wait inside an account request, with `during_wait`
+    /// standing in for the time spent blocked on the socket.
+    fn interrupted_wait(
+        client: &NativeClient,
+        before_wait: impl FnOnce(),
+        during_wait: impl Fn(),
+    ) -> anyhow::Error {
+        before_wait();
+        client
+            .account_request_blocking(|_, _, check| {
+                wait_for_notification(Duration::from_secs(5), check, |_| {
+                    during_wait();
+                    Ok(Some(()))
+                })
+            })
+            .unwrap_err()
+    }
+
+    #[test]
+    fn stop_during_a_notification_wait_reports_stopped_without_claiming_unsent() {
+        let client = super::super::tests::client();
+        let error = interrupted_wait(&client, || (), || client.stop().unwrap());
+        assert_eq!(
+            AccountInterrupted::find(&error),
+            Some(AccountInterrupted::Stopped)
+        );
+        assert!(!error.is::<NativeRequestNotSubmitted>());
+        assert!(format!("{error:#}").contains("Account notification session superseded"));
+        assert_eq!(client.account_status().unwrap().in_flight, 0);
+    }
+
+    #[test]
+    fn renewal_during_a_notification_wait_reports_superseded_credentials() {
+        let client = super::super::tests::client();
+        let error = interrupted_wait(&client, || (), || renew(&client));
+        assert_eq!(
+            AccountInterrupted::find(&error),
+            Some(AccountInterrupted::CredentialsSuperseded)
+        );
+        assert!(!error.is::<NativeRequestNotSubmitted>());
+        assert!(format!("{error:#}").contains("Account notification session superseded"));
+    }
+
+    #[test]
+    fn transfer_before_a_request_reports_transferred() {
+        let client = super::super::tests::client();
+        client.shutdown_blocking().unwrap();
+        client.owned_account().unwrap().lock().unwrap().lifecycle = AccountLifecycle::Transferred;
+        let error = begin_push_request(&client, 0).err().unwrap();
+        assert_eq!(
+            AccountInterrupted::find(&error),
+            Some(AccountInterrupted::Transferred)
+        );
+    }
+
+    #[test]
+    fn a_wait_that_is_not_interrupted_returns_its_notification_or_times_out() {
+        let client = super::super::tests::client();
+        let received = client
+            .account_request_blocking(|_, _, check| {
+                wait_for_notification(Duration::from_secs(5), check, |_| Ok(Some(7)))
+            })
+            .unwrap();
+        assert_eq!(received, Some(7));
+        let quiet = client
+            .account_request_blocking(|_, _, check| {
+                wait_for_notification(Duration::from_millis(20), check, |slice| {
+                    std::thread::sleep(slice);
+                    Ok(None::<()>)
+                })
+            })
+            .unwrap();
+        assert_eq!(quiet, None);
     }
 }

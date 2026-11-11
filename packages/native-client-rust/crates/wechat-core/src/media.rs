@@ -1897,22 +1897,30 @@ fn video_representation_mismatch(
     error.chain().find_map(|cause| cause.downcast_ref())
 }
 fn service_diagnostic(error: &anyhow::Error) -> Option<(&'static str, i32)> {
+    use wechat_protocol::Service;
+    if let Some(failure) = wechat_protocol::ServiceRejected::find(error) {
+        let stage = match failure.service {
+            Service::CdnBootstrap => Some("bootstrap"),
+            Service::CdnDownload => Some("download"),
+            Service::CdnUpload => Some("upload"),
+            Service::AccountAuthentication | Service::AutomaticAuthentication => {
+                Some("authentication")
+            }
+            Service::Voice => Some("voice"),
+            Service::NativeEnvelope => Some("native_envelope"),
+            _ => None,
+        };
+        if let Some(stage) = stage {
+            return Some((stage, failure.code));
+        }
+    }
+    // HTTP statuses come from the HTTP layer, not from a service code.
     for cause in error.chain() {
         let message = cause.to_string();
-        for (prefix, stage) in [
-            ("CDN bootstrap returned ", "bootstrap"),
-            ("CDN download returned ", "download"),
-            ("CDN upload returned ", "upload"),
-            ("CDN HTTP status ", "http"),
-            ("sticker_http_status_", "http"),
-            ("Account authentication returned ", "authentication"),
-            ("Automatic authentication returned ", "authentication"),
-            ("Voice service returned ", "voice"),
-            ("Native envelope returned ", "native_envelope"),
-        ] {
+        for prefix in ["CDN HTTP status ", "sticker_http_status_"] {
             if let Some(value) = message.strip_prefix(prefix) {
                 if let Ok(code) = value.parse::<i32>() {
-                    return Some((stage, code));
+                    return Some(("http", code));
                 }
             }
         }
@@ -5864,7 +5872,9 @@ mod tests {
     }
     #[test]
     fn service_errors_expose_only_fixed_stage_and_whole_numeric_codes() {
-        let expired_auth = anyhow::anyhow!("CDN bootstrap returned -13");
+        use wechat_protocol::{Service, ServiceRejected};
+        let expired_auth =
+            anyhow::Error::new(ServiceRejected::new(Service::CdnBootstrap, -13)).context("media");
         assert_eq!(service_diagnostic(&expired_auth), Some(("bootstrap", -13)));
         assert_eq!(classify_error(&expired_auth), "auth_required");
         let denied = anyhow::anyhow!("CDN HTTP status 403");
@@ -5873,11 +5883,17 @@ mod tests {
             classify_error(&anyhow::anyhow!("CDN HTTP status 503")),
             "transport_unavailable"
         );
+        // Message text alone is not a service diagnostic.
+        assert!(service_diagnostic(&anyhow::anyhow!("CDN bootstrap returned -13")).is_none());
         assert!(service_diagnostic(&anyhow::anyhow!(
-            "CDN bootstrap returned -13 https://secret.invalid"
+            "CDN HTTP status 403 https://secret.invalid"
         ))
         .is_none());
-        assert!(service_diagnostic(&anyhow::anyhow!("prefix CDN download returned 4")).is_none());
+        assert_eq!(
+            service_diagnostic(&ServiceRejected::new(Service::Room, 4).into()),
+            None,
+            "boundaries outside media have no media stage"
+        );
         let nested = anyhow::anyhow!("connection closed before message completed")
             .context("opaque request wrapper");
         assert_eq!(classify_error(&nested), "transport_unavailable");

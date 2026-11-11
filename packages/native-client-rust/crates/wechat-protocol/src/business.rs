@@ -1,4 +1,5 @@
 //! Business encryption is separate from authenticated MMTLS records.
+use crate::errors::{Service, ServiceRejected};
 use crate::{crypto::*, protobuf as p, MAX_MESSAGE_BYTES};
 use anyhow::{bail, ensure, Result};
 use openssl::{nid::Nid, symm::Mode};
@@ -343,11 +344,7 @@ impl AuthenticatedPacket {
     /// Call only on the plaintext returned by the authenticated MMTLS transport.
     pub fn decode_verified_transport_reply(&self, input: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
         let envelope = split(input)?;
-        ensure!(
-            envelope.return_code == 0,
-            "Native envelope returned {}",
-            envelope.return_code
-        );
+        ServiceRejected::check(Service::NativeEnvelope, envelope.return_code)?;
         ensure!(
             envelope.cgi == self.cgi as u64
                 && envelope.encryption == self.mode

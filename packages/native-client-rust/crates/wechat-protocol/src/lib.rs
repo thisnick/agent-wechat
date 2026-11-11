@@ -12,6 +12,8 @@
 //! | Send text | [`NativeClient::send_text`], [`TextSendResult`] |
 //! | Contacts and rooms | [`NativeClient::lookup_contacts`], [`NativeClient::lookup_room`] |
 //! | Attachments | [`media`], [`media_send`], [`NativeClient::send_file`] |
+//! | Logout and shutdown | [`NativeClient::logout`], [`NativeClient::shutdown`], and `_blocking` forms of both |
+//! | Classify a failure | [`ServiceRejected`], [`is_session_rejected`], [`AccountInterrupted`], [`NativeRequestNotSubmitted`] |
 //! | Low-level encoding | [`wire`], [`protobuf`] |
 //!
 //! # Send one text message
@@ -57,10 +59,33 @@
 //! Account-owned requests run blocking transport work on Tokio's blocking pool.
 //! Login bootstrap and remaining low-level operations
 //! are blocking and require a blocking worker in async applications.
+//!
+//! # Errors
+//!
+//! Functions return `anyhow::Error`. Branch on the types it carries rather than
+//! on message text:
+//!
+//! - [`ServiceRejected`] holds the [`Service`] and the non-zero code of a
+//!   verified response. [`is_session_rejected`] is true when the account needs
+//!   a new login or renewal.
+//! - [`AccountInterrupted`] says why the account owner ended a request or a
+//!   notification wait: stopped, transferred, or superseded by a renewal.
+//! - [`NativeRequestNotSubmitted`] says nothing was handed to transport. An
+//!   interruption without it has an unknown outcome.
+//!
+//! # Blocking embedders
+//!
+//! Applications that run their own blocking workers need no Tokio runtime:
+//! use [`NativeClient::request_blocking`],
+//! [`NativeClient::open_push_connection_blocking`],
+//! [`NativeClient::renew_session_blocking`], [`NativeClient::logout_blocking`],
+//! [`PendingLogout::submit_blocking`] and [`NativeClient::shutdown_blocking`].
 pub mod business;
 
 pub mod calls;
 mod client;
+mod errors;
+pub use errors::{is_session_rejected, AccountInterrupted, Service, ServiceRejected};
 mod lan_login;
 pub use lan_login::login_lan_error_reason;
 pub mod contact_sync;

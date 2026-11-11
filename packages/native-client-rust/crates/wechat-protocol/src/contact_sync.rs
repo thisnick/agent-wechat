@@ -1,5 +1,6 @@
 //! Linux 4.1.13.26 contact stream (CGI8674). This stream has its own
 //! `rs_config`/`sync_11` cursor; the message SyncKey is only request context.
+use crate::errors::{Service, ServiceRejected};
 use crate::{protobuf as p, wire, AccountState, NativeClient};
 use anyhow::{bail, ensure, Result};
 use serde::{Deserialize, Serialize};
@@ -70,7 +71,7 @@ pub fn decode(input: &[u8]) -> Result<ContactSyncBatch> {
     );
     let fields = p::decode(input)?;
     let code = p::base_code(&fields)?;
-    ensure!(code == 0, "Contact sync service returned {code}");
+    ServiceRejected::check(Service::ContactSync, code)?;
     let cursor = p::data(&fields, 3)?.to_vec();
     validate_cursor(&cursor)?;
     let mut continuation = Vec::new();

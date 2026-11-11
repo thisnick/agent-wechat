@@ -66,7 +66,11 @@ impl SimulatorUpstream {
                 .as_str()
                 .unwrap_or("simulator_request_failed");
             if code == "auth_required" {
-                bail!("Heartbeat returned -13");
+                return Err(wechat_protocol::ServiceRejected::new(
+                    wechat_protocol::Service::Heartbeat,
+                    wechat_protocol::ServiceRejected::SESSION_REJECTED,
+                )
+                .into());
             }
             bail!("simulator_request_failed: {code}");
         }

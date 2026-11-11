@@ -28,7 +28,7 @@ pub fn group_inventory_request(state: &AccountState, cursor: &[u8]) -> Result<Ve
 pub fn decode_group_inventory(raw: &[u8]) -> Result<GroupMetadataPage> {
     let fields = p::decode(raw)?;
     let code = p::base_code(&fields)?;
-    ensure!(code == 0, "Group metadata service returned {code}");
+    ServiceRejected::check(Service::GroupMetadata, code)?;
     let mut contacts = vec![];
     let mut seen = HashSet::new();
     for field in fields.iter().filter(|f| f.number == 2) {

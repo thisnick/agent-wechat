@@ -292,42 +292,13 @@ fn now() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 fn auth_rejected(error: &anyhow::Error) -> bool {
-    if error
-        .downcast_ref::<wechat_protocol::openim::OpenImServiceError>()
-        .is_some_and(|failure| failure.service_code == -13)
-    {
-        return true;
-    }
-    error.chain().any(|cause| {
-        let message = cause.to_string();
-        [
-            "Native envelope returned ",
-            "Heartbeat returned ",
-            "Sync service returned ",
-            "Contact service returned ",
-            "Contact sync service returned ",
-            "Saved-device login returned ",
-            "Account authentication returned ",
-            "Automatic authentication returned ",
-        ]
-        .iter()
-        .any(|prefix| {
-            message
-                .strip_prefix(prefix)
-                .and_then(|v| v.parse::<i32>().ok())
-                == Some(-13)
-        })
-    })
+    wechat_protocol::is_session_rejected(error)
 }
 fn saved_trust_rejected(error: &anyhow::Error) -> bool {
+    use wechat_protocol::{Service, ServiceRejected};
     auth_rejected(error)
-        || error.chain().any(|cause| {
-            cause
-                .to_string()
-                .strip_prefix("Saved-device login returned ")
-                .and_then(|v| v.parse::<i32>().ok())
-                == Some(-2017)
-        })
+        || ServiceRejected::find(error)
+            == Some(&ServiceRejected::new(Service::SavedDeviceLogin, -2017))
 }
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
     tokio::task::spawn_blocking(f)
@@ -1189,12 +1160,9 @@ impl Core {
                         self.progress(&op, "failed", json!({"code":"login_lan_challenge_failed","reason":reason,"retryable":false,"hint":"Your phone must be able to reach this computer over the local network. Start a new login after checking connectivity."}))?;
                         return Ok(());
                     }
-                    let service_code = error.chain().find_map(|cause| {
-                        cause
-                            .to_string()
-                            .strip_prefix("Login poll returned ")
-                            .and_then(|s| s.parse::<i32>().ok())
-                    });
+                    let service_code = wechat_protocol::ServiceRejected::find(&error)
+                        .filter(|failure| failure.service == wechat_protocol::Service::LoginPoll)
+                        .map(|failure| failure.code);
                     self.progress(&op, "failed", json!({"code":"login_poll_failed","serviceCode":service_code,"retryable":false}))?;
                     return Ok(());
                 }
@@ -2796,22 +2764,27 @@ mod tests {
     }
     #[test]
     fn only_authenticated_saved_trust_rejections_permit_qr_fallback() {
+        use wechat_protocol::{Service, ServiceRejected};
+        let rejected = |service, code| anyhow::Error::new(ServiceRejected::new(service, code));
         for code in [-13, -2017] {
-            assert!(saved_trust_rejected(&anyhow::anyhow!(
-                "Saved-device login returned {code}"
-            )));
+            assert!(saved_trust_rejected(
+                &rejected(Service::SavedDeviceLogin, code).context("login failed")
+            ));
         }
+        assert!(!saved_trust_rejected(&rejected(
+            Service::SavedDeviceLogin,
+            -20170
+        )));
+        assert!(!saved_trust_rejected(&rejected(Service::LoginPoll, -2017)));
         for message in [
-            "Saved-device login returned -20170",
-            "Saved-device login returned -2017 trailing",
+            // Text alone never counts: only the typed rejection does.
+            "Saved-device login returned -2017",
             "transport error -2017",
             "record authentication failed",
         ] {
             assert!(!saved_trust_rejected(&anyhow::anyhow!("{message}")));
         }
-        assert!(!auth_rejected(&anyhow::anyhow!(
-            "Saved-device login returned -2017"
-        )));
+        assert!(!auth_rejected(&rejected(Service::SavedDeviceLogin, -2017)));
     }
     #[tokio::test]
     async fn share_intents_are_encrypted_idempotent_and_never_requeued_after_uncertain_restart() {
@@ -2905,22 +2878,27 @@ mod tests {
     }
     #[test]
     fn auth_fallback_requires_a_whole_rejection_from_a_known_protocol_boundary() {
-        for prefix in [
-            "Native envelope returned ",
-            "Heartbeat returned ",
-            "Contact service returned ",
-            "Automatic authentication returned ",
+        use wechat_protocol::{Service, ServiceRejected};
+        let rejected = |service, code| anyhow::Error::new(ServiceRejected::new(service, code));
+        for service in [
+            Service::NativeEnvelope,
+            Service::Heartbeat,
+            Service::Contact,
+            Service::AutomaticAuthentication,
         ] {
             assert!(auth_rejected(
-                &anyhow::anyhow!(format!("{prefix}-13")).context("operation failed")
+                &rejected(service, -13).context("operation failed")
             ));
-            for suffix in ["-130", "-1317", "-13 extra", "-13/secret"] {
-                assert!(!auth_rejected(&anyhow::anyhow!(format!(
-                    "{prefix}{suffix}"
-                ))));
+            for code in [-130, -1317, 13] {
+                assert!(!auth_rejected(&rejected(service, code)));
             }
         }
+        for service in [Service::CdnBootstrap, Service::Room, Service::LoginPoll] {
+            assert!(!auth_rejected(&rejected(service, -13)));
+        }
         for message in [
+            // Text alone never counts: only the typed rejection does.
+            "Heartbeat returned -13",
             "network failed -13",
             "checksum -13",
             "profile /private/-13",

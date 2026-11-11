@@ -161,10 +161,10 @@ mod tests {
     #[tokio::test]
     async fn rejected_push_polling_and_sync_requests_log_out_once_without_resubmission() {
         for (source, boundary) in [
-            ("push", "Native envelope"),
-            ("polling", "Heartbeat"),
-            ("sync", "Sync service"),
-            ("contact_sync", "Contact sync service"),
+            ("push", wechat_protocol::Service::NativeEnvelope),
+            ("polling", wechat_protocol::Service::Heartbeat),
+            ("sync", wechat_protocol::Service::Sync),
+            ("contact_sync", wechat_protocol::Service::ContactSync),
         ] {
             let (_directory, core) = core();
             let (send, _) = core
@@ -175,8 +175,10 @@ mod tests {
             let result: Result<()> = core
                 .session_request("one", source, |_| async {
                     calls.fetch_add(1, Ordering::SeqCst);
-                    Err(anyhow::anyhow!(format!("{boundary} returned -13"))
-                        .context("request failed"))
+                    Err(
+                        anyhow::Error::new(wechat_protocol::ServiceRejected::new(boundary, -13))
+                            .context("request failed"),
+                    )
                 })
                 .await;
             assert!(result.is_err());
@@ -246,7 +248,8 @@ mod tests {
         for message in [
             "network timeout",
             "HTTP 503",
-            "Native envelope returned -130",
+            // The same words without the typed rejection do not end a session.
+            "Native envelope returned -13",
             "path/auth_required/cache",
             "profile -13",
         ] {
@@ -282,7 +285,13 @@ mod tests {
                     .session_request("one", "push", |_| async {
                         started.send(()).unwrap();
                         completed.await.unwrap();
-                        Err::<(), _>(anyhow::anyhow!("Native envelope returned -13"))
+                        Err::<(), _>(
+                            wechat_protocol::ServiceRejected::new(
+                                wechat_protocol::Service::NativeEnvelope,
+                                -13,
+                            )
+                            .into(),
+                        )
                     })
                     .await
             });
@@ -319,7 +328,10 @@ mod tests {
         let failure = core
             .session_request("one", "polling", |_| async {
                 core.session_request("one", "sync", |_| async {
-                    Err::<(), _>(anyhow::anyhow!("Sync service returned -13"))
+                    Err::<(), _>(
+                        wechat_protocol::ServiceRejected::new(wechat_protocol::Service::Sync, -13)
+                            .into(),
+                    )
                 })
                 .await
             })
@@ -339,7 +351,10 @@ mod tests {
     async fn duplicate_failures_and_restart_keep_one_logout_fence_and_retained_data() {
         let (directory, core) = core();
         let fence = core.session_fence("one").unwrap();
-        let error = anyhow::anyhow!("Heartbeat returned -13");
+        let error = anyhow::Error::new(wechat_protocol::ServiceRejected::new(
+            wechat_protocol::Service::Heartbeat,
+            -13,
+        ));
         let (one, two) = tokio::join!(
             core.logout_rejected_session("one", &fence, &error, "polling"),
             core.logout_rejected_session("one", &fence, &error, "push")
