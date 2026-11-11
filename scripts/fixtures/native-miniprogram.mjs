@@ -68,8 +68,12 @@ export async function stageGlassMiniProgram(dataDir, account) {
   const second = "pages/glass/second";
   const service = `
     __wxCodeSpace__.batchAddCompiledTemplate(${glassTemplates});
+    __wxCodeSpace__.addComponentStaticConfig("${home}", {"usingComponents":{
+      "mp-cell":"weui-miniprogram/cell/cell", "mp-cells":"weui-miniprogram/cells/cells",
+      "mp-badge":"weui-miniprogram/badge/badge", "mp-dialog":"weui-miniprogram/dialog/dialog"
+    }});
     define("${home}.js",function(require,module,exports){
-      Page({ data:{count:0,image:"/icons/test.svg",imageState:""}, increment(){this.setData({count:this.data.count+1});}, imageLoaded(e){this.setData({imageState:e.detail.width+"x"+e.detail.height});} });
+      Page({ data:{count:0,image:"/icons/test.svg",imageState:"",dialog:false,buttons:[{text:"Done"}],result:""}, showDialog(){this.setData({dialog:true});}, dialogTap(e){this.setData({dialog:false,result:"Button " + e.detail.index});}, increment(){this.setData({count:this.data.count+1});}, imageLoaded(e){this.setData({imageState:e.detail.width+"x"+e.detail.height});} });
     },{isPage:true,isComponent:false,currentFile:"${home}.js"});
     define("${second}.js",function(require,module,exports){
       Page({back(){wx.navigateBack();}});
@@ -77,7 +81,7 @@ export async function stageGlassMiniProgram(dataDir, account) {
   `;
   const bytes = archive({
     "icons/test.svg": '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="1"><path fill="#12503e" d="M0 0h2v1H0z"/></svg>',
-    "app-config.json": JSON.stringify({ pages: [home, second] }),
+    "app-config.json": JSON.stringify({ pages: [home, second], useExtendedLib: {weui:"1.5.6"} }),
     "app-service.js": service,
     "app-wxss.js": `
       setCssToHead(["wx-text{color:rgb(18,80,62)}.mini-toolbar{display:none}"])();

@@ -36,7 +36,7 @@ These checks cover startup. Booking, ordering, payment, and complete signed-in f
 | Main archive and subpackage loading | Verified main archive. Same-release staged JavaScript subpackages can load lazily. Subpackage pages, automatic subpackage download and preload rules remain unavailable. |
 | Compiled templates and styles | Glass-easel and selected Exparser pages. Both paths adapt compiled app/page WXSS and responsive units; styles stay outside the host toolbar. Exparser also supports selected component styles. Native Skyline, XR and Mini Game renderers are unavailable. |
 | Page navigation and app lifecycle | Main-archive page stack and browser visibility. App tab bar, custom route builders, app bar, and native split frames are unavailable. |
-| WeUI extended library and plugins | Require separately supplied code and host support. Extended library resolution and native plugins are unavailable. |
+| WeUI extended library and plugins | Glass-easel can load the pinned WeUI 1.5.6 extension when declared with `useExtendedLib.weui` (`true` or `"1.5.6"`). App-bundled components retain their code. Native plugins, Exparser extensions, and controls requiring unavailable host APIs remain unsupported. |
 | Cloud development and ads | Cloud database, cloud functions, cloud files and the advertising SDK are unavailable. |
 | Workers and AI handoff | Native workers, chat tools, agent entry points, and `wx.onAgentHandoff` are unavailable. |
 | Network and files | Authorized public HTTPS requests and a separate display image bridge. Native file storage, uploads, downloads and app WebSockets are unavailable. |

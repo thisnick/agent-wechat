@@ -9,12 +9,13 @@ let glassViewId = 0;
 // Glass-easel's DOM backend uses native tag names, unlike the legacy adapter's
 // data-wx-tag elements. Keep each page's CSS inside its own view and remove it
 // with the view on navigation.
-export function applyGlassStyles(view, route) {
+export function applyGlassStyles(view, route, components = new Map()) {
   const scope = String(++glassViewId);
   view.dataset.miniGlass = scope;
   const owned = [];
   const native = new CSSStyleSheet();
   native.replaceSync(`@scope ([data-mini-glass="${scope}"]) {
+    mini-page, view, scroll-view { display: block; }
     image { display: inline-block; width: 320px; height: 240px; overflow: hidden; }
     image > img { display: block; width: 100%; height: 100%; }
     image > img.aspectFit { object-fit: contain; }
@@ -30,14 +31,16 @@ export function applyGlassStyles(view, route) {
     image > img.bottom-left { object-position: bottom left; } image > img.bottom-right { object-position: bottom right; }
   }`);
   owned.push(native);
-  for (const name of ["app", route]) {
+  for (const name of new Set(["app", route, ...components.keys()])) {
     const source = compiledStyles.get(name);
     if (source === undefined) continue;
     const ast = parse(source, { parseCustomProperty: true });
     responsiveUnits(ast);
     walk(ast, {
-      visit: "TypeSelector",
       enter(node) {
+        const prefix = components.get(name);
+        if (node.type === "ClassSelector" && prefix) node.name = prefix + "--" + node.name;
+        if (node.type !== "TypeSelector") return;
         if (["body", "page", "wx-page"].includes(node.name)) node.name = "mini-page";
         else if (node.name.startsWith("wx-")) node.name = node.name.slice(3);
       },

@@ -1,6 +1,6 @@
 import { MiniProgramEnv, glassEasel } from "./adapter.js";
 import * as initial from "./page.js";
-import { appConfig, componentConfigs, registerModules } from "./modules.js";
+import { appConfig, compiledStyles, componentConfigs, componentTemplateFactories, registerModules } from "./modules.js";
 import { createSelectorQuery, createIntersectionObserver, mountLegacy, needsPrivacyAuthorization, registerBehavior, navigateBuiltin } from "./legacy.js";
 import { applyGlassStyles } from "./styles.js";
 import { registerGlassImage } from "./images.js";
@@ -28,6 +28,20 @@ let app = { globalData: { theme: "light", hasLogin: false } };
 const getApp = () => app;
 const registerApp = value => { app = value; };
 const factories = registerModules(registerApp, getApp);
+let extensionTemplates = {};
+// External extensions are supplied only when requested. App-bundled modules win.
+if (appConfig.useExtendedLib?.weui) {
+  if (initial.framework !== "glass-easel") throw new Error("WeUI extensions currently require Glass-easel");
+  const requested = appConfig.useExtendedLib.weui;
+  if (requested !== true && requested !== "1.5.6") throw new Error("Unsupported WeUI extension version");
+  const library = await import("./weui.js");
+  for (const [id, factory] of library.factories) if (!factories.has(id)) factories.set(id, factory);
+  for (const [id, config] of Object.entries(library.configs)) if (!componentConfigs.has(id)) componentConfigs.set(id, config);
+  for (const [id, style] of Object.entries(library.styles)) if (!compiledStyles.has(id)) compiledStyles.set(id, style);
+  // useExtendedLib supplies the shared WeUI stylesheet automatically.
+  compiledStyles.set("app", library.styles["weui-miniprogram/index"] + "\n" + (compiledStyles.get("app") ?? ""));
+  extensionTemplates = library.templates;
+}
 // Compiled service factories shadow browser globals. Libraries that look
 // for a global object can use these built-ins without evaluating a string.
 const serviceSelf = Object.assign(Object.create(null), { Object, Date });
@@ -575,25 +589,71 @@ function setForeground(visible) {
 }
 
 let glassBackend;
+const glassEnv = new MiniProgramEnv();
+const glassSpace = glassEnv.createCodeSpace("mini-program", true);
+const glassRegistered = new Set();
+const glassScopes = new Map();
+function registerGlassComponents(entry, groups, pageModule) {
+  const pending = new Set();
+  function register(route) {
+    if (glassRegistered.has(route) || pending.has(route)) return;
+    if (!groups[route] && componentTemplateFactories[route]) {
+      const object = value => value ?? Object.create(null);
+      const text = value => value == null ? "" : String(value);
+      const changed = (change, key) => change === true || change?.[key];
+      try { Object.assign(groups, componentTemplateFactories[route]({}, undefined, undefined, {}, undefined, object, text, changed)); }
+      catch (error) { console.warn("Mini Program component template unavailable", route, error.message); }
+    }
+    if (!groups[route]) {
+      if (route === entry) throw new Error("Missing Mini Program page template");
+      console.warn("Mini Program component template unavailable", route);
+      return;
+    }
+    pending.add(route);
+    const config = componentConfigs.get(route) ?? {};
+    const usingComponents = {};
+    for (const [tag, target] of Object.entries(config.usingComponents ?? {})) {
+      if (typeof target !== "string" || target.includes(":")) throw new Error("Unsupported Mini Program component reference");
+      const dependency = resolvePath(route, target);
+      usingComponents[tag] = "/" + dependency;
+      register(dependency);
+    }
+    glassSpace.addCompiledTemplate(route, { groupList: groups, content: groups[route], fallbackListenerOnNativeNode: true });
+    const scope = "mini_component_" + glassScopes.size;
+    const isolated = config.component && config.styleIsolation !== "shared";
+    glassScopes.set(route, isolated ? scope : undefined);
+    // The browser host installs CSSOM sheets under its existing CSP.
+    glassSpace.addStyleSheet(route, "", isolated ? scope : undefined);
+    glassSpace.addComponentStaticConfig(route, { ...config, usingComponents: {
+      image: "/" + registerGlassImage(glassSpace, route), ...usingComponents,
+    } });
+    glassSpace.componentEnv(route, ({ Page, Component, Behavior }) => {
+      if (route === entry) loadPage(pageModule, Page, Component, Behavior);
+      else withRegistration({ page: Page, component: Component, behavior: Behavior }, () => {
+        modules.delete(route + ".js");
+        requireFrom("")("/" + route);
+      });
+    });
+    glassRegistered.add(route);
+    pending.delete(route);
+  }
+  register(entry);
+}
 function mountGlass(view, module, query, setLoadingPage) {
   const { entry, templatesFactory } = module;
   const object = value => value ?? Object.create(null);
   const text = value => value == null ? "" : String(value);
   const changed = (change, key) => change === true || change?.[key];
   const groups = templatesFactory({}, undefined, undefined, {}, undefined, object, text, changed);
-  const env = new MiniProgramEnv();
-  const space = env.createCodeSpace("mini-program", true);
-  space.addCompiledTemplate(entry, {
-    groupList: groups, content: groups[entry], fallbackListenerOnNativeNode: true,
-  });
-  space.addComponentStaticConfig(entry, { usingComponents: { image: "/" + registerGlassImage(space, entry) } });
-  space.componentEnv(entry, ({ Page, Component, Behavior }) => loadPage(module, Page, Component, Behavior));
+  for (const [route, template] of Object.entries(extensionTemplates)) if (!groups[route]) groups[route] = template;
+  registerGlassComponents(entry, groups, module);
   if (!glassBackend) {
     glassBackend = new glassEasel.CurrentWindowBackendContext();
     glassBackend.onEvent(glassEasel.Event.triggerBackendEvent);
+    glassBackend.registerStyleSheetContent("", "");
   }
   const dom = glassBackend;
-  const root = env.associateBackend(dom).createRoot("mini-page", space, entry);
+  const root = glassEnv.associateBackend(dom).createRoot("mini-page", glassSpace, entry);
   const instance = root.get();
   instance.route = entry;
   instance.options = { ...query };
@@ -621,7 +681,7 @@ function display(module, query, mode = "push") {
   view.className = "mini-app-view";
   const content = document.createElement("section");
   content.append(document.createElement("span"));
-  const releaseStyles = module.framework !== "exparser" ? applyGlassStyles(view, module.entry) : () => {};
+  let releaseStyles = () => {};
   view.append(content);
   main.append(view);
   const setLoadingPage = instance => {
@@ -633,6 +693,7 @@ function display(module, query, mode = "push") {
     lifecycle = module.framework === "exparser"
       ? mountLegacy(content, module, query, register => loadPage(module, register, value => register(value, true)), loadComponent, setLoadingPage)
       : mountGlass(content, module, query, setLoadingPage);
+    if (module.framework !== "exparser") releaseStyles = applyGlassStyles(view, module.entry, glassScopes);
   } catch (error) {
     releaseStyles();
     view.remove();

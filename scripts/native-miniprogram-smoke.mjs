@@ -1,6 +1,7 @@
 // Synthetic Mini Program hub, CLI and browser acceptance.
 // Build wx and wx-dev with --profile test and build packages/shared first.
-// Uses no WeChat account or third-party package. Requests stay on loopback.
+// Uses no WeChat account or downloaded app package. Bundled MIT WeUI components
+// are exercised through the runner; requests stay on loopback.
 // Set CARGO_TARGET_DIR or WX_BINARY / WX_DEV_BINARY for existing binaries.
 // MINIPROGRAM_SCREENSHOTS retains browser screenshots when requested.
 import assert from "node:assert/strict";
@@ -166,13 +167,23 @@ try {
   assert.equal(await glassPage.evaluate(() => document.adoptedStyleSheets.length), glassSheets);
   await glassPage.getByRole("button", { name: "Increment", exact: true }).click();
   await glassPage.getByText("Count 2", { exact: true }).waitFor();
+  await glassPage.getByText("Room", { exact: true }).waitFor();
+  await glassPage.getByText("Available", { exact: true }).waitFor();
+  const cellStyle = await glassPage.getByText("Room", { exact: true }).evaluate(node => getComputedStyle(node.closest("view[class~=weui-cell]")).paddingLeft);
+  assert.ok(parseFloat(cellStyle) > 10);
+  await glassPage.getByRole("button", { name: "Open dialog", exact: true }).click();
+  await glassPage.getByText("Component slots work", { exact: true }).waitFor();
+  await glassPage.getByText("Done", { exact: true }).click();
+  await glassPage.getByText("Button 0", { exact: true }).waitFor();
+  await glassPage.waitForTimeout(350);
+  assert.equal(await glassPage.getByText("Done", { exact: true }).isVisible(), false);
   assert.deepEqual(glassErrors, []);
   const titleResult = await glassPage.evaluate(() => wx.setNavigationBarTitle({ title: "Fixture title" }));
   assert.equal(titleResult.errMsg, "setNavigationBarTitle:ok");
   assert.equal(await glassPage.title(), "Fixture title");
   await glassPage.screenshot({ path: join(output, "cli-glass-easel.png") });
   await glassPage.close();
-  console.log("PASS: Glass-easel compiled CSS, rpx, scoped toolbar, tap, native navigator, back and stylesheet cleanup");
+  console.log("PASS: Glass-easel CSS, WeUI cells/dialog events, rpx, scoped toolbar, navigation and stylesheet cleanup");
   const page = await browser.newPage({ viewport: { width: 410, height: 776 } });
   const pageErrors = [];
   page.on("pageerror", error => pageErrors.push(error.message));

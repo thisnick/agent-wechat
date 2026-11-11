@@ -48,3 +48,7 @@ not mistake them for JavaScript-shell logging.
 Retrieve list icons from WeChat app metadata when no saved card artwork is available.
 Render Glass-easel image components using the same package and credential-free image
 loader as Exparser, with image dimensions, aspect modes, and stale-load protection.
+
+Load declared Glass-easel custom components and their scoped styles, including
+separately packaged component templates. Supply pinned WeUI 1.5.6 for declared
+Glass-easel extensions, retaining app-bundled module versions.

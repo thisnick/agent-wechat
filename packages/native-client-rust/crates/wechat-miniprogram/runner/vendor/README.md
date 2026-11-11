@@ -20,3 +20,24 @@ selectors to browser elements. See `CSS-TREE-LICENSE` and the
 [upstream source](https://github.com/csstree/csstree).
 
 - `csstree.esm.js` SHA-256 `a34589878a06f95e4e144c27748db5e6d81ba19619d3f36036027098e16c3522`
+
+## WeUI extension
+
+`weui.js` embeds `weui-miniprogram` 1.5.6 (MIT), including its WeUI styles,
+CommonJS factories, and WXS scripts. WXML is compiled by the MIT-licensed
+Glass-easel template compiler 1.2.1. The browser loads it only for a declared
+`useExtendedLib.weui` extension. An app's own module registrations take priority.
+See `WEUI-LICENSE` and the [upstream source](https://github.com/wechat-miniprogram/weui-miniprogram).
+
+The upstream npm archive integrity is:
+
+- `weui-miniprogram` 1.5.6: `sha512-bGRHUdrQkFf6FzNT5UTapAMRdZQF0UP2uKu9ZR4MkPNwO3cWzlrkW8vBLxdS6k02O3VeNFATj/AsBCjHAsMBzA==`
+
+Regenerate from unpacked packages, without installation scripts:
+
+```sh
+node scripts/build-mini-weui.mjs /path/to/weui-package /path/to/template-compiler-package
+```
+
+This supplies components, not native host APIs. Components requiring unavailable
+controls, relations, or platform APIs remain experimental.

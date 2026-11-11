@@ -33,6 +33,7 @@ pub fn asset(path: &str) -> Option<(&'static str, &'static str)> {
         "/images.js" => (javascript, include_str!("../runner/images.js")),
         "/css-tree.js" => (javascript, include_str!("../runner/vendor/css-tree.js")),
         "/legacy.js" => (javascript, include_str!("../runner/legacy.js")),
+        "/weui.js" => (javascript, include_str!("../runner/vendor/weui.js")),
         "/adapter.js" => (javascript, include_str!("../runner/vendor/adapter.js")),
         "/glass-easel.js" => (javascript, include_str!("../runner/vendor/glass-easel.js")),
         _ => return None,
@@ -152,12 +153,33 @@ pub fn module_registry(archive: &Archive, service: &str) -> Result<String> {
     }
     let component_configs: BTreeMap<_, _> =
         index.configs.iter().chain(&index.legacy_configs).collect();
+    // Lazy component templates may be stored outside the main service script.
+    // Read registrations only; never execute the per-component service wrapper.
+    let mut component_templates = Vec::new();
+    for route in component_configs.keys() {
+        let path = format!("{route}.appservice.js");
+        if !archive.entries.contains_key(&path) {
+            continue;
+        }
+        let (source, component_index) = archive.service(&path)?;
+        if let Some(span) = component_index.glass.get(*route) {
+            component_templates.push(format!(
+                "{}: ({})",
+                serde_json::to_string(route)?,
+                &source[span.clone()]
+            ));
+        }
+    }
     let mut output = format!(
-        "{SERVICE_GLOBALS}export const compiledStyles = new Map(Object.entries(JSON.parse({})));\nexport const appConfig = JSON.parse({});\nexport const componentConfigs = new Map(Object.entries(JSON.parse({})));\nexport const registerModules = (App, getApp) => new Map([\n",
+        "{SERVICE_GLOBALS}export const componentTemplateFactories = {{{}}};\n",
+        component_templates.join(",\n"),
+    );
+    output.push_str(&format!(
+        "export const compiledStyles = new Map(Object.entries(JSON.parse({})));\nexport const appConfig = JSON.parse({});\nexport const componentConfigs = new Map(Object.entries(JSON.parse({})));\nexport const registerModules = (App, getApp) => new Map([\n",
         serde_json::to_string(&serde_json::to_string(&styles)?)?,
         serde_json::to_string(&config.to_string())?,
         serde_json::to_string(&serde_json::to_string(&component_configs)?)?,
-    );
+    ));
     append_module_factories(&mut output, source, index, "")?;
     let (source, index) = archive.view_service(service)?;
     if let Some(prelude) = index
@@ -241,4 +263,44 @@ export function legacyTemplate(route, fallback) {{
 "#,
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::OnceLock;
+
+    #[test]
+    fn component_templates_are_read_without_executing_their_service_wrapper() {
+        let files = [
+            (
+                "app-service.js",
+                r#"__wxCodeSpace__.addComponentStaticConfig("components/cell", {"component":true});"#,
+            ),
+            (
+                "components/cell.appservice.js",
+                r#"__wxCodeSpace__.batchAddCompiledTemplate(function(){ return {"components/cell":function(){return "template";}}; }); require("do-not-execute-wrapper");"#,
+            ),
+        ];
+        let mut archive = Archive {
+            bytes: Vec::new(),
+            entries: BTreeMap::new(),
+        };
+        for (path, source) in files {
+            let start = archive.bytes.len();
+            archive.bytes.extend_from_slice(source.as_bytes());
+            archive.entries.insert(
+                path.into(),
+                Some(crate::Member {
+                    range: start..archive.bytes.len(),
+                    service: OnceLock::new(),
+                }),
+            );
+        }
+        let module = module_registry(&archive, "app-service.js").unwrap();
+        assert!(module.contains(r#""components/cell": (function()"#));
+        assert!(module.contains(r#"return "template""#));
+        assert!(!module.contains("do-not-execute-wrapper"));
+        assert_eq!(module.matches("const print =").count(), 1);
+    }
 }
