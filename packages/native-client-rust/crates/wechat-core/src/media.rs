@@ -23,6 +23,8 @@ use wechat_store::{MediaAssetRecord, MediaJobRecord, OwnedMediaSource};
 mod automatic;
 #[path = "media_identity.rs"]
 mod identity;
+#[path = "media_storage.rs"]
+mod storage;
 #[path = "media_video.rs"]
 mod video;
 
@@ -288,9 +290,9 @@ fn initialize_file_upload_ids(plan: &mut SendPlan, source_bytes: usize) -> Resul
     plan.file_upload_progress_id = Some(progress_id);
     Ok(true)
 }
-fn wxgf_preview_source_id(source_sha256: &str) -> String {
-    format!("wxgf-preview-v1_{source_sha256}")
-}
+/// ID prefix of the stored previews earlier versions kept as uploads. Previews
+/// are now decoded on request; maintenance deletes these rows.
+const WXGF_PREVIEW_PREFIX: &str = "wxgf-preview-v1_";
 fn media_request_hash(
     request: &MediaSendRequest,
     primary: &str,
@@ -403,11 +405,22 @@ impl Core {
         self.authorize_media_record(account, &row)?;
         let asset: MediaAsset = serde_json::from_value(row.metadata.clone())?;
         ensure!(asset.state == "available", "media_not_available");
-        let sealed = row.payload.as_deref().context("media_not_cached")?;
-        let mut opened = self
-            .vault
-            .open_media_record(account, &format!("asset:{id}"), sealed)?;
-        let bytes = std::mem::take(&mut *opened);
+        let bytes = match row.payload.as_deref() {
+            Some(sealed) => {
+                let mut opened =
+                    self.vault
+                        .open_media_record(account, &format!("asset:{id}"), sealed)?;
+                std::mem::take(&mut *opened)
+            }
+            // No copy is kept here once the official profile holds the bytes.
+            None => {
+                let key = self
+                    .store
+                    .media_asset_profile_key(account, id)?
+                    .context("media_not_cached")?;
+                self.profile_media_bytes(account, &asset, &key)?
+            }
+        };
         ensure!(
             asset.byte_length == Some(bytes.len() as u64)
                 && asset.sha256.as_deref() == Some(&digest(&bytes)),
@@ -425,7 +438,8 @@ impl Core {
         })
     }
     pub fn media_preview_content(&self, account: &str, id: &str) -> Result<MediaContent> {
-        // Verify the retained source as well as the separately encrypted preview.
+        // The preview is decoded from the verified source each time; no copy of
+        // it is stored.
         let original = self.media_content(account, id)?;
         let asset = self.media_asset(account, id)?;
         let preview = asset.preview.context("media_preview_unavailable")?;
@@ -433,19 +447,29 @@ impl Core {
             preview.source_sha256 == original.sha256,
             "media_integrity_failed"
         );
-        let (source, bytes) =
-            self.source_bytes(account, &wxgf_preview_source_id(&original.sha256))?;
-        ensure!(
-            source.sha256 == preview.sha256
-                && source.byte_length == preview.byte_length
-                && source.media_type == preview.content_type,
-            "media_integrity_failed"
-        );
+        let decoded = Self::wxgf_preview(&original.bytes)?;
+        let sha256 = digest(&decoded.bytes);
+        if sha256 != preview.sha256
+            || decoded.bytes.len() as u64 != preview.byte_length
+            || decoded.inspection.content_type != preview.content_type
+        {
+            // A different FFmpeg build can encode the same frame differently.
+            // Record what is served now, so the next read of this attachment
+            // describes the preview a client will receive.
+            let mut described = self.media_asset(account, id)?;
+            if let Some(recorded) = described.preview.as_mut() {
+                recorded.sha256 = sha256.clone();
+                recorded.byte_length = decoded.bytes.len() as u64;
+                recorded.content_type = decoded.inspection.content_type.clone();
+            }
+            self.store
+                .save_media_asset(account, id, &serde_json::to_value(&described)?, None)?;
+        }
         self.media_asset(account, id)?;
         Ok(MediaContent {
-            bytes,
-            content_type: preview.content_type,
-            sha256: preview.sha256,
+            sha256,
+            bytes: decoded.bytes,
+            content_type: decoded.inspection.content_type,
             filename: Some(preview.filename),
             source_sha256: Some(original.sha256),
         })
@@ -1111,54 +1135,20 @@ impl Core {
         bytes: &[u8],
     ) -> Result<MediaImagePreview> {
         let source_sha256 = digest(bytes);
-        let id = wxgf_preview_source_id(&source_sha256);
-        let source = if self.store.media_source_metadata(account, &id).is_ok() {
-            self.source_bytes(account, &id)?.0
+        // Decoding also proves the image can be shown. The preview itself is
+        // decoded again on request and is not stored.
+        let decoded = Self::wxgf_preview(bytes)?;
+        let extension = if decoded.inspection.content_type == "image/png" {
+            "png"
         } else {
-            let decoded = wechat_media::wxgf_preview(bytes)?;
-            ensure!(
-                ["image/jpeg", "image/png"].contains(&decoded.inspection.content_type.as_str())
-                    && !decoded.bytes.is_empty()
-                    && decoded.bytes.len() <= 16 * 1024 * 1024,
-                "image_decode_failed"
-            );
-            let extension = if decoded.inspection.content_type == "image/png" {
-                "png"
-            } else {
-                "jpg"
-            };
-            let name = format!("{asset_id}.still.{extension}");
-            let hash = digest(&decoded.bytes);
-            let sealed = self
-                .vault
-                .seal(account, &format!("source:{id}"), &decoded.bytes)?;
-            match self.store.create_media_source(
-                account,
-                &id,
-                &name,
-                &decoded.inspection.content_type,
-                decoded.bytes.len() as u64,
-                &hash,
-                &sealed,
-            ) {
-                Ok(source) => source,
-                // A concurrent discovery may already have published this exact
-                // source's preview. Reuse only its authenticated owned bytes.
-                Err(error) => self.source_bytes(account, &id).map_err(|_| error)?.0,
-            }
+            "jpg"
         };
-        ensure!(
-            ["image/jpeg", "image/png"].contains(&source.media_type.as_str())
-                && source.byte_length > 0
-                && source.byte_length <= 16 * 1024 * 1024,
-            "media_integrity_failed"
-        );
         Ok(MediaImagePreview {
             source_sha256,
-            content_type: source.media_type,
-            byte_length: source.byte_length,
-            sha256: source.sha256,
-            filename: source.name,
+            byte_length: decoded.bytes.len() as u64,
+            sha256: digest(&decoded.bytes),
+            filename: format!("{asset_id}.still.{extension}"),
+            content_type: decoded.inspection.content_type,
             content_url: format!(
                 "/v1/accounts/{account}/media/{asset_id}/content?representation=preview"
             ),
@@ -1608,6 +1598,8 @@ impl Core {
             asset.official_writeback = status.into();
             self.store
                 .save_media_asset(account, asset_id, &serde_json::to_value(&asset)?, None)?;
+            // The copy stays whenever the profile cannot return these bytes.
+            let _ = self.release_to_profile(account, &asset, &bytes);
         }
         self.complete_download(account, id, &asset)
     }
@@ -1722,6 +1714,7 @@ impl Core {
         asset.official_writeback = status.into();
         self.store
             .save_media_asset(account, &asset.id, &serde_json::to_value(&asset)?, None)?;
+        let _ = self.release_to_profile(account, &asset, &bytes);
         Ok(asset)
     }
     fn project_received_hardlink(
@@ -3171,9 +3164,10 @@ impl Core {
                     self.store.save_media_asset(
                         account,
                         &asset.id,
-                        &serde_json::to_value(cached)?,
+                        &serde_json::to_value(&cached)?,
                         None,
                     )?;
+                    let _ = self.release_to_profile(account, &cached, &bytes);
                 }
                 message_ids.push(message_id);
             }
@@ -3344,9 +3338,10 @@ impl Core {
                 self.store.save_media_asset(
                     account,
                     &asset.id,
-                    &serde_json::to_value(cached)?,
+                    &serde_json::to_value(&cached)?,
                     None,
                 )?;
+                let _ = self.release_to_profile(account, &cached, &raw);
             }
             message_ids.push(message_id);
         }
@@ -3790,6 +3785,9 @@ fn video_thumbnail(bytes: &[u8], cancelled: impl FnMut() -> Result<()>) -> Resul
 #[cfg(test)]
 #[path = "media_concurrency_tests.rs"]
 mod concurrency_tests;
+#[cfg(test)]
+#[path = "media_storage_tests.rs"]
+mod storage_tests;
 
 #[cfg(test)]
 mod tests {
@@ -4493,7 +4491,7 @@ mod tests {
             }
         }
     }
-    fn file_plan() -> SendPlan {
+    pub(super) fn file_plan() -> SendPlan {
         SendPlan {
             request: MediaSendRequest {
                 thread_id: "filehelper".into(),
@@ -4521,7 +4519,7 @@ mod tests {
             reuse_completed_upload: None,
         }
     }
-    fn plan_job(core: &Core, id: &str, plan: &SendPlan) {
+    pub(super) fn plan_job(core: &Core, id: &str, plan: &SendPlan) {
         let payload = core
             .vault
             .seal(
@@ -4553,13 +4551,13 @@ mod tests {
         )
         .unwrap()
     }
-    fn reservation() -> FileUploadReservation {
+    pub(super) fn reservation() -> FileUploadReservation {
         FileUploadReservation {
             file_upload_token: "v1_c3ludGhldGljLXByaXZhdGU=".into(),
             overwrite_newmsgid: u64::MAX,
         }
     }
-    fn test_core() -> (tempfile::TempDir, Arc<Core>) {
+    pub(super) fn test_core() -> (tempfile::TempDir, Arc<Core>) {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(wechat_store::Store::open(&dir.path().join("data")).unwrap());
         store.create_account("one").unwrap();
@@ -5316,7 +5314,7 @@ mod tests {
         }
     }
     #[test]
-    fn wxgf_source_and_preview_remain_distinct_encrypted_account_scoped_and_restartable() {
+    fn wxgf_source_stays_encrypted_and_its_preview_is_decoded_on_request_across_restarts() {
         let (dir, core) = test_core();
         let raw = include_bytes!("../../wechat-media/tests/fixtures/static.wxgf");
         let asset: MediaAsset = serde_json::from_value(json!({
@@ -5361,9 +5359,16 @@ mod tests {
         assert_eq!(still.source_sha256.as_deref(), Some(digest(raw).as_str()));
         assert_eq!(digest(&still.bytes), preview.sha256);
         assert_eq!(wechat_media::inspect_image(&still.bytes).unwrap().frames, 1);
-        let cache_id = wxgf_preview_source_id(&digest(raw));
-        let (metadata, sealed) = core.store.media_source("one", &cache_id).unwrap();
-        assert!(!sealed.windows(still.bytes.len()).any(|b| b == still.bytes));
+        // The preview is decoded on request. Nothing is stored for it, so the
+        // account holds no upload and exactly one payload file: the original.
+        let media = dir.path().join("data/accounts/one/agent/media");
+        let stored = || std::fs::read_dir(&media).unwrap().count();
+        assert_eq!(stored(), 1);
+        assert!(core
+            .store
+            .media_source_ids_with_prefix("one", WXGF_PREVIEW_PREFIX, 10)
+            .unwrap()
+            .is_empty());
         let again = core
             .cache_asset(
                 "one",
@@ -5375,14 +5380,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(again.preview.unwrap().sha256, preview.sha256);
-        assert_eq!(
-            core.store
-                .media_source("one", &cache_id)
-                .unwrap()
-                .0
-                .created_at,
-            metadata.created_at
-        );
+        assert_eq!(stored(), 1);
         assert!(core.media_preview_content("two", &asset.id).is_err());
         drop(core);
         let core = Core::new(
@@ -5395,6 +5393,26 @@ mod tests {
             core.media_preview_content("one", &asset.id).unwrap().bytes,
             still.bytes
         );
+        // A preview described by another decoder build is served as decoded
+        // now, and the description is corrected for the next reader.
+        let mut stale = core.media_asset("one", &asset.id).unwrap();
+        stale.preview.as_mut().unwrap().sha256 = "1".repeat(64);
+        stale.preview.as_mut().unwrap().byte_length = 1;
+        core.store
+            .save_media_asset(
+                "one",
+                &asset.id,
+                &serde_json::to_value(stale).unwrap(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            core.media_preview_content("one", &asset.id).unwrap().bytes,
+            still.bytes
+        );
+        let corrected = core.media_asset("one", &asset.id).unwrap().preview.unwrap();
+        assert_eq!(corrected.sha256, digest(&still.bytes));
+        assert_eq!(corrected.byte_length, still.bytes.len() as u64);
         let mut tampered = core.media_asset("one", &asset.id).unwrap();
         tampered.preview.as_mut().unwrap().source_sha256 = "0".repeat(64);
         core.store
@@ -5414,7 +5432,7 @@ mod tests {
         );
     }
     #[test]
-    fn concurrent_wxgf_discoveries_reuse_the_same_verified_preview() {
+    fn concurrent_wxgf_discoveries_describe_the_same_preview() {
         let (_dir, core) = test_core();
         let barrier = std::sync::Barrier::new(2);
         let bytes = include_bytes!("../../wechat-media/tests/fixtures/static.wxgf");

@@ -13,6 +13,8 @@ pub(crate) fn migrate(db: &mut Connection) -> Result<()> {
     tx.commit()?;
     Ok(())
 }
+/// The account `control.sqlite` schema version after every migration.
+pub(crate) const ACCOUNT_SCHEMA_VERSION: i64 = 13;
 pub fn unix_seconds() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -237,8 +239,12 @@ impl Store {
             .admitted
             .lock()
             .map_err(|_| anyhow::anyhow!("database admission lock poisoned"))?;
-        let (mut db, ()) =
-            crate::admission::open_prepared(&path, Some(&admitted), Self::prepare_account)?;
+        let (mut db, ()) = crate::admission::open_prepared(
+            &path,
+            Some(&admitted),
+            ACCOUNT_SCHEMA_VERSION,
+            Self::prepare_account,
+        )?;
         let result = f(&mut db);
         db.close().map_err(|(_, error)| error)?;
         if result.is_ok() {
@@ -249,7 +255,7 @@ impl Store {
     pub(crate) fn prepare_account(db: &mut Connection) -> Result<()> {
         db.busy_timeout(std::time::Duration::from_secs(2))?;
         let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if !(1..=12).contains(&version) {
+        if !(1..=ACCOUNT_SCHEMA_VERSION).contains(&version) {
             bail!("unsupported account sidecar schema");
         }
         if version == 1 {
@@ -319,6 +325,11 @@ impl Store {
             tx.execute_batch(include_str!(
                 "../migrations/account/V012__call_local_closure.sql"
             ))?;
+            tx.commit()?;
+        }
+        if version < 13 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!("../migrations/account/V013__media_files.sql"))?;
             tx.commit()?;
         }
         Ok(())
@@ -1247,7 +1258,7 @@ mod runtime_prefix_tests {
             .stage_sync("test", "old", b"old sealed commands", b"message cursor")
             .unwrap();
         store.control("test", |db| {
-            db.execute_batch("DROP TABLE call_actions;DROP TABLE call_sessions;DROP INDEX apply_intents_stream;ALTER TABLE apply_intents DROP COLUMN stream;PRAGMA user_version=7;")?;
+            db.execute_batch("ALTER TABLE media_assets DROP COLUMN payload_file;ALTER TABLE media_assets DROP COLUMN profile_key;ALTER TABLE media_sources DROP COLUMN payload_file;DROP TABLE call_actions;DROP TABLE call_sessions;DROP INDEX apply_intents_stream;ALTER TABLE apply_intents DROP COLUMN stream;PRAGMA user_version=7;")?;
             Ok(())
         }).unwrap();
         drop(store);

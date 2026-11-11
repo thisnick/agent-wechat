@@ -72,6 +72,7 @@ api-token
 storage-key
 accounts/<local-id>/profile/       # experimental managed/copy profile
 accounts/<local-id>/agent/control.sqlite
+accounts/<local-id>/agent/media/   # encrypted attachment and upload files
 ```
 
 Directly bound official profiles stay at their selected external location. They are not imported implicitly. Credentials, raw apply batches and queued send payloads use authenticated encryption with a separate storage key. API tokens are not database or storage keys. Missing/wrong storage keys fail without replacing protected state. Back up the durable root and any external secret references together. A profile-only export excludes the daemon sidecar and its active authorization coordinator. Official login material already written into the selected profile is copied with that profile, so exported trees remain private account data.

@@ -1,5 +1,14 @@
 //! SQLite may recover or unlink companions even when schema admission fails.
 //! Validate an owned copy before allowing it to open an existing store family.
+//!
+//! A database that has no journal or WAL to replay and is already on the
+//! current schema version is opened in place: neither SQLite nor a migration has
+//! anything to change, so the copies would protect nothing. It is still checked
+//! for corruption before use.
+//!
+//! The scratch copies are removed when admission returns. A process that is
+//! stopped part-way leaves them behind, so the next successful admission of a
+//! database removes leftover scratch directories beside it.
 use anyhow::{ensure, Context, Result};
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
@@ -12,6 +21,9 @@ use std::{
 };
 
 const SUFFIXES: [&str; 4] = ["", "-wal", "-shm", "-journal"];
+const SCRATCH: &str = ".sqlite-admission-";
+/// Marks a scratch directory that was kept on purpose as the only pre-open copy.
+const RETAINED: &str = "retained";
 #[path = "admission_wal.rs"]
 mod wal;
 pub(crate) type AdmissionCache = BTreeMap<PathBuf, Family>;
@@ -159,6 +171,50 @@ fn retain_recovery(original: &Path, parent: &Path) -> Result<PathBuf> {
     wechat_platform::sync_dir(parent)?;
     Ok(destination)
 }
+impl Family {
+    /// True when opening this family cannot change it: no journal, WAL or WAL
+    /// index holds anything to replay, and the header already carries the
+    /// current schema version, so no migration will run.
+    fn settled(&self, current: i64) -> Result<bool> {
+        if self
+            .0
+            .iter()
+            .any(|(suffix, m)| !suffix.is_empty() && m.length > 0)
+        {
+            return Ok(false);
+        }
+        let Some(main) = self.0.get("").filter(|m| m.length >= 100) else {
+            return Ok(false);
+        };
+        let mut header = [0; 100];
+        let mut file = main.file.try_clone()?;
+        file.seek(SeekFrom::Start(0))?;
+        file.read_exact(&mut header)?;
+        Ok(&header[..16] == b"SQLite format 3\0"
+            && i64::from(i32::from_be_bytes(header[60..64].try_into().unwrap())) == current)
+    }
+}
+/// Remove scratch directories that an interrupted admission left beside this
+/// database. One kept on purpose carries a marker and is left alone.
+fn sweep_scratch(parent: &Path) {
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let ours = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(SCRATCH));
+        if ours
+            && fs::symlink_metadata(&path)
+                .is_ok_and(|m| m.is_dir() && !wechat_platform::is_link(&m))
+            && !path.join(RETAINED).exists()
+        {
+            let _ = fs::remove_dir_all(&path);
+        }
+    }
+}
 fn connect(path: &Path) -> Result<Connection> {
     // Never create a missing original after admission, and never follow a final
     // link that appeared between validation and SQLite's own open.
@@ -186,6 +242,7 @@ fn check(db: &Connection) -> Result<()> {
 pub(crate) fn open_prepared<T>(
     path: &Path,
     cache: Option<&AdmissionCache>,
+    current: i64,
     prepare: impl Fn(&mut Connection) -> Result<T>,
 ) -> Result<(Connection, T)> {
     // Permission failures should be rejected before SQLite can recover or clean
@@ -213,7 +270,19 @@ pub(crate) fn open_prepared<T>(
     }
     let family = Family::read(path)?;
     let parent = path.parent().context("database needs a parent")?;
-    let scratch = wechat_platform::private_tempdir_in(parent, ".sqlite-admission-")?;
+    if family.settled(current)? {
+        let mut db = connect(path)?;
+        check(&db).map_err(|error| {
+            anyhow::anyhow!(
+                "cannot validate {}: {error}; existing database and companions preserved",
+                path.display()
+            )
+        })?;
+        let value = prepare(&mut db)?;
+        sweep_scratch(parent);
+        return Ok((db, value));
+    }
+    let scratch = wechat_platform::private_tempdir_in(parent, SCRATCH)?;
     let original = scratch.path().join("original");
     let validation = scratch.path().join("validation");
     wechat_platform::private_dir(&original)?;
@@ -267,7 +336,11 @@ pub(crate) fn open_prepared<T>(
         Ok((db, value))
     })();
     match opened {
-        Ok(result) => Ok(result),
+        Ok(result) => {
+            drop(scratch);
+            sweep_scratch(parent);
+            Ok(result)
+        }
         Err(error) => {
             // A successful private validation followed by a source I/O failure
             // is uncertain. Keep the pre-open family for explicit recovery.
@@ -276,6 +349,9 @@ pub(crate) fn open_prepared<T>(
                 None => match retain_recovery(&original, parent) {
                     Ok(path) => path,
                     Err(_) => {
+                        // Best effort: without the marker a later successful
+                        // admission treats this directory as a leftover.
+                        let _ = File::create(scratch.path().join(RETAINED));
                         let recovery = scratch.keep();
                         return Err(error.context(format!("database admission failed; unpublished pre-open recovery family retained at {}",recovery.join("original").display())));
                     }
@@ -297,4 +373,150 @@ pub(crate) fn remember(cache: &mut AdmissionCache, path: &Path) -> Result<()> {
     }
     cache.insert(path.to_owned(), Family::read(path)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn database(directory: &Path, version: i64) -> PathBuf {
+        let path = directory.join("store.sqlite");
+        private(&path, b"");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(&format!(
+            "CREATE TABLE t(value TEXT);INSERT INTO t VALUES('kept');PRAGMA user_version={version};"
+        ))
+        .unwrap();
+        drop(db);
+        path
+    }
+    fn private(path: &Path, bytes: &[u8]) {
+        use std::io::Write;
+        wechat_platform::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .unwrap()
+            .write_all(bytes)
+            .unwrap();
+    }
+    fn scratch(directory: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name.starts_with(SCRATCH))
+            .collect();
+        names.sort();
+        names
+    }
+    /// Opens the database and reports how many times `prepare` ran: once when
+    /// opened in place, twice when a copy was validated first.
+    fn open(path: &Path, current: i64) -> Result<usize> {
+        let runs = Cell::new(0);
+        let (db, ()) = open_prepared(path, None, current, |db| {
+            runs.set(runs.get() + 1);
+            db.pragma_update(None, "user_version", current)?;
+            Ok(())
+        })?;
+        let value: String = db.query_row("SELECT value FROM t", [], |r| r.get(0))?;
+        assert_eq!(value, "kept");
+        Ok(runs.get())
+    }
+
+    #[test]
+    fn current_database_without_companions_opens_in_place_and_others_are_copied_first() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = database(temp.path(), 3);
+        // An earlier schema version is migrated on a copy before the original.
+        assert_eq!(open(&path, 4).unwrap(), 2);
+        // Now current, with nothing to replay: no copy is made.
+        assert_eq!(open(&path, 4).unwrap(), 1);
+        let settled = || Family::read(&path).unwrap().settled(4).unwrap();
+        assert!(settled());
+        // A newer schema version than the database carries is not settled.
+        assert!(!Family::read(&path).unwrap().settled(5).unwrap());
+        // An empty companion holds nothing to replay; one with content does.
+        for suffix in ["-journal", "-wal"] {
+            let companion = member_path(&path, suffix).unwrap();
+            private(&companion, b"");
+            assert!(settled());
+            private(&companion, b"pending");
+            assert!(!settled());
+            fs::remove_file(companion).unwrap();
+        }
+        // A live WAL is copied first; a cleanly closed one is opened in place.
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch("PRAGMA journal_mode=WAL;INSERT INTO t VALUES('later');")
+            .unwrap();
+        assert!(!settled());
+        drop(db);
+        assert!(settled());
+        assert_eq!(open(&path, 4).unwrap(), 1);
+        assert!(scratch(temp.path()).is_empty());
+    }
+
+    #[test]
+    fn a_corrupt_current_database_is_refused_in_place_without_being_changed() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = database(temp.path(), 4);
+        let mut bytes = fs::read(&path).unwrap();
+        assert!(Family::read(&path).unwrap().settled(4).unwrap());
+        // Damage the table's page while leaving the header and version intact.
+        let page = bytes.len() - 4096;
+        bytes[page..page + 64].fill(0xff);
+        private(&path, &bytes);
+        assert!(Family::read(&path).unwrap().settled(4).unwrap());
+        let error = open_prepared(&path, None, 4, |_| Ok(()))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            error.contains("existing database and companions preserved"),
+            "{error}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert!(scratch(temp.path()).is_empty());
+    }
+
+    #[test]
+    fn leftovers_of_an_interrupted_admission_are_removed_and_a_kept_copy_stays() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = database(temp.path(), 4);
+        let stale = temp.path().join(format!("{SCRATCH}interrupted"));
+        fs::create_dir_all(stale.join("original")).unwrap();
+        fs::write(stale.join("original/database.sqlite"), b"partial copy").unwrap();
+        fs::create_dir_all(stale.join("validation")).unwrap();
+        let kept = temp.path().join(format!("{SCRATCH}kept"));
+        fs::create_dir_all(kept.join("original")).unwrap();
+        fs::write(kept.join("original/database.sqlite"), b"only copy").unwrap();
+        fs::write(kept.join(RETAINED), b"").unwrap();
+        let other = temp.path().join(".sqlite-recovery-0000");
+        fs::create_dir_all(&other).unwrap();
+        // A file with the scratch prefix is not a scratch directory.
+        fs::write(temp.path().join(format!("{SCRATCH}file")), b"").unwrap();
+
+        // A refused open removes nothing.
+        assert!(open_prepared(&path, None, 4, |_| -> Result<()> {
+            anyhow::bail!("refused")
+        })
+        .is_err());
+        assert_eq!(scratch(temp.path()).len(), 3);
+
+        for current in [4, 5] {
+            // Opened in place, then through the copy path after a version bump.
+            open(&path, current).unwrap();
+            assert_eq!(
+                scratch(temp.path()),
+                [format!("{SCRATCH}file"), format!("{SCRATCH}kept")]
+            );
+        }
+        assert_eq!(
+            fs::read(kept.join("original/database.sqlite")).unwrap(),
+            b"only copy"
+        );
+        assert!(other.is_dir());
+    }
 }
