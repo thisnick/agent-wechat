@@ -36,6 +36,12 @@ channel agent-wechat.calls.voice.realtime.agentContext.enabled | boolean, defaul
 channel agent-wechat.calls.voice.realtime.consultFastMode | boolean | Set fast mode for the regular OpenClaw consultation run when its model supports it.
 channel agent-wechat.calls.voice.realtime.consultPolicy | string, values auto|substantive|always, default auto | Guide when the voice model consults. Always can use a final caller utterance as the consultation question when the voice model does not consult. GPT-Live models do not support always.
 channel agent-wechat.calls.voice.realtime.consultThinkingLevel | string, values off|minimal|low|medium|high|xhigh|adaptive|max|ultra | Thinking level for the regular OpenClaw consultation run.
+channel agent-wechat.calls.voice.realtime.fastContext | object | Before a consultation runs the agent, search the agent's indexed memory and session context for the question. Matching snippets go straight back to the voice model and the agent does not run; this also applies to owner requests, including actions and hang-up. Applies to bidi mode.
+channel agent-wechat.calls.voice.realtime.fastContext.enabled | boolean, default false | Search memory and session context before each consultation.
+channel agent-wechat.calls.voice.realtime.fastContext.fallbackToConsult | boolean, default false | Run the agent when the search finds nothing. When false, the voice model says it does not have that context handy.
+channel agent-wechat.calls.voice.realtime.fastContext.maxResults | integer, min 1, max 10, default 3 | Most snippets returned to the voice model.
+channel agent-wechat.calls.voice.realtime.fastContext.sources | array, min items 1, unique items, default ["memory","sessions"] | Indexed sources to search. The active memory plugin decides which session transcripts this call's session may see.
+channel agent-wechat.calls.voice.realtime.fastContext.timeoutMs | integer, min 100, max 10000, default 800 | How long the search may take before it counts as finding nothing.
 channel agent-wechat.calls.voice.realtime.instructions | string, max length 4000 | Additional conversation guidance; does not grant tool or account-owner authority.
 channel agent-wechat.calls.voice.realtime.model | string, min length 1, max length 200 | Speech model, such as gpt-realtime-2.1 or the continuous gpt-live-1-codex; omitted uses the selected provider's default.
 channel agent-wechat.calls.voice.realtime.provider | string, min length 1, max length 200 | Use openai. Other providers fail preflight without fallback.
@@ -116,6 +122,12 @@ plugin.calls.voice.realtime.agentContext.enabled | boolean, default false | Use 
 plugin.calls.voice.realtime.consultFastMode | boolean | Set fast mode for the regular OpenClaw consultation run when its model supports it.
 plugin.calls.voice.realtime.consultPolicy | string, values auto|substantive|always, default auto | Guide when the voice model consults. Always can use a final caller utterance as the consultation question when the voice model does not consult. GPT-Live models do not support always.
 plugin.calls.voice.realtime.consultThinkingLevel | string, values off|minimal|low|medium|high|xhigh|adaptive|max|ultra | Thinking level for the regular OpenClaw consultation run.
+plugin.calls.voice.realtime.fastContext | object | Before a consultation runs the agent, search the agent's indexed memory and session context for the question. Matching snippets go straight back to the voice model and the agent does not run; this also applies to owner requests, including actions and hang-up. Applies to bidi mode.
+plugin.calls.voice.realtime.fastContext.enabled | boolean, default false | Search memory and session context before each consultation.
+plugin.calls.voice.realtime.fastContext.fallbackToConsult | boolean, default false | Run the agent when the search finds nothing. When false, the voice model says it does not have that context handy.
+plugin.calls.voice.realtime.fastContext.maxResults | integer, min 1, max 10, default 3 | Most snippets returned to the voice model.
+plugin.calls.voice.realtime.fastContext.sources | array, min items 1, unique items, default ["memory","sessions"] | Indexed sources to search. The active memory plugin decides which session transcripts this call's session may see.
+plugin.calls.voice.realtime.fastContext.timeoutMs | integer, min 100, max 10000, default 800 | How long the search may take before it counts as finding nothing.
 plugin.calls.voice.realtime.instructions | string, max length 4000 | Additional conversation guidance; does not grant tool or account-owner authority.
 plugin.calls.voice.realtime.model | string, min length 1, max length 200 | Speech model, such as gpt-realtime-2.1 or the continuous gpt-live-1-codex; omitted uses the selected provider's default.
 plugin.calls.voice.realtime.provider | string, min length 1, max length 200 | Use openai. Other providers fail preflight without fallback.

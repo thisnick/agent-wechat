@@ -5,6 +5,10 @@ const consultPolicies = ["auto", "substantive", "always"] as const;
 const consultThinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "adaptive", "max", "ultra"] as const;
 type ConsultPolicy = (typeof consultPolicies)[number];
 type ConsultThinkingLevel = (typeof consultThinkingLevels)[number];
+const fastContextSources = ["memory", "sessions"] as const;
+type FastContextSource = (typeof fastContextSources)[number];
+/** OpenClaw's memory/session lookup that can answer a consultation without an agent run. */
+export type ResolvedCallFastContextConfig = { enabled: boolean; timeoutMs: number; maxResults: number; sources: FastContextSource[]; fallbackToConsult: boolean };
 export const callSessionScopes = ["per-contact", "per-call"] as const;
 export type CallSessionScope = (typeof callSessionScopes)[number];
 export type WeChatConferenceGroupConfig = { autoJoin?: boolean; autoJoinAllowFrom?: string[]; toolPolicy?: "none" | "safe-read-only" | "owner"; ownerInviterToolPolicy?: "none" | "safe-read-only" | "owner"; sessionKey?: string };
@@ -33,6 +37,7 @@ export type WeChatVoiceCallsConfig = {
     consultPolicy?: ConsultPolicy;
     consultThinkingLevel?: ConsultThinkingLevel;
     consultFastMode?: boolean;
+    fastContext?: { enabled?: boolean; timeoutMs?: number; maxResults?: number; sources?: FastContextSource[]; fallbackToConsult?: boolean };
     providers?: { openai?: { apiKey?: unknown } };
   };
   toolPolicy?: "none" | "safe-read-only" | "owner";
@@ -49,7 +54,7 @@ export type ResolvedWeChatVoiceCallsConfig = Required<Omit<WeChatVoiceCallsConfi
   conferences: { groups: Record<string, ResolvedWeChatConferenceGroupConfig> };
   realtime: { provider: string; model?: string; voice?: string; instructions?: string; agentContext: { enabled: boolean };
     recentContext: { enabled: boolean; maxMessages: number };
-    consultPolicy: ConsultPolicy; consultThinkingLevel?: ConsultThinkingLevel; consultFastMode?: boolean };
+    consultPolicy: ConsultPolicy; consultThinkingLevel?: ConsultThinkingLevel; consultFastMode?: boolean; fastContext: ResolvedCallFastContextConfig };
   consultation: { timeoutMs: number; inboundSessionKey?: string; summary: boolean; recentMessages: number };
 };
 export type ResolvedWeChatCallsConfig = { voice?: ResolvedWeChatVoiceCallsConfig; video: { enabled: boolean } };
@@ -83,6 +88,18 @@ function conferenceGroups(value: WeChatVoiceCallsConfig["conferences"], toolPoli
       ...(group.ownerInviterToolPolicy !== undefined ? { ownerInviterToolPolicy: group.ownerInviterToolPolicy } : {}), sessionKey: group.sessionKey };
   }
   return groups;
+}
+function fastContextConfig(value: unknown): ResolvedCallFastContextConfig {
+  const fast = value ?? {};
+  if (!object(fast) || Object.keys(fast).some(key => !["enabled", "timeoutMs", "maxResults", "sources", "fallbackToConsult"].includes(key))
+    || (fast.enabled !== undefined && typeof fast.enabled !== "boolean")
+    || (fast.fallbackToConsult !== undefined && typeof fast.fallbackToConsult !== "boolean")
+    || (fast.timeoutMs !== undefined && (!Number.isInteger(fast.timeoutMs) || (fast.timeoutMs as number) < 100 || (fast.timeoutMs as number) > 10000))
+    || (fast.maxResults !== undefined && (!Number.isInteger(fast.maxResults) || (fast.maxResults as number) < 1 || (fast.maxResults as number) > 10))
+    || (fast.sources !== undefined && (!Array.isArray(fast.sources) || fast.sources.length === 0
+      || fast.sources.some(source => !fastContextSources.includes(source)) || new Set(fast.sources).size !== fast.sources.length))) throw Error("Invalid calling configuration");
+  return { enabled: fast.enabled === true, timeoutMs: (fast.timeoutMs as number | undefined) ?? 800, maxResults: (fast.maxResults as number | undefined) ?? 3,
+    sources: (fast.sources as FastContextSource[] | undefined) ?? [...fastContextSources], fallbackToConsult: fast.fallbackToConsult === true };
 }
 function voiceConfig(value: WeChatVoiceCallsConfig | undefined): ResolvedWeChatVoiceCallsConfig | undefined {
   if (!value || value.enabled !== true) return undefined;
@@ -125,7 +142,7 @@ function voiceConfig(value: WeChatVoiceCallsConfig | undefined): ResolvedWeChatV
     agentId: value.agentId, realtime: { provider: realtime.provider ?? "openai", model: realtime.model, voice: realtime.voice, instructions: realtime.instructions,
       agentContext: { enabled: agentContext?.enabled === true },
       recentContext: { enabled: recentContext?.enabled === true, maxMessages: recentContext?.maxMessages ?? 10 }, consultPolicy: realtime.consultPolicy ?? "auto",
-      consultThinkingLevel: realtime.consultThinkingLevel, consultFastMode: realtime.consultFastMode },
+      consultThinkingLevel: realtime.consultThinkingLevel, consultFastMode: realtime.consultFastMode, fastContext: fastContextConfig(realtime.fastContext) },
     toolPolicy, conferences: { groups: conferenceGroups(value.conferences, toolPolicy) },
     allowConsultSessionPersistence: value.allowConsultSessionPersistence === true,
     consultation: { timeoutMs, inboundSessionKey: consultation.inboundSessionKey, summary: consultation.summary ?? true,
@@ -185,6 +202,13 @@ export const callsConfigSchema = {
         consultPolicy: { type: "string", enum: consultPolicies, default: "auto", description: "Guide when the voice model consults. Always can use a final caller utterance as the consultation question when the voice model does not consult. GPT-Live models do not support always." },
         consultThinkingLevel: { type: "string", enum: consultThinkingLevels, description: "Thinking level for the regular OpenClaw consultation run." },
         consultFastMode: { type: "boolean", description: "Set fast mode for the regular OpenClaw consultation run when its model supports it." },
+        fastContext: { type: "object", additionalProperties: false, description: "Before a consultation runs the agent, search the agent's indexed memory and session context for the question. Matching snippets go straight back to the voice model and the agent does not run; this also applies to owner requests, including actions and hang-up. Applies to bidi mode.", properties: {
+          enabled: { type: "boolean", default: false, description: "Search memory and session context before each consultation." },
+          timeoutMs: { type: "integer", minimum: 100, maximum: 10000, default: 800, description: "How long the search may take before it counts as finding nothing." },
+          maxResults: { type: "integer", minimum: 1, maximum: 10, default: 3, description: "Most snippets returned to the voice model." },
+          sources: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", enum: fastContextSources }, default: [...fastContextSources], description: "Indexed sources to search. The active memory plugin decides which session transcripts this call's session may see." },
+          fallbackToConsult: { type: "boolean", default: false, description: "Run the agent when the search finds nothing. When false, the voice model says it does not have that context handy." },
+        } },
         providers: { type: "object", additionalProperties: false, properties: {
           openai: { type: "object", additionalProperties: false, properties: {
             apiKey: { description: "Optional OpenClaw SecretRef or API-key string. Omitted uses the selected agent's OpenAI auth profile or Gateway environment." },

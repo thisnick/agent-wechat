@@ -152,6 +152,9 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
     || typeof reply?.dispatchReplyWithBufferedBlockDispatcher !== "function" || typeof reply.finalizeInboundContext !== "function"
     || !config.allowConsultSessionPersistence)) throw Error("Calling consultation unavailable");
   if (consultationAvailable && typeof sdk.buildRealtimeVoiceSpeakExactMessage !== "function") throw Error("Calling consultation unavailable");
+  // Agent mode runs the agent for every turn; fast context only shortcuts realtime consultations.
+  const fastContext = !agentMode && consultationAvailable && config.realtime.fastContext.enabled;
+  if (fastContext && typeof sdk.resolveRealtimeVoiceFastContextConsult !== "function") throw Error("Calling consultation unavailable");
   if (alwaysConsult && (typeof sdk.createRealtimeVoiceForcedConsultCoordinator !== "function"
     || typeof sdk.classifySkippableRealtimeVoiceConsultTranscript !== "function")) throw Error("Calling consultation unavailable");
   const hostCfg = cfg as OpenClawConfig;
@@ -298,7 +301,7 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
       // The chat context goes to the agent once per call, with the first consultation that starts.
       let consultContext = context.consultContext;
       type ConsultMode = "owner" | "safe-read-only" | "none";
-      const traceConsult = (mode: ConsultMode, stage: "started" | "ok" | "failed", category?: ConsultFailureCategory): void => {
+      const traceConsult = (mode: ConsultMode, stage: "started" | "ok" | "failed" | "fast-context-answered" | "fast-context-fallback", category?: ConsultFailureCategory): void => {
         try { context.logAudioTrace?.(`[wechat-call-audio] plugin consult mode=${mode} stage=${stage}${category ? ` category=${category}` : ""}`); }
         catch { /* Diagnostics cannot affect consultation. */ }
       };
@@ -317,6 +320,19 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
             isOwner || context.conference ? { senderId: context.senderId, accountId: context.channelAccountId ?? DEFAULT_ACCOUNT_ID, group: !!context.conference } : undefined) : undefined;
           dispatched = mode;
           traceConsult(mode, "started");
+          const assertCurrent = () => { requestSignal?.throwIfAborted(); if (epoch !== providerEpoch || !scopeIsCurrent(access.scope)) throw Error("Calling consultation authority changed"); };
+          if (fastContext && !turn?.contextOnly) {
+            // OpenClaw searches as this call's session and authorizes session hits for it.
+            // Its debug messages can carry private values, so only the outcome is traced.
+            const fast = await sdk.resolveRealtimeVoiceFastContextConsult({ cfg: access.cfg, agentId: config.agentId, sessionKey,
+              config: config.realtime.fastContext, args: { question }, logger: {},
+              labels: { audienceLabel: context.conference ? "group" : "caller", contextName: "OpenClaw memory or session context" },
+              liveness: { signal: AbortSignal.any([signal, providerAbort.signal, ...(requestSignal ? [requestSignal] : [])]), assertCurrent } });
+            assertCurrent();
+            const text = fast?.handled ? fast.result?.text : undefined;
+            traceConsult(mode, typeof text === "string" && text.trim() ? "fast-context-answered" : "fast-context-fallback");
+            if (typeof text === "string" && text.trim()) return { text };
+          }
           // OpenClaw decides owner status from commands.ownerAllowFrom and runs
           // the agent's configured model routing. The SDK's tool list keeps
           // other callers to read-only lookups; owners get no extra limit.
@@ -337,7 +353,7 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
             toolsAllow: turn?.contextOnly ? [] : sdk.resolveRealtimeVoiceAgentConsultToolsAllow(mode),
             thinking: config.realtime.consultThinkingLevel, fastMode: config.realtime.consultFastMode,
             signal: AbortSignal.any([signal, providerAbort.signal, ...(requestSignal ? [requestSignal] : []), AbortSignal.timeout(config.consultation.timeoutMs)]),
-            assertCurrent: () => { requestSignal?.throwIfAborted(); if (epoch !== providerEpoch || !scopeIsCurrent(access.scope)) throw Error("Calling consultation authority changed"); },
+            assertCurrent,
             onRunStarted: () => { runStarted = true; consultContext = undefined; } });
           const current = currentAccess();
           if (!current.allowed || current.scope !== access.scope || closed || signal.aborted || epoch !== providerEpoch || requestSignal?.aborted) throw Error("Calling consultation authority changed");

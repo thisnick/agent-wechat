@@ -262,6 +262,69 @@ test("a continuous model streams without the consult tool and delegates through 
   await assert.rejects(prepared.open({ ...callbacks, failed }, { senderId: "synthetic-peer", signal }), /provider unavailable/);
 });
 
+test("fast context is off by default and validates its settings", () => {
+  const voice = { enabled: true, agentId: "agent", realtime: { provider: "openai" } };
+  assert.deepEqual(resolveWeChatCallsConfig({ voice })!.voice!.realtime.fastContext,
+    { enabled: false, timeoutMs: 800, maxResults: 3, sources: ["memory", "sessions"], fallbackToConsult: false });
+  const custom = resolveWeChatCallsConfig({ voice: { ...voice, realtime: { provider: "openai",
+    fastContext: { enabled: true, timeoutMs: 1500, maxResults: 5, sources: ["memory"], fallbackToConsult: true } } } })!.voice!;
+  assert.deepEqual(custom.realtime.fastContext, { enabled: true, timeoutMs: 1500, maxResults: 5, sources: ["memory"], fallbackToConsult: true });
+  for (const fastContext of [{ timeoutMs: 50 }, { timeoutMs: 1.5 }, { maxResults: 0 }, { maxResults: 11 }, { sources: [] }, { sources: ["files"] },
+    { sources: ["memory", "memory"] }, { enabled: "yes" }, { fallbackToConsult: 1 }, { unknown: true }, "on"]) {
+    assert.throws(() => resolveWeChatCallsConfig({ voice: { ...voice, realtime: { provider: "openai", fastContext: fastContext as any } } }), /Invalid calling configuration/);
+  }
+});
+
+test("fast context answers a consultation from memory before the agent runs, and falls back when it finds nothing", async () => {
+  const voicePath: string = "openclaw/plugin-sdk/realtime-voice";
+  const audioPath: string = "openclaw/plugin-sdk/realtime-voice-provider";
+  const [sdk, audio] = await Promise.all([import(voicePath), import(audioPath)]);
+  const live = { inputAudioFormats: [pcm], outputAudioFormats: [pcm], supportsBargeIn: false, handlesInputAudioBargeIn: true,
+    supportsToolCalls: false, handlesAgentConsult: true };
+  let request: any;
+  const fake = { id: "openai", createBridge(params: any) { request = params; let connected = false; return {
+    connect: async () => { connected = true; params.onReady(); }, isConnected: () => connected, outputAudioMode: "continuous", pacesInputAudio: true,
+    sendUserMessage() {}, sendAudio() {}, setMediaTimestamp() {}, handleBargeIn() {}, close: () => { connected = false; },
+  }; } };
+  const { dispatches, reply } = fakeReply(async ({ replyOptions }) => { replyOptions.onAgentRunStart(); return "Synthetic agent result"; });
+  const runtime = { channel: { reply }, agent: { session: { resolveStorePath: () => "/synthetic/store", getSessionEntry: () => undefined } } } as unknown as PluginRuntime;
+  const lookups: any[] = []; let fastResult: unknown = { handled: true, result: { text: "Synthetic memory snippet" } };
+  const voiceSdk = { ...sdk, resolveConfiguredRealtimeVoiceProvider: () => ({ provider: fake, providerConfig: {}, capabilities: live }),
+    resolveRealtimeVoiceFastContextConsult: async (params: any) => { lookups.push(params); params.liveness.assertCurrent(); return fastResult; } };
+  const signal = new AbortController().signal;
+  const failed = () => assert.fail("Unexpected provider failure");
+  const traces: string[] = [];
+
+  // Off by default: the lookup never runs and the agent answers.
+  const off = await (await prepareOpenClawCallVoice(config(true), {}, runtime, { voiceSdk, audioSdk: audio })).open({ ...callbacks, failed }, { senderId: "synthetic-peer", signal });
+  assert.deepEqual(await request.runAgentConsult({ prompt: "Read synthetic data", signal }), { text: "Synthetic agent result" });
+  assert.equal(lookups.length, 0); assert.equal(dispatches.length, 1);
+  await off.close();
+
+  const enabled = config(true);
+  enabled.realtime.fastContext = { enabled: true, timeoutMs: 800, maxResults: 3, sources: ["memory", "sessions"], fallbackToConsult: true };
+  await assert.rejects(prepareOpenClawCallVoice(enabled, {}, runtime, { voiceSdk: { ...voiceSdk, resolveRealtimeVoiceFastContextConsult: undefined }, audioSdk: audio }), /consultation unavailable/);
+  const prepared = await prepareOpenClawCallVoice(enabled, {}, runtime, { voiceSdk, audioSdk: audio });
+  const session = await prepared.open({ ...callbacks, failed }, { senderId: "synthetic-peer", signal, logAudioTrace: line => traces.push(line) });
+  assert.deepEqual(await request.runAgentConsult({ prompt: "What did we decide?", signal }), { text: "Synthetic memory snippet" });
+  assert.equal(dispatches.length, 1, "a fast-context answer does not run the agent");
+  assert.equal(lookups.length, 1);
+  assert.equal(lookups[0].agentId, "agent");
+  assert.deepEqual(lookups[0].args, { question: "What did we decide?" });
+  assert.equal(lookups[0].sessionKey, dispatches[0].ctx.SessionKey, "searches as the call's own consultation session");
+  assert.deepEqual(lookups[0].config, enabled.realtime.fastContext);
+  assert.equal(lookups[0].labels.audienceLabel, "caller");
+
+  // Nothing found with fallbackToConsult: the agent runs as usual.
+  fastResult = { handled: false };
+  assert.deepEqual(await request.runAgentConsult({ prompt: "Check synthetic status", signal }), { text: "Synthetic agent result" });
+  assert.equal(lookups.length, 2); assert.equal(dispatches.length, 2);
+  assert.equal(traces.filter(line => line.includes("stage=fast-context-answered")).length, 1);
+  assert.equal(traces.filter(line => line.includes("stage=fast-context-fallback")).length, 1);
+  assert.equal(traces.some(line => /synthetic|decide/i.test(line)), false, "traces carry no question or snippet text");
+  await session.close();
+});
+
 test("shared host voice profile supplies identity, user grounding and persona without agent instructions", async t => {
   const dir = await mkdtemp(join(tmpdir(), "wechat-call-voice-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
