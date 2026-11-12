@@ -114,12 +114,12 @@ impl MediaTransport for SimulatorMedia {
     ) -> Result<UploadedImage> {
         progress(0, Some(p.original.encrypted.len() as u64))?;
         Ok(UploadedImage {
-            original: self.upload_object(
+            original: Some(self.upload_object(
                 &p.original,
                 MediaQuality::Original,
                 None,
                 Some((p.width, p.height)),
-            )?,
+            )?),
             standard: self.upload_object(
                 &p.original,
                 MediaQuality::Standard,
@@ -197,11 +197,6 @@ pub(super) fn submit(
         MediaBody::Image(upload) => (
             3,
             wechat_protocol::media_send::local_image_xml(upload)?,
-            None,
-        ),
-        MediaBody::StandardImage(upload) => (
-            3,
-            wechat_protocol::media_send::local_standard_image_xml(upload)?,
             None,
         ),
         MediaBody::Video { upload, seconds } => (

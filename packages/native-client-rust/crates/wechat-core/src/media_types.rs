@@ -80,8 +80,8 @@ pub enum VideoSendQuality {
     /// Also include the unchanged source video.
     Original,
 }
-/// How the original copy of an image is prepared. The standard and thumbnail copies are always
-/// compact previews.
+/// Which image copies are offered: standard and thumbnail previews, optionally with a
+/// full-resolution original.
 #[derive(
     Clone, Copy, Debug, Default, Serialize, Deserialize, TS, schemars::JsonSchema, PartialEq, Eq,
 )]

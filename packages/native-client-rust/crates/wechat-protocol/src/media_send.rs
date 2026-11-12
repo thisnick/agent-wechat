@@ -221,39 +221,28 @@ fn local_element(name: &str, attributes: Vec<(&str, String)>) -> String {
         .collect::<String>();
     format!("<msg><{name}{attributes}/></msg>")
 }
+/// Reconstruct metadata for the uploaded image copies, including an original when present.
 pub fn local_image_xml(image: &UploadedImage) -> Result<String> {
-    local_image_xml_with_original(image, true)
-}
-/// Reconstruct image metadata that offers standard and thumbnail copies without an original.
-pub fn local_standard_image_xml(image: &UploadedImage) -> Result<String> {
-    local_image_xml_with_original(image, false)
-}
-fn local_image_xml_with_original(
-    image: &UploadedImage,
-    original_advertised: bool,
-) -> Result<String> {
-    descriptor(&image.original, MediaQuality::Original)?;
+    if let Some(original) = &image.original {
+        descriptor(original, MediaQuality::Original)?;
+        ensure!(
+            original.descriptor.aes_key == image.standard.descriptor.aes_key,
+            "Image variants require one main key"
+        );
+    }
     descriptor(&image.standard, MediaQuality::Standard)?;
     descriptor(&image.thumbnail, MediaQuality::Thumbnail)?;
-    ensure!(
-        image.original.descriptor.aes_key == image.standard.descriptor.aes_key,
-        "Image variants require one main key"
-    );
-    let main = if original_advertised {
-        &image.original
-    } else {
-        &image.standard
-    };
-    let original_id = if original_advertised {
-        image.original.descriptor.file_id.clone()
-    } else {
-        String::new()
-    };
-    let original_bytes = if original_advertised {
-        image.original.plaintext_bytes
-    } else {
-        0
-    };
+    let main = image.original.as_ref().unwrap_or(&image.standard);
+    let original_id = image
+        .original
+        .as_ref()
+        .map(|v| v.descriptor.file_id.clone())
+        .unwrap_or_default();
+    let original_bytes = image
+        .original
+        .as_ref()
+        .map(|v| v.plaintext_bytes)
+        .unwrap_or(0);
     Ok(local_element(
         "img",
         vec![
@@ -406,54 +395,35 @@ pub fn file_send_request_with_reservation(
     fields.extend([p::uint(9, 0), p::uint(10, 0), p::uint(11, 2)]);
     p::message(&fields)
 }
+/// Build a submission for the uploaded image copies, including an original when present.
 pub fn image_send_request(
     state: &AccountState,
     destination: &str,
     client_id: &str,
     image: &UploadedImage,
 ) -> Result<Vec<u8>> {
-    image_send_request_with_original(state, destination, client_id, image, true)
-}
-/// Build an image submission offering the verified standard and thumbnail copies, with no original.
-pub fn standard_image_send_request(
-    state: &AccountState,
-    destination: &str,
-    client_id: &str,
-    image: &UploadedImage,
-) -> Result<Vec<u8>> {
-    image_send_request_with_original(state, destination, client_id, image, false)
-}
-fn image_send_request_with_original(
-    state: &AccountState,
-    destination: &str,
-    client_id: &str,
-    image: &UploadedImage,
-    original_advertised: bool,
-) -> Result<Vec<u8>> {
     clean(destination, 512)?;
     clean(client_id, 4096)?;
-    descriptor(&image.original, MediaQuality::Original)?;
+    if let Some(original) = &image.original {
+        descriptor(original, MediaQuality::Original)?;
+        ensure!(
+            original.descriptor.aes_key == image.standard.descriptor.aes_key,
+            "Image main variants require one shared key"
+        );
+    }
     descriptor(&image.standard, MediaQuality::Standard)?;
     descriptor(&image.thumbnail, MediaQuality::Thumbnail)?;
-    ensure!(
-        image.original.descriptor.aes_key == image.standard.descriptor.aes_key,
-        "Image main variants require one shared key"
-    );
-    let main = if original_advertised {
-        &image.original
-    } else {
-        &image.standard
-    };
-    let original_id = if original_advertised {
-        image.original.descriptor.file_id.as_bytes()
-    } else {
-        &[]
-    };
-    let original_bytes = if original_advertised {
-        image.original.plaintext_bytes
-    } else {
-        0
-    };
+    let main = image.original.as_ref().unwrap_or(&image.standard);
+    let original_id = image
+        .original
+        .as_ref()
+        .map(|v| v.descriptor.file_id.as_bytes())
+        .unwrap_or(&[]);
+    let original_bytes = image
+        .original
+        .as_ref()
+        .map(|v| v.plaintext_bytes)
+        .unwrap_or(0);
     let thumbnail = &image.thumbnail;
     let width = thumbnail
         .width
@@ -476,7 +446,7 @@ fn image_send_request_with_original(
         p::uint(7, thumbnail.plaintext_bytes as u64),
         p::bytes(8, &p::buffer(&[])),
         p::uint(9, 3),
-        p::uint(11, u64::from(original_advertised)),
+        p::uint(11, u64::from(image.original.is_some())),
         p::int32(12, 2),
         p::int32(13, 0),
         p::bytes(15, original_id),
@@ -1314,12 +1284,7 @@ mod tests {
             height: Some(12),
         };
         let image = UploadedImage {
-            original: uploaded(
-                MediaQuality::Original,
-                "unused-original",
-                90,
-                &"0".repeat(32),
-            ),
+            original: None,
             standard: uploaded(MediaQuality::Standard, "standard-copy", 60, &"1".repeat(32)),
             thumbnail: uploaded(
                 MediaQuality::Thumbnail,
@@ -1328,8 +1293,7 @@ mod tests {
                 &"2".repeat(32),
             ),
         };
-        let raw = standard_image_send_request(&synthetic_state(), "filehelper", "client", &image)
-            .unwrap();
+        let raw = image_send_request(&synthetic_state(), "filehelper", "client", &image).unwrap();
         let fields = p::decode(&raw).unwrap();
         assert_eq!(p::scalar(&fields, 11).unwrap(), 0);
         assert_eq!(p::data(&fields, 15).unwrap(), b"");
@@ -1338,10 +1302,50 @@ mod tests {
         assert_eq!(p::scalar(&fields, 20).unwrap(), 60);
         assert_eq!(p::data(&fields, 21).unwrap(), b"thumbnail-copy");
         assert_eq!(p::data(&fields, 27).unwrap(), "1".repeat(32).as_bytes());
-        let xml = local_standard_image_xml(&image).unwrap();
+        let xml = local_image_xml(&image).unwrap();
         assert!(xml.contains("hdlength=\"0\""));
         assert!(xml.contains("cdnbigimgurl=\"\""));
         assert!(xml.contains("cdnmidimgurl=\"standard-copy\""));
+
+        let mut saved = serde_json::to_value(&image).unwrap();
+        saved.as_object_mut().unwrap().remove("original");
+        let restored: UploadedImage = serde_json::from_value(saved).unwrap();
+        assert!(restored.original.is_none());
+        assert_eq!(
+            image_send_request(&synthetic_state(), "filehelper", "client", &restored).unwrap(),
+            raw
+        );
+
+        let mut original_image = image;
+        original_image.original = Some(uploaded(
+            MediaQuality::Original,
+            "original-copy",
+            90,
+            &"0".repeat(32),
+        ));
+        let raw = image_send_request(&synthetic_state(), "filehelper", "client", &original_image)
+            .unwrap();
+        let fields = p::decode(&raw).unwrap();
+        assert_eq!(p::scalar(&fields, 11).unwrap(), 1);
+        assert_eq!(p::data(&fields, 15).unwrap(), b"original-copy");
+        assert_eq!(p::scalar(&fields, 19).unwrap(), 90);
+        assert_eq!(p::data(&fields, 27).unwrap(), "0".repeat(32).as_bytes());
+        assert!(local_image_xml(&original_image)
+            .unwrap()
+            .contains("cdnbigimgurl=\"original-copy\""));
+        for wrong_quality in [false, true] {
+            let mut invalid = original_image.clone();
+            let original = invalid.original.as_mut().unwrap();
+            if wrong_quality {
+                original.descriptor.quality = MediaQuality::Standard;
+            } else {
+                original.descriptor.aes_key = vec![2; 16];
+            }
+            assert!(
+                image_send_request(&synthetic_state(), "filehelper", "client", &invalid).is_err()
+            );
+            assert!(local_image_xml(&invalid).is_err());
+        }
     }
 
     #[test]
@@ -1402,7 +1406,7 @@ mod tests {
         assert_eq!(p::data(&app, 8).unwrap(), b"share-client");
         assert!(p::optional_data(&outer, 5).unwrap().is_none()); // No file MD5 for a URL share.
         let image = UploadedImage {
-            original: descriptor(MediaQuality::Original, "image.jpg"),
+            original: Some(descriptor(MediaQuality::Original, "image.jpg")),
             standard: descriptor(MediaQuality::Standard, "image.jpg"),
             thumbnail: descriptor(MediaQuality::Thumbnail, "image.jpg"),
         };

@@ -1257,10 +1257,15 @@ pub struct PreparedVideoUpload {
     pub video: PreparedUpload,
     pub thumbnail: PreparedVariant,
 }
+/// Uploaded copies offered by an image message, with an optional original.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct UploadedImage {
-    pub original: UploadedMedia,
+    /// Original copy to offer alongside the previews; `None` offers only standard and thumbnail.
+    #[serde(default)]
+    pub original: Option<UploadedMedia>,
+    /// Compressed main image copy.
     pub standard: UploadedMedia,
+    /// Small preview image copy.
     pub thumbnail: UploadedMedia,
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -1602,7 +1607,12 @@ impl CdnClient {
         let id =
             file_id.ok_or_else(|| anyhow::anyhow!("Image upload returned no file identifier"))?;
         Ok(UploadedImage {
-            original: uploaded_primary(&p.original, &id, Some(p.width), Some(p.height)),
+            original: Some(uploaded_primary(
+                &p.original,
+                &id,
+                Some(p.width),
+                Some(p.height),
+            )),
             standard: uploaded_variant(&p.original, &p.standard, &id, MediaQuality::Standard),
             thumbnail: uploaded_variant(&p.original, &p.thumbnail, &id, MediaQuality::Thumbnail),
         })
@@ -2745,9 +2755,10 @@ mod tests {
         assert_eq!(requests.last().unwrap().1, total - 1);
         assert_eq!(reported.borrow()[0], 0);
         assert!(reported.borrow().iter().all(|sent| *sent < total as u64));
-        assert_eq!(uploaded.original.plaintext_bytes as usize, original.len());
-        assert_eq!(uploaded.original.width, Some(4200));
-        for copy in [&uploaded.original, &uploaded.standard, &uploaded.thumbnail] {
+        let uploaded_original = uploaded.original.as_ref().unwrap();
+        assert_eq!(uploaded_original.plaintext_bytes as usize, original.len());
+        assert_eq!(uploaded_original.width, Some(4200));
+        for copy in [uploaded_original, &uploaded.standard, &uploaded.thumbnail] {
             assert_eq!(copy.descriptor.file_id, "image-object");
         }
         // A standard copy keeps its own limits.

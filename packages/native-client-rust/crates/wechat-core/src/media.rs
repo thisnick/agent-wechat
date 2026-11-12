@@ -91,32 +91,71 @@ impl Drop for UploadMaterial {
         self.task_id.zeroize();
     }
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize)]
 struct ImageUploadReceipt {
     #[serde(flatten)]
     uploaded: UploadedImage,
-    // This records what a pending or accepted send advertises. Older upload receipts
-    // always advertised an original, so replay and local repair must retain that choice.
-    #[serde(default = "legacy_image_original_advertised")]
-    original_advertised: bool,
+    // The existing CDN carrier also uploads a compact original for standard sends.
+    // Keep that operational receipt for readback/recovery, but never advertise or
+    // project it as a message asset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unadvertised_original: Option<UploadedMedia>,
 }
-fn legacy_image_original_advertised() -> bool {
-    true
+impl<'de> Deserialize<'de> for ImageUploadReceipt {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Saved {
+            #[serde(flatten)]
+            uploaded: UploadedImage,
+            #[serde(default)]
+            unadvertised_original: Option<UploadedMedia>,
+            // Old receipts without this field always advertised their original.
+            #[serde(default)]
+            original_advertised: Option<bool>,
+        }
+        let mut saved = Saved::deserialize(deserializer)?;
+        if saved.original_advertised == Some(false) {
+            if let Some(original) = saved.uploaded.original.take() {
+                if saved.unadvertised_original.is_some() {
+                    return Err(serde::de::Error::custom(
+                        "conflicting image upload receipts",
+                    ));
+                }
+                saved.unadvertised_original = Some(original);
+            }
+        }
+        Ok(Self {
+            uploaded: saved.uploaded,
+            unadvertised_original: saved.unadvertised_original,
+        })
+    }
 }
 impl ImageUploadReceipt {
-    fn body(&self) -> MediaBody<'_> {
-        if self.original_advertised {
-            MediaBody::Image(&self.uploaded)
-        } else {
-            MediaBody::StandardImage(&self.uploaded)
+    fn new(mut uploaded: UploadedImage, quality: ImageSendQuality) -> Result<Self> {
+        if quality == ImageSendQuality::Original {
+            ensure!(
+                uploaded.original.is_some(),
+                "uploaded_image_original_missing"
+            );
         }
+        let unadvertised_original = if quality == ImageSendQuality::Standard {
+            uploaded.original.take()
+        } else {
+            None
+        };
+        Ok(Self {
+            uploaded,
+            unadvertised_original,
+        })
     }
-    fn local_xml(&self) -> Result<String> {
-        if self.original_advertised {
-            wechat_protocol::media_send::local_image_xml(&self.uploaded)
-        } else {
-            wechat_protocol::media_send::local_standard_image_xml(&self.uploaded)
-        }
+    fn variants_for_verification(&self) -> impl Iterator<Item = &UploadedMedia> {
+        self.uploaded
+            .original
+            .iter()
+            .chain(self.unadvertised_original.iter())
+            .chain([&self.uploaded.standard, &self.uploaded.thumbnail])
     }
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -2848,10 +2887,7 @@ impl Core {
                     self.store.save_media_job(account, &row)?;
                     self.phase_media(account, id, "uploading")?;
                     let uploaded = cdn.upload_image(&prepared, &callback)?;
-                    plan.uploaded_image = Some(ImageUploadReceipt {
-                        uploaded,
-                        original_advertised: quality == ImageSendQuality::Original,
-                    });
+                    plan.uploaded_image = Some(ImageUploadReceipt::new(uploaded, quality)?);
                     plan.image_variant_sizing = sizing;
                     self.save_send_plan(account, id, &plan)?;
                 }
@@ -2986,8 +3022,7 @@ impl Core {
             verified.push(downloaded.sha256);
         }
         if let Some(receipt) = &plan.uploaded_image {
-            let u = &receipt.uploaded;
-            for variant in [&u.original, &u.standard, &u.thumbnail] {
+            for variant in receipt.variants_for_verification() {
                 let downloaded = cdn.download(&variant.descriptor, &callback)?;
                 ensure!(
                     downloaded.sha256 == variant.sha256,
@@ -3034,7 +3069,7 @@ impl Core {
                 upload: plan.uploaded_file.as_ref().unwrap(),
                 reservation: plan.reservation.as_ref(),
             },
-            MediaKind::Image => plan.uploaded_image.as_ref().unwrap().body(),
+            MediaKind::Image => MediaBody::Image(&plan.uploaded_image.as_ref().unwrap().uploaded),
             MediaKind::Video => MediaBody::Video {
                 upload: plan.uploaded_video.as_ref().unwrap(),
                 seconds: plan
@@ -3247,10 +3282,13 @@ impl Core {
                 ),
                 MediaKind::Image => (
                     3,
-                    plan.uploaded_image
-                        .as_ref()
-                        .context("uploaded_media_missing")?
-                        .local_xml()?,
+                    wechat_protocol::media_send::local_image_xml(
+                        &plan
+                            .uploaded_image
+                            .as_ref()
+                            .context("uploaded_media_missing")?
+                            .uploaded,
+                    )?,
                     String::new(),
                 ),
                 MediaKind::Video => (
@@ -3311,7 +3349,12 @@ impl Core {
                             match asset.variant {
                                 MediaVariant::Original => (
                                     variants.0.clone().into(),
-                                    uploaded.original.sha256.clone(),
+                                    uploaded
+                                        .original
+                                        .as_ref()
+                                        .context("uploaded_image_original_missing")?
+                                        .sha256
+                                        .clone(),
                                     "image/jpeg",
                                 ),
                                 MediaVariant::Standard => (
@@ -6026,7 +6069,14 @@ mod tests {
             height: Some(height),
         };
         UploadedImage {
-            original: uploaded("original<&\"id", MediaQuality::Original, 1, 100, 80, 60),
+            original: Some(uploaded(
+                "original<&\"id",
+                MediaQuality::Original,
+                1,
+                100,
+                80,
+                60,
+            )),
             standard: uploaded("standard", MediaQuality::Standard, 1, 60, 40, 30),
             thumbnail: uploaded("thumbnail", MediaQuality::Thumbnail, 2, 20, 20, 15),
         }
@@ -6036,36 +6086,61 @@ mod tests {
         let image = synthetic_image_upload();
         let legacy: ImageUploadReceipt =
             serde_json::from_value(serde_json::to_value(&image).unwrap()).unwrap();
-        assert!(legacy.original_advertised);
-        assert!(matches!(legacy.body(), MediaBody::Image(_)));
+        assert!(legacy.uploaded.original.is_some());
+        assert!(legacy.unadvertised_original.is_none());
         assert_eq!(
-            discover(&message(3), &legacy.local_xml().unwrap())
-                .unwrap()
-                .len(),
+            discover(
+                &message(3),
+                &wechat_protocol::media_send::local_image_xml(&legacy.uploaded).unwrap()
+            )
+            .unwrap()
+            .len(),
             3
         );
         for advertised in [false, true] {
-            let receipt = ImageUploadReceipt {
-                uploaded: image.clone(),
-                original_advertised: advertised,
+            // Both the old original-only receipts and the earlier standard-only
+            // receipts keep their advertised variants and all carrier readbacks.
+            let mut old = serde_json::to_value(&image).unwrap();
+            old["original_advertised"] = advertised.into();
+            let old: ImageUploadReceipt = serde_json::from_value(old).unwrap();
+            assert_eq!(old.uploaded.original.is_some(), advertised);
+            assert_eq!(old.unadvertised_original.is_some(), !advertised);
+            assert_eq!(old.variants_for_verification().count(), 3);
+            let quality = if advertised {
+                ImageSendQuality::Original
+            } else {
+                ImageSendQuality::Standard
             };
+            let receipt = ImageUploadReceipt::new(image.clone(), quality).unwrap();
             let saved = serde_json::to_value(&receipt).unwrap();
+            assert!(saved.get("original_advertised").is_none());
+            assert_eq!(saved["original"].is_null(), !advertised);
             let replayed: ImageUploadReceipt = serde_json::from_value(saved).unwrap();
-            assert_eq!(replayed.original_advertised, advertised);
-            assert_eq!(matches!(replayed.body(), MediaBody::Image(_)), advertised);
-            assert_eq!(
-                matches!(replayed.body(), MediaBody::StandardImage(_)),
-                !advertised
-            );
-            let variants = discover(&message(3), &replayed.local_xml().unwrap())
-                .unwrap()
-                .into_iter()
-                .map(|entry| entry.1)
-                .collect::<Vec<_>>();
+            assert_eq!(replayed.uploaded.original.is_some(), advertised);
+            assert_eq!(replayed.unadvertised_original.is_some(), !advertised);
+            assert_eq!(replayed.variants_for_verification().count(), 3);
+            let variants = discover(
+                &message(3),
+                &wechat_protocol::media_send::local_image_xml(&replayed.uploaded).unwrap(),
+            )
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.1)
+            .collect::<Vec<_>>();
             assert_eq!(variants.contains(&MediaVariant::Original), advertised);
             assert!(variants.contains(&MediaVariant::Standard));
             assert!(variants.contains(&MediaVariant::Thumbnail));
         }
+        let mut standard = image;
+        standard.original = None;
+        assert!(ImageUploadReceipt::new(standard.clone(), ImageSendQuality::Original).is_err());
+        assert!(
+            ImageUploadReceipt::new(standard, ImageSendQuality::Standard)
+                .unwrap()
+                .uploaded
+                .original
+                .is_none()
+        );
     }
     #[test]
     fn accepted_local_xml_preserves_distinct_variants_and_escapes_opaque_ids() {

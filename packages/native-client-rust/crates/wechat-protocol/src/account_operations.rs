@@ -294,6 +294,7 @@ impl NativeClient {
         .await
     }
 
+    /// Submit the uploaded standard and thumbnail copies, including an original when present.
     pub async fn send_image(
         &self,
         destination: &str,
@@ -304,21 +305,6 @@ impl NativeClient {
         let upload = upload.clone();
         self.account_request(move |transport, state, _| {
             transport.send_image_snapshot(state, &destination, &client_id, &upload)
-        })
-        .await
-    }
-
-    /// Submit an image offering its verified standard and thumbnail copies without an original.
-    pub async fn send_standard_image(
-        &self,
-        destination: &str,
-        client_id: &str,
-        upload: &crate::media::UploadedImage,
-    ) -> Result<crate::media_send::MediaSendResult> {
-        let (destination, client_id) = (destination.to_owned(), client_id.to_owned());
-        let upload = upload.clone();
-        self.account_request(move |transport, state, _| {
-            transport.send_standard_image_snapshot(state, &destination, &client_id, &upload)
         })
         .await
     }

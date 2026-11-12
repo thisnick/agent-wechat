@@ -1363,23 +1363,6 @@ impl NativeClient {
         )
     }
     #[doc(hidden)]
-    pub(crate) fn send_standard_image_snapshot(
-        &self,
-        state: &mut AccountState,
-        destination: &str,
-        client_id: &str,
-        upload: &crate::media::UploadedImage,
-    ) -> Result<crate::media_send::MediaSendResult> {
-        let request =
-            crate::media_send::standard_image_send_request(state, destination, client_id, upload)?;
-        crate::media_send::decode_image_send(
-            &self.authenticated_rpc(state, 110, "/cgi-bin/micromsg-bin/uploadmsgimg", &request)?,
-            client_id,
-            &state.own_username,
-            destination,
-        )
-    }
-    #[doc(hidden)]
     pub(crate) fn send_video_snapshot(
         &self,
         state: &mut AccountState,

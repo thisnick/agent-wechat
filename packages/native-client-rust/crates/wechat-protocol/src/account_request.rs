@@ -84,9 +84,8 @@ impl AccountRequest<'_> {
     operation!(send_quote(destination: &str, client_id: &str, created_at: u32, content: &str, source: Option<&str>) -> crate::media_send::MediaSendResult => send_quote_with_source_snapshot);
     operation!(reserve_file_upload(destination: &str, client_id: &str, name: &str, length: usize, md5: &str) -> crate::file_upload::FileUploadReservation => reserve_file_upload_snapshot);
     operation!(send_file(destination: &str, client_id: &str, created_at: u32, upload: &crate::media::UploadedMedia, reservation: Option<&crate::file_upload::FileUploadReservation>) -> crate::media_send::MediaSendResult => send_file_with_reservation_snapshot);
-    operation!(send_image(destination: &str, client_id: &str, upload: &crate::media::UploadedImage) -> crate::media_send::MediaSendResult => send_image_snapshot);
-    /// Submit an image offering its verified standard and thumbnail copies without an original.
-    pub fn send_standard_image(
+    /// Submit the uploaded standard and thumbnail copies, including an original when present.
+    pub fn send_image(
         &mut self,
         destination: &str,
         client_id: &str,
@@ -94,7 +93,7 @@ impl AccountRequest<'_> {
     ) -> Result<crate::media_send::MediaSendResult> {
         self.admit()?;
         self.transport
-            .send_standard_image_snapshot(self.state, destination, client_id, upload)
+            .send_image_snapshot(self.state, destination, client_id, upload)
     }
 
     operation!(send_video(destination: &str, client_id: &str, upload: &crate::media::UploadedVideo, seconds: u32) -> crate::media_send::MediaSendResult => send_video_snapshot);

@@ -784,7 +784,7 @@
         "type": "object"
       },
       "ImageSendQuality": {
-        "description": "How the original copy of an image is prepared. The standard and thumbnail copies are always\ncompact previews.",
+        "description": "Which image copies are offered: standard and thumbnail previews, optionally with a\nfull-resolution original.",
         "oneOf": [
           {
             "const": "standard",
