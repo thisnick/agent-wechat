@@ -487,12 +487,12 @@
                         "fastContext": {
                           "type": "object",
                           "additionalProperties": false,
-                          "description": "Before a consultation runs the agent, search the agent's indexed memory and session context for the question. Matching snippets go straight back to the voice model and the agent does not run; this also applies to owner requests, including actions and hang-up. Applies to bidi mode.",
+                          "description": "On the verified owner's direct calls, search the agent's indexed memory and session context before a consultation runs the agent. Matching snippets go straight back to the voice model and the agent does not run; the next consultation in the call runs the agent, so the voice model or the caller can ask again when the snippets do not answer or an action is needed. Other callers and conferences always run the agent. Applies to bidi mode.",
                           "properties": {
                             "enabled": {
                               "type": "boolean",
                               "default": false,
-                              "description": "Search memory and session context before each consultation."
+                              "description": "Search memory and session context before the owner's consultations."
                             },
                             "timeoutMs": {
                               "type": "integer",

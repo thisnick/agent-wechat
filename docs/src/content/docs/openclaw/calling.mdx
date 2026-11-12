@@ -256,7 +256,7 @@ All paths below are relative to `calls.voice`.
 | `consultation.summary`, `consultation.recentMessages`, `realtime.recentContext` | Summarize each answered call and share recent chat with the agent (on by default), and give the next call a recap (off by default). See [Remember earlier calls](../call-memory/). |
 | `realtime.consultPolicy` | `auto` (default) answers greetings, small talk and general-knowledge questions itself, and consults for current information, personal records or memory, tools and actions. `substantive` answers only greetings and short replies itself and consults before any factual answer. `always` also starts a consult from the caller's current turn if the provider skips it; GPT-Live models do not support it. |
 | `realtime.consultThinkingLevel`, `realtime.consultFastMode` | Optional OpenClaw reasoning level and fast-mode override for consultations. |
-| `realtime.fastContext` | Off by default. With `enabled: true`, each consultation first searches the agent's indexed memory and session context (`sources`), returning up to `maxResults` snippets (3) within `timeoutMs` (800). If it finds snippets, the voice model answers from them and the agent does not run. If it finds nothing, the voice model says it doesn't have that context handy; set `fallbackToConsult: true` to run the agent instead. Not used in `agent` mode. |
+| `realtime.fastContext` | Off by default. With `enabled: true`, consultations on the owner's direct calls first search the agent's indexed memory and session context (`sources`), returning up to `maxResults` snippets (3) within `timeoutMs` (800). If it finds snippets, the voice model answers from them and the agent does not run; asking again runs the agent. If it finds nothing, the voice model says it doesn't have that context handy; set `fallbackToConsult: true` to run the agent instead. Other callers, conferences and `agent` mode always use the agent. |
 | `consultation.inboundSessionKey` | Optional existing session of the selected agent that seeds a new call session for inbound calls. |
 | `consultation.timeoutMs` | 30,000 by default; 1,000–120,000 ms. |
 | `maxDurationSeconds` | 3,600 (one hour) by default; 30–3,600 seconds. The plugin hangs up when it is reached. The native daemon currently ends calls after 20 minutes. |
@@ -335,7 +335,7 @@ model, including CLI runtimes such as `claude-cli`, and its fallback models.
 
 :::note[Good to know]
 Mode changes apply to new calls after the channel reloads.
-With `fastContext` on, any consultation that matches a snippet skips the agent, including an owner's hang-up or other action request. Snippets reach the voice model without the agent's read-only rules for non-owner callers.
+With `fastContext` on, an owner's request that matches a snippet, including hang-up or another action, first gets the snippets. The voice model then asks again, or you repeat the request, and the agent runs it a moment later. GPT-Live models often wait for you to repeat it.
 Disabled call types are ignored without answering or declining. Video permission
 does not supply video capability: even with `video.enabled: true`, this backend
 cannot handle video or convert it to voice. Neither conversation mode enables

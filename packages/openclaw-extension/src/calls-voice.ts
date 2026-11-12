@@ -81,6 +81,13 @@ const DELEGATED_SUBSTANTIVE_GUIDANCE = [
   "- Delegate to the OpenClaw agent before answering requests that need facts, memory, current information, tools, workspace state, or the user's OpenClaw-specific context.",
   "- Keep spoken replies concise and natural.",
 ].join("\n");
+/** A fast-context result is lookup material for the voice model, never an answer to read out word for word. */
+const fastContextMessage = (text: string) => ["Internal OpenClaw memory lookup result. It is not from the caller and is not a final OpenClaw answer.",
+  "Do not read it aloud as written. Use it to answer the caller briefly and naturally, or follow its instructions.", text].join("\n");
+/** After a fast-context answer the next consultation runs the agent, so snippets that missed the point can be passed. */
+const fastContextEscape = (toolConsult: boolean) => "If this does not answer the caller's request, or the caller asked for something to be done, do not say you lack the context: "
+  + (toolConsult ? "call the consultation tool again now with the same request." : "delegate the same request again now.")
+  + " The next consultation runs the full OpenClaw agent.";
 const fits = (formats: ProviderCapabilities["inputAudioFormats"]) => formats?.some(format => format.encoding === PCM.encoding && format.sampleRateHz === PCM.sampleRateHz && format.channels === 1) === true;
 type ProviderBridgeRequest = Record<string, unknown> & { audioFormat?: { encoding: string; sampleRateHz: number; channels: number } };
 
@@ -152,7 +159,8 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
     || typeof reply?.dispatchReplyWithBufferedBlockDispatcher !== "function" || typeof reply.finalizeInboundContext !== "function"
     || !config.allowConsultSessionPersistence)) throw Error("Calling consultation unavailable");
   if (consultationAvailable && typeof sdk.buildRealtimeVoiceSpeakExactMessage !== "function") throw Error("Calling consultation unavailable");
-  // Agent mode runs the agent for every turn; fast context only shortcuts realtime consultations.
+  // Agent mode runs the agent for every turn; fast context only shortcuts realtime
+  // consultations, and only the verified owner's direct calls (see consult()).
   const fastContext = !agentMode && consultationAvailable && config.realtime.fastContext.enabled;
   if (fastContext && typeof sdk.resolveRealtimeVoiceFastContextConsult !== "function") throw Error("Calling consultation unavailable");
   if (alwaysConsult && (typeof sdk.createRealtimeVoiceForcedConsultCoordinator !== "function"
@@ -300,12 +308,14 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
       let providerAbort = new AbortController();
       // The chat context goes to the agent once per call, with the first consultation that starts.
       let consultContext = context.consultContext;
+      // Set by a fast-context answer: the next consultation skips fast context and runs the agent.
+      let fastContextAnswered = false;
       type ConsultMode = "owner" | "safe-read-only" | "none";
-      const traceConsult = (mode: ConsultMode, stage: "started" | "ok" | "failed" | "fast-context-answered" | "fast-context-fallback", category?: ConsultFailureCategory): void => {
+      const traceConsult = (mode: ConsultMode, stage: "started" | "ok" | "failed" | "fast-context-answered" | "fast-context-fallback" | "fast-context-bypassed", category?: ConsultFailureCategory): void => {
         try { context.logAudioTrace?.(`[wechat-call-audio] plugin consult mode=${mode} stage=${stage}${category ? ` category=${category}` : ""}`); }
         catch { /* Diagnostics cannot affect consultation. */ }
       };
-      const consult = async (question: string, requestSignal?: AbortSignal, turn?: { contextOnly?: boolean; context?: string; interruption?: string }): Promise<{ text: string }> => {
+      const consult = async (question: string, requestSignal?: AbortSignal, turn?: { contextOnly?: boolean; context?: string; interruption?: string }): Promise<{ text: string; fastContext?: true }> => {
         if (closed || signal.aborted || !ready || !consultationEnabled || consulting || question.length > MAX_CONSULT_PROMPT_CHARS || !question.trim()) throw Error("Calling consultation not admitted");
         consulting = true;
         const epoch = providerEpoch;
@@ -321,7 +331,13 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
           dispatched = mode;
           traceConsult(mode, "started");
           const assertCurrent = () => { requestSignal?.throwIfAborted(); if (epoch !== providerEpoch || !scopeIsCurrent(access.scope)) throw Error("Calling consultation authority changed"); };
-          if (fastContext && !turn?.contextOnly) {
+          // Snippets skip the agent's caller-specific rules, so only the verified owner of a
+          // direct call gets them; other callers and conference rooms always run the agent.
+          const fastEligible = fastContext && isOwner && !context.conference && !turn?.contextOnly;
+          const bypassFast = fastEligible && fastContextAnswered;
+          if (!turn?.contextOnly) fastContextAnswered = false;
+          if (bypassFast) traceConsult(mode, "fast-context-bypassed");
+          if (fastEligible && !bypassFast) {
             // OpenClaw searches as this call's session and authorizes session hits for it.
             // Its debug messages can carry private values, so only the outcome is traced.
             const fast = await sdk.resolveRealtimeVoiceFastContextConsult({ cfg: access.cfg, agentId: config.agentId, sessionKey,
@@ -331,7 +347,10 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
             assertCurrent();
             const text = fast?.handled ? fast.result?.text : undefined;
             traceConsult(mode, typeof text === "string" && text.trim() ? "fast-context-answered" : "fast-context-fallback");
-            if (typeof text === "string" && text.trim()) return { text };
+            if (typeof text === "string" && text.trim()) {
+              fastContextAnswered = true;
+              return { text: `${text}\n\n${fastContextEscape(toolConsult)}`, fastContext: true };
+            }
           }
           // OpenClaw decides owner status from commands.ownerAllowFrom and runs
           // the agent's configured model routing. The SDK's tool list keeps
@@ -376,8 +395,9 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
         }),
         active: () => inBackground(() => scopeIsCurrent(expected)),
         clearAudio: callbacks.clear,
-        speak: text => inBackground(() => {
-          if (scopeIsCurrent(expected)) session!.sendUserMessage!(sdk.buildRealtimeVoiceSpeakExactMessage({ surfaceLabel: "the WeChat caller", text: text.slice(0, 8000) }));
+        speak: (text, fastContextResult) => inBackground(() => {
+          if (scopeIsCurrent(expected)) session!.sendUserMessage!(fastContextResult ? fastContextMessage(text.slice(0, 8000))
+            : sdk.buildRealtimeVoiceSpeakExactMessage({ surfaceLabel: "the WeChat caller", text: text.slice(0, 8000) }));
         }),
       });
       try {
@@ -413,7 +433,8 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
             if (!access.allowed) throw Error("Calling consultation not admitted");
             const result = forced ? await forced.native(request.prompt, undefined, request.signal) : await consult(request.prompt, request.signal);
             if ("error" in result || !scopeIsCurrent(access.scope)) throw Error("Calling consultation failed");
-            return result;
+            // The provider puts delegation results in its own words; the fast-context marker is internal.
+            return { text: result.text, ...("alreadyDelivered" in result && result.alreadyDelivered ? { alreadyDelivered: true as const } : {}) };
           }) } : {}),
           onToolCall: async (event: { name: string; callId: string; args: unknown }) => {
             if (closed || signal.aborted) return;
@@ -453,7 +474,8 @@ export async function prepareOpenClawCallVoice(config: ResolvedWeChatVoiceCallsC
                   .catch(() => ({ error: "Call consultation failed" }));
                 if (epoch !== providerEpoch || !scopeIsCurrent(access.scope) || ("alreadyDelivered" in answer && answer.alreadyDelivered)) return;
                 const text = "text" in answer ? answer.text : "I couldn't get an answer from my OpenClaw agent.";
-                session!.sendUserMessage!(sdk.buildRealtimeVoiceSpeakExactMessage({ surfaceLabel: "the WeChat caller", text: text.slice(0, 8000) }));
+                session!.sendUserMessage!("fastContext" in answer && answer.fastContext ? fastContextMessage(text.slice(0, 8000))
+                  : sdk.buildRealtimeVoiceSpeakExactMessage({ surfaceLabel: "the WeChat caller", text: text.slice(0, 8000) }));
               })).catch(() => {}).finally(() => { toolConsulting = false; });
             });
           },
