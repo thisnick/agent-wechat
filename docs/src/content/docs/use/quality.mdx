@@ -16,7 +16,7 @@ Choose outgoing preparation when sending, then select a received variant when do
 | Video, original send | Playback and thumbnail, plus unchanged `original` |
 | Ordinary file | Unchanged source bytes |
 
-**Images:** the sender preserves a JPEG source only when it is at most 65,520 bytes. Otherwise it creates a JPEG starting at a 1,280-pixel longest edge. Standard and thumbnail copies start at 640 and 160 pixels. Preparation lowers JPEG quality and, if needed, dimensions to fit each copy within 65,520 bytes. The image source limit is 26,214,383 bytes.
+**Images:** by default the sender preserves a JPEG source only when it is at most 65,520 bytes. Otherwise it creates an original JPEG starting at a 1,280-pixel longest edge. Standard and thumbnail copies start at 640 and 160 pixels. Preparation lowers JPEG quality and, if needed, dimensions to fit each of those copies within 65,520 bytes. With `imageQuality: "original"`, the original copy keeps the full source resolution (up to 4096 pixels on the longest edge) and is allowed to exceed 65,520 bytes, so it stays viewable as the original. The image source limit is 26,214,383 bytes.
 
 Large RGB or grayscale JPEG photos can contain up to 64 million pixels, with neither dimension exceeding 8,192 pixels. They decode at reduced resolution before preparation. Other image formats keep the 16,777,216-pixel limit. To preserve a larger photo unchanged, send it as a file attachment.
 
@@ -33,7 +33,7 @@ In the desktop or web composer, select **Original media quality** to include the
      --idempotency-key photo --wait 3600
    ```
 
-   There is no image equivalent of `--video-quality`. For unchanged image bytes, use `--file ./photo.jpg`; the recipient receives a file attachment.
+   Add `--image-quality original` to keep the full-resolution image as the original copy; recipients can then open the original instead of the 640-pixel preview. Omit it for the compact default. To deliver the source bytes exactly, use `--file ./photo.jpg`.
 
 2. Choose video preparation:
 
@@ -59,7 +59,7 @@ In the desktop or web composer, select **Original media quality** to include the
 }
 ```
 
-Omit `videoQuality` for normal video. For images, use `kind: "image"` without `videoQuality`. Optional `standardSourceId` and `thumbnailSourceId` accept separately uploaded JPEG copies, each at most 65,520 bytes; omitted copies are generated. This does not bypass preparation of the primary image. The SDK's `sendMedia` takes the same fields.
+Omit `videoQuality` for normal video. For images, use `kind: "image"` and, when the full-resolution copy should stay viewable, add `"imageQuality": "original"`; omit it for the compact default. Optional `standardSourceId` and `thumbnailSourceId` accept separately uploaded JPEG copies, each at most 65,520 bytes; omitted copies are generated. This does not bypass preparation of the primary image. The SDK's `sendMedia` takes the same fields.
 
 ### OpenClaw
 

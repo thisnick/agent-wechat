@@ -783,6 +783,21 @@
         ],
         "type": "object"
       },
+      "ImageSendQuality": {
+        "description": "How an image is sent: `standard` (default) sends a 640px preview plus a small \"original\" copy,\nwhile `original` keeps the full-resolution image so recipients can open the original.",
+        "oneOf": [
+          {
+            "const": "standard",
+            "description": "Send the compact preview and a size-limited original copy.",
+            "type": "string"
+          },
+          {
+            "const": "original",
+            "description": "Send the full-resolution image as the original copy.",
+            "type": "string"
+          }
+        ]
+      },
       "LinkCard": {
         "description": "Details of a shared link, article, music or video card, or a Channels post.",
         "properties": {
@@ -1340,6 +1355,17 @@
               "integer",
               "null"
             ]
+          },
+          "imageQuality": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ImageSendQuality"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How to send an image, `standard` by default or `original`. Only valid for image sends."
           },
           "kind": {
             "$ref": "#/components/schemas/MediaKind",

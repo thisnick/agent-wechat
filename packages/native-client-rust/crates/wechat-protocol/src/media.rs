@@ -1157,7 +1157,12 @@ fn upload_fields(
     end: usize,
 ) -> Result<CdnFields> {
     ensure!(
-        sequence > 0 && start <= end && end < p.encrypted.len() && end - start < UPLOAD_CHUNK,
+        sequence > 0
+            && start <= end
+            && end < p.encrypted.len()
+            // Image originals may exceed one chunk: the CDN accepts a single request up to
+            // MAX_NATIVE_UPLOAD_BYTES, which keeps full-resolution originals round-trippable.
+            && (end - start < UPLOAD_CHUNK || p.kind == MediaQuality::Original),
         "Invalid upload range"
     );
     let mut f = shared(conf, sequence, p.kind.filetype());
@@ -1271,9 +1276,12 @@ pub struct UploadedVideo {
     pub original: Option<UploadedMedia>,
 }
 fn jpeg_dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
+    jpeg_dimensions_with_limit(bytes, 65520)
+}
+fn jpeg_dimensions_with_limit(bytes: &[u8], max_bytes: usize) -> Result<(u32, u32)> {
     use image::GenericImageView;
     ensure!(
-        !bytes.is_empty() && bytes.len() <= 65520,
+        !bytes.is_empty() && bytes.len() <= max_bytes,
         "JPEG variant outside small-object profile"
     );
     ensure!(
@@ -1345,7 +1353,7 @@ impl PreparedImageUpload {
         key: &[u8],
         file_key: &str,
     ) -> Result<Self> {
-        let (width, height) = jpeg_dimensions(original)?;
+        let (width, height) = jpeg_dimensions_with_limit(original, MAX_NATIVE_UPLOAD_BYTES)?;
         let original = PreparedUpload::with_material(
             original,
             MediaQuality::Original,
@@ -1375,7 +1383,7 @@ impl PreparedImageUpload {
         file_name: &str,
         destination: &str,
     ) -> Result<Self> {
-        let (width, height) = jpeg_dimensions(original)?;
+        let (width, height) = jpeg_dimensions_with_limit(original, MAX_NATIVE_UPLOAD_BYTES)?;
         let original =
             PreparedUpload::prepare(original, MediaQuality::Original, file_name, destination)?;
         let standard = PreparedVariant::new(standard, &original.aes_key)?;
@@ -1394,13 +1402,13 @@ impl PreparedImageUpload {
         self.original.validate()?;
         let raw = decrypt_cdn(&self.original.encrypted, &self.original.aes_key)?;
         ensure!(
-            jpeg_dimensions(&raw)? == (self.width, self.height),
+            jpeg_dimensions_with_limit(&raw, MAX_NATIVE_UPLOAD_BYTES)? == (self.width, self.height),
             "Prepared original dimensions differ"
         );
         self.standard.validate(&self.original.aes_key)?;
         self.thumbnail.validate(&self.original.aes_key)?;
         ensure!(
-            self.original.plaintext_bytes <= 65520
+            self.original.plaintext_bytes <= MAX_NATIVE_UPLOAD_BYTES as u32
                 && self.standard.width <= self.width
                 && self.standard.height <= self.height
                 && self.thumbnail.width <= self.standard.width
