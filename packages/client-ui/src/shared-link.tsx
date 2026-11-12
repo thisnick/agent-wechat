@@ -42,7 +42,7 @@ export function SharedLink({
   const content = (
     <>
       <span className="shared-link-art" ref={element} aria-hidden="true">
-        <LinkThumbnail asset={thumbnail} connection={connection} />
+        <ImageThumbnail asset={thumbnail} connection={connection} fallback={<Link2 strokeWidth={1.5} />} />
       </span>
       <span className="shared-link-copy">
         <strong>{emojiText(title)}</strong>
@@ -83,12 +83,14 @@ export function SharedLink({
   );
 }
 
-function LinkThumbnail({
+export function ImageThumbnail({
   asset,
   connection,
+  fallback,
 }: {
   asset?: MediaAsset;
   connection: Connection;
+  fallback: React.ReactNode;
 }) {
   const [url, setUrl] = useState("");
   const cache = connection.incomingMedia.previews;
@@ -111,6 +113,6 @@ function LinkThumbnail({
   return url ? (
     <img src={url} alt="" onError={() => setUrl("")} />
   ) : (
-    <Link2 strokeWidth={1.5} />
+    fallback
   );
 }

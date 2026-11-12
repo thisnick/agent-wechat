@@ -58,6 +58,17 @@ All targets enforce the decoder deadline, output bounds and FFmpeg allocation/
 thread limits. Unix additionally applies process resource limits; Windows does
 not currently provide equivalent kernel-enforced memory/CPU limits.
 
+## Mini Program runner checks
+
+Build `wx` and `wx-dev` with `--profile test`, build `packages/shared`, and
+install the matching Playwright Chromium. Run
+`node scripts/native-miniprogram-smoke.mjs`. The test uses disposable simulator
+accounts and checks package selection, browser rendering, navigation, lazy
+subpackage imports, and the launch network policy.
+
+See [Mini Program compatibility](MINIPROGRAM-COMPATIBILITY.md) for the official
+demo catalog and observed startup coverage.
+
 ## Isolated account acceptance
 
 Use a dedicated test account and a disposable supported-format profile. Confirm

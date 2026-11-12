@@ -16,6 +16,7 @@ mod client_actions;
 mod daemon;
 mod events;
 mod login;
+mod miniprogram;
 mod outcome;
 mod output;
 mod profile_cli;
@@ -115,6 +116,12 @@ enum Command {
     Calls {
         #[command(subcommand)]
         command: Option<calls_cli::CallsCommand>,
+    },
+    /// Open a Mini Program from the selected account's verified package cache (experimental).
+    #[command(name = "miniprogram")]
+    MiniProgram {
+        #[command(subcommand)]
+        command: miniprogram::MiniProgramCommand,
     },
     /// Look up known contact IDs on the selected account.
     #[command(hide = true)]
@@ -935,7 +942,7 @@ enum TokenCommand {
         /// Account ID the token may use, or * for all accounts; repeat for several.
         #[arg(long, required = true)]
         accounts: Vec<String>,
-        /// Permission to grant: read, media, send, read-state, login, admin or calls; repeat.
+        /// Permission to grant: read, media, send, read-state, login, admin, calls or mini-programs; repeat.
         #[arg(long, required = true)]
         scopes: Vec<String>,
         /// Expire the token at this Unix time in seconds; it never expires if omitted.
@@ -1127,6 +1134,14 @@ async fn private_media_output(
 #[tokio::main]
 async fn main() {
     let arguments = std::env::args_os().collect::<Vec<_>>();
+    if arguments.len() == 2 && arguments[1] == "__mini-program-host-v1" {
+        if let Err(error) = miniprogram::machine_host().await {
+            let code = miniprogram::host_error_code(&error);
+            println!("{}", json!({"version": 1, "state": "error", "code": code}));
+            std::process::exit(1);
+        }
+        std::process::exit(0);
+    }
     let json = arguments.iter().any(|s| s == "--json");
     let cli = match cli_help::command()
         .try_get_matches_from(arguments)
@@ -1191,6 +1206,14 @@ impl Remote {
         Self::with_token(config, None)
     }
     fn with_token(config: wechat_config::ClientConfig, token: Option<String>) -> Result<Self> {
+        Self::with_connection(config, token, None, false)
+    }
+    fn with_connection(
+        config: wechat_config::ClientConfig,
+        token: Option<String>,
+        certificate: Option<&str>,
+        direct: bool,
+    ) -> Result<Self> {
         let base = reqwest::Url::parse(&format!("{}/", config.endpoint.trim_end_matches('/')))?;
         if !base.username().is_empty()
             || base.password().is_some()
@@ -1209,11 +1232,18 @@ impl Remote {
         {
             bail!("remote daemon endpoints require HTTPS");
         }
+        let mut http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(65));
+        if direct {
+            http = http.no_proxy();
+        }
+        if let Some(certificate) = certificate {
+            http =
+                http.add_root_certificate(reqwest::Certificate::from_pem(certificate.as_bytes())?);
+        }
         Ok(Self {
-            http: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(Duration::from_secs(65))
-                .build()?,
+            http: http.build()?,
             base,
             token: match token {
                 Some(value) => {
@@ -1411,7 +1441,7 @@ async fn run(cli: Cli) -> Result<()> {
     }
     if matches!(cli.command, Command::Licenses) {
         return output.print(
-            &json!({"silkProject":include_str!("../../wechat-protocol/vendor/silk/LICENSE-MIT"),"silkSdk":include_str!("../../wechat-protocol/vendor/silk/LICENSE-SDK"),"protocol":include_str!("../../wechat-protocol/NOTICE")}),
+            &json!({"silkProject":include_str!("../../wechat-protocol/vendor/silk/LICENSE-MIT"),"silkSdk":include_str!("../../wechat-protocol/vendor/silk/LICENSE-SDK"),"protocol":include_str!("../../wechat-protocol/NOTICE"),"glassEasel":wechat_miniprogram::runner::GLASS_EASEL_LICENSE,"cssTree":wechat_miniprogram::runner::CSS_TREE_LICENSE}),
         );
     }
     if matches!(cli.command, Command::Version) {
@@ -1660,11 +1690,13 @@ async fn run(cli: Cli) -> Result<()> {
             | Command::Tokens { .. }
             | Command::Config { .. }
     );
-    // Calling grants can observe/control one selected account without also
-    // reading the account catalog. The API resolves aliases and checks scope.
-    let selected_call_account =
-        matches!(&cli.command, Command::Calls { .. }) && r.account.is_some();
-    if requires_account && !selected_call_account {
+    // Calls and Mini Programs can use a selected account without reading the
+    // account catalog. The API resolves aliases and checks the relevant scope.
+    let selected_account_without_catalog = matches!(
+        &cli.command,
+        Command::Calls { .. } | Command::MiniProgram { .. }
+    ) && r.account.is_some();
+    if requires_account && !selected_account_without_catalog {
         let catalog = r.get("v1/accounts").await?;
         let items = catalog["items"]
             .as_array()
@@ -1714,6 +1746,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Calls { command } => {
             return calls_cli::run(&r, command.context("choose a calls command")?, cli.json).await;
         }
+        Command::MiniProgram { command } => return miniprogram::run(r, command, cli.json).await,
         Command::LookupContacts { ids }
         | Command::Contacts {
             command: Some(ContactCommand::Lookup { ids }),

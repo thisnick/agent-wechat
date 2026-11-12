@@ -592,3 +592,21 @@ test('media batch fallback probes an older hub once and keeps ordinary GET suppo
   assert.equal(probes, 1);
   assert.equal(gets, 3);
 });
+
+test('Mini Program login uses launch IPC and does not retry uncertain requests', async () => {
+  const invocation = '00000000-0000-4000-8000-000000000002';
+  let attempts = 0;
+  const client = new NativeWeChatClient({
+    ...options,
+    fetch: async (url, init) => {
+      attempts++;
+      assert.equal(new URL(url).pathname, '/v1/accounts/a/mini-programs/wx0123456789abcdef/launches/launch/ipc');
+      assert.equal(init.method, 'POST');
+      assert.equal(init.headers.get('Idempotency-Key'), invocation);
+      assert.deepEqual(JSON.parse(init.body), { method: 'wx.login' });
+      throw new Error('connection lost');
+    },
+  });
+  await assert.rejects(client.issueMiniProgramLogin('a', 'wx0123456789abcdef', 'launch', invocation), /connection lost/);
+  assert.equal(attempts, 1);
+});

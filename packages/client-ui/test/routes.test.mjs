@@ -19,6 +19,7 @@ const samples = {
   message: { server: "hub-1", account: "account-1", thread: "123@chatroom", message: "msg_9" },
   media: { server: "hub-1", account: "account-1", thread: "123@chatroom", message: "msg_9" },
   info: { server: "hub-1", account: "account-1", thread: "123@chatroom" },
+  "mini-programs": { server: "hub-1", account: "account-1" },
   contacts: { server: "hub-1", account: "account-1" },
   "new-chat": { server: "hub-1", account: "account-1" },
   settings: { server: "hub-1", account: "account-1" },
@@ -44,6 +45,7 @@ test("addresses follow the published patterns", () => {
   assert.equal(formatRoute({ name: "message", server: "s", account: "a", thread: "t", message: "m" }), "#/s/a/chats/t/message/m");
   assert.equal(formatRoute({ name: "media", server: "s", account: "a", thread: "t", message: "m" }), "#/s/a/chats/t/media/m");
   assert.equal(formatRoute({ name: "info", server: "s", account: "a", thread: "t" }), "#/s/a/chats/t/info");
+  assert.equal(formatRoute({ name: "mini-programs", server: "s", account: "a" }), "#/s/a/mini-programs");
   assert.equal(formatRoute({ name: "contacts", server: "s", account: "a" }), "#/s/a/contacts");
   assert.equal(formatRoute({ name: "new-chat", server: "s", account: "a" }), "#/s/a/new-chat");
   assert.equal(formatRoute({ name: "settings", server: "s", account: "a" }), "#/s/a/settings");

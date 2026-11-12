@@ -93,6 +93,8 @@ pub mod crypto;
 pub mod file_upload;
 pub mod media;
 pub mod media_send;
+mod miniprogram;
+pub use miniprogram::MiniProgramNetworkPolicy;
 pub mod mmtls;
 mod notice;
 pub mod openim;

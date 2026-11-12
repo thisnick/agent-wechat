@@ -11,6 +11,7 @@ mod http_interface_tests;
 #[cfg(test)]
 mod http_route_table;
 mod media;
+mod miniprogram;
 #[cfg(test)]
 mod schema_listing;
 use anyhow::{bail, Context, Result};
@@ -78,6 +79,7 @@ pub fn version() -> Version {
             "events",
             "scoped-tokens",
             "config",
+            "mini-programs",
         ]
         .into_iter()
         .filter(|capability| *capability != "official-profile-login" || cfg!(target_os = "linux"))
@@ -130,6 +132,9 @@ impl IntoResponse for ApiError {
 }
 impl From<anyhow::Error> for ApiError {
     fn from(error: anyhow::Error) -> Self {
+        if let Some(mapped) = miniprogram::error(&error) {
+            return mapped;
+        }
         let message = error.to_string();
         if message == "mention_all_forbidden" {
             return Self(StatusCode::FORBIDDEN, "mention_all_forbidden");
@@ -1296,6 +1301,7 @@ pub fn router(core: Arc<Core>, token: &str) -> Router {
         .merge(actions::routes())
         .merge(groups::routes())
         .merge(call_routes())
+        .merge(miniprogram::routes())
         .with_state(app.clone());
     // Resolve aliases before route matching so scope checks and vault AAD always
     // use the canonical account identifier.
@@ -1985,6 +1991,51 @@ mod tests {
             .0,
             StatusCode::NOT_FOUND
         );
+    }
+    #[tokio::test]
+    async fn mini_program_routes_separate_listing_and_running() {
+        let (_temp, core, app) = setup();
+        let reader = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let runner = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        for (token, scope) in [(reader, "read"), (runner, "mini-programs")] {
+            core.store
+                .issue_token(
+                    scope,
+                    &format!("{:x}", Sha256::digest(token.as_bytes())),
+                    &["one".into()],
+                    &[scope.into()],
+                    None,
+                )
+                .unwrap();
+        }
+        let app_id = "wx0123456789abcdef";
+        let launch = format!("/{app_id}/launches");
+        let archive = format!("/{app_id}/packages/1/main");
+        let fetch = format!("/{app_id}/packages");
+        let ipc = format!("{launch}/invalid/ipc");
+        let card = Some(json!({"sourceMessageId":"saved-card"}));
+        let login = Some(json!({"method":"wx.login"}));
+        let forbidden = StatusCode::FORBIDDEN;
+        // A missing fixture archive or invalid launch ID reaches 404 after authorization.
+        let not_found = StatusCode::NOT_FOUND;
+        for (token, account, method, suffix, body, expected) in [
+            (reader, "one", "GET", "", None, StatusCode::OK),
+            (runner, "one", "GET", "", None, forbidden),
+            (reader, "one", "POST", &launch, None, forbidden),
+            (runner, "one", "POST", &launch, None, not_found),
+            (runner, "one", "POST", &launch, card, forbidden),
+            (runner, "two", "POST", &launch, None, forbidden),
+            (reader, "one", "GET", &archive, None, forbidden),
+            (runner, "one", "GET", &archive, None, not_found),
+            (runner, "one", "POST", &fetch, None, forbidden),
+            (reader, "one", "POST", &ipc, login.clone(), forbidden),
+            (runner, "two", "POST", &ipc, login.clone(), forbidden),
+            (runner, "one", "POST", &ipc, login, not_found),
+        ] {
+            let path = format!("/v1/accounts/{account}/mini-programs{suffix}");
+            let (status, _) = call(app.clone(), method, &path, Some(token), body).await;
+            assert_eq!(status, expected, "{method} {path}");
+        }
     }
     #[tokio::test]
     async fn quoted_text_requires_both_scopes_and_rejects_quote_on_other_send_kinds() {

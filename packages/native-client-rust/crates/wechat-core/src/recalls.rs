@@ -759,6 +759,9 @@ impl Core {
                 object.remove("location");
             }
             value["appMessageType"] = Value::Null;
+            if let Some(fields) = value.as_object_mut() {
+                fields.remove("miniProgram");
+            }
             value["mentions"] =
                 json!({"state":"known","userIds":[],"self":false,"all":false,"source":null});
             value["media"] = json!([]);

@@ -30,6 +30,7 @@ wechat-store = { path = "../wechat-store" }
 wechat-api = { path = "../wechat-api" }
 
 wechat-core = { path = "../wechat-core" }
+wechat-miniprogram = { path = "../wechat-miniprogram" }
 wechat-profile = { path = "../wechat-profile" }
 wechat-calls = { path = "../wechat-calls", features = ["native-opus"] }
 wechat-audio = { path = "../wechat-audio", features = ["native-audio"] }

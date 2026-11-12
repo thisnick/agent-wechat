@@ -14,6 +14,7 @@ export type RouteName =
   | "message"
   | "media"
   | "info"
+  | "mini-programs"
   | "contacts"
   | "new-chat"
   | "settings";
@@ -27,6 +28,7 @@ export type Route =
   | { name: "message"; server: string; account: string; thread: string; message: string }
   | { name: "media"; server: string; account: string; thread: string; message: string }
   | { name: "info"; server: string; account: string; thread: string }
+  | { name: "mini-programs"; server: string; account: string }
   | { name: "contacts"; server: string; account: string }
   | { name: "new-chat"; server: string; account: string }
   | { name: "settings"; server: string; account: string };
@@ -89,6 +91,11 @@ export const routeTable: readonly RouteEntry[] = [
     pattern: "/{server}/{account}/chats/{thread}/info",
     name: "info",
     description: "Conversation details, including group settings for a group chat.",
+  },
+  {
+    pattern: "/{server}/{account}/mini-programs",
+    name: "mini-programs",
+    description: "Mini Programs and package availability for the selected account.",
   },
   {
     pattern: "/{server}/{account}/contacts",

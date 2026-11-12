@@ -85,7 +85,14 @@ impl Store {
             || scopes.iter().any(|s| {
                 !matches!(
                     s.as_str(),
-                    "read" | "media" | "send" | "read-state" | "login" | "admin" | "calls"
+                    "read"
+                        | "media"
+                        | "send"
+                        | "read-state"
+                        | "login"
+                        | "admin"
+                        | "calls"
+                        | "mini-programs"
                 )
             })
         {

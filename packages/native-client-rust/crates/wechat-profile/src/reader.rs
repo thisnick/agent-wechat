@@ -690,6 +690,26 @@ impl ProfileReader {
     }
 
     pub fn messages(&self, q: &MessageQuery) -> Result<Page<Message>> {
+        self.messages_filtered(q, None)
+    }
+
+    /// Read recent saved Mini Program cards using the profile's exact message types.
+    pub fn recent_mini_program_messages(&self, maximum: usize) -> Result<Page<Message>> {
+        let query = MessageQuery {
+            limit: Some(maximum),
+            ..Default::default()
+        };
+        let mut page =
+            self.messages_filtered(&query, Some([(33_i64 << 32) | 49, (36_i64 << 32) | 49]))?;
+        page.next_cursor = None;
+        Ok(page)
+    }
+
+    fn messages_filtered(
+        &self,
+        q: &MessageQuery,
+        types: Option<[i64; 2]>,
+    ) -> Result<Page<Message>> {
         let n = limit(q.limit)?;
         if let Some(chat) = &q.chat {
             validate_name(chat)?;
@@ -776,14 +796,23 @@ impl ProfileReader {
                     } else {
                         (None, 0, None)
                     };
-                let sql=format!("SELECT * FROM {} WHERE (?1 IS NULL OR create_time<?1 OR (create_time=?1 AND (?2=1 OR (?2=0 AND local_id<?3)))) AND (?4 IS NULL OR (local_type & 2147483647)=?4) ORDER BY create_time DESC,local_id DESC LIMIT ?5",quote_identifier(table_name));
-                let mut s = c.prepare(&sql)?;
-                let records = s
-                    .query_map(
+                let table_sql = quote_identifier(table_name);
+                let records = if let Some([first, second]) = types {
+                    // Equality on local_type can use the official type/sequence index.
+                    let mut statement = c.prepare(&format!(
+                        "SELECT * FROM {table_sql} WHERE local_type IN (?1,?2) ORDER BY create_time DESC,local_id DESC LIMIT ?3"
+                    ))?;
+                    let rows = statement.query_map(params![first, second, n + 1], raw)?;
+                    rows.collect::<std::result::Result<Vec<_>, _>>()?
+                } else {
+                    let sql=format!("SELECT * FROM {table_sql} WHERE (?1 IS NULL OR create_time<?1 OR (create_time=?1 AND (?2=1 OR (?2=0 AND local_id<?3)))) AND (?4 IS NULL OR (local_type & 2147483647)=?4) ORDER BY create_time DESC,local_id DESC LIMIT ?5");
+                    let mut statement = c.prepare(&sql)?;
+                    let rows = statement.query_map(
                         params![max_time, equal_mode, local_bound, q.message_type, n + 1],
                         raw,
-                    )?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                    )?;
+                    rows.collect::<std::result::Result<Vec<_>, _>>()?
+                };
                 let peer = hashes
                     .get(&table_name[4..].to_ascii_lowercase())
                     .filter(|v| v.len() == 1)

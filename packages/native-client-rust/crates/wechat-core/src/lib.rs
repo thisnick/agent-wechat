@@ -11,6 +11,8 @@ pub use links::{LinkCard, ShareSendRequest};
 mod locations;
 pub use locations::{LocationCard, LocationCoordinateSystem};
 mod media;
+mod miniprogram;
+pub use miniprogram::{MiniProgramCard, MiniProgramLaunch, MiniProgramSummary};
 mod mention_send;
 pub use mention_send::{TextMentionPosition, TextMentions};
 pub mod media_types;

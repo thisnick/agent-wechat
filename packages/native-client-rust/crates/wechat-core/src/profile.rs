@@ -369,6 +369,18 @@ pub(crate) fn normalized_message(
             .map(|out| if out { "outgoing" } else { "incoming" })
     };
     let mut value = json!({"id":message_id(&msg.id)?,"accountId":account,"threadId":thread,"peerId":thread,"serverId":msg.server_message_id,"senderId":sender,"direction":direction,"type":msg.message_type,"appMessageType":app_type,"quote":quote,"link":link,"body":text,"createdAt":created,"mentions":mentions(msg.source.text.as_deref(),own),"media":[],"version":generation,"projection":"official-profile"});
+    if let Some(program) = app.and_then(|app| app.mini_program) {
+        value["body"] = json!(program
+            .card
+            .title
+            .as_ref()
+            .or(program.card.display_name.as_ref())
+            .map_or_else(
+                || "[Mini Program]".into(),
+                |title| format!("[Mini Program] {title}")
+            ));
+        value["miniProgram"] = json!(program.card);
+    }
     if let Some(location) = location {
         value["location"] = serde_json::to_value(location)?;
     }

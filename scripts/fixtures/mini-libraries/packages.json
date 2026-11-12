@@ -1,0 +1,32 @@
+{
+  "miniprogram-computed": {
+    "version": "9.0.0",
+    "integrity": "sha512-Y1caTpeCnauJc/aeeGNqQ2ZgyNvs5WLGSUvnCg+t/aJkNgQnMxbfcw/YhBIGPTkUTvskYIj6MoqSEwAnjNpnWw==",
+    "source": "dist/index.js",
+    "file": "computed.js"
+  },
+  "mobx-miniprogram": {
+    "version": "6.12.3",
+    "integrity": "sha512-GEq1EG7jZPnrHYV43oppa6jY9lgbNRuGPiXyOFRoluHjd5LIGBf3a+zXMjzO1AVwrFOWvVRazxtzfiRXMUUqZw==",
+    "source": "dist/mobx.cjs.production.min.js",
+    "file": "mobx.js"
+  },
+  "mobx-miniprogram-bindings": {
+    "version": "7.0.1",
+    "integrity": "sha512-8jLM+SXr2O0+I6V6eGwYSwGmdHYQ6l0rx3W8DltF+hjt/IcCUkXFFUL7CTaafObx598VF50Qv52aUo2KcC+PHg==",
+    "source": "dist/index.js",
+    "file": "bindings.js"
+  },
+  "fast-deep-equal": {
+    "version": "3.1.3",
+    "integrity": "sha512-f3qQ9oQy9j2AhBe/H9VC91wLmKBCCU/gDOnKNAYG5hswO7BLKj09Hc5HYNz9cGI++xlpDCIgDaitVs03ATR84Q==",
+    "source": "index.js",
+    "file": "fast-deep-equal.js"
+  },
+  "rfdc": {
+    "version": "1.4.1",
+    "integrity": "sha512-q1b3N5QkRUWUl7iyylaaj3kOpIT0N2i9MqIEQXP73GVsN9cw3fdx8X63cEmWhJGi2PPCF23Ijp7ktmd39rawIA==",
+    "source": "index.js",
+    "file": "rfdc.js"
+  }
+}

@@ -22,6 +22,7 @@ wechat-store = { path = "../wechat-store" }
 wechat-profile = { path = "../wechat-profile" }
 wechat-protocol = { path = "../wechat-protocol" }
 wechat-media = { path = "../wechat-media" }
+wechat-miniprogram = { path = "../wechat-miniprogram" }
 uuid.workspace = true
 chrono.workspace = true
 sha2.workspace = true
