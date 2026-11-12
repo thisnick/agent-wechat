@@ -87,7 +87,7 @@ pub enum VideoSendQuality {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ImageSendQuality {
-    /// Reduce the original copy to at most 1,280 pixels and 65,520 bytes.
+    /// Offer a compressed standard copy and thumbnail without an original.
     #[default]
     Standard,
     /// Send a JPEG source unchanged as the original copy, or convert another format to JPEG at
@@ -121,8 +121,8 @@ pub struct MediaSendRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub video_quality: Option<VideoSendQuality>,
-    /// `original` sends the image at full resolution as its original copy; `standard`, the
-    /// default, reduces it. Only valid for image sends.
+    /// `original` includes a full-resolution original; `standard`, the default, offers only
+    /// compressed standard and thumbnail copies. Only valid for image sends.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub image_quality: Option<ImageSendQuality>,

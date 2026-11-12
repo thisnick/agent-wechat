@@ -1654,8 +1654,8 @@ durationMs: number | null,
  */
 videoQuality?: VideoSendQuality, 
 /**
- * `original` sends the image at full resolution as its original copy; `standard`, the
- * default, reduces it. Only valid for image sends.
+ * `original` includes a full-resolution original; `standard`, the default, offers only
+ * compressed standard and thumbnail copies. Only valid for image sends.
  */
 imageQuality?: ImageSendQuality, };
 export type MediaImagePreview = { 

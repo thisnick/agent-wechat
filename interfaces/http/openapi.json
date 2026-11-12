@@ -788,7 +788,7 @@
         "oneOf": [
           {
             "const": "standard",
-            "description": "Reduce the original copy to at most 1,280 pixels and 65,520 bytes.",
+            "description": "Offer a compressed standard copy and thumbnail without an original.",
             "type": "string"
           },
           {
@@ -1365,7 +1365,7 @@
                 "type": "null"
               }
             ],
-            "description": "`original` sends the image at full resolution as its original copy; `standard`, the\ndefault, reduces it. Only valid for image sends."
+            "description": "`original` includes a full-resolution original; `standard`, the default, offers only\ncompressed standard and thumbnail copies. Only valid for image sends."
           },
           "kind": {
             "$ref": "#/components/schemas/MediaKind",

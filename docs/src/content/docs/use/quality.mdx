@@ -1,55 +1,40 @@
 ---
 title: Video and image quality
-description: How image and video copies work, how to send them, and how to request and download a particular quality.
+description: Choose image and video send quality, then download an available copy.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-Choose outgoing preparation when sending, then select a received variant when downloading. A variant named `original` does not always preserve your source bytes.
+Image sends default to **standard** quality in the CLI and HTTP API. OpenClaw sends images at **original** quality automatically. Video sends default to normal quality.
 
-## How quality works
+## Choose send quality
 
-| Media | Copies |
+| Send | Copies offered to the recipient |
 | --- | --- |
-| Image | `original`, `standard`, `thumbnail` |
-| Video, normal send (default) | `normal` playback and `thumbnail` |
-| Video, original send | Playback and thumbnail, plus unchanged `original` |
-| Ordinary file | Unchanged source bytes |
+| Image, `standard` (default) | Compressed `standard` and `thumbnail`; no original |
+| Image, `original` | Full-resolution `original`, plus standard and thumbnail |
+| Video, `normal` (default) | Prepared playback and thumbnail |
+| Video, `original` | Playback and thumbnail, plus unchanged original |
+| File attachment | Unchanged source bytes |
 
-**Images:** every image send carries three copies. How the `original` copy is prepared depends on the image quality you choose:
+**Images:** original quality preserves JPEG source bytes. PNG, GIF and WebP sources become JPEGs at full resolution. Generated standard and thumbnail copies start at 640 and 160 pixels on the longest edge; preparation lowers JPEG quality and then dimensions until each fits 65,520 bytes. Small images are not enlarged.
 
-| Image quality | `original` copy |
-| --- | --- |
-| `standard` (default) | A JPEG source of at most 65,520 bytes is kept unchanged. Anything else becomes a JPEG starting at a 1,280-pixel longest edge, reduced until it fits 65,520 bytes. |
-| `original` | A JPEG source is sent unchanged, at its own resolution. Another format (PNG, GIF, WebP) is converted to JPEG once at its full resolution. |
+The image source limit is 26,214,383 bytes. JPEGs allow 64 million pixels and 8,192 pixels per edge; large RGB and grayscale JPEGs use a reduced decode for previews. Other formats allow 16,777,216 pixels. For larger images or unchanged non-JPEG bytes, send a file attachment.
 
-In both cases the `standard` and `thumbnail` copies start at 640 and 160 pixels, and JPEG quality and then dimensions are lowered until each fits 65,520 bytes.
+**Videos:** MOV, MP4, 3GP, 3G2 and MJ2 sources allow 512 MiB. Playback uses H.264 Main at up to 720 pixels on the longest edge and 30 fps, with AAC audio when present. Preparation never shortens a video. Container support depends on its codecs.
 
-The image source limit is 26,214,383 bytes. A JPEG can contain up to 64 million pixels, with neither dimension exceeding 8,192 pixels; RGB and grayscale photos above 16,777,216 pixels are supported, and their previews are made from a reduced-resolution decode. Other image formats keep the 16,777,216-pixel limit. For a larger image, or for exact bytes in a format other than JPEG, send it as a file attachment.
+## Send from the CLI
 
-**Video:** MOV, MP4, 3GP, 3G2 and MJ2 sources allow **512 MiB (536,870,912 bytes)**. The desktop and web attachment picker checks the connected hub's limit; the synthetic preview has a smaller limit. Playback uses H.264 Main, at most 720 pixels on the longest edge and 30 fps, with AAC audio when present. Preparation checks the complete output and rejects videos that cannot fit; it never shortens them. Container support depends on the codecs inside the file.
-
-In the desktop or web composer, select **Original media quality** to include the unchanged video source alongside the prepared playback copy. The adjacent hint explains this option. It applies to all videos in the staged batch. Leave it unchecked to send playback and thumbnail only.
-
-## Send images and videos
-
-1. Send an image with automatically prepared copies:
+1. Send a compressed image, or include its full-resolution original:
 
    ```bash
    wx messages send filehelper --image ./photo.jpg \
-     --idempotency-key photo --wait 3600
-   ```
-
-   Add `--image-quality original` to send the photo at full resolution:
-
-   ```bash
+     --idempotency-key photo-standard --wait 3600
    wx messages send filehelper --image ./photo.jpg --image-quality original \
      --idempotency-key photo-original --wait 3600
    ```
 
-   To deliver a PNG or other non-JPEG source byte for byte, use `--file ./photo.png`; the recipient receives a file attachment.
-
-2. Choose video preparation:
+2. Choose video quality:
 
    ```bash
    wx messages send filehelper --video ./clip.mp4 --video-quality normal \
@@ -58,65 +43,64 @@ In the desktop or web composer, select **Original media quality** to include the
      --idempotency-key clip-original --wait 3600
    ```
 
-3. Inspect the returned job with `wx jobs get JOB_ID`. Successful submission reports `state: "accepted"`; inspect `result.uploadReadbackVerified`. Image jobs also report `result.imagePreparation.sourcePreserved`.
+3. Inspect the returned job with `wx --json jobs get JOB_ID`. Successful sends include these fields:
 
-### HTTP API and SDK
+   ```json
+   {"state":"accepted","result":{"uploadReadbackVerified":true}}
+   ```
 
-[Upload the source](/use/media/#http-api-and-sdk), then submit to `POST /sends` with an `Idempotency-Key` header:
+   Image jobs also report `imagePreparation.originalAdvertised` and `imagePreparation.sourcePreserved` inside `result`.
+
+## HTTP API and SDK
+
+[Upload a source](/use/media/#http-api-and-sdk), then submit to `POST /sends` with an `Idempotency-Key` header:
 
 ```json
 {
   "threadId": "filehelper",
-  "kind": "video",
+  "kind": "image",
   "sourceId": "SOURCE_ID",
-  "videoQuality": "original"
+  "imageQuality": "original"
 }
 ```
 
-Omit `videoQuality` for normal video. For images, use `kind: "image"`; add `"imageQuality": "original"` to send the image at full resolution, or omit it for the compact default. Optional `standardSourceId` and `thumbnailSourceId` accept separately uploaded JPEG copies, each at most 65,520 bytes; omitted copies are generated. This does not bypass preparation of the primary image. The SDK's `sendMedia` takes the same fields.
+Omit `imageQuality` for standard images. For videos, use `kind: "video"` and optional `videoQuality: "original"`. The SDK's `sendMedia` accepts the same fields.
 
-### OpenClaw
+Optional `standardSourceId` and `thumbnailSourceId` accept separately uploaded JPEG copies of at most 65,520 bytes. Omitted copies are generated.
 
-Send an image through the regular message tool's `media` field. For one video, add:
+## OpenClaw
+
+The regular message tool's `media` field sends images at original quality automatically. JPEGs keep their source bytes; other supported image formats become full-resolution JPEGs. Use `asDocument: true` for unchanged bytes as a file attachment.
+
+For an original video, add:
 
 ```json
 {
-  "action": "send",
-  "channel": "agent-wechat",
-  "to": "CHAT_ID",
-  "media": "/absolute/path/clip.mp4",
   "channelData": {
     "agent-wechat": { "videoQuality": "original" }
   }
 }
 ```
 
-Set `mediaMaxMb` to allow the source size. Use `asDocument: true` without `videoQuality` to preserve media as an ordinary file.
+Set `mediaMaxMb` high enough for the source. Video quality options cannot combine with document mode.
 
-## Request and receive a quality
+## Download a copy
 
-1. Use `best` (default) for the best cached copy, downloading when none is cached, or request a particular variant:
+1. Request `best` (the default) or an advertised variant:
 
    ```bash
    wx messages media CHAT_ID IMAGE_ID --quality standard --output ./standard.jpg
    wx messages media CHAT_ID IMAGE_ID --quality original --output ./original.jpg
-   wx messages media CHAT_ID VIDEO_ID --quality normal --output ./playback.mp4
-   wx messages media CHAT_ID VIDEO_ID --quality original --output ./original.mp4
    ```
 
-   `thumbnail` selects a preview. `--cached-only` prevents downloads. A missing cached copy reports `state: "not_cached"`.
+   `--cached-only` prevents downloads. A missing cached copy reports `state: "not_cached"`.
 
-2. Check `state` and `actualVariant` in the returned asset. `variant` describes the advertised copy; `actualVariant` describes verified bytes. A strict quality request cannot substitute a lower copy. If a transfer remains pending, inspect its job ID.
-
-3. With the API, list `GET /messages/{id}/media`, request `POST /messages/{id}/media-transfers` with `{"messageId":"MESSAGE_ID","quality":"original"}`, poll `GET /jobs/{id}`, then fetch the available asset's `contentUrl`. These routes are under `/v1/accounts/{account}`. SDK equivalents are `mediaAssets`, `transferMedia`, `job` and `mediaContentStream`.
-
-4. In OpenClaw, call `wechat_media` with `{"messageId":"MESSAGE_ID","quality":"original"}`. Use `download: false` for cache only. Check `status` and actual `variant`; ready images include a file path and prepared image content, while videos return a file path.
+2. Check `state` and `actualVariant` in the returned asset. An original request cannot substitute a preview or recover detail removed before sending. For API and SDK download steps, see [Media](/use/media/). In OpenClaw, use `wechat_media` with `quality: "original"` when the message offers one.
 
 <Aside title="Good to know">
-- A receiver can request only copies offered by the message. Requesting original cannot recreate source detail lost during sending. Recipient apps decide which video copy to play.
-- Download policy controls automatic caching; manual requests remain available. See [Settings](/use/settings/).
-- Keep job IDs after timeouts. Reusing a send key with different quality conflicts; see [Sends and recovery](/how-it-works/sends/).
-- The playback copy must fit in 25 MiB, so a video with audio can be at most about 29 minutes long, whatever its source size. Preparation stops with `media_encoder_timeout` after 5 minutes, which a large source can reach on slow hardware.
-- An unchanged JPEG keeps its embedded metadata, which can include the camera model and the location where the photo was taken. The default image quality re-encodes any image above 65,520 bytes, which removes it.
-- Server acceptance, recipient playback and source-byte equality are separate checks.
+- New standard sends have no Original download option. Older saved sends retain the copies they originally offered.
+- Original JPEGs keep embedded metadata, including possible camera and location information. This also applies to OpenClaw image sends.
+- Keep job IDs after timeouts. Changing quality while reusing a send key conflicts; see [Sends and recovery](/how-it-works/sends/).
+- Video playback must fit in 25 MiB, limiting video with audio to about 29 minutes. Preparation times out after five minutes.
+- Download policy affects automatic caching; see [Settings](/use/settings/). Server acceptance and recipient playback are separate checks.
 </Aside>

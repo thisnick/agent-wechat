@@ -414,6 +414,9 @@ impl crate::upstream::Upstream for BoundUpstream {
             MediaBody::Image(upload) => {
                 request.send_image(input.destination, input.client_id, upload)
             }
+            MediaBody::StandardImage(upload) => {
+                request.send_standard_image(input.destination, input.client_id, upload)
+            }
             MediaBody::Video { upload, seconds } => {
                 request.send_video(input.destination, input.client_id, upload, seconds)
             }

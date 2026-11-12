@@ -73,6 +73,8 @@ pub enum MediaBody<'a> {
         reservation: Option<&'a wechat_protocol::file_upload::FileUploadReservation>,
     },
     Image(&'a UploadedImage),
+    /// An image offering standard and thumbnail copies without an original.
+    StandardImage(&'a UploadedImage),
     Video {
         upload: &'a UploadedVideo,
         seconds: u32,

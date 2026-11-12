@@ -199,6 +199,11 @@ pub(super) fn submit(
             wechat_protocol::media_send::local_image_xml(upload)?,
             None,
         ),
+        MediaBody::StandardImage(upload) => (
+            3,
+            wechat_protocol::media_send::local_standard_image_xml(upload)?,
+            None,
+        ),
         MediaBody::Video { upload, seconds } => (
             43,
             wechat_protocol::media_send::local_video_xml(upload, seconds)?,

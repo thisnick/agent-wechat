@@ -222,6 +222,16 @@ fn local_element(name: &str, attributes: Vec<(&str, String)>) -> String {
     format!("<msg><{name}{attributes}/></msg>")
 }
 pub fn local_image_xml(image: &UploadedImage) -> Result<String> {
+    local_image_xml_with_original(image, true)
+}
+/// Reconstruct image metadata that offers standard and thumbnail copies without an original.
+pub fn local_standard_image_xml(image: &UploadedImage) -> Result<String> {
+    local_image_xml_with_original(image, false)
+}
+fn local_image_xml_with_original(
+    image: &UploadedImage,
+    original_advertised: bool,
+) -> Result<String> {
     descriptor(&image.original, MediaQuality::Original)?;
     descriptor(&image.standard, MediaQuality::Standard)?;
     descriptor(&image.thumbnail, MediaQuality::Thumbnail)?;
@@ -229,20 +239,35 @@ pub fn local_image_xml(image: &UploadedImage) -> Result<String> {
         image.original.descriptor.aes_key == image.standard.descriptor.aes_key,
         "Image variants require one main key"
     );
+    let main = if original_advertised {
+        &image.original
+    } else {
+        &image.standard
+    };
+    let original_id = if original_advertised {
+        image.original.descriptor.file_id.clone()
+    } else {
+        String::new()
+    };
+    let original_bytes = if original_advertised {
+        image.original.plaintext_bytes
+    } else {
+        0
+    };
     Ok(local_element(
         "img",
         vec![
-            ("aeskey", hex::encode(&image.original.descriptor.aes_key)),
+            ("aeskey", hex::encode(&main.descriptor.aes_key)),
             ("encryver", "1".into()),
-            ("cdnbigimgurl", image.original.descriptor.file_id.clone()),
+            ("cdnbigimgurl", original_id),
             ("cdnmidimgurl", image.standard.descriptor.file_id.clone()),
             ("cdnthumburl", image.thumbnail.descriptor.file_id.clone()),
             (
                 "cdnthumbaeskey",
                 hex::encode(&image.thumbnail.descriptor.aes_key),
             ),
-            ("md5", hex32(&image.original.md5)?),
-            ("hdlength", image.original.plaintext_bytes.to_string()),
+            ("md5", hex32(&main.md5)?),
+            ("hdlength", original_bytes.to_string()),
             ("length", image.standard.plaintext_bytes.to_string()),
             (
                 "cdnthumblength",
@@ -387,6 +412,24 @@ pub fn image_send_request(
     client_id: &str,
     image: &UploadedImage,
 ) -> Result<Vec<u8>> {
+    image_send_request_with_original(state, destination, client_id, image, true)
+}
+/// Build an image submission offering the verified standard and thumbnail copies, with no original.
+pub fn standard_image_send_request(
+    state: &AccountState,
+    destination: &str,
+    client_id: &str,
+    image: &UploadedImage,
+) -> Result<Vec<u8>> {
+    image_send_request_with_original(state, destination, client_id, image, false)
+}
+fn image_send_request_with_original(
+    state: &AccountState,
+    destination: &str,
+    client_id: &str,
+    image: &UploadedImage,
+    original_advertised: bool,
+) -> Result<Vec<u8>> {
     clean(destination, 512)?;
     clean(client_id, 4096)?;
     descriptor(&image.original, MediaQuality::Original)?;
@@ -396,6 +439,21 @@ pub fn image_send_request(
         image.original.descriptor.aes_key == image.standard.descriptor.aes_key,
         "Image main variants require one shared key"
     );
+    let main = if original_advertised {
+        &image.original
+    } else {
+        &image.standard
+    };
+    let original_id = if original_advertised {
+        image.original.descriptor.file_id.as_bytes()
+    } else {
+        &[]
+    };
+    let original_bytes = if original_advertised {
+        image.original.plaintext_bytes
+    } else {
+        0
+    };
     let thumbnail = &image.thumbnail;
     let width = thumbnail
         .width
@@ -418,24 +476,21 @@ pub fn image_send_request(
         p::uint(7, thumbnail.plaintext_bytes as u64),
         p::bytes(8, &p::buffer(&[])),
         p::uint(9, 3),
-        p::uint(11, 1),
+        p::uint(11, u64::from(original_advertised)),
         p::int32(12, 2),
         p::int32(13, 0),
-        p::bytes(15, image.original.descriptor.file_id.as_bytes()),
+        p::bytes(15, original_id),
         p::bytes(16, image.standard.descriptor.file_id.as_bytes()),
-        p::bytes(
-            17,
-            hex::encode(&image.original.descriptor.aes_key).as_bytes(),
-        ),
+        p::bytes(17, hex::encode(&main.descriptor.aes_key).as_bytes()),
         p::int32(18, 1),
-        p::int32(19, image.original.plaintext_bytes as i32),
+        p::int32(19, original_bytes as i32),
         p::int32(20, image.standard.plaintext_bytes as i32),
         p::bytes(21, thumbnail.descriptor.file_id.as_bytes()),
         p::int32(22, thumbnail.plaintext_bytes as i32),
         p::int32(23, height as i32),
         p::int32(24, width as i32),
         p::bytes(25, hex::encode(&thumbnail.descriptor.aes_key).as_bytes()),
-        p::bytes(27, hex32(&image.original.md5)?.as_bytes()),
+        p::bytes(27, hex32(&main.md5)?.as_bytes()),
         p::uint(28, 0),
         p::uint(30, 0),
         p::uint(36, 0),
@@ -1236,6 +1291,57 @@ mod tests {
             );
             assert!(local_video_xml(&altered, 4).is_err());
         }
+    }
+
+    #[test]
+    fn standard_only_image_leaves_original_unadvertised() {
+        use crate::media::MediaDescriptor;
+        let uploaded = |quality, id: &str, size: u32, md5: &str| UploadedMedia {
+            descriptor: MediaDescriptor {
+                file_id: id.into(),
+                aes_key: vec![1; 16],
+                quality,
+                expected_bytes: Some(u64::from(size)),
+                expected_md5: Some(md5.into()),
+                strict_size: true,
+                expires_at: None,
+            },
+            plaintext_bytes: size,
+            md5: md5.into(),
+            sha256: "0".repeat(64),
+            file_name: "synthetic.jpg".into(),
+            width: Some(16),
+            height: Some(12),
+        };
+        let image = UploadedImage {
+            original: uploaded(
+                MediaQuality::Original,
+                "unused-original",
+                90,
+                &"0".repeat(32),
+            ),
+            standard: uploaded(MediaQuality::Standard, "standard-copy", 60, &"1".repeat(32)),
+            thumbnail: uploaded(
+                MediaQuality::Thumbnail,
+                "thumbnail-copy",
+                30,
+                &"2".repeat(32),
+            ),
+        };
+        let raw = standard_image_send_request(&synthetic_state(), "filehelper", "client", &image)
+            .unwrap();
+        let fields = p::decode(&raw).unwrap();
+        assert_eq!(p::scalar(&fields, 11).unwrap(), 0);
+        assert_eq!(p::data(&fields, 15).unwrap(), b"");
+        assert_eq!(p::scalar(&fields, 19).unwrap(), 0);
+        assert_eq!(p::data(&fields, 16).unwrap(), b"standard-copy");
+        assert_eq!(p::scalar(&fields, 20).unwrap(), 60);
+        assert_eq!(p::data(&fields, 21).unwrap(), b"thumbnail-copy");
+        assert_eq!(p::data(&fields, 27).unwrap(), "1".repeat(32).as_bytes());
+        let xml = local_standard_image_xml(&image).unwrap();
+        assert!(xml.contains("hdlength=\"0\""));
+        assert!(xml.contains("cdnbigimgurl=\"\""));
+        assert!(xml.contains("cdnmidimgurl=\"standard-copy\""));
     }
 
     #[test]

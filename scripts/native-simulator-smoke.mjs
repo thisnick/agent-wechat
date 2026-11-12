@@ -479,11 +479,13 @@ try {
   });
   assert.equal(photoDone.result.imagePreparation.sourceSha256, createHash("sha256").update(photo).digest("hex"));
   assert.equal(photoDone.result.imagePreparation.sourcePreserved, false);
-  assert.ok(photoDone.result.imagePreparation.width <= 1280);
-  assert.ok(photoDone.result.imagePreparation.height <= 1280);
+  assert.equal(photoDone.result.imagePreparation.originalAdvertised, false);
+  assert.ok(photoDone.result.imagePreparation.width <= 640);
+  assert.ok(photoDone.result.imagePreparation.height <= 640);
   for (const id of photoDone.result.messageIds) {
     const assets = await a.mediaAssets("personal", id);
-    for (const quality of ["original", "standard", "thumbnail"]) {
+    assert.equal(assets.items.some(asset => asset.variant === "original"), false);
+    for (const quality of ["standard", "thumbnail"]) {
       const asset = assets.items.find(asset => asset.variant === quality);
       assert.equal(asset?.state, "available");
       const content = await a.mediaContent("personal", asset.id);

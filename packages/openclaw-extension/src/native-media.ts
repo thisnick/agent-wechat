@@ -52,7 +52,7 @@ function mediaSendReceiptIds(job: MediaJob, audioAsVoice: boolean): string[] | u
 /** Acceptance precedes local receipt projection. Inspect the submitted job only. */
 export async function waitNativeMediaSendReceipts(client: NativeWeChatClient, accountId: string, threadId: string, initial: MediaJob, audioAsVoice: boolean, timeoutMs = 10000): Promise<MediaJob> {
   if (initial.accountId !== accountId || initial.threadId !== threadId || initial.kind !== "send") throw Error("Native media receipt job identity mismatch; inspect the submitted job and do not resend");
-  const deadline = Date.now() + Math.max(0, Math.min(timeoutMs, 10000)); let job = initial, delay = 100;
+  const deadline = Date.now() + Math.max(0, Math.min(timeoutMs, 120000)); let job = initial, delay = 100;
   while (successfulSendJobs.has(job.state) && !mediaSendReceiptIds(job, audioAsVoice) && Date.now() < deadline) {
     const result = mediaSendResult(job);
     if (["unknown", "not_applicable"].includes(String(result.profileProjection))
@@ -387,9 +387,10 @@ export async function sendNativeAttachment(client: NativeWeChatClient, account: 
     source = await client.upload(accountId, blob, filename, mime);
   } finally { if (temporary) await rm(temporary, { recursive: true, force: true }); }
   const input: MediaSendRequest = { threadId, kind: selectedKind, sourceId: source.id, standardSourceId: null, thumbnailSourceId: null, playSeconds: null, durationMs: null,
+    ...(selectedKind === "image" ? { imageQuality: "original" as const } : {}),
     ...(selectedKind === "video" ? { videoQuality: options.videoQuality ?? "normal" } : {}) };
   await beforeSend?.();
-  const waitMs = audioAsVoice ? 25 * 60000 : selectedKind === "video" || selectedKind === "file" && sourceBytes > NATIVE_MAX_ORDINARY_SOURCE_BYTES ? 60 * 60000 : 65000;
+  const waitMs = audioAsVoice ? 25 * 60000 : selectedKind === "image" || selectedKind === "video" || selectedKind === "file" && sourceBytes > NATIVE_MAX_ORDINARY_SOURCE_BYTES ? 60 * 60000 : 65000;
   const submitted = await client.sendMedia(accountId, input, key);
   let job: MediaJob;
   try { job = await waitNativeMediaJob(client, accountId, submitted, waitMs); }
@@ -398,7 +399,7 @@ export async function sendNativeAttachment(client: NativeWeChatClient, account: 
     // response content or credentials, and cannot authorize another submission.
     throw new NativeMediaJobInspectionError(submitted, accountId, threadId, key, "status_unavailable");
   }
-  if (successfulSendJobs.has(job.state)) job = await waitNativeMediaSendReceipts(client, accountId, threadId, job, audioAsVoice);
+  if (successfulSendJobs.has(job.state)) job = await waitNativeMediaSendReceipts(client, accountId, threadId, job, audioAsVoice, selectedKind === "image" ? 120000 : 10000);
   if (!successfulSendJobs.has(job.state)) throw new NativeMediaJobInspectionError(job, accountId, threadId, key, "job_not_completed");
   const result = mediaSendResult(job);
   const chunks = Array.isArray(result.chunks) ? result.chunks.filter(chunk => chunk && typeof chunk === "object") as Array<{ state?: string; serverMessageId?: string }> : [];
