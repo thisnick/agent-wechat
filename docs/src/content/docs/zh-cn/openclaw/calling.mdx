@@ -1,7 +1,9 @@
 ---
 title: 配置语音通话
 description: 配置语音通话、对话模式、认证凭据与智能体协同咨询。
-sourceHash: bf46bbdae2f4
+banner:
+  content: "本页面由机器翻译，尚未经人工审阅。"
+sourceHash: d7a96e6502cb
 ---
 
 在 `channels.agent-wechat.calls` 下配置通话功能。语音与视频功能默认均为禁用状态。语音通话支持单聊呼叫以及独立配置的群语音会议。
@@ -190,8 +192,9 @@ sourceHash: bf46bbdae2f4
 | `allowConsultSessionPersistence` | 设为 `true` 允许在通话期间使用 OpenClaw 会话进行协同咨询。 |
 | `sessionScope` | `per-contact`（每个联系人保持一个会话，使智能体能够记住过往通话）或 `per-call`。参见[记忆过往通话](../call-memory/)。 |
 | `consultation.summary`, `consultation.recentMessages`, `realtime.recentContext` | 为每次已接听的通话生成摘要，并与智能体共享最近的聊天记录（默认开启）；为下一次通话提供简要回顾（默认关闭）。参见[记忆过往通话](../call-memory/)。 |
-| `realtime.consultPolicy` | `auto` 由模型自主决定何时咨询；`substantive` 要求其就事实与上下文发起咨询；`always` 在模型漏查时由呼叫方轮次强制触发咨询。 |
+| `realtime.consultPolicy` | `auto`（默认）由语音模型自行回答问候、闲聊和常识性问题，对于实时信息、个人记录或记忆、工具调用及操作指令则发起咨询。`substantive` 仅由语音模型自行回答问候和简短回复，任何事实性回答前均先咨询。`always` 在提供商跳过咨询时，还会根据呼叫方当前轮次强制发起咨询；GPT-Live 模型不支持该选项。 |
 | `realtime.consultThinkingLevel`, `realtime.consultFastMode` | 可选的 OpenClaw 推理级别与咨询极速模式覆盖。 |
+| `realtime.fastContext` | 默认关闭。设为 `enabled: true` 后，对于所有者的直接通话，咨询会先在智能体已建立索引的记忆与会话上下文（`sources`）中搜索，并在 `timeoutMs`（800）毫秒内最多返回 `maxResults`（3）条片段。若找到片段，语音模型将据此作答，而不运行智能体；再次提问则会运行智能体。若未找到任何内容，语音模型会表示手头没有相关上下文；设置 `fallbackToConsult: true` 则改为运行智能体。其他呼叫方、群语音会议以及 `agent` 模式始终使用智能体。 |
 | `consultation.inboundSessionKey` | 可选的选定智能体已有会话，在首次接听来电时用来初始化新的通话会话。 |
 | `consultation.timeoutMs` | 默认 30,000 毫秒；有效区间 1,000–120,000 毫秒。 |
 | `maxDurationSeconds` | 默认 3,600 秒（1 小时）；有效区间 30–3,600 秒。达到该上限时插件将自动挂断。Native 守护进程当前最多支持持续通话 20 分钟。 |
@@ -244,6 +247,7 @@ sourceHash: bf46bbdae2f4
 
 :::note[使用提示]
 模式变更在通道重新加载后对新通话生效。
+开启 `fastContext` 后，所有者的请求若与某条片段相匹配（包括挂断或其他操作），会先得到这些片段。随后语音模型再次发起咨询，或你重复一次该请求，智能体便会稍后执行。GPT-Live 模型通常会等待你重复该请求。
 未启用的通话类型将直接被忽略，既不主动接听也不主动拒绝。开启视频权限并不代表具备视频通话能力：即使设置 `video.enabled: true`，当前后端也无法处理视频画面，亦无法将其自动转为语音。无论哪种对话模式，都不支持将单聊呼叫直接升级为群语音会议。
 
 语音桥接器在等待呼叫方说话时发送静音数据。对于实时模型，如果呼叫方打断回复，桥接器会清空已排队的音频，并向语音模型上报预估的播放位置。GPT-Live 模型则自主处理打断。Realtime 最多可排队 10 分钟的回复；达到该上限时会取消回复并上报播放位置，而不是静默截断尾部音频。Live 模型保持 3 秒的音频队列以降低延迟。
