@@ -158,6 +158,7 @@ mod tests {
                 play_seconds: None,
                 duration_ms: None,
                 video_quality: None,
+                image_quality: None,
             },
             client_id: "synthetic-client".into(),
             created_at: 123,

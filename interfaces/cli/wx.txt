@@ -351,6 +351,7 @@ wx messages send --detach | switch | Return as soon as the work is queued instea
 wx messages send --file | takes <FILE> | Send this file as an attachment
 wx messages send --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse this key when retrying so the daemon applies the request only once
 wx messages send --image | takes <IMAGE> | Send this image file
+wx messages send --image-quality | takes <IMAGE_QUALITY>, values standard|original | Send a compact image copy, or keep the full-resolution original for viewing
 wx messages send --mention | takes <MENTION>, repeatable | Mention a group member by account ID; repeat for multiple members
 wx messages send --mention-all | switch | Mention all group members (WeChat enforces the account's permissions)
 wx messages send --quote-message-id | takes <QUOTE_MESSAGE_ID> | Quote a stored message in this chat; also supply its exact server ID
