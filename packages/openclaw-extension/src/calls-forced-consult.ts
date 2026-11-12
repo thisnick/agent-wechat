@@ -17,12 +17,13 @@ type ForcedConsultSdk = {
   createRealtimeVoiceForcedConsultCoordinator: () => ConsultCoordinator;
   classifySkippableRealtimeVoiceConsultTranscript: (text: string) => string | undefined;
 };
-type ConsultResult = { text: string; alreadyDelivered?: true } | { error: string; retryable?: boolean; started?: boolean };
+/** `fastContext` marks memory snippets for the voice model to interpret rather than an agent answer. */
+type ConsultResult = { text: string; alreadyDelivered?: true; fastContext?: true } | { error: string; retryable?: boolean; started?: boolean };
 type ConsultHooks = {
-  consult(question: string, signal?: AbortSignal): Promise<{ text: string }>;
+  consult(question: string, signal?: AbortSignal): Promise<{ text: string; fastContext?: true }>;
   active(): boolean;
   clearAudio(): void;
-  speak(text: string): void;
+  speak(text: string, fastContext?: boolean): void;
 };
 
 const FALLBACK_DELAY_MS = 200;
@@ -39,8 +40,8 @@ export function createCallForcedConsult(sdk: ForcedConsultSdk, hooks: ConsultHoo
 
   async function run(question: string, signal?: AbortSignal): Promise<ConsultResult> {
     try {
-      const { text } = await hooks.consult(question, signal);
-      return { text: text.slice(0, 8000) };
+      const { text, fastContext } = await hooks.consult(question, signal);
+      return { text: text.slice(0, 8000), ...(fastContext ? { fastContext } : {}) };
     } catch {
       return { error: "Call consultation failed" };
     }
@@ -55,12 +56,15 @@ export function createCallForcedConsult(sdk: ForcedConsultSdk, hooks: ConsultHoo
     try {
       const result = await current.result;
       if (!active()) return;
+      // Fast-context snippets are not a final answer: the voice model may ask the same
+      // question again to reach the agent, so it must not count as already delivered.
+      const settle = () => "text" in result && result.fastContext ? coordinator.remove(handle) : coordinator.markDelivered(handle);
       if (current.deliverViaTool) {
-        coordinator.markDelivered(handle);
+        settle();
       } else if ("text" in result && result.text.trim()) {
         hooks.clearAudio();
-        hooks.speak(result.text);
-        coordinator.markDelivered(handle);
+        hooks.speak(result.text, result.fastContext === true);
+        settle();
       } else {
         coordinator.remove(handle);
       }

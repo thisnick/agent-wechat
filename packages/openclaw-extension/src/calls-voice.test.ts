@@ -128,7 +128,8 @@ test("installed host bridge and streaming resampler work with an account-free fa
   assert.match(bridgeParams.instructions, /Use short sentences/);
   assert.match(bridgeParams.instructions, /does not grant account-owner authority/);
   assert.match(bridgeParams.instructions, /conversation-only/);
-  assert.doesNotMatch(bridgeParams.instructions, /Synthetic default|openclaw_agent_consult|synthetic-openai-secret/);
+  assert.match(bridgeParams.instructions, /unless a tool or consultation result in this call supplied it/);
+  assert.doesNotMatch(bridgeParams.instructions, /Synthetic default|openclaw_agent_consult|synthetic-openai-secret|small talk|Consult behavior/);
   session.sendAudio(Buffer.alloc(960)); assert.equal(input.length, 1);
   providerRequest.onAudio(Buffer.alloc(960), { itemId: "item" }); session.interruptOutput(); assert.equal(heard, 1); assert.equal(clears, 1);
   assert.deepEqual(providerRequest.tools, []); assert.equal(providerRequest.runAgentConsult, undefined); assert.equal(typeof bridgeParams.onTranscript, "function");
@@ -174,6 +175,10 @@ test("a delayed consultation acknowledges quietly through the public SDK and del
   try {
     assert.match(bridgeArgs.instructions, /acknowledge it once/);
     assert.match(bridgeArgs.instructions, /stay quiet unless the caller asks for its status/);
+    // auto: the host adds nothing, so the call scopes what the voice model answers itself.
+    assert.match(bridgeArgs.instructions, /Answer greetings, small talk and general-knowledge questions yourself/);
+    assert.match(bridgeArgs.instructions, /Use the consultation tool when a request needs current information/);
+    assert.doesNotMatch(bridgeArgs.instructions, /only when verified|Consult behavior/);
     const event = { callId: "lookup", name: "openclaw_agent_consult", args: { question: "Check a fact" } };
     await bridgeArgs.onToolCall(event);
     for (let i = 0; i < 100 && !dispatches.length; i++) await delay(5);
@@ -222,7 +227,9 @@ test("a continuous model streams without the consult tool and delegates through 
   assert.deepEqual(request.tools, []);
   assert.equal(request.interruptResponseOnInputAudio, false);
   assert.match(request.instructions, /Delegate relevant lookups/);
-  assert.doesNotMatch(request.instructions, /openclaw_agent_consult/);
+  assert.match(request.instructions, /Answer greetings, small talk and general-knowledge questions yourself/);
+  assert.match(request.instructions, /Delegate to the OpenClaw agent when a request needs current information/);
+  assert.doesNotMatch(request.instructions, /openclaw_agent_consult|consultation tool|Consult behavior/);
   // Delegation sends the request with recent transcript, beyond a tool question's limit.
   const prompt = `<realtime_delegation><input>Read synthetic data</input><transcript_delta>${"caller: synthetic words. ".repeat(250)}</transcript_delta></realtime_delegation>`;
   assert.ok(prompt.length > 4000);
@@ -241,10 +248,124 @@ test("a continuous model streams without the consult tool and delegates through 
   assert.equal(dispatches.length, 1);
   await quiet.close();
 
+  // substantive reaches a delegating model, worded without the consult tool it does not have.
+  const substantive = config(true); substantive.realtime.consultPolicy = "substantive";
+  const strict = await (await prepareOpenClawCallVoice(substantive, {}, runtime, dependencies)).open({ ...callbacks, failed }, { senderId: "synthetic-peer", signal });
+  assert.match(request.instructions, /Consult behavior:/);
+  assert.match(request.instructions, /Delegate to the OpenClaw agent before answering requests that need facts/);
+  assert.doesNotMatch(request.instructions, /openclaw_agent_consult|small talk/);
+  await strict.close();
+
   const always = config(true); always.realtime.consultPolicy = "always";
   await assert.rejects(prepareOpenClawCallVoice(always, {}, runtime, dependencies), /capabilities unavailable/);
   outputAudioMode = "response";
   await assert.rejects(prepared.open({ ...callbacks, failed }, { senderId: "synthetic-peer", signal }), /provider unavailable/);
+});
+
+test("fast context is off by default and validates its settings", () => {
+  const voice = { enabled: true, agentId: "agent", realtime: { provider: "openai" } };
+  assert.deepEqual(resolveWeChatCallsConfig({ voice })!.voice!.realtime.fastContext,
+    { enabled: false, timeoutMs: 800, maxResults: 3, sources: ["memory", "sessions"], fallbackToConsult: false });
+  const custom = resolveWeChatCallsConfig({ voice: { ...voice, realtime: { provider: "openai",
+    fastContext: { enabled: true, timeoutMs: 1500, maxResults: 5, sources: ["memory"], fallbackToConsult: true } } } })!.voice!;
+  assert.deepEqual(custom.realtime.fastContext, { enabled: true, timeoutMs: 1500, maxResults: 5, sources: ["memory"], fallbackToConsult: true });
+  for (const fastContext of [{ timeoutMs: 50 }, { timeoutMs: 1.5 }, { maxResults: 0 }, { maxResults: 11 }, { sources: [] }, { sources: ["files"] },
+    { sources: ["memory", "memory"] }, { enabled: "yes" }, { fallbackToConsult: 1 }, { unknown: true }, "on"]) {
+    assert.throws(() => resolveWeChatCallsConfig({ voice: { ...voice, realtime: { provider: "openai", fastContext: fastContext as any } } }), /Invalid calling configuration/);
+  }
+});
+
+test("fast context answers only the owner's direct calls, is interpreted rather than read out, and the next consultation runs the agent", async () => {
+  const voicePath: string = "openclaw/plugin-sdk/realtime-voice";
+  const host = await import(voicePath);
+  const ownerPeer = "synthetic-owner";
+  const fastContext = { enabled: true, timeoutMs: 800, maxResults: 3, sources: ["memory", "sessions"], fallbackToConsult: false };
+  const cfg = { commands: { ownerAllowFrom: [`agent-wechat:${ownerPeer}`] }, channels: { "agent-wechat": {
+    native: { mode: "external", accountId: "native-account", endpoint: "http://127.0.0.1:1", token: "synthetic-token-".repeat(4), consumerStateDir: "/synthetic/consumer" },
+    calls: { voice: { enabled: true, agentId: "agent", toolPolicy: "owner", allowConsultSessionPersistence: true, realtime: { provider: "openai", fastContext } } },
+  } } };
+  const voice = resolveWeChatCallsConfig(cfg.channels["agent-wechat"].calls as any)!.voice!;
+  assert.deepEqual(voice.realtime.fastContext, fastContext);
+  const { dispatches, reply } = fakeReply(async ({ replyOptions }) => { replyOptions.onAgentRunStart(); return "Synthetic agent result"; });
+  const runtime = { config: { current: () => cfg }, channel: { reply }, agent: { session: { resolveStorePath: () => "/synthetic/store", getSessionEntry: () => undefined } } } as unknown as PluginRuntime;
+  const lookups: any[] = []; let fastResult: unknown;
+  const tool = { inputAudioFormats: [pcm], outputAudioFormats: [pcm], supportsBargeIn: true, supportsToolCalls: true };
+  const live = { inputAudioFormats: [pcm], outputAudioFormats: [pcm], supportsBargeIn: false, handlesInputAudioBargeIn: true, supportsToolCalls: false, handlesAgentConsult: true };
+  const start = async (capabilities: typeof tool | typeof live, senderId: string) => {
+    let bridgeArgs: any; const spoken: string[] = []; const traces: string[] = [];
+    const sdk = { ...host,
+      resolveConfiguredRealtimeVoiceProvider: () => ({ provider: { id: "openai", createBridge() {} }, providerConfig: {}, capabilities }),
+      resolveRealtimeVoiceFastContextConsult: async (params: any) => { lookups.push(params); params.liveness.assertCurrent(); return fastResult; },
+      createRealtimeVoiceBridgeSession(args: any) { bridgeArgs = args; return {
+        bridge: { isConnected: () => true, outputAudioMode: capabilities === live ? "continuous" : "response" }, connect: async () => args.onReady(),
+        sendAudio() {}, setMediaTimestamp() {}, handleBargeIn() {}, close() {}, submitToolResult() {},
+        sendUserMessage(text: string) { spoken.push(text); },
+      }; },
+    };
+    const prepared = await prepareOpenClawCallVoice(voice, cfg, runtime, { voiceSdk: sdk, audioSdk: { createStreamingPcmResampler() {} } });
+    const session = await prepared.open(callbacks, { senderId, connectedPeer: () => senderId, nativeAccountId: "native-account", channelAccountId: "default",
+      logAudioTrace: line => traces.push(line), signal: new AbortController().signal });
+    let toolCalls = 0;
+    const ask = async (question: string): Promise<string> => {
+      if (capabilities === live) return (await bridgeArgs.runAgentConsult({ prompt: question, signal: new AbortController().signal })).text;
+      const before = spoken.length;
+      await bridgeArgs.onToolCall({ name: host.REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME, callId: `lookup-${++toolCalls}`, args: { question } });
+      for (let i = 0; i < 100 && spoken.length === before; i++) await delay(5);
+      return spoken.at(-1)!;
+    };
+    return { session, ask, traces };
+  };
+
+  // A non-owner caller never gets snippets: the agent and its read-only rules answer.
+  fastResult = { handled: true, result: { text: "Synthetic private memory snippet" } };
+  const guest = await start(tool, "synthetic-guest");
+  assert.match(await guest.ask("What is the owner's address?"), /Speak this exact OpenClaw answer[\s\S]*Synthetic agent result/);
+  assert.equal(lookups.length, 0); assert.equal(dispatches.length, 1);
+  assert.match(dispatches[0].ctx.BodyForAgent, /non-owner WeChat caller/);
+  await guest.session.close();
+
+  // The owner's snippets go to the voice model to interpret, with the way back to the agent.
+  const owner = await start(tool, ownerPeer);
+  const first = await owner.ask("What did we decide?");
+  assert.match(first, /^Internal OpenClaw memory lookup result\./);
+  assert.match(first, /Do not read it aloud as written/);
+  assert.match(first, /Synthetic private memory snippet/);
+  assert.match(first, /call the consultation tool again now with the same request/);
+  assert.doesNotMatch(first, /Speak this exact/);
+  assert.equal(lookups.length, 1); assert.equal(dispatches.length, 1, "a fast-context answer does not run the agent");
+  assert.deepEqual(lookups[0].args, { question: "What did we decide?" });
+  assert.equal(lookups[0].agentId, "agent");
+  assert.deepEqual(lookups[0].config, fastContext);
+  // Asking again (here, an action the snippets cannot perform) runs the agent with owner tools.
+  assert.match(await owner.ask("Hang up the call"), /Speak this exact OpenClaw answer[\s\S]*Synthetic agent result/);
+  assert.equal(lookups.length, 1, "the consultation after a fast-context answer skips the lookup");
+  assert.equal(dispatches.length, 2); assert.equal(dispatches[1].replyOptions.toolsAllow, undefined);
+  assert.equal(lookups[0].sessionKey, dispatches[1].ctx.SessionKey, "searches as the owner's own call session");
+  // The bypass is used once; a later question searches again, and a miss with no fallback is interpreted too.
+  fastResult = { handled: true, result: { text: "No relevant OpenClaw memory was found quickly for the live caller." } };
+  assert.match(await owner.ask("Anything else on file?"), /^Internal OpenClaw memory lookup result\.[\s\S]*No relevant OpenClaw memory/);
+  assert.equal(lookups.length, 2); assert.equal(dispatches.length, 2);
+  // The miss above also counts as a fast-context answer, so the next consultation runs the agent.
+  fastResult = { handled: false };
+  assert.match(await owner.ask("Read synthetic data"), /Synthetic agent result/);
+  assert.equal(lookups.length, 2); assert.equal(dispatches.length, 3);
+  // With fallbackToConsult, the SDK reports a miss as unhandled and the agent runs.
+  assert.match(await owner.ask("Check synthetic status"), /Synthetic agent result/);
+  assert.equal(lookups.length, 3); assert.equal(dispatches.length, 4);
+  assert.deepEqual(owner.traces.map(line => line.match(/stage=(fast-context-\w+)/)?.[1]).filter(Boolean),
+    ["fast-context-answered", "fast-context-bypassed", "fast-context-answered", "fast-context-bypassed", "fast-context-fallback"]);
+  assert.equal(owner.traces.some(line => /synthetic|decide|snippet/i.test(line)), false, "traces carry no question or snippet text");
+  await owner.session.close();
+
+  // GPT-Live gets plain text to put in its own words, worded as delegation.
+  fastResult = { handled: true, result: { text: "Synthetic private memory snippet" } };
+  const liveOwner = await start(live, ownerPeer);
+  const delegated = await liveOwner.ask("What did we decide?");
+  assert.match(delegated, /^Synthetic private memory snippet/);
+  assert.match(delegated, /delegate the same request again now/);
+  assert.equal(await liveOwner.ask("Hang up the call"), "Synthetic agent result");
+  assert.equal(lookups.length, 4); assert.equal(dispatches.length, 5);
+  await liveOwner.session.close();
 });
 
 test("shared host voice profile supplies identity, user grounding and persona without agent instructions", async t => {
@@ -371,6 +492,7 @@ test("opted-in consultation is isolated, non-owner, policy-limited and deduplica
   assert.deepEqual(bridgeArgs.tools.map((tool: { name: string }) => tool.name), ["openclaw_agent_consult"]);
   assert.match(bridgeArgs.instructions, /Call openclaw_agent_consult before answering/);
   assert.match(bridgeArgs.instructions, /Consultation is read-only/);
+  assert.doesNotMatch(bridgeArgs.instructions, /small talk/);
   const event = { callId: "tool1", name: "openclaw_agent_consult", args: { question: "Read synthetic data" } };
   // A provider callback may inherit an already released request context.
   await instance.run({ active: false }, () => invoke(event));

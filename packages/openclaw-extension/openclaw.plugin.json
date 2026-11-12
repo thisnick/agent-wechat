@@ -430,6 +430,54 @@
                     "type": "boolean",
                     "description": "Set fast mode for the regular OpenClaw consultation run when its model supports it."
                   },
+                  "fastContext": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "description": "On the verified owner's direct calls, search the agent's indexed memory and session context before a consultation runs the agent. Matching snippets go straight back to the voice model and the agent does not run; the next consultation in the call runs the agent, so the voice model or the caller can ask again when the snippets do not answer or an action is needed. Other callers and conferences always run the agent. Applies to bidi mode.",
+                    "properties": {
+                      "enabled": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Search memory and session context before the owner's consultations."
+                      },
+                      "timeoutMs": {
+                        "type": "integer",
+                        "minimum": 100,
+                        "maximum": 10000,
+                        "default": 800,
+                        "description": "How long the search may take before it counts as finding nothing."
+                      },
+                      "maxResults": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 10,
+                        "default": 3,
+                        "description": "Most snippets returned to the voice model."
+                      },
+                      "sources": {
+                        "type": "array",
+                        "minItems": 1,
+                        "uniqueItems": true,
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "memory",
+                            "sessions"
+                          ]
+                        },
+                        "default": [
+                          "memory",
+                          "sessions"
+                        ],
+                        "description": "Indexed sources to search. The active memory plugin decides which session transcripts this call's session may see."
+                      },
+                      "fallbackToConsult": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Run the agent when the search finds nothing. When false, the voice model says it does not have that context handy."
+                      }
+                    }
+                  },
                   "providers": {
                     "type": "object",
                     "additionalProperties": false,
@@ -973,6 +1021,54 @@
                       "consultFastMode": {
                         "type": "boolean",
                         "description": "Set fast mode for the regular OpenClaw consultation run when its model supports it."
+                      },
+                      "fastContext": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "description": "On the verified owner's direct calls, search the agent's indexed memory and session context before a consultation runs the agent. Matching snippets go straight back to the voice model and the agent does not run; the next consultation in the call runs the agent, so the voice model or the caller can ask again when the snippets do not answer or an action is needed. Other callers and conferences always run the agent. Applies to bidi mode.",
+                        "properties": {
+                          "enabled": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Search memory and session context before the owner's consultations."
+                          },
+                          "timeoutMs": {
+                            "type": "integer",
+                            "minimum": 100,
+                            "maximum": 10000,
+                            "default": 800,
+                            "description": "How long the search may take before it counts as finding nothing."
+                          },
+                          "maxResults": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 10,
+                            "default": 3,
+                            "description": "Most snippets returned to the voice model."
+                          },
+                          "sources": {
+                            "type": "array",
+                            "minItems": 1,
+                            "uniqueItems": true,
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "memory",
+                                "sessions"
+                              ]
+                            },
+                            "default": [
+                              "memory",
+                              "sessions"
+                            ],
+                            "description": "Indexed sources to search. The active memory plugin decides which session transcripts this call's session may see."
+                          },
+                          "fallbackToConsult": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Run the agent when the search finds nothing. When false, the voice model says it does not have that context handy."
+                          }
+                        }
                       },
                       "providers": {
                         "type": "object",
