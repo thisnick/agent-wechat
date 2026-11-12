@@ -128,7 +128,8 @@ test("installed host bridge and streaming resampler work with an account-free fa
   assert.match(bridgeParams.instructions, /Use short sentences/);
   assert.match(bridgeParams.instructions, /does not grant account-owner authority/);
   assert.match(bridgeParams.instructions, /conversation-only/);
-  assert.doesNotMatch(bridgeParams.instructions, /Synthetic default|openclaw_agent_consult|synthetic-openai-secret/);
+  assert.match(bridgeParams.instructions, /unless a tool or consultation result in this call supplied it/);
+  assert.doesNotMatch(bridgeParams.instructions, /Synthetic default|openclaw_agent_consult|synthetic-openai-secret|small talk|Consult behavior/);
   session.sendAudio(Buffer.alloc(960)); assert.equal(input.length, 1);
   providerRequest.onAudio(Buffer.alloc(960), { itemId: "item" }); session.interruptOutput(); assert.equal(heard, 1); assert.equal(clears, 1);
   assert.deepEqual(providerRequest.tools, []); assert.equal(providerRequest.runAgentConsult, undefined); assert.equal(typeof bridgeParams.onTranscript, "function");
@@ -174,6 +175,10 @@ test("a delayed consultation acknowledges quietly through the public SDK and del
   try {
     assert.match(bridgeArgs.instructions, /acknowledge it once/);
     assert.match(bridgeArgs.instructions, /stay quiet unless the caller asks for its status/);
+    // auto: the host adds nothing, so the call scopes what the voice model answers itself.
+    assert.match(bridgeArgs.instructions, /Answer greetings, small talk and general-knowledge questions yourself/);
+    assert.match(bridgeArgs.instructions, /Use the consultation tool when a request needs current information/);
+    assert.doesNotMatch(bridgeArgs.instructions, /only when verified|Consult behavior/);
     const event = { callId: "lookup", name: "openclaw_agent_consult", args: { question: "Check a fact" } };
     await bridgeArgs.onToolCall(event);
     for (let i = 0; i < 100 && !dispatches.length; i++) await delay(5);
@@ -222,7 +227,9 @@ test("a continuous model streams without the consult tool and delegates through 
   assert.deepEqual(request.tools, []);
   assert.equal(request.interruptResponseOnInputAudio, false);
   assert.match(request.instructions, /Delegate relevant lookups/);
-  assert.doesNotMatch(request.instructions, /openclaw_agent_consult/);
+  assert.match(request.instructions, /Answer greetings, small talk and general-knowledge questions yourself/);
+  assert.match(request.instructions, /Delegate to the OpenClaw agent when a request needs current information/);
+  assert.doesNotMatch(request.instructions, /openclaw_agent_consult|consultation tool|Consult behavior/);
   // Delegation sends the request with recent transcript, beyond a tool question's limit.
   const prompt = `<realtime_delegation><input>Read synthetic data</input><transcript_delta>${"caller: synthetic words. ".repeat(250)}</transcript_delta></realtime_delegation>`;
   assert.ok(prompt.length > 4000);
@@ -240,6 +247,14 @@ test("a continuous model streams without the consult tool and delegates through 
   await assert.rejects(request.runAgentConsult({ prompt: "Read synthetic data", signal }));
   assert.equal(dispatches.length, 1);
   await quiet.close();
+
+  // substantive reaches a delegating model, worded without the consult tool it does not have.
+  const substantive = config(true); substantive.realtime.consultPolicy = "substantive";
+  const strict = await (await prepareOpenClawCallVoice(substantive, {}, runtime, dependencies)).open({ ...callbacks, failed }, { senderId: "synthetic-peer", signal });
+  assert.match(request.instructions, /Consult behavior:/);
+  assert.match(request.instructions, /Delegate to the OpenClaw agent before answering requests that need facts/);
+  assert.doesNotMatch(request.instructions, /openclaw_agent_consult|small talk/);
+  await strict.close();
 
   const always = config(true); always.realtime.consultPolicy = "always";
   await assert.rejects(prepareOpenClawCallVoice(always, {}, runtime, dependencies), /capabilities unavailable/);
@@ -371,6 +386,7 @@ test("opted-in consultation is isolated, non-owner, policy-limited and deduplica
   assert.deepEqual(bridgeArgs.tools.map((tool: { name: string }) => tool.name), ["openclaw_agent_consult"]);
   assert.match(bridgeArgs.instructions, /Call openclaw_agent_consult before answering/);
   assert.match(bridgeArgs.instructions, /Consultation is read-only/);
+  assert.doesNotMatch(bridgeArgs.instructions, /small talk/);
   const event = { callId: "tool1", name: "openclaw_agent_consult", args: { question: "Read synthetic data" } };
   // A provider callback may inherit an already released request context.
   await instance.run({ active: false }, () => invoke(event));

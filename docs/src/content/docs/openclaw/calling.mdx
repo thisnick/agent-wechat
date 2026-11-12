@@ -254,7 +254,7 @@ All paths below are relative to `calls.voice`.
 | `allowConsultSessionPersistence` | Set to `true` to allow consultation in OpenClaw sessions for calls. |
 | `sessionScope` | `per-contact` (one session per contact, so the agent remembers earlier calls) or `per-call`. See [Remember earlier calls](../call-memory/). |
 | `consultation.summary`, `consultation.recentMessages`, `realtime.recentContext` | Summarize each answered call and share recent chat with the agent (on by default), and give the next call a recap (off by default). See [Remember earlier calls](../call-memory/). |
-| `realtime.consultPolicy` | `auto` lets the provider choose when to consult. `substantive` directs it to consult for facts and context. `always` also starts a consult from the caller's current turn if the provider skips it. |
+| `realtime.consultPolicy` | `auto` (default) answers greetings, small talk and general-knowledge questions itself, and consults for current information, personal records or memory, tools and actions. `substantive` answers only greetings and short replies itself and consults before any factual answer. `always` also starts a consult from the caller's current turn if the provider skips it; GPT-Live models do not support it. |
 | `realtime.consultThinkingLevel`, `realtime.consultFastMode` | Optional OpenClaw reasoning level and fast-mode override for consultations. |
 | `consultation.inboundSessionKey` | Optional existing session of the selected agent that seeds a new call session for inbound calls. |
 | `consultation.timeoutMs` | 30,000 by default; 1,000–120,000 ms. |
