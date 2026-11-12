@@ -308,8 +308,9 @@ fn media_request_hash(
     if let Some(quality) = request.video_quality {
         normalized["videoQuality"] = serde_json::to_value(quality)?;
     }
-    if let Some(quality) = request.image_quality {
-        normalized["imageQuality"] = serde_json::to_value(quality)?;
+    // Omitted and `standard` are the same request, so only `original` is hashed.
+    if request.image_quality == Some(ImageSendQuality::Original) {
+        normalized["imageQuality"] = serde_json::to_value(ImageSendQuality::Original)?;
     }
     Ok(digest(&serde_json::to_vec(&normalized)?))
 }
@@ -2786,11 +2787,7 @@ impl Core {
                     let sizing = ImageVariantSizing::DownscaleOnly;
                     let quality = plan.request.image_quality.unwrap_or_default();
                     let (original, standard, thumbnail) =
-                        image_variants_with_quality(&bytes, standard, thumb, sizing, quality)?;
-                    let inspection = wechat_protocol::media::inspect_image(&original)?;
-                    let mut row = self.store.media_job(account, id)?;
-                    row.data["result"]["imagePreparation"] = json!({"sourceSha256":source.sha256,"sentOriginalSha256":digest(&original),"sourcePreserved":original==bytes,"width":inspection.width,"height":inspection.height});
-                    self.store.save_media_job(account, &row)?;
+                        image_variants(&bytes, standard, thumb, sizing, quality)?;
                     let prepared = PreparedImageUpload::with_material(
                         &original,
                         &standard,
@@ -2800,18 +2797,11 @@ impl Core {
                         &material.key,
                         &material.file_key,
                     )?;
+                    let mut row = self.store.media_job(account, id)?;
+                    row.data["result"]["imagePreparation"] = json!({"sourceSha256":source.sha256,"sentOriginalSha256":digest(&original),"sourcePreserved":original==bytes,"width":prepared.width,"height":prepared.height});
+                    self.store.save_media_job(account, &row)?;
                     self.phase_media(account, id, "uploading")?;
-                    self.progress_media(account, id, 0, Some(original.len() as u64))?;
-                    let uploaded = match cdn.upload_image(&prepared) {
-                        Ok(uploaded) => uploaded,
-                        Err(error) => {
-                            eprintln!("image upload failed: {error:#}");
-                            let mut row = self.store.media_job(account, id)?;
-                            row.data["uploadError"] = json!(format!("{error:#}"));
-                            self.store.save_media_job(account, &row)?;
-                            return Err(error);
-                        }
-                    };
+                    let uploaded = cdn.upload_image(&prepared, &callback)?;
                     plan.uploaded_image = Some(uploaded);
                     plan.image_variant_sizing = sizing;
                     self.save_send_plan(account, id, &plan)?;
@@ -3258,6 +3248,7 @@ impl Core {
                     standard,
                     thumbnail,
                     plan.image_variant_sizing,
+                    plan.request.image_quality.unwrap_or_default(),
                 )?)
             } else {
                 None
@@ -3385,40 +3376,32 @@ fn image_variants(
     standard: Option<Vec<u8>>,
     thumbnail: Option<Vec<u8>>,
     sizing: ImageVariantSizing,
-) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
-    image_variants_with_quality(
-        bytes,
-        standard,
-        thumbnail,
-        sizing,
-        ImageSendQuality::Standard,
-    )
-}
-/// Largest edge kept for an `original` image send. WeChat's own client centers originals around
-/// this size, and larger edges hit CDN and client decode limits.
-const IMAGE_ORIGINAL_MAX_EDGE: u32 = 4096;
-fn image_variants_with_quality(
-    bytes: &[u8],
-    standard: Option<Vec<u8>>,
-    thumbnail: Option<Vec<u8>>,
-    sizing: ImageVariantSizing,
     quality: ImageSendQuality,
 ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
     let decoded = decode_send_image(bytes)?;
-    let original = match quality {
-        ImageSendQuality::Original => original_image_variant(bytes, &decoded)?,
+    let (original, original_image) = match quality {
+        ImageSendQuality::Original => {
+            let original = original_image_variant(bytes, &decoded)?;
+            // The previews come from the decoded source, which a large photo has
+            // already reduced, and are drawn upright because the unchanged
+            // original keeps its EXIF orientation.
+            let mut upright = decoded;
+            upright.apply_orientation(source_orientation(bytes));
+            (original, upright)
+        }
         ImageSendQuality::Standard => {
-            if bytes.len() <= 65520
+            let original = if bytes.len() <= 65520
                 && image::guess_format(bytes)? == image::ImageFormat::Jpeg
                 && wechat_protocol::media::inspect_image(bytes).is_ok()
             {
                 bytes.to_vec()
             } else {
                 fit_jpeg(&decoded, 1280, 65520, sizing)?
-            }
+            };
+            let original_image = image::load_from_memory(&original)?;
+            (original, original_image)
         }
     };
-    let original_image = image::load_from_memory(&original)?;
     let supplied_jpeg = |raw: Vec<u8>| -> Result<Vec<u8>> {
         ensure!(
             raw.len() <= 65520 && image::guess_format(&raw)? == image::ImageFormat::Jpeg,
@@ -3439,28 +3422,33 @@ fn image_variants_with_quality(
     Ok((original, standard, thumbnail))
 }
 
+/// The original copy of an `original` image send. A JPEG source is sent
+/// unchanged, whatever its resolution. Another format has no JPEG to keep, so
+/// it is converted once at its full resolution.
 fn original_image_variant(bytes: &[u8], decoded: &image::DynamicImage) -> Result<Vec<u8>> {
-    if bytes.len() <= wechat_protocol::media::MAX_NATIVE_UPLOAD_BYTES
-        && image::guess_format(bytes)? == image::ImageFormat::Jpeg
-        && wechat_protocol::media::inspect_image(bytes).is_ok()
-    {
+    if image::guess_format(bytes)? == image::ImageFormat::Jpeg {
         return Ok(bytes.to_vec());
     }
-    let edge = decoded
-        .width()
-        .max(decoded.height())
-        .min(IMAGE_ORIGINAL_MAX_EDGE)
-        .max(1);
-    let resized = decoded.thumbnail(edge, edge).to_rgb8();
-    for quality in [95, 92, 88, 82, 75] {
+    let pixels = decoded.to_rgb8();
+    for quality in [95, 90, 85, 75] {
         let mut out = vec![];
         image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality)
-            .encode_image(&resized)?;
+            .encode_image(&pixels)?;
         if out.len() <= wechat_protocol::media::MAX_NATIVE_UPLOAD_BYTES {
             return Ok(out);
         }
     }
     bail!("unsupported_image_size")
+}
+/// EXIF orientation of the source, or upright when it records none.
+fn source_orientation(bytes: &[u8]) -> image::metadata::Orientation {
+    use image::ImageDecoder;
+    image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|reader| reader.into_decoder().ok())
+        .and_then(|mut decoder| decoder.orientation().ok())
+        .unwrap_or(image::metadata::Orientation::NoTransforms)
 }
 fn image_decode_error(error: image::ImageError) -> anyhow::Error {
     anyhow::anyhow!(match error {
@@ -5683,9 +5671,17 @@ mod tests {
             .write_to(&mut source, image::ImageFormat::Png)
             .unwrap();
         let raw = source.into_inner();
-        let (a, b, c) = image_variants(&raw, None, None, sizing).unwrap();
-        assert!(image_variants(&a, Some(raw), None, sizing).is_err());
-        assert!(image_variants(&a, None, Some(vec![0; 65521]), sizing).is_err());
+        let (a, b, c) =
+            image_variants(&raw, None, None, sizing, ImageSendQuality::Standard).unwrap();
+        assert!(image_variants(&a, Some(raw), None, sizing, ImageSendQuality::Standard).is_err());
+        assert!(image_variants(
+            &a,
+            None,
+            Some(vec![0; 65521]),
+            sizing,
+            ImageSendQuality::Standard
+        )
+        .is_err());
         for bytes in [&a, &b, &c] {
             assert!(bytes.len() <= 65520);
             wechat_protocol::media::inspect_image(bytes).unwrap();
@@ -5716,6 +5712,7 @@ mod tests {
             None,
             None,
             ImageVariantSizing::DownscaleOnly,
+            ImageSendQuality::Standard,
         )
         .unwrap();
         let original_size = wechat_protocol::media::inspect_image(&original).unwrap();
@@ -5731,42 +5728,102 @@ mod tests {
         )
         .unwrap();
     }
-    #[test]
-    fn original_image_quality_keeps_full_resolution() {
-        let mut noise = 7u32;
-        let pixels = image::RgbImage::from_fn(2048, 2048, |x, y| {
-            noise ^= noise << 13;
-            noise ^= noise >> 17;
-            noise ^= noise << 5;
-            let [red, green, blue, _] = noise.to_le_bytes();
-            image::Rgb([red ^ (x as u8), green ^ (y as u8), blue])
+    fn photo(width: u32, height: u32, format: image::ImageFormat) -> Vec<u8> {
+        let pixels = image::RgbImage::from_fn(width, height, |x, y| {
+            image::Rgb([(x / 16) as u8, (y / 16) as u8, ((x + y) / 32) as u8])
         });
         let mut source = std::io::Cursor::new(vec![]);
-        pixels
-            .write_to(&mut source, image::ImageFormat::Png)
-            .unwrap();
-        let (original, standard, thumbnail) = image_variants_with_quality(
-            source.get_ref(),
+        pixels.write_to(&mut source, format).unwrap();
+        source.into_inner()
+    }
+    fn prepared(original: &[u8], standard: &[u8], thumbnail: &[u8]) -> PreparedImageUpload {
+        PreparedImageUpload::with_material(
+            original,
+            standard,
+            thumbnail,
+            "original.jpg",
+            "filehelper",
+            &[2; 16],
+            "0123456789abcdef0123456789abcdef",
+        )
+        .unwrap()
+    }
+    fn original_variants(source: &[u8]) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        image_variants(
+            source,
             None,
             None,
             ImageVariantSizing::DownscaleOnly,
             ImageSendQuality::Original,
         )
-        .unwrap();
-        let original_size = wechat_protocol::media::inspect_image(&original).unwrap();
-        assert_eq!((original_size.width, original_size.height), (2048, 2048));
-        assert!(original.len() > 65520);
+        .unwrap()
+    }
+    #[test]
+    fn original_image_quality_sends_a_large_jpeg_unchanged() {
+        // 24 million pixels and a 6,000-pixel edge: beyond both the full-decode
+        // and the preview limits, and far beyond 65,520 bytes.
+        let source = photo(6000, 4000, image::ImageFormat::Jpeg);
+        assert!(source.len() > 65520);
+        let (original, standard, thumbnail) = original_variants(&source);
+        assert_eq!(original, source);
+        let upload = prepared(&original, &standard, &thumbnail);
+        assert_eq!((upload.width, upload.height), (6000, 4000));
+        assert_eq!((upload.standard.width, upload.standard.height), (640, 427));
         assert!(standard.len() <= 65520 && thumbnail.len() <= 65520);
-        PreparedImageUpload::with_material(
-            &original,
-            &standard,
-            &thumbnail,
-            "original.png",
-            "filehelper",
-            &[2; 16],
-            "0123456789abcdef0123456789abcdef",
+        // The same source without the option keeps the compact original.
+        let (compact, ..) = image_variants(
+            &source,
+            None,
+            None,
+            ImageVariantSizing::DownscaleOnly,
+            ImageSendQuality::Standard,
         )
         .unwrap();
+        assert!(compact.len() <= 65520 && compact != source);
+    }
+    #[test]
+    fn original_image_quality_converts_other_formats_at_full_resolution() {
+        let source = photo(2048, 1536, image::ImageFormat::Png);
+        let (original, standard, thumbnail) = original_variants(&source);
+        assert_eq!(
+            image::guess_format(&original).unwrap(),
+            image::ImageFormat::Jpeg
+        );
+        let upload = prepared(&original, &standard, &thumbnail);
+        assert_eq!((upload.width, upload.height), (2048, 1536));
+        assert!(original.len() > 65520);
+    }
+    #[test]
+    fn original_image_previews_follow_exif_orientation() {
+        let mut source = photo(400, 200, image::ImageFormat::Jpeg);
+        // APP1 Exif segment whose only entry is Orientation = 6 (rotate 90 degrees).
+        let mut exif = b"Exif\0\0II*\0\x08\0\0\0\x01\0".to_vec();
+        exif.extend([0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0]);
+        let mut segment = vec![0xff, 0xe1];
+        segment.extend(((exif.len() + 2) as u16).to_be_bytes());
+        segment.extend(exif);
+        source.splice(2..2, segment);
+        let (original, standard, thumbnail) = original_variants(&source);
+        assert_eq!(original, source);
+        let upload = prepared(&original, &standard, &thumbnail);
+        assert_eq!((upload.width, upload.height), (400, 200));
+        assert_eq!((upload.standard.width, upload.standard.height), (200, 400));
+        assert_eq!((upload.thumbnail.width, upload.thumbnail.height), (80, 160));
+    }
+    #[test]
+    fn standard_image_quality_hashes_like_an_omitted_one() {
+        let mut plan = file_plan();
+        plan.request.kind = MediaKind::Image;
+        let hash = |request: &MediaSendRequest| {
+            media_request_hash(request, "source", None, None, None).unwrap()
+        };
+        let omitted = hash(&plan.request);
+        plan.request.image_quality = Some(ImageSendQuality::Standard);
+        assert_eq!(omitted, hash(&plan.request));
+        plan.request.image_quality = Some(ImageSendQuality::Original);
+        assert_ne!(omitted, hash(&plan.request));
+        plan.request.kind = MediaKind::File;
+        assert!(validate_send_source_sizes(&plan.request, 1, None, None).is_err());
     }
     #[test]
     fn image_writeback_preserves_legacy_variant_sizing() {
@@ -5780,8 +5837,14 @@ mod tests {
         image::DynamicImage::new_rgb8(80, 60)
             .write_to(&mut source, image::ImageFormat::Png)
             .unwrap();
-        let (original, standard, thumbnail) =
-            image_variants(source.get_ref(), None, None, plan.image_variant_sizing).unwrap();
+        let (original, standard, thumbnail) = image_variants(
+            source.get_ref(),
+            None,
+            None,
+            plan.image_variant_sizing,
+            ImageSendQuality::Standard,
+        )
+        .unwrap();
         for (bytes, dimensions) in [
             (&original, (1280, 960)),
             (&standard, (640, 480)),
@@ -5803,8 +5866,14 @@ mod tests {
             assert!(decoded.as_bytes().len() < 10 * 1024 * 1024);
             let top = decoded.to_rgb8().get_pixel(0, 0).0;
             assert!(top[2] > top[0] + 100, "lost the synthetic blue pixels");
-            let (original, standard, thumbnail) =
-                image_variants(&source, None, None, ImageVariantSizing::DownscaleOnly).unwrap();
+            let (original, standard, thumbnail) = image_variants(
+                &source,
+                None,
+                None,
+                ImageVariantSizing::DownscaleOnly,
+                ImageSendQuality::Standard,
+            )
+            .unwrap();
             for (bytes, edge) in [(&original, 1280), (&standard, 640), (&thumbnail, 160)] {
                 let inspected = wechat_protocol::media::inspect_image(bytes).unwrap();
                 assert!(inspected.width <= edge && inspected.height <= edge);
@@ -5854,8 +5923,14 @@ mod tests {
         let decoded = decode_send_image(&source).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (1532, 2040));
         assert_eq!(decoded.as_luma8().unwrap().get_pixel(0, 0).0, [128]);
-        let (original, _, _) =
-            image_variants(&source, None, None, ImageVariantSizing::DownscaleOnly).unwrap();
+        let (original, _, _) = image_variants(
+            &source,
+            None,
+            None,
+            ImageVariantSizing::DownscaleOnly,
+            ImageSendQuality::Standard,
+        )
+        .unwrap();
         wechat_protocol::media::inspect_image(&original).unwrap();
     }
     #[test]
@@ -5865,8 +5940,14 @@ mod tests {
             .write_to(&mut source, image::ImageFormat::Jpeg)
             .unwrap();
         let source = source.into_inner();
-        let (original, standard, thumbnail) =
-            image_variants(&source, None, None, ImageVariantSizing::DownscaleOnly).unwrap();
+        let (original, standard, thumbnail) = image_variants(
+            &source,
+            None,
+            None,
+            ImageVariantSizing::DownscaleOnly,
+            ImageSendQuality::Standard,
+        )
+        .unwrap();
         assert_eq!(source, original);
         for variant in [&standard, &thumbnail] {
             let size = wechat_protocol::media::inspect_image(variant).unwrap();

@@ -892,7 +892,7 @@ struct MessageSendArgs {
     /// Prepare normal playback, or include the unchanged original video too.
     #[arg(long, requires = "video", value_parser = ["normal", "original"])]
     video_quality: Option<String>,
-    /// Send a compact image copy, or keep the full-resolution original for viewing.
+    /// Reduce the image's original copy (default), or send it at full resolution.
     #[arg(long, requires = "image", value_parser = ["standard", "original"])]
     image_quality: Option<String>,
     /// Send this audio file as a voice message.

@@ -16,9 +16,16 @@ Choose outgoing preparation when sending, then select a received variant when do
 | Video, original send | Playback and thumbnail, plus unchanged `original` |
 | Ordinary file | Unchanged source bytes |
 
-**Images:** by default the sender preserves a JPEG source only when it is at most 65,520 bytes. Otherwise it creates an original JPEG starting at a 1,280-pixel longest edge. Standard and thumbnail copies start at 640 and 160 pixels. Preparation lowers JPEG quality and, if needed, dimensions to fit each of those copies within 65,520 bytes. With `imageQuality: "original"`, the original copy keeps the full source resolution (up to 4096 pixels on the longest edge) and is allowed to exceed 65,520 bytes, so it stays viewable as the original. The image source limit is 26,214,383 bytes.
+**Images:** every image send carries three copies. How the `original` copy is prepared depends on the image quality you choose:
 
-Large RGB or grayscale JPEG photos can contain up to 64 million pixels, with neither dimension exceeding 8,192 pixels. They decode at reduced resolution before preparation. Other image formats keep the 16,777,216-pixel limit. To preserve a larger photo unchanged, send it as a file attachment.
+| Image quality | `original` copy |
+| --- | --- |
+| `standard` (default) | A JPEG source of at most 65,520 bytes is kept unchanged. Anything else becomes a JPEG starting at a 1,280-pixel longest edge, reduced until it fits 65,520 bytes. |
+| `original` | A JPEG source is sent unchanged, at its own resolution. Another format (PNG, GIF, WebP) is converted to JPEG once at its full resolution. |
+
+In both cases the `standard` and `thumbnail` copies start at 640 and 160 pixels, and JPEG quality and then dimensions are lowered until each fits 65,520 bytes.
+
+The image source limit is 26,214,383 bytes. A JPEG can contain up to 64 million pixels, with neither dimension exceeding 8,192 pixels; RGB and grayscale photos above 16,777,216 pixels are supported, and their previews are made from a reduced-resolution decode. Other image formats keep the 16,777,216-pixel limit. For a larger image, or for exact bytes in a format other than JPEG, send it as a file attachment.
 
 **Video:** MOV, MP4, 3GP, 3G2 and MJ2 sources allow **512 MiB (536,870,912 bytes)**. The desktop and web attachment picker checks the connected hub's limit; the synthetic preview has a smaller limit. Playback uses H.264 Main, at most 720 pixels on the longest edge and 30 fps, with AAC audio when present. Preparation checks the complete output and rejects videos that cannot fit; it never shortens them. Container support depends on the codecs inside the file.
 
@@ -33,7 +40,14 @@ In the desktop or web composer, select **Original media quality** to include the
      --idempotency-key photo --wait 3600
    ```
 
-   Add `--image-quality original` to keep the full-resolution image as the original copy; recipients can then open the original instead of the 640-pixel preview. Omit it for the compact default. To deliver the source bytes exactly, use `--file ./photo.jpg`.
+   Add `--image-quality original` to send the photo at full resolution:
+
+   ```bash
+   wx messages send filehelper --image ./photo.jpg --image-quality original \
+     --idempotency-key photo-original --wait 3600
+   ```
+
+   To deliver a PNG or other non-JPEG source byte for byte, use `--file ./photo.png`; the recipient receives a file attachment.
 
 2. Choose video preparation:
 
@@ -59,7 +73,7 @@ In the desktop or web composer, select **Original media quality** to include the
 }
 ```
 
-Omit `videoQuality` for normal video. For images, use `kind: "image"` and, when the full-resolution copy should stay viewable, add `"imageQuality": "original"`; omit it for the compact default. Optional `standardSourceId` and `thumbnailSourceId` accept separately uploaded JPEG copies, each at most 65,520 bytes; omitted copies are generated. This does not bypass preparation of the primary image. The SDK's `sendMedia` takes the same fields.
+Omit `videoQuality` for normal video. For images, use `kind: "image"`; add `"imageQuality": "original"` to send the image at full resolution, or omit it for the compact default. Optional `standardSourceId` and `thumbnailSourceId` accept separately uploaded JPEG copies, each at most 65,520 bytes; omitted copies are generated. This does not bypass preparation of the primary image. The SDK's `sendMedia` takes the same fields.
 
 ### OpenClaw
 
@@ -103,5 +117,6 @@ Set `mediaMaxMb` to allow the source size. Use `asDocument: true` without `video
 - Download policy controls automatic caching; manual requests remain available. See [Settings](/use/settings/).
 - Keep job IDs after timeouts. Reusing a send key with different quality conflicts; see [Sends and recovery](/how-it-works/sends/).
 - The playback copy must fit in 25 MiB, so a video with audio can be at most about 29 minutes long, whatever its source size. Preparation stops with `media_encoder_timeout` after 5 minutes, which a large source can reach on slow hardware.
+- An unchanged JPEG keeps its embedded metadata, which can include the camera model and the location where the photo was taken. The default image quality re-encodes any image above 65,520 bytes, which removes it.
 - Server acceptance, recipient playback and source-byte equality are separate checks.
 </Aside>

@@ -1601,6 +1601,7 @@ computerName: string, };
 export type MediaKind = "image" | "file" | "video" | "voice" | "sticker";
 export type MediaVariant = "best" | "thumbnail" | "standard" | "original" | "normal" | "encoded";
 export type VideoSendQuality = "normal" | "original";
+export type ImageSendQuality = "standard" | "original";
 export type MediaTransferRequest = { 
 /**
  * ID of the message to download from. It must match the message ID in the URL.
@@ -1651,7 +1652,12 @@ durationMs: number | null,
 /**
  * How to send a video, `normal` by default or `original`. Only valid for video sends.
  */
-videoQuality?: VideoSendQuality, };
+videoQuality?: VideoSendQuality, 
+/**
+ * `original` sends the image at full resolution as its original copy; `standard`, the
+ * default, reduces it. Only valid for image sends.
+ */
+imageQuality?: ImageSendQuality, };
 export type MediaImagePreview = { 
 /**
  * SHA-256 of the original image bytes this preview was made from.

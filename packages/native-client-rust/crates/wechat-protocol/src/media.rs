@@ -1157,12 +1157,7 @@ fn upload_fields(
     end: usize,
 ) -> Result<CdnFields> {
     ensure!(
-        sequence > 0
-            && start <= end
-            && end < p.encrypted.len()
-            // Image originals may exceed one chunk: the CDN accepts a single request up to
-            // MAX_NATIVE_UPLOAD_BYTES, which keeps full-resolution originals round-trippable.
-            && (end - start < UPLOAD_CHUNK || p.kind == MediaQuality::Original),
+        sequence > 0 && start <= end && end < p.encrypted.len() && end - start < UPLOAD_CHUNK,
         "Invalid upload range"
     );
     let mut f = shared(conf, sequence, p.kind.filetype());
@@ -1275,13 +1270,32 @@ pub struct UploadedVideo {
     #[serde(default)]
     pub original: Option<UploadedMedia>,
 }
-fn jpeg_dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
-    jpeg_dimensions_with_limit(bytes, 65520)
+/// Dimensions of an image original after decoding it once. An original is not
+/// held to the 65,520-byte limit of the standard and thumbnail copies, and may
+/// be an unchanged camera JPEG larger than their 4,096-pixel edge limit.
+fn original_jpeg_dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
+    ensure!(
+        !bytes.is_empty() && bytes.len() <= MAX_NATIVE_UPLOAD_BYTES,
+        "JPEG original outside upload limit"
+    );
+    let inspection = inspect_image(bytes)?;
+    ensure!(
+        inspection.content_type == "image/jpeg",
+        "Expected JPEG original"
+    );
+    Ok((inspection.width, inspection.height))
 }
-fn jpeg_dimensions_with_limit(bytes: &[u8], max_bytes: usize) -> Result<(u32, u32)> {
+/// Dimensions from the JPEG frame header, without decoding its pixels.
+fn jpeg_header_dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
+    Ok(
+        image::ImageReader::with_format(std::io::Cursor::new(bytes), image::ImageFormat::Jpeg)
+            .into_dimensions()?,
+    )
+}
+fn jpeg_dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
     use image::GenericImageView;
     ensure!(
-        !bytes.is_empty() && bytes.len() <= max_bytes,
+        !bytes.is_empty() && bytes.len() <= 65520,
         "JPEG variant outside small-object profile"
     );
     ensure!(
@@ -1353,7 +1367,7 @@ impl PreparedImageUpload {
         key: &[u8],
         file_key: &str,
     ) -> Result<Self> {
-        let (width, height) = jpeg_dimensions_with_limit(original, MAX_NATIVE_UPLOAD_BYTES)?;
+        let (width, height) = original_jpeg_dimensions(original)?;
         let original = PreparedUpload::with_material(
             original,
             MediaQuality::Original,
@@ -1383,7 +1397,7 @@ impl PreparedImageUpload {
         file_name: &str,
         destination: &str,
     ) -> Result<Self> {
-        let (width, height) = jpeg_dimensions_with_limit(original, MAX_NATIVE_UPLOAD_BYTES)?;
+        let (width, height) = original_jpeg_dimensions(original)?;
         let original =
             PreparedUpload::prepare(original, MediaQuality::Original, file_name, destination)?;
         let standard = PreparedVariant::new(standard, &original.aes_key)?;
@@ -1402,15 +1416,18 @@ impl PreparedImageUpload {
         self.original.validate()?;
         let raw = decrypt_cdn(&self.original.encrypted, &self.original.aes_key)?;
         ensure!(
-            jpeg_dimensions_with_limit(&raw, MAX_NATIVE_UPLOAD_BYTES)? == (self.width, self.height),
+            jpeg_header_dimensions(&raw)? == (self.width, self.height),
             "Prepared original dimensions differ"
         );
         self.standard.validate(&self.original.aes_key)?;
         self.thumbnail.validate(&self.original.aes_key)?;
         ensure!(
             self.original.plaintext_bytes <= MAX_NATIVE_UPLOAD_BYTES as u32
-                && self.standard.width <= self.width
-                && self.standard.height <= self.height
+                // A preview of a rotated camera original is drawn upright, so its
+                // edges may be the original's stored edges exchanged.
+                && ((self.standard.width <= self.width && self.standard.height <= self.height)
+                    || (self.standard.width <= self.height
+                        && self.standard.height <= self.width))
                 && self.thumbnail.width <= self.standard.width
                 && self.thumbnail.height <= self.standard.height
                 && self.thumbnail.width <= 320
@@ -1531,27 +1548,57 @@ fn uploaded_variant(
 }
 impl CdnClient {
     pub fn upload_image(&self, p: &PreparedImageUpload) -> Result<UploadedImage> {
+        self.upload_image_with_progress(p, |_, _| Ok(()))
+    }
+    /// Upload an image's original, standard and thumbnail copies, reporting the encrypted bytes
+    /// of the original sent so far and their total before each request.
+    pub fn upload_image_with_progress(
+        &self,
+        p: &PreparedImageUpload,
+        progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+    ) -> Result<UploadedImage> {
+        self.upload_image_with_transport(p, progress, |path, fields| self.post(path, fields))
+    }
+    /// Upload the original in 64 KiB ranges like a video. The first request
+    /// also carries the standard and thumbnail copies and the image metadata,
+    /// so an original that fits one range is still a single request.
+    fn upload_image_with_transport(
+        &self,
+        p: &PreparedImageUpload,
+        mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+        mut post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
+    ) -> Result<UploadedImage> {
         p.validate()?;
-        let end = p.original.encrypted.len() - 1;
-        let mut f = upload_fields(&self.config, &p.original, 1, 0, end)?;
-        f.insert("filedata".into(), p.original.encrypted.clone());
-        add_thumbnail(&mut f, &p.thumbnail);
-        for (k, v) in [
-            ("imgheight", p.height as u64),
-            ("imgwidth", p.width as u64),
-            ("midimgrawsize", p.standard.plaintext_bytes as u64),
-            ("midimgtotalsize", p.standard.encrypted.len() as u64),
-            ("midimgchecksum", p.standard.encrypted_checksum as u64),
-            ("file_format", 0),
-            ("mid_format", 0),
-        ] {
-            put(&mut f, k, v);
-        }
-        f.insert("midimgmd5".into(), p.standard.md5.as_bytes().to_vec());
-        f.insert("midimgdata".into(), p.standard.encrypted.clone());
-        let reply = self.post("/uploadv3", &f)?;
+        let total = p.original.encrypted.len();
         let mut file_id = None;
-        validate_upload_reply(&reply, 1, 0, end, &mut file_id)?;
+        for (sequence, chunk) in p.original.encrypted.chunks(UPLOAD_CHUNK).enumerate() {
+            let start = sequence * UPLOAD_CHUNK;
+            let end = start + chunk.len() - 1;
+            progress(start as u64, Some(total as u64))?;
+            let mut f = upload_fields(&self.config, &p.original, sequence as u32 + 1, start, end)?;
+            f.insert("filedata".into(), chunk.to_vec());
+            if start == 0 {
+                add_thumbnail(&mut f, &p.thumbnail);
+                for (k, v) in [
+                    ("imgheight", p.height as u64),
+                    ("imgwidth", p.width as u64),
+                    ("midimgrawsize", p.standard.plaintext_bytes as u64),
+                    ("midimgtotalsize", p.standard.encrypted.len() as u64),
+                    ("midimgchecksum", p.standard.encrypted_checksum as u64),
+                    ("file_format", 0),
+                    ("mid_format", 0),
+                ] {
+                    put(&mut f, k, v);
+                }
+                f.insert("midimgmd5".into(), p.standard.md5.as_bytes().to_vec());
+                f.insert("midimgdata".into(), p.standard.encrypted.clone());
+            }
+            let reply = post("/uploadv3", &f)?;
+            validate_upload_reply(&reply, sequence as u32 + 1, start, end, &mut file_id)?;
+            if end + 1 < total {
+                progress((end + 1) as u64, Some(total as u64))?;
+            }
+        }
         let id =
             file_id.ok_or_else(|| anyhow::anyhow!("Image upload returned no file identifier"))?;
         Ok(UploadedImage {
@@ -2622,6 +2669,93 @@ mod tests {
             &jpeg(4, 4),
             &jpeg(2, 2),
             "image.jpg",
+            "filehelper"
+        )
+        .is_err());
+    }
+    #[test]
+    fn image_original_uploads_in_ranges_with_previews_in_the_first_request() {
+        fn jpeg(w: u32, h: u32, noisy: bool) -> Vec<u8> {
+            let mut seed = 7u32;
+            let rgb = image::RgbImage::from_fn(w, h, |_, _| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                let [r, g, b, _] = if noisy { seed } else { 0x0050_280c }.to_le_bytes();
+                image::Rgb([r, g, b])
+            });
+            let mut out = vec![];
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 95)
+                .encode_image(&rgb)
+                .unwrap();
+            out
+        }
+        // Wider than the 4,096-pixel preview limit and several ranges long.
+        let original = jpeg(4200, 64, true);
+        assert!(original.len() > 3 * UPLOAD_CHUNK);
+        let p = PreparedImageUpload::prepare(
+            &original,
+            &jpeg(640, 10, false),
+            &jpeg(160, 3, false),
+            "wide.jpg",
+            "filehelper",
+        )
+        .unwrap();
+        assert_eq!((p.width, p.height), (4200, 64));
+        let total = p.original.encrypted.len();
+        let requests = std::cell::RefCell::new(vec![]);
+        let reported = std::cell::RefCell::new(vec![]);
+        let uploaded = client()
+            .upload_image_with_transport(
+                &p,
+                |sent, all| {
+                    assert_eq!(all, Some(total as u64));
+                    reported.borrow_mut().push(sent);
+                    Ok(())
+                },
+                |path, fields| {
+                    assert_eq!(path, "/uploadv3");
+                    assert_eq!(integer(fields, "filetype")?, 1);
+                    assert_eq!(integer(fields, "totalsize")?, total as i64);
+                    // Every request must fit the bounded CDN envelope.
+                    pack_cdn(fields)?;
+                    let start = integer(fields, "rangestart")? as usize;
+                    let end = integer(fields, "rangeend")? as usize;
+                    assert_eq!(fields["filedata"], p.original.encrypted[start..=end]);
+                    let first = start == 0;
+                    for key in ["thumbdata", "midimgdata", "midimgmd5", "imgwidth"] {
+                        assert_eq!(fields.contains_key(key), first, "{key}");
+                    }
+                    assert_eq!(integer(fields, "hasthumb")?, i64::from(first));
+                    requests.borrow_mut().push((start, end));
+                    let mut reply = CdnFields::new();
+                    put(&mut reply, "retcode", 0);
+                    for key in ["seq", "rangestart", "rangeend"] {
+                        reply.insert(key.into(), fields[key].clone());
+                    }
+                    reply.insert("fileid".into(), b"image-object".to_vec());
+                    Ok(reply)
+                },
+            )
+            .unwrap();
+        let requests = requests.into_inner();
+        assert_eq!(requests.len(), total.div_ceil(UPLOAD_CHUNK));
+        assert_eq!(requests[0], (0, UPLOAD_CHUNK - 1));
+        assert!(requests.windows(2).all(|pair| pair[0].1 + 1 == pair[1].0));
+        assert_eq!(requests.last().unwrap().1, total - 1);
+        assert_eq!(reported.borrow()[0], 0);
+        assert!(reported.borrow().iter().all(|sent| *sent < total as u64));
+        assert_eq!(uploaded.original.plaintext_bytes as usize, original.len());
+        assert_eq!(uploaded.original.width, Some(4200));
+        for copy in [&uploaded.original, &uploaded.standard, &uploaded.thumbnail] {
+            assert_eq!(copy.descriptor.file_id, "image-object");
+        }
+        // A standard copy keeps its own limits.
+        assert!(PreparedImageUpload::prepare(
+            &original,
+            &jpeg(4200, 64, false),
+            &jpeg(160, 3, false),
+            "wide.jpg",
             "filehelper"
         )
         .is_err());

@@ -784,16 +784,16 @@
         "type": "object"
       },
       "ImageSendQuality": {
-        "description": "How an image is sent: `standard` (default) sends a 640px preview plus a small \"original\" copy,\nwhile `original` keeps the full-resolution image so recipients can open the original.",
+        "description": "How the original copy of an image is prepared. The standard and thumbnail copies are always\ncompact previews.",
         "oneOf": [
           {
             "const": "standard",
-            "description": "Send the compact preview and a size-limited original copy.",
+            "description": "Reduce the original copy to at most 1,280 pixels and 65,520 bytes.",
             "type": "string"
           },
           {
             "const": "original",
-            "description": "Send the full-resolution image as the original copy.",
+            "description": "Send a JPEG source unchanged as the original copy, or convert another format to JPEG at\nits full resolution.",
             "type": "string"
           }
         ]
@@ -1365,7 +1365,7 @@
                 "type": "null"
               }
             ],
-            "description": "How to send an image, `standard` by default or `original`. Only valid for image sends."
+            "description": "`original` sends the image at full resolution as its original copy; `standard`, the\ndefault, reduces it. Only valid for image sends."
           },
           "kind": {
             "$ref": "#/components/schemas/MediaKind",

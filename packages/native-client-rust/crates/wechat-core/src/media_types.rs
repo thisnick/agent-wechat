@@ -80,17 +80,18 @@ pub enum VideoSendQuality {
     /// Also include the unchanged source video.
     Original,
 }
-/// How an image is sent: `standard` (default) sends a 640px preview plus a small "original" copy,
-/// while `original` keeps the full-resolution image so recipients can open the original.
+/// How the original copy of an image is prepared. The standard and thumbnail copies are always
+/// compact previews.
 #[derive(
     Clone, Copy, Debug, Default, Serialize, Deserialize, TS, schemars::JsonSchema, PartialEq, Eq,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ImageSendQuality {
-    /// Send the compact preview and a size-limited original copy.
+    /// Reduce the original copy to at most 1,280 pixels and 65,520 bytes.
     #[default]
     Standard,
-    /// Send the full-resolution image as the original copy.
+    /// Send a JPEG source unchanged as the original copy, or convert another format to JPEG at
+    /// its full resolution.
     Original,
 }
 /// Request to send an uploaded file, image, video or voice note. Upload the bytes first, then send
@@ -120,7 +121,8 @@ pub struct MediaSendRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub video_quality: Option<VideoSendQuality>,
-    /// How to send an image, `standard` by default or `original`. Only valid for image sends.
+    /// `original` sends the image at full resolution as its original copy; `standard`, the
+    /// default, reduces it. Only valid for image sends.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub image_quality: Option<ImageSendQuality>,

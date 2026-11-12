@@ -457,6 +457,7 @@ fn receipt_with_video_quality(
             "idempotencyKey",
             "serverId",
             "videoQuality",
+            "imageQuality",
         ] {
             if existing[field] != value[field] {
                 bail!("idempotency_conflict: receipt input changed");
@@ -681,8 +682,10 @@ pub async fn send(
     let hash = format!("{:x}", Sha256::digest(&bytes));
     let key = key.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let video_quality = (kind == "video").then(|| video_quality.unwrap_or_else(|| "normal".into()));
-    let image_quality =
-        (kind == "image").then(|| image_quality.unwrap_or_else(|| "standard".into()));
+    // `standard` is the same request as leaving the option out, so only
+    // `original` is recorded and sent. Receipts written before the option
+    // existed then still match.
+    let image_quality = image_quality.filter(|quality| kind == "image" && quality == "original");
     let (path, mut receipt) = receipt_with_video_quality(
         config,
         r,
@@ -1312,6 +1315,29 @@ mod tests {
             .to_string()
             .contains("idempotency_conflict"));
         assert!(make(None).is_err());
+        let image = |key, quality| {
+            receipt_with_video_quality(
+                &config,
+                &remote,
+                "filehelper",
+                "image",
+                "source-sha",
+                key,
+                None,
+                None,
+                quality,
+            )
+        };
+        // A compact send records no image quality, as before the option existed.
+        let (_, compact) = image("compact-key", None).unwrap();
+        assert!(compact.get("imageQuality").is_none());
+        assert!(image("compact-key", None).is_ok());
+        assert!(image("compact-key", Some("original")).is_err());
+        assert!(image("original-key", Some("original")).is_ok());
+        assert!(image("original-key", None)
+            .unwrap_err()
+            .to_string()
+            .contains("idempotency_conflict"));
     }
 
     #[test]
