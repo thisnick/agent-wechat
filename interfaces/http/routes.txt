@@ -31,6 +31,7 @@ request MediaQuery | object, rejects unknown fields | Options for fetching a sav
 request MediaQuery.quality | string, nullable | `best` (the default), `original`, `standard` or `thumbnail`.
 request MediaSendRequest | object, rejects unknown fields | Request to send an uploaded file, image, video or voice note. Upload the bytes first, then send with the returned source ID.
 request MediaSendRequest.durationMs | integer, nullable, min 0, format uint32 | Length of a voice note in milliseconds. Optional, because the daemon measures the audio itself.
+request MediaSendRequest.imageQuality | string, nullable, values standard|original | `original` includes a full-resolution original; `standard`, the default, offers only compressed standard and thumbnail copies. Only valid for image sends.
 request MediaSendRequest.kind | string, required, values image|file|video|voice|sticker | What to send. Stickers cannot be sent.
 request MediaSendRequest.playSeconds | integer, nullable, min 0, format uint32 | Length of a video in seconds, from 1 to 3600. Optional, because the daemon measures the video itself.
 request MediaSendRequest.sourceId | string, required | ID of the uploaded source to send, as returned by the upload route.

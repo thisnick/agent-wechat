@@ -3,11 +3,87 @@
   "packages": {
     "cargo-watch": {
       "resolved": "github:NixOS/nixpkgs/ea30586ee015f37f38783006a9bc9e4aa64d7d61?narHash=sha256-PDFfpswLiuG%2FDcadTBb7dEfO3jX1fcGlCD4ZKSkC0M8%3D#cargo-watch",
-      "source": "nixpkg"
+      "source": "nixpkg",
+      "systems": {
+        "x86_64-linux": {
+          "outputs": [
+            {
+              "path": "/nix/store/1jjg5g44ibz8vfiiw73pchic38nxlsfc-cargo-watch-8.5.3",
+              "default": true
+            }
+          ]
+        }
+      }
+    },
+    "cmake@latest": {
+      "last_modified": "2025-11-23T21:50:36Z",
+      "resolved": "github:NixOS/nixpkgs/ee09932cedcef15aaf476f9343d1dea2cb77e261#cmake",
+      "source": "devbox-search",
+      "version": "4.1.2",
+      "systems": {
+        "aarch64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/0v5vpvwbl94qv9447jz995i4n9mx4l63-cmake-4.1.2",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/0v5vpvwbl94qv9447jz995i4n9mx4l63-cmake-4.1.2"
+        },
+        "aarch64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/ipjw0mbzcycidbw62gsz47cgivqxm2lv-cmake-4.1.2",
+              "default": true
+            },
+            {
+              "name": "debug",
+              "path": "/nix/store/4m6l2qb5s7vyirybbn3c5k1rv2dww1vy-cmake-4.1.2-debug"
+            }
+          ],
+          "store_path": "/nix/store/ipjw0mbzcycidbw62gsz47cgivqxm2lv-cmake-4.1.2"
+        },
+        "x86_64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/i7c7r2g0zycvi7wh3rnw1dx3aglbvw2d-cmake-4.1.2",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/i7c7r2g0zycvi7wh3rnw1dx3aglbvw2d-cmake-4.1.2"
+        },
+        "x86_64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/w9jm660dykns6hzrdhxmqfywnc9ail8g-cmake-4.1.2",
+              "default": true
+            },
+            {
+              "name": "debug",
+              "path": "/nix/store/pnizhra0882ijp3nilvzdzbaa0ayq4hd-cmake-4.1.2-debug"
+            }
+          ],
+          "store_path": "/nix/store/w9jm660dykns6hzrdhxmqfywnc9ail8g-cmake-4.1.2"
+        }
+      }
     },
     "colima": {
       "resolved": "github:NixOS/nixpkgs/ea30586ee015f37f38783006a9bc9e4aa64d7d61?narHash=sha256-PDFfpswLiuG%2FDcadTBb7dEfO3jX1fcGlCD4ZKSkC0M8%3D#colima",
-      "source": "nixpkg"
+      "source": "nixpkg",
+      "systems": {
+        "x86_64-linux": {
+          "outputs": [
+            {
+              "path": "/nix/store/sq136glgf7d8c007d6c0nfmg7pkc6dw3-colima-0.9.1",
+              "default": true
+            }
+          ]
+        }
+      }
     },
     "direnv@latest": {
       "last_modified": "2026-01-23T17:20:52Z",
@@ -58,8 +134,8 @@
       }
     },
     "github:NixOS/nixpkgs/nixos-26.05#nodejs_24": {
-      "last_modified": "2026-10-12T00:30:22Z",
-      "resolved": "github:NixOS/nixpkgs/7993f34ee47e28a3d607a525aadc6c94b73be728?lastModified=1791765022&narHash=sha256-ZGq3ptZzA%2BoO0N%2FWi%2FF%2BGbuTijLkYExD01LvpNFAvr0%3D#nodejs_24"
+      "last_modified": "2026-11-08T19:26:10Z",
+      "resolved": "github:NixOS/nixpkgs/ac588ef1c914865dad517b337ea0eb9694a4021c?lastModified=1794165970&narHash=sha256-XuAV2cUwaod3Bt4XFVqiXz3v1w2ex16W6Sv4S7EWres%3D#nodejs_24"
     },
     "github:NixOS/nixpkgs/nixpkgs-unstable": {
       "last_modified": "2026-01-14T04:14:06Z",
@@ -67,16 +143,46 @@
     },
     "pnpm": {
       "resolved": "github:NixOS/nixpkgs/ea30586ee015f37f38783006a9bc9e4aa64d7d61?narHash=sha256-PDFfpswLiuG%2FDcadTBb7dEfO3jX1fcGlCD4ZKSkC0M8%3D#pnpm",
-      "source": "nixpkg"
+      "source": "nixpkg",
+      "systems": {
+        "x86_64-linux": {
+          "outputs": [
+            {
+              "path": "/nix/store/61lr9izijvg30pcribjdxgjxvh3bysp4-pnpm-10.26.1",
+              "default": true
+            }
+          ]
+        }
+      }
     },
     "rustup": {
       "plugin_version": "0.0.1",
       "resolved": "github:NixOS/nixpkgs/ea30586ee015f37f38783006a9bc9e4aa64d7d61?narHash=sha256-PDFfpswLiuG%2FDcadTBb7dEfO3jX1fcGlCD4ZKSkC0M8%3D#rustup",
-      "source": "nixpkg"
+      "source": "nixpkg",
+      "systems": {
+        "x86_64-linux": {
+          "outputs": [
+            {
+              "path": "/nix/store/w3hyqp287l6j790wn81x8chj5bcb69wb-rustup-1.28.2",
+              "default": true
+            }
+          ]
+        }
+      }
     },
     "sqlcipher": {
       "resolved": "github:NixOS/nixpkgs/ea30586ee015f37f38783006a9bc9e4aa64d7d61?narHash=sha256-PDFfpswLiuG%2FDcadTBb7dEfO3jX1fcGlCD4ZKSkC0M8%3D#sqlcipher",
-      "source": "nixpkg"
+      "source": "nixpkg",
+      "systems": {
+        "x86_64-linux": {
+          "outputs": [
+            {
+              "path": "/nix/store/4br8xi7yr37811hlxpvabc98li5hl31c-sqlcipher-4.12.0",
+              "default": true
+            }
+          ]
+        }
+      }
     }
   }
 }

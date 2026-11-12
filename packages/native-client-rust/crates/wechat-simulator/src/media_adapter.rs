@@ -107,14 +107,19 @@ impl MediaTransport for SimulatorMedia {
         )?;
         Ok(result)
     }
-    fn upload_image(&self, p: &PreparedImageUpload) -> Result<UploadedImage> {
+    fn upload_image(
+        &self,
+        p: &PreparedImageUpload,
+        progress: Progress<'_>,
+    ) -> Result<UploadedImage> {
+        progress(0, Some(p.original.encrypted.len() as u64))?;
         Ok(UploadedImage {
-            original: self.upload_object(
+            original: Some(self.upload_object(
                 &p.original,
                 MediaQuality::Original,
                 None,
                 Some((p.width, p.height)),
-            )?,
+            )?),
             standard: self.upload_object(
                 &p.original,
                 MediaQuality::Standard,

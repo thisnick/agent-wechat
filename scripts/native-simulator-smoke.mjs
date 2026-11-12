@@ -1,7 +1,7 @@
 // Real hub processes and the existing SDK; all account/profile/upstream state is synthetic.
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -479,11 +479,14 @@ try {
   });
   assert.equal(photoDone.result.imagePreparation.sourceSha256, createHash("sha256").update(photo).digest("hex"));
   assert.equal(photoDone.result.imagePreparation.sourcePreserved, false);
-  assert.ok(photoDone.result.imagePreparation.width <= 1280);
-  assert.ok(photoDone.result.imagePreparation.height <= 1280);
+  assert.equal(photoDone.result.imagePreparation.originalAdvertised, false);
+  assert.equal(photoDone.result.verifiedSha256.length, 3);
+  assert.ok(photoDone.result.imagePreparation.width <= 640);
+  assert.ok(photoDone.result.imagePreparation.height <= 640);
   for (const id of photoDone.result.messageIds) {
     const assets = await a.mediaAssets("personal", id);
-    for (const quality of ["original", "standard", "thumbnail"]) {
+    assert.equal(assets.items.some(asset => asset.variant === "original"), false);
+    for (const quality of ["standard", "thumbnail"]) {
       const asset = assets.items.find(asset => asset.variant === quality);
       assert.equal(asset?.state, "available");
       const content = await a.mediaContent("personal", asset.id);
@@ -494,6 +497,33 @@ try {
   }
   assert.equal((await a.sendMedia("personal", photoRequest, "large-photo-send")).id, photoDone.id);
   assert.equal((await a.sendByKey("personal", "large-photo-send")).id, photoDone.id);
+  await assert.rejects(a.sendMedia("personal", { ...photoRequest, imageQuality: "original" }, "large-photo-send"), error => error.status === 409 && error.code === "idempotency_conflict");
+
+  const photoPath = join(temporary, "synthetic-50mp.jpg");
+  await writeFile(photoPath, photo);
+  const photoOriginal = await cli("messages", "send", "sim_mei", "--image", photoPath, "--image-quality", "original", "--idempotency-key", "large-photo-original", "--detach");
+  const photoOriginalDone = await waitFor("50 MP original accepted and projected", async () => {
+    const job = await a.job("personal", photoOriginal.id);
+    assert.ok(!["failed", "cancelled", "needs_review"].includes(job.state), job.reason);
+    return job.state === "accepted" && job.result?.messageIds?.length && job;
+  }, 60000);
+  const photoHash = createHash("sha256").update(photo).digest("hex");
+  assert.equal(photoOriginalDone.result.imagePreparation.sourcePreserved, true);
+  assert.equal(photoOriginalDone.result.imagePreparation.originalAdvertised, true);
+  assert.equal(photoOriginalDone.result.imagePreparation.sentOriginalSha256, photoHash);
+  assert.equal(photoOriginalDone.result.verifiedSha256.length, 3);
+  for (const id of photoOriginalDone.result.messageIds) {
+    const assets = (await a.mediaAssets("personal", id)).items;
+    for (const variant of ["original", "standard", "thumbnail"]) {
+      const asset = assets.find(asset => asset.variant === variant);
+      assert.equal(asset?.state, "available");
+      const content = await a.mediaContent("personal", asset.id);
+      assert.equal(createHash("sha256").update(content.bytes).digest("hex"), asset.sha256);
+      if (variant === "original") assert.deepEqual(content.bytes, new Uint8Array(photo));
+      else assert.ok(content.bytes.length <= 65520);
+    }
+  }
+  assert.equal((await cli("messages", "send", "sim_mei", "--image", photoPath, "--image-quality", "original", "--idempotency-key", "large-photo-original", "--detach")).id, photoOriginalDone.id);
 
   const moviePath = join(repository, "packages/native-client-rust/crates/wechat-core/tests/fixtures/send-videos/legacy-mjpeg.mov");
   const movie = await readFile(moviePath);

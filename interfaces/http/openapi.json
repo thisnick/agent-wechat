@@ -783,6 +783,21 @@
         ],
         "type": "object"
       },
+      "ImageSendQuality": {
+        "description": "Which image copies are offered: standard and thumbnail previews, optionally with a\nfull-resolution original.",
+        "oneOf": [
+          {
+            "const": "standard",
+            "description": "Offer a compressed standard copy and thumbnail without an original.",
+            "type": "string"
+          },
+          {
+            "const": "original",
+            "description": "Send a JPEG source unchanged as the original copy, or convert another format to JPEG at\nits full resolution.",
+            "type": "string"
+          }
+        ]
+      },
       "LinkCard": {
         "description": "Details of a shared link, article, music or video card, or a Channels post.",
         "properties": {
@@ -1340,6 +1355,17 @@
               "integer",
               "null"
             ]
+          },
+          "imageQuality": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ImageSendQuality"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`original` includes a full-resolution original; `standard`, the default, offers only\ncompressed standard and thumbnail copies. Only valid for image sends."
           },
           "kind": {
             "$ref": "#/components/schemas/MediaKind",

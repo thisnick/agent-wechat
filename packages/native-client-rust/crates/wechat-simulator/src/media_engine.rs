@@ -286,7 +286,7 @@ pub(super) fn receive(
             (
                 3,
                 wechat_protocol::media_send::local_image_xml(&UploadedImage {
-                    original: primary,
+                    original: Some(primary),
                     standard,
                     thumbnail,
                 })?,
