@@ -3,7 +3,7 @@ title: Rust 开发库
 description: 在 Rust 中使用原生微信协议、Profile 与语音媒体库。
 banner:
   content: "本页面由机器翻译，尚未经过人工审校。"
-sourceHash: 4b0bc4baeaf8
+sourceHash: 51038395912d
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -50,6 +50,8 @@ fn contacts(profile: &str, keys_path: &str) -> wechat_profile::Result<()> {
 ```
 
 读取缓存媒体时绝不会发起下载。拥有该 Profile 的应用程序可以使用 `OwnedReaderCache`，并由其自行同步。
+
+`contacts` 列出当前的记录行。若需获取某个确切存储身份（包括保留下来的已删除联系人或群聊记录），请使用 `reader.contact(username)`。在修改联系人或群聊之前，请检查返回的标志位；仅有存储记录并不意味着该对象符合修改条件。
 
 ## 发送单条文本消息 \{#send-one-text-message}
 
