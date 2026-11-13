@@ -1,4 +1,5 @@
-// The private Changesets package versions public Rust libraries independently of apps.
+// The private Changesets package carries the Rust libraries' version and changelog.
+// It is in the applications' fixed Changesets group, so every release gives both the same version.
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { releaseChannel } from './native-release-policy.mjs';
@@ -12,7 +13,7 @@ export async function readCrateVersion({ root = process.cwd(), version } = {}) {
   if (pkg.name !== cratePackage.name || pkg.private !== true || (version !== undefined && pkg.version !== version)) {
     throw new Error('Rust library package/version mismatch');
   }
-  // The committed library version can remain a beta while the apps leave beta.
+  // The channel comes from the committed version itself, not from Changesets' pre-release state.
   const tag = pkg.version?.split('-')[1]?.split('.')[0];
   releaseChannel(pkg.version, tag ? { mode: 'pre', tag } : undefined);
   return pkg.version;

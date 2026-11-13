@@ -769,6 +769,7 @@ pub fn typescript() -> String {
         wechat_core::media_types::MediaKind::decl(),
         wechat_core::media_types::MediaVariant::decl(),
         wechat_core::media_types::VideoSendQuality::decl(),
+        wechat_core::media_types::ImageSendQuality::decl(),
         wechat_core::media_types::MediaTransferRequest::decl(),
         wechat_core::media_types::MediaSendRequest::decl(),
         wechat_core::media_types::MediaImagePreview::decl(),
@@ -925,6 +926,7 @@ mod tests {
         assert!(generated.contains("NATIVE_MAX_ORDINARY_SOURCE_BYTES = 26214383 as const"));
         assert!(generated.contains("NATIVE_MAX_VIDEO_SOURCE_BYTES = 536870912 as const"));
         assert!(generated.contains("videoQuality?: VideoSendQuality"));
+        assert!(generated.contains("imageQuality?: ImageSendQuality"));
         assert!(generated.contains("serverId: string | null"));
         assert!(generated.contains("unreadCount: number | null"));
         assert!(generated.contains("type NativePage<T>"));

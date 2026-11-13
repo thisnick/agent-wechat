@@ -6,11 +6,11 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Exact app version on main; leave empty for a library-only recovery
+        description: Exact app version on main; leave empty to recover only the Rust libraries
         required: false
         type: string
       crate_version:
-        description: Exact @agent-wechat/rust-crates version on main; leave empty for app-only recovery
+        description: Exact @agent-wechat/rust-crates version on main (same as the app version); leave empty to recover only the app
         required: false
         type: string
       confirm_publish:
@@ -149,6 +149,7 @@ jobs:
       release: true
       native_artifact_prefix: native-release
     secrets: inherit
+  # Runs alongside the release for information. No publishing job waits for it.
   checks:
     needs: plan
     if: needs.plan.outputs.publish == 'true' || needs.plan.outputs.crate_publish == 'true'
@@ -156,7 +157,7 @@ jobs:
     with:
       simulator_checks: false
   prepare:
-    needs: [plan, checks, build, portable, desktop]
+    needs: [plan, build, portable, desktop]
     environment: native-release
     permissions:
       contents: write
@@ -228,7 +229,7 @@ jobs:
       confirm_publish: true
 
   crates:
-    needs: [plan, checks]
+    needs: plan
     if: needs.plan.outputs.crate_publish == 'true'
     permissions:
       contents: write

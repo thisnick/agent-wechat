@@ -5,10 +5,11 @@ import { createCallForcedConsult } from "./calls-forced-consult.ts";
 const sdkPath: string = "openclaw/plugin-sdk/realtime-voice";
 const stock = await import(sdkPath);
 
-function fixture() {
+function fixture(answer: { text: string; fastContext?: true } = { text: "Verified answer" }) {
   const timers = new Set<() => void>();
   const questions: string[] = [];
   const spoken: string[] = [];
+  const fastContextSpoken: boolean[] = [];
   let clears = 0;
   let finish = () => {};
   const forced = createCallForcedConsult({
@@ -20,12 +21,12 @@ function fixture() {
     active: () => true,
     consult(question) {
       questions.push(question);
-      return new Promise(resolve => { finish = () => resolve({ text: "Verified answer" }); });
+      return new Promise(resolve => { finish = () => resolve(answer); });
     },
     clearAudio() { clears++; },
-    speak(text) { spoken.push(text); },
+    speak(text, fastContext) { spoken.push(text); fastContextSpoken.push(fastContext === true); },
   });
-  return { forced, questions, spoken, get clears() { return clears; },
+  return { forced, questions, spoken, fastContextSpoken, get clears() { return clears; },
     fire() { for (const callback of [...timers]) if (timers.delete(callback)) callback(); },
     async complete() { finish(); await new Promise<void>(resolve => setImmediate(resolve)); },
   };
@@ -77,4 +78,23 @@ test("closing a call clears a queued fallback and suppresses any result already 
     assert.equal(f.questions.length, start ? 1 : 0);
     assert.deepEqual(f.spoken, []);
   }
+});
+
+test("a fast-context fallback answer is marked for interpretation and does not block asking the same question again", async () => {
+  const question = "What did we decide?";
+  const agent = fixture();
+  agent.forced.onTranscript("user", question, true); agent.fire(); await agent.complete();
+  assert.deepEqual(agent.fastContextSpoken, [false]);
+  assert.deepEqual(await agent.forced.native(question, "tool-1"), { text: "The caller already received this answer. Do not repeat it.", alreadyDelivered: true });
+  agent.forced.close();
+
+  const fast = fixture({ text: "Synthetic memory snippet", fastContext: true });
+  fast.forced.onTranscript("user", question, true); fast.fire(); await fast.complete();
+  assert.deepEqual(fast.spoken, ["Synthetic memory snippet"]);
+  assert.deepEqual(fast.fastContextSpoken, [true]);
+  const again = fast.forced.native(question, "tool-1");
+  await fast.complete();
+  assert.deepEqual(fast.questions, [question, question], "asking again starts a new consultation");
+  assert.deepEqual(await again, { text: "Synthetic memory snippet", fastContext: true });
+  fast.forced.close();
 });

@@ -398,7 +398,7 @@ fn receipt(
     key: &str,
     server_id: Option<&str>,
 ) -> Result<(PathBuf, Value)> {
-    receipt_with_video_quality(config, r, target, kind, hash, key, server_id, None)
+    receipt_with_video_quality(config, r, target, kind, hash, key, server_id, None, None)
 }
 #[allow(clippy::too_many_arguments)]
 fn receipt_with_video_quality(
@@ -410,6 +410,7 @@ fn receipt_with_video_quality(
     key: &str,
     server_id: Option<&str>,
     video_quality: Option<&str>,
+    image_quality: Option<&str>,
 ) -> Result<(PathBuf, Value)> {
     if key.is_empty() || key.len() > 200 || key.chars().any(char::is_control) {
         bail!("invalid idempotency key");
@@ -439,6 +440,9 @@ fn receipt_with_video_quality(
     if let Some(quality) = video_quality {
         value["videoQuality"] = json!(quality);
     }
+    if let Some(quality) = image_quality {
+        value["imageQuality"] = json!(quality);
+    }
     if let Some(server_id) = server_id {
         value["serverId"] = json!(server_id);
     }
@@ -453,6 +457,7 @@ fn receipt_with_video_quality(
             "idempotencyKey",
             "serverId",
             "videoQuality",
+            "imageQuality",
         ] {
             if existing[field] != value[field] {
                 bail!("idempotency_conflict: receipt input changed");
@@ -565,6 +570,7 @@ pub async fn send(
     file: Option<PathBuf>,
     video: Option<PathBuf>,
     video_quality: Option<String>,
+    image_quality: Option<String>,
     voice: Option<PathBuf>,
     key: Option<String>,
     detach: bool,
@@ -676,6 +682,10 @@ pub async fn send(
     let hash = format!("{:x}", Sha256::digest(&bytes));
     let key = key.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let video_quality = (kind == "video").then(|| video_quality.unwrap_or_else(|| "normal".into()));
+    // `standard` is the same request as leaving the option out, so only
+    // `original` is recorded and sent. Receipts written before the option
+    // existed then still match.
+    let image_quality = image_quality.filter(|quality| kind == "image" && quality == "original");
     let (path, mut receipt) = receipt_with_video_quality(
         config,
         r,
@@ -685,6 +695,7 @@ pub async fn send(
         &key,
         None,
         video_quality.as_deref(),
+        image_quality.as_deref(),
     )?;
     eprintln!("Submission receipt: {}", path.display());
     if receipt["resourceId"].is_string() {
@@ -744,6 +755,9 @@ pub async fn send(
                     let mut request = json!({"threadId":thread,"kind":kind,"sourceId":source_id});
                     if let Some(quality) = video_quality {
                         request["videoQuality"] = quality.into();
+                    }
+                    if let Some(quality) = image_quality {
+                        request["imageQuality"] = quality.into();
                     }
                     request
                 }),
@@ -1165,6 +1179,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 Some("quoted-fixture-key".into()),
                 true,
                 0,
@@ -1289,6 +1304,7 @@ mod tests {
                 "quality-key",
                 None,
                 quality,
+                None,
             )
         };
         let (_, original) = make(Some("normal")).unwrap();
@@ -1299,6 +1315,29 @@ mod tests {
             .to_string()
             .contains("idempotency_conflict"));
         assert!(make(None).is_err());
+        let image = |key, quality| {
+            receipt_with_video_quality(
+                &config,
+                &remote,
+                "filehelper",
+                "image",
+                "source-sha",
+                key,
+                None,
+                None,
+                quality,
+            )
+        };
+        // A compact send records no image quality, as before the option existed.
+        let (_, compact) = image("compact-key", None).unwrap();
+        assert!(compact.get("imageQuality").is_none());
+        assert!(image("compact-key", None).is_ok());
+        assert!(image("compact-key", Some("original")).is_err());
+        assert!(image("original-key", Some("original")).is_ok());
+        assert!(image("original-key", None)
+            .unwrap_err()
+            .to_string()
+            .contains("idempotency_conflict"));
     }
 
     #[test]
@@ -1352,6 +1391,7 @@ mod tests {
                 (kind == "image").then(|| path.clone()),
                 None,
                 (kind == "video").then(|| path.clone()),
+                None,
                 None,
                 (kind == "voice").then(|| path.clone()),
                 Some("synthetic-key".into()),

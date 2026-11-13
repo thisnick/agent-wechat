@@ -2906,6 +2906,7 @@ version = "2.2.0"
 dependencies = [
  "anyhow",
  "image",
+ "jpeg-decoder",
  "libc",
  "md-5",
  "serde",

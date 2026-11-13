@@ -1,34 +1,38 @@
 ---
 title: Rust 开发库
-description: 在 Rust 中直接使用原生的微信协议与官方 Profile 存储库。
-sourceHash: 33c22b49705c
+description: 在 Rust 中使用原生微信协议、Profile 与语音媒体库。
+banner:
+  content: "本页面由机器翻译，尚未经过人工审校。"
+sourceHash: 77cc3c81c0bf
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-通过这些底层库，可以直接执行受支持的微信服务端操作并读写官方 Profile 存储。它们在没有后台守护进程或官方可执行程序的情况下即可独立运行。若应用程序连接到已有的守护进程，请参考 [HTTP API](/use/api/)。
+无需 Daemon 或官方可执行程序，即可直接使用这些库。连接到正在运行的 Daemon 的应用程序可以使用 [HTTP API](/use/api/)。
 
-| Crate | 职责与用途 |
+| Crate | 用途 |
 | --- | --- |
-| [wechat-protocol](https://docs.rs/wechat-protocol) | NativeClient、认证请求、信令与加密传输协议 |
-| [wechat-calls](https://docs.rs/wechat-calls) | 通话准入、会话、媒体 Worker、音源追踪、PCM 与 Opus 编解码 |
-| [wechat-profile](https://docs.rs/wechat-profile) | Profile 密钥、历史记录、联系人、媒体缓存及安全写入器 |
-| [wechat-media](https://docs.rs/wechat-media) | 共享的图像检查与解码支持 |
-| [wechat-platform](https://docs.rs/wechat-platform) | 私有文件与操作系统级支撑 |
+| [wechat-protocol](https://docs.rs/wechat-protocol) | 认证、传输、同步与消息编解码 |
+| [wechat-profile](https://docs.rs/wechat-profile) | Profile 密钥、联系人、历史记录、缓存媒体与经过校验的写入器 |
+| [wechat-calls](https://docs.rs/wechat-calls) | 语音会话与媒体基础组件、PCM 混音及可选的 Opus |
+| [wechat-media](https://docs.rs/wechat-media) | 图像检查与解码 |
+| [wechat-platform](https://docs.rs/wechat-platform) | 私有文件与操作系统支持 |
 
 ## 添加依赖 \{#add-dependencies}
 
-1. 引入开发库；`1.3.0` 是其在 crates.io 上的首个正式发布版本：
+1. 为所有库选择相同的已发布 Rust 库版本。将下面的 `VERSION` 替换为该版本号。`wechat-calls` 与账号所有者客户端 API 首次随 conference 发布版本提供；更早的版本中不包含它们。
 
    ```bash
-   cargo add wechat-protocol@=1.3.0 wechat-profile@=1.3.0
+   cargo add wechat-protocol@=VERSION wechat-profile@=VERSION
    ```
 
-2. 使用 Rust 1.93.1+、C 编译器、Make 与 Perl 进行构建。四个 Crate 均与原生发布版本保持一致；Cargo 会自动解析依赖的支撑库。
+2. 使用 Rust 1.93.1+、C 编译器、Make 与 Perl 进行构建。Cargo 会自动解析所依赖的支持库。原生 Opus 还需要 CMake 与 C++ 编译器。
+
+自 2.3.2 之后的版本起，Rust 库的版本号与 CLI、Daemon 和 OpenClaw 插件保持一致，且每次发布都会同时发布全部五个库。此前的库版本（直至 2.2.0）单独编号；请选择 crates.io 上列出的版本。
 
 ## 读取已停止的 Profile \{#read-a-stopped-profile}
 
-停止 Profile 的写入进程或提供一致性快照副本，然后加载受保护的密钥文件。快照标志表明调用方保证了这一前提；该函数不会主动终止外部进程。
+停止 Profile 的写入进程，或提供一致的副本，然后加载受保护的密钥文件。快照标志仅记录调用方的确认，并不会停止其他进程。
 
 ```rust
 use wechat_profile::{KeyFile, ListQuery, ProfileLocation, ProfileReader, ReadOptions};
@@ -45,24 +49,21 @@ fn contacts(profile: &str, keys_path: &str) -> wechat_profile::Result<()> {
 }
 ```
 
-读取本地缓存的媒体绝不会发起网络下载。已经独占拥有 Profile 访问权的应用可以使用附带自身并发同步协调的 `OwnedReaderCache`。
+读取缓存媒体时绝不会发起下载。拥有该 Profile 的应用程序可以使用 `OwnedReaderCache`，并由其自行同步。
 
 ## 发送单条文本消息 \{#send-one-text-message}
 
-服务端操作大多是 `NativeClient` 上的方法。应用程序自行负责凭据存储、故障恢复与 Profile 数据回写。
+操作大多是 `NativeClient` 上的方法。应用程序负责凭据存储、恢复与 Profile 回写。
 
-1. 调用 `start_qr_login`，轮询直至 `LoginStatus::Approved`，然后调用 `complete_login`。将返回的 `AccountState` 传入 `NativeClient::from_account(state, options)`。克隆句柄将共享同一个账号所有者。操作不再接受独立的可变账号状态。
-2. 在提交前保存计划执行的操作、唯一任务 ID 以及 Unix 秒级时间戳。传入接收方的确切微信号：
+1. 调用 `start_qr_login`，轮询直至 `LoginStatus::Approved`，然后调用 `complete_login`。将返回的 `AccountState` 传入 `NativeClient::from_account(state, options)`。克隆出的句柄共享同一个账号所有者。操作不再接受单独的可变账号状态。
+2. 提交前，先记录操作、唯一任务 ID 与 Unix 秒级时间戳。收件人请使用其确切的微信号：
 
    ```rust
    use wechat_protocol::{wire, NativeClient, TextSendOptions, TextSendResult};
 
    async fn send_once(
-       client: &NativeClient,
-       recipient: &str,
-       text: &str,
-       task_id: &str,
-       created_at: u32,
+       client: &NativeClient, recipient: &str, text: &str,
+       task_id: &str, created_at: u32,
    ) -> anyhow::Result<TextSendResult> {
        let client_id = wire::client_message_id(task_id.as_bytes());
        anyhow::ensure!(client_id != 0, "Choose another task ID");
@@ -72,32 +73,43 @@ fn contacts(profile: &str, keys_path: &str) -> wechat_profile::Result<()> {
    }
    ```
 
-3. 检查回执中的 `accepted`、`returned_destination_matches` 与 `returned_client_id_matches`。已被接受的回执包含十进制字符串格式的 `server_message_id`；这并不代表接收方已打开播放或本地历史已完成回写。
+3. 检查 `accepted`、`returned_destination_matches` 与 `returned_client_id_matches`。回执中的 `server_message_id` 并不能证明接收方已播放该消息，也不能证明历史记录已回写。
 
-在本地代码仓库中直接运行可执行示例，将展示全新的登录二维码并提交一次消息：
+在代码仓库中运行可执行示例，会显示新的登录二维码并提交一次消息：
 
 ```bash
 cargo run --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol --example send_text -- RECIPIENT UNIQUE_TASK_ID "Hello from Rust"
 ```
 
-若服务端接收则输出 `"accepted": true`。运行 `--help` 不会发起任何网络请求。`qr_login`、`sync_once` 与 `protobuf` 演示登录、汇总一页同步消息以及本地编解码操作。`sync_once` 不保存游标；长连接接收方必须先保留同步命令，然后再推进游标。
+服务端接收后会输出 `"accepted": true`。`--help` 不会发起任何网络请求。`qr_login`、`sync_once` 与 `protobuf` 分别演示登录、单页同步以及本地编解码。`sync_once` 不保存游标；持续接收消息的程序必须先保留同步命令，然后再推进游标。
+
+## 发送图片与视频 \{#send-images-and-videos}
+
+在调用协议发送方法之前，请先准备并上传各个副本。每个方法都会处理两种画质：
+
+| 方法 | `upload.original: None` | `upload.original: Some(...)` |
+| --- | --- | --- |
+| `NativeClient::send_image` | 高清与缩略图 | 另包含原图 |
+| `NativeClient::send_video` | 播放版与缩略图 | 另包含原始视频 |
+
+`UploadedImage.original` 现为 `Option<UploadedMedia>`。迁移 Rust 调用方时，请将已有的原图包装为 `Some(...)`，并在读取该字段时处理 `None` 的情况。使用 Daemon [媒体 API](/use/quality/) 的应用程序则改为在发送请求中选择画质。
 
 ## 使用通话媒体 \{#use-calling-media}
 
-引入相同 Rust 库版本的 `wechat-calls`。它不打开任何底层硬件设备或 Tokio 运行时。具体示例请参考其 [Crate 指南](https://docs.rs/crate/wechat-calls/latest)。
+请使用相同的 Rust 库版本添加 `wechat-calls`。它不会打开任何设备，也不会创建 Tokio 运行时。示例请参考其 [Crate 指南](https://docs.rs/crate/wechat-calls/latest)。
 
-| 特性标志 (Features) | 用途说明 |
+| Features | 用途 |
 | --- | --- |
-| 默认 `native-runtime` | 原生会话/媒体集成、protocol 支持与 Opus 编解码 |
-| 禁用默认特性 + `native-opus` | 无需账号依赖的独立编解码器与 PCM 工具集 |
-| 禁用所有默认特性 | 可移植的 PCM、队列、时钟步调与混音支持（支持 WebAssembly） |
+| 默认 `native-runtime` | 原生会话与媒体集成，以及协议和 Opus 支持 |
+| 禁用默认特性 + `native-opus` | 不依赖账号的编解码与 PCM 工具 |
+| 禁用默认特性 | 可移植的 PCM、队列、节拍控制与混音，包括 WebAssembly |
 
-高级 `client.calls()` 门面接口仍在完善中。目前完整的通话操作请使用[通话控制 API](../calls-api/)。[Crate 架构](../../zh-cn/how-it-works/rust-crates/) 详细介绍了各模块分工与依赖。
+高级 `client.calls()` 门面接口尚未完成。目前完整的通话操作请使用[通话 API](../calls-api/)。[Crate 架构](../../how-it-works/rust-crates/)说明了各库之间的依赖关系。
 
-## Profile 写入操作 \{#profile-writes}
+## Profile 写入 \{#profile-writes}
 
-`stage_*` 准备数据字节，`apply_*` 应用逻辑 Profile 记录更新，`publish_*` 将数据安装到 Profile 既有物理路径中。这些是 API 的方法命名，而非官方客户端的原生名称；`apply_*` 与 `publish_*` 存在交集，且不保证跨操作的全局原子性。MMKV 暂存会生成加密数据与匹配的 `.crc` 元数据。发布阶段通过临时文件写入。`WriteOptions::durable_intent_id` 引用预先保存的持久化恢复记录；本库无法自动证明该记录是否存在。
+`stage_*` 准备字节数据，`apply_*` 应用逻辑更新，`publish_*` 将字节安装到 Profile 中的路径。这些是 API 名称，并非官方客户端的名称；`apply_*` 与 `publish_*` 的职责有部分重叠，且不保证整个操作是原子的。MMKV 暂存会生成加密数据以及匹配的 `.crc` 元数据。发布时会使用临时文件。`WriteOptions::durable_intent_id` 指向你事先保存的恢复记录；该库无法验证此记录是否存在。
 
 <Aside title="使用提示">
-账号拥有的异步方法使用底层传输 Worker 线程。在异步应用中调用阻塞引导方法时需要使用阻塞 Worker 线程。使用新的测试账号登录可能会顶掉已有的其他桌面端会话；示例代码仅在内存中保留凭据。持久化保存凭据时请务必加密，并在重试前复核状态存疑的发送。Profile 写入操作需要独占所有权、匹配的密钥和受支持的数据架构。对 Linux Profile 的支持并不代表已兼容官方 Windows/macOS 布局。部分音视频路径需要系统安装 FFmpeg。建议锁定依赖版本并在升级前评估 API 变更。
+账号所有的异步方法使用传输 Worker。在异步应用中，阻塞式引导方法需要阻塞 Worker。新的测试登录可能会使已有的桌面端会话下线；示例仅在内存中保存凭据。保存凭据时请加密，并在重试前先核查状态不确定的发送。Profile 写入器需要独占所有权、匹配的密钥以及受支持的架构。Linux 上的 Profile 支持并不代表兼容 Windows 或 macOS。部分媒体功能需要 FFmpeg。请固定依赖版本，并在升级前检查 API 变更。
 </Aside>

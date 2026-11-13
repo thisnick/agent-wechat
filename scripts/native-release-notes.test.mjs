@@ -5,12 +5,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { changelogEntry, mergeReleaseNotes, renderReleaseNotes } from './native-release-notes.mjs';
 
-async function fixture(t, cliNotes = '### Major Changes\n\n- Native daemon.', pluginNotes = '### Major Changes\n\n- OpenClaw SecretRefs.', desktopNotes = '') {
+async function fixture(t, cliNotes = '### Major Changes\n\n- Native daemon.', pluginNotes = '### Major Changes\n\n- OpenClaw SecretRefs.', desktopNotes = '', crateNotes = '') {
   const root = await mkdtemp(join(tmpdir(), 'native-release-notes-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  for (const [directory, name, notes] of [['cli', '@agent-wechat/cli', cliNotes], ['openclaw-extension', '@agent-wechat/agent-wechat', pluginNotes], ['desktop', '@agent-wechat/desktop', desktopNotes]]) {
+  for (const [directory, name, notes] of [['cli', '@agent-wechat/cli', cliNotes], ['openclaw-extension', '@agent-wechat/agent-wechat', pluginNotes], ['desktop', '@agent-wechat/desktop', desktopNotes], ['rust-crates', '@agent-wechat/rust-crates', crateNotes]]) {
     const path = join(root, 'packages', directory); await mkdir(path, { recursive: true });
-    await writeFile(join(path, 'package.json'), JSON.stringify({ name, version: '1.0.0', ...(directory === 'desktop' ? { private: true } : {}) }));
+    await writeFile(join(path, 'package.json'), JSON.stringify({ name, version: '1.0.0', ...(['desktop', 'rust-crates'].includes(directory) ? { private: true } : {}) }));
     await writeFile(join(path, 'CHANGELOG.md'), `# ${name}\n\n## 1.0.0\n\n${notes}\n\n## 0.16.0\n\n- Old release.\n`);
   }
   return root;
@@ -34,6 +34,19 @@ test('desktop-only changes produce release notes when both npm packages have emp
   assert.match(notes, /## @agent-wechat\/desktop 1\.0\.0\n\n### Minor Changes\n\n- Per-account notifications\./);
   assert.doesNotMatch(notes, /Old release|## @agent-wechat\/cli|## @agent-wechat\/agent-wechat/);
   assert.equal(await renderReleaseNotes({ root, existing: notes }), notes);
+});
+test('a library-only change produces release notes; a library version from before the shared version is left out', async t => {
+  const root = await fixture(t, '', '', '', '### Patch Changes\n\n- Typed errors.');
+  const notes = await renderReleaseNotes({ root });
+  assert.match(notes, /## @agent-wechat\/rust-crates 1\.0\.0\n\n### Patch Changes\n\n- Typed errors\./);
+  assert.doesNotMatch(notes, /Old release|## @agent-wechat\/cli|## @agent-wechat\/desktop/);
+  await writeFile(join(root, 'packages/rust-crates/package.json'), JSON.stringify({ name: '@agent-wechat/rust-crates', version: '0.9.0', private: true }));
+  await assert.rejects(renderReleaseNotes({ root }), /no release notes/);
+  const mixed = await fixture(t, undefined, undefined, '', '- Typed errors.');
+  await writeFile(join(mixed, 'packages/rust-crates/package.json'), JSON.stringify({ name: '@agent-wechat/rust-crates', version: '0.9.0', private: true }));
+  assert.doesNotMatch(await renderReleaseNotes({ root: mixed }), /rust-crates|Typed errors/);
+  await writeFile(join(mixed, 'packages/rust-crates/package.json'), JSON.stringify({ name: '@agent-wechat/other', version: '1.0.0', private: true }));
+  await assert.rejects(renderReleaseNotes({ root: mixed }), /package\/version mismatch/);
 });
 test('desktop release notes remain alongside CLI and plugin changes', async t => {
   const root = await fixture(t, undefined, undefined, '- Desktop settings.');

@@ -104,6 +104,19 @@ test("native outbound ordinary audio stays file and explicit voice stays voice",
   const kinds:string[]=[];let submissions=0;const client={upload:async()=>({id:"upload"}),sendMedia:async(_account:string,input:any,key:string)=>{submissions++;kinds.push(input.kind);assert.equal(key,"stable-key");return sendJob({result:{messageIds:["msg"],chunks:[{state:"accepted",serverMessageId:"18446744073709551614"}]}});}}as unknown as NativeWeChatClient;
   await sendNativeAttachment(client,account,"filehelper",path,false,"stable-key");await sendNativeAttachment(client,account,"filehelper",path,true,"stable-key");assert.deepEqual(kinds,["file","voice"]);assert.equal(submissions,2);
 });
+test("OpenClaw image sends request original quality and image documents remain files", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "native-image-quality-")); t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "image.png"); await writeFile(path, bytes);
+  const selected: any[] = [];
+  const client = { upload: async () => ({ id: "image-source" }),
+    sendMedia: async (_account: string, input: any) => { selected.push(input); return sendJob({ result: { messageIds: ["stored"] } }); },
+    message: async () => ({ id: "stored", accountId: "a", threadId: "filehelper", direction: "outgoing", serverId: "18446744073709551614" }),
+  } as unknown as NativeWeChatClient;
+  await sendNativeAttachment(client, account, "filehelper", path, false, "image-original");
+  await sendNativeAttachment(client, account, "filehelper", path, false, "image-document", undefined, { forceDocument: true });
+  assert.deepEqual(selected.map(request => [request.kind, request.imageQuality, request.videoQuality]), [["image", "original", undefined], ["file", undefined, undefined]]);
+  assert.equal(selected[0].sourceId, "image-source");
+});
 test("video quality reaches the native request, account and video limits apply before staging, and document mode preserves file selection", async t => {
   const directory = await mkdtemp(join(tmpdir(), "native-video-options-")); t.after(() => rm(directory, { recursive: true, force: true }));
   const path = join(directory, "source.mp4"); await writeFile(path, new Uint8Array(1)); await truncate(path, 50 * 1024 * 1024);
@@ -201,22 +214,23 @@ test("remote voice uses the file name when the server labels audio generically",
   await assert.rejects(sendNativeAttachment(voiceClient(staged, kinds), account, "filehelper", "https://example.invalid/speech.bin", true, "remote-unknown"), /explicit audio attachment/);
   assert.deepEqual(staged, ["speech.opus audio/ogg", "voice audio/opus"]); assert.deepEqual(kinds, ["voice", "voice"]);
 });
-test("large file polling allows a 36-minute transfer and a one-hour deadline never resubmits", async t => {
+test("original image and large file polling allow long transfers without resubmission", async t => {
   const directory = await mkdtemp(join(tmpdir(), "native-large-file-wait-")); t.after(() => rm(directory, { recursive: true, force: true }));
   const path = join(directory, "synthetic.bin"); await writeFile(path, new Uint8Array(1)); await truncate(path, 26 * 1024 * 1024);
+  const photo = join(directory, "photo.jpg"); await writeFile(photo, bytes);
   let clock = 0; t.mock.method(Date, "now", () => clock);
-  for (const completes of [true, false]) {
+  for (const source of [path, photo]) for (const completes of [true, false]) {
     clock = 0; let uploads = 0, sends = 0, polls = 0;
     const initial = sendJob({ state: "running", phase: "uploading" });
     const client = { upload: async () => { uploads++; return { id: "upload" }; },
-      sendMedia: async (_a: string, _input: unknown, key: string) => { sends++; assert.equal(key, "same-large-key"); return initial; },
+      sendMedia: async (_a: string, input: any, key: string) => { sends++; assert.equal(key, "same-large-key"); assert.equal(input.imageQuality, source === photo ? "original" : undefined); return initial; },
       job: async (a: string, id: string) => { polls++; clock += completes ? 12 * 60000 : 20 * 60000; assert.equal(a, "a"); assert.equal(id, initial.id);
         return completes && clock >= 30 * 60000 ? sendJob({ result: { messageIds: ["stored-file"] } }) : initial; },
       message: async () => ({ id: "stored-file", accountId: "a", threadId: "filehelper", direction: "outgoing", serverId: "18446744073709551614" }),
       retryJob: async () => assert.fail("Polling cannot retry a send"),
     } as unknown as NativeWeChatClient;
-    if (completes) assert.equal((await sendNativeAttachment(client, account, "filehelper", path, false, "same-large-key")).messageId, "stored-file");
-    else await assert.rejects(sendNativeAttachment(client, account, "filehelper", path, false, "same-large-key"), /job job requires inspection.*do not automatically resend/);
+    if (completes) assert.equal((await sendNativeAttachment(client, account, "filehelper", source, false, "same-large-key")).messageId, "stored-file");
+    else await assert.rejects(sendNativeAttachment(client, account, "filehelper", source, false, "same-large-key"), /job job requires inspection.*do not automatically resend/);
     assert.equal(uploads, 1); assert.equal(sends, 1); assert.equal(polls, 3);
   }
 });
@@ -292,6 +306,23 @@ test("accepted media and split voice wait for complete stored receipts using onl
     assert.equal((result.meta.messageIds as unknown[]).length, voice ? 2 : 1);
     assert.equal(uploads, 1); assert.equal(sends, 1); assert.equal(polls, 2); assert.equal(reads, voice ? 2 : 1);
   }
+});
+test("original image receipts can finish after acceptance without another upload or send", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "native-image-receipt-wait-")); t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "photo.jpg"); await writeFile(path, bytes);
+  let clock = 0, uploads = 0, sends = 0, polls = 0;
+  t.mock.method(Date, "now", () => clock);
+  const initial = sendJob({ result: { nativeReceipt: { status: "server_accepted" }, uploadReadbackVerified: true } });
+  const client = { upload: async () => { uploads++; return { id: "upload" }; },
+    sendMedia: async (_account: string, input: any) => { sends++; assert.equal(input.imageQuality, "original"); return initial; },
+    job: async (accountId: string, id: string) => { polls++; clock += 15000; assert.equal(accountId, "a"); assert.equal(id, initial.id);
+      return { ...initial, result: { messageIds: polls === 2 ? ["stored-image"] : undefined, profileProjection: polls === 2 ? "complete" : "pending" } }; },
+    message: async () => ({ id: "stored-image", accountId: "a", threadId: "filehelper", direction: "outgoing", serverId: "18446744073709551614" }),
+    retryJob: async () => assert.fail("Receipt waiting must not retry"), transferMedia: async () => assert.fail("Receipt waiting must not transfer"),
+  } as unknown as NativeWeChatClient;
+  const result = await sendNativeAttachment(client, account, "filehelper", path, false, "stable-original-image");
+  assert.equal(result.meta.receiptState, "verified"); assert.equal(result.messageId, "stored-image");
+  assert.equal(uploads, 1); assert.equal(sends, 1); assert.equal(polls, 2);
 });
 test("missing or foreign receipt job reads remain explicit uncertainty without another send", async t => {
   const directory = await mkdtemp(join(tmpdir(), "native-missing-send-receipt-")); t.after(() => rm(directory, { recursive: true, force: true }));

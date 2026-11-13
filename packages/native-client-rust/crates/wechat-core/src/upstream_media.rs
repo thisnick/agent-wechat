@@ -17,7 +17,11 @@ pub trait MediaTransport {
         progress: Progress<'_>,
     ) -> Result<DownloadedMedia>;
     fn upload(&self, prepared: &PreparedUpload, progress: Progress<'_>) -> Result<UploadedMedia>;
-    fn upload_image(&self, prepared: &PreparedImageUpload) -> Result<UploadedImage>;
+    fn upload_image(
+        &self,
+        prepared: &PreparedImageUpload,
+        progress: Progress<'_>,
+    ) -> Result<UploadedImage>;
     fn upload_video(
         &self,
         prepared: &PreparedVideoUpload,
@@ -47,8 +51,12 @@ impl MediaTransport for CdnClient {
     fn upload(&self, prepared: &PreparedUpload, progress: Progress<'_>) -> Result<UploadedMedia> {
         self.upload_with_progress(prepared, progress)
     }
-    fn upload_image(&self, prepared: &PreparedImageUpload) -> Result<UploadedImage> {
-        self.upload_image(prepared)
+    fn upload_image(
+        &self,
+        prepared: &PreparedImageUpload,
+        progress: Progress<'_>,
+    ) -> Result<UploadedImage> {
+        self.upload_image_with_progress(prepared, progress)
     }
     fn upload_video(
         &self,

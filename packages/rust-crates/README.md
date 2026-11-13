@@ -16,15 +16,17 @@ Describe the library change and any migration needed by Rust callers.
 
 Use `minor` for compatible additions and `major` for breaking library APIs.
 Include the CLI or OpenClaw package in the same changeset when its behavior also
-changes. A crate change does not automatically bump the applications, or the
-reverse. All five public crates keep the same version and exact internal
-dependency requirements.
+changes. This package is in the same fixed Changesets group as the CLI, OpenClaw
+extension and desktop app: every release gives the crates and the applications
+one shared version, taking the largest bump any of them asks for. All five
+public crates keep that version and exact internal dependency requirements.
 
-`pnpm version-packages` updates the manifests and Cargo lockfiles. Unpublished
-Rust crates keep the application workspace version. The generated Version
-Packages PR can contain application releases, library releases, or both.
+`pnpm version-packages` updates the manifests and Cargo lockfiles. Every release
+publishes the five crates, with an empty changelog entry when no library
+changed.
 
-Library releases use `crates-vVERSION` Git tags and their own GitHub release
+Library releases use `crates-vVERSION` Git tags (the same `VERSION` as the
+application's `vVERSION` tag) and their own GitHub release
 notes. Publication retains the existing `native-release.yml` caller,
 `native-release` environment and crates.io trusted publishers. See
 [RELEASING.md](../../RELEASING.md) for checks and recovery.

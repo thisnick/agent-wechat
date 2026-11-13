@@ -29,9 +29,10 @@ connecting to a running daemon can use the [HTTP API](/use/api/).
 2. Build with Rust 1.93.1+, a C compiler, Make and Perl. Cargo resolves supporting
    crates automatically. Native Opus also needs CMake and a C++ compiler.
 
-Rust libraries are versioned together, independently of the CLI, daemon and
-OpenClaw plugin. Choose a version listed on crates.io; application version numbers
-do not select library versions.
+From the release after 2.3.2, the Rust libraries have the same version number as
+the CLI, daemon and OpenClaw plugin, and every release publishes all five. Earlier
+library versions (up to 2.2.0) were numbered separately; choose a version listed
+on crates.io.
 
 ## Read a stopped profile
 
@@ -97,6 +98,17 @@ Server acceptance prints `"accepted": true`. `--help` makes no network requests.
 `qr_login`, `sync_once` and `protobuf` demonstrate login, one sync page and local
 codecs. `sync_once` saves no cursor; persistent receivers must retain commands
 before advancing it.
+
+## Send images and videos
+
+Prepare and upload the copies before calling the protocol send method. Each method handles both qualities:
+
+| Method | `upload.original: None` | `upload.original: Some(...)` |
+| --- | --- | --- |
+| `NativeClient::send_image` | Standard and thumbnail | Also includes the original image |
+| `NativeClient::send_video` | Playback and thumbnail | Also includes the original video |
+
+`UploadedImage.original` is now `Option<UploadedMedia>`. When migrating Rust callers, wrap an existing original in `Some(...)` and handle `None` when reading the field. Applications using the daemon's [media API](/use/quality/) select quality in the send request instead.
 
 ## Use calling media
 
