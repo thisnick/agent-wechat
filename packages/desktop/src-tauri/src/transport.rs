@@ -38,6 +38,26 @@ pub struct Request {
     pub headers: BTreeMap<String, String>,
     pub body: bool,
 }
+fn forward_headers(
+    mut builder: reqwest::RequestBuilder,
+    headers: &BTreeMap<String, String>,
+) -> reqwest::RequestBuilder {
+    for (name, value) in headers {
+        if [
+            "content-type",
+            "range",
+            "if-match",
+            "if-none-match",
+            "idempotency-key",
+            "accept",
+        ]
+        .contains(&name.to_ascii_lowercase().as_str())
+        {
+            builder = builder.header(name, value);
+        }
+    }
+    builder
+}
 fn request_id(id: &str) -> Result<()> {
     uuid::Uuid::parse_str(id)?;
     Ok(())
@@ -156,26 +176,14 @@ pub async fn http_request(
     if url.origin() != base.origin() {
         return Err("Invalid API origin".into());
     }
-    let mut builder = active
+    let builder = active
         .http
         .request(
             reqwest::Method::from_bytes(request.method.as_bytes()).unwrap(),
             url,
         )
         .bearer_auth(active.key.as_str());
-    for (name, value) in &request.headers {
-        if [
-            "content-type",
-            "range",
-            "if-none-match",
-            "idempotency-key",
-            "accept",
-        ]
-        .contains(&name.to_ascii_lowercase().as_str())
-        {
-            builder = builder.header(name, value);
-        }
-    }
+    let mut builder = forward_headers(builder, &request.headers);
     let mut uploaded = state.uploads.lock().await.remove(&request.id);
     if request.body {
         let upload = uploaded.as_mut().ok_or("Upload was cancelled")?;
@@ -279,6 +287,35 @@ pub async fn http_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn conditional_sticker_mutations_keep_revision_and_native_credentials() {
+        for method in [reqwest::Method::PATCH, reqwest::Method::DELETE] {
+            for name in ["if-match", "If-Match"] {
+                let revision = format!("\"{}\"", "a".repeat(64));
+                let headers = BTreeMap::from([
+                    (name.into(), revision.clone()),
+                    ("Idempotency-Key".into(), "saved-intent".into()),
+                    ("Authorization".into(), "Bearer webview-placeholder".into()),
+                    ("Host".into(), "untrusted.example".into()),
+                ]);
+                let request = forward_headers(
+                    reqwest::Client::new()
+                        .request(
+                            method.clone(),
+                            "http://127.0.0.1/v1/accounts/a/custom-stickers/s",
+                        )
+                        .bearer_auth("native-key"),
+                    &headers,
+                )
+                .build()
+                .unwrap();
+                assert_eq!(request.headers()["if-match"], revision);
+                assert_eq!(request.headers()["idempotency-key"], "saved-intent");
+                assert_eq!(request.headers()["authorization"], "Bearer native-key");
+                assert!(!request.headers().contains_key("host"));
+            }
+        }
+    }
     #[test]
     fn paths_cannot_escape_to_another_origin_or_resource() {
         for value in [

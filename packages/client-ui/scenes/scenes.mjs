@@ -477,8 +477,22 @@ async function stickerFixtures(page, cold = false) {
   const packs = [pack('pack.cats', 'Cozy cats', true), pack('pack.vibes', 'Good vibes', true), pack('pack.hello', 'Little hellos', false)];
   const downloaded = new Set();
   const saved = { items: ids.slice(0, cold ? 48 : 6).map(id => ({ id, caption: null, original: cold ? null : asset(id) })), revision: 'b'.repeat(64), freshness: 'profile' };
+  let importKey;
+  await page.route(/\/jobs\/scene-add$/, route => {
+    const id = 'f'.repeat(32);
+    saved.items = [{ id, caption: 'Imported sticker', original: asset(id) }, ...saved.items.filter(item => item.id !== id)];
+    saved.revision = 'c'.repeat(64);
+    return route.fulfill({json:{id:'scene-add',kind:'sticker_saved',state:'available',result:{profileWriteback:'complete'}}});
+  });
   await page.route(/\/custom-stickers(?:\/[^/?]+)?(?:\?.*)?$/, route => {
     const tail = new URL(route.request().url()).pathname.split('/custom-stickers')[1];
+    if (route.request().method() === 'POST') {
+      const request = route.request();
+      if (tail || request.postDataJSON().source.preparationId !== 'prep-scene' || !request.headers()['idempotency-key']) return route.fulfill({status:400,json:{error:{code:'invalid_sticker_source'}}});
+      if (importKey) throw Error('The UI submitted a successful import twice');
+      importKey = request.headers()['idempotency-key'];
+      return route.fulfill({status:202,json:{id:'scene-add',kind:'sticker_saved',state:'queued'}});
+    }
     if(route.request().method()==='PATCH') {
       const moving=tail.slice(1),after=route.request().postDataJSON().position.afterId;
       const item=saved.items.find(item=>item.id===moving);const rest=saved.items.filter(item=>item.id!==moving);
@@ -501,11 +515,11 @@ async function stickerFixtures(page, cold = false) {
   await page.route(/\/media\/sticker_preview_[^/]+$/, route => route.fulfill({json:{...asset('preview'),id:new URL(route.request().url()).pathname.split('/').pop()}}));
   await page.route(/\/media\/sticker(?:-|_preview_)[^/]+\/content(?:\?.*)?$/, route => route.fulfill({ body: gif, contentType: 'image/gif' }));
 }
-for (const mode of ['picker', 'edit', 'packs', 'pack-detail', 'import', 'lazy-loading', 'loading']) {
+for (const mode of ['picker', 'edit', 'packs', 'pack-detail', 'import', 'import-saved', 'lazy-loading', 'loading']) {
   scenes.push({
     name: `stickers-${mode}`,
     route: 'chat',
-    description: { loading: 'Added pack contents show loading until the response arrives, with empty state only after an empty response.', 'lazy-loading': 'Missing Saved originals and pack thumbnails load on visibility, including after scrolling.', picker: 'Composer-anchored Saved picker with labeled added-pack tabs.', edit: 'Saved edit mode stays inside the composer tray with removal and keyboard placement.', packs: 'Official pack browser shows added and available packs in one dialog.', 'pack-detail': 'Official pack detail has complete contents, captions, membership and a copyable ID.', import: 'Add to Saved reviews prepared files before per-item submission.' }[mode],
+    description: { loading: 'Added pack contents show loading until the response arrives, with empty state only after an empty response.', 'lazy-loading': 'Missing Saved originals and pack thumbnails load on visibility, including after scrolling.', picker: 'Composer-anchored Saved picker with labeled added-pack tabs.', edit: 'Saved edit mode stays inside the composer tray with removal and keyboard placement.', packs: 'Official pack browser shows added and available packs in one dialog.', 'pack-detail': 'Official pack detail has complete contents, captions, membership and a copyable ID.', import: 'Add to Saved reviews prepared files before per-item submission.', 'import-saved': 'A completed asynchronous import refreshes Saved without reopening the picker or resubmitting the item.' }[mode],
     viewports: ['desktop', 'narrow', 'compact'],
     setup: standardWorld,
     target: world => ({ account: ACCOUNT.id, thread: world.mei }),
@@ -587,7 +601,7 @@ for (const mode of ['picker', 'edit', 'packs', 'pack-detail', 'import', 'lazy-lo
           expect(detailReads).toBe(initialReads);
           await page.locator('.sticker-pack-item').first().click(); await expect(page.locator('.sticker-draft')).toHaveCount(0); await expect(page.locator('.sticker-detail-cover img')).toBeVisible(); }
       }
-      if (mode === 'import') {
+      if (mode === 'import' || mode === 'import-saved') {
         await page.route(/\/media-sources$/, route => route.fulfill({ json: { id: 'source-scene', name: 'wave.gif' } }));
         const asset = { id: 'sticker-prepared', state: 'available', contentType: 'image/gif', sha256: 'a'.repeat(64), byteLength: 100 };
         await page.route(/\/sticker-preparations$/, route => route.fulfill({ json: { id: 'prep-scene', state: 'available', result: { id: 'prep-scene', sourceId: 'source-scene', original: asset, preview: asset, contactSheet: asset, width: 96, height: 96, durationMs: 1200, transformations: [], expiresAt: 9999999999 } } }));
@@ -595,6 +609,17 @@ for (const mode of ['picker', 'edit', 'packs', 'pack-detail', 'import', 'lazy-lo
         await page.locator('.sticker-tray').evaluate((tray,encoded)=>{ const transfer=new DataTransfer(); transfer.items.add(new File([Uint8Array.from(atob(encoded),c=>c.charCodeAt(0))],'wave.gif',{type:'image/gif'}));tray.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:transfer}));},fixture);
         await expect(page.locator('.composer-attachments')).toHaveCount(0);
         await expect(page.getByRole('button', { name: 'Add 1', exact: true })).toBeEnabled();
+        if (mode === 'import-saved') {
+          await page.getByRole('button', { name: 'Add 1', exact: true }).click();
+          const dialog = page.getByRole('dialog', { name: 'Add to Saved' });
+          await expect(dialog.getByText('Added', { exact: true })).toBeVisible();
+          await expect(dialog.getByRole('button', { name: 'Add 0', exact: true })).toBeDisabled();
+          await dialog.getByRole('button', { name: 'Done', exact: true }).click();
+          await expect(page.locator('.sticker-cell')).toHaveCount(7);
+          await expect(page.getByRole('button', { name: 'Imported sticker', exact: true })).toBeVisible();
+          await expect(page.locator('.sticker-draft')).toHaveCount(0);
+          await expect(page.getByRole('alert')).toHaveCount(0);
+        }
       }
     },
   });
