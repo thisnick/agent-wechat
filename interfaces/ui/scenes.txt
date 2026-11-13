@@ -19,8 +19,9 @@ scene new-group-avatar | route /{server}/{account}/chats, viewports desktop | A 
 scene quoted-sender-names | route /{server}/{account}/chats/{thread}, viewports desktop+narrow | Quoted replies use supplied author names, cached names for older replies, and You for own messages.
 scene settings | route /{server}/{account}/settings, viewports desktop+narrow | Settings for the app, the hub and the signed-in account.
 scene stickers-edit | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Saved edit mode stays inside the composer tray with removal and keyboard placement.
-scene stickers-import | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Add to Saved reviews prepared files before per-item submission.
-scene stickers-import-saved | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | A completed asynchronous import refreshes Saved without reopening the picker or resubmitting the item.
+scene stickers-import | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Add to Saved has one primary Add action after preview review.
+scene stickers-import-retry | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | A partial import keeps its per-file results open; retry submits only the remaining item before returning to Saved.
+scene stickers-import-saved | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | A completed asynchronous import closes the dialog and selects Saved without reopening the picker or resubmitting the item.
 scene stickers-lazy-loading | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Missing Saved originals and pack thumbnails load on visibility, including after scrolling.
 scene stickers-loading | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Added pack contents show loading until the response arrives, with empty state only after an empty response.
 scene stickers-pack-detail | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Official pack detail has complete contents, captions, membership and a copyable ID.

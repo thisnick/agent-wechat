@@ -16,7 +16,9 @@
 .sticker-unloaded .icon { width: 30px; height: 30px; }
 .sticker-tray footer, .sticker-modal footer { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--line, #e2e9e4); font-size: 12px; }
 .sticker-tray footer span { color: var(--muted, #6b7b70); }
-.sticker-tray footer button:last-child, .sticker-modal footer button:nth-child(2) { color: #19734e; font-weight: 600; }
+.sticker-tray footer button:last-child { color: #19734e; font-weight: 600; }
+.sticker-modal footer button.sticker-add-submit { margin-left: auto; background: var(--accent, #19734e); color: #fff; font-weight: 600; padding: 9px 18px; }
+.sticker-modal footer button.sticker-add-submit:hover:not(:disabled) { background: var(--accent-hover, #166742); }
 .sticker-remove { position: absolute; top: -5px; right: -5px; display: grid; place-items: center; border: 1px solid var(--line, #dbe4df); border-radius: 50%; width: 22px; height: 22px; background: var(--surface, white); color: #b64e4e; cursor: pointer; font-size: 18px; }
 .is-editing .sticker-tile { border-color: #e2e9e4; animation: sticker-jiggle .24s ease-in-out infinite alternate; cursor: grab; touch-action: none; }
 .is-editing .sticker-cell:nth-child(even) .sticker-tile { animation-direction: alternate-reverse; }
@@ -53,7 +55,7 @@
 .dark .sticker-unloaded { background: #343638; color: #8c9690; }
 .dark .sticker-tile:hover, .dark .sticker-pack-item:hover { background: #304039; }
 .dark .sticker-tabs [aria-selected=true], .dark .sticker-browser-tabs [aria-pressed=true] { background: #2b4538; color: #a5dabb; }
-.dark .sticker-tray footer button:last-child, .dark .sticker-modal footer button:nth-child(2) { color: #a5dabb; }
+.dark .sticker-tray footer button:last-child { color: #a5dabb; }
 @media (max-width: 520px) { .sticker-pack-cards { grid-template-columns: 1fr; }.sticker-modal-body { padding: 15px; }.sticker-grid { gap: 6px; padding: 10px; }.sticker-tabs button { padding: 8px; font-size: 11px; }.pack-detail-grid { grid-template-columns: repeat(3,minmax(0,1fr)); } }
 
 .sticker-detail-cover { display:flex; justify-content:center; margin:8px 0; height:112px; }

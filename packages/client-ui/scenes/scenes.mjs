@@ -477,21 +477,24 @@ async function stickerFixtures(page, cold = false) {
   const packs = [pack('pack.cats', 'Cozy cats', true), pack('pack.vibes', 'Good vibes', true), pack('pack.hello', 'Little hellos', false)];
   const downloaded = new Set();
   const saved = { items: ids.slice(0, cold ? 48 : 6).map(id => ({ id, caption: null, original: cold ? null : asset(id) })), revision: 'b'.repeat(64), freshness: 'profile' };
-  let importKey;
-  await page.route(/\/jobs\/scene-add$/, route => {
-    const id = 'f'.repeat(32);
-    saved.items = [{ id, caption: 'Imported sticker', original: asset(id) }, ...saved.items.filter(item => item.id !== id)];
+  const imports = new Map();
+  await page.route(/\/jobs\/scene-add(?:-\d+)?$/, route => {
+    const job = imports.get(new URL(route.request().url()).pathname.split('/').pop());
+    const id = job.stickerId;
+    saved.items = [{ id, caption: job.caption, original: asset(id) }, ...saved.items.filter(item => item.id !== id)];
     saved.revision = 'c'.repeat(64);
-    return route.fulfill({json:{id:'scene-add',kind:'sticker_saved',state:'available',result:{profileWriteback:'complete'}}});
+    return route.fulfill({json:{id:job.id,kind:'sticker_saved',state:'available',result:{profileWriteback:'complete'}}});
   });
   await page.route(/\/custom-stickers(?:\/[^/?]+)?(?:\?.*)?$/, route => {
     const tail = new URL(route.request().url()).pathname.split('/custom-stickers')[1];
     if (route.request().method() === 'POST') {
       const request = route.request();
-      if (tail || request.postDataJSON().source.preparationId !== 'prep-scene' || !request.headers()['idempotency-key']) return route.fulfill({status:400,json:{error:{code:'invalid_sticker_source'}}});
-      if (importKey) throw Error('The UI submitted a successful import twice');
-      importKey = request.headers()['idempotency-key'];
-      return route.fulfill({status:202,json:{id:'scene-add',kind:'sticker_saved',state:'queued'}});
+      const preparationId = request.postDataJSON().source.preparationId;
+      if (tail || !/^prep-scene(?:-\d+)?$/.test(preparationId) || !request.headers()['idempotency-key']) return route.fulfill({status:400,json:{error:{code:'invalid_sticker_source'}}});
+      if ([...imports.values()].some(job => job.preparationId === preparationId)) throw Error('The UI submitted a successful import twice');
+      const sequence = imports.size + 1, id = sequence === 1 ? 'scene-add' : `scene-add-${sequence}`;
+      imports.set(id, {id, preparationId, stickerId:String(100 + sequence).padStart(32, '0'), caption:sequence === 1 ? 'Imported sticker' : `Imported sticker ${sequence}`});
+      return route.fulfill({status:202,json:{id,kind:'sticker_saved',state:'queued'}});
     }
     if(route.request().method()==='PATCH') {
       const moving=tail.slice(1),after=route.request().postDataJSON().position.afterId;
@@ -515,11 +518,11 @@ async function stickerFixtures(page, cold = false) {
   await page.route(/\/media\/sticker_preview_[^/]+$/, route => route.fulfill({json:{...asset('preview'),id:new URL(route.request().url()).pathname.split('/').pop()}}));
   await page.route(/\/media\/sticker(?:-|_preview_)[^/]+\/content(?:\?.*)?$/, route => route.fulfill({ body: gif, contentType: 'image/gif' }));
 }
-for (const mode of ['picker', 'edit', 'packs', 'pack-detail', 'import', 'import-saved', 'lazy-loading', 'loading']) {
+for (const mode of ['picker', 'edit', 'packs', 'pack-detail', 'import', 'import-saved', 'import-retry', 'lazy-loading', 'loading']) {
   scenes.push({
     name: `stickers-${mode}`,
     route: 'chat',
-    description: { loading: 'Added pack contents show loading until the response arrives, with empty state only after an empty response.', 'lazy-loading': 'Missing Saved originals and pack thumbnails load on visibility, including after scrolling.', picker: 'Composer-anchored Saved picker with labeled added-pack tabs.', edit: 'Saved edit mode stays inside the composer tray with removal and keyboard placement.', packs: 'Official pack browser shows added and available packs in one dialog.', 'pack-detail': 'Official pack detail has complete contents, captions, membership and a copyable ID.', import: 'Add to Saved reviews prepared files before per-item submission.', 'import-saved': 'A completed asynchronous import refreshes Saved without reopening the picker or resubmitting the item.' }[mode],
+    description: { loading: 'Added pack contents show loading until the response arrives, with empty state only after an empty response.', 'lazy-loading': 'Missing Saved originals and pack thumbnails load on visibility, including after scrolling.', picker: 'Composer-anchored Saved picker with labeled added-pack tabs.', edit: 'Saved edit mode stays inside the composer tray with removal and keyboard placement.', packs: 'Official pack browser shows added and available packs in one dialog.', 'pack-detail': 'Official pack detail has complete contents, captions, membership and a copyable ID.', import: 'Add to Saved has one primary Add action after preview review.', 'import-saved': 'A completed asynchronous import closes the dialog and selects Saved without reopening the picker or resubmitting the item.', 'import-retry': 'A partial import keeps its per-file results open; retry submits only the remaining item before returning to Saved.' }[mode],
     viewports: ['desktop', 'narrow', 'compact'],
     setup: standardWorld,
     target: world => ({ account: ACCOUNT.id, thread: world.mei }),
@@ -601,24 +604,52 @@ for (const mode of ['picker', 'edit', 'packs', 'pack-detail', 'import', 'import-
           expect(detailReads).toBe(initialReads);
           await page.locator('.sticker-pack-item').first().click(); await expect(page.locator('.sticker-draft')).toHaveCount(0); await expect(page.locator('.sticker-detail-cover img')).toBeVisible(); }
       }
-      if (mode === 'import' || mode === 'import-saved') {
+      if (mode === 'import' || mode === 'import-saved' || mode === 'import-retry') {
+        if (mode === 'import-saved') await page.getByRole('tab', { name: 'Cozy cats' }).click();
         await page.route(/\/media-sources$/, route => route.fulfill({ json: { id: 'source-scene', name: 'wave.gif' } }));
         const asset = { id: 'sticker-prepared', state: 'available', contentType: 'image/gif', sha256: 'a'.repeat(64), byteLength: 100 };
-        await page.route(/\/sticker-preparations$/, route => route.fulfill({ json: { id: 'prep-scene', state: 'available', result: { id: 'prep-scene', sourceId: 'source-scene', original: asset, preview: asset, contactSheet: asset, width: 96, height: 96, durationMs: 1200, transformations: [], expiresAt: 9999999999 } } }));
+        let preparedCount = 0;
+        await page.route(/\/sticker-preparations$/, route => { const id = ++preparedCount === 1 ? 'prep-scene' : `prep-scene-${preparedCount}`; return route.fulfill({ json: { id, state: 'available', result: { id, sourceId: 'source-scene', original: asset, preview: asset, contactSheet: asset, width: 96, height: 96, durationMs: 1200, transformations: [], expiresAt: 9999999999 } } }); });
         const fixture=(await readFile(new URL('../../native-client-rust/crates/wechat-simulator/fixtures/sticker.gif', import.meta.url))).toString('base64');
-        await page.locator('.sticker-tray').evaluate((tray,encoded)=>{ const transfer=new DataTransfer(); transfer.items.add(new File([Uint8Array.from(atob(encoded),c=>c.charCodeAt(0))],'wave.gif',{type:'image/gif'}));tray.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:transfer}));},fixture);
+        await page.locator('.sticker-tray').evaluate((tray,{encoded,count})=>{ const transfer=new DataTransfer(); for(let i=0;i<count;i++) transfer.items.add(new File([Uint8Array.from(atob(encoded),c=>c.charCodeAt(0))],`wave-${i+1}.gif`,{type:'image/gif'}));tray.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:transfer}));},{encoded:fixture,count:mode==='import-retry'?2:1});
         await expect(page.locator('.composer-attachments')).toHaveCount(0);
-        await expect(page.getByRole('button', { name: 'Add 1', exact: true })).toBeEnabled();
+        const dialog = page.getByRole('dialog', { name: 'Add to Saved' });
+        await expect(dialog.getByRole('button', { name: 'Done', exact: true })).toHaveCount(0);
+        await expect(dialog.getByRole('button', { name: mode === 'import-retry' ? 'Add 2' : 'Add 1', exact: true })).toBeEnabled();
         if (mode === 'import-saved') {
+          let finish;
+          await page.route(/\/jobs\/scene-add$/, async route => { await new Promise(resolve => { finish = resolve; }); await route.fallback(); });
           await page.getByRole('button', { name: 'Add 1', exact: true }).click();
-          const dialog = page.getByRole('dialog', { name: 'Add to Saved' });
-          await expect(dialog.getByText('Added', { exact: true })).toBeVisible();
-          await expect(dialog.getByRole('button', { name: 'Add 0', exact: true })).toBeDisabled();
-          await dialog.getByRole('button', { name: 'Done', exact: true }).click();
+          await expect(dialog.getByRole('button', { name: 'Saving…', exact: true })).toBeDisabled();
+          await dialog.press('Escape'); await expect(dialog).toBeVisible();
+          await expect.poll(() => typeof finish).toBe('function'); finish();
+          await expect(dialog).toHaveCount(0);
+          await expect(page.getByRole('tab', { name: 'Saved', exact: true })).toHaveAttribute('aria-selected', 'true');
           await expect(page.locator('.sticker-cell')).toHaveCount(7);
           await expect(page.getByRole('button', { name: 'Imported sticker', exact: true })).toBeVisible();
           await expect(page.locator('.sticker-draft')).toHaveCount(0);
           await expect(page.getByRole('alert')).toHaveCount(0);
+        }
+        if (mode === 'import-retry') {
+          let attempts = 0, retryKey;
+          await page.route(/\/custom-stickers$/, async route => {
+            const request = route.request();
+            if (request.method() === 'POST' && request.postDataJSON().source.preparationId === 'prep-scene-2') {
+              attempts++;
+              if (attempts === 1) { retryKey = request.headers()['idempotency-key']; return route.fulfill({status:503,json:{error:{code:'service_unavailable'}}}); }
+              expect(request.headers()['idempotency-key']).toBe(retryKey);
+            }
+            await route.fallback();
+          });
+          await dialog.getByRole('button', { name: 'Add 2', exact: true }).click();
+          await expect(dialog.getByText('Added', { exact: true })).toHaveCount(1);
+          await expect(dialog.getByRole('alert')).toHaveCount(1);
+          await expect(dialog.getByRole('button', { name: 'Add 1', exact: true })).toBeEnabled();
+          await dialog.getByRole('button', { name: 'Add 1', exact: true }).click();
+          await expect(dialog).toHaveCount(0);
+          await expect(page.locator('.sticker-cell')).toHaveCount(8);
+          expect(attempts).toBe(2);
+          await expect(page.locator('.sticker-draft')).toHaveCount(0);
         }
       }
     },

@@ -268,6 +268,7 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
     if (event.dataTransfer.files.length) review(Array.from(event.dataTransfer.files));
   }
   function review(files: File[]) {
+    if (busy) return;
     setEdit(false);
     const count=(imports?.length ?? 0)+files.length;
     setImports(old => [...(old ?? []),...files.slice(0,Math.max(0,20-(old?.length ?? 0))).map(file => ({ id: crypto.randomUUID(), file, key: crypto.randomUUID(), prepareKey: crypto.randomUUID(), selected: true, fit: false, start: "", duration: "" }))]);
@@ -295,14 +296,19 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
   },[imports]);
   async function addBatch() {
     await act(async () => {
-      for (const item of imports ?? []) {
-        if (!item.selected || !item.prepared || item.added) continue;
+      const selected = (imports ?? []).filter(item => item.selected);
+      let allAdded = selected.length > 0;
+      for (const item of selected) {
+        if (item.added) continue;
+        if (!item.prepared) { allAdded = false; continue; }
         try {
           await waitStickerJob(client, account, await client.addCustomSticker(account, { source: { kind: "prepared", preparationId: item.prepared.id } }, item.key, signal()), signal());
           guard(); updateImport(item.id, { added: true, error: undefined });
-        } catch (error) { if (!signal().aborted) updateImport(item.id, { error: readableError(error) }); }
+        } catch (error) { allAdded = false; if (!signal().aborted) updateImport(item.id, { error: readableError(error) }); }
       }
       await refresh();
+      guard();
+      if (allAdded) { setTab("saved"); setImports(null); }
     });
   }
   const visible = tab === "saved" ? saved.items.slice(0,savedLimit) : packItems.id === tab ? packItems.items : [];
@@ -359,13 +365,13 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
       </> : <><nav className="sticker-browser-tabs"><button aria-pressed={browser === "browse"} onClick={() => void browse("browse")}>{t("stickers.browse")}</button><button aria-pressed={browser === "added"} onClick={() => void browse("added")}>{t("stickers.added")}</button></nav><div className="sticker-pack-cards">{(browser === "added" ? added : catalog).map(pack => <button key={pack.id} onClick={() => void inspect(pack)} className="sticker-pack-card" disabled={busy}><StickerImage client={client} account={account} asset={pack.icon} label={pack.name} acquire /><span><strong>{pack.name}</strong><small>{pack.membership === "added" ? t("stickers.added") : t("stickers.previewPack")}</small></span><Icon name="chevron" /></button>)}</div>{browser === "browse" && cursor && <button disabled={busy} onClick={() => void browse("browse", cursor)}>{t("stickers.morePacks")}</button>}</>}
       {busy && <p role="status">{t("stickers.working")}</p>}{error && <p role="alert" className="sticker-error">{error}</p>}
     </StickerModal>}
-    {imports && <StickerModal label={t("stickers.addToSaved")} close={() => setImports(null)} onDrop={drop}>
-      <header><div><h2>{t("stickers.addToSaved")}</h2><p>{t("stickers.importHint")}</p></div><Button icon="close" label={t("stickers.close")} onClick={() => setImports(null)} /></header>
+    {imports && <StickerModal label={t("stickers.addToSaved")} close={() => { if (!busy) setImports(null); }} onDrop={drop}>
+      <header><div><h2>{t("stickers.addToSaved")}</h2><p>{t("stickers.importHint")}</p></div><Button icon="close" label={t("stickers.close")} disabled={busy} onClick={() => setImports(null)} /></header>
       <div className="sticker-import-list">{imports.map(item => <article key={item.id} className="sticker-import-item"><input type="checkbox" aria-label={t("stickers.includeFile", { name: item.file.name })} checked={item.selected} disabled={busy || item.added} onChange={event => updateImport(item.id, { selected: event.target.checked })} /><StickerImage client={client} account={account} asset={item.prepared?.original} label={item.file.name} /><div><strong>{item.file.name}</strong>{item.added ? <p>{t("stickers.added")}</p> : item.prepared ? <p>{t("stickers.preparedDimensions", { width: item.prepared.width, height: item.prepared.height, seconds: item.prepared.durationMs / 1000 })}</p> : <button disabled={item.busy || busy} onClick={() => void prepare(item)}>{item.busy ? t("stickers.preparing") : t("stickers.prepare")}</button>}
         {item.error && <p role="alert" className="sticker-error">{item.error}</p>}
-        {!item.added && <details><summary>{t("stickers.adjust")}</summary><label><input type="checkbox" checked={item.fit} onChange={event => updateImport(item.id, { fit: event.target.checked, prepared: undefined, prepareKey: crypto.randomUUID(), key: crypto.randomUUID() })} />{t("stickers.fit")}</label><label>{t("stickers.startSeconds")}<input type="number" min="0" step="0.1" value={item.start} onChange={event => updateImport(item.id, { start: event.target.value, prepared: undefined, prepareKey: crypto.randomUUID(), key: crypto.randomUUID() })} /></label><label>{t("stickers.durationSeconds")}<input type="number" min="0.1" max="10" step="0.1" value={item.duration} onChange={event => updateImport(item.id, { duration: event.target.value, prepared: undefined, prepareKey: crypto.randomUUID(), key: crypto.randomUUID() })} /></label></details>}
+        {!item.added && <details><summary>{t("stickers.adjust")}</summary><label><input type="checkbox" disabled={busy} checked={item.fit} onChange={event => updateImport(item.id, { fit: event.target.checked, prepared: undefined, prepareKey: crypto.randomUUID(), key: crypto.randomUUID() })} />{t("stickers.fit")}</label><label>{t("stickers.startSeconds")}<input type="number" disabled={busy} min="0" step="0.1" value={item.start} onChange={event => updateImport(item.id, { start: event.target.value, prepared: undefined, prepareKey: crypto.randomUUID(), key: crypto.randomUUID() })} /></label><label>{t("stickers.durationSeconds")}<input type="number" disabled={busy} min="0.1" max="10" step="0.1" value={item.duration} onChange={event => updateImport(item.id, { duration: event.target.value, prepared: undefined, prepareKey: crypto.randomUUID(), key: crypto.randomUUID() })} /></label></details>}
       </div></article>)}</div>
-      <footer><button disabled={busy} onClick={() => fileInput.current?.click()}>{t("stickers.chooseFiles")}</button><button disabled={busy || !ready} onClick={() => void addBatch()}>{t("stickers.addCount", { count: ready })}</button><button disabled={busy} onClick={() => setImports(null)}>{t("stickers.done")}</button></footer>{error && <p role="alert">{error}</p>}
+      <footer><button disabled={busy} onClick={() => fileInput.current?.click()}>{t("stickers.chooseFiles")}</button><button className="sticker-add-submit" disabled={busy || !ready} onClick={() => void addBatch()}>{busy ? t("stickers.saving") : t("stickers.addCount", { count: ready })}</button></footer>{error && <p role="alert">{error}</p>}
     </StickerModal>}
   </div>;
 }
