@@ -432,7 +432,24 @@ impl ProfileReader {
             Some(CursorKey::Name { name }) => name,
             _ => return Err(ProfileError::InvalidCursor),
         };
-        let c = self.snapshot.open(self.role("contact.db", "contacts")?)?;
+        let database = self.role("contact.db", "contacts")?;
+        let c = self.snapshot.open(database)?;
+        // Keep readable layouts without a deletion column working. When the
+        // marker exists, filter before pagination; historical labels and group
+        // rosters still read the retained rows independently.
+        let has_delete_flag = self
+            .schemas
+            .iter()
+            .filter(|schema| schema.database == database)
+            .flat_map(|schema| &schema.tables)
+            .filter(|table| table.name == "contact")
+            .flat_map(|table| &table.columns)
+            .any(|column| column.name == "delete_flag");
+        let present = if has_delete_flag {
+            "coalesce(delete_flag,0)=0"
+        } else {
+            "1"
+        };
         register_search_lower(&c)?;
         let terms = search_terms(q.search.as_deref());
         let mut values = vec![Value::Text(after)];
@@ -444,7 +461,7 @@ impl ProfileReader {
         let limit = values.len() + 1;
         values.push(Value::Integer((n + 1) as i64));
         let mut s = c.prepare(&format!(
-            "SELECT * FROM contact WHERE username>?1 AND coalesce(delete_flag,0)=0{clause} ORDER BY username LIMIT ?{limit}"
+            "SELECT * FROM contact WHERE username>?1 AND {present}{clause} ORDER BY username LIMIT ?{limit}"
         ))?;
         let records = s
             .query_map(rusqlite::params_from_iter(values.iter()), raw)?

@@ -404,6 +404,69 @@ fn contacts_threads_groups_and_room_aliases() {
     assert_eq!(m.items[0].room_display_name.as_deref(), Some("Room"));
 }
 #[test]
+fn contact_catalog_filters_deleted_rows_before_search_pagination() {
+    let d = fixture();
+    let c = Connection::open(d.path().join("account/db_storage/contact/contact.db")).unwrap();
+    c.execute_batch(
+        "ALTER TABLE contact ADD COLUMN delete_flag INTEGER;
+         UPDATE contact SET delete_flag=1 WHERE username='peer';
+         INSERT INTO contact(username,nick_name,remark,alias,local_type,delete_flag) VALUES
+         ('a_deleted','Catalog fixture','','',1,1),
+         ('b_present','Catalog fixture','','',1,0),
+         ('c_deleted','Catalog fixture','','',1,2),
+         ('d_nullable','Catalog fixture','','',1,NULL),
+         ('e_malformed','Catalog fixture','','',1,'unknown'),
+         ('z_deleted','Catalog fixture','','',1,-1);",
+    )
+    .unwrap();
+    drop(c);
+    let r = reader(d.path());
+    let all = r.contacts(&ListQuery::default()).unwrap();
+    assert_eq!(
+        all.items
+            .iter()
+            .map(|item| item.username.as_str())
+            .collect::<Vec<_>>(),
+        ["b_present", "d_nullable", "room@chatroom", "self"]
+    );
+    let query = ListQuery {
+        search: Some("Catalog fixture".into()),
+        limit: Some(1),
+        ..Default::default()
+    };
+    let first = r.contacts(&query).unwrap();
+    assert_eq!(first.items[0].username, "b_present");
+    let next = r
+        .contacts(&ListQuery {
+            cursor: Some(first.next_cursor.unwrap()),
+            ..query
+        })
+        .unwrap();
+    assert_eq!(next.items[0].username, "d_nullable");
+    assert!(next.next_cursor.is_none());
+    assert!(r
+        .contacts(&ListQuery {
+            search: Some("a_deleted".into()),
+            ..Default::default()
+        })
+        .unwrap()
+        .items
+        .is_empty());
+    assert_eq!(r.labels().unwrap()["peer"], "Work");
+    assert_eq!(
+        r.group_members("room@chatroom", &ListQuery::default())
+            .unwrap()
+            .items[0]
+            .username,
+        "peer"
+    );
+    assert_eq!(
+        r.threads(&ListQuery::default()).unwrap().items[0].label,
+        "Work"
+    );
+}
+
+#[test]
 fn read_requires_quiescence_and_plaintext_opt_in() {
     let d = fixture();
     let loc = ProfileLocation::new(d.path().join("account")).unwrap();
