@@ -10,6 +10,7 @@ use base64::{
 };
 use md5::Md5;
 use rusqlite::{
+    functions::FunctionFlags,
     params,
     types::{Value, ValueRef},
     Connection, OptionalExtension, Row,
@@ -35,6 +36,23 @@ fn search_terms(search: Option<&str>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// SQLite's built-in lower() only folds ASCII. Use the same Unicode mapping
+/// as the in-memory catalog, without changing the official database schema.
+fn register_search_lower(connection: &Connection) -> Result<()> {
+    connection.create_scalar_function(
+        "wechat_search_lower",
+        1,
+        FunctionFlags::SQLITE_UTF8
+            | FunctionFlags::SQLITE_DETERMINISTIC
+            | FunctionFlags::SQLITE_INNOCUOUS,
+        |context| {
+            let text = context.get::<String>(0)?;
+            Ok(text.to_lowercase())
+        },
+    )?;
+    Ok(())
+}
+
 /// Build a case-insensitive AND-of-terms predicate over `columns`.
 ///
 /// Every term must appear in at least one column, but different terms may match
@@ -50,7 +68,9 @@ fn search_clause(columns: &[&str], terms: &[String], params: &mut Vec<Value>) ->
             if i > 0 {
                 clause.push_str(" OR ");
             }
-            clause.push_str(&format!("instr(lower(coalesce({column}, '')), ?{idx})>0"));
+            clause.push_str(&format!(
+                "instr(wechat_search_lower(coalesce({column}, '')), ?{idx})>0"
+            ));
         }
         clause.push(')');
     }
@@ -413,6 +433,7 @@ impl ProfileReader {
             _ => return Err(ProfileError::InvalidCursor),
         };
         let c = self.snapshot.open(self.role("contact.db", "contacts")?)?;
+        register_search_lower(&c)?;
         let terms = search_terms(q.search.as_deref());
         let mut values = vec![Value::Text(after)];
         let clause = search_clause(
@@ -1376,6 +1397,7 @@ impl ProfileReader {
         {
             return Err(ProfileError::InvalidMetadata);
         }
+        register_search_lower(&c)?;
         let terms = search_terms(q.search.as_deref());
         let mut values = vec![Value::Text(room_row.0.to_string()), Value::Text(after)];
         let clause = search_clause(

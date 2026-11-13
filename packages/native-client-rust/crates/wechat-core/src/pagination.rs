@@ -567,7 +567,7 @@ const CATALOG_SEARCH_FIELDS: [&str; 6] =
 
 /// Split a user query into lowercased terms. Whitespace-separated terms are
 /// combined with AND semantics, so a nickname and a WeChat ID can be supplied
-/// together (for example `"Serena serera2008"`). An empty query matches all.
+/// together (for example `"Mira wxid_example"`). An empty query matches all.
 fn catalog_search_terms(search: Option<&str>) -> Vec<String> {
     search
         .map(|s| {
@@ -1072,14 +1072,14 @@ mod tests {
 
     #[test]
     fn catalog_search_single_term_matches_any_field() {
-        let item = json!({"id":"serera2008","displayName":"Serena"});
+        let item = json!({"id":"wxid_example","displayName":"Mira"});
         assert!(catalog_item_matches(
             &item,
-            &catalog_search_terms(Some("serera"))
+            &catalog_search_terms(Some("wxid_"))
         ));
         assert!(catalog_item_matches(
             &item,
-            &catalog_search_terms(Some("SERENA"))
+            &catalog_search_terms(Some("MIRA"))
         ));
         assert!(!catalog_item_matches(
             &item,
@@ -1089,29 +1089,29 @@ mod tests {
 
     #[test]
     fn catalog_search_terms_are_anded_across_fields() {
-        let item = json!({"id":"serera2008","displayName":"Serena","nickname":"Serena"});
+        let item = json!({"id":"wxid_example","displayName":"Mira","nickname":"Mira"});
         // Nickname and WeChat ID may be combined in either order.
         assert!(catalog_item_matches(
             &item,
-            &catalog_search_terms(Some("serena serera2008"))
+            &catalog_search_terms(Some("mira wxid_example"))
         ));
         assert!(catalog_item_matches(
             &item,
-            &catalog_search_terms(Some("serera2008 serena"))
+            &catalog_search_terms(Some("wxid_example mira"))
         ));
         // A term that matches no field rejects the whole query.
         assert!(!catalog_item_matches(
             &item,
-            &catalog_search_terms(Some("serena otherid"))
+            &catalog_search_terms(Some("mira otherid"))
         ));
     }
 
     #[test]
     fn catalog_search_ignores_extra_whitespace_and_empty_queries() {
-        let item = json!({"id":"serera2008","displayName":"Serena"});
+        let item = json!({"id":"wxid_example","displayName":"Mira"});
         assert!(catalog_item_matches(
             &item,
-            &catalog_search_terms(Some("  serena   serera2008  "))
+            &catalog_search_terms(Some("  mira   wxid_example  "))
         ));
         assert!(catalog_item_matches(
             &item,

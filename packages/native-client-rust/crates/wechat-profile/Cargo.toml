@@ -18,7 +18,7 @@ wechat-media = { path = "../wechat-media", version = "=2.2.0" }
 wechat-platform = { path = "../wechat-platform", version = "=2.2.0" }
 serde.workspace = true
 serde_json.workspace = true
-rusqlite = { workspace = true, features = ["limits", "hooks"] }
+rusqlite = { workspace = true, features = ["limits", "hooks", "functions"] }
 sha2.workspace = true
 tempfile.workspace = true
 thiserror = "2"
