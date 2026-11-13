@@ -2116,9 +2116,9 @@ fn validate_destination(value: &str) -> Result<()> {
     }
     Ok(())
 }
-/// A normal video reply may carry the CDN's observed transformed
-/// representation (subtype 9) when the response digest validated. Treat that as
-/// the requested normal variant; original-variant checks stay strict.
+/// Downloads have passed the transport's integrity checks. A returned video
+/// representation 9 can satisfy a normal-video request; original requests keep
+/// their descriptor's exact identity and representation checks.
 fn received_video_variant(
     kind: MediaKind,
     variant: MediaVariant,
@@ -2130,7 +2130,8 @@ fn received_video_variant(
         .is_none_or(|v| v == quality.filetype());
     let observed_normal = kind == MediaKind::Video
         && variant == MediaVariant::Normal
-        && media.verified_video_representation
+        && quality == MediaQuality::Video
+        && media.requested_quality == MediaQuality::Video
         && media.substituted_filetype == Some(9);
     (ordinary || observed_normal).then_some(variant)
 }
@@ -6391,27 +6392,16 @@ mod tests {
     }
 }
 #[test]
-fn observed_video_subtype_requires_verified_normal_video_representation() {
+fn observed_video_subtype_only_satisfies_normal_video_requests() {
     let mut media = wechat_protocol::media::DownloadedMedia {
         bytes: vec![],
         requested_quality: wechat_protocol::media::MediaQuality::Video,
         substituted_filetype: Some(9),
-        verified_video_representation: false,
         picture_format: None,
         md5: String::new(),
         sha256: String::new(),
         advertised_size_matches: Some(false),
     };
-    assert_eq!(
-        received_video_variant(
-            MediaKind::Video,
-            MediaVariant::Normal,
-            wechat_protocol::media::MediaQuality::Video,
-            &media
-        ),
-        None
-    );
-    media.verified_video_representation = true;
     assert_eq!(
         received_video_variant(
             MediaKind::Video,
@@ -6430,6 +6420,26 @@ fn observed_video_subtype_requires_verified_normal_video_representation() {
         ),
         None
     );
+    assert_eq!(
+        received_video_variant(
+            MediaKind::Image,
+            MediaVariant::Normal,
+            MediaQuality::Video,
+            &media
+        ),
+        None
+    );
+    media.requested_quality = MediaQuality::Thumbnail;
+    assert_eq!(
+        received_video_variant(
+            MediaKind::Video,
+            MediaVariant::Normal,
+            MediaQuality::Video,
+            &media
+        ),
+        None
+    );
+    media.requested_quality = MediaQuality::Video;
     media.substituted_filetype = Some(10);
     assert_eq!(
         received_video_variant(
