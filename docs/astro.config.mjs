@@ -93,7 +93,7 @@ export default defineConfig({
             { label: 'Agent tools', translations: { 'zh-CN': '智能体工具' }, slug: 'openclaw/tools' },
             { label: 'Read receipts', translations: { 'zh-CN': '已读回执' }, slug: 'openclaw/read-receipts' },
           ] },
-          { label: 'Skills', translations: { 'zh-CN': 'Skills' }, slug: 'use/skills' },
+          { label: 'Skills', slug: 'use/skills' },
           { label: 'HTTP API', translations: { 'zh-CN': 'HTTP API' }, slug: 'use/api' },
         ] },
         { label: 'How it works', translations: { 'zh-CN': '工作原理' }, items: [

@@ -58,6 +58,7 @@ jobs:
         with:
           filters: |
             helpers:
+              - 'packages/skills/**'
               - 'scripts/native-ci-*'
               - 'scripts/native-build-release*'
               - 'scripts/native-release-preflight*'
@@ -185,6 +186,7 @@ jobs:
           python3 scripts/native-build-release.test.py
           node --test scripts/native-ci-artifact.test.mjs scripts/native-ci-media-assertions.test.mjs scripts/native-release-preflight.test.mjs scripts/native-merge-release.test.mjs
           node --test scripts/native-image-release.test.mjs
+          bash packages/skills/agent-wechat/scripts/test-skill.sh
 
   docs:
     needs: changes

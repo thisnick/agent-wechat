@@ -1,91 +1,33 @@
-# `wx` CLI Exit Codes and Uncertain State Handling
+# Exit codes and existing operations
 
-When writing automation scripts or invoking `wx` from an AI agent, evaluate the command exit code and JSON response fields to safely handle outcomes and prevent duplicate actions.
+Inspect the returned object as well as the process exit code. Zero also covers successfully queued work.
 
----
+| Exit | Meaning | Next step |
+| --- | --- | --- |
+| 0 | The command returned a result; work may still be pending | Inspect `state` and any returned ID |
+| 1 | Other operation failure | Read the error and existing operation |
+| 2 | Invalid arguments, configuration, or account selection | Correct the input or select the intended account |
+| 3 | The configured endpoint is unavailable | Check routing/connectivity; preserve any submitted intent key |
+| 4 | Access denied | Use appropriately authorized existing credentials |
+| 5 | Account needs login | Start login only when requested or authorized |
+| 6 | Phone approval or another challenge is required | Present the challenge to the user |
+| 7 | The client's wait ended | Inspect the existing job; daemon work continues |
+| 8 | Outcome is unknown or needs review | Stop submission and inspect the existing operation |
+| 9 | Failed, rejected, cancelled, expired, unavailable, unsupported, or not cached | Inspect the specific state and reason |
+| 130 | Client wait interrupted | Work may still be running; inspect its ID |
 
-## 1. Process Exit Code Table
+These values come from the native CLI outcome handling. An endpoint error during a send does not establish that nothing was submitted.
 
-| Exit Code | Status Name | Meaning and Scenario | Agent Action |
-| :---: | :--- | :--- | :--- |
-| **`0`** | **Success** | Operation succeeded. Local and remote states are confirmed. | Proceed with next task. |
-| **`1`** | **Failure** | Definite failure (e.g. invalid arguments, target not found, server rejected request, network unreachable). | Inspect stderr or JSON `error` field to report or adjust parameters. May retry if appropriate. |
-| **`8`** | **Uncertain / NeedsReview** | **Outcome uncertain (core safety guardrail)**.<br>The request was submitted to the network, but due to timeout, connection reset, or lost ACK, **it is unknown whether the server processed the send**. | **DO NOT BLINDLY RETRY!**<br>Never re-send the same payload immediately. Poll using the returned `idempotency_key`, `operation_id`, or `send_id`. |
-| **`64`** | **Usage Error** | CLI argument parsing error (missing required arguments, incompatible options). | Fix command invocation arguments. |
+## JSON
 
----
+With `--json`, stdout contains the actual result object. It is not wrapped in a generic `outcome/data` envelope. Lists expose `items`/`nextCursor`; jobs and operations expose their own IDs and states.
 
-## 2. In-Depth Guide: Handling Exit Code 8 (Uncertain / NeedsReview)
+Parser and transport failures write JSON to stderr with `error.code`, `error.message`, and `error.retryable`. A returned failed job can instead be a normal stdout result with a nonzero exit code. Capture both channels.
 
-### 1. Why does Exit Code 8 happen?
-In distributed instant messaging and transactional systems, network communication is subject to the **Two Generals' Problem**:
-* The client sends a message or recall request to WeChat servers.
-* WeChat servers receive the request, commit it to their database, and route it to recipients.
-* Just before the server's acknowledgement (HTTP ACK) reaches the client, the network drops or times out.
+## Recovery
 
-If the client assumes failure and blindly retries sending, the recipient will receive duplicate messages, spamming group chats or causing conflicting actions.
+For a media job, inspect `wx --json --account ACCOUNT jobs get JOB_ID`. For account/group work use `operations get`; for a text-send receipt use `messages send-status`. Keep the original idempotency key, parameters, and returned IDs.
 
-### 2. Standard Handling Procedure for Exit Code 8
+Do not assume that a sync or a matching message in history proves an uncertain intent was accepted. Do not create another key or resubmit because polling or the client's wait ended. If no operation ID was returned, report the original key and failure for reconciliation instead of inventing a lookup command.
 
-When an agent or script encounters exit code `8`:
-
-```mermaid
-flowchart TD
-  Exit8["Encounter exit code 8 (Uncertain)"] --> Extract["Extract sendId / idempotencyKey from output"]
-  Extract --> Query["Run wx messages sends get <SEND_ID>"]
-  Query --> Check{Query status result}
-  Check -->|completed| Done["Confirmed by cloud: treat as success"]
-  Check -->|failed / rejected| Fail["Server rejected: confirmed failure"]
-  Check -->|still pending| Wait["Wait a few seconds, retry query, or run wx sync"]
-```
-
-1. **Extract IDs**: Parse `sendId`, `operationId`, or the previously supplied `idempotency_key` from the JSON output.
-2. **Poll Status**:
-   ```bash
-   wx messages sends get <SEND_ID>
-   # Or lookup by idempotency key:
-   wx messages sends lookup --idempotency-key <YOUR_KEY>
-   ```
-3. **Reconcile via NewSync**:
-   * Run `wx sync` to fetch downstream events.
-   * If the message was accepted on the server, a send confirmation event will appear in the incremental sync stream.
-
----
-
-## 3. `--json` Output Structure Specification
-
-When the `--json` flag is provided, `wx` outputs structured JSON:
-
-### 1. Success Response (Exit Code 0)
-```json
-{
-  "outcome": "success",
-  "data": {
-    "messageId": "msg_local_123456",
-    "serverId": "8899001122334455",
-    "createdAt": 1729900000,
-    "receiptState": "accepted"
-  }
-}
-```
-
-### 2. Uncertain Response (Exit Code 8)
-```json
-{
-  "outcome": "uncertain",
-  "receiptState": "needs_review",
-  "sendId": "send_job_789abc",
-  "idempotencyKey": "unique_task_001",
-  "retryable": false,
-  "reason": "Request submitted but response timed out after 30s"
-}
-```
-
-### 3. Definite Failure Response (Exit Code 1)
-```json
-{
-  "outcome": "failure",
-  "code": 403,
-  "error": "Account not authorized to send to this contact"
-}
-```
+Local writeback repair uses already owned bytes and receipts; it does not resend messages. Retry only when the operation is eligible and the requested recovery is understood. See the installed `wx jobs retry --help` and the product documentation.
