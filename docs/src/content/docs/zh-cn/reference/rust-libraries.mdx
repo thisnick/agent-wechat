@@ -3,7 +3,7 @@ title: Rust 开发库
 description: 在 Rust 中使用原生微信协议、Profile 与语音媒体库。
 banner:
   content: "本页面由机器翻译，尚未经过人工审校。"
-sourceHash: 77cc3c81c0bf
+sourceHash: 4b0bc4baeaf8
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -53,10 +53,10 @@ fn contacts(profile: &str, keys_path: &str) -> wechat_profile::Result<()> {
 
 ## 发送单条文本消息 \{#send-one-text-message}
 
-操作大多是 `NativeClient` 上的方法。应用程序负责凭据存储、恢复与 Profile 回写。
+操作均为 `NativeClient` 上的方法。应用程序负责凭据存储、恢复与 Profile 回写。
 
 1. 调用 `start_qr_login`，轮询直至 `LoginStatus::Approved`，然后调用 `complete_login`。将返回的 `AccountState` 传入 `NativeClient::from_account(state, options)`。克隆出的句柄共享同一个账号所有者。操作不再接受单独的可变账号状态。
-2. 提交前，先记录操作、唯一任务 ID 与 Unix 秒级时间戳。收件人请使用其确切的微信号：
+2. 提交前，先记录操作、唯一任务 ID 与 Unix 秒级时间戳。收件人请使用其确切的微信用户名（username）：
 
    ```rust
    use wechat_protocol::{wire, NativeClient, TextSendOptions, TextSendResult};
@@ -82,6 +82,14 @@ cargo run --manifest-path packages/native-client-rust/Cargo.toml -p wechat-proto
 ```
 
 服务端接收后会输出 `"accepted": true`。`--help` 不会发起任何网络请求。`qr_login`、`sync_once` 与 `protobuf` 分别演示登录、单页同步以及本地编解码。`sync_once` 不保存游标；持续接收消息的程序必须先保留同步命令，然后再推进游标。
+
+## 表情 \{#stickers}
+
+`wechat-media::prepare_sticker` 会为调用方拥有的源文件进行准备（可选择适配或裁剪），并返回 GIF、静态图和抽样帧输出。`sticker_export_gif` 会保留已有的 GIF 字节；`export_sticker_pack` 会在调用方的文件系统中写入一个所选表情包以及可续传的校验和索引。
+
+`NativeClient` 提供“我的表情”的分页与元数据、有上限的上传分块、“我的表情”的修改操作、表情包的分页、详情与说明，以及原始的成员关系确认。`StickerId::parse` 会规范化内容标识；`StickerPackId::parse` 则将产品标识分开保存。使用这些传输方法的应用需自行负责提交日志和 Profile 回写。读取缓存的 Profile 数据绝不会获取缺失的媒体。
+
+在本工作区内，`wechat-core` 提供 `core.stickers(account)?`，这是一个绑定账号的异步句柄，支持 `list`、`get`、`media`、`prepare`、`add_prepared`、`save_received`、`move_after`、`remove`、`packs`、`browse`、`pack`、`items`、`add_pack`、`remove_pack`、`acquire`、`acquire_pack`、`acquire_preview`、`send`、`sync` 和 `job`。它负责账号门控并使用已有任务；文件系统导出不属于该句柄。`wechat-core` 是 Daemon 的实现，并非单独发布的 HTTP 客户端 crate。外部应用可以使用[表情 REST 资源](/reference/stickers/)。
 
 ## 发送图片与视频 \{#send-images-and-videos}
 

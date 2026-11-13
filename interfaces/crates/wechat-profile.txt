@@ -11,6 +11,7 @@ enum wechat_profile::KeyInfoSource | enum | MISSING DOC
 enum wechat_profile::NativeGroupEdit | enum<'a> | Effects established for ordinary Linux group controls. This writer never deletes chat history and never treats a membership delta as a full roster.
 enum wechat_profile::ProfileError | enum | MISSING DOC
 enum wechat_profile::SqlValue | enum | MISSING DOC
+enum wechat_profile::StickerPackCacheKind | enum | Persisted aggregate or icon file of one official pack.
 enum wechat_profile::ThreadExitReadOutcome | enum | MISSING DOC
 enum wechat_profile::VerifiedImageQuality | enum | MISSING DOC
 enum wechat_profile::VideoQuality | enum | MISSING DOC
@@ -137,6 +138,12 @@ field wechat_profile::InitializedLayout::databases | alloc::vec::Vec<alloc::stri
 field wechat_profile::InitializedLayout::encrypted | bool | MISSING DOC
 field wechat_profile::InitializedLayout::official_startup_verified | bool | MISSING DOC
 field wechat_profile::InitializedLayout::unsupported | alloc::vec::Vec<alloc::string::String> | MISSING DOC
+field wechat_profile::InstalledPackSticker::captions | alloc::vec::Vec<(alloc::string::String, alloc::string::String)> | Caption language and text pairs, sorted by language.
+field wechat_profile::InstalledPackSticker::id | alloc::string::String | Official content identity.
+field wechat_profile::InstalledPackSticker::sort_order | i64 | Official sort key within this pack.
+field wechat_profile::InstalledStickerPack::download_status | core::option::Option<i64> | Retained download status. It is not interpreted as membership.
+field wechat_profile::InstalledStickerPack::id | alloc::string::String | Official package identity.
+field wechat_profile::InstalledStickerPack::name | core::option::Option<alloc::string::String> | Official display name when retained locally.
 field wechat_profile::KeyFile::account_binding | alloc::string::String | MISSING DOC
 field wechat_profile::KeyFile::databases | alloc::collections::btree::map::BTreeMap<alloc::string::String, wechat_profile::keys::DatabaseKey> | MISSING DOC
 field wechat_profile::KeyFile::image_dat | core::option::Option<wechat_profile::keys::ImageDatKey> | MISSING DOC
@@ -272,6 +279,26 @@ field wechat_profile::SavedLoginProjection::cookie | &'a [u8] | MISSING DOC
 field wechat_profile::SavedLoginProjection::key_info | &'a [u8] | MISSING DOC
 field wechat_profile::SavedLoginProjection::local_device_id64 | core::option::Option<u64> | MISSING DOC
 field wechat_profile::SavedLoginProjection::pc_account_name | core::option::Option<&'a str> | MISSING DOC
+field wechat_profile::SavedSticker::caption | core::option::Option<alloc::string::String> | Optional official caption; an empty caption does not imply a name.
+field wechat_profile::SavedSticker::id | alloc::string::String | Official content identity, retained as lowercase hexadecimal.
+field wechat_profile::SavedStickerProjection::order | alloc::vec::Vec<alloc::string::String> | Complete authoritative list, newest first. Partial pages are not valid input.
+field wechat_profile::SavedStickerProjection::records | alloc::vec::Vec<wechat_profile::stickers::SavedStickerRecord> | Complete records supplied by the verified metadata/object reconciliation.
+field wechat_profile::SavedStickerProjection::removed_metadata | alloc::vec::Vec<alloc::string::String> | Exact type-3 metadata identities selected for removal; unrelated orphan metadata is preserved rather than inferred absent from collection order.
+field wechat_profile::SavedStickerRecord::activity_id | alloc::string::String | Official activity identity.
+field wechat_profile::SavedStickerRecord::aes_key | alloc::string::String | Retained encrypted-representation key.
+field wechat_profile::SavedStickerRecord::auth_key | alloc::string::String | Retained source authorization.
+field wechat_profile::SavedStickerRecord::caption | alloc::string::String | Official optional caption, empty when absent.
+field wechat_profile::SavedStickerRecord::cdn_url | alloc::string::String | Original source.
+field wechat_profile::SavedStickerRecord::designer_id | alloc::string::String | Official designer identity.
+field wechat_profile::SavedStickerRecord::encrypt_url | alloc::string::String | Encrypted representation source.
+field wechat_profile::SavedStickerRecord::extern_md5 | alloc::string::String | External representation identity.
+field wechat_profile::SavedStickerRecord::extern_url | alloc::string::String | External representation source.
+field wechat_profile::SavedStickerRecord::id | alloc::string::String | Content identity.
+field wechat_profile::SavedStickerRecord::product_id | alloc::string::String | Retained product/source identity.
+field wechat_profile::SavedStickerRecord::thumb_url | alloc::string::String | Thumbnail source.
+field wechat_profile::SavedStickerRecord::tp_url | alloc::string::String | Retained alternate thumbnail/source URL.
+field wechat_profile::SavedStickers::items | alloc::vec::Vec<wechat_profile::stickers::SavedSticker> | Items in picker order.
+field wechat_profile::SavedStickers::revision | alloc::string::String | Digest of ordered identities, suitable for a collection precondition.
 field wechat_profile::SchemaReport::application_id | i64 | MISSING DOC
 field wechat_profile::SchemaReport::database | alloc::string::String | MISSING DOC
 field wechat_profile::SchemaReport::fingerprint | alloc::string::String | MISSING DOC
@@ -289,6 +316,29 @@ field wechat_profile::SqlValue::Real::0 | alloc::string::String | -
 field wechat_profile::SqlValue::Text::0 | alloc::string::String | -
 field wechat_profile::SqlValue::TextBytes::0 | alloc::string::String | -
 field wechat_profile::StagedMmkv::changed_keys | alloc::vec::Vec<alloc::string::String> | MISSING DOC
+field wechat_profile::StickerPackCaptionRecord::caption | alloc::string::String | Official caption text.
+field wechat_profile::StickerPackCaptionRecord::id | alloc::string::String | Original content identity.
+field wechat_profile::StickerPackCaptionRecord::language | alloc::string::String | Official locale or literal `default` fallback.
+field wechat_profile::StickerPackFileRecord::file_type | i64 | Native file type, distinct from a message type.
+field wechat_profile::StickerPackFileRecord::id | alloc::string::String | Original content identity.
+field wechat_profile::StickerPackFileRecord::original_offset | u32 | Offset in the decrypted original aggregate.
+field wechat_profile::StickerPackFileRecord::original_size | u32 | Plaintext original size.
+field wechat_profile::StickerPackFileRecord::sort_order | i64 | Native ordinal in the pack, preserved from its supplied order.
+field wechat_profile::StickerPackFileRecord::thumbnail_offset | u32 | Offset in the decrypted thumbnail aggregate.
+field wechat_profile::StickerPackFileRecord::thumbnail_size | u32 | Plaintext thumbnail size.
+field wechat_profile::StickerPackRecord::author | alloc::string::String | Literal author column.
+field wechat_profile::StickerPackRecord::copyright | alloc::string::String | Official copyright text.
+field wechat_profile::StickerPackRecord::download_status | i64 | Retained native download state; verified cache availability is checked separately.
+field wechat_profile::StickerPackRecord::full_description | alloc::string::String | Literal Linux full-description column.
+field wechat_profile::StickerPackRecord::id | alloc::string::String | Official product identity.
+field wechat_profile::StickerPackRecord::install_time | i64 | Retained installation timestamp; zero is not replaced with the current time.
+field wechat_profile::StickerPackRecord::introduction | alloc::string::String | Literal Linux introduction column; distinct from the wire display-description alias.
+field wechat_profile::StickerPackRecord::name | alloc::string::String | Official package name.
+field wechat_profile::StickerPackRecord::panel_url | alloc::string::String | Private native panel source.
+field wechat_profile::StickerPackRecord::payment_status | i64 | Retained payment state, never inferred from a localized price string.
+field wechat_profile::StickerPackRecord::remove_time | i64 | Retained removal timestamp.
+field wechat_profile::StickerPackRecord::sort_order | i64 | Official package ordering value.
+field wechat_profile::StickerPackRecord::store_icon_url | alloc::string::String | Private native icon source.
 field wechat_profile::TableSchema::columns | alloc::vec::Vec<wechat_profile::schema::ColumnSchema> | MISSING DOC
 field wechat_profile::TableSchema::definition | core::option::Option<alloc::string::String> | MISSING DOC
 field wechat_profile::TableSchema::indexes | alloc::vec::Vec<wechat_profile::schema::IndexSchema> | MISSING DOC
@@ -344,6 +394,8 @@ fn wechat_profile::ProfileReader::group_avatar_members | fn(&self, rooms: &[allo
 fn wechat_profile::ProfileReader::group_members | fn(&self, room: &str, q: &wechat_profile::model::ListQuery) -> wechat_profile::Result<wechat_profile::model::Page<wechat_profile::model::GroupMember>> | MISSING DOC
 fn wechat_profile::ProfileReader::group_mention_permissions | fn(&self, room: &str, own: core::option::Option<&str>) -> wechat_profile::Result<wechat_profile::model::GroupMentionPermissions> | MISSING DOC
 fn wechat_profile::ProfileReader::groups | fn(&self, q: &wechat_profile::model::ListQuery) -> wechat_profile::Result<wechat_profile::model::Page<wechat_profile::model::Group>> | MISSING DOC
+fn wechat_profile::ProfileReader::installed_pack_stickers | fn(&self, pack_id: &str) -> wechat_profile::Result<alloc::vec::Vec<wechat_profile::stickers::InstalledPackSticker>> | Read ordered file identities and captions from an installed pack. No network acquisition is initiated by this read.
+fn wechat_profile::ProfileReader::installed_sticker_packs | fn(&self) -> wechat_profile::Result<alloc::vec::Vec<wechat_profile::stickers::InstalledStickerPack>> | Read every locally installed pack, including packs absent from a current store feed. Membership is established by package records, not cache files.
 fn wechat_profile::ProfileReader::inventory | fn(&self) -> &[wechat_profile::model::DatabaseInventory] | MISSING DOC
 fn wechat_profile::ProfileReader::labels | fn(&self) -> wechat_profile::Result<alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>> | MISSING DOC
 fn wechat_profile::ProfileReader::latest_messages | fn(&self, chats: &[alloc::string::String], own_username: core::option::Option<&str>) -> wechat_profile::Result<alloc::collections::btree::map::BTreeMap<alloc::string::String, wechat_profile::model::Message>> | Read the latest saved message for each requested conversation in one snapshot. One compound query per shard selects one indexed row per conversation; no point lookups or older-body decoding are needed.
@@ -355,7 +407,11 @@ fn wechat_profile::ProfileReader::messages_by_server_id | fn(&self, chat: &str, 
 fn wechat_profile::ProfileReader::open | fn(location: wechat_profile::snapshot::ProfileLocation, keys: wechat_profile::keys::KeyFile, options: wechat_profile::snapshot::ReadOptions) -> wechat_profile::Result<Self> | MISSING DOC
 fn wechat_profile::ProfileReader::peer_metadata | fn(&self, peers: &[alloc::string::String]) -> wechat_profile::Result<alloc::collections::btree::map::BTreeMap<alloc::string::String, wechat_profile::peer_metadata::PeerMetadata>> | Read one page's saved metadata without refreshing contacts or catalogs. Missing peers are omitted. A malformed extra buffer affects only its peer; an incompatible database schema remains an error.
 fn wechat_profile::ProfileReader::require_writable | fn(&self) -> wechat_profile::Result<()> | MISSING DOC
+fn wechat_profile::ProfileReader::saved_sticker_record | fn(&self, id: &str) -> wechat_profile::Result<wechat_profile::stickers::SavedStickerRecord> | Read the private type-3 transport record for one Saved identity. The caller must keep its URLs and keys out of public representations.
+fn wechat_profile::ProfileReader::saved_stickers | fn(&self) -> wechat_profile::Result<wechat_profile::stickers::SavedStickers> | Read Saved membership in the supported Linux picker order. This does not fetch metadata or alter the account's collection.
 fn wechat_profile::ProfileReader::schemas | fn(&self) -> &[wechat_profile::schema::SchemaReport] | MISSING DOC
+fn wechat_profile::ProfileReader::sticker_pack_files | fn(&self, pack: &str) -> wechat_profile::Result<alloc::vec::Vec<wechat_profile::sticker_packs::StickerPackFileRecord>> | Read bounded original/thumbnail slice descriptors in native ordinal order. The caller decrypts the complete aggregate before applying these offsets.
+fn wechat_profile::ProfileReader::sticker_pack_record | fn(&self, pack: &str) -> wechat_profile::Result<wechat_profile::sticker_packs::StickerPackRecord> | Read a complete canonical package row without contacting the server. Missing membership is NotCached, not a conclusion about catalog existence.
 fn wechat_profile::ProfileReader::thread_exists | fn(&self, username: &str) -> wechat_profile::Result<bool> | MISSING DOC
 fn wechat_profile::ProfileReader::thread_muted | fn(&self, threads: &[alloc::string::String]) -> wechat_profile::Result<alloc::collections::btree::map::BTreeMap<alloc::string::String, core::option::Option<bool>>> | Derive notification preferences for a page without refreshing contacts. Direct contacts and groups use different official fields; incomplete identities and unexpected values remain unknown.
 fn wechat_profile::ProfileReader::thread_pinned | fn(&self, threads: &[alloc::string::String]) -> wechat_profile::Result<alloc::collections::btree::map::BTreeMap<alloc::string::String, core::option::Option<bool>>> | Read the saved pin bit for ordinary contacts and active groups in one query. Incomplete identities and unsupported built-in peers stay unknown.
@@ -379,15 +435,24 @@ fn wechat_profile::apply_group_patch | fn(location: &wechat_profile::snapshot::P
 fn wechat_profile::apply_group_projection | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, input: &wechat_profile::projection::GroupProjection, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<()> | MISSING DOC
 fn wechat_profile::apply_hardlink_projection | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, input: &wechat_profile::media::HardlinkProjection, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<wechat_profile::media::AppliedHardlink> | MISSING DOC
 fn wechat_profile::apply_incoming_text | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, input: &wechat_profile::writer::IncomingText, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<wechat_profile::writer::AppliedText> | Supports only the verified existing direct-chat incoming text family. It does not allocate new chats/maps, infer sort collisions, update FTS or project unknown media/system commands. A partial error may follow a committed message transaction; recover by retrying the same durable input.
+fn wechat_profile::apply_initialize_emoticon | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, password: &[u8], options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<wechat_profile::keys::DatabaseKey> | Create only a missing emoticon database in a caller-owned supported profile. Existing files and unknown schemas are never replaced or migrated. The returned key must be published in the caller's protected key manifest before use. Caller retains the durable initialization intent across publication; a crash after publication leaves a readable file that must be admitted, not recreated. Other profile databases and cache files are untouched.
 fn wechat_profile::apply_media_resource_projection | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, input: &wechat_profile::media::MediaResourceProjection, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<wechat_profile::media::AppliedMediaResource> | MISSING DOC
 fn wechat_profile::apply_media_resource_variants | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, input: &wechat_profile::media::MediaResourceProjection, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<wechat_profile::media::AppliedMediaResource> | Add one or more verified resource variants without erasing other qualities. Only a matching pending (status0,size0) detail can transition to downloaded.
 fn wechat_profile::apply_message_projection | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, input: &wechat_profile::projection::MessageProjection, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<wechat_profile::projection::AppliedMessage> | MISSING DOC
 fn wechat_profile::apply_message_session_projection | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, input: &wechat_profile::projection::MessageSessionProjection, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<()> | Reconcile a committed message into a desktop session, preserving drafts, unrelated unread rows and preexisting counter/list discrepancies. It makes no server/phone read request and is retryable after a message-only commit.
+fn wechat_profile::apply_message_sticker_cache | fn(location: &wechat_profile::snapshot::ProfileLocation, uin: u32, username: &str, month: &str, id: &str, bytes: &[u8], options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<bool> | Publish one verified outgoing GIF in the native message asset cache. The caller records the local calendar month before submission; no Saved or pack membership/metadata is created. Conflicting existing bytes are preserved.
 fn wechat_profile::apply_native_group_edit | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, room: &str, edit: wechat_profile::projection::NativeGroupEdit<'_>, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<()> | MISSING DOC
 fn wechat_profile::apply_native_roster_patch | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, input: &wechat_profile::projection::NativeRosterPatch, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<()> | Translate only the proved network member identity/display semantics into the local repeated-field1 representation. Caller proves roster completeness (for example, a separate complete member identity list in the server reply). Unknown root/member protobuf chunks, existing owner and unrelated contact fields are retained byte-for-byte. No network version is guessed into opaque fields.
 fn wechat_profile::apply_recall_projection | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, peer: &str, server_id: &str, recalled_at: core::option::Option<i64>, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<core::option::Option<wechat_profile::model::SourceMessageId>> | Replace the live row while preserving its source/server identity and ordering. Media cache files and unknown official files have independent lifetimes.
 fn wechat_profile::apply_recall_projection_with_notice | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, peer: &str, server_id: &str, recalled_at: core::option::Option<i64>, replacement_text: core::option::Option<&str>, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<core::option::Option<wechat_profile::model::SourceMessageId>> | Preserve the server's replacement text as XML text, never as markup.
+fn wechat_profile::apply_remove_sticker_pack_cache | fn(location: &wechat_profile::snapshot::ProfileLocation, pack: &str, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<()> | Remove only one pack's three known persisted caches, after membership SQL removal. Other files and every custom Saved cache are preserved. Files are unlinked separately in icon/thumbnail/original order; a partial error is reported for local replay, which never contacts the server. Missing files are satisfied no-ops; links and special files are refused.
+fn wechat_profile::apply_saved_sticker_cache | fn(location: &wechat_profile::snapshot::ProfileLocation, uin: u32, username: &str, id: &str, bytes: &[u8], options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<bool> | Publish verified original bytes at the account's official persisted Saved cache path. Existing different bytes are preserved and reported as a conflict. No membership/order change, thumbnail synthesis or network access occurs.
+fn wechat_profile::apply_saved_stickers | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, projection: &wechat_profile::stickers::SavedStickerProjection, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<()> | Apply a complete Saved reconciliation in one emoticon-database transaction. Rebuilds favorite order, removes only supplied type-3 metadata keys and inserts/replaces supplied complete records. Other types, packs, caches and unknown files are preserved. Replay is idempotent for these logical values; SQLite rowids are not stable identities. Caller owns exclusive access and a durable receipt, and must fence stale receipts before invoking this writer.
 fn wechat_profile::apply_session_projection | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, peer: &str, fields: &wechat_profile::model::RawFields, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<bool> | Explicit session fields. New sessions require a complete row; patches retain unrelated drafts/read metadata. Caller determines actual native values.
+fn wechat_profile::apply_sticker_pack_cache | fn(location: &wechat_profile::snapshot::ProfileLocation, uin: u32, username: &str, pack: &str, kind: wechat_profile::sticker_cache::StickerPackCacheKind, bytes: &[u8], options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<bool> | Publish one already verified pack aggregate/icon at its native encrypted path. Never replaces conflicting existing bytes. The original and thumbnail writes are separate; callers retain their inputs and finish SQL only after both pass. The caller verifies account identity, item bounds/hashes and image formats.
+fn wechat_profile::apply_sticker_pack_captions | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, pack: &str, captions: &[wechat_profile::sticker_packs::StickerPackCaptionRecord], options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<()> | Insert/replace supplied captions only for products still referenced by a pack or any NonStore row. Unspecified languages remain intact. Empty language/text pairs are ignored; query failures never count as proof of no references.
+fn wechat_profile::apply_sticker_pack_content | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, pack: &str, files: &[wechat_profile::sticker_packs::StickerPackFileRecord], options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<()> | Register already verified, already published original/thumbnail aggregates. Replaces only supplied file rows, then changes only the existing package's download readiness. Other package fields and unspecified files are preserved. Missing membership fails; callers must not fabricate it from cached media. Filesystem publication precedes this SQL transaction and needs its own receipt.
+fn wechat_profile::apply_sticker_pack_membership | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, records: &[wechat_profile::sticker_packs::StickerPackRecord], removed: &[alloc::string::String], options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<()> | Reconcile package membership from a completed authoritative account list. New rows use complete supplied records with OR IGNORE; existing rows remain unchanged, including their readiness, timestamps and ordering. This does not implement the interactive manager's conditional full-record rank replacement. Selected removals delete package/file rows and only orphaned captions, while preserving every Saved/NonStore reference. The SQL changes use one transaction; cache cleanup is separate and remains the caller's durable responsibility. No media acquisition, purchase or account mutation is submitted here.
 fn wechat_profile::cache_file_projection | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, source: &wechat_profile::model::SourceMessageId, chat: &str, plaintext: &[u8], options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<wechat_profile::media::AppliedHardlinkCache> | Register an ordinary subtype6 attachment's verified bytes, resource row, filename pair and native hardlink. A new collision-bounded local name is an explicit allocation policy; an existing resource filename is retained.
 fn wechat_profile::cache_hardlink_media_projection | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, source: &wechat_profile::model::SourceMessageId, chat: &str, kind: wechat_profile::media::HardlinkKind, filename: &str, plaintext: &[u8], options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<wechat_profile::media::AppliedHardlinkCache> | Register verified ordinary file/video bytes in the observed month/hardlink namespace. This does not invent a MessageResourceDetail subtype or packed attachment record; adapters with that metadata can register it separately. A digest prefix makes the local filename deterministic and collision bounded.
 fn wechat_profile::cache_image_projection | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, source: &wechat_profile::model::SourceMessageId, chat: &str, quality: wechat_profile::model::ImageQuality, plaintext: &[u8], options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<wechat_profile::media::AppliedImageCache> | Cache one actual JPEG/PNG quality under a deterministic local basename. The observed DAT/resource/hardlink representation is retained; basename allocation and UTC month are local policies, not a claim about the native generator. No other variant is removed. Original bytes must match the message XML MD5.
@@ -424,9 +489,12 @@ fn wechat_profile::publish_mmkv_create | fn(path: impl core::convert::AsRef<std:
 fn wechat_profile::publish_saved_key_info | fn(home: impl core::convert::AsRef<std::path::Path>, username: &str, plan: &wechat_profile::login_storage::SavedKeyInfoPlan, bytes: &[u8], options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<wechat_profile::login_storage::SavedKeyInfoPublication> | Publish native-shaped key-info, retaining unrelated accounts/history. The inspected writer supplies key_md5='' (not a digest of the new credential). Its known UNIQUE(user_name_md5,key_info_md5) tuple is replaced only when the older tuple contains identical bytes and the same native empty key_md5. If no DB exists, use the native raw legacy fallback without inventing a DB.
 fn wechat_profile::publish_saved_key_info_guarded | fn(home: impl core::convert::AsRef<std::path::Path>, username: &str, plan: &wechat_profile::login_storage::SavedKeyInfoPlan, bytes: &[u8], options: &wechat_profile::writer::WriteOptions, allowed: impl core::ops::function::FnMut() -> bool) -> wechat_profile::Result<wechat_profile::login_storage::SavedKeyInfoPublication> | The coordinator must recheck its authorization fence immediately before each independently durable publication. A false guard preserves the caller's encrypted intent for replay; it cannot roll back an earlier committed file.
 fn wechat_profile::read_account_sync_key | fn(location: &wechat_profile::snapshot::ProfileLocation, identity: &wechat_profile::mmkv::ProfileIdentity, options: &wechat_profile::snapshot::ReadOptions) -> wechat_profile::Result<zeroize::Zeroizing<alloc::vec::Vec<u8>>> | Read the desktop cursor from a caller-confirmed stopped/coherent account. The binary cursor is independent of saved-login and business-session keys.
+fn wechat_profile::read_message_sticker_cache | fn(location: &wechat_profile::snapshot::ProfileLocation, uin: u32, username: &str, month: &str, id: &str) -> wechat_profile::Result<alloc::vec::Vec<u8>> | Read an original GIF retained in the official local-month message cache. Membership and product caches are independent of this chat-rendering copy.
 fn wechat_profile::read_mmkv_identity | fn(data: &[u8], metadata: &[u8], format_key: &[u8]) -> wechat_profile::Result<wechat_profile::mmkv::ProfileIdentity> | CRC32 checks the captured ciphertext span; it is not authentication. Identity values must also match the independently authenticated native account.
 fn wechat_profile::read_profile_key_info | fn(home: impl core::convert::AsRef<std::path::Path>, username: &str, stopped_or_consistent_snapshot: bool) -> wechat_profile::Result<(zeroize::Zeroizing<alloc::vec::Vec<u8>>, wechat_profile::login_storage::KeyInfoSource)> | Restore only the existing account's key-info for a new approval/QR exchange. This remains useful when saved AutoAuth trust is expired or unavailable; a fresh approval does not justify dropping the installation's key-info.
 fn wechat_profile::read_profile_saved_login | fn(home: impl core::convert::AsRef<std::path::Path>, format_key: &[u8], stopped_or_consistent_snapshot: bool) -> wechat_profile::Result<wechat_profile::login_storage::ProfileSavedLogin> | Read identity and the exact native latest-row/legacy selection from a stopped full HOME. Database/WAL/SHM queries use an isolated working copy; encrypted profile DB keys and native login credentials are never substituted.
+fn wechat_profile::read_saved_sticker_cache | fn(location: &wechat_profile::snapshot::ProfileLocation, uin: u32, username: &str, id: &str, external_md5: core::option::Option<&str>) -> wechat_profile::Result<alloc::vec::Vec<u8>> | Read and verify a Saved original from its official encrypted cache. WXGF alternatives must match the separately supplied external representation MD5. This never downloads media or writes to the profile.
+fn wechat_profile::read_sticker_pack_cache | fn(location: &wechat_profile::snapshot::ProfileLocation, uin: u32, username: &str, pack: &str, kind: wechat_profile::sticker_cache::StickerPackCacheKind) -> wechat_profile::Result<alloc::vec::Vec<u8>> | Read and decrypt a bounded official pack aggregate/icon. This does not prove individual item integrity: callers must check each SQL slice against its MD5 and inspect image bytes before describing them as available.
 fn wechat_profile::remove_recalled_search | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, peer: &str, server: &str, source: &wechat_profile::model::SourceMessageId, created: i64, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<()> | Remove only the supported ordinary index entries for this exact owned source. The caller retains its recall intent and retries local work after interruption.
 fn wechat_profile::saved_login_policy | fn(data: &[u8], metadata: &[u8], format_key: &[u8]) -> wechat_profile::Result<u32> | Preserve the existing desktop auto-login policy while reading a bound store.
 fn wechat_profile::stage_accepted_saved_login_projection | fn(data: &[u8], metadata: &[u8], format_key: &[u8], username: &str, input: &wechat_profile::login_storage::SavedLoginProjection<'_>) -> wechat_profile::Result<wechat_profile::mmkv::StagedMmkv> | Accepted-login-only variant. The caller must have installed the matching authenticated generation and cleared its own logout fence first. Generic staging retains the logout flag; only this explicit path may clear it.
@@ -469,6 +537,8 @@ impl core::clone::Clone for wechat_profile::ImageQuality | impl | -
 impl core::clone::Clone for wechat_profile::IncomingText | impl | -
 impl core::clone::Clone for wechat_profile::IndexSchema | impl | -
 impl core::clone::Clone for wechat_profile::InitializedLayout | impl | -
+impl core::clone::Clone for wechat_profile::InstalledPackSticker | impl | -
+impl core::clone::Clone for wechat_profile::InstalledStickerPack | impl | -
 impl core::clone::Clone for wechat_profile::KeyFile | impl | -
 impl core::clone::Clone for wechat_profile::KeyInfoSource | impl | -
 impl core::clone::Clone for wechat_profile::ListQuery | impl | -
@@ -493,10 +563,18 @@ impl core::clone::Clone for wechat_profile::ReadOptions | impl | -
 impl core::clone::Clone for wechat_profile::ReadProjection | impl | -
 impl core::clone::Clone for wechat_profile::SavedKeyInfoPlan | impl | -
 impl core::clone::Clone for wechat_profile::SavedKeyInfoPublication | impl | -
+impl core::clone::Clone for wechat_profile::SavedSticker | impl | -
+impl core::clone::Clone for wechat_profile::SavedStickerProjection | impl | -
+impl core::clone::Clone for wechat_profile::SavedStickerRecord | impl | -
+impl core::clone::Clone for wechat_profile::SavedStickers | impl | -
 impl core::clone::Clone for wechat_profile::SchemaReport | impl | -
 impl core::clone::Clone for wechat_profile::SecretBytes | impl | -
 impl core::clone::Clone for wechat_profile::SourceMessageId | impl | -
 impl core::clone::Clone for wechat_profile::SqlValue | impl | -
+impl core::clone::Clone for wechat_profile::StickerPackCacheKind | impl | -
+impl core::clone::Clone for wechat_profile::StickerPackCaptionRecord | impl | -
+impl core::clone::Clone for wechat_profile::StickerPackFileRecord | impl | -
+impl core::clone::Clone for wechat_profile::StickerPackRecord | impl | -
 impl core::clone::Clone for wechat_profile::TableSchema | impl | -
 impl core::clone::Clone for wechat_profile::Thread | impl | -
 impl core::clone::Clone for wechat_profile::ThreadExitReadOutcome | impl | -
@@ -541,6 +619,8 @@ impl core::default::Default for wechat_profile::ListQuery | impl | -
 impl core::default::Default for wechat_profile::MessageQuery | impl | -
 impl core::default::Default for wechat_profile::OwnedReaderCache | impl | -
 impl core::default::Default for wechat_profile::ReadOptions | impl | -
+impl core::default::Default for wechat_profile::SavedStickerRecord | impl | -
+impl core::default::Default for wechat_profile::StickerPackRecord | impl | -
 impl core::error::Error for wechat_profile::ProfileError | impl | -
 impl core::fmt::Debug for wechat_profile::AppliedContact | impl | -
 impl core::fmt::Debug for wechat_profile::AppliedContactPin | impl | -
@@ -575,6 +655,8 @@ impl core::fmt::Debug for wechat_profile::ImageQuality | impl | -
 impl core::fmt::Debug for wechat_profile::IncomingText | impl | -
 impl core::fmt::Debug for wechat_profile::IndexSchema | impl | -
 impl core::fmt::Debug for wechat_profile::InitializedLayout | impl | -
+impl core::fmt::Debug for wechat_profile::InstalledPackSticker | impl | -
+impl core::fmt::Debug for wechat_profile::InstalledStickerPack | impl | -
 impl core::fmt::Debug for wechat_profile::KeyFile | impl | -
 impl core::fmt::Debug for wechat_profile::KeyInfoSource | impl | -
 impl core::fmt::Debug for wechat_profile::ListQuery | impl | -
@@ -598,10 +680,15 @@ impl core::fmt::Debug for wechat_profile::ProfileError | impl | -
 impl core::fmt::Debug for wechat_profile::ProfileLocation | impl | -
 impl core::fmt::Debug for wechat_profile::ReadOptions | impl | -
 impl core::fmt::Debug for wechat_profile::ReadProjection | impl | -
+impl core::fmt::Debug for wechat_profile::SavedSticker | impl | -
+impl core::fmt::Debug for wechat_profile::SavedStickers | impl | -
 impl core::fmt::Debug for wechat_profile::SchemaReport | impl | -
 impl core::fmt::Debug for wechat_profile::SecretBytes | impl | -
 impl core::fmt::Debug for wechat_profile::SourceMessageId | impl | -
 impl core::fmt::Debug for wechat_profile::SqlValue | impl | -
+impl core::fmt::Debug for wechat_profile::StickerPackCacheKind | impl | -
+impl core::fmt::Debug for wechat_profile::StickerPackCaptionRecord | impl | -
+impl core::fmt::Debug for wechat_profile::StickerPackFileRecord | impl | -
 impl core::fmt::Debug for wechat_profile::TableSchema | impl | -
 impl core::fmt::Debug for wechat_profile::Thread | impl | -
 impl core::fmt::Debug for wechat_profile::ThreadExitReadOutcome | impl | -
@@ -617,6 +704,7 @@ impl core::marker::Copy for wechat_profile::HardlinkKind | impl | -
 impl core::marker::Copy for wechat_profile::ImageQuality | impl | -
 impl core::marker::Copy for wechat_profile::KeyInfoSource | impl | -
 impl core::marker::Copy for wechat_profile::SavedKeyInfoPublication | impl | -
+impl core::marker::Copy for wechat_profile::StickerPackCacheKind | impl | -
 impl core::marker::Copy for wechat_profile::VerifiedImageQuality | impl | -
 impl core::marker::Copy for wechat_profile::VideoQuality | impl | -
 impl core::marker::StructuralPartialEq for wechat_profile::ColumnSchema | impl | -
@@ -641,14 +729,23 @@ impl serde_core::de::Deserialize<'de> for wechat_profile::HardlinkKind | impl<'d
 impl serde_core::de::Deserialize<'de> for wechat_profile::HardlinkProjection | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_profile::ImageQuality | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_profile::IncomingText | impl<'de> | -
+impl serde_core::de::Deserialize<'de> for wechat_profile::InstalledPackSticker | impl<'de> | -
+impl serde_core::de::Deserialize<'de> for wechat_profile::InstalledStickerPack | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_profile::MediaResourceProjection | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_profile::MessageProjection | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_profile::MessageSessionProjection | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_profile::NativeMemberPatch | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_profile::NativeRosterPatch | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_profile::SavedKeyInfoPlan | impl<'de> | -
+impl serde_core::de::Deserialize<'de> for wechat_profile::SavedSticker | impl<'de> | -
+impl serde_core::de::Deserialize<'de> for wechat_profile::SavedStickerProjection | impl<'de> | -
+impl serde_core::de::Deserialize<'de> for wechat_profile::SavedStickerRecord | impl<'de> | -
+impl serde_core::de::Deserialize<'de> for wechat_profile::SavedStickers | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_profile::SourceMessageId | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_profile::SqlValue | impl<'de> | -
+impl serde_core::de::Deserialize<'de> for wechat_profile::StickerPackCaptionRecord | impl<'de> | -
+impl serde_core::de::Deserialize<'de> for wechat_profile::StickerPackFileRecord | impl<'de> | -
+impl serde_core::de::Deserialize<'de> for wechat_profile::StickerPackRecord | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_profile::VideoQuality | impl<'de> | -
 impl serde_core::ser::Serialize for wechat_profile::AppliedContact | impl | -
 impl serde_core::ser::Serialize for wechat_profile::AppliedContactPin | impl | -
@@ -680,6 +777,8 @@ impl serde_core::ser::Serialize for wechat_profile::ImageQuality | impl | -
 impl serde_core::ser::Serialize for wechat_profile::IncomingText | impl | -
 impl serde_core::ser::Serialize for wechat_profile::IndexSchema | impl | -
 impl serde_core::ser::Serialize for wechat_profile::InitializedLayout | impl | -
+impl serde_core::ser::Serialize for wechat_profile::InstalledPackSticker | impl | -
+impl serde_core::ser::Serialize for wechat_profile::InstalledStickerPack | impl | -
 impl serde_core::ser::Serialize for wechat_profile::KeyInfoSource | impl | -
 impl serde_core::ser::Serialize for wechat_profile::MediaResourceProjection | impl | -
 impl serde_core::ser::Serialize for wechat_profile::Message | impl | -
@@ -698,9 +797,16 @@ impl serde_core::ser::Serialize for wechat_profile::PeerOpenImWording | impl | -
 impl serde_core::ser::Serialize for wechat_profile::ReadProjection | impl | -
 impl serde_core::ser::Serialize for wechat_profile::SavedKeyInfoPlan | impl | -
 impl serde_core::ser::Serialize for wechat_profile::SavedKeyInfoPublication | impl | -
+impl serde_core::ser::Serialize for wechat_profile::SavedSticker | impl | -
+impl serde_core::ser::Serialize for wechat_profile::SavedStickerProjection | impl | -
+impl serde_core::ser::Serialize for wechat_profile::SavedStickerRecord | impl | -
+impl serde_core::ser::Serialize for wechat_profile::SavedStickers | impl | -
 impl serde_core::ser::Serialize for wechat_profile::SchemaReport | impl | -
 impl serde_core::ser::Serialize for wechat_profile::SourceMessageId | impl | -
 impl serde_core::ser::Serialize for wechat_profile::SqlValue | impl | -
+impl serde_core::ser::Serialize for wechat_profile::StickerPackCaptionRecord | impl | -
+impl serde_core::ser::Serialize for wechat_profile::StickerPackFileRecord | impl | -
+impl serde_core::ser::Serialize for wechat_profile::StickerPackRecord | impl | -
 impl serde_core::ser::Serialize for wechat_profile::TableSchema | impl | -
 impl serde_core::ser::Serialize for wechat_profile::Thread | impl | -
 impl serde_core::ser::Serialize for wechat_profile::ThreadExitReadOutcome | impl | -
@@ -739,6 +845,8 @@ struct wechat_profile::ImageDatKey | struct { private fields } | MISSING DOC
 struct wechat_profile::IncomingText | struct { public fields } | MISSING DOC
 struct wechat_profile::IndexSchema | struct { public fields } | MISSING DOC
 struct wechat_profile::InitializedLayout | struct { public fields } | MISSING DOC
+struct wechat_profile::InstalledPackSticker | struct { public fields } | One official pack item and its localized captions.
+struct wechat_profile::InstalledStickerPack | struct { public fields } | A pack present in the official installed-pack table.
 struct wechat_profile::KeyFile | struct { public fields } | MISSING DOC
 struct wechat_profile::ListQuery | struct { public fields } | MISSING DOC
 struct wechat_profile::MediaResourceProjection | struct { public fields } | Exact native resource metadata. The destination allocates all local IDs and translates names. Detail type/status/data_index and opaque protobuf bytes are explicit build-adapter inputs rather than guessed media-wide defaults.
@@ -769,10 +877,17 @@ struct wechat_profile::ReadProjection | struct { public fields } | MISSING DOC
 struct wechat_profile::SavedKeyInfoPlan | struct { public fields } | Hash-only expected generations, suitable for embedding in a coordinator's encrypted journal. No credential bytes are returned by this plan.
 struct wechat_profile::SavedKeyInfoPublication | struct { public fields } | MISSING DOC
 struct wechat_profile::SavedLoginProjection | struct<'a> { public fields } | One accepted credential generation. No Debug/serde implementation is provided. The caller binds this generation to bootstrap username/UIN/device first.
+struct wechat_profile::SavedSticker | struct { public fields } | One item in the account's Saved collection. Transport URLs remain private.
+struct wechat_profile::SavedStickerProjection | struct { public fields } | Receipt-derived full Saved order and narrowly selected metadata changes.
+struct wechat_profile::SavedStickerRecord | struct { public fields } | A complete official NonStore record. Transport keys and URLs are private profile data and must never be returned through a public sticker API.
+struct wechat_profile::SavedStickers | struct { public fields } | Ordered Saved membership from one consistent official-profile read.
 struct wechat_profile::SchemaReport | struct { public fields } | MISSING DOC
 struct wechat_profile::SecretBytes | struct (_) | MISSING DOC
 struct wechat_profile::SourceMessageId | struct { public fields } | Local IDs are scoped to a database *and* a table. Decimal strings avoid a lossy JSON floating-point conversion and are not native server checkpoints.
 struct wechat_profile::StagedMmkv | struct { private fields } | Complete staged pair. Publication across these files requires caller recovery; this object alone never modifies any filesystem or native sync checkpoint.
+struct wechat_profile::StickerPackCaptionRecord | struct { public fields } | One official localized caption, independent of a custom editable name.
+struct wechat_profile::StickerPackFileRecord | struct { public fields } | One item slice in the decrypted original and thumbnail aggregates.
+struct wechat_profile::StickerPackRecord | struct { public fields } | Complete official package record, including independent content readiness.
 struct wechat_profile::TableSchema | struct { public fields } | MISSING DOC
 struct wechat_profile::Thread | struct { public fields } | MISSING DOC
 struct wechat_profile::ThreadExitReadProjection | struct { public fields } | MISSING DOC
@@ -837,6 +952,9 @@ variant wechat_profile::SqlValue::Null | - | MISSING DOC
 variant wechat_profile::SqlValue::Real | (alloc::string::String) | MISSING DOC
 variant wechat_profile::SqlValue::Text | (alloc::string::String) | MISSING DOC
 variant wechat_profile::SqlValue::TextBytes | (alloc::string::String) | MISSING DOC
+variant wechat_profile::StickerPackCacheKind::Icon | - | Pack icon, stored outside the thumbnail aggregate.
+variant wechat_profile::StickerPackCacheKind::Original | - | Concatenated original media, with SQL plaintext offsets.
+variant wechat_profile::StickerPackCacheKind::Thumbnail | - | Concatenated thumbnails, with separate SQL plaintext offsets.
 variant wechat_profile::ThreadExitReadOutcome::Applied | - | MISSING DOC
 variant wechat_profile::ThreadExitReadOutcome::ExcludedPeer | - | MISSING DOC
 variant wechat_profile::ThreadExitReadOutcome::HiddenSession | - | MISSING DOC

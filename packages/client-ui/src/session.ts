@@ -238,6 +238,18 @@ export async function inventory<T>(
 export class HubSession {
   private value = initial();
   private listeners = new Set<() => void>();
+  private eventListeners = new Set<(event: NativeEvent, account: string) => void>();
+  /** Observe committed account events without starting a second event stream. */
+  onEvent = (listener: (event: NativeEvent, account: string) => void): (() => void) => {
+    this.eventListeners.add(listener);
+    return () => { this.eventListeners.delete(listener); };
+  };
+  private eventGapListeners = new Set<(account: string) => void>();
+  /** Refresh dependent views after rebuilding an expired event stream. */
+  onEventGap = (listener: (account: string) => void): (() => void) => {
+    this.eventGapListeners.add(listener);
+    return () => { this.eventGapListeners.delete(listener); };
+  };
   private signOutListeners = new Set<(account: string) => void>();
   onSignedOut = (listener: (account: string) => void): (() => void) => {
     this.signOutListeners.add(listener);
@@ -450,6 +462,8 @@ export class HubSession {
     this.settingsListeners.clear();
     this.mediaInvalidationListeners.clear();
     this.signOutListeners.clear();
+    this.eventListeners.clear();
+    this.eventGapListeners.clear();
     this.histories.clear();
   }
   deactivate(account = this.value.account): void {
@@ -1354,6 +1368,9 @@ export class HubSession {
     generation = this.generation,
   ): Promise<void> {
     if (!this.current(account, generation)) return;
+    for (const listener of this.eventListeners) {
+      try { listener(event, account); } catch { /* Presentation observers cannot interrupt event processing. */ }
+    }
     if (isSignOut(event)) {
       this.signedOut(account, event.cursor);
       return;
@@ -1438,7 +1455,12 @@ export class HubSession {
     this.historyLoaded = false;
     const selected = this.value.selected;
     if (selected) await this.select(selected);
-    if (this.current(account, generation)) this.cursor = boundary;
+    if (this.current(account, generation)) {
+      this.cursor = boundary;
+      for (const listener of this.eventGapListeners) {
+        try { listener(account); } catch { /* View observers cannot interrupt recovery. */ }
+      }
+    }
   }
   private async watch(
     account: string,

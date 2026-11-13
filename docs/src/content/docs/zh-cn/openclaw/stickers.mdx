@@ -1,0 +1,69 @@
+---
+title: 管理“我的表情”
+description: 通过 OpenClaw 准备工作区媒体、预览表情并管理“我的表情”。
+banner:
+  content: "本页面由机器翻译，尚未经过人工审校。"
+sourceHash: 4ceabe4ef8a3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+使用仅限所有者的 `wechat_stickers` 工具管理已配置账号的“我的表情”。该工具通过当前会话的文件传输通道工作，因此执行工作区可以位于与 Gateway 和 Daemon 不同的机器上。
+
+1. 列出账号的“我的表情”。
+
+   ```json
+   {"action":"list"}
+   ```
+
+   结果包含有序的 `items` 列表和 `revision`。放置或移除表情时请保留该 revision；过期的 revision 会导致操作失败，而不会覆盖手机端的修改。
+
+2. 以图像方式查看单个表情。
+
+   ```json
+   {"action":"preview","stickerId":"STICKER_ID"}
+   ```
+
+   预览会将图像内容返回给模型视觉输入。动图 GIF 预览包含抽样帧；静态预览不能证明动画可以播放。`get` 返回元数据和媒体引用，但不会传递视觉输入。
+
+3. 将原图下载到执行工作区。
+
+   ```json
+   {"action":"download","stickerId":"STICKER_ID","output":"stickers/chosen.gif","idempotencyKey":"chosen-original-1"}
+   ```
+
+   原图缺失时，会返回 `staged:false` 的下载任务。该任务完成后，重新发送相同请求。成功暂存的结果包含实际的工作区相对路径、MIME 类型、字节长度和校验和。文件扩展名必须与真实原图一致，适用时包括 `.wxgf`。
+
+4. 准备由远程执行生成的文件。
+
+   ```json
+   {"action":"prepare","file":"stickers/clip.mp4","startMs":1000,"durationMs":2000,"fit":true,"idempotencyKey":"clip-prepare-1"}
+   ```
+
+   使用返回的 `preparationId` 进行 `preview`，然后保存：
+
+   ```json
+   {"action":"add","preparationId":"PREPARATION_ID","idempotencyKey":"clip-save-1"}
+   ```
+
+   仅准备不会保存或发送。在原图已下载并校验后，也可以使用一个收到的 `messageId`/`assetId` 组合进行添加。
+
+| 操作 | 必需的参数 |
+| --- | --- |
+| `move` | `stickerId`、当前 `revision`、`afterId`（放在第一位时为 null）、稳定的 `idempotencyKey` |
+| `remove` | `stickerId`、当前 `revision`、稳定的 `idempotencyKey` |
+| 已准备内容的预览/下载 | `preparationId`，下载时还需 `output` |
+
+宿主通过其文件系统桥读取 SSH 沙箱中的文件，并通过其工作区适配器读取配对节点的文件。插件从该读取器上传字节；它不会打开匹配的 Gateway 路径，也不会建立自己的 SSH 连接。下载沿相反方向使用同一宿主传输。Daemon 凭据保留在 Gateway 上。不支持的宿主能力会在报告暂存成功之前失败；普通的未绑定本地路径不会被当作当前工作区。
+
+通过 OpenClaw 的标准 `message` 工具发送已有的“我的表情”引用：
+
+```json
+{"action":"sticker","channel":"agent-wechat","target":"CONTACT_ID","stickerId":["STICKER_ID"]}
+```
+
+此仅限所有者的操作会返回 Daemon 任务。宿主会提供其稳定的提交键；检查不确定的结果时请保留该键。排队中的任务不是已送达消息的回执。无需重新下载或上传原图。
+
+<Aside type="note" title="使用提示">
+“我的表情”是一个集合。没有可编辑的自定义名称或文件夹，官方表情包不在此工具范围内。保留操作键，并在提交另一项修改前检查不确定的结果。已有的输出文件会被保留。官方表情包的操作请参阅[命令行与输入框工作流](/use/stickers/)。
+</Aside>

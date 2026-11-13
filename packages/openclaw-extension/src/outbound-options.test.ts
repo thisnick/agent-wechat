@@ -79,3 +79,15 @@ test("cancellation after a completed part retains its receipt", async () => {
   });
   assert.equal(calls, 2);
 });
+
+test("host-owned remote file reader survives channel handoff without gateway path interpretation", async () => {
+  const reader = async (path: string) => { assert.equal(path, "outputs/sticker.gif"); return Buffer.from("remote"); };
+  let transferred: any;
+  const handlers = createWeChatMediaHandlers((async (...args: any[]) => {
+    transferred = args[8];
+    return { messageId: "stored", meta: { outcome: "sent" } };
+  }) as typeof sendWeChatMedia);
+  await handlers.sendMedia({ cfg: {}, to: "peer", text: "", mediaUrl: "outputs/sticker.gif", mediaAccess: { readFile: reader } });
+  assert.equal(transferred.readFile, reader);
+  assert.equal((await transferred.readFile("outputs/sticker.gif")).toString(), "remote");
+});

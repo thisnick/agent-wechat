@@ -1,0 +1,15 @@
+CREATE TABLE kStoreEmoticonPackageTable(package_id_ TEXT,package_name_ TEXT,payment_status_ INTEGER,download_status_ INTEGER,install_time_ INTEGER,remove_time_ INTEGER,sort_order_ INTEGER,introduction_ TEXT,full_description_ TEXT,copyright_ TEXT,author_ TEXT,store_icon_url_ TEXT,panel_url_ TEXT);
+CREATE UNIQUE INDEX kStoreEmoticonPackageTable_PID ON kStoreEmoticonPackageTable(package_id_);
+CREATE TABLE kStoreEmoticonFilesTable(package_id_ TEXT,md5_ TEXT,type_ INTEGER,sort_order_ INTEGER,emoticon_size_ INTEGER,emoticon_offset_ INTEGER,thumb_size_ INTEGER,thumb_offset_ INTEGER);
+CREATE UNIQUE INDEX kStoreEmoticonFilesTable_PID_MD5 ON kStoreEmoticonFilesTable(package_id_,md5_);
+CREATE INDEX kStoreEmoticonFilesTable_MD5 ON kStoreEmoticonFilesTable(md5_);
+CREATE TABLE kStoreEmoticonCaptionsTable(package_id_ TEXT,md5_ TEXT,language_ TEXT,caption_ TEXT);
+CREATE UNIQUE INDEX kStoreEmoticonCaptionsTable_PID_MD5_LAN ON kStoreEmoticonCaptionsTable(package_id_,md5_,language_);
+CREATE INDEX kStoreEmoticonCaptionsTable_MD5 ON kStoreEmoticonCaptionsTable(md5_);
+CREATE TABLE kNonStoreEmoticonTable(type INTEGER,md5 TEXT,caption TEXT,product_id TEXT,aes_key TEXT,thumb_url TEXT,tp_url TEXT,auth_key TEXT,cdn_url TEXT,extern_url TEXT,extern_md5 TEXT,encrypt_url TEXT,designer_id TEXT,activity_id TEXT);
+CREATE UNIQUE INDEX kNonStoreEmoticonTable_TYPE_MD5 ON kNonStoreEmoticonTable(type,md5);
+CREATE TABLE kFavEmoticonOrderTable(md5 TEXT);
+CREATE UNIQUE INDEX kFavEmoticonOrderTable_MD5 ON kFavEmoticonOrderTable(md5);
+CREATE TABLE kCustomEmoticonOrderTable(md5 TEXT);
+CREATE UNIQUE INDEX kCustomEmoticonOrderTable_MD5 ON kCustomEmoticonOrderTable(md5);
+CREATE TABLE kExpressRecentUseEemoticonTable(Key TEXT PRIMARY KEY,ValueInt64 INTEGER,ValueDouble REAL,ValueStdStr TEXT,ValueBlob BLOB);

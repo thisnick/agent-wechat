@@ -112,9 +112,12 @@ struct AccountCalls {
     closing: bool,
 }
 
+type OperationGates = BTreeMap<(String, String), Arc<AsyncMutex<()>>>;
+
 #[doc(hidden)]
 pub struct CoreShared {
     account_calls: Mutex<AccountCalls>,
+    pub(crate) sticker_metadata: crate::sticker_metadata_cache::StickerMetadataCache,
     native_accounts: Mutex<BTreeMap<String, Option<wechat_protocol::NativeClient>>>,
 
     pub(crate) call_epochs: Mutex<BTreeMap<String, crate::calls::authority::Entry>>,
@@ -137,9 +140,11 @@ pub struct CoreShared {
     pub(crate) media_storage_maintained: AtomicBool,
     pub(crate) gates: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
     text_send_gates: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
+    operation_gates: Mutex<OperationGates>,
     pub(crate) media_gates: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
     media_downloads: Mutex<BTreeMap<String, Arc<tokio::sync::Semaphore>>>,
     media_download_limit: Arc<tokio::sync::Semaphore>,
+    pub(crate) sticker_preparation_limit: Arc<tokio::sync::Semaphore>,
     pub(crate) read_limit: Arc<tokio::sync::Semaphore>,
     pub(crate) cancels: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
     pub(crate) workers: Mutex<std::collections::BTreeSet<String>>,
@@ -351,6 +356,7 @@ impl Core {
             live_store: None,
             shared: Arc::new(CoreShared {
                 account_calls: Mutex::new(AccountCalls::default()),
+                sticker_metadata: Default::default(),
                 native_accounts: Mutex::new(BTreeMap::new()),
 
                 call_epochs: Mutex::new(BTreeMap::new()),
@@ -373,8 +379,10 @@ impl Core {
                 gates: Mutex::new(BTreeMap::new()),
                 media_gates: Mutex::new(BTreeMap::new()),
                 text_send_gates: Mutex::new(BTreeMap::new()),
+                operation_gates: Mutex::new(BTreeMap::new()),
                 media_downloads: Mutex::new(BTreeMap::new()),
                 media_download_limit: Arc::new(tokio::sync::Semaphore::new(4)),
+                sticker_preparation_limit: Arc::new(tokio::sync::Semaphore::new(2)),
                 read_limit: Arc::new(tokio::sync::Semaphore::new(8)),
                 cancels: Mutex::new(BTreeMap::new()),
                 workers: Mutex::new(std::collections::BTreeSet::new()),
@@ -532,6 +540,21 @@ impl Core {
             .entry(account.into())
             .or_insert_with(|| Arc::new(AsyncMutex::new(())))
             .clone())
+    }
+    pub(crate) async fn lock_operation(
+        &self,
+        account: &str,
+        kind: &str,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>> {
+        self.store.account(account)?;
+        let gate = self
+            .operation_gates
+            .lock()
+            .map_err(|_| anyhow::anyhow!("operation manager unavailable"))?
+            .entry((account.to_owned(), kind.to_owned()))
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone();
+        Ok(gate.lock_owned().await)
     }
     pub async fn lock_account(&self, account: &str) -> Result<tokio::sync::OwnedMutexGuard<()>> {
         Ok(self.gate(account)?.lock_owned().await)
@@ -765,6 +788,7 @@ impl Core {
         Ok(())
     }
     pub fn logout_local(&self, account: &str) -> Result<()> {
+        self.sticker_metadata.invalidate_account(account);
         self.disconnect(account)?;
         let stamp = now();
         let mut op = Operation {
@@ -1277,18 +1301,31 @@ impl Core {
         account: &str,
         ids: Vec<String>,
     ) -> Result<Value> {
-        let gate = self.gate(account)?;
-        let _guard = gate.lock().await;
-        let core = self.clone();
-        let account = account.to_string();
-        blocking(move || {
-            let mut state = core.account_state(&account)?;
-            let contacts = core.native_request(&account, &mut state, |request| {
-                request.lookup_contacts(&ids)
-            })?;
-            core.save_state(&account, &state)?;
-            let items: Vec<_> = contacts.contacts.iter().map(contact_lookup_item).collect();
-            Ok(json!({"items": items, "results": contacts.results}))
+        self.session_request(account, "contact_lookup", |fence| async move {
+            let guard = self.lock_account(account).await?;
+            let core = self.clone();
+            let account = account.to_owned();
+            blocking(move || {
+                let mut permit = crate::account_network::AccountNetworkPermit {
+                    guard: Some(guard),
+                    runtime: tokio::runtime::Handle::current(),
+                };
+                let mut state = core.session_state(&account, &fence)?;
+                let expected = core
+                    .store
+                    .runtime(&account, "account-state")?
+                    .context("auth_required")?;
+                let desired = core.store.runtime(&account, "desired")?;
+                let contacts = permit.transfer(&core, &account, || {
+                    core.native_request(&account, &mut state, |request| {
+                        request.lookup_contacts(&ids)
+                    })
+                })?;
+                core.save_network_state(&account, &state, &expected, &fence, desired.as_deref())?;
+                let items: Vec<_> = contacts.contacts.iter().map(contact_lookup_item).collect();
+                Ok(json!({"items": items, "results": contacts.results}))
+            })
+            .await
         })
         .await
     }
@@ -1298,13 +1335,18 @@ impl Core {
         room: &str,
         version: u32,
     ) -> Result<Value> {
-        let gate = self.gate(account)?;
-        let _guard = gate.lock().await;
-        let core = self.clone();
-        let account = account.to_string();
-        let room = room.to_string();
-        blocking(move||{let mut state=core.account_state(&account)?;let roster=core.native_request(&account, &mut state, |request| request.lookup_room(&room,version))?;core.save_state(&account,&state)?;
-            Ok(json!({"id":roster.room_id,"version":roster.version,"items":roster.members.into_iter().map(|m|json!({"id":m.username,"nickname":m.nickname,"roomDisplayName":m.room_display_name})).collect::<Vec<_>>(),"profileProjection":"pending"}))
+        self.session_request(account, "room_lookup", |fence| async move {
+            let guard = self.lock_account(account).await?;
+            let core = self.clone(); let account = account.to_owned(); let room = room.to_owned();
+            blocking(move || {
+                let mut permit = crate::account_network::AccountNetworkPermit { guard: Some(guard), runtime: tokio::runtime::Handle::current() };
+                let mut state = core.session_state(&account, &fence)?;
+                let expected = core.store.runtime(&account, "account-state")?.context("auth_required")?;
+                let desired = core.store.runtime(&account, "desired")?;
+                let roster = permit.transfer(&core, &account, || core.native_request(&account, &mut state, |request| request.lookup_room(&room, version)))?;
+                core.save_network_state(&account, &state, &expected, &fence, desired.as_deref())?;
+                Ok(json!({"id":roster.room_id,"version":roster.version,"items":roster.members.into_iter().map(|m|json!({"id":m.username,"nickname":m.nickname,"roomDisplayName":m.room_display_name})).collect::<Vec<_>>(),"profileProjection":"pending"}))
+            }).await
         }).await
     }
     pub async fn send_text(
@@ -1879,7 +1921,11 @@ impl Core {
     fn project_pending(&self, account: &str) -> Result<Value> {
         self.project_pending_with_media(account, false)
     }
-    fn project_pending_with_media(&self, account: &str, download_voice: bool) -> Result<Value> {
+    pub(crate) fn project_pending_with_media(
+        &self,
+        account: &str,
+        download_voice: bool,
+    ) -> Result<Value> {
         let mut projected = 0;
         let mut unsupported = 0;
         self.account_state(account)?;
@@ -2434,7 +2480,7 @@ impl Core {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     #[test]
     fn contact_lookup_skips_blank_names() {
@@ -2612,7 +2658,7 @@ mod tests {
             assert!(login_failure_result(&error).get("database").is_none());
         }
     }
-    pub(super) fn state() -> AccountState {
+    pub(crate) fn state() -> AccountState {
         AccountState {
             schema: 1,
             device: DeviceProfile {
@@ -4503,7 +4549,7 @@ mod tests {
         core.install_login_state("fresh", &accepted, None).unwrap();
         let created = core.ensure_managed_profile("fresh", &accepted).unwrap();
         assert_eq!(created["state"], "created");
-        assert_eq!(created["databases"], 7);
+        assert_eq!(created["databases"], 8);
         assert!(store
             .runtime("fresh", "profile-bootstrap")
             .unwrap()

@@ -62,21 +62,42 @@ pub fn fetch_sticker(
     descriptor: &StickerDescriptor,
     mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
 ) -> Result<(Vec<u8>, ImageInspection)> {
-    let url = validate_sticker_url(&descriptor.url)?;
     ensure!(
-        descriptor.expected_bytes > 0
-            && descriptor.expected_bytes <= 16 * 1024 * 1024
-            && descriptor.expected_md5.len() == 32
-            && descriptor
-                .expected_md5
-                .bytes()
-                .all(|b| b.is_ascii_hexdigit()),
+        descriptor.expected_bytes > 0 && descriptor.expected_bytes <= 16 * 1024 * 1024,
         "sticker_metadata_invalid"
     );
     if let Some(expiry) = descriptor.expires_at {
         ensure!(expiry > crate::wire::unix_time()? as u64, "media_expired");
     }
-    progress(0, Some(descriptor.expected_bytes))?;
+    fetch_sticker_source(
+        &descriptor.url,
+        &descriptor.expected_md5,
+        Some(descriptor.expected_bytes),
+        &mut progress,
+    )
+}
+
+/// Fetch an original whose metadata has no advertised length. Enforces the same
+/// host, DNS, stream-size, MD5 and image checks without inventing a source length.
+pub fn fetch_sticker_original(
+    url: &str,
+    expected_md5: &str,
+    progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+) -> Result<(Vec<u8>, ImageInspection)> {
+    fetch_sticker_source(url, expected_md5, None, progress)
+}
+fn fetch_sticker_source(
+    url: &str,
+    expected_md5: &str,
+    expected_bytes: Option<u64>,
+    mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+) -> Result<(Vec<u8>, ImageInspection)> {
+    let url = validate_sticker_url(url)?;
+    ensure!(
+        expected_md5.len() == 32 && expected_md5.bytes().all(|b| b.is_ascii_hexdigit()),
+        "sticker_metadata_invalid"
+    );
+    progress(0, expected_bytes)?;
     let host = url
         .host_str()
         .ok_or_else(|| anyhow::anyhow!("sticker_source_not_allowed"))?;
@@ -126,7 +147,7 @@ pub fn fetch_sticker(
     let mut bytes = vec![];
     let mut chunk = [0u8; 65536];
     loop {
-        progress(bytes.len() as u64, Some(descriptor.expected_bytes))?;
+        progress(bytes.len() as u64, expected_bytes)?;
         let n = response
             .read(&mut chunk)
             .map_err(|_| anyhow::anyhow!("sticker_fetch_failed"))?;
@@ -140,9 +161,8 @@ pub fn fetch_sticker(
         );
     }
     ensure!(
-        bytes.len() as u64 == descriptor.expected_bytes
-            && hex::encode(crate::crypto::md5(&bytes))
-                .eq_ignore_ascii_case(&descriptor.expected_md5),
+        expected_bytes.is_none_or(|length| bytes.len() as u64 == length)
+            && hex::encode(crate::crypto::md5(&bytes)).eq_ignore_ascii_case(expected_md5),
         "media_integrity_failed"
     );
     let inspection = inspect_image(&bytes)?;

@@ -13,6 +13,7 @@ mod http_route_table;
 mod media;
 #[cfg(test)]
 mod schema_listing;
+mod stickers;
 use anyhow::{bail, Context, Result};
 use axum::{
     extract::{DefaultBodyLimit, Extension, Path, Query, Request, State},
@@ -131,6 +132,33 @@ impl IntoResponse for ApiError {
 impl From<anyhow::Error> for ApiError {
     fn from(error: anyhow::Error) -> Self {
         let message = error.to_string();
+        for (code, status) in [
+            ("sticker_preparation_not_found", StatusCode::NOT_FOUND),
+            ("custom_sticker_not_found", StatusCode::NOT_FOUND),
+            ("sticker_revision_mismatch", StatusCode::PRECONDITION_FAILED),
+            ("invalid_sticker_id", StatusCode::BAD_REQUEST),
+            ("invalid_sticker_pack_id", StatusCode::BAD_REQUEST),
+            ("invalid_language", StatusCode::BAD_REQUEST),
+            ("invalid_sticker_placement", StatusCode::BAD_REQUEST),
+            ("sticker_preparation_not_available", StatusCode::CONFLICT),
+            ("sticker_source_message_mismatch", StatusCode::BAD_REQUEST),
+            ("invalid_sticker_source", StatusCode::BAD_REQUEST),
+            ("sticker_preparation_expired", StatusCode::GONE),
+            ("sticker_source_size_limit", StatusCode::PAYLOAD_TOO_LARGE),
+            ("sticker_trim_invalid", StatusCode::BAD_REQUEST),
+            ("invalid_sticker_download", StatusCode::BAD_REQUEST),
+            ("sticker_pack_not_added", StatusCode::CONFLICT),
+            ("sticker_source_unavailable", StatusCode::CONFLICT),
+            (
+                "unsupported_sticker_send_format",
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            ),
+            ("sticker_pack_detail_rejected", StatusCode::BAD_GATEWAY),
+        ] {
+            if message == code {
+                return Self(status, code);
+            }
+        }
         if message == "mention_all_forbidden" {
             return Self(StatusCode::FORBIDDEN, "mention_all_forbidden");
         }
@@ -1293,6 +1321,7 @@ pub fn router(core: Arc<Core>, token: &str) -> Router {
         .api_route("/v1/accounts/{a}/consumers/{consumer}/ack", post(ack))
         .layer(DefaultBodyLimit::max(128 * 1024))
         .merge(media::routes())
+        .merge(stickers::routes())
         .merge(actions::routes())
         .merge(groups::routes())
         .merge(call_routes())
@@ -2369,6 +2398,209 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         panic!("saved-only empty account did not reach needs_login");
+    }
+    #[tokio::test]
+    async fn saved_item_get_indexes_owned_metadata_without_starting_an_acquisition() {
+        let (_temp, core, app) = setup();
+        let account = core.store.account("one").unwrap();
+        let (location, keys, _) =
+            wechat_profile::initialize_profile(&account.profile_path, &[42; 32]).unwrap();
+        let keyfile = core.store.root.join("accounts/one/agent/profile-keys.json");
+        keys.write_new(&keyfile).unwrap();
+        core.store.set_keys_file("one", &keyfile).unwrap();
+        let id = "00000000000000000000000000000000";
+        wechat_profile::apply_saved_stickers(
+            &location,
+            &keys,
+            &wechat_profile::SavedStickerProjection {
+                order: vec![id.into()],
+                removed_metadata: vec![],
+                records: vec![wechat_profile::SavedStickerRecord {
+                    id: id.into(),
+                    cdn_url: "https://wxapp.tc.qq.com/synthetic-unfetched".into(),
+                    ..Default::default()
+                }],
+            },
+            &wechat_profile::WriteOptions {
+                exclusive_ownership_confirmed: true,
+                allow_plaintext: false,
+                durable_intent_id: "http-sticker-fixture".into(),
+            },
+        )
+        .unwrap();
+        let (status, list) = call(
+            app.clone(),
+            "GET",
+            "/v1/accounts/one/custom-stickers",
+            Some(OWNER),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(list["items"].as_array().unwrap().len(), 1);
+        let (status, item) = call(
+            app.clone(),
+            "GET",
+            &format!("/v1/accounts/one/custom-stickers/{id}"),
+            Some(OWNER),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(item["id"], id);
+        assert!(item.get("cdnUrl").is_none());
+        assert_eq!(item["original"]["contentUrl"], Value::Null);
+        assert!(core.store.queued_media_jobs("one").unwrap().is_empty());
+        for method in ["PATCH", "DELETE"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(format!("/v1/accounts/one/custom-stickers/{id}"))
+                        .header("authorization", format!("Bearer {OWNER}"))
+                        .header("content-type", "application/json")
+                        .header("idempotency-key", "needs-precondition")
+                        .body(Body::from(if method == "PATCH" {
+                            r#"{"position":{"afterId":null}}"#
+                        } else {
+                            ""
+                        }))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::PRECONDITION_REQUIRED);
+        }
+    }
+    #[tokio::test]
+    async fn saved_mutation_jobs_need_send_scope_for_read_cancel_and_retry() {
+        let (_temp, core, app) = setup();
+        let token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        core.store
+            .issue_token(
+                "media-only",
+                &format!("{:x}", Sha256::digest(token.as_bytes())),
+                &["one".into()],
+                &["media".into()],
+                None,
+            )
+            .unwrap();
+        core.store
+            .create_media_job(
+                "one",
+                "saved-mutation",
+                "saved:key",
+                &"0".repeat(64),
+                "sticker_saved",
+                &json!({}),
+                b"sealed-placeholder",
+            )
+            .unwrap();
+        for (method, suffix) in [("GET", ""), ("POST", "/cancel"), ("POST", "/retry")] {
+            assert_eq!(
+                call(
+                    app.clone(),
+                    method,
+                    &format!("/v1/accounts/one/jobs/saved-mutation{suffix}"),
+                    Some(token),
+                    None
+                )
+                .await
+                .0,
+                StatusCode::FORBIDDEN
+            );
+        }
+        assert_eq!(
+            core.store.media_job("one", "saved-mutation").unwrap().state,
+            "queued"
+        );
+    }
+    #[tokio::test]
+    async fn sticker_preparation_is_scoped_idempotent_and_returns_real_media() {
+        let (_temp, core, app) = setup();
+        let gif = include_bytes!("../../wechat-simulator/fixtures/sticker.gif");
+        let source = core
+            .upload_source("one", "test.gif", "image/gif", gif)
+            .unwrap();
+        let body = json!({"sourceId":source.id,"fit":false});
+        assert_eq!(
+            call(
+                app.clone(),
+                "POST",
+                "/v1/accounts/one/sticker-preparations",
+                None,
+                Some(body.clone())
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let request = || {
+            Request::builder()
+                .method("POST")
+                .uri("/v1/accounts/one/sticker-preparations")
+                .header("authorization", format!("Bearer {OWNER}"))
+                .header("content-type", "application/json")
+                .header("idempotency-key", "one-preparation")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap()
+        };
+        let first = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(first.status(), StatusCode::ACCEPTED);
+        let location = first.headers()["location"].to_str().unwrap().to_owned();
+        let first: Value =
+            serde_json::from_slice(&first.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(
+            location,
+            format!(
+                "/v1/accounts/one/sticker-preparations/{}",
+                first["id"].as_str().unwrap()
+            )
+        );
+        let second = app.clone().oneshot(request()).await.unwrap();
+        let second: Value =
+            serde_json::from_slice(&second.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(first["id"], second["id"]);
+        let completed = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let (status, job) = call(app.clone(), "GET", &location, Some(OWNER), None).await;
+                assert_eq!(status, StatusCode::OK);
+                if job["state"] == "available" {
+                    break job;
+                }
+                assert!(
+                    matches!(job["state"].as_str(), Some("queued" | "running")),
+                    "{job}"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(completed["result"]["warnings"], json!([]));
+        let url = completed["result"]["preview"]["contentUrl"]
+            .as_str()
+            .unwrap();
+        let image = app
+            .oneshot(
+                Request::builder()
+                    .uri(url)
+                    .header("authorization", format!("Bearer {OWNER}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(image.status(), StatusCode::OK);
+        assert_eq!(image.headers()["content-type"], "image/png");
+        let bytes = image.into_body().collect().await.unwrap().to_bytes();
+        assert!(bytes.starts_with(b"\x89PNG"));
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&bytes)),
+            completed["result"]["preview"]["sha256"].as_str().unwrap()
+        );
     }
     async fn call(
         app: Router,

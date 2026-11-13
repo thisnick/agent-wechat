@@ -1,0 +1,91 @@
+---
+title: Sticker API
+description: Saved stickers, preparations, official packs, media acquisition and sends.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Manage Saved and official packs as account resources. All paths below start with
+`/v1/accounts/{accountId}`. GET requests read metadata or already owned media;
+they do not start acquisition or change account membership.
+
+| Resource | Methods and purpose |
+| --- | --- |
+| `/sticker-collections` | GET Saved plus every added-pack picker descriptor |
+| `/custom-stickers` | GET ordered Saved/revision; POST save prepared or received media |
+| `/custom-stickers/{id}` | GET metadata/media; PATCH placement; DELETE Saved membership |
+| `/sticker-preparations` | POST uploaded source plus optional trim/fit |
+| `/sticker-preparations/{id}` | GET job, outputs, previews, transformations and expiry |
+| `/sticker-packs` | GET available-feed page; `?membership=added` reads the complete account-added list |
+| `/sticker-packs/{id}` | GET name, membership and separate content readiness |
+| `/sticker-packs/{id}/stickers` | GET contents and optional official captions; `?language=en` selects a locale |
+| `/sticker-packs/{id}/stickers/{stickerId}` | GET one item |
+| `/sticker-packs/{id}/membership` | PUT `{}` adds eligible-free membership; DELETE removes it |
+| `/sticker-downloads` | POST `stickerId` for Saved, `packId` for one whole pack, or both for one pack item; `assetId` acquires an advertised icon/cover/thumbnail |
+| `/sticker-syncs` | POST `{"scope":"saved"}`, `"added"` or `"all"` |
+
+Metadata/media reads and downloads use `media` scope. Saved mutations,
+membership and sync submissions use `send` scope. Uploads, jobs, media-content,
+sends and events reuse the ordinary API resources. A sticker send may acquire
+a missing canonical GIF; it preserves an existing alternate-format Saved cache.
+
+## Prepare, review and save
+
+1. Upload bytes through `/media-sources`. Preparation receives the returned
+   `sourceId`, never a path on the caller's machine.
+
+   ```json
+   {"sourceId":"SOURCE_ID","fit":true,"trim":{"startMs":1000,"durationMs":2000}}
+   ```
+
+2. POST that body to `/sticker-preparations` with `Idempotency-Key`. A completed
+   preparation links to authenticated original, preview and sampled-frame media.
+3. Save the reviewed output with POST `/custom-stickers`:
+
+   ```json
+   {"source":{"kind":"prepared","preparationId":"PREPARATION_ID"}}
+   ```
+
+   A received source instead uses
+   `{"source":{"kind":"message","messageId":"MESSAGE_ID","assetId":"ASSET_ID"}}`.
+   Its original must already be downloaded and verified. Alternate WXGF files
+   cannot be saved as a new item directly; use a verified canonical original.
+
+## Placement and operation recovery
+
+PATCH and DELETE require the quoted collection revision in `If-Match`. Place an
+item with `{"position":{"afterId":"OTHER_ID"}}`; null means first. Resolve last
+against a fresh list with the moving item excluded. Missing preconditions return
+428. A stale revision returns 412 with the current revision; refresh the list.
+
+Asynchronous submissions return 202, the existing job representation and a
+status location. Reuse the same idempotency key and intent after an uncertain
+response. Already-satisfied membership reconciles as a no-op. Keep server
+acceptance, profile writeback, membership and media readiness separate. A
+`needs_review` result is not permission to resubmit under a new key. Local
+writeback repair uses retained inputs without resending or acquiring again.
+
+## Send a selection
+
+POST `/sends` with the normal send idempotency header:
+
+```json
+{"kind":"sticker","threadId":"CHAT_ID","source":{"kind":"pack","packId":"PACK_ID","stickerId":"STICKER_ID"}}
+```
+
+Saved uses `{"kind":"saved","stickerId":"STICKER_ID"}`; direct prepared sends
+use `{"kind":"prepared","preparationId":"PREPARATION_ID"}`. Sending does not
+add Saved membership. Existing selections need an available original and are
+revalidated before submission.
+
+Listen for `sticker-collections.changed` and refresh the affected view. The daemon
+reconciles supported push notifications and reconnects; clients do not need
+continuous list polling.
+
+<Aside type="note" title="Good to know">
+Membership removal deletes the account's link to a product, not the product or
+chat history. Catalog coverage never establishes membership. Unadded acquisitions
+are temporary. Prepared outputs expire after 24 hours unless a pending operation
+still needs them. Official profiles hold settled state; existing operational
+storage holds jobs and recovery inputs without a new sticker schema.
+</Aside>

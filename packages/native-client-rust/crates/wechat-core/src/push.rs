@@ -140,6 +140,7 @@ impl Core {
             .await?;
         self.drain_contact_sync(account, &fence).await?;
         ready.store(true, Ordering::Release);
+        self.sticker_reconnected(account)?;
         self.store.append_event(
             account,
             "account.push",
@@ -269,6 +270,7 @@ impl Core {
             crate::calls::notifications::after_sync_staged(self, account, &id, &batch, origin);
         }
         let projection = self.project_pending_with_media(account, true)?;
+        let _ = self.schedule_sticker_reconciliation(account);
         if !batch.continuation {
             self.store.put_runtime(account, "history-caught-up", b"1")?;
         }

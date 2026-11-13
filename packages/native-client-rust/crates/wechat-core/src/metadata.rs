@@ -737,16 +737,18 @@ impl Core {
         Ok(count)
     }
     pub fn recover_metadata(&self, account: &str) -> Result<usize> {
+        let recovered_stickers = self.recover_saved_sticker_projections(account)?
+            + self.recover_sticker_pack_projections(account)?;
         let pending = self.store.pending_metadata(account)?;
         if pending.is_empty() {
-            return Ok(0);
+            return Ok(recovered_stickers);
         }
         if self.account_state(account).is_err()
             || self.write_options(account, "metadata-recovery").is_err()
         {
             return Ok(0);
         };
-        let mut n = 0;
+        let mut n = recovered_stickers;
         for (id, _) in pending {
             let Ok(receipt) = self.metadata_receipt(account, &id) else {
                 continue;

@@ -846,6 +846,15 @@ pub fn publish_cache_file(
     if hex::encode(Sha256::digest(bytes)) != expected_sha256.to_ascii_lowercase() {
         return Err(ProfileError::InvalidMetadata);
     }
+    apply_checked_cache_file(location, relative, bytes, cache_path_limit(relative))
+}
+
+pub(crate) fn apply_checked_cache_file(
+    location: &ProfileLocation,
+    relative: &str,
+    bytes: &[u8],
+    max: usize,
+) -> Result<bool> {
     let target = location.root.join(relative);
     let parent = target.parent().ok_or(ProfileError::InvalidMetadata)?;
     let mut here = location.root.clone();
@@ -874,12 +883,7 @@ pub fn publish_cache_file(
         }
     }
     if fs::symlink_metadata(&target).is_ok() {
-        if cache_matches(
-            &location.root,
-            Path::new(relative),
-            bytes,
-            cache_path_limit(relative),
-        )? {
+        if cache_matches(&location.root, Path::new(relative), bytes, max)? {
             return Ok(false);
         }
         return Err(ProfileError::SourceChanged);

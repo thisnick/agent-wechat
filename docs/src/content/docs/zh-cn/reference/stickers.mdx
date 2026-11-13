@@ -1,0 +1,67 @@
+---
+title: 表情 API
+description: 我的表情、准备内容、官方表情包、媒体获取与发送。
+banner:
+  content: "本页面由机器翻译，尚未经过人工审校。"
+sourceHash: 5092be66b1c6
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+将“我的表情”和官方表情包作为账号资源进行管理。以下所有路径都以 `/v1/accounts/{accountId}` 开头。GET 请求只读取元数据或已拥有的媒体；它们不会启动获取，也不会更改账号的成员关系。
+
+| 资源 | 方法与用途 |
+| --- | --- |
+| `/sticker-collections` | GET 返回“我的表情”以及每个已添加表情包的选择器描述 |
+| `/custom-stickers` | GET 返回有序的“我的表情”及 revision；POST 保存已准备或已接收的媒体 |
+| `/custom-stickers/{id}` | GET 获取元数据/媒体；PATCH 调整位置；DELETE 移出“我的表情” |
+| `/sticker-preparations` | POST 提交已上传的源文件，并可选裁剪/适配 |
+| `/sticker-preparations/{id}` | GET 获取任务、输出、预览、转换记录与过期时间 |
+| `/sticker-packs` | GET 获取可用列表页；`?membership=added` 读取账号已添加的完整列表 |
+| `/sticker-packs/{id}` | GET 获取名称、成员关系以及单独的内容就绪状态 |
+| `/sticker-packs/{id}/stickers` | GET 获取内容及可选的官方说明；`?language=en` 选择语言 |
+| `/sticker-packs/{id}/stickers/{stickerId}` | GET 获取单个表情 |
+| `/sticker-packs/{id}/membership` | PUT `{}` 添加符合条件的免费表情包成员关系；DELETE 移除 |
+| `/sticker-downloads` | POST：“我的表情”使用 `stickerId`，整个表情包使用 `packId`，表情包中的单个表情则同时使用两者；`assetId` 获取已公布的图标/封面/缩略图 |
+| `/sticker-syncs` | POST `{"scope":"saved"}`、`"added"` 或 `"all"` |
+
+读取元数据和媒体以及下载使用 `media` 权限范围。修改“我的表情”、成员关系和同步提交使用 `send` 权限范围。上传、任务、媒体内容、发送和事件复用普通 API 资源。发送表情时可能会获取缺失的标准 GIF；已有的其他格式“我的表情”缓存会被保留。
+
+## 准备、预览与保存 \{#prepare-review-and-save}
+
+1. 通过 `/media-sources` 上传字节。准备接口接收返回的 `sourceId`，绝不接收调用方机器上的路径。
+
+   ```json
+   {"sourceId":"SOURCE_ID","fit":true,"trim":{"startMs":1000,"durationMs":2000}}
+   ```
+
+2. 携带 `Idempotency-Key`，将该请求体 POST 到 `/sticker-preparations`。准备完成后，会链接到经过身份验证的原图、预览和抽样帧媒体。
+3. 使用 POST `/custom-stickers` 保存已检查的输出：
+
+   ```json
+   {"source":{"kind":"prepared","preparationId":"PREPARATION_ID"}}
+   ```
+
+   接收到的媒体源则使用 `{"source":{"kind":"message","messageId":"MESSAGE_ID","assetId":"ASSET_ID"}}`。其原图必须已下载并通过校验。其他格式的 WXGF 文件不能直接保存为新项目；请改用已校验的标准原图。
+
+## 位置调整与操作恢复 \{#placement-and-operation-recovery}
+
+PATCH 和 DELETE 需要在 `If-Match` 中提供加引号的集合 revision。使用 `{"position":{"afterId":"OTHER_ID"}}` 放置项目；null 表示放在第一位。若要放到最后，请基于排除待移动项目后的最新列表进行解析。缺少前置条件时返回 428。revision 过期时返回 412 及当前 revision；请刷新列表。
+
+异步提交返回 202、现有的任务表示以及状态位置。在响应不确定后，请使用相同的幂等键和意图重试。已满足的成员关系会按无操作处理。应分别保持服务端接受、Profile 回写、成员关系和媒体就绪状态。`needs_review` 结果不代表可以使用新键重新提交。本地回写修复会使用保留的输入，无需重新发送或再次获取。
+
+## 发送所选表情 \{#send-a-selection}
+
+使用常规的发送幂等请求头，POST `/sends`：
+
+```json
+{"kind":"sticker","threadId":"CHAT_ID","source":{"kind":"pack","packId":"PACK_ID","stickerId":"STICKER_ID"}}
+```
+
+“我的表情”使用 `{"kind":"saved","stickerId":"STICKER_ID"}`；直接发送已准备的内容使用 `{"kind":"prepared","preparationId":"PREPARATION_ID"}`。发送不会将表情加入“我的表情”。已有的所选项需要可用的原图，并会在提交前重新校验。
+
+监听 `sticker-collections.changed` 并刷新受影响的视图。Daemon 会协调受支持的推送通知并重新连接；客户端无需持续轮询列表。
+
+<Aside type="note" title="使用提示">
+移除成员关系只会删除账号与某个产品之间的关联，不会删除产品或聊天记录。目录中出现的内容不能证明账号已添加该表情包。未添加的获取内容仅为临时数据。除非待处理操作仍需要，已准备的输出会在 24 小时后过期。官方 Profile 保存已确定的状态；现有的运营存储保存任务和恢复所需的输入，而不新增表情数据结构。
+</Aside>
