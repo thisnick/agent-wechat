@@ -35,7 +35,17 @@ async function previewTransfer<T>(action: () => Promise<T>, signal: AbortSignal)
 /** Authenticated bytes become a local image URL, never a token-bearing URL. */
 export function StickerImage({ client, account, asset, label, acquire = false }: { client: NativeWeChatClient; account: string; asset?: MediaAsset | null; label: string; acquire?: boolean }) {
   const [url, setUrl] = useState("");
+  const element = useRef<HTMLElement | null>(null);
+  const [visible, setVisible] = useState(false);
   useEffect(() => {
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) { setVisible(true); observer.disconnect(); }
+    }, { rootMargin: "80px" });
+    if (element.current) observer.observe(element.current);
+    return () => observer.disconnect();
+  }, []);
+  useEffect(() => {
+    if (!visible) return;
     const abort = new AbortController(); let owned = "";
     setUrl("");
     void (async () => {
@@ -55,8 +65,8 @@ export function StickerImage({ client, account, asset, label, acquire = false }:
       owned = URL.createObjectURL(new Blob([new Uint8Array(content.bytes)], { type: content.contentType })); setUrl(owned);
     })().catch(()=>{});
     return () => { abort.abort(); if (owned) URL.revokeObjectURL(owned); };
-  }, [client, account, asset?.id, asset?.sha256, asset?.state, acquire]);
-  return url ? <img src={url} alt={label} draggable={false} /> : <span className="sticker-unloaded" aria-label={label}><Icon name="smile" /></span>;
+  }, [client, account, asset?.id, asset?.sha256, asset?.state, acquire, visible]);
+  return url ? <img ref={node => { element.current = node; }} src={url} alt={label} draggable={false} /> : <span ref={node => { element.current = node; }} className="sticker-unloaded" aria-label={label}><Icon name="smile" /></span>;
 }
 
 /** Only visible tray tiles read metadata or acquire missing media. */
@@ -121,6 +131,10 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
   const root = useRef<HTMLDivElement>(null), fileInput = useRef<HTMLInputElement>(null), hold = useRef<ReturnType<typeof setTimeout> | undefined>(undefined), held = useRef(false);
   const scope = useRef(new AbortController()), keys = useRef(new Map<string, string>()), id = useId();
   const preparing = useRef(false);
+  const catalogLoaded = useRef(0);
+  const packViews = useRef(new Map<string, { at: number; detail: StickerPack; items: StickerPackSticker[] }>());
+  const viewEpoch = useRef(0);
+  const clearPackViews = () => { viewEpoch.current++; packViews.current.clear(); catalogLoaded.current = 0; };
   const pointerDrag=useRef<{id:string;x:number;y:number;moved:boolean}|null>(null);
   useEffect(()=>{if(!edit) held.current=false;},[edit]);
   useEffect(() => { const abort = new AbortController(); scope.current = abort; return () => abort.abort(); }, [account, connection]);
@@ -129,9 +143,9 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
   const key = (intent: string) => { let value = keys.current.get(intent); if (!value) { value = crypto.randomUUID(); keys.current.set(intent, value); } return value; };
   async function refresh() {
     const [list, packs] = await Promise.all([client.customStickers(account, signal()), client.stickerPacks(account, { membership: "added" }, signal())]);
-    guard(); setSaved(old => { const cached=new Map(old.items.map(item=>[item.id,item.original])); return {...list,items:list.items.map(item=>({...item,original:cached.get(item.id) ?? item.original}))}; }); setAdded(packs.items);
+    guard(); setSaved(old => { const cached=new Map(old.items.map(item=>[item.id,item.original])); return {...list,items:list.items.map(item=>({...item,original:cached.get(item.id) ?? item.original}))}; }); setAdded(packs.items); return packs;
   }
-  async function act(action: () => Promise<void>) {
+  async function act(action: () => Promise<unknown>) {
     if (busy) return;
     setBusy(true); setError("");
     try { await action(); } catch (error) {
@@ -145,16 +159,21 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
   useEffect(() => {
     if (!open) { setEdit(false); return; }
     void act(refresh);
-    const dismiss = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node) && !browser && !imports) setOpen(false); };
-    document.addEventListener("pointerdown", dismiss);
     const off = connection.session.onEvent((event, changed) => {
-      if (changed === account && (event.kind === "sticker-collections.changed" || event.kind === "account.push" && event.data.state === "connected")) void refresh().catch(error => { if (!signal().aborted) setError(readableError(error)); });
+      if (changed === account && (event.kind === "sticker-collections.changed" || event.kind === "account.push" && event.data.state === "connected")) { clearPackViews(); void refresh().catch(error => { if (!signal().aborted) setError(readableError(error)); }); }
     });
     const offGap=connection.session.onEventGap(changed=> {
-      if(changed===account) void refresh().catch(error=>{if(!signal().aborted) setError(readableError(error));});
+      if(changed===account) { clearPackViews(); void refresh().catch(error=>{if(!signal().aborted) setError(readableError(error));}); }
     });
-    return () => { document.removeEventListener("pointerdown", dismiss); off(); offGap(); clearTimeout(hold.current); };
+    return () => { off(); offGap(); clearTimeout(hold.current); };
+  }, [open, account, connection]);
+  useEffect(() => {
+    if (!open) return;
+    const dismiss = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node) && !browser && !imports) setOpen(false); };
+    document.addEventListener("pointerdown", dismiss);
+    return () => document.removeEventListener("pointerdown", dismiss);
   }, [open, browser, imports !== null]);
+  useEffect(() => { clearPackViews(); }, [account, connection]);
   useEffect(() => {
     if (!open || tab === "saved") return;
     const abort = new AbortController();
@@ -193,19 +212,27 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
   }
   async function browse(mode: "browse" | "added", next?: string) {
     setBrowser(mode); setDetail(null);
-    if (mode === "added") return;
-    await act(async () => { const result = await client.stickerPacks(account, next ? { cursor: next } : {}, signal()); guard(); setCatalog(old => next ? [...old, ...result.items] : result.items); setCursor(result.nextCursor); });
+    if (mode === "added" || !next && Date.now() - catalogLoaded.current < 60_000) return;
+    const epoch = viewEpoch.current;
+    await act(async () => { const result = await client.stickerPacks(account, next ? { cursor: next } : {}, signal()); guard(); setCatalog(old => next ? [...old, ...result.items] : result.items); setCursor(result.nextCursor); if (epoch === viewEpoch.current) catalogLoaded.current = Date.now(); });
   }
   async function inspect(pack: StickerPack) {
+    const epoch = viewEpoch.current;
+    const cached = packViews.current.get(pack.id);
+    if (cached && Date.now() - cached.at < 60_000) {
+      setDetail(cached.detail); setDetailPreview(null); setDetailItems(cached.items); return;
+    }
     await act(async () => {
       const [detail, contents] = await Promise.all([client.stickerPack(account, pack.id, signal()), client.stickerPackItems(account, pack.id, "en", signal())]);
       guard(); setDetail(detail); setDetailPreview(null); setDetailItems(contents.items);
+      if (packViews.current.size >= 20) packViews.current.delete(packViews.current.keys().next().value!);
+      if (epoch === viewEpoch.current) packViews.current.set(pack.id, { at: Date.now(), detail, items: contents.items });
     });
   }
   async function acquire(pack: string, selected?: string) {
     await act(async () => {
       await waitStickerJob(client, account, await client.downloadSticker(account, { packId: pack }, key(`pack-download:${pack}`), signal()), signal());
-      keys.current.delete(`pack-download:${pack}`);
+      keys.current.delete(`pack-download:${pack}`); packViews.current.delete(pack);
       const contents = await client.stickerPackItems(account, pack, "en", signal()); guard(); setDetailItems(contents.items);
       if(selected) setDetailPreview(contents.items.find(item=>item.id===selected) ?? null);
     });
@@ -214,8 +241,13 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
     await act(async () => {
       const intent = `membership:${pack.id}:${add}`;
       await waitStickerJob(client, account, await (add ? client.addStickerPack(account, pack.id, key(intent), signal()) : client.removeStickerPack(account, pack.id, key(intent), signal())), signal());
-      keys.current.delete(intent); await refresh();
-      const [fresh,contents] = await Promise.all([client.stickerPack(account, pack.id, signal()),client.stickerPackItems(account,pack.id,"en",signal())]);
+      keys.current.delete(intent); clearPackViews();
+      const packs = await refresh();
+      const member = packs.items.find(item => item.id === pack.id);
+      const fresh: StickerPack = { ...pack, membership: member ? "added" : "not_added", contentReadiness: member?.contentReadiness ?? "unverified" };
+      // The completed mutation and canonical Added read establish membership.
+      // Refresh media references after removal without repeating remote pack detail.
+      const contents = await client.stickerPackItems(account,pack.id,"en",signal());
       guard(); setDetail(fresh); setDetailItems(contents.items); setDetailPreview(null);
       setCatalog(old => old.map(item => item.id === pack.id ? fresh : item));
       if (!add && tab === pack.id) setTab("saved");
@@ -267,7 +299,7 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
   const ready = imports?.filter(item => item.selected && item.prepared && !item.added).length ?? 0;
   return <div className="sticker-picker" ref={root} onKeyDown={event => { if (event.key === "Escape" && !browser && !imports) { setOpen(false); event.stopPropagation(); } }}>
     <button type="button" className="icon-btn" aria-label={t("stickers.open")} title={t("stickers.open")} aria-expanded={open} aria-controls={id} disabled={!enabled} onClick={() => setOpen(value => !value)}><Icon name="smile" /></button>
-    {open && <section id={id} className="sticker-tray" data-composer-file-drop aria-label={t("stickers.picker")} onDragOver={event => { event.preventDefault(); event.stopPropagation(); }} onDrop={drop}>
+    {open && !browser && !imports && <section id={id} className="sticker-tray" data-composer-file-drop aria-label={t("stickers.picker")} onDragOver={event => { event.preventDefault(); event.stopPropagation(); }} onDrop={drop}>
       <div className="sticker-tabs" role="tablist" aria-label={t("stickers.collections")}>
         <button role="tab" aria-selected={tab === "saved"} onClick={() => { setTab("saved"); setEdit(false); }}>{t("stickers.saved")}</button>
         {added.slice(0, 3).map(pack => <button role="tab" key={pack.id} aria-selected={tab === pack.id} onClick={() => { setTab(pack.id); setEdit(false); setItems([]); }}>{pack.name}</button>)}

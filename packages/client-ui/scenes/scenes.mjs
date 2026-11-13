@@ -549,7 +549,17 @@ for (const mode of ['picker', 'edit', 'packs', 'pack-detail', 'import', 'lazy-lo
       if (mode === 'packs' || mode === 'pack-detail') {
         await page.getByRole('button', { name: 'Browse packs', exact: true }).click();
         await expect(page.getByRole('dialog', { name: 'Browse packs' })).toBeVisible();
-        if (mode === 'pack-detail') { await page.getByRole('button', { name: /Little hellos Preview pack/ }).click(); await expect(page.getByRole('dialog', { name: 'Little hellos' })).toBeVisible(); await page.locator('.sticker-pack-item').first().click(); await expect(page.locator('.sticker-draft')).toHaveCount(0); await expect(page.locator('.sticker-detail-cover img')).toBeVisible(); }
+        if (mode === 'pack-detail') {
+          let detailReads=0;
+          page.on('request',request=>{if(new URL(request.url()).pathname.includes('/sticker-packs/pack.hello'))detailReads++;});
+          await page.getByRole('button', { name: /Little hellos Preview pack/ }).click();
+          await expect(page.getByRole('dialog', { name: 'Little hellos' })).toBeVisible();
+          const initialReads=detailReads;expect(initialReads).toBe(2);
+          await page.getByRole('button',{name:'Back',exact:true}).click();
+          await page.getByRole('button', { name: /Little hellos Preview pack/ }).click();
+          await expect(page.getByRole('dialog', { name: 'Little hellos' })).toBeVisible();
+          expect(detailReads).toBe(initialReads);
+          await page.locator('.sticker-pack-item').first().click(); await expect(page.locator('.sticker-draft')).toHaveCount(0); await expect(page.locator('.sticker-detail-cover img')).toBeVisible(); }
       }
       if (mode === 'import') {
         await page.route(/\/media-sources$/, route => route.fulfill({ json: { id: 'source-scene', name: 'wave.gif' } }));
