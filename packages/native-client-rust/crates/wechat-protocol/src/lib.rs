@@ -105,3 +105,11 @@ pub mod wire;
 pub use client::*;
 
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+
+mod sticker_id;
+pub mod sticker_packs;
+pub mod sticker_send;
+pub use sticker_id::{StickerId, StickerPackId};
+pub mod sticker_upload;
+
+pub mod custom_stickers;

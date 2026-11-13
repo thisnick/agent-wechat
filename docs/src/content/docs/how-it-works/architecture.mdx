@@ -36,7 +36,7 @@ flowchart LR
 
 | Part | Job |
 | --- | --- |
-| Account worker | One per account: holds the connection to WeChat, keeps the login alive, and runs one change at a time |
+| Account worker | One per account: holds the connection to WeChat, keeps the login alive, and coordinates account changes and recovery |
 | Sync | Receives new messages through a push connection, falling back to polling if the connection drops |
 | Profile reader/writer | Reads history through a small pool of consistent snapshots; keeps one writer for supported database layouts |
 | Job queue | Runs sends, downloads, recalls and read notices, and remembers them across restarts |
@@ -52,8 +52,21 @@ journal mode.
 
 Downloads have a separate limit: two per account and four across the daemon.
 Network waits release the account writer, which checks the login and job state
-again before saving a result. Sends keep their existing queue. Discovering and
-registering saved media still uses the writer.
+again before saving a result. Sticker operations, contact and room lookups,
+group changes and recalls also release the writer during network waits.
+Conflicting operations keep their ordering guards; logout and credential checks
+still apply before results are saved.
+
+Added-pack lists and already indexed message media use consistent read snapshots.
+Discovering and registering missing media still uses the writer. Pending media
+is rechecked for files that may already exist in the official profile.
+
+All clients of one daemon share a short-lived sticker metadata cache. It keeps
+up to 64 catalog/detail/caption responses of at most 128 KiB each for 60 seconds
+in memory, and combines simultaneous requests for the same metadata. Restarting
+clears it. Entries are separated by account and authenticated session; logout
+removes that account's entries. Membership and media availability are read from
+the profile and existing media records, not from this cache.
 
 See [Rust crate architecture](../rust-crates/) for packages and dependencies,
 and [Rust libraries](/reference/rust-libraries/) for direct library use.

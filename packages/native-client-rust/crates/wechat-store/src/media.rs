@@ -332,7 +332,7 @@ impl Store {
         payload: &[u8],
     ) -> Result<(MediaJobRecord, bool)> {
         self.control(account, |db| {
-            if key.is_empty() || key.len()>250 || id.is_empty() || id.len()>100 || hash.len()!=64 || !matches!(kind,"download"|"send") { bail!("invalid media job"); }
+            if key.is_empty() || key.len()>250 || id.is_empty() || id.len()>100 || hash.len()!=64 || !matches!(kind,"download"|"send"|"sticker_prepare"|"sticker_saved"|"sticker_pack"|"sticker_acquire"|"sticker_send") { bail!("invalid media job"); }
             let tx = db.transaction()?;
             if kind == "send" {
                 let inhibited:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM runtime WHERE key='logged-out')",[],|r|r.get(0))?;
@@ -357,6 +357,15 @@ impl Store {
         })
     }
 
+    /// Latest completed acquisitions for one product, used only to reuse owned
+    /// temporary archives after membership changes. This is not a pack catalog.
+    pub fn completed_sticker_acquisitions(&self, account: &str, pack: &str) -> Result<Vec<String>> {
+        self.control(account,|db| {
+            let mut query=db.prepare("SELECT id FROM media_jobs WHERE kind='sticker_acquire' AND state='available' AND json_extract(data_json,'$.packId')=?1 ORDER BY updated_at DESC LIMIT 5")?;
+            let rows=query.query_map([pack],|row|row.get(0))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+    }
     pub fn media_job(&self, account: &str, id: &str) -> Result<MediaJobRecord> {
         self.control(account, |db| read_job(db, id))
     }
@@ -368,6 +377,32 @@ impl Store {
                 |r| r.get(0),
             )?;
             read_job(db, &id)
+        })
+    }
+    /// Find an existing submission and validate its content hash before a
+    /// caller rechecks expiring inputs or changing account preconditions.
+    pub fn find_media_job(
+        &self,
+        account: &str,
+        key: &str,
+        hash: &str,
+    ) -> Result<Option<MediaJobRecord>> {
+        self.control(account, |db| {
+            let existing: Option<(String, String)> = db
+                .query_row(
+                    "SELECT id,request_hash FROM media_jobs WHERE idempotency_key=?1",
+                    [key],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            existing
+                .map(|(id, old)| {
+                    if old != hash {
+                        bail!("idempotency_conflict");
+                    }
+                    read_job(db, &id)
+                })
+                .transpose()
         })
     }
     pub fn pending_media_projections(&self, account: &str) -> Result<Vec<String>> {
@@ -382,7 +417,7 @@ impl Store {
     pub fn incomplete_media_writeback(&self, account: &str) -> Result<bool> {
         self.control(account, |db| {
             Ok(db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM media_assets WHERE json_extract(metadata_json,'$.state')='available' AND coalesce(json_extract(metadata_json,'$.officialWriteback'),'')!='complete') OR EXISTS(SELECT 1 FROM media_jobs j WHERE j.kind='send' AND (j.state='accepted' OR json_extract(j.data_json,'$.serverMessageId') IS NOT NULL OR EXISTS(SELECT 1 FROM json_each(j.data_json,'$.result.chunks') c WHERE json_extract(c.value,'$.state')='accepted')) AND coalesce(json_extract(j.data_json,'$.result.officialMediaWriteback'),'') NOT IN ('complete','not_applicable'))",
+                "SELECT EXISTS(SELECT 1 FROM media_assets WHERE json_extract(metadata_json,'$.state')='available' AND coalesce(json_extract(metadata_json,'$.officialWriteback'),'') NOT IN ('complete','not_applicable')) OR EXISTS(SELECT 1 FROM media_jobs j WHERE j.kind='send' AND (j.state='accepted' OR json_extract(j.data_json,'$.serverMessageId') IS NOT NULL OR EXISTS(SELECT 1 FROM json_each(j.data_json,'$.result.chunks') c WHERE json_extract(c.value,'$.state')='accepted')) AND coalesce(json_extract(j.data_json,'$.result.officialMediaWriteback'),'') NOT IN ('complete','not_applicable')) OR EXISTS(SELECT 1 FROM media_jobs WHERE kind IN ('sticker_saved','sticker_pack','sticker_send','sticker_acquire') AND (state IN ('queued','running','needs_review') OR (json_extract(data_json,'$.serverAcceptance')='accepted' AND coalesce(json_extract(data_json,'$.profileWriteback'),'')!='complete')))",
                 [],
                 |row| row.get(0),
             )?)
@@ -403,7 +438,7 @@ impl Store {
             };
             anyhow::ensure!(family.is_empty() || matches!(family.as_str(),"asset"|"job"),"invalid_media_repair_cursor");
             anyhow::ensure!(id.len()<=255 && !id.chars().any(char::is_control),"invalid_media_repair_cursor");
-            let mut q=db.prepare("SELECT family,id FROM (SELECT 'asset' AS family,id FROM media_assets WHERE kind IN ('image','file','video','voice') AND json_extract(metadata_json,'$.state')='available' AND coalesce(json_extract(metadata_json,'$.officialWriteback'),'')!='complete' UNION ALL SELECT 'job' AS family,id FROM media_jobs j WHERE j.kind='send' AND (j.state='accepted' OR json_extract(j.data_json,'$.serverMessageId') IS NOT NULL OR EXISTS(SELECT 1 FROM json_each(j.data_json,'$.result.chunks') c WHERE json_extract(c.value,'$.state')='accepted')) AND coalesce(json_extract(j.data_json,'$.result.officialMediaWriteback'),'') NOT IN ('complete','not_applicable')) ORDER BY CASE WHEN family>?2 OR (family=?2 AND id>?3) THEN 0 ELSE 1 END,family,id LIMIT ?1")?;
+            let mut q=db.prepare("SELECT family,id FROM (SELECT 'asset' AS family,id FROM media_assets WHERE kind IN ('image','file','video','voice') AND json_extract(metadata_json,'$.state')='available' AND coalesce(json_extract(metadata_json,'$.officialWriteback'),'') NOT IN ('complete','not_applicable') UNION ALL SELECT 'job' AS family,id FROM media_jobs WHERE kind IN ('sticker_saved','sticker_pack','sticker_send','sticker_acquire') AND json_extract(data_json,'$.serverAcceptance')='accepted' AND coalesce(json_extract(data_json,'$.profileWriteback'),'')!='complete' UNION ALL SELECT 'job' AS family,id FROM media_jobs j WHERE j.kind='send' AND (j.state='accepted' OR json_extract(j.data_json,'$.serverMessageId') IS NOT NULL OR EXISTS(SELECT 1 FROM json_each(j.data_json,'$.result.chunks') c WHERE json_extract(c.value,'$.state')='accepted')) AND coalesce(json_extract(j.data_json,'$.result.officialMediaWriteback'),'') NOT IN ('complete','not_applicable')) ORDER BY CASE WHEN family>?2 OR (family=?2 AND id>?3) THEN 0 ELSE 1 END,family,id LIMIT ?1")?;
             let rows=q.query_map(params![limit,family,id],|r|Ok((r.get(0)?,r.get(1)?)))?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)
         })
@@ -465,7 +500,7 @@ impl Store {
         self.control(account,|db|{
             let tx=db.transaction()?;let old=read_job(&tx,id)?;
             if !matches!(old.state.as_str(),"available"|"accepted"|"expired"|"unsupported"|"needs_review") {
-                tx.execute("UPDATE media_jobs SET cancel_requested=1,state=CASE WHEN state='queued' THEN 'cancelled' ELSE state END,retryable=CASE WHEN kind='download' THEN 1 ELSE retryable END,updated_at=?2 WHERE id=?1",params![id,chrono::Utc::now().to_rfc3339()])?;
+                tx.execute("UPDATE media_jobs SET cancel_requested=1,state=CASE WHEN state='queued' THEN 'cancelled' ELSE state END,retryable=CASE WHEN kind IN ('download','sticker_prepare') THEN 1 ELSE retryable END,updated_at=?2 WHERE id=?1",params![id,chrono::Utc::now().to_rfc3339()])?;
             }
             let row=read_job(&tx,id)?;if job_changed(&old,&row){job_event(&tx,account,&row)?;}
             tx.commit()?;Ok(row)
@@ -529,7 +564,7 @@ impl Store {
             let tx=db.transaction()?;
             let ids={let mut q=tx.prepare("SELECT id FROM media_jobs WHERE state='running'")?;let rows=q.query_map([],|r|r.get::<_,String>(0))?;rows.collect::<rusqlite::Result<Vec<_>>>()?};
             let now=chrono::Utc::now().to_rfc3339();
-            tx.execute("UPDATE media_jobs SET state='needs_review',error_code=CASE WHEN phase='reserving' THEN 'restart_during_reservation' ELSE 'restart_after_submission' END,retryable=0,updated_at=?1 WHERE state='running' AND kind='send' AND phase IN ('reserving','uploading','submitting')",[&now])?;
+            tx.execute("UPDATE media_jobs SET state='needs_review',error_code=CASE WHEN phase='reserving' THEN 'restart_during_reservation' ELSE 'restart_after_submission' END,retryable=0,updated_at=?1 WHERE state='running' AND kind IN ('send','sticker_saved','sticker_pack','sticker_acquire','sticker_send') AND phase IN ('reserving','uploading','submitting')",[&now])?;
             tx.execute("UPDATE media_jobs SET state=CASE WHEN cancel_requested=1 THEN 'cancelled' WHEN attempts<3 THEN 'queued' ELSE 'failed' END,retryable=CASE WHEN attempts<3 THEN 1 ELSE 0 END,error_code='worker_interrupted',updated_at=?1 WHERE state='running'",[&now])?;
             for id in &ids {job_event(&tx,account,&read_job(&tx,id)?)?;}
             tx.commit()?;Ok(ids.len())
@@ -838,6 +873,50 @@ impl Store {
             )?;
             let rows = q.query_map([before], |r| Ok((r.get(0)?, r.get(1)?)))?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+    }
+    /// Sources referenced by sticker preparations or sends, paired with whether
+    /// the operation finished before the upload grace period. Uncertain sends
+    /// and accepted sends awaiting profile writeback retain their inputs.
+    pub fn sticker_preparation_sources_for_release(
+        &self,
+        account: &str,
+        settled_seconds: i64,
+    ) -> Result<Vec<(String, bool)>> {
+        anyhow::ensure!(settled_seconds >= 0, "invalid_limit");
+        let before = (chrono::Utc::now() - chrono::Duration::seconds(settled_seconds)).to_rfc3339();
+        self.control(account, |db| {
+            let mut query = db.prepare("SELECT json_extract(data_json,'$.sourceId'), (retryable=0 AND updated_at<=?1 AND (state IN ('failed','cancelled','unsupported','expired') OR (state='available' AND (kind='sticker_prepare' OR json_extract(data_json,'$.profileWriteback')='complete'))) AND (coalesce(json_extract(data_json,'$.serverAcceptance'),'')!='accepted' OR coalesce(json_extract(data_json,'$.profileWriteback'),'')='complete')) FROM media_jobs WHERE kind IN ('sticker_prepare','sticker_send') AND json_type(data_json,'$.sourceId')='text'")?;
+            let rows = query.query_map([before], |r| Ok((r.get(0)?,r.get(1)?)))?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+    /// Release expired local preparation outputs, retaining job/idempotency
+    /// receipts. A pending operation naming the preparation keeps its bytes.
+    /// This never touches official-profile files or performs network work.
+    pub fn expire_sticker_preparation_assets(
+        &self,
+        account: &str,
+        now: i64,
+        limit: u32,
+    ) -> Result<usize> {
+        anyhow::ensure!((1..=1000).contains(&limit), "invalid_limit");
+        let files = self.media_directory(account)?;
+        self.control(account, |db| {
+            let tx = db.transaction()?;
+            let expired = {
+                let mut query = tx.prepare("SELECT a.id,a.payload_file,a.metadata_json FROM media_assets a WHERE json_extract(a.metadata_json,'$.preparationExpiresAt')<=?1 AND json_extract(a.metadata_json,'$.state')='available' AND NOT EXISTS(SELECT 1 FROM media_jobs j WHERE json_extract(j.data_json,'$.preparationId')=json_extract(a.metadata_json,'$.jobId') AND (j.state IN ('queued','running','needs_review') OR j.retryable=1 OR (j.kind IN ('sticker_saved','sticker_acquire') AND json_extract(j.data_json,'$.serverAcceptance')='accepted' AND coalesce(json_extract(j.data_json,'$.profileWriteback'),'')!='complete'))) LIMIT ?2")?;
+                let rows = query.query_map(params![now,limit], |r| Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,String>(2)?)))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            for (id,_,metadata) in &expired {
+                let mut metadata: Value = serde_json::from_str(metadata)?;
+                metadata["state"] = "expired".into(); metadata["reason"] = "sticker_preparation_expired".into(); metadata["contentUrl"] = Value::Null;
+                tx.execute("UPDATE media_assets SET metadata_json=?2,payload=NULL,payload_file=NULL,updated_at=?3 WHERE id=?1",params![id,serde_json::to_string(&metadata)?,chrono::Utc::now().to_rfc3339()])?;
+            }
+            tx.commit()?;
+            for (_,file,_) in &expired { if let Some(file) = file { media_files::remove(&files,file); } }
+            Ok(expired.len())
         })
     }
     pub fn media_sync_receipts(&self, account: &str) -> Result<Vec<(String, Vec<u8>)>> {
@@ -1365,6 +1444,37 @@ mod tests {
         assert!(!s.claim_media_job("test", "download1").unwrap());
     }
     #[test]
+    fn sticker_send_inputs_survive_uncertain_and_incomplete_writeback() {
+        let (_directory, store) = setup();
+        for (id, state, writeback, released) in [
+            ("uncertain", "needs_review", "pending", false),
+            ("writeback", "failed", "blocked", false),
+            ("missing", "failed", "", false),
+            ("finished", "available", "complete", true),
+            ("failed", "failed", "pending", true),
+        ] {
+            store
+                .create_media_job(
+                    "test",
+                    id,
+                    &format!("send:{id}"),
+                    &"0".repeat(64),
+                    "sticker_send",
+                    &json!({"sourceId":format!("source-{id}"),"profileWriteback":if id=="missing" {Value::Null} else {json!(writeback)},"serverAcceptance":if id=="writeback" || id=="missing" {"accepted"} else {"pending"}}),
+                    b"protected",
+                )
+                .unwrap();
+            let mut row = store.media_job("test", id).unwrap();
+            row.state = state.into();
+            row.retryable = false;
+            store.save_media_job("test", &row).unwrap();
+            let rows = store
+                .sticker_preparation_sources_for_release("test", 0)
+                .unwrap();
+            assert!(rows.contains(&(format!("source-{id}"), released)));
+        }
+    }
+    #[test]
     fn source_limits_and_asset_metadata_do_not_require_payload_copies() {
         let (_t, store) = setup();
         let max = wechat_media::MAX_FILE_BYTES as u64;
@@ -1449,5 +1559,44 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+    #[test]
+    fn interrupted_pack_membership_is_reviewable_and_not_queued_for_resubmission() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("data")).unwrap();
+        store.create_account("one").unwrap();
+        let hash = "0".repeat(64);
+        store
+            .create_media_job(
+                "one",
+                "pack-intent",
+                "pack:key",
+                &hash,
+                "sticker_pack",
+                &serde_json::json!({}),
+                b"sealed-owned-intent",
+            )
+            .unwrap();
+        assert!(store.claim_media_job("one", "pack-intent").unwrap());
+        let mut row = store.media_job("one", "pack-intent").unwrap();
+        row.phase = "submitting".into();
+        store.save_media_job("one", &row).unwrap();
+        store.recover_media_jobs("one").unwrap();
+        let row = store.media_job("one", "pack-intent").unwrap();
+        assert_eq!(row.state, "needs_review");
+        assert!(!row.retryable);
+        assert!(store.queued_media_jobs("one").unwrap().is_empty());
+        assert!(store.retry_media_job("one", "pack-intent").is_err());
+        assert_eq!(
+            store
+                .find_media_job("one", "pack:key", &hash)
+                .unwrap()
+                .unwrap()
+                .id,
+            "pack-intent"
+        );
+        assert!(store
+            .find_media_job("one", "pack:key", &"1".repeat(64))
+            .is_err());
     }
 }

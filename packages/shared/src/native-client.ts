@@ -301,6 +301,82 @@ export class NativeWeChatClient {
     const response = await this.response(`v1/accounts/${id(accountId)}/uploads`, { method: "POST", body: form, signal }, false, this.mediaTimeoutMs);
     return JSON.parse(new TextDecoder().decode(await this.readBounded(response))) as OwnedMediaSource;
   }
+  /** Derive Saved and all added official pack tabs from the account profile. */
+  stickerCollections(accountId: string, signal?: AbortSignal): Promise<import("./native.generated.js").StickerCollections> {
+    return this.request(`v1/accounts/${id(accountId)}/sticker-collections`, { signal });
+  }
+  /** Read the available catalog page, or every account-added pack independently of the feed. */
+  stickerPacks(accountId: string, query: { membership?: "added"; cursor?: string } = {}, signal?: AbortSignal): Promise<import("./native.generated.js").StickerPackList> {
+    if (query.membership && query.cursor) throw new Error("The added-pack list does not take a catalog cursor");
+    const params = new URLSearchParams(); if (query.membership) params.set("membership", query.membership); if (query.cursor) params.set("cursor", query.cursor);
+    return this.request(`v1/accounts/${id(accountId)}/sticker-packs${params.size ? `?${params}` : ""}`, { signal });
+  }
+  /** Read pack metadata; membership and content readiness are separate fields. */
+  stickerPack(accountId: string, packId: string, signal?: AbortSignal): Promise<import("./native.generated.js").StickerPack> {
+    return this.request(`v1/accounts/${id(accountId)}/sticker-packs/${id(packId)}`, { signal });
+  }
+  /** Read complete supplied contents and optional official captions without downloading media. */
+  stickerPackItems(accountId: string, packId: string, language = "en", signal?: AbortSignal): Promise<import("./native.generated.js").StickerPackStickers> {
+    return this.request(`v1/accounts/${id(accountId)}/sticker-packs/${id(packId)}/stickers?language=${encodeURIComponent(language)}`, { signal });
+  }
+  /** Read one item within a selected pack, using its stable original identity. */
+  stickerPackItem(accountId: string, packId: string, stickerId: string, language = "en", signal?: AbortSignal): Promise<import("./native.generated.js").StickerPackSticker> {
+    return this.request(`v1/accounts/${id(accountId)}/sticker-packs/${id(packId)}/stickers/${id(stickerId)}?language=${encodeURIComponent(language)}`, { signal });
+  }
+  /** Establish eligible-free membership. Already satisfied intents reconcile as no-ops. */
+  addStickerPack(accountId: string, packId: string, key: string, signal?: AbortSignal): Promise<MediaJob> {
+    return this.stickerSubmission(accountId, `sticker-packs/${id(packId)}/membership`, "PUT", {}, key, undefined, signal);
+  }
+  /** Remove membership asynchronously, preserving Saved references and chat history. */
+  removeStickerPack(accountId: string, packId: string, key: string, signal?: AbortSignal): Promise<MediaJob> {
+    return this.stickerSubmission(accountId, `sticker-packs/${id(packId)}/membership`, "DELETE", undefined, key, undefined, signal);
+  }
+  /** Read Saved membership and order from the official profile without refreshing it. */
+  customStickers(accountId: string, signal?: AbortSignal): Promise<import("./native.generated.js").CustomStickerList> {
+    return this.request(`v1/accounts/${id(accountId)}/custom-stickers`, { signal });
+  }
+  /** Read one Saved sticker by its stable content identity. */
+  customSticker(accountId: string, stickerId: string, signal?: AbortSignal): Promise<import("./native.generated.js").CustomSticker> {
+    return this.request(`v1/accounts/${id(accountId)}/custom-stickers/${id(stickerId)}`, { signal });
+  }
+  /** Prepare owned image/GIF bytes without saving or sending. Reuse the key after timeouts. */
+  prepareSticker(accountId: string, input: import("./native.generated.js").StickerPreparationRequest, key: string, signal?: AbortSignal): Promise<MediaJob> {
+    if (!key || key.length > 200 || /[\r\n]/.test(key)) throw new Error("An idempotency key is required");
+    return this.request(`v1/accounts/${id(accountId)}/sticker-preparations`, { method: "POST", headers: { "Idempotency-Key": key }, body: JSON.stringify(input), signal });
+  }
+  /** Save prepared media or a verified received sticker into Saved. Does not send. */
+  addCustomSticker(accountId: string, input: import("./native.generated.js").AddCustomStickerRequest, key: string, signal?: AbortSignal): Promise<MediaJob> {
+    return this.stickerSubmission(accountId, "custom-stickers", "POST", input, key, undefined, signal);
+  }
+  /** Move with a fresh collection revision; null afterId means first. */
+  moveCustomSticker(accountId: string, stickerId: string, input: import("./native.generated.js").MoveCustomStickerRequest, revision: string, key: string, signal?: AbortSignal): Promise<MediaJob> {
+    return this.stickerSubmission(accountId, `custom-stickers/${id(stickerId)}`, "PATCH", input, key, revision, signal);
+  }
+  /** Remove membership asynchronously. A stale revision returns HTTP 412. */
+  removeCustomSticker(accountId: string, stickerId: string, revision: string, key: string, signal?: AbortSignal): Promise<MediaJob> {
+    return this.stickerSubmission(accountId, `custom-stickers/${id(stickerId)}`, "DELETE", undefined, key, revision, signal);
+  }
+  /** Request reconciliation instead of polling account collection lists. */
+  syncStickers(accountId: string, input: import("./native.generated.js").StickerSyncRequest, key: string, signal?: AbortSignal): Promise<MediaJob> {
+    return this.stickerSubmission(accountId, "sticker-syncs", "POST", input, key, undefined, signal);
+  }
+  /** Acquire one Saved original, one pack item or one selected pack; GET never starts transfers. */
+  downloadSticker(accountId: string, input: import("./native.generated.js").StickerDownloadRequest, key: string, signal?: AbortSignal): Promise<MediaJob> {
+    return this.stickerSubmission(accountId, "sticker-downloads", "POST", input, key, undefined, signal);
+  }
+  private stickerSubmission(accountId: string, resource: string, method: string, input: unknown, key: string, revision?: string, signal?: AbortSignal): Promise<MediaJob> {
+    if (!key || key.length > 200 || /[\u0000-\u001f\u007f]/.test(key)) throw new Error("An idempotency key is required");
+    if (revision !== undefined && !/^[0-9a-f]{64}$/.test(revision)) throw new Error("A collection revision is required");
+    return this.request(`v1/accounts/${id(accountId)}/${resource}`, { method, headers: { "Idempotency-Key": key, ...(revision !== undefined && { "If-Match": `"${revision}"` }) }, ...(input !== undefined && { body: JSON.stringify(input) }), signal });
+  }
+  /** Read the original preparation job and verified output/preview references. */
+  stickerPreparation(accountId: string, preparationId: string, signal?: AbortSignal): Promise<MediaJob> {
+    return this.request(`v1/accounts/${id(accountId)}/sticker-preparations/${id(preparationId)}`, { signal });
+  }
+  /** Send one stable Saved, added-pack or preparation reference. Reuse the submission key after timeouts. */
+  sendSticker(accountId: string, input: import("./native.generated.js").StickerSendRequest, key: string, signal?: AbortSignal): Promise<MediaJob> {
+    return this.stickerSubmission(accountId, "sends", "POST", input, key, undefined, signal);
+  }
   sendMedia(accountId: string, input: MediaSendRequest, key: string): Promise<MediaJob> { if (!key || /[\r\n]/.test(key)) throw new Error("An idempotency key is required"); return this.request(`v1/accounts/${id(accountId)}/sends`, { method: "POST", headers: { "Idempotency-Key": key }, body: JSON.stringify(input) }); }
   mediaAssets(accountId: string, messageId: string, signal?: AbortSignal): Promise<{ items: MediaAsset[] }> { return this.request(`v1/accounts/${id(accountId)}/messages/${id(messageId)}/media`, { signal }); }
   async mediaAssetsBatch(accountId: string, messageIds: string[], signal?: AbortSignal): Promise<import("./native.generated.js").NativeMediaBatch> {

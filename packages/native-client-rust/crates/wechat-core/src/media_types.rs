@@ -204,7 +204,7 @@ pub struct MediaAsset {
     #[ts(optional)]
     pub preview: Option<MediaImagePreview>,
 }
-/// A background upload or download of media, with its progress. Poll it by ID until it finishes.
+/// A background media or sticker operation, with its progress and outcome.
 #[derive(Clone, Debug, Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaJob {
@@ -212,14 +212,15 @@ pub struct MediaJob {
     pub id: String,
     /// ID of the account the job belongs to.
     pub account_id: String,
-    /// `send` for an upload to a chat, or `download` for fetching a received attachment.
+    /// `send`, `download`, `sticker_prepare`, `sticker_saved`, `sticker_pack`,
+    /// `sticker_acquire` or `sticker_send`.
     pub kind: String,
-    /// Where the job stands: `queued`, `running`, `available` (download finished), `accepted`
+    /// Where the job stands: `queued`, `running`, `available` (operation finished), `accepted`
     /// (WeChat took the send), `needs_review` (the outcome is unknown, so check before sending
     /// again), `cancelled`, `expired`, `unsupported` or `failed`.
     pub state: String,
     /// Current step: `queued`, `preparing`, `downloading`, `reserving`, `uploading`, `submitting`,
-    /// `readback` or `completed`.
+    /// `readback`, `projecting` or `completed`.
     pub phase: String,
     /// How many times the job has been started. A failed job can be retried only while this is
     /// below 3.

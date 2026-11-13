@@ -122,11 +122,11 @@ async fn assets(
     Path((a, id)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
     c.require(Some(&a), "media")?;
-    let guard = app.core.lock_account(&a).await?;
-    Ok(Json(
-        json!({"items":work(move||{let _guard=guard;app.core.media_assets(&a,&id)}).await?}),
-    ))
+    let mut rows = app.core.media_assets_concurrent(&a, vec![id]).await?;
+    let assets = rows.pop().context("media_result_missing")?.1?;
+    Ok(Json(json!({"items": assets})))
 }
+
 async fn assets_batch(
     State(app): State<App>,
     Extension(c): Extension<Claims>,
@@ -143,12 +143,10 @@ async fn assets_batch(
     {
         return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_request"));
     }
-    let guard = app.core.lock_account(&a).await?;
-    let rows = work(move || {
-        let _guard = guard;
-        app.core.media_assets_batch(&a, &input.message_ids)
-    })
-    .await?;
+    let rows = app
+        .core
+        .media_assets_concurrent(&a, input.message_ids)
+        .await?;
     let items = rows
         .into_iter()
         .map(|(message_id, result)| match result {
@@ -219,7 +217,17 @@ async fn job(
     c.require(Some(&a), "media")
         .or_else(|_| c.require(Some(&a), "send"))?;
     let job = app.core.media_job(&a, &id)?;
-    c.require(Some(&a), if job.kind == "send" { "send" } else { "media" })?;
+    c.require(
+        Some(&a),
+        if matches!(
+            job.kind.as_str(),
+            "send" | "sticker_saved" | "sticker_pack" | "sticker_send"
+        ) {
+            "send"
+        } else {
+            "media"
+        },
+    )?;
     Ok(Json(
         serde_json::to_value(job).map_err(anyhow::Error::from)?,
     ))
@@ -232,7 +240,17 @@ async fn cancel_job(
     c.require(Some(&a), "media")
         .or_else(|_| c.require(Some(&a), "send"))?;
     let job = app.core.media_job(&a, &id)?;
-    c.require(Some(&a), if job.kind == "send" { "send" } else { "media" })?;
+    c.require(
+        Some(&a),
+        if matches!(
+            job.kind.as_str(),
+            "send" | "sticker_saved" | "sticker_pack" | "sticker_send"
+        ) {
+            "send"
+        } else {
+            "media"
+        },
+    )?;
     Ok(Json(
         serde_json::to_value(app.core.cancel_media_job(&a, &id)?).map_err(anyhow::Error::from)?,
     ))
@@ -246,7 +264,17 @@ async fn retry_job(
     c.require(Some(&a), "media")
         .or_else(|_| c.require(Some(&a), "send"))?;
     let job = app.core.media_job(&a, &id)?;
-    c.require(Some(&a), if job.kind == "send" { "send" } else { "media" })?;
+    c.require(
+        Some(&a),
+        if matches!(
+            job.kind.as_str(),
+            "send" | "sticker_saved" | "sticker_pack" | "sticker_send"
+        ) {
+            "send"
+        } else {
+            "media"
+        },
+    )?;
     let reuse = request
         .and_then(|Json(request)| request.reuse_completed_upload)
         .unwrap_or(false);
@@ -412,6 +440,22 @@ pub(super) async fn send(
                 serde_json::to_value(app.core.send_share(&a, key, request).await?)
                     .map_err(anyhow::Error::from)?,
             ),
+        ));
+    }
+    if input.get("kind").is_some_and(|v| v == "sticker") {
+        let request: wechat_core::StickerSendRequest = serde_json::from_value(input)
+            .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_request"))?;
+        let core = app.core.clone();
+        let key = key.to_string();
+        let guard = core.lock_account(&a).await?;
+        let job = super::work(move || {
+            let _guard = guard;
+            core.send_sticker(&a, &key, request)
+        })
+        .await?;
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(serde_json::to_value(job).map_err(anyhow::Error::from)?),
         ));
     }
     if input.get("kind").is_some_and(|v| v != "text") {

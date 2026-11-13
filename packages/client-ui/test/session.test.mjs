@@ -1457,9 +1457,13 @@ test("expired event cursors rebuild the snapshot and reconnect from its boundary
       );
     },
   });
+  const gaps=[];
+  hub.onEventGap(account=>gaps.push(account));
+  hub.onEventGap(()=>{throw Error("observer failure");});
   await hub.activate("a");
   await new Promise((done) => setTimeout(done, 1700));
   assert.deepEqual(starts, ["20", "50"]);
+  assert.deepEqual(gaps,["a"]);
   assert.equal(hub.snapshot().selected, "peer");
 });
 

@@ -99,6 +99,31 @@ pub(crate) fn ordinary(content: &str) -> Option<StickerDescriptor> {
     })
 }
 
+impl crate::Core {
+    /// Read Saved membership from the supported official profile without a network refresh.
+    pub fn saved_stickers(&self, account: &str) -> anyhow::Result<crate::CustomStickerList> {
+        let saved = self.profile_reader_owned(account)?.saved_stickers()?;
+        Ok(crate::CustomStickerList {
+            items: saved
+                .items
+                .into_iter()
+                .map(|item| crate::CustomSticker {
+                    id: item.id,
+                    caption: item.caption,
+                    original: None,
+                })
+                .collect(),
+            revision: saved.revision,
+            freshness: "profile".into(),
+        })
+    }
+}
+
+pub(crate) fn order_revision(ids: &[String]) -> anyhow::Result<String> {
+    use sha2::{Digest, Sha256};
+    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(ids)?)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

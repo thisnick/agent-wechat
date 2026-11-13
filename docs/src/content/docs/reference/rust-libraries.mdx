@@ -99,6 +99,29 @@ Server acceptance prints `"accepted": true`. `--help` makes no network requests.
 codecs. `sync_once` saves no cursor; persistent receivers must retain commands
 before advancing it.
 
+## Stickers
+
+`wechat-media::prepare_sticker` prepares owned sources with optional fit/trim and
+returns GIF, still and sampled-frame outputs. `sticker_export_gif` preserves
+existing GIF bytes; `export_sticker_pack` writes one selected pack and a resumable
+checksum index on the caller's filesystem.
+
+`NativeClient` supplies Saved pages/metadata, bounded upload chunks, Saved
+mutations, pack pages/details/captions and raw membership acknowledgements.
+`StickerId::parse` normalizes a content identity; `StickerPackId::parse` keeps the
+product identity separate. Applications using these transport methods own
+submission journals and profile writeback. Cached profile reads never acquire
+missing media.
+
+Within this workspace, `wechat-core` provides `core.stickers(account)?`, an
+account-bound asynchronous handle for `list`, `get`, `media`, `prepare`,
+`add_prepared`, `save_received`, `move_after`, `remove`, `packs`, `browse`, `pack`,
+`items`, `add_pack`, `remove_pack`, `acquire`, `acquire_pack`, `acquire_preview`, `send`, `sync` and
+`job`. It owns account gating and uses existing jobs; filesystem export stays
+outside that handle. `wechat-core` is the daemon implementation, not a separately
+published HTTP client crate. External applications can use the
+[sticker REST resources](/reference/stickers/).
+
 ## Send images and videos
 
 Prepare and upload the copies before calling the protocol send method. Each method handles both qualities:

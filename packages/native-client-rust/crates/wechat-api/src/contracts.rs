@@ -680,6 +680,27 @@ pub struct NativeAccountRemoval {
 
 pub fn typescript() -> String {
     let declarations = [
+        wechat_core::StickerPreparationRequest::decl(),
+        wechat_core::StickerPreparationTrim::decl(),
+        wechat_core::PreparedSticker::decl(),
+        wechat_core::CustomSticker::decl(),
+        wechat_core::CustomStickerList::decl(),
+        wechat_core::StickerCollection::decl(),
+        wechat_core::StickerCollections::decl(),
+        wechat_core::StickerPack::decl(),
+        wechat_core::StickerPackList::decl(),
+        wechat_core::StickerPackSticker::decl(),
+        wechat_core::StickerPackStickers::decl(),
+        wechat_core::CustomStickerSource::decl(),
+        wechat_core::AddCustomStickerRequest::decl(),
+        wechat_core::CustomStickerPosition::decl(),
+        wechat_core::MoveCustomStickerRequest::decl(),
+        wechat_core::StickerDownloadRequest::decl(),
+        wechat_core::StickerSendKind::decl(),
+        wechat_core::StickerSendSource::decl(),
+        wechat_core::StickerSendRequest::decl(),
+        wechat_core::StickerSyncRequest::decl(),
+        wechat_core::StickerSyncScope::decl(),
         wechat_core::call_types::CallClientHello::decl(),
         wechat_core::call_types::CallParticipant::decl(),
         wechat_core::call_types::CallMembership::decl(),
@@ -787,6 +808,11 @@ pub fn typescript() -> String {
         output.push('\n');
     }
     output
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
 }
 
 #[cfg(test)]

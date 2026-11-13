@@ -50,6 +50,93 @@ impl Store {
     }
 }
 
+impl Store {
+    /// Stage a sticker profile write and supersede older unapplied snapshots in
+    /// one transaction. Payloads are encrypted by Core before admission.
+    pub fn stage_sticker_projection(&self, account: &str, id: &str, payload: &[u8]) -> Result<()> {
+        self.control(account, |db| {
+            let tx = db.transaction()?;
+            let old: Option<Vec<u8>> = tx.query_row("SELECT payload FROM apply_intents WHERE id=?1", [id], |r| r.get(0)).optional()?;
+            if let Some(old) = old {
+                if old != payload { bail!("sticker_projection_conflict"); }
+                return Ok(());
+            }
+            tx.execute("INSERT INTO apply_intents(id,payload,state,created_at,stream) VALUES(?1,?2,'pending',?3,'stickers')", params![id,payload,chrono::Utc::now().to_rfc3339()])?;
+            tx.execute("INSERT INTO runtime VALUES('sticker-projection-latest',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [id.as_bytes()])?;
+            tx.commit()?;
+            Ok(())
+        })
+    }
+    /// Read retained sticker write intents without initiating any network work.
+    pub fn pending_sticker_projections(&self, account: &str) -> Result<Vec<(String, Vec<u8>)>> {
+        self.control(account, |db| {
+            let mut query = db.prepare("SELECT id,payload FROM apply_intents WHERE stream='stickers' AND state!='projected' ORDER BY created_at,id LIMIT 1000")?;
+            let rows = query.query_map([], |r| Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+            Ok(rows)
+        })
+    }
+    /// Retire an applied or superseded write intent and emit its collection
+    /// revision atomically. Replays do not emit duplicate events.
+    pub fn finish_sticker_projection(&self, account: &str, id: &str, revision: &str) -> Result<()> {
+        self.control(account, |db| {
+            let tx = db.transaction()?;
+            let changed = tx.execute("UPDATE apply_intents SET state='projected' WHERE id=?1 AND stream='stickers' AND state!='projected'", [id])?;
+            if changed != 0 {
+                tx.execute("INSERT INTO events(kind,data_json,created_at) VALUES('sticker-collections.changed',?1,?2)", params![serde_json::json!({"collectionId":"saved","revision":revision}).to_string(),chrono::Utc::now().to_rfc3339()])?;
+                let sequence = tx.last_insert_rowid();
+                tx.execute("DELETE FROM events WHERE sequence < ?1", [sequence.saturating_sub(10_000)])?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+}
+
+impl Store {
+    /// Stage a complete pack reconciliation without superseding pending Saved
+    /// writes. The payload is encrypted by Core; no account request occurs here.
+    pub fn stage_sticker_pack_projection(
+        &self,
+        account: &str,
+        id: &str,
+        payload: &[u8],
+    ) -> Result<()> {
+        self.control(account,|db| {
+            let tx=db.transaction()?;
+            let old: Option<Vec<u8>>=tx.query_row("SELECT payload FROM apply_intents WHERE id=?1",[id],|r|r.get(0)).optional()?;
+            if let Some(old)=old {if old!=payload {bail!("sticker_projection_conflict");}return Ok(());}
+            tx.execute("INSERT INTO apply_intents(id,payload,state,created_at,stream) VALUES(?1,?2,'pending',?3,'sticker_packs')",params![id,payload,chrono::Utc::now().to_rfc3339()])?;
+            tx.execute("INSERT INTO runtime VALUES('sticker-pack-projection-latest',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[id.as_bytes()])?;
+            tx.commit()?;Ok(())
+        })
+    }
+    /// Read retained local pack write intents, without acquiring media or resubmitting membership.
+    pub fn pending_sticker_pack_projections(
+        &self,
+        account: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        self.control(account,|db| {
+            let mut query=db.prepare("SELECT id,payload FROM apply_intents WHERE stream='sticker_packs' AND state!='projected' ORDER BY created_at,id LIMIT 1000")?;
+            let rows=query.query_map([],|r|Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;Ok(rows)
+        })
+    }
+    /// Retire a pack receipt and emit one collection event in the same transaction.
+    pub fn finish_sticker_pack_projection(
+        &self,
+        account: &str,
+        id: &str,
+        revision: &str,
+    ) -> Result<()> {
+        self.control(account,|db| {
+            let tx=db.transaction()?;
+            if tx.execute("UPDATE apply_intents SET state='projected' WHERE id=?1 AND stream='sticker_packs' AND state!='projected'",[id])? != 0 {
+                tx.execute("INSERT INTO events(kind,data_json,created_at) VALUES('sticker-collections.changed',?1,?2)",params![serde_json::json!({"collectionId":"packs","revision":revision}).to_string(),chrono::Utc::now().to_rfc3339()])?;
+                let sequence=tx.last_insert_rowid();tx.execute("DELETE FROM events WHERE sequence < ?1",[sequence.saturating_sub(10000)])?;
+            }tx.commit()?;Ok(())
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

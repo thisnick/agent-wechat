@@ -592,3 +592,58 @@ test('media batch fallback probes an older hub once and keeps ordinary GET suppo
   assert.equal(probes, 1);
   assert.equal(gets, 3);
 });
+test('sticker preparation has its own resource, stable key, and no save/send side effect', async () => {
+  const calls = [];
+  const client = new NativeWeChatClient({ ...options, fetch: async (url, init) => {
+    calls.push([new URL(url).pathname, init.method ?? 'GET', init.headers.get('Idempotency-Key'), init.body]);
+    return Response.json({ id: 'job', state: 'queued' });
+  } });
+  await client.customStickers('a');
+  await client.customSticker('a', 'sticker');
+  await client.prepareSticker('a', { sourceId: 'owned', fit: true, trim: null }, 'stable');
+  await client.stickerPreparation('a', 'job');
+  assert.deepEqual(calls.map(c => c[0]), ['/v1/accounts/a/custom-stickers','/v1/accounts/a/custom-stickers/sticker','/v1/accounts/a/sticker-preparations','/v1/accounts/a/sticker-preparations/job']);
+  assert.deepEqual(calls.map(c => c[1]), ['GET','GET','POST','GET']);
+  assert.equal(calls[2][2], 'stable');
+  assert.deepEqual(JSON.parse(calls[2][3]), { sourceId:'owned', fit:true, trim:null });
+  assert.throws(() => client.prepareSticker('a', { sourceId:'owned', fit:false }, ''), /idempotency/);
+});
+test('Saved operations preserve REST methods, preconditions and keys without starting work on GET',async()=>{
+  const calls=[];const revision='a'.repeat(64);
+  const client=new NativeWeChatClient({...options,fetch:async(url,init)=>{
+    calls.push({path:new URL(url).pathname,method:init.method??'GET',key:init.headers.get('Idempotency-Key'),match:init.headers.get('If-Match'),body:init.body?JSON.parse(init.body):null});
+    return Response.json({id:'job',state:'queued'});
+  }});
+  await client.customStickers('a');await client.customSticker('a','chosen');
+  await client.addCustomSticker('a',{source:{kind:'prepared',preparationId:'prepared'}},'add');
+  await client.moveCustomSticker('a','chosen',{position:{afterId:null}},revision,'move');
+  await client.removeCustomSticker('a','chosen',revision,'remove');
+  await client.syncStickers('a',{scope:'saved'},'sync');
+  await client.downloadSticker('a',{stickerId:'chosen'},'download');
+  assert.deepEqual(calls.map(c=>c.method),['GET','GET','POST','PATCH','DELETE','POST','POST']);
+  assert.equal(calls[3].match,`"${revision}"`);assert.equal(calls[4].match,`"${revision}"`);
+  assert.deepEqual(calls[3].body,{position:{afterId:null}});assert.equal(calls[4].body,null);
+  assert.deepEqual(calls.map(c=>c.key),[null,null,'add','move','remove','sync','download']);
+});
+test('pack reads stay separate from membership, acquisition and sticker sending', async () => {
+  const calls=[];
+  const client=new NativeWeChatClient({...options,fetch:async(url,init)=>{
+    calls.push({url:new URL(url),method:init.method??'GET',key:init.headers.get('Idempotency-Key'),body:init.body?JSON.parse(init.body):null});
+    return Response.json({id:'job',state:'queued'});
+  }});
+  await client.stickerPacks('a',{membership:'added'});
+  await client.stickerPack('a','pack/opaque');
+  await client.stickerPackItems('a','pack/opaque');
+  await client.addStickerPack('a','pack/opaque','add-pack');
+  await client.removeStickerPack('a','pack/opaque','remove-pack');
+  await client.downloadSticker('a',{packId:'pack/opaque'},'acquire-pack');
+  await client.sendSticker('a',{kind:'sticker',threadId:'peer',source:{kind:'pack',packId:'pack/opaque',stickerId:'chosen'}},'send-sticker');
+  assert.deepEqual(calls.map(c=>c.method),['GET','GET','GET','PUT','DELETE','POST','POST']);
+  assert.equal(calls[0].url.search,'?membership=added');
+  assert.ok(calls[1].url.pathname.endsWith('/sticker-packs/pack%2Fopaque'));
+  assert.deepEqual(calls.map(c=>c.key),[null,null,null,'add-pack','remove-pack','acquire-pack','send-sticker']);
+  assert.deepEqual(calls[5].body,{packId:'pack/opaque'});
+  assert.ok(calls[6].url.pathname.endsWith('/sends'));
+  assert.equal(calls[6].body.source.stickerId,'chosen');
+  assert.throws(()=>client.stickerPacks('a',{membership:'added',cursor:'catalog-only'}),/cursor/);
+});

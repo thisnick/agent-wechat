@@ -471,6 +471,90 @@ wx profiles select <NAME> | position 1, required | Profile name from wx profiles
 wx profiles use | hidden alias | Alias of wx profiles select
 wx serve | - | Run the daemon in the foreground. Use the supplied service unit for background ownership
 wx status | - | Show the selected server's health and identity
+wx stickers | - | Read Saved stickers and prepare local sticker media
+wx stickers add | - | Save a local source, a prepared result, or one received sticker
+wx stickers add --asset | takes <ASSET> | Verified original sticker asset belonging to --message
+wx stickers add --detach | switch | Return the queued job without waiting
+wx stickers add --fit | switch | Permit proportional resizing for a local source
+wx stickers add --idempotency-key | takes <IDEMPOTENCY_KEY> | Stable submission key; reuse the key after an uncertain response
+wx stickers add --message | takes <MESSAGE> | Received message containing the original sticker attachment
+wx stickers add --prepared | takes <PREPARED> | Completed preparation to save, without preparing it again
+wx stickers add --wait | takes <WAIT>, default 30 | Seconds to wait; work continues after the client stops waiting
+wx stickers add <FILE> | position 1 | Local source to prepare and review through its returned previews
+wx stickers download | - | Download one Saved original to this machine, preserving its real format
+wx stickers download --detach | switch | Return the queued job without waiting
+wx stickers download --idempotency-key | takes <IDEMPOTENCY_KEY> | Stable submission key; reuse the key after an uncertain response
+wx stickers download --output | required, takes <OUTPUT> | New local output with an extension matching the original format
+wx stickers download --resume | switch | Resume a matching partial original, or verify an already complete output
+wx stickers download --wait | takes <WAIT>, default 30 | Seconds to wait; work continues after the client stops waiting
+wx stickers download <ID> | position 1, required | Stable Saved sticker identity
+wx stickers list | - | List Saved stickers in official picker order
+wx stickers move | - | Move within Saved using a fresh list, excluding the moving item for --last
+wx stickers move --after | takes <AFTER> | Place immediately after this Saved identity
+wx stickers move --detach | switch | Return the queued job without waiting
+wx stickers move --first | switch | Place at the beginning of Saved
+wx stickers move --idempotency-key | takes <IDEMPOTENCY_KEY> | Stable submission key; reuse the key after an uncertain response
+wx stickers move --last | switch | Place at the end of a freshly read Saved list
+wx stickers move --wait | takes <WAIT>, default 30 | Seconds to wait; work continues after the client stops waiting
+wx stickers move <ID> | position 1, required | Stable Saved sticker identity
+wx stickers packs | - | Browse, inspect, export and change membership of official packs
+wx stickers packs add | - | Establish eligible-free membership without acquiring original media
+wx stickers packs add --detach | switch | Return the queued job without waiting
+wx stickers packs add --idempotency-key | takes <IDEMPOTENCY_KEY> | Stable submission key; reuse the key after an uncertain response
+wx stickers packs add --wait | takes <WAIT>, default 30 | Seconds to wait; work continues after the client stops waiting
+wx stickers packs add <ID> | position 1, required | Official product identity
+wx stickers packs browse | - | Read one page of the available public feed; it is not a global inventory
+wx stickers packs browse --cursor | takes <CURSOR> | Opaque continuation from an earlier browse result
+wx stickers packs download | - | Export one selected pack as numbered GIFs plus index.json; does not add it
+wx stickers packs download --detach | switch | Return the queued job without waiting
+wx stickers packs download --idempotency-key | takes <IDEMPOTENCY_KEY> | Stable submission key; reuse the key after an uncertain response
+wx stickers packs download --output | required, takes <OUTPUT> | Local export directory
+wx stickers packs download --resume | switch | Verify an existing index and checksums, retaining completed files
+wx stickers packs download --wait | takes <WAIT>, default 30 | Seconds to wait; work continues after the client stops waiting
+wx stickers packs download <ID> | position 1, required | Official product identity, never the whole catalog
+wx stickers packs items | - | List the complete supplied sticker identities, captions and media references
+wx stickers packs items --language | takes <LANGUAGE>, default en | Exact official caption locale, with default fallback
+wx stickers packs items <ID> | position 1, required | Official product identity
+wx stickers packs list | - | List every account-added official pack, including those outside the catalog
+wx stickers packs remove | - | Remove account membership without deleting the official product or chat history
+wx stickers packs remove --detach | switch | Return the queued job without waiting
+wx stickers packs remove --idempotency-key | takes <IDEMPOTENCY_KEY> | Stable submission key; reuse the key after an uncertain response
+wx stickers packs remove --wait | takes <WAIT>, default 30 | Seconds to wait; work continues after the client stops waiting
+wx stickers packs remove <ID> | position 1, required | Official product identity
+wx stickers packs show | - | Read one pack's name, membership and content readiness
+wx stickers packs show <ID> | position 1, required | Official product identity
+wx stickers prepare | - | Prepare a local image, GIF, or MOV/MP4 video without saving or sending it
+wx stickers prepare --detach | switch | Return immediately after the preparation is queued
+wx stickers prepare --duration | takes <DURATION> | Retained segment length in seconds, at most ten
+wx stickers prepare --fit | switch | Permit proportional resizing to the sticker edge limit
+wx stickers prepare --idempotency-key | takes <IDEMPOTENCY_KEY> | Stable key for this preparation; reuse it after an uncertain response
+wx stickers prepare --start | takes <START> | Start of an explicit segment in seconds; requires --duration
+wx stickers prepare --wait | takes <WAIT>, default 30 | Seconds to wait; work continues after the client stops waiting
+wx stickers prepare <FILE> | position 1, required | Local input file; the CLI uploads its bytes rather than a daemon path
+wx stickers preview | - | Save a prepared visual PNG without saving a sticker to the account
+wx stickers preview --contact-sheet | switch | Export the sampled-frame contact sheet instead of the first frame
+wx stickers preview --output | required, takes <OUTPUT> | New local PNG file. Existing files are never overwritten
+wx stickers preview --prepared | takes <PREPARED> | Preparation identity returned by stickers prepare
+wx stickers preview <ID> | position 1 | Saved sticker to preview; choose this or --prepared
+wx stickers remove | - | Remove Saved membership, preserving messages and official packs
+wx stickers remove --detach | switch | Return the queued job without waiting
+wx stickers remove --idempotency-key | takes <IDEMPOTENCY_KEY> | Stable submission key; reuse the key after an uncertain response
+wx stickers remove --wait | takes <WAIT>, default 30 | Seconds to wait; work continues after the client stops waiting
+wx stickers remove <ID> | position 1, required | Stable Saved sticker identity
+wx stickers send | - | Send an existing Saved or added-pack sticker using its stable identity
+wx stickers send --detach | switch | Return the queued job without waiting
+wx stickers send --idempotency-key | takes <IDEMPOTENCY_KEY> | Stable submission key; reuse the key after an uncertain response
+wx stickers send --pack | takes <PACK> | Official pack identity; omit to select Saved
+wx stickers send --to | required, takes <TO> | Intended contact or chat identity
+wx stickers send --wait | takes <WAIT>, default 30 | Seconds to wait; work continues after the client stops waiting
+wx stickers send <ID> | position 1, required | Stable sticker content identity
+wx stickers show | - | Show one Saved sticker by stable content identity
+wx stickers show <ID> | position 1, required | Sticker identity returned by stickers list
+wx stickers sync | - | Reconcile Saved with the server after reconnecting or an event gap
+wx stickers sync --detach | switch | Return the queued job without waiting
+wx stickers sync --idempotency-key | takes <IDEMPOTENCY_KEY> | Stable submission key; reuse the key after an uncertain response
+wx stickers sync --scope | takes <SCOPE>, default all, values saved|added|all | Collections to refresh: saved, added or all
+wx stickers sync --wait | takes <WAIT>, default 30 | Seconds to wait; work continues after the client stops waiting
 wx store | - | Offline operations require exclusive ownership; stop the daemon and official client first
 wx store attach | - | Attach a supported stopped official profile in place
 wx store attach --path | required, takes <PATH> | Stopped official profile home or account folder to use in place
