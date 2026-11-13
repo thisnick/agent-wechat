@@ -493,9 +493,7 @@ async fn resumable_original(remote: &Remote, id: &str, output: &Path, asset: &Va
     );
     temp.as_file().sync_all()?;
     temp.persist_noclobber(output).map_err(|e| e.error)?;
-    if std::fs::symlink_metadata(&partial)
-        .is_ok_and(|meta| wechat_platform::same_file(&info, &meta))
-    {
+    if wechat_platform::same_path_file(&partial, &file).unwrap_or(false) {
         std::fs::remove_file(&partial)?;
     }
     if std::fs::read(&metadata_path)
