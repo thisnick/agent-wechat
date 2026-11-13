@@ -3,25 +3,25 @@ title: 发送与下载附件
 description: 文件、图片、视频与语音的大小限制、较长的发送时间，以及 CLI、API 和 SDK 接口。
 banner:
   content: "本页面由机器翻译，尚未经过人工审校。"
-sourceHash: 133141fab46f
+sourceHash: ae8e50b12f4b
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-在桌面端或 Web 客户端中，可点击附件按钮、直接粘贴文件或图片，或将文件拖放到消息输入框中。可在发送前检查或移除已暂存的文件，点击 **发送** 会将输入文本和各个文件作为独立消息分别发出。JPEG、PNG、GIF 和 WebP 文件将作为图片发送；MOV、MP4、3GP、3G2 和 MJ2 文件将作为视频发送；其他格式均作为普通文件附件发送。客户端会校验所连接 Hub 节点的规格上限；本地合成预览的限制较原生 Hub 更小。
+在桌面端或 Web 客户端中，可点击附件按钮、直接粘贴文件或图片，或将文件拖放到消息输入框中。可在发送前检查或移除已暂存的文件，点击 **发送** 会将输入文本和各个文件作为独立消息分别发出。JPEG、PNG、GIF 和 WebP 文件将作为图片发送；MOV、MP4、3GP、3G2 和 MJ2 文件将作为视频发送；其他格式均作为普通文件附件发送。客户端会校验所连接 Hub 的规格上限；本地合成预览的限制较原生 Hub 更小。
 
-可通过 CLI、HTTP API 或 OpenClaw 发送各类附件。普通文件上限为 **512 MiB (536,870,912 字节)**。具体限制视选择的消息类型而定：
+可通过 CLI、HTTP API 或 OpenClaw 发送各类附件。普通文件上限为 **512 MiB (536,870,912 字节)**。具体限制视选择的发送类型而定：
 
-| 附件类型 | 最大原始体积 |
+| 发送类型 | 最大原始体积 |
 | --- | --- |
 | 普通文件 (File) | 536,870,912 字节 |
-| 视频文件 (Video) | 536,870,912 字节 |
+| 视频 (Video) | 536,870,912 字节 |
 | 图片 (Image) 或语音 (Voice) | 各 26,214,383 字节 (25 MiB 减 17 字节) |
-| 表情 (Sticker) | 准备好的 GIF 以及可用的“我的表情”/已添加表情包引用；参见[表情](/use/stickers/) |
+| 表情 (Sticker) | 准备好的 GIF，以及可用的收藏表情或已添加表情包引用；参见[表情](/use/stickers/) |
 
-文件附件会严格保留源文件的每一个原始字节。发送图片时可能会按微信规范进行缩放与重编码。语音发送支持 WAV、MP3、M4A、AAC、FLAC、Ogg（包含 `.opus`）、WebM、CAF 或 AMR 音频，并将其转为微信语音条。参考[视频与图片画质](/use/quality/)了解发送前转码处理及接收时的画质选择。
+文件附件会严格保留源文件的每一个原始字节。发送图片时可能会缩放或重新编码。语音发送支持 WAV、MP3、M4A、AAC、FLAC、Ogg（包含 `.opus`）、WebM、CAF 或 AMR 音频，并将其转为语音消息。参考[视频与图片画质](/use/quality/)了解发送前的预处理，以及接收时如何选择画质副本。
 
-## CLI 命令行 \{#cli}
+## CLI \{#cli}
 
 1. 发送文件，并允许最长 1 小时用于上传、下载校验及提交：
 
@@ -49,7 +49,7 @@ import { Aside } from '@astrojs/starlight/components';
 
 ## HTTP API 与 SDK \{#http-api-and-sdk}
 
-1. 通过 `GET /v1/accounts/{account}/capabilities` 检查当前连接节点的限制指标：
+1. 通过 `GET /v1/accounts/{account}/capabilities` 检查当前连接的 Daemon 的限制指标：
 
    ```json
    {
@@ -63,7 +63,7 @@ import { Aside } from '@astrojs/starlight/components';
    }
    ```
 
-   `mediaUploadMaxBytes` 限制暂存大小。在为特定类型的发送暂存数据前，请检查 `mediaSendMaxBytes[kind]`。
+   `mediaUploadMaxBytes` 限制暂存大小。在为特定发送类型暂存数据前，请检查 `mediaSendMaxBytes[kind]`。
 
 2. 先暂存单个文件，随后将其返回的 `id` 作为 `sourceId` 进行提交：
 
@@ -94,7 +94,7 @@ import { Aside } from '@astrojs/starlight/components';
 
 ## 下载文件 \{#download-files}
 
-普通文件与接收到的视频下载最高支持 512 MiB。每次下载必须严格匹配消息中声明的体积与 MD5：
+普通文件与接收到的视频下载最高支持 512 MiB。文件及原始视频副本必须与消息中声明的大小和 MD5 一致。对于普通视频，微信可能会选择另一份副本；Daemon 会在提供该副本之前校验其返回的校验值和大小。请使用以下命令下载：
 
 ```bash
 wx messages media filehelper MESSAGE_ID --output ./saved.pdf --wait 3600
@@ -102,20 +102,21 @@ wx messages media filehelper MESSAGE_ID --output ./saved.pdf --wait 3600
 
 CLI 会在发布输出文件前校验大小与 SHA-256。SDK 客户端可以使用 `mediaContentStream` 并传入 `{ maxBytes: NATIVE_MAX_SOURCE_BYTES }`；默认拉取上限为 128 MiB。保存数据流时请检查所选资源的大小和 SHA-256。
 
-## OpenClaw
+## OpenClaw \{#openclaw}
 
-在配置中设置 [`channels.agent-wechat.mediaMaxMb`](/reference/configuration/#openclaw) 以放行预期的附件大小。例如设为 `512` 允许最高 512 MiB 的文件。扩展在暂存前会取该配置与具体媒体类型上限的较小值。调高该值无法突破 Daemon 对各个媒体类型的硬性规格。
+在配置中设置 [`channels.agent-wechat.mediaMaxMb`](/reference/configuration/#openclaw) 以放行预期的附件大小。例如设为 `512` 允许最高 512 MiB 的文件。扩展在暂存前会取该配置与具体发送类型上限的较小值。调高该值无法突破 Daemon 对各发送类型的限制。
 
 普通音频文件将作为文件发送；若指定 `audioAsVoice` 则作为语音消息发送。对于较大的普通文件，OpenClaw 会进行最长一小时的任务轮询。若轮询超时，请记录返回的任务 ID 并主动查询，切勿直接重复发起发送。
 
-使用 OpenClaw 的 `asDocument`/`forceDocument` 选项可以将媒体文件作为普通文件发送。视频质量选项仅在视频模式下生效。
+使用 OpenClaw 的 `asDocument`/`forceDocument` 选项可以将媒体文件作为普通文件发送。视频质量选项仅适用于视频发送。
 
-<Aside type="note" title="使用提示">
-- **文件类型检测** 优先使用浏览器识别的媒体类型，当类型缺失或宽泛时则回退到文件扩展名判断。即使视频容器格式受支持，也可能包含不受支持的编码格式；若发送预处理失败，可导出为标准的 MP4 重新尝试。部分视频在发送前可能无法在浏览器中直接预览。
-- 发送大文件或原始画质视频在上传期间会在 Daemon 内存中占用约两倍于源文件体积的内存。
-- Daemon 会在正式向微信提交附件消息前先将已上传的云端字节回读校验。`accepted` 仅代表微信服务端已接收该消息，不代表对方已成功接收或打开。
-- 服务端秒传捷径暂不支持。存疑的预留与发送状态需要人工复核，绝不会自动盲目开启二次发送。
-- 若任务在校验期间停止，可执行 `wx jobs retry JOB_ID --reuse-completed-upload` 复用已上传的数据对象。这需要确保此前从未发起过正式消息提交；API 客户端可向 `POST /jobs/{id}/retry-completed-upload` 提交 `reuseCompletedUpload: true`；SDK 的 `retryJob` 同样支持该参数。
-- 网关和代理超时同样适用。响应丢失后，请使用相同幂等键查询；详见[消息发送与恢复机制](/how-it-works/sends/)。
-- 当微信返回的数据与消息声明的大小或 MD5 不匹配时，接收视频的下载会停止。对于不超过 25 MiB 的视频，任务将失败并报错 `media_integrity_failed`，其 `result.cdnDownloadFailure` 会展示声明大小、实际交付大小以及哪些校验匹配。它绝不包含文件的原始内容或哈希值。
+<Aside title="使用提示">
+- 文件类型检测优先使用浏览器识别的媒体类型，当类型缺失或宽泛时则回退到文件扩展名判断。即使视频容器格式受支持，也可能包含不受支持的编码格式；若发送预处理失败，可导出为 MP4 后重试。部分视频在发送前可能无法在浏览器中直接预览。
+- 发送大文件或原始画质视频时，上传期间 Daemon 内存中占用的空间约为源文件体积的两倍。
+- Daemon 会在正式向微信提交附件消息前，先将已上传的字节回读并校验。`accepted` 仅代表微信已接收该消息，并不代表对方已接收或打开。
+- 不支持服务端秒传。存疑的预留与发送需要人工复核，绝不会自动再次发起发送。
+- 若任务在校验期间停止，可执行 `wx jobs retry JOB_ID --reuse-completed-upload` 复用其已保存的对象。使用前须确认提交从未开始；API 客户端可对 `POST /jobs/{id}/retry-completed-upload` 提交 `reuseCompletedUpload: true`；SDK 的 `retryJob` 同样接受该选项。
+- 网关和代理的超时同样适用。若响应丢失，请使用相同的幂等键进行查询；详见[发送与恢复](/how-it-works/sends/)。
+- 普通视频的已校验字节若与消息元数据不一致，仍可通过 Daemon 下载，但其 `officialWriteback` 会保持 `blocked` 状态。官方 Profile 缓存仍会执行原有的身份校验。
+- 无法识别的视频响应若与消息中声明的大小或 MD5 不一致，下载将停止。任务可能包含 `result.cdnDownloadFailure`，其中列出声明的大小、实际交付的大小以及哪些校验项匹配。这些诊断信息不包含文件内容或哈希值。
 </Aside>
