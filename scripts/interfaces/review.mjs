@@ -405,7 +405,14 @@ export function renderComment({ reports, changesets, baseline, openapi }) {
     lines.push('');
   }
   let body = lines.join('\n');
-  if (body.length > 60000) body = `${body.slice(0, 60000)}\n\n…comment truncated; see the Files changed tab.`;
+  if (body.length > 60000) {
+    const suffix = '\n\n…comment truncated; see the Files changed tab.';
+    // Reserve the notice and a closing fence within the consumer's size bound.
+    let prefix = body.slice(0, 60000 - suffix.length - 4);
+    prefix = prefix.slice(0, prefix.lastIndexOf('\n'));
+    if ((prefix.match(/^```/gm)?.length ?? 0) % 2) prefix += '\n```';
+    body = prefix + suffix;
+  }
   return body;
 }
 
