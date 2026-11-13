@@ -501,11 +501,11 @@ async function stickerFixtures(page, cold = false) {
   await page.route(/\/media\/sticker_preview_[^/]+$/, route => route.fulfill({json:{...asset('preview'),id:new URL(route.request().url()).pathname.split('/').pop()}}));
   await page.route(/\/media\/sticker(?:-|_preview_)[^/]+\/content(?:\?.*)?$/, route => route.fulfill({ body: gif, contentType: 'image/gif' }));
 }
-for (const mode of ['picker', 'edit', 'packs', 'pack-detail', 'import', 'lazy-loading']) {
+for (const mode of ['picker', 'edit', 'packs', 'pack-detail', 'import', 'lazy-loading', 'loading']) {
   scenes.push({
     name: `stickers-${mode}`,
     route: 'chat',
-    description: { 'lazy-loading': 'Missing Saved originals and pack thumbnails load on visibility, including after scrolling.', picker: 'Composer-anchored Saved picker with labeled added-pack tabs.', edit: 'Saved edit mode stays inside the composer tray with removal and keyboard placement.', packs: 'Official pack browser shows added and available packs in one dialog.', 'pack-detail': 'Official pack detail has complete contents, captions, membership and a copyable ID.', import: 'Add to Saved reviews prepared files before per-item submission.' }[mode],
+    description: { loading: 'Added pack contents show loading until the response arrives, with empty state only after an empty response.', 'lazy-loading': 'Missing Saved originals and pack thumbnails load on visibility, including after scrolling.', picker: 'Composer-anchored Saved picker with labeled added-pack tabs.', edit: 'Saved edit mode stays inside the composer tray with removal and keyboard placement.', packs: 'Official pack browser shows added and available packs in one dialog.', 'pack-detail': 'Official pack detail has complete contents, captions, membership and a copyable ID.', import: 'Add to Saved reviews prepared files before per-item submission.' }[mode],
     viewports: ['desktop', 'narrow', 'compact'],
     setup: standardWorld,
     target: world => ({ account: ACCOUNT.id, thread: world.mei }),
@@ -515,6 +515,32 @@ for (const mode of ['picker', 'edit', 'packs', 'pack-detail', 'import', 'lazy-lo
       await page.getByRole('button', { name: 'Stickers', exact: true }).click();
       await expect(page.getByRole('region', { name: 'Sticker picker' })).toBeVisible();
       await expect(page.getByRole('tab', { name: 'Cozy cats' })).toBeVisible();
+      if (mode === 'loading') {
+        let finish;
+        const response = new Promise(resolve => { finish = resolve; });
+        await page.route(/\/sticker-packs\/pack.cats\/stickers(?:\?.*)?$/, async route => {
+          await response;
+          await route.fulfill({ json: { packId: 'pack.cats', items: [] } });
+        });
+        await page.getByRole('tab', { name: 'Cozy cats' }).click();
+        await expect(page.getByRole('region', { name: 'Sticker picker' }).getByRole('status')).toHaveText('Loading stickers…');
+        await expect(page.getByText('No stickers here yet')).toHaveCount(0);
+        finish();
+        await expect(page.getByRole('region', { name: 'Sticker picker' }).getByRole('status')).toHaveText('No stickers here yet');
+        await page.getByRole('tab', { name: 'Cozy cats' }).click();
+        await expect(page.getByRole('region', { name: 'Sticker picker' }).getByRole('status')).toHaveText('No stickers here yet');
+        let finishNext;
+        const nextResponse = new Promise(resolve => { finishNext = resolve; });
+        await page.route(/\/sticker-packs\/pack.vibes\/stickers(?:\?.*)?$/, async route => {
+          await nextResponse;
+          await route.fulfill({ json: { packId: 'pack.vibes', items: [] } });
+        });
+        await page.getByRole('tab', { name: 'Good vibes' }).click();
+        await expect(page.getByRole('region', { name: 'Sticker picker' }).getByRole('status')).toHaveText('Loading stickers…');
+        await expect(page.getByText('No stickers here yet')).toHaveCount(0);
+        finishNext();
+        await expect(page.getByRole('region', { name: 'Sticker picker' }).getByRole('status')).toHaveText('No stickers here yet');
+      }
       if (mode === 'lazy-loading') {
         await expect(page.locator('.sticker-cell img').first()).toBeVisible();
         await expect.poll(()=>page.locator('.sticker-cell img').count()).toBeGreaterThan(3);

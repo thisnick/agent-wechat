@@ -122,7 +122,9 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
   const client = connection.session.client;
   const [open, setOpen] = useState(false), [edit, setEdit] = useState(false), [tab, setTab] = useState("saved");
   const [saved, setSaved] = useState<CustomStickerList>({ items: [], revision: "", freshness: "profile" });
-  const [added, setAdded] = useState<StickerPack[]>([]), [items, setItems] = useState<StickerPackSticker[]>([]);
+  const [added, setAdded] = useState<StickerPack[]>([]);
+  const [savedLoaded, setSavedLoaded] = useState(false);
+  const [packItems, setPackItems] = useState<{ id: string; items: StickerPackSticker[]; loading: boolean }>({ id: "", items: [], loading: false });
   const [browser, setBrowser] = useState<"browse" | "added" | null>(null), [catalog, setCatalog] = useState<StickerPack[]>([]), [cursor, setCursor] = useState<string | null>(null);
   const [detail, setDetail] = useState<StickerPack | null>(null), [detailItems, setDetailItems] = useState<StickerPackSticker[]>([]);
   const [detailPreview,setDetailPreview]=useState<StickerPackSticker|null>(null);
@@ -143,7 +145,7 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
   const key = (intent: string) => { let value = keys.current.get(intent); if (!value) { value = crypto.randomUUID(); keys.current.set(intent, value); } return value; };
   async function refresh() {
     const [list, packs] = await Promise.all([client.customStickers(account, signal()), client.stickerPacks(account, { membership: "added" }, signal())]);
-    guard(); setSaved(old => { const cached=new Map(old.items.map(item=>[item.id,item.original])); return {...list,items:list.items.map(item=>({...item,original:cached.get(item.id) ?? item.original}))}; }); setAdded(packs.items); return packs;
+    guard(); setSaved(old => { const cached=new Map(old.items.map(item=>[item.id,item.original])); return {...list,items:list.items.map(item=>({...item,original:cached.get(item.id) ?? item.original}))}; }); setSavedLoaded(true); setAdded(packs.items); return packs;
   }
   async function act(action: () => Promise<unknown>) {
     if (busy) return;
@@ -178,7 +180,13 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
     if (!open || tab === "saved") return;
     const abort = new AbortController();
     const active = AbortSignal.any([signal(), abort.signal]);
-    void client.stickerPackItems(account, tab, "en", active).then(result => { active.throwIfAborted(); setItems(result.items); }).catch(error => { if (!active.aborted) setError(readableError(error)); });
+    setPackItems({ id: tab, items: [], loading: true });
+    setError("");
+    void client.stickerPackItems(account, tab, "en", active).then(result => {
+      active.throwIfAborted(); setPackItems({ id: tab, items: result.items, loading: false });
+    }).catch(error => {
+      if (!active.aborted) { setPackItems({ id: tab, items: [], loading: false }); setError(readableError(error)); }
+    });
     return () => abort.abort();
   }, [open, tab, added]);
   async function choose(item: CustomSticker | StickerPackSticker, pack?: string) {
@@ -297,14 +305,15 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
       await refresh();
     });
   }
-  const visible = tab === "saved" ? saved.items.slice(0,savedLimit) : items;
+  const visible = tab === "saved" ? saved.items.slice(0,savedLimit) : packItems.id === tab ? packItems.items : [];
+  const loading = tab === "saved" ? !savedLoaded || busy : packItems.id !== tab || packItems.loading;
   const ready = imports?.filter(item => item.selected && item.prepared && !item.added).length ?? 0;
   return <div className="sticker-picker" ref={root} onKeyDown={event => { if (event.key === "Escape" && !browser && !imports) { setOpen(false); event.stopPropagation(); } }}>
     <button type="button" className="icon-btn" aria-label={t("stickers.open")} title={t("stickers.open")} aria-expanded={open} aria-controls={id} disabled={!enabled} onClick={() => setOpen(value => !value)}><Icon name="smile" /></button>
     {open && !browser && !imports && <section id={id} className="sticker-tray" data-composer-file-drop aria-label={t("stickers.picker")} onDragOver={event => { event.preventDefault(); event.stopPropagation(); }} onDrop={drop}>
       <div className="sticker-tabs" role="tablist" aria-label={t("stickers.collections")}>
         <button role="tab" aria-selected={tab === "saved"} onClick={() => { setTab("saved"); setEdit(false); }}>{t("stickers.saved")}</button>
-        {added.slice(0, 3).map(pack => <button role="tab" key={pack.id} aria-selected={tab === pack.id} onClick={() => { setTab(pack.id); setEdit(false); setItems([]); }}>{pack.name}</button>)}
+        {added.slice(0, 3).map(pack => <button role="tab" key={pack.id} aria-selected={tab === pack.id} onClick={() => { setTab(pack.id); setEdit(false); }}>{pack.name}</button>)}
         <button disabled={busy} onClick={() => void browse("added")}>{t("stickers.allAdded")}</button>
       </div>
       <div key={tab} className={`sticker-grid ${edit ? "is-editing" : ""}`} role="group" aria-label={edit ? t("stickers.editSaved") : t("stickers.choose")}>
@@ -335,7 +344,7 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
           {edit && <><button className="sticker-remove" aria-label={t("stickers.removeItem", { index: index + 1 })} disabled={busy} onClick={() => void remove(item.id)}>×</button>
             <div className="sticker-keyboard-move"><button disabled={busy || index === 0} aria-label={t("stickers.moveEarlier", { index: index + 1 })} onClick={() => void move(item.id, index > 1 ? saved.items[index - 2].id : null)}>←</button><button disabled={busy || index === saved.items.length - 1} aria-label={t("stickers.moveLater", { index: index + 1 })} onClick={() => void move(item.id, saved.items[index + 1].id)}>→</button></div></>}
         </div>)}
-        {!visible.length && <p className="sticker-empty">{busy ? t("stickers.loading") : t("stickers.empty")}</p>}
+        {!visible.length && !error && <p className="sticker-empty" role="status">{loading ? t("stickers.loading") : t("stickers.empty")}</p>}
         {tab==="saved" && savedLimit<saved.items.length && <button onClick={()=>setSavedLimit(count=>count+25)}>{t("stickers.moreSaved")}</button>}
       </div>
       {error && <p className="sticker-error" role="alert">{error}</p>}

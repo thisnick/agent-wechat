@@ -21,6 +21,7 @@ scene settings | route /{server}/{account}/settings, viewports desktop+narrow | 
 scene stickers-edit | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Saved edit mode stays inside the composer tray with removal and keyboard placement.
 scene stickers-import | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Add to Saved reviews prepared files before per-item submission.
 scene stickers-lazy-loading | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Missing Saved originals and pack thumbnails load on visibility, including after scrolling.
+scene stickers-loading | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Added pack contents show loading until the response arrives, with empty state only after an empty response.
 scene stickers-pack-detail | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Official pack detail has complete contents, captions, membership and a copyable ID.
 scene stickers-packs | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Official pack browser shows added and available packs in one dialog.
 scene stickers-picker | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Composer-anchored Saved picker with labeled added-pack tabs.
