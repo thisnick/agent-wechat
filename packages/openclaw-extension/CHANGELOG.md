@@ -1,5 +1,23 @@
 # @agent-wechat/wechat
 
+## 2.4.0
+
+### Minor Changes
+
+- [#481](https://github.com/thisnick/agent-wechat/pull/481) [`e9f2b12`](https://github.com/thisnick/agent-wechat/commit/e9f2b126cbf61869f8fe21214847742c4f276fa2) Thanks [@thisnick](https://github.com/thisnick)! - Add Saved sticker import, placement, removal, preparation and sends, plus official pack browsing, details, membership, media acquisition and one-pack GIF export. The composer gains a sticker tray, in-tray editing, import review and pack browsing. REST resources, generated contracts and account-bound Rust operations share durable jobs and official profile storage. OpenClaw manages Saved, sends existing references through the standard message action, delivers visual previews and transfers files through the host's execution-workspace bridge. Outbound media honors the host's remote file reader.
+
+### Patch Changes
+
+- [#473](https://github.com/thisnick/agent-wechat/pull/473) [`65734c4`](https://github.com/thisnick/agent-wechat/commit/65734c48a95b2be5df9930db4d3a72b576b9040c) Thanks [@thisnick](https://github.com/thisnick)! - Add `calls.voice.realtime.fastContext`, off by default, based on OpenClaw's phone plugin. When enabled, consultations on the verified owner's direct calls first search the agent's indexed memory and session context and answer from matching snippets without running the agent. The next consultation in the call runs the agent, so asking again gets past snippets that did not answer or a request that needs an action. Other callers and conferences always use the agent. Set `fallbackToConsult: true` to run the agent when nothing is found.
+
+- [#477](https://github.com/thisnick/agent-wechat/pull/477) [`28290b3`](https://github.com/thisnick/agent-wechat/commit/28290b31140fd9bf027bb3237d995fc98be8220b) Thanks [@thisnick](https://github.com/thisnick)! - Images can now be sent at full resolution. Pass `--image-quality original` to `wx messages send --image`, or `"imageQuality": "original"` to `POST /sends`. A JPEG within the supported source limits is then sent unchanged as the image's original copy, and other formats are converted to JPEG once at full resolution. The CLI and HTTP API default to `standard`, offering only compressed standard and thumbnail copies without an Original download option. Existing saved upload receipts retain their previous original availability. OpenClaw image sends automatically request original quality and allow large image transfers and delayed local receipts to finish without resubmitting the send.
+
+  JPEG images up to 8,192 pixels per edge and 64 million pixels can now also be downloaded and read back; previously images wider or taller than 4,096 pixels were rejected.
+
+  Rust image sends now use one `NativeClient::send_image` method for both qualities, matching video sends. `UploadedImage.original` is now `Option<UploadedMedia>`: use `None` for standard and thumbnail only, or `Some(original)` to include an original. This is a breaking Rust API change included in this minor release; callers constructing the struct must wrap their original in `Some(...)` and handle its possible absence when reading it. The account-scoped method, request builder and local metadata helper use the same optional-original model.
+
+- [#473](https://github.com/thisnick/agent-wechat/pull/473) [`39248aa`](https://github.com/thisnick/agent-wechat/commit/39248aae241126873446f62494f6123f37b0453e) Thanks [@thisnick](https://github.com/thisnick)! - Voice calls consult the OpenClaw agent less often. With the default `consultPolicy: "auto"`, the voice model now answers greetings, small talk and general-knowledge questions itself, and consults for current information, personal records or memory, tools and actions. Previously it was told to report facts only when verified, which led it to consult for almost every answer. `consultPolicy: "substantive"` now also applies to GPT-Live models, worded for their delegation instead of the consult tool.
+
 ## 2.3.2
 
 ## 2.3.1

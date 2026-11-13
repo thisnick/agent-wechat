@@ -1,5 +1,21 @@
 # @agent-wechat/desktop
 
+## 2.4.0
+
+### Minor Changes
+
+- [#481](https://github.com/thisnick/agent-wechat/pull/481) [`e9f2b12`](https://github.com/thisnick/agent-wechat/commit/e9f2b126cbf61869f8fe21214847742c4f276fa2) Thanks [@thisnick](https://github.com/thisnick)! - Add Saved sticker import, placement, removal, preparation and sends, plus official pack browsing, details, membership, media acquisition and one-pack GIF export. The composer gains a sticker tray, in-tray editing, import review and pack browsing. REST resources, generated contracts and account-bound Rust operations share durable jobs and official profile storage. OpenClaw manages Saved, sends existing references through the standard message action, delivers visual previews and transfers files through the host's execution-workspace bridge. Outbound media honors the host's remote file reader.
+
+### Patch Changes
+
+- [#481](https://github.com/thisnick/agent-wechat/pull/481) [`6098ebf`](https://github.com/thisnick/agent-wechat/commit/6098ebfa592b4695617f09b52f39297ed796e904) Thanks [@thisnick](https://github.com/thisnick)! - Share recent sticker catalog metadata across clients and release the account writer during sticker operations, contact and room lookups, group mutations and recalls. Preserve operation ordering, accepted receipts and session fences. Read added packs and already indexed message media on consistent snapshots. Show confirmed pack membership before refreshing previews.
+
+- [#481](https://github.com/thisnick/agent-wechat/pull/481) [`27e73c4`](https://github.com/thisnick/agent-wechat/commit/27e73c48ab189d17e5d48bbd86b5c7af1e4c53d7) Thanks [@thisnick](https://github.com/thisnick)! - Speed up sticker pack browsing by loading only visible previews, pausing the obscured tray, and removing duplicate collection and post-membership detail reads. Reuse recent catalog and pack views for up to one minute, invalidating them on collection changes, reconnection, event gaps and mutations.
+
+- [#481](https://github.com/thisnick/agent-wechat/pull/481) [`9e97480`](https://github.com/thisnick/agent-wechat/commit/9e9748097724c7530c42ab9a650858d13d3aef2f) Thanks [@thisnick](https://github.com/thisnick)! - Show a loading message while sticker collections are being fetched. Only show the empty message after an empty response, and keep an already selected pack visible when its tab is clicked again.
+
+- [#481](https://github.com/thisnick/agent-wechat/pull/481) [`e9bc9f1`](https://github.com/thisnick/agent-wechat/commit/e9bc9f1dc0c47a42e0ccd6e2b967f4a1c4e13b85) Thanks [@thisnick](https://github.com/thisnick)! - Load missing Saved sticker media and official pack thumbnails when tiles enter the composer tray viewport. Limit concurrent transfers, skip off-screen metadata reads, and discard obsolete pack responses when switching tabs.
+
 ## 2.3.2
 
 ### Patch Changes
