@@ -1532,14 +1532,17 @@ impl Core {
                         "link_thumbnail_size_limit"
                     );
                 }
-                let actual = if media
-                    .substituted_filetype
-                    .is_none_or(|v| v == descriptor.quality.filetype())
-                {
-                    Some(asset.variant)
-                } else {
-                    None
-                };
+                ensure!(
+                    asset.variant != MediaVariant::Original
+                        || (media.advertised_size_matches != Some(false)
+                            && descriptor
+                                .expected_md5
+                                .as_ref()
+                                .is_none_or(|v| v.eq_ignore_ascii_case(&media.md5))),
+                    "unsupported_media_variant"
+                );
+                let actual =
+                    received_video_variant(asset.kind, asset.variant, descriptor.quality, &media);
                 ensure!(actual == Some(asset.variant), "unsupported_media_variant");
                 official_writeback = if asset.official_writeback == "unsupported" {
                     None
@@ -2113,6 +2116,25 @@ fn validate_destination(value: &str) -> Result<()> {
     }
     Ok(())
 }
+/// A normal video reply may carry the CDN's observed transformed
+/// representation (subtype 9) when the response digest validated. Treat that as
+/// the requested normal variant; original-variant checks stay strict.
+fn received_video_variant(
+    kind: MediaKind,
+    variant: MediaVariant,
+    quality: MediaQuality,
+    media: &wechat_protocol::media::DownloadedMedia,
+) -> Option<MediaVariant> {
+    let ordinary = media
+        .substituted_filetype
+        .is_none_or(|v| v == quality.filetype());
+    let observed_normal = kind == MediaKind::Video
+        && variant == MediaVariant::Normal
+        && media.verified_video_representation
+        && media.substituted_filetype == Some(9);
+    (ordinary || observed_normal).then_some(variant)
+}
+
 fn select_asset(mut assets: Vec<MediaAsset>, quality: MediaVariant) -> Result<MediaAsset> {
     if quality != MediaVariant::Best {
         return assets
@@ -6367,6 +6389,57 @@ mod tests {
             assert!(pcm.len().abs_diff(16000) <= 800, "{name}: {}", pcm.len());
         }
     }
+}
+#[test]
+fn observed_video_subtype_requires_verified_normal_video_representation() {
+    let mut media = wechat_protocol::media::DownloadedMedia {
+        bytes: vec![],
+        requested_quality: wechat_protocol::media::MediaQuality::Video,
+        substituted_filetype: Some(9),
+        verified_video_representation: false,
+        picture_format: None,
+        md5: String::new(),
+        sha256: String::new(),
+        advertised_size_matches: Some(false),
+    };
+    assert_eq!(
+        received_video_variant(
+            MediaKind::Video,
+            MediaVariant::Normal,
+            wechat_protocol::media::MediaQuality::Video,
+            &media
+        ),
+        None
+    );
+    media.verified_video_representation = true;
+    assert_eq!(
+        received_video_variant(
+            MediaKind::Video,
+            MediaVariant::Normal,
+            wechat_protocol::media::MediaQuality::Video,
+            &media
+        ),
+        Some(MediaVariant::Normal)
+    );
+    assert_eq!(
+        received_video_variant(
+            MediaKind::Video,
+            MediaVariant::Original,
+            wechat_protocol::media::MediaQuality::Video,
+            &media
+        ),
+        None
+    );
+    media.substituted_filetype = Some(10);
+    assert_eq!(
+        received_video_variant(
+            MediaKind::Video,
+            MediaVariant::Normal,
+            wechat_protocol::media::MediaQuality::Video,
+            &media
+        ),
+        None
+    );
 }
 
 #[path = "recall_send_author_media.rs"]

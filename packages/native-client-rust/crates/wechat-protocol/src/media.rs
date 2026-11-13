@@ -329,6 +329,10 @@ pub struct DownloadedMedia {
     pub bytes: Vec<u8>,
     pub requested_quality: MediaQuality,
     pub substituted_filetype: Option<u32>,
+    /// Set when the CDN returned the observed transformed normal-video
+    /// representation (istrans=13, videoformat=1, ver=0) and the response
+    /// digest validated. Callers may accept the normal variant for this case.
+    pub verified_video_representation: bool,
     pub picture_format: Option<u32>,
     pub md5: String,
     pub sha256: String,
@@ -611,6 +615,8 @@ impl CdnClient {
         let mut server_md5 = None;
         let observe_video = descriptor.quality == MediaQuality::Video && !strict_transfer;
         let mut video_reply = VideoReplyMetadata::default();
+        let mut video_transcode: Option<bool> = None;
+        let mut video_response_md5: Option<String> = None;
         for sequence in 1..=u32::try_from(ciphertext_limit.div_ceil(chunk_bytes))? {
             progress(
                 position as u64,
@@ -633,6 +639,54 @@ impl CdnClient {
             fields.insert("wxmsgflag".into(), vec![]);
             fields.insert("fileid".into(), descriptor.file_id.as_bytes().to_vec());
             let reply = post(if large { "/downloadbig" } else { "/download" }, &fields)?;
+            let response_digest = reply
+                .get("rawfilemd5")
+                .and_then(|v| std::str::from_utf8(v).ok())
+                .filter(|v| v.len() == 32 && v.bytes().all(|b| b.is_ascii_hexdigit()))
+                .map(|v| v.to_ascii_lowercase());
+            let transformed = descriptor.quality == MediaQuality::Video
+                && matches!(integer(&reply, "istrans").ok(), Some(13 | 999))
+                && integer(&reply, "videoformat").ok() == Some(1)
+                && integer(&reply, "ver").ok() == Some(0)
+                && response_digest.is_some();
+            if transformed {
+                for key in [
+                    "retrysec",
+                    "isretry",
+                    "isoverload",
+                    "isgetcdn",
+                    "backsrcnum",
+                    "rsppicformat",
+                ] {
+                    ensure!(
+                        !reply.contains_key(key)
+                            || (integer(&reply, key)? == 0
+                                || (key == "backsrcnum" && matches!(integer(&reply, key)?, 0..=2))),
+                        "Unsupported transformed-video control: {key}"
+                    );
+                }
+                ensure!(
+                    !reply.contains_key("substituteftype")
+                        || matches!(integer(&reply, "substituteftype")?, 0 | 4 | 9),
+                    "Unsupported transformed-video representation"
+                );
+            }
+            if descriptor.quality == MediaQuality::Video {
+                ensure!(
+                    video_transcode.is_none_or(|v| v == transformed),
+                    "CDN representation changed during transfer"
+                );
+                video_transcode = Some(transformed);
+                if let Some(value) = response_digest {
+                    ensure!(
+                        video_response_md5.as_ref().is_none_or(|v| v == &value),
+                        "CDN representation changed during transfer"
+                    );
+                    video_response_md5 = Some(value);
+                } else if transformed {
+                    anyhow::bail!("media_integrity_failed");
+                }
+            }
             let code = integer(&reply, "retcode")?;
             ServiceRejected::check_wide(Service::CdnDownload, code)?;
             if strict_transfer || reply.contains_key("seq") {
@@ -643,7 +697,7 @@ impl CdnClient {
             }
             if large {
                 validate_large_download_reply(&reply, descriptor, &mut server_md5)?;
-            } else if large_video {
+            } else if large_video && !transformed {
                 validate_large_video_download_reply(&reply, descriptor, &mut server_md5)?;
             }
             let start = usize::try_from(integer(&reply, "rangestart")?)?;
@@ -657,11 +711,13 @@ impl CdnClient {
                     && !data.is_empty()
                     && size > 0
                     && size <= ciphertext_limit
-                    && expected_ciphertext.is_none_or(|expected| expected == size)
+                    && (transformed || expected_ciphertext.is_none_or(|expected| expected == size))
                     && size >= position
                     && data.len() <= size - position
                     && end <= requested_end
-                    && (!strict_transfer || data.len() == (size - position).min(chunk_bytes))
+                    && (!strict_transfer
+                        || transformed
+                        || data.len() == (size - position).min(chunk_bytes))
                     && (total == 0 || total == size)
                     && end == start + data.len() - 1,
                 "Inconsistent CDN range response"
@@ -702,15 +758,19 @@ impl CdnClient {
         let bytes = decrypt_cdn(&encrypted, &descriptor.aes_key)?;
         ensure!(bytes.len() <= plaintext_limit, "Decoded CDN body too large");
         let size_matches = descriptor.expected_bytes.map(|n| n == bytes.len() as u64);
-        let size_rejected =
-            (strict_transfer || descriptor.strict_size) && size_matches == Some(false);
+        let size_rejected = video_transcode != Some(true)
+            && (strict_transfer || descriptor.strict_size)
+            && size_matches == Some(false);
         let digest = hex::encode(md5(&bytes));
         let digest_matches = descriptor.expected_md5.as_ref().map(|expected| {
             expected.len() == 32
                 && expected.bytes().all(|b| b.is_ascii_hexdigit())
                 && digest.eq_ignore_ascii_case(expected)
         });
-        if observe_video && (size_rejected || digest_matches == Some(false)) {
+        if observe_video
+            && video_transcode != Some(true)
+            && (size_rejected || digest_matches == Some(false))
+        {
             // Reject exactly as before, but keep comparison facts so a different
             // server-selected representation can be told apart from corruption.
             return Err(video_reply
@@ -723,11 +783,18 @@ impl CdnClient {
                 )
                 .into());
         }
-        ensure!(!size_rejected, "Advertised media size mismatch");
-        ensure!(
-            digest_matches != Some(false),
-            "Advertised media checksum mismatch"
-        );
+        if video_transcode == Some(true) {
+            ensure!(
+                video_response_md5.as_deref() == Some(digest.as_str()),
+                "CDN transformed video checksum mismatch"
+            );
+        } else {
+            ensure!(!size_rejected, "Advertised media size mismatch");
+            ensure!(
+                digest_matches != Some(false),
+                "Advertised media checksum mismatch"
+            );
+        }
         if let Some(expected) = server_md5 {
             ensure!(
                 digest.eq_ignore_ascii_case(&expected),
@@ -739,6 +806,7 @@ impl CdnClient {
             bytes,
             requested_quality: descriptor.quality,
             substituted_filetype,
+            verified_video_representation: video_transcode == Some(true),
             picture_format,
             md5: digest,
             sha256: sha,
@@ -2959,5 +3027,54 @@ mod tests {
             assert_eq!(error.to_string(), "synthetic transport stop");
             assert_eq!(requests, 1);
         }
+    }
+
+    #[test]
+    fn transformed_video_representation_is_accepted_with_validated_response_digest() {
+        for istrans in [13, 999] {
+            let (mut d, raw, encrypted) = download_fixture(103, MediaQuality::Video);
+            // The advertised representation differs from the delivered bytes.
+            d.expected_bytes = Some(90);
+            d.expected_md5 = Some("0".repeat(32));
+            let received = client()
+                .download_with_transport(
+                    &d,
+                    |_, _| Ok(()),
+                    |_, fields| {
+                        let mut r = download_reply(fields, &d, &encrypted);
+                        put(&mut r, "istrans", istrans);
+                        put(&mut r, "videoformat", 1);
+                        put(&mut r, "ver", 0);
+                        put(&mut r, "backsrcnum", 2);
+                        put(&mut r, "substituteftype", 4);
+                        r.insert("rawfilemd5".into(), hex::encode(md5(&raw)).into_bytes());
+                        Ok(r)
+                    },
+                )
+                .unwrap();
+            assert_eq!(received.bytes, raw);
+            assert!(received.verified_video_representation);
+        }
+    }
+
+    #[test]
+    fn transformed_video_without_matching_response_digest_is_rejected() {
+        let (mut d, _raw, encrypted) = download_fixture(103, MediaQuality::Video);
+        d.expected_bytes = Some(90);
+        d.expected_md5 = Some("0".repeat(32));
+        assert!(client()
+            .download_with_transport(
+                &d,
+                |_, _| Ok(()),
+                |_, fields| {
+                    let mut r = download_reply(fields, &d, &encrypted);
+                    put(&mut r, "istrans", 999);
+                    put(&mut r, "videoformat", 1);
+                    put(&mut r, "ver", 0);
+                    r.insert("rawfilemd5".into(), "0".repeat(32).into_bytes());
+                    Ok(r)
+                },
+            )
+            .is_err());
     }
 }

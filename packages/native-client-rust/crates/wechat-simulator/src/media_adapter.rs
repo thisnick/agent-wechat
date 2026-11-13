@@ -95,6 +95,7 @@ impl MediaTransport for SimulatorMedia {
             requested_quality: descriptor.quality,
             substituted_filetype: None,
             picture_format: None,
+            verified_video_representation: false,
             advertised_size_matches: Some(true),
         })
     }
