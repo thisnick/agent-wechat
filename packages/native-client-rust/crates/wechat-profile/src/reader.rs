@@ -424,6 +424,22 @@ impl ProfileReader {
             coverage: self.coverage(),
         })
     }
+    /// Read one retained contact or group row by its exact username, including
+    /// deleted rows. Callers must check its flags before admitting mutations.
+    /// Missing rows return `NotCached`; duplicate usernames return `InvalidMetadata`.
+    pub fn contact(&self, username: &str) -> Result<Contact> {
+        validate_name(username)?;
+        let c = self.snapshot.open(self.role("contact.db", "contacts")?)?;
+        let mut statement =
+            c.prepare("SELECT * FROM contact WHERE username=?1 COLLATE BINARY LIMIT 2")?;
+        let mut rows = statement.query_map([username], raw)?;
+        let record = rows.next().transpose()?.ok_or(ProfileError::NotCached)?;
+        if rows.next().transpose()?.is_some() {
+            return Err(ProfileError::InvalidMetadata);
+        }
+        contact(record)
+    }
+
     pub fn contacts(&self, q: &ListQuery) -> Result<Page<Contact>> {
         let n = limit(q.limit)?;
         let hash = query_hash("contacts", &q.search)?;
@@ -432,7 +448,24 @@ impl ProfileReader {
             Some(CursorKey::Name { name }) => name,
             _ => return Err(ProfileError::InvalidCursor),
         };
-        let c = self.snapshot.open(self.role("contact.db", "contacts")?)?;
+        let database = self.role("contact.db", "contacts")?;
+        let c = self.snapshot.open(database)?;
+        // Keep readable layouts without a deletion column working. When the
+        // marker exists, filter before pagination; historical labels and group
+        // rosters still read the retained rows independently.
+        let has_delete_flag = self
+            .schemas
+            .iter()
+            .filter(|schema| schema.database == database)
+            .flat_map(|schema| &schema.tables)
+            .filter(|table| table.name == "contact")
+            .flat_map(|table| &table.columns)
+            .any(|column| column.name == "delete_flag");
+        let present = if has_delete_flag {
+            "coalesce(delete_flag,0)=0"
+        } else {
+            "1"
+        };
         register_search_lower(&c)?;
         let terms = search_terms(q.search.as_deref());
         let mut values = vec![Value::Text(after)];
@@ -444,7 +477,7 @@ impl ProfileReader {
         let limit = values.len() + 1;
         values.push(Value::Integer((n + 1) as i64));
         let mut s = c.prepare(&format!(
-            "SELECT * FROM contact WHERE username>?1{clause} ORDER BY username LIMIT ?{limit}"
+            "SELECT * FROM contact WHERE username>?1 AND {present}{clause} ORDER BY username LIMIT ?{limit}"
         ))?;
         let records = s
             .query_map(rusqlite::params_from_iter(values.iter()), raw)?

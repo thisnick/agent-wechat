@@ -127,21 +127,10 @@ impl Core {
         Ok(value)
     }
     fn group_contact(&self, account: &str, id: &str) -> Result<wechat_profile::Contact> {
-        let reader = self.profile_reader_owned(account)?;
-        let mut cursor = None;
-        loop {
-            let page = reader.contacts(&wechat_profile::ListQuery {
-                search: Some(id.into()),
-                limit: Some(200),
-                cursor,
-            })?;
-            if let Some(contact) = page.items.into_iter().find(|c| c.username == id) {
-                return Ok(contact);
-            }
-            cursor = page.next_cursor;
-            if cursor.is_none() {
-                bail!("group_contact_unavailable");
-            }
+        match self.profile_reader_owned(account)?.contact(id) {
+            Ok(contact) => Ok(contact),
+            Err(wechat_profile::ProfileError::NotCached) => bail!("group_contact_unavailable"),
+            Err(error) => Err(error.into()),
         }
     }
     fn load_group_attempt(&self, record: &StoredGroupMutation) -> Result<(Attempt, Receipts)> {
@@ -1143,13 +1132,25 @@ pub(super) mod tests {
         .into_iter()
         .enumerate()
         {
-            set_delete_flag(&core, "peer", flag);
+            set_delete_flag(&core, "peer", flag.clone());
+            assert_eq!(
+                core.group_contact("one", "peer").unwrap().raw_fields["delete_flag"],
+                flag
+            );
+            let visible = core
+                .contacts("one", &wechat_profile::ListQuery::default())
+                .unwrap();
+            assert!(visible["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item["id"] != "peer"));
             let key = format!("invalid-delete-{index}");
-            assert!(core
-                .admit_group("one", create(), &key)
-                .unwrap_err()
-                .to_string()
-                .contains("ordinary_contact_required"));
+            let error = core.admit_group("one", create(), &key).unwrap_err();
+            assert!(
+                error.to_string().contains("ordinary_contact_required"),
+                "case {index}: {error}"
+            );
             assert!(core
                 .store
                 .group_mutation_by_key("one", &key, None)
