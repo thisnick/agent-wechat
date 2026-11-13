@@ -58,3 +58,5 @@
 
 .sticker-detail-cover { display:flex; justify-content:center; margin:8px 0; height:112px; }
 .sticker-detail-cover img { max-height:112px; max-width:100%; object-fit:contain; }
+
+.sticker-tile-image { display: flex; width: 100%; height: 100%; min-height: 0; }

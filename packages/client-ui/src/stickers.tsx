@@ -59,6 +59,45 @@ export function StickerImage({ client, account, asset, label, acquire = false }:
   return url ? <img src={url} alt={label} draggable={false} /> : <span className="sticker-unloaded" aria-label={label}><Icon name="smile" /></span>;
 }
 
+/** Only visible tray tiles read metadata or acquire missing media. */
+function StickerTileImage({ client, account, item, pack }: { client: NativeWeChatClient; account: string; item: CustomSticker | StickerPackSticker; pack?: string }) {
+  const root = useRef<HTMLSpanElement>(null);
+  const [visible, setVisible] = useState(false);
+  const [asset, setAsset] = useState<MediaAsset | null | undefined>(item.original);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) { setVisible(true); observer.disconnect(); }
+    }, { root: root.current?.closest(".sticker-grid"), rootMargin: "80px" });
+    if (root.current) observer.observe(root.current);
+    return () => observer.disconnect();
+  }, []);
+  useEffect(() => {
+    if (!visible) return;
+    const abort = new AbortController();
+    void previewTransfer(async () => {
+      let current: CustomSticker | StickerPackSticker = pack ? item : await client.customSticker(account, item.id, abort.signal);
+      let media = current.original;
+      // Pack thumbnails are much smaller than the full animation archive.
+      if (media?.state !== "available" && pack && (current as StickerPackSticker).thumbnail) {
+        media = (current as StickerPackSticker).thumbnail;
+      } else if (media?.state !== "available") {
+        await waitStickerJob(client, account, await client.downloadSticker(account,
+          { stickerId: item.id, ...(pack ? { packId: pack } : {}) }, crypto.randomUUID(), abort.signal), abort.signal);
+        current = pack ? await client.stickerPackItem(account, pack, item.id, "en", abort.signal)
+          : await client.customSticker(account, item.id, abort.signal);
+        media = current.original;
+      }
+      abort.signal.throwIfAborted();
+      setAsset(media);
+    }, abort.signal).catch(error => { if (!abort.signal.aborted) setError(readableError(error)); });
+    return () => abort.abort();
+  }, [client, account, item.id, pack, visible]);
+  return <span ref={root} className="sticker-tile-image" title={error || undefined}>
+    <StickerImage client={client} account={account} asset={visible ? asset : null} label={item.caption || t("stickers.sticker")} acquire={visible} />
+  </span>;
+}
+
 export function StickerDraftPreview({ connection, account, draft, remove }: { connection: Connection; account: string; draft: StickerDraft; remove: () => void }) {
   return <section className="sticker-draft" aria-label={t("stickers.draft")}>
     <StickerImage client={connection.session.client} account={account} asset={draft.asset} label={draft.label} />
@@ -92,22 +131,6 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
     const [list, packs] = await Promise.all([client.customStickers(account, signal()), client.stickerPacks(account, { membership: "added" }, signal())]);
     guard(); setSaved(old => { const cached=new Map(old.items.map(item=>[item.id,item.original])); return {...list,items:list.items.map(item=>({...item,original:cached.get(item.id) ?? item.original}))}; }); setAdded(packs.items);
   }
-  useEffect(()=> {
-    if (!open || !saved.revision) return;
-    const abort=new AbortController();const active=AbortSignal.any([signal(),abort.signal]);
-    const revision=saved.revision;const candidates=saved.items.slice(0,savedLimit);let cursor=0;
-    const work=async()=> {
-      while (cursor<candidates.length && !active.aborted) {
-        const next=candidates[cursor++];
-        try {
-          const item=await client.customSticker(account,next.id,active);active.throwIfAborted();
-          setSaved(old=>old.revision===revision ? {...old,items:old.items.map(existing=>existing.id===item.id ? item : existing)} : old);
-        } catch {if (active.aborted) return;}
-      }
-    };
-    for(let worker=0;worker<4;worker++) void work();
-    return ()=>abort.abort();
-  },[open,saved.revision,savedLimit]);
   async function act(action: () => Promise<void>) {
     if (busy) return;
     setBusy(true); setError("");
@@ -134,7 +157,10 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
   }, [open, browser, imports !== null]);
   useEffect(() => {
     if (!open || tab === "saved") return;
-    void client.stickerPackItems(account, tab, "en", signal()).then(result => { guard(); setItems(result.items); }).catch(error => { if (!signal().aborted) setError(readableError(error)); });
+    const abort = new AbortController();
+    const active = AbortSignal.any([signal(), abort.signal]);
+    void client.stickerPackItems(account, tab, "en", active).then(result => { active.throwIfAborted(); setItems(result.items); }).catch(error => { if (!active.aborted) setError(readableError(error)); });
+    return () => abort.abort();
   }, [open, tab, added]);
   async function choose(item: CustomSticker | StickerPackSticker, pack?: string) {
     if (edit || held.current || busy) return;
@@ -247,7 +273,7 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
         {added.slice(0, 3).map(pack => <button role="tab" key={pack.id} aria-selected={tab === pack.id} onClick={() => { setTab(pack.id); setEdit(false); setItems([]); }}>{pack.name}</button>)}
         <button disabled={busy} onClick={() => void browse("added")}>{t("stickers.allAdded")}</button>
       </div>
-      <div className={`sticker-grid ${edit ? "is-editing" : ""}`} role="group" aria-label={edit ? t("stickers.editSaved") : t("stickers.choose")}>
+      <div key={tab} className={`sticker-grid ${edit ? "is-editing" : ""}`} role="group" aria-label={edit ? t("stickers.editSaved") : t("stickers.choose")}>
         {visible.map((item, index) => <div className="sticker-cell" data-sticker-id={item.id} key={item.id}>
           <button type="button" className="sticker-tile" disabled={busy} aria-label={item.caption || t("stickers.item", { index: index + 1 })}
             onPointerDown={event => {
@@ -270,7 +296,7 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
               void move(drag.id,after);
             }} onPointerCancel={()=>{clearTimeout(hold.current);pointerDrag.current=null;}} onPointerLeave={()=>clearTimeout(hold.current)}
             onClick={() => void choose(item, tab === "saved" ? undefined : tab)}>
-            <StickerImage client={client} account={account} asset={item.original} label={item.caption || t("stickers.sticker")} />
+            <StickerTileImage key={`${account}:${tab}:${item.id}`} client={client} account={account} item={item} pack={tab === "saved" ? undefined : tab} />
           </button>
           {edit && <><button className="sticker-remove" aria-label={t("stickers.removeItem", { index: index + 1 })} disabled={busy} onClick={() => void remove(item.id)}>×</button>
             <div className="sticker-keyboard-move"><button disabled={busy || index === 0} aria-label={t("stickers.moveEarlier", { index: index + 1 })} onClick={() => void move(item.id, index > 1 ? saved.items[index - 2].id : null)}>←</button><button disabled={busy || index === saved.items.length - 1} aria-label={t("stickers.moveLater", { index: index + 1 })} onClick={() => void move(item.id, saved.items[index + 1].id)}>→</button></div></>}
