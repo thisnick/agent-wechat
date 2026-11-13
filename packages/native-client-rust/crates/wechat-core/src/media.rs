@@ -738,6 +738,131 @@ impl Core {
             }
         });
     }
+    /// Read already indexed media on consistent snapshots; only missing indexing uses the writer.
+    pub async fn media_assets_concurrent(
+        self: &Arc<Self>,
+        account: &str,
+        ids: Vec<String>,
+    ) -> Result<Vec<(String, Result<Vec<MediaAsset>>)>> {
+        ensure!(
+            !ids.is_empty()
+                && ids.len() <= 40
+                && ids.iter().all(|id| !id.is_empty() && id.len() <= 8192),
+            "invalid_request"
+        );
+        let owned = account.to_owned();
+        let rows = self
+            .read(account, move |core| {
+                Ok(ids
+                    .into_iter()
+                    .map(|id| {
+                        let value = core.indexed_message_media(&owned, &id);
+                        (id, value)
+                    })
+                    .collect::<Vec<_>>())
+            })
+            .await?;
+        if rows.iter().all(|(_, result)| !matches!(result, Ok(None))) {
+            return Ok(rows
+                .into_iter()
+                .map(|(id, result)| (id, result.map(Option::unwrap)))
+                .collect());
+        }
+        let guard = self.lock_account(account).await?;
+        let core = self.clone();
+        let account = account.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            Ok(rows
+                .into_iter()
+                .map(|(id, result)| {
+                    let result = match result {
+                        Ok(None) => core.media_assets(&account, &id),
+                        Ok(Some(assets)) => Ok(assets),
+                        Err(error) => Err(error),
+                    };
+                    (id, result)
+                })
+                .collect())
+        })
+        .await?
+    }
+    fn indexed_message_media(
+        &self,
+        account: &str,
+        message_id: &str,
+    ) -> Result<Option<Vec<MediaAsset>>> {
+        let reader = self.profile_reader_owned(account)?;
+        self.ensure_message_not_recalled_with_reader(account, message_id, &reader)?;
+        let own = self.profile_username(account)?;
+        let msg = reader.message(&source_message_id(message_id)?, own.as_deref())?;
+        if !matches!(msg.message_type, 3 | 34 | 43 | 47 | 49) {
+            return Ok(Some(vec![]));
+        }
+        let rows = self.store.media_assets(account, message_id)?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        if msg.message_type == 47 {
+            return rows
+                .iter()
+                .map(|row| self.media_asset(account, &row.id))
+                .collect::<Result<Vec<_>>>()
+                .map(Some);
+        }
+        let binding = identity::capture(&msg)?;
+        let content = msg
+            .content
+            .text
+            .as_deref()
+            .context("media_metadata_unavailable")?;
+        let mut quoted = msg.clone();
+        let plans = if let Some(link) = crate::quotes::message_app(&msg)
+            .and_then(|app| crate::quotes::quoted_link(&app).or(app.link))
+        {
+            link.thumbnail
+                .into_iter()
+                .map(|source| {
+                    (
+                        MediaKind::Image,
+                        MediaVariant::Thumbnail,
+                        DownloadPlan::LinkThumbnail { source },
+                        Some("link-preview".into()),
+                    )
+                })
+                .collect()
+        } else if let Some(content) = crate::quotes::quoted_image_content(&msg) {
+            quoted.message_type = 3;
+            discover(&quoted, &content)?
+        } else if let Some((kind, content)) = crate::quotes::quoted_sticker_content(&msg) {
+            quoted.message_type = i64::from(kind);
+            quoted.local_type = kind.to_string();
+            discover(&quoted, &content)?
+        } else {
+            discover(&msg, content)?
+        };
+
+        let mut assets = vec![];
+        for (_, variant, _, _) in plans {
+            let hash = digest(&serde_json::to_vec(&(
+                "bound-source-v1",
+                account,
+                &binding,
+                variant,
+                content,
+            ))?);
+            let id = format!("asset_{}", &hash[..40]);
+            let Some(row) = rows.iter().find(|row| row.id == id) else {
+                return Ok(None);
+            };
+            let asset = self.media_asset(account, &row.id)?;
+            if asset.state != "available" {
+                return Ok(None);
+            }
+            assets.push(asset);
+        }
+        Ok(Some(assets))
+    }
     pub fn media_assets(&self, account: &str, message_id: &str) -> Result<Vec<MediaAsset>> {
         let reader = self.profile_reader_owned(account)?;
         self.media_assets_with_reader(account, message_id, &reader)
@@ -1363,9 +1488,9 @@ impl Core {
             } else if row.kind == "sticker_acquire" {
                 core.perform_sticker_pack_download(&account, &id, &mut permit)
             } else if row.kind == "sticker_pack" {
-                core.perform_sticker_pack_job(&account, &id)
+                core.perform_sticker_pack_job(&account, &id, &mut permit)
             } else if row.kind == "sticker_saved" {
-                core.perform_saved_sticker_job(&account, &id)
+                core.perform_saved_sticker_job(&account, &id, &mut permit)
             } else if row.kind == "download" {
                 core.perform_download_guarded(&account, &id, Some(&mut permit))
             } else {

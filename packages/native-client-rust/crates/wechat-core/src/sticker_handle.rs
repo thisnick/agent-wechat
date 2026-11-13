@@ -53,9 +53,33 @@ impl StickerAccount {
         })
         .await?
     }
+    async fn network<T: Send + 'static>(
+        &self,
+        action: impl FnOnce(
+                Arc<Core>,
+                String,
+                &mut crate::account_network::AccountNetworkPermit,
+            ) -> Result<T>
+            + Send
+            + 'static,
+    ) -> Result<T> {
+        let core = self.core.clone();
+        let account = self.account.clone();
+        let guard = core.lock_account(&account).await?;
+        tokio::task::spawn_blocking(move || {
+            let mut permit = crate::account_network::AccountNetworkPermit {
+                guard: Some(guard),
+                runtime: tokio::runtime::Handle::current(),
+            };
+            action(core, account, &mut permit)
+        })
+        .await?
+    }
     /// Read Saved in canonical picker order, with its collection revision.
     pub async fn list(&self) -> Result<CustomStickerList> {
-        self.run(|core, account| core.saved_stickers(&account))
+        let account = self.account.clone();
+        self.core
+            .read(&self.account, move |core| core.saved_stickers(&account))
             .await
     }
     /// Read one Saved item and index already owned original/preview references.
@@ -146,27 +170,37 @@ impl StickerAccount {
     }
     /// Read every account-added pack independently of catalog coverage.
     pub async fn packs(&self) -> Result<StickerPackList> {
-        self.run(|core, account| core.added_sticker_packs(&account))
+        let account = self.account.clone();
+        self.core
+            .read(&self.account, move |core| {
+                core.added_sticker_packs(&account)
+            })
             .await
     }
     /// Read one available-feed page; None starts a new pagination sequence.
     pub async fn browse(&self, cursor: Option<&str>) -> Result<StickerPackList> {
         let cursor = cursor.map(str::to_string);
-        self.run(move |core, account| core.browse_sticker_packs(&account, cursor.as_deref()))
-            .await
+        self.network(move |core, account, permit| {
+            core.browse_sticker_packs_guarded(&account, cursor.as_deref(), Some(permit))
+        })
+        .await
     }
     /// Read current product metadata, membership and verified content readiness.
     pub async fn pack(&self, id: &StickerPackId) -> Result<StickerPack> {
         let id = id.to_string();
-        self.run(move |core, account| core.sticker_pack_detail(&account, &id))
-            .await
+        self.network(move |core, account, permit| {
+            core.sticker_pack_detail_guarded(&account, &id, Some(permit))
+        })
+        .await
     }
     /// Read complete supplied contents and official locale captions; never acquires.
     pub async fn items(&self, id: &StickerPackId, language: &str) -> Result<StickerPackStickers> {
         let id = id.to_string();
         let language = language.to_string();
-        self.run(move |core, account| core.sticker_pack_stickers(&account, &id, &language))
-            .await
+        self.network(move |core, account, permit| {
+            core.sticker_pack_stickers_guarded(&account, &id, &language, Some(permit))
+        })
+        .await
     }
     /// Establish eligible-free membership without downloading its archive.
     pub async fn add_pack(&self, key: &str, id: &StickerPackId) -> Result<MediaJob> {

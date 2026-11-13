@@ -247,10 +247,12 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
       const fresh: StickerPack = { ...pack, membership: member ? "added" : "not_added", contentReadiness: member?.contentReadiness ?? "unverified" };
       // The completed mutation and canonical Added read establish membership.
       // Refresh media references after removal without repeating remote pack detail.
-      const contents = await client.stickerPackItems(account,pack.id,"en",signal());
-      guard(); setDetail(fresh); setDetailItems(contents.items); setDetailPreview(null);
+      guard(); setDetail(fresh); setDetailItems([]); setDetailPreview(null);
       setCatalog(old => old.map(item => item.id === pack.id ? fresh : item));
       if (!add && tab === pack.id) setTab("saved");
+      // Membership is already confirmed. Loading previews must not delay that feedback.
+      const contents = await client.stickerPackItems(account,pack.id,"en",signal());
+      guard(); setDetailItems(contents.items);
     });
   }
   function drop(event: DragEvent) {

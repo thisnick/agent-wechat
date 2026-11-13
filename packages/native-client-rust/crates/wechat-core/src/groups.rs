@@ -176,6 +176,7 @@ impl Core {
         if self.stopping.load(Ordering::Acquire) {
             bail!("service_stopping");
         }
+        let operation_guard = self.lock_operation(account, "group_recall").await?;
         let (op, created, guard) = self.admit_group_guarded(account, action, key).await?;
         if created {
             let worker_account = account.to_owned();
@@ -187,11 +188,17 @@ impl Core {
                     let account = worker_account.clone();
                     let operation = id.clone();
                     blocking(move || {
-                        let _guard = guard;
+                        let _operation = operation_guard;
+                        let mut permit = crate::account_network::AccountNetworkPermit {
+                            guard: Some(guard),
+                            runtime: tokio::runtime::Handle::current(),
+                        };
                         worker.execute_group(&account, &operation, |state, rpc| {
-                            worker
-                                .account_upstream(&account)?
-                                .group_mutation_raw(state, rpc)
+                            permit.transfer(&worker, &account, || {
+                                worker
+                                    .account_upstream(&account)?
+                                    .group_mutation_raw(state, rpc)
+                            })
                         })?;
                         Ok(())
                     })
@@ -458,6 +465,8 @@ impl Core {
                 return Ok(op);
             }
         };
+        let fence = self.session_fence(account)?;
+        let desired = self.store.runtime(account, "desired")?;
         for (step, rpc) in attempt.requests.iter().enumerate() {
             if self.stopping.load(Ordering::Acquire) {
                 return self.hold_group(account, id);
@@ -529,17 +538,10 @@ impl Core {
                 });
             }
             let saved = (|| -> Result<Vec<u8>> {
-                self.check_state_profile(account, &state)?;
-                let sealed =
-                    self.vault
-                        .seal(account, "account-state", &serde_json::to_vec(&state)?)?;
-                self.store.save_push_authorization(
-                    account,
-                    &sealed,
-                    &expected,
-                    attempt.epoch.as_deref(),
-                )?;
-                Ok(sealed)
+                self.save_network_state(account, &state, &expected, &fence, desired.as_deref())?;
+                self.store
+                    .runtime(account, "account-state")?
+                    .context("auth_required")
             })();
             let saved = match saved {
                 Ok(saved) => saved,
@@ -1536,6 +1538,60 @@ pub(super) mod tests {
             .execute_group("one", &op.id, |_, _| Ok(created(false)))
             .unwrap();
         assert_eq!(done.state, "succeeded");
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn group_network_wait_allows_readers_and_replay_does_not_resubmit() {
+        struct PausedGroup {
+            began: tokio::sync::Notify,
+            release: Mutex<std::sync::mpsc::Receiver<()>>,
+            calls: AtomicUsize,
+        }
+        impl crate::upstream::Upstream for PausedGroup {
+            fn kind(&self) -> crate::upstream::UpstreamKind {
+                crate::upstream::UpstreamKind::Native
+            }
+            fn group_mutation_raw(&self, _: &mut AccountState, _: &GroupRpc) -> Result<Vec<u8>> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.began.notify_one();
+                self.release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(5))?;
+                Ok(created(false))
+            }
+        }
+        let (_temp, mut core) = fixture();
+        let (release, wait) = std::sync::mpsc::channel();
+        let host = Arc::new(PausedGroup {
+            began: Default::default(),
+            release: Mutex::new(wait),
+            calls: AtomicUsize::new(0),
+        });
+        Arc::get_mut(&mut Arc::get_mut(&mut core).unwrap().shared)
+            .unwrap()
+            .upstream = host.clone();
+        let operation = core
+            .mutate_group("one", create(), "concurrent-create")
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), host.began.notified())
+            .await
+            .unwrap();
+        let writer =
+            tokio::time::timeout(std::time::Duration::from_secs(1), core.lock_account("one"))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(host.calls.load(Ordering::SeqCst), 1);
+        drop(writer);
+        release.send(()).unwrap();
+        let replay = core
+            .mutate_group("one", create(), "concurrent-create")
+            .await
+            .unwrap();
+        assert_eq!(replay.id, operation.id);
+        assert_eq!(replay.state, "succeeded");
+        assert_eq!(host.calls.load(Ordering::SeqCst), 1);
     }
     #[tokio::test]
     async fn admission_guard_prevents_credential_updates_before_group_execution() {

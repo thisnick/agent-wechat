@@ -657,3 +657,24 @@ async fn startup_converts_an_earlier_database_in_the_background_without_blocking
     // It runs once per process.
     core.spawn_media_storage_maintenance().unwrap();
 }
+
+#[tokio::test]
+async fn indexed_voice_metadata_is_readable_from_a_read_only_snapshot() {
+    let (_directory, core) = profile_core();
+    let (encoded, assets) = profile_voice(&core);
+    cache_complete(&core, &encoded, &assets);
+    let message = assets[0].message_id.clone().unwrap();
+    let query = message.clone();
+    let indexed = core
+        .read("one", move |view| view.indexed_message_media("one", &query))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(indexed.len(), assets.len());
+    let rows = core
+        .media_assets_concurrent("one", vec![message])
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1.as_ref().unwrap().len(), assets.len());
+}

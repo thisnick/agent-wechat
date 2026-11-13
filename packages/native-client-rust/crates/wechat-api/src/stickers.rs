@@ -280,39 +280,26 @@ async fn packs(
                 "invalid_sticker_pack_query",
             ));
         }
-        let guard = app.core.lock_account(&a).await?;
-        return Ok(Json(
-            work(move || {
-                let _guard = guard;
-                app.core.added_sticker_packs(&a)
-            })
-            .await?,
-        ));
+        return Ok(Json(app.core.stickers(&a)?.packs().await?));
     }
-    let guard = app.core.lock_account(&a).await?;
     Ok(Json(
-        work(move || {
-            let _guard = guard;
-            app.core.browse_sticker_packs(&a, query.cursor.as_deref())
-        })
-        .await?,
+        app.core
+            .stickers(&a)?
+            .browse(query.cursor.as_deref())
+            .await?,
     ))
 }
+
 async fn pack(
     State(app): State<App>,
     Extension(c): Extension<Claims>,
     Path((a, id)): Path<(String, String)>,
 ) -> ApiResult<Json<wechat_core::StickerPack>> {
     c.require(Some(&a), "media")?;
-    let guard = app.core.lock_account(&a).await?;
-    Ok(Json(
-        work(move || {
-            let _guard = guard;
-            app.core.sticker_pack_detail(&a, &id)
-        })
-        .await?,
-    ))
+    let id = wechat_core::StickerPackId::parse(&id)?;
+    Ok(Json(app.core.stickers(&a)?.pack(&id).await?))
 }
+
 async fn pack_items(
     State(app): State<App>,
     Extension(c): Extension<Claims>,
@@ -320,16 +307,15 @@ async fn pack_items(
     Query(query): Query<StickerLanguageQuery>,
 ) -> ApiResult<Json<wechat_core::StickerPackStickers>> {
     c.require(Some(&a), "media")?;
-    let guard = app.core.lock_account(&a).await?;
+    let id = wechat_core::StickerPackId::parse(&id)?;
     Ok(Json(
-        work(move || {
-            let _guard = guard;
-            app.core
-                .sticker_pack_stickers(&a, &id, query.language.as_deref().unwrap_or("en"))
-        })
-        .await?,
+        app.core
+            .stickers(&a)?
+            .items(&id, query.language.as_deref().unwrap_or("en"))
+            .await?,
     ))
 }
+
 async fn pack_item(
     State(app): State<App>,
     Extension(c): Extension<Claims>,
@@ -337,13 +323,12 @@ async fn pack_item(
     Query(query): Query<StickerLanguageQuery>,
 ) -> ApiResult<Json<wechat_core::StickerPackSticker>> {
     c.require(Some(&a), "media")?;
-    let guard = app.core.lock_account(&a).await?;
-    let items = work(move || {
-        let _guard = guard;
-        app.core
-            .sticker_pack_stickers(&a, &id, query.language.as_deref().unwrap_or("en"))
-    })
-    .await?;
+    let id = wechat_core::StickerPackId::parse(&id)?;
+    let items = app
+        .core
+        .stickers(&a)?
+        .items(&id, query.language.as_deref().unwrap_or("en"))
+        .await?;
     Ok(Json(
         items
             .items

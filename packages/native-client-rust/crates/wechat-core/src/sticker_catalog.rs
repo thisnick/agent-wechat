@@ -19,6 +19,34 @@ struct PackContinuation {
     seen: Vec<String>,
 }
 impl Core {
+    fn cached_sticker_metadata(
+        &self,
+        account: &str,
+        key: &str,
+        permit: Option<&mut MediaAccountPermit>,
+        fetch: impl FnOnce(&mut wechat_protocol::AccountRequest<'_>) -> Result<Vec<u8>>,
+    ) -> Result<Vec<u8>> {
+        let fence = self.session_fence(account)?;
+        let epoch = self
+            .store
+            .runtime(account, "logout-epoch")?
+            .unwrap_or_default();
+        let key = format!(
+            "{}:{}:{:x}:{:x}:{}",
+            account.len(),
+            account,
+            Sha256::digest(fence.authorization),
+            Sha256::digest(epoch),
+            key
+        );
+        let mut state = self.session_state(account, &fence)?;
+        let result = cdn_transfer(permit, self, account, || {
+            self.sticker_metadata
+                .get(key, || self.native_request(account, &mut state, fetch))
+        });
+        self.session_state(account, &fence)?;
+        Ok((*result?).clone())
+    }
     /// Derive Saved and all canonical added-pack picker descriptors.
     pub fn sticker_collections(&self, account: &str) -> Result<StickerCollections> {
         let mut items = vec![StickerCollection {
@@ -78,6 +106,14 @@ impl Core {
         account: &str,
         cursor: Option<&str>,
     ) -> Result<StickerPackList> {
+        self.browse_sticker_packs_guarded(account, cursor, None)
+    }
+    pub(crate) fn browse_sticker_packs_guarded(
+        &self,
+        account: &str,
+        cursor: Option<&str>,
+        permit: Option<&mut MediaAccountPermit>,
+    ) -> Result<StickerPackList> {
         let mut continuation = if let Some(encoded) = cursor {
             ensure!(encoded.len() <= 8192, "invalid_cursor");
             let payload = URL_SAFE_NO_PAD
@@ -109,9 +145,13 @@ impl Core {
                 seen: vec![],
             }
         };
-        let mut state = self.account_state(account)?;
-        let raw = self.native_request(account, &mut state, |ctx| {
-            ctx.sticker_pack_page_raw(wire::StickerPackFeed::Catalog, &continuation.cursor)
+        let cache_key = format!("catalog:{:x}", Sha256::digest(&continuation.cursor));
+        let raw = self.cached_sticker_metadata(account, &cache_key, permit, |ctx| {
+            let raw =
+                ctx.sticker_pack_page_raw(wire::StickerPackFeed::Catalog, &continuation.cursor)?;
+            let page = wire::decode_sticker_pack_page(&raw)?;
+            ensure!(!page.restart, "pagination_cursor_expired");
+            Ok(raw)
         })?;
         let page = wire::decode_sticker_pack_page(&raw)?;
         ensure!(!page.restart, "pagination_cursor_expired");
@@ -170,19 +210,23 @@ impl Core {
             coverage: "available_feed".into(),
         })
     }
-    pub(super) fn remote_sticker_pack_detail(
+    /// Read current detail metadata without establishing membership or acquiring media.
+    pub fn sticker_pack_detail(&self, account: &str, pack: &str) -> Result<StickerPack> {
+        self.sticker_pack_detail_guarded(account, pack, None)
+    }
+    pub(crate) fn sticker_pack_detail_guarded(
         &self,
         account: &str,
         pack: &str,
-    ) -> Result<wire::StickerPackDetail> {
-        let mut state = self.account_state(account)?;
+        permit: Option<&mut MediaAccountPermit>,
+    ) -> Result<StickerPack> {
         let raw =
-            self.native_request(account, &mut state, |ctx| ctx.sticker_pack_detail_raw(pack))?;
-        wire::decode_sticker_pack_detail(&raw, pack)
-    }
-    /// Read current detail metadata without establishing membership or acquiring media.
-    pub fn sticker_pack_detail(&self, account: &str, pack: &str) -> Result<StickerPack> {
-        let detail = self.remote_sticker_pack_detail(account, pack)?;
+            self.cached_sticker_metadata(account, &format!("detail:{pack}"), permit, |ctx| {
+                let raw = ctx.sticker_pack_detail_raw(pack)?;
+                wire::decode_sticker_pack_detail(&raw, pack)?;
+                Ok(raw)
+            })?;
+        let detail = wire::decode_sticker_pack_detail(&raw, pack)?;
         let mut item = public_sticker_pack(
             &detail.summary,
             Some(detail.items.len() as u32),
@@ -208,15 +252,36 @@ impl Core {
         pack: &str,
         language: &str,
     ) -> Result<StickerPackStickers> {
+        self.sticker_pack_stickers_guarded(account, pack, language, None)
+    }
+    pub(crate) fn sticker_pack_stickers_guarded(
+        &self,
+        account: &str,
+        pack: &str,
+        language: &str,
+        mut permit: Option<&mut MediaAccountPermit>,
+    ) -> Result<StickerPackStickers> {
         ensure!(
             !language.is_empty() && language.len() <= 64 && !language.chars().any(char::is_control),
             "invalid_language"
         );
-        let detail = self.remote_sticker_pack_detail(account, pack)?;
-        let mut state = self.account_state(account)?;
-        let raw = self.native_request(account, &mut state, |ctx| {
-            ctx.sticker_pack_captions_raw(pack)
-        })?;
+        let raw = self.cached_sticker_metadata(
+            account,
+            &format!("detail:{pack}"),
+            permit.as_deref_mut(),
+            |ctx| {
+                let raw = ctx.sticker_pack_detail_raw(pack)?;
+                wire::decode_sticker_pack_detail(&raw, pack)?;
+                Ok(raw)
+            },
+        )?;
+        let detail = wire::decode_sticker_pack_detail(&raw, pack)?;
+        let raw =
+            self.cached_sticker_metadata(account, &format!("captions:{pack}"), permit, |ctx| {
+                let raw = ctx.sticker_pack_captions_raw(pack)?;
+                wire::decode_sticker_pack_captions(&raw)?;
+                Ok(raw)
+            })?;
         let captions = wire::decode_sticker_pack_captions(&raw)?;
         let items = detail
             .items
@@ -320,15 +385,26 @@ impl Core {
         )?;
         Ok(Some(asset))
     }
+    fn known_pack_asset(
+        &self,
+        account: &str,
+        pack: &str,
+        item: &str,
+        role: &str,
+    ) -> Option<MediaAsset> {
+        let id = super::sticker_pack_download::pack_asset_id(pack, item, role);
+        let asset = self.media_asset(account, &id).ok()?;
+        (asset.state == "available" && self.media_content(account, &id).is_ok()).then_some(asset)
+    }
     fn pack_media_state(&self, account: &str, pack: &mut StickerPack, ids: Option<&[String]>) {
-        pack.icon = self.indexed_pack_asset(account, &pack.id, "icon", "icon");
+        pack.icon = self.known_pack_asset(account, &pack.id, "icon", "icon");
         if let Some(ids) = ids {
             if !ids.is_empty() {
                 pack.sticker_count = Some(ids.len() as u32);
                 let available = ids
                     .iter()
                     .filter(|id| {
-                        self.indexed_pack_asset(account, &pack.id, id, "original")
+                        self.known_pack_asset(account, &pack.id, id, "original")
                             .is_some()
                     })
                     .count();

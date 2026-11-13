@@ -122,11 +122,11 @@ async fn assets(
     Path((a, id)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
     c.require(Some(&a), "media")?;
-    let guard = app.core.lock_account(&a).await?;
-    Ok(Json(
-        json!({"items":work(move||{let _guard=guard;app.core.media_assets(&a,&id)}).await?}),
-    ))
+    let mut rows = app.core.media_assets_concurrent(&a, vec![id]).await?;
+    let assets = rows.pop().context("media_result_missing")?.1?;
+    Ok(Json(json!({"items": assets})))
 }
+
 async fn assets_batch(
     State(app): State<App>,
     Extension(c): Extension<Claims>,
@@ -143,12 +143,10 @@ async fn assets_batch(
     {
         return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_request"));
     }
-    let guard = app.core.lock_account(&a).await?;
-    let rows = work(move || {
-        let _guard = guard;
-        app.core.media_assets_batch(&a, &input.message_ids)
-    })
-    .await?;
+    let rows = app
+        .core
+        .media_assets_concurrent(&a, input.message_ids)
+        .await?;
     let items = rows
         .into_iter()
         .map(|(message_id, result)| match result {

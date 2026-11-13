@@ -288,11 +288,16 @@ impl Core {
         account: &str,
         id: &str,
         job: &mut SavedJob,
+        permit: &mut MediaAccountPermit,
     ) -> Result<(Vec<String>, Option<String>)> {
         let fence = job.fence.clone();
-        self.read_saved_order_with(account, id, &fence, &mut |raw| {
-            self.retain_saved_read(account, id, job, raw)
-        })
+        self.read_saved_order_with(
+            account,
+            id,
+            &fence,
+            &mut |raw| self.retain_saved_read(account, id, job, raw),
+            permit,
+        )
     }
     fn reconcile_saved_order(
         &self,
@@ -300,6 +305,7 @@ impl Core {
         id: &str,
         job: &mut SavedJob,
         order: Vec<String>,
+        permit: &mut MediaAccountPermit,
     ) -> Result<()> {
         let fence = job.fence.clone();
         self.reconcile_saved_order_with(
@@ -307,10 +313,16 @@ impl Core {
             id,
             &fence,
             &mut |raw| self.retain_saved_read(account, id, job, raw),
+            permit,
             order,
         )
     }
-    pub(super) fn perform_saved_sticker_job(&self, account: &str, id: &str) -> Result<()> {
+    pub(super) fn perform_saved_sticker_job(
+        &self,
+        account: &str,
+        id: &str,
+        permit: &mut MediaAccountPermit,
+    ) -> Result<()> {
         let row = self.store.media_job(account, id)?;
         let mut job: SavedJob = serde_json::from_slice(&self.vault.open_record(
             account,
@@ -324,8 +336,8 @@ impl Core {
             "sticker_submission_needs_review"
         );
         self.ensure_sticker_database(account, id)?;
-        let (mut order, version) = self.read_saved_order(account, id, &mut job)?;
-        self.reconcile_saved_order(account, id, &mut job, order.clone())?;
+        let (mut order, version) = self.read_saved_order(account, id, &mut job, permit)?;
+        self.reconcile_saved_order(account, id, &mut job, order.clone(), permit)?;
         if !job.accepted {
             let action = match job.intent.clone() {
                 SavedIntent::Sync => None,
@@ -380,8 +392,10 @@ impl Core {
                                 job.submitted = true;
                                 self.save_saved_job(account, id, &job)?;
                                 let mut state = self.resume_media_state(account, id, &job.fence)?;
-                                let raw = self.native_request(account, &mut state, |ctx| {
-                                    ctx.upload_sticker_chunk_raw(&bytes, job.upload_offset)
+                                let raw = permit.transfer(self, account, || {
+                                    self.native_request(account, &mut state, |ctx| {
+                                        ctx.upload_sticker_chunk_raw(&bytes, job.upload_offset)
+                                    })
                                 })?;
                                 job.replies.push(raw.clone());
                                 self.save_saved_job(account, id, &job)?;
@@ -407,8 +421,10 @@ impl Core {
                 job.outcome = Some((identity.clone(), action.clone()));
                 self.save_saved_job(account, id, &job)?;
                 let mut state = self.resume_media_state(account, id, &job.fence)?;
-                let raw = self.native_request(account, &mut state, |ctx| {
-                    ctx.mutate_custom_sticker(&identity, &action)
+                let raw = permit.transfer(self, account, || {
+                    self.native_request(account, &mut state, |ctx| {
+                        ctx.mutate_custom_sticker(&identity, &action)
+                    })
                 })?;
                 job.replies.push(raw.clone());
                 self.save_saved_job(account, id, &job)?;
@@ -419,9 +435,9 @@ impl Core {
                 job.accepted = true;
                 self.save_saved_job(account, id, &job)?;
                 self.phase_media(account, id, "reconciling")?;
-                let (fresh, _) = self.read_saved_order(account, id, &mut job)?;
+                let (fresh, _) = self.read_saved_order(account, id, &mut job, permit)?;
                 order = fresh;
-                self.reconcile_saved_order(account, id, &mut job, order.clone())?;
+                self.reconcile_saved_order(account, id, &mut job, order.clone(), permit)?;
             }
         }
         if let Some((identity, action)) = &job.outcome {

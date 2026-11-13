@@ -15,7 +15,7 @@ pub(super) fn authentication_required(error: &anyhow::Error) -> bool {
 }
 
 impl Core {
-    fn session_fence(&self, account: &str) -> Result<SessionFence> {
+    pub(crate) fn session_fence(&self, account: &str) -> Result<SessionFence> {
         Ok(SessionFence {
             authorization: authorization(&self.account_state(account)?)?,
             logout_epoch: self.store.runtime(account, "logout-epoch")?,

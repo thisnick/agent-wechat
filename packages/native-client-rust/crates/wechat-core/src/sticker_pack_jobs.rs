@@ -183,13 +183,16 @@ impl Core {
         account: &str,
         id: &str,
         plan: &mut PackJob,
+        permit: &mut MediaAccountPermit,
     ) -> Result<Vec<wire::StickerPackSummary>> {
         let mut cursor = vec![];
         let mut items = vec![];
         for _ in 0..100 {
             let mut state = self.resume_media_state(account, id, &plan.fence)?;
-            let raw = self.native_request(account, &mut state, |ctx| {
-                ctx.sticker_pack_page_raw(wire::StickerPackFeed::Added, &cursor)
+            let raw = permit.transfer(self, account, || {
+                self.native_request(account, &mut state, |ctx| {
+                    ctx.sticker_pack_page_raw(wire::StickerPackFeed::Added, &cursor)
+                })
             })?;
             self.retain_pack_read(account, id, plan, &raw)?;
             self.resume_media_state(account, id, &plan.fence)?;
@@ -250,7 +253,12 @@ impl Core {
         }
         self.project_sticker_packs(account, records)
     }
-    pub(super) fn perform_sticker_pack_job(&self, account: &str, id: &str) -> Result<()> {
+    pub(super) fn perform_sticker_pack_job(
+        &self,
+        account: &str,
+        id: &str,
+        permit: &mut MediaAccountPermit,
+    ) -> Result<()> {
         let row = self.store.media_job(account, id)?;
         let mut plan: PackJob = serde_json::from_slice(&self.vault.open_record(
             account,
@@ -268,25 +276,32 @@ impl Core {
         self.ensure_sticker_database(account, id)?;
         if matches!(plan.intent, PackIntent::Sync { saved: true, .. }) {
             let fence = plan.fence.clone();
-            let (order, _) = self.read_saved_order_with(account, id, &fence, &mut |raw| {
-                self.retain_pack_read(account, id, &mut plan, raw)
-            })?;
+            let (order, _) = self.read_saved_order_with(
+                account,
+                id,
+                &fence,
+                &mut |raw| self.retain_pack_read(account, id, &mut plan, raw),
+                permit,
+            )?;
             self.reconcile_saved_order_with(
                 account,
                 id,
                 &fence,
                 &mut |raw| self.retain_pack_read(account, id, &mut plan, raw),
+                permit,
                 order,
             )?;
         }
-        let mut summaries = self.read_added_pack_list(account, id, &mut plan)?;
+        let mut summaries = self.read_added_pack_list(account, id, &mut plan, permit)?;
         self.reconcile_added_pack_list(account, &summaries)?;
         if let PackIntent::Membership { id: pack, added } = plan.intent.clone() {
             let present = summaries.iter().any(|summary| summary.id == pack);
             if !plan.accepted && present != added {
                 let mut state = self.resume_media_state(account, id, &plan.fence)?;
-                let raw = self.native_request(account, &mut state, |ctx| {
-                    ctx.sticker_pack_detail_raw(&pack)
+                let raw = permit.transfer(self, account, || {
+                    self.native_request(account, &mut state, |ctx| {
+                        ctx.sticker_pack_detail_raw(&pack)
+                    })
                 })?;
                 self.retain_pack_read(account, id, &mut plan, &raw)?;
                 let detail = wire::decode_sticker_pack_detail(&raw, &pack)?;
@@ -301,8 +316,10 @@ impl Core {
                     plan.grant_submitted = true;
                     self.save_pack_job(account, id, &plan)?;
                     let mut state = self.resume_media_state(account, id, &plan.fence)?;
-                    let raw = self.native_request(account, &mut state, |ctx| {
-                        ctx.sticker_pack_acquisition_raw(&pack)
+                    let raw = permit.transfer(self, account, || {
+                        self.native_request(account, &mut state, |ctx| {
+                            ctx.sticker_pack_acquisition_raw(&pack)
+                        })
                     })?;
                     plan.grant_reply = Some(raw.clone());
                     self.save_pack_job(account, id, &plan)?;
@@ -319,8 +336,10 @@ impl Core {
                 plan.submitted = true;
                 self.save_pack_job(account, id, &plan)?;
                 let mut state = self.resume_media_state(account, id, &plan.fence)?;
-                let raw = self.native_request(account, &mut state, |ctx| {
-                    ctx.sticker_pack_membership_raw(&pack, added)
+                let raw = permit.transfer(self, account, || {
+                    self.native_request(account, &mut state, |ctx| {
+                        ctx.sticker_pack_membership_raw(&pack, added)
+                    })
                 })?;
                 plan.reply = Some(raw.clone());
                 self.save_pack_job(account, id, &plan)?;
@@ -332,7 +351,7 @@ impl Core {
                 plan.accepted = true;
                 self.save_pack_job(account, id, &plan)?;
                 self.phase_media(account, id, "reconciling")?;
-                summaries = self.read_added_pack_list(account, id, &mut plan)?;
+                summaries = self.read_added_pack_list(account, id, &mut plan, permit)?;
                 self.reconcile_added_pack_list(account, &summaries)?;
             }
             ensure!(

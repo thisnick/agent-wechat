@@ -8,12 +8,14 @@ impl Core {
         id: &str,
         fence: &MediaAuthorizationFence,
         retain: &mut dyn FnMut(&[u8]) -> Result<()>,
+        permit: &mut MediaAccountPermit,
         request: &[u8],
     ) -> Result<wire::CustomStickerPage> {
         self.resume_media_state(account, id, fence)?;
         let mut state = self.account_state(account)?;
-        let raw =
-            self.native_request(account, &mut state, |ctx| ctx.custom_stickers_raw(request))?;
+        let raw = permit.transfer(self, account, || {
+            self.native_request(account, &mut state, |ctx| ctx.custom_stickers_raw(request))
+        })?;
         ensure!(raw.len() <= 2 * 1024 * 1024, "sticker_receipt_limit");
         retain(&raw)?;
         self.resume_media_state(account, id, fence)?;
@@ -25,6 +27,7 @@ impl Core {
         id: &str,
         fence: &MediaAuthorizationFence,
         retain: &mut dyn FnMut(&[u8]) -> Result<()>,
+        permit: &mut MediaAccountPermit,
     ) -> Result<(Vec<String>, Option<String>)> {
         let mut order = Vec::new();
         let mut cursor = (0, Vec::new());
@@ -34,6 +37,7 @@ impl Core {
                 id,
                 fence,
                 retain,
+                permit,
                 &wire::custom_sticker_list_request(cursor.0, &cursor.1)?,
             )?;
             for item in &page.ids {
@@ -55,12 +59,14 @@ impl Core {
         }
         bail!("sticker_page_limit")
     }
+    #[allow(clippy::too_many_arguments)] // Receipt sink and network permit have independent lifetimes.
     pub(super) fn reconcile_saved_order_with(
         &self,
         account: &str,
         id: &str,
         fence: &MediaAuthorizationFence,
         retain: &mut dyn FnMut(&[u8]) -> Result<()>,
+        permit: &mut MediaAccountPermit,
         order: Vec<String>,
     ) -> Result<()> {
         let before = self.saved_stickers(account)?;
@@ -80,6 +86,7 @@ impl Core {
                 id,
                 fence,
                 retain,
+                permit,
                 &wire::custom_sticker_metadata_request(batch)?,
             )?;
             for item in page.metadata {

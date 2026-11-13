@@ -248,8 +248,10 @@ impl Core {
                 probe: plan.probe,
             };
             let mut state = self.resume_media_state(account, id, &plan.fence)?;
-            let raw = self.native_request(account, &mut state, |ctx| {
-                ctx.send_sticker_chunk_raw(&chunk)
+            let raw = permit.transfer(self, account, || {
+                self.native_request(account, &mut state, |ctx| {
+                    ctx.send_sticker_chunk_raw(&chunk)
+                })
             })?;
             ensure!(
                 raw.len() <= 65536 && plan.replies.len() < 2050,

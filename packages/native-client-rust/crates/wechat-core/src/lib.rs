@@ -31,6 +31,7 @@ mod read_view;
 pub use read_view::ReadTimings;
 mod sticker_control;
 mod sticker_handle;
+mod sticker_metadata_cache;
 pub use sticker_handle::{StickerAccount, StickerId, StickerPackId, StickerPreparationId};
 mod sticker_types;
 mod stickers;

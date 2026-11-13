@@ -71,6 +71,7 @@ impl Core {
         let message = message.to_owned();
         let server = expected_server_id.to_owned();
         let key = key.to_owned();
+        let operation_guard = self.lock_operation(&account, "group_recall").await?;
         let guard = self.lock_account(&account).await?;
         let worker_account = account.clone();
         let (operation, created) = blocking(move || {
@@ -88,10 +89,16 @@ impl Core {
                     let account = worker_account.clone();
                     let operation_id = id.clone();
                     blocking(move || {
-                        let _guard = guard;
+                        let _operation = operation_guard;
+                        let mut permit = crate::account_network::AccountNetworkPermit {
+                            guard: Some(guard),
+                            runtime: tokio::runtime::Handle::current(),
+                        };
                         worker.execute_recall(&account, &operation_id, |state, request| {
-                            worker.native_request(&account, state, |operation| {
-                                operation.recall_message(request)
+                            permit.transfer(&worker, &account, || {
+                                worker.native_request(&account, state, |operation| {
+                                    operation.recall_message(request)
+                                })
                             })
                         })
                     })
@@ -321,6 +328,8 @@ impl Core {
                 return Ok(op);
             }
         };
+        let fence = self.session_fence(account)?;
+        let desired = self.store.runtime(account, "desired")?;
         match self.store.claim_message_recall(
             account,
             id,
@@ -351,23 +360,9 @@ impl Core {
                     op.result["remoteOutcome"] = json!("accepted");
                     self.store.save_message_recall_progress(&op, "accepted")?;
                     // An older callback cannot replace a newer login/logout.
-                    let installed = (|| -> Result<()> {
-                        self.check_state_profile(account, &state)?;
-                        let sealed = self.vault.seal(
-                            account,
-                            "account-state",
-                            &serde_json::to_vec(&state)?,
-                        )?;
-                        self.store.save_push_authorization(
-                            account,
-                            &sealed,
-                            &expected,
-                            attempt.logout_epoch.as_deref(),
-                        )?;
-                        let _ = self.project_saved_login(account, &state);
-                        Ok(())
-                    })()
-                    .is_ok();
+                    let installed = self
+                        .save_network_state(account, &state, &expected, &fence, desired.as_deref())
+                        .is_ok();
                     op.result["authorizationSaved"] = json!(installed);
                     self.finish_confirmed_recall(op, &attempt, "recalled", true)
                 } else {

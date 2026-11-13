@@ -119,8 +119,10 @@ impl Core {
         } else {
             if plan.locator.is_none() {
                 let mut state = self.resume_media_state(account, id, &plan.fence)?;
-                let raw = self.native_request(account, &mut state, |ctx| {
-                    ctx.sticker_pack_detail_raw(&plan.pack)
+                let raw = permit.transfer(self, account, || {
+                    self.native_request(account, &mut state, |ctx| {
+                        ctx.sticker_pack_detail_raw(&plan.pack)
+                    })
                 })?;
                 let detail = wire::decode_sticker_pack_detail(&raw, &plan.pack)?;
                 ensure!(
@@ -136,8 +138,10 @@ impl Core {
                     "sticker_pack_item_not_found"
                 );
                 let mut state = self.resume_media_state(account, id, &plan.fence)?;
-                let captions = self.native_request(account, &mut state, |ctx| {
-                    ctx.sticker_pack_captions_raw(&plan.pack)
+                let captions = permit.transfer(self, account, || {
+                    self.native_request(account, &mut state, |ctx| {
+                        ctx.sticker_pack_captions_raw(&plan.pack)
+                    })
                 })?;
                 plan.detail = Some(detail);
                 plan.captions = Some(wire::decode_sticker_pack_captions(&captions)?);
@@ -145,8 +149,10 @@ impl Core {
                 plan.submitted = true;
                 self.save_acquisition(account, id, &plan)?;
                 let mut state = self.resume_media_state(account, id, &plan.fence)?;
-                let raw = self.native_request(account, &mut state, |ctx| {
-                    ctx.sticker_pack_acquisition_raw(&plan.pack)
+                let raw = permit.transfer(self, account, || {
+                    self.native_request(account, &mut state, |ctx| {
+                        ctx.sticker_pack_acquisition_raw(&plan.pack)
+                    })
                 })?;
                 plan.reply = Some(raw.clone());
                 self.save_acquisition(account, id, &plan)?;
@@ -161,7 +167,9 @@ impl Core {
             }
             self.phase_media(account, id, "downloading")?;
             let mut state = self.resume_media_state(account, id, &plan.fence)?;
-            let config = self.native_request(account, &mut state, |ctx| ctx.cdn_config())?;
+            let config = permit.transfer(self, account, || {
+                self.native_request(account, &mut state, |ctx| ctx.cdn_config())
+            })?;
             let cdn = CdnClient::new(config, Duration::from_secs(25))?;
             let downloaded = permit.transfer(self, account, || {
                 cdn.download_with_progress(plan.locator.as_ref().unwrap(), |n, t| {
