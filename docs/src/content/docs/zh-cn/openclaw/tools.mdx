@@ -1,12 +1,14 @@
 ---
 title: 智能体工具
-description: OpenClaw 智能体可调用的微信工具集，以及如何开启跨会话检索权限。
-sourceHash: e6326571a8ca
+description: OpenClaw 智能体可调用的微信工具，以及如何授权访问所有会话。
+banner:
+  content: "本页面由机器翻译，尚未经过人工审校。"
+sourceHash: 1ee65b6dfdd7
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-除了被动回复消息，智能体还会获得一套针对 **当前会话** 的专属工具。它们默认无法窥探其他会话或未绑定的账号。
+除了被动回复消息，智能体还会获得一套针对 **当前会话** 的专属工具。消息历史类工具无法读取其他会话或账号。仅限所有者使用的表情工具可管理已配置账号上的“我的表情”。
 
 | 工具名称 | 功能描述 |
 | --- | --- |
@@ -15,9 +17,14 @@ import { Aside } from '@astrojs/starlight/components';
 | `wechat_message` | 按 ID 获取单条消息详情 |
 | `wechat_media` | 下载某条消息的图片、文件、视频或语音，并为智能体提供本地文件路径。图片还会直接作为多模态输入呈现给大模型。 |
 | `wechat_send_share` | 发送分享卡片（标题、链接、可选摘要及缩略图） |
-| `wechat_recall` | 撤回你在当前会话中刚发出的消息 |
+| `wechat_recall` | 撤回你的账号在当前会话中发出的消息 |
+| `wechat_stickers` | 仅限所有者：列出“我的表情”、查看元数据、图片预览、下载原图、准备、添加、调整位置及移除 |
 
 例如当用户提问“Sam 刚才发的地址是什么？”时，智能体可以调用 `wechat_search` 传入 `{"query": "地址"}`，并对匹配到的照片调用 `wechat_media` 提取图像内容。
+
+## 自定义表情 \{#custom-stickers}
+
+使用 [`wechat_stickers`](../stickers/) 准备执行工作区中的文件、检查实际的图片预览并管理“我的表情”。它支持八种操作：`list`、`get`、`preview`、`download`、`prepare`、`add`、`move` 和 `remove`。浏览官方表情包及管理成员关系可在桌面应用和 CLI 中完成。
 
 ## 语音通话 \{#calling}
 

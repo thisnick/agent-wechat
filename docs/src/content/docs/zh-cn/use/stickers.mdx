@@ -1,0 +1,61 @@
+---
+title: 使用与管理表情
+description: 导入自定义媒体，整理“我的表情”，浏览或导出官方表情包。
+banner:
+  content: "本页面由机器翻译，尚未经过人工审校。"
+sourceHash: 3c2f498268cd
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+在消息输入框旁打开**表情**。**我的表情**中保存自定义表情；带标签的选项卡中是已添加的官方表情包。**全部已添加**包含可见选项卡之外的表情包。选择表情后会生成一个可移除的草稿。点击常规的**发送**按钮即可发出。
+
+## 添加并整理“我的表情” \{#add-and-arrange-saved}
+
+1. 选择**添加表情**，或将文件拖放到已打开的面板中。图片、GIF 以及 MOV/MP4 视频会出现在**添加到我的表情**中，供预览和检查。
+2. 需要时调整适配方式或视频片段。准备过程不会悄悄缩放、裁剪或拉伸源文件。排除不需要的文件，然后选择**添加 N**。若其他项目需要调整或重试，已成功的项目仍保持成功状态。
+3. 选择**编辑**，或长按“我的表情”中的表情。拖动即可调整顺序；箭头控件支持用键盘调整位置。移除控件会删除单个“我的表情”项目。选择**完成**即可退出编辑。编辑操作不会生成待发送的草稿。
+
+收到的表情消息菜单中也提供**添加到表情**。
+
+等效的命令行流程使用 CLI 所在机器上的路径：
+
+```sh
+wx stickers list
+wx stickers prepare clip.mp4 --start 1 --duration 2 --fit
+wx stickers preview --prepared PREPARATION_ID --output preview.png
+wx stickers add --prepared PREPARATION_ID
+wx stickers move STICKER_ID --last
+wx stickers download STICKER_ID --output original.gif
+wx stickers remove STICKER_ID
+```
+
+准备操作会返回一个任务。完成后的结果包括原图、预览、抽样帧图、尺寸、转换记录和过期时间。若操作的响应不确定，请保留其幂等键。使用 `--detach` 可立即返回任务，使用 `--wait SECONDS` 可等待指定秒数。`--json` 会保持结果为机器可读格式。
+
+## 浏览并使用官方表情包 \{#browse-and-use-official-packs}
+
+选择**浏览表情包**查看可用的表情包，或选择**已添加**查看账号的完整列表。表情包详情会显示其内容、可选的官方说明、预览、成员关系和可复制的 ID。可见的卡片会在滚动时加载预览。选择未添加表情包中的表情，会单独预览其动画，与**添加表情包**相互独立。最近浏览过的目录页和表情包详情会在一分钟内无需再次请求即可重新打开；表情合集的变化会使这些已保存的视图失效。已添加的表情可以生成草稿；**移除表情包**会移除成员关系，并保留聊天记录。
+
+```sh
+wx stickers sync --scope all
+wx stickers packs list
+wx stickers packs browse
+wx stickers packs show PACK_ID
+wx stickers packs items PACK_ID
+wx stickers packs add PACK_ID
+wx stickers packs download PACK_ID --output ./pack
+wx stickers send STICKER_ID --pack PACK_ID --to CONTACT_ID
+wx stickers packs remove PACK_ID
+```
+
+`packs list` 包含所有已添加的表情包，与目录覆盖范围无关。`packs browse` 返回可用列表的一页，以及可选的续页游标；如需下一页，请使用 `--cursor`。该列表并不保证是完整的全局清单。
+
+`packs download` 会导出**一个所选表情包**，包含 `001.gif`、`002.gif`……以及 `index.json`。索引记录 ID、说明、排序、校验和、转换记录和每个项目的结果。已有的 GIF 字节会被保留；受支持的其他格式会被转换。导出不会添加成员关系。
+
+使用 `--resume` 可继续同一次导出。CLI 会校验表情包、有序的标识和已有的校验和，保留已完成的项目，并不改动无关文件。
+
+单个 `stickers download` 也支持 `--resume`。若 `.wx-part` 文件与标识记录匹配，将通过经过身份验证的字节范围读取继续下载。CLI 会在安装输出文件前校验最终校验和；传输失败后会保留未完成的部分文件，并且绝不会覆盖无关的输出文件。
+
+<Aside type="note" title="使用提示">
+“我的表情”的说明是可选的官方元数据，不是可编辑的名称。成员关系与媒体就绪状态彼此独立。激活免费表情包时不会下载其压缩包。仅支持符合条件的免费表情包；不包括购买，也不包括未经校验的全局搜索。发送目前使用已校验的 GIF 原图；不受支持的原图格式仍可下载和导出。Daemon 获取用于发送的标准 GIF 时，会保留“我的表情”中的其他格式缓存。原图保留其真实格式。仅有图像的预览并不代表模型看过动画。
+</Aside>
