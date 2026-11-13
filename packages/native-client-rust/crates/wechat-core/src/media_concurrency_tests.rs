@@ -7,6 +7,7 @@ pub(super) struct PausedDownloads {
     starts: std::sync::mpsc::Sender<String>,
     release: Arc<(Mutex<bool>, Condvar)>,
     count: Arc<AtomicUsize>,
+    video_reply: Mutex<Option<Vec<u8>>>,
 }
 struct PausedCdn(Arc<PausedDownloads>);
 impl Upstream for Arc<PausedDownloads> {
@@ -36,6 +37,18 @@ impl MediaTransport for PausedCdn {
             })
             .unwrap();
         ensure!(*released, "synthetic transfer timed out");
+        if let Some(bytes) = self.0.video_reply.lock().unwrap().clone() {
+            progress(bytes.len() as u64, Some(bytes.len() as u64))?;
+            return Ok(DownloadedMedia {
+                md5: hex_string(&wechat_protocol::crypto::md5(&bytes)),
+                sha256: digest(&bytes),
+                bytes,
+                requested_quality: descriptor.quality,
+                substituted_filetype: Some(9),
+                picture_format: None,
+                advertised_size_matches: Some(false),
+            });
+        }
         let mut bytes = std::io::Cursor::new(Vec::new());
         image::DynamicImage::new_rgb8(2, 2).write_to(&mut bytes, image::ImageFormat::Png)?;
         let bytes = bytes.into_inner();
@@ -84,6 +97,7 @@ pub(super) fn fixture() -> (
         starts,
         release: Arc::new((Mutex::new(false), Condvar::new())),
         count: Arc::new(AtomicUsize::new(0)),
+        video_reply: Mutex::new(None),
     });
     Arc::get_mut(&mut Arc::get_mut(&mut core).unwrap().shared)
         .unwrap()
@@ -133,15 +147,13 @@ pub(super) fn fixture() -> (
     (tmp, core, upstream, received)
 }
 fn queue(core: &Core, n: usize) -> String {
-    let id = format!("image-{n}");
-    let asset: MediaAsset = serde_json::from_value(json!({
-        "id":id,"accountId":"one","messageId":null,"kind":"image","variant":"standard","actualVariant":null,
-        "state":"pending","contentType":null,"byteLength":null,"sha256":null,"filename":null,"expiresAt":null,
-        "reason":null,"retryable":true,"jobId":null,"contentUrl":null,"animationFrames":null,"officialWriteback":"unsupported","preview":null
-    })).unwrap();
-    let plan = DownloadPlan::Cdn {
-        descriptor: MediaDescriptor {
-            file_id: id.clone(),
+    queue_download(
+        core,
+        n,
+        "image",
+        "standard",
+        MediaDescriptor {
+            file_id: format!("image-{n}"),
             aes_key: vec![1; 16],
             quality: MediaQuality::Standard,
             expected_bytes: None,
@@ -149,7 +161,22 @@ fn queue(core: &Core, n: usize) -> String {
             strict_size: false,
             expires_at: None,
         },
-    };
+    )
+}
+fn queue_download(
+    core: &Core,
+    n: usize,
+    kind: &str,
+    variant: &str,
+    descriptor: MediaDescriptor,
+) -> String {
+    let id = format!("{kind}-{n}");
+    let asset: MediaAsset = serde_json::from_value(json!({
+        "id":id,"accountId":"one","messageId":null,"kind":kind,"variant":variant,"actualVariant":null,
+        "state":"pending","contentType":null,"byteLength":null,"sha256":null,"filename":null,"expiresAt":null,
+        "reason":null,"retryable":true,"jobId":null,"contentUrl":null,"animationFrames":null,"officialWriteback":"unsupported","preview":null
+    })).unwrap();
+    let plan = DownloadPlan::Cdn { descriptor };
     let plan = core
         .vault
         .seal(
@@ -164,8 +191,8 @@ fn queue(core: &Core, n: usize) -> String {
             &MediaAssetRecord {
                 id: id.clone(),
                 message_id: None,
-                kind: "image".into(),
-                variant: "standard".into(),
+                kind: kind.into(),
+                variant: variant.into(),
                 metadata: serde_json::to_value(asset).unwrap(),
                 plan,
                 payload: None,
@@ -281,4 +308,79 @@ async fn logout_during_an_image_download_rejects_the_late_result() {
         core.media_asset("one", "image-0").unwrap().state,
         "available"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn selected_normal_video_is_published_but_cannot_replace_an_original() {
+    for variant in [MediaVariant::Normal, MediaVariant::Original] {
+        let (tmp, core, upstream, _received) = fixture();
+        let source = tmp.path().join("synthetic.mp4");
+        assert!(std::process::Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=green:s=32x32:d=0.1",
+                "-an",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                "-y",
+            ])
+            .arg(&source)
+            .status()
+            .unwrap()
+            .success());
+        let bytes = std::fs::read(source).unwrap();
+        *upstream.video_reply.lock().unwrap() = Some(bytes.clone());
+        let variant_name = if variant == MediaVariant::Normal {
+            "normal"
+        } else {
+            "original"
+        };
+        let job = queue_download(
+            &core,
+            0,
+            "video",
+            variant_name,
+            MediaDescriptor {
+                file_id: "synthetic-video".into(),
+                aes_key: vec![1; 16],
+                quality: MediaQuality::Video,
+                expected_bytes: Some(bytes.len() as u64 + 32),
+                expected_md5: Some("0".repeat(32)),
+                strict_size: variant == MediaVariant::Original,
+                expires_at: None,
+            },
+        );
+        release(&upstream);
+        core.clone().run_media_worker("one", &job).await.unwrap();
+        let status = core.media_job("one", &job).unwrap();
+        if variant == MediaVariant::Normal {
+            assert_eq!(
+                status.state,
+                "available",
+                "{}",
+                serde_json::to_string(&status).unwrap()
+            );
+            let saved = core.media_asset("one", "video-0").unwrap();
+            assert_eq!(saved.actual_variant, Some(MediaVariant::Normal));
+            assert_eq!(saved.sha256.as_deref(), Some(digest(&bytes).as_str()));
+            assert_eq!(saved.byte_length, Some(bytes.len() as u64));
+        } else {
+            assert_eq!(status.state, "unsupported");
+            assert_eq!(status.reason.as_deref(), Some("unsupported_media"));
+            assert_ne!(
+                core.media_asset("one", "video-0").unwrap().state,
+                "available"
+            );
+        }
+        core.clone().run_media_worker("one", &job).await.unwrap();
+        assert_eq!(upstream.count.load(Ordering::SeqCst), 1);
+    }
 }

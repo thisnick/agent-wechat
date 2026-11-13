@@ -1766,14 +1766,17 @@ impl Core {
                         "link_thumbnail_size_limit"
                     );
                 }
-                let actual = if media
-                    .substituted_filetype
-                    .is_none_or(|v| v == descriptor.quality.filetype())
-                {
-                    Some(asset.variant)
-                } else {
-                    None
-                };
+                ensure!(
+                    asset.variant != MediaVariant::Original
+                        || (media.advertised_size_matches != Some(false)
+                            && descriptor
+                                .expected_md5
+                                .as_ref()
+                                .is_none_or(|v| v.eq_ignore_ascii_case(&media.md5))),
+                    "unsupported_media_variant"
+                );
+                let actual =
+                    received_video_variant(asset.kind, asset.variant, descriptor.quality, &media);
                 ensure!(actual == Some(asset.variant), "unsupported_media_variant");
                 official_writeback = if asset.official_writeback == "unsupported" {
                     None
@@ -2397,6 +2400,26 @@ fn validate_destination(value: &str) -> Result<()> {
     }
     Ok(())
 }
+/// Downloads have passed the transport's integrity checks. A returned video
+/// representation 9 can satisfy a normal-video request; original requests keep
+/// their descriptor's exact identity and representation checks.
+fn received_video_variant(
+    kind: MediaKind,
+    variant: MediaVariant,
+    quality: MediaQuality,
+    media: &wechat_protocol::media::DownloadedMedia,
+) -> Option<MediaVariant> {
+    let ordinary = media
+        .substituted_filetype
+        .is_none_or(|v| v == quality.filetype());
+    let observed_normal = kind == MediaKind::Video
+        && variant == MediaVariant::Normal
+        && quality == MediaQuality::Video
+        && media.requested_quality == MediaQuality::Video
+        && media.substituted_filetype == Some(9);
+    (ordinary || observed_normal).then_some(variant)
+}
+
 fn select_asset(mut assets: Vec<MediaAsset>, quality: MediaVariant) -> Result<MediaAsset> {
     if quality != MediaVariant::Best {
         return assets
@@ -6651,6 +6674,66 @@ mod tests {
             assert!(pcm.len().abs_diff(16000) <= 800, "{name}: {}", pcm.len());
         }
     }
+}
+#[test]
+fn observed_video_subtype_only_satisfies_normal_video_requests() {
+    let mut media = wechat_protocol::media::DownloadedMedia {
+        bytes: vec![],
+        requested_quality: wechat_protocol::media::MediaQuality::Video,
+        substituted_filetype: Some(9),
+        picture_format: None,
+        md5: String::new(),
+        sha256: String::new(),
+        advertised_size_matches: Some(false),
+    };
+    assert_eq!(
+        received_video_variant(
+            MediaKind::Video,
+            MediaVariant::Normal,
+            wechat_protocol::media::MediaQuality::Video,
+            &media
+        ),
+        Some(MediaVariant::Normal)
+    );
+    assert_eq!(
+        received_video_variant(
+            MediaKind::Video,
+            MediaVariant::Original,
+            wechat_protocol::media::MediaQuality::Video,
+            &media
+        ),
+        None
+    );
+    assert_eq!(
+        received_video_variant(
+            MediaKind::Image,
+            MediaVariant::Normal,
+            MediaQuality::Video,
+            &media
+        ),
+        None
+    );
+    media.requested_quality = MediaQuality::Thumbnail;
+    assert_eq!(
+        received_video_variant(
+            MediaKind::Video,
+            MediaVariant::Normal,
+            MediaQuality::Video,
+            &media
+        ),
+        None
+    );
+    media.requested_quality = MediaQuality::Video;
+    media.substituted_filetype = Some(10);
+    assert_eq!(
+        received_video_variant(
+            MediaKind::Video,
+            MediaVariant::Normal,
+            wechat_protocol::media::MediaQuality::Video,
+            &media
+        ),
+        None
+    );
 }
 
 #[path = "recall_send_author_media.rs"]

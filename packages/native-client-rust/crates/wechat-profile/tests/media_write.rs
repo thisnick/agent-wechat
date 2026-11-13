@@ -919,6 +919,23 @@ fn video_resource_variants_share_basename_and_preserve_other_variants() {
         &o
     )
     .is_err());
+    // Verified server-selected bytes cannot replace a cache bound to the
+    // message's original normal-video identity.
+    let selected = movie_container_fixture(Some(b"isom"), b"selected normal response");
+    assert!(cache_video_projection(
+        &location,
+        &keys,
+        &source,
+        "peer",
+        VideoQuality::Normal,
+        &selected,
+        &o
+    )
+    .is_err());
+    assert_eq!(
+        fs::read(d.path().join("account").join(&a.relative_path)).unwrap(),
+        normal
+    );
     let db = resource_db(&d);
     let types = db
         .prepare("SELECT type,size,status FROM MessageResourceDetail ORDER BY type")

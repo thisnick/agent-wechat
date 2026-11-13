@@ -91,7 +91,7 @@ File attachments preserve source bytes. Image sends can resize/re-encode them. V
 
 ## Download files
 
-Ordinary files and received videos download up to 512 MiB. Each download must match the size and MD5 in the message:
+Ordinary files and received videos download up to 512 MiB. Files and original video copies must match the size and MD5 in the message. For a normal video, WeChat can select another copy; the daemon checks its returned checksum and size before making it available:
 
 ```bash
 wx messages media filehelper MESSAGE_ID --output ./saved.pdf --wait 3600
@@ -114,5 +114,6 @@ Use OpenClaw’s `asDocument`/`forceDocument` option to send media as an ordinar
 - Server-side duplicate-file shortcuts are not supported. Uncertain reservations and sends require review; another send is never started automatically.
 - After a job stops during verification, `wx jobs retry JOB_ID --reuse-completed-upload` can reuse its saved object. This requires proof that submission never started; API clients use `POST /jobs/{id}/retry-completed-upload` with `reuseCompletedUpload: true`; the SDK accepts this option on `retryJob`.
 - Gateway and proxy timeouts also apply. After a lost response, inspect the same key; see [Sends and recovery](/how-it-works/sends/).
-- A received video download stops when WeChat returns bytes that differ from the message's size or MD5. For videos up to 25 MiB the job fails with `media_integrity_failed`, and its `result.cdnDownloadFailure` shows the advertised and delivered sizes and which checks matched. It never contains the file's bytes or hashes.
+- A normal video whose verified bytes differ from the message metadata can be downloaded through the daemon while its `officialWriteback` remains `blocked`. The official-profile cache keeps its existing identity checks.
+- Unrecognized video responses that differ from the message's size or MD5 stop the download. The job may include `result.cdnDownloadFailure` with advertised and delivered sizes and which checks matched. These diagnostics exclude file bytes and hashes.
 </Aside>
