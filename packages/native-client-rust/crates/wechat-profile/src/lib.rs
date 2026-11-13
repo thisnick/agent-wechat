@@ -54,6 +54,11 @@ mod recall_search;
 mod recalls;
 mod schema;
 mod snapshot;
+mod sticker_packs;
+pub use sticker_packs::*;
+mod sticker_cache;
+mod stickers;
+pub use sticker_cache::*;
 mod thread_read;
 mod writer;
 
@@ -72,6 +77,7 @@ pub use recall_search::*;
 pub use recalls::*;
 pub use schema::*;
 pub use snapshot::{keys_from_agent_cache, keys_from_password, ProfileLocation, ReadOptions};
+pub use stickers::*;
 pub use thread_read::*;
 pub use writer::*;
 

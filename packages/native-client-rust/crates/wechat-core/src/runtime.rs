@@ -140,6 +140,7 @@ pub struct CoreShared {
     pub(crate) media_gates: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
     media_downloads: Mutex<BTreeMap<String, Arc<tokio::sync::Semaphore>>>,
     media_download_limit: Arc<tokio::sync::Semaphore>,
+    pub(crate) sticker_preparation_limit: Arc<tokio::sync::Semaphore>,
     pub(crate) read_limit: Arc<tokio::sync::Semaphore>,
     pub(crate) cancels: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
     pub(crate) workers: Mutex<std::collections::BTreeSet<String>>,
@@ -375,6 +376,7 @@ impl Core {
                 text_send_gates: Mutex::new(BTreeMap::new()),
                 media_downloads: Mutex::new(BTreeMap::new()),
                 media_download_limit: Arc::new(tokio::sync::Semaphore::new(4)),
+                sticker_preparation_limit: Arc::new(tokio::sync::Semaphore::new(2)),
                 read_limit: Arc::new(tokio::sync::Semaphore::new(8)),
                 cancels: Mutex::new(BTreeMap::new()),
                 workers: Mutex::new(std::collections::BTreeSet::new()),
@@ -1879,7 +1881,11 @@ impl Core {
     fn project_pending(&self, account: &str) -> Result<Value> {
         self.project_pending_with_media(account, false)
     }
-    fn project_pending_with_media(&self, account: &str, download_voice: bool) -> Result<Value> {
+    pub(crate) fn project_pending_with_media(
+        &self,
+        account: &str,
+        download_voice: bool,
+    ) -> Result<Value> {
         let mut projected = 0;
         let mut unsupported = 0;
         self.account_state(account)?;
@@ -4503,7 +4509,7 @@ mod tests {
         core.install_login_state("fresh", &accepted, None).unwrap();
         let created = core.ensure_managed_profile("fresh", &accepted).unwrap();
         assert_eq!(created["state"], "created");
-        assert_eq!(created["databases"], 7);
+        assert_eq!(created["databases"], 8);
         assert!(store
             .runtime("fresh", "profile-bootstrap")
             .unwrap()

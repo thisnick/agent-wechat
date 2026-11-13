@@ -131,6 +131,12 @@ durable jobs, upload readback and uncertain-send handling. Sticker retrieval is
 restricted to the verified original-byte CDN host, with pinned public DNS,
 redirect refusal, MD5 validation and bounded full image decoding.
 
+Sticker APIs also expose Saved list/metadata and mutations, direct original
+uploads, public/account-added pack pages, details, captions, free-pack activation,
+membership and single-intent GIF sends. `StickerId` and `StickerPackId` validate
+caller identities. Retain raw mutation/send acknowledgements before interpreting
+acceptance; the protocol crate does not supply an application recovery journal.
+
 The native ordinary-file implementation selects the four-phase
 apply/uploadblock/fin/complete carrier when PKCS#7 ciphertext reaches 25 MiB.
 This uses the reference's supported multiphase policy for the 16-byte padding
@@ -190,7 +196,7 @@ unchanged. This is one test account/build result, not universal server acceptanc
 
 The media network methods follow previously verified native recipes. Expanded
 multi-range MP4 uploads still require isolated live validation. Group sends,
-group creation, sticker sends, active push association and a long-lived longlink
+group creation, active push association and a long-lived longlink
 reconnect supervisor remain outside the verified scope. Avatar bytes
 still need full bounded image decoding in the caller. QR images receive bounded
 PNG-header checks only; supplied JPEG upload variants are fully decoded with

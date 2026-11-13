@@ -418,6 +418,13 @@ impl Core {
         let parsed = if command.id == 5 {
             let message =
                 wechat_protocol::wire::decode_add_message(&command.payload, &state.own_username)?;
+            if crate::sticker_control::supported_sticker_control(&message, &state.own_username) {
+                self.retain_control_raw(account, command, receipt)?;
+                self.retain_sticker_refresh(account, receipt)?;
+                let mut pending = message_blocker(&message);
+                pending.reason = "sticker_reconciliation_pending";
+                return Err(pending.into());
+            }
             if let Some(recall) = crate::recalls::incoming_recall(&message, &state.own_username)? {
                 self.retain_control_raw(account, command, receipt)?;
                 self.apply_confirmed_recall_with_notice(
@@ -2542,7 +2549,7 @@ impl Core {
         outgoing_source: Option<&str>,
     ) -> Result<wechat_profile::SourceMessageId> {
         identity(destination)?;
-        if ![3, 34, 43, 49].contains(&message_type)
+        if ![3, 34, 43, 47, 49].contains(&message_type)
             || content.is_empty()
             || content.len() > 4 * 1024 * 1024
             || summary.len() > 65536

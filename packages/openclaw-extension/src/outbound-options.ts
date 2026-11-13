@@ -6,9 +6,12 @@ import { parseWeChatTextMentions, validateWeChatMentionSend } from "./outbound-m
 import type { WeChatOutboundSendOptions } from "./outbound-media.ts";
 import { nativeOutboundKey } from "./native-send-key.ts";
 import { parseWeChatReplyTo, validateWeChatReplySend } from "./outbound-reply.ts";
+import { handleNativeStickerAction } from "./native-sticker-send.ts";
 
 type MediaPayload = { text?: string; mediaUrl?: string; mediaUrls?: string[]; audioAsVoice?: boolean; channelData?: Record<string, unknown>; replyToId?: string };
-type SendContext = { cfg: unknown; to: string; text: string; mediaUrl?: string; audioAsVoice?: boolean; forceDocument?: boolean; signal?: AbortSignal;
+type HostMediaAccess = { readFile?: (path: string) => Promise<Buffer>; workspaceDir?: string; localRoots?: readonly string[] };
+type SendContext = {
+  mediaAccess?: HostMediaAccess; mediaReadFile?: (path: string) => Promise<Buffer>; mediaLocalRoots?: readonly string[]; cfg: unknown; to: string; text: string; mediaUrl?: string; audioAsVoice?: boolean; forceDocument?: boolean; signal?: AbortSignal;
   replyToId?: string | null;
   deliveryQueueId?: string; deliveryPartIndex?: number;
   onPlatformSendDispatch?: () => Promise<void>; assertDirectAdapterHandoff?: () => void;
@@ -25,7 +28,7 @@ export function nativePayloadMediaOptions(payload: MediaPayload): WeChatOutbound
     ...(options.mentions !== undefined ? { mentions: parseWeChatTextMentions(options.mentions) } : {}) };
 }
 
-export const wechatMediaActions: NonNullable<ChannelPlugin["actions"]> = {
+const mediaActions: NonNullable<ChannelPlugin["actions"]> = {
   describeMessageTool: () => ({ actions: ["send"], schema: { actions: ["send"], visibility: "all-configured", properties: {
     replyTo: { type: "string", minLength: 1, maxLength: 4096, description: "Quote a stored WeChat message in this same chat. Use its exact id from wechat_history, wechat_search or wechat_message, or the current inbound message ID; not a server ID or send/job ID. Text replies only; group replies may include mentions. Send attachments separately. The hub validates the original message." },
     channelData: { type: "object", description: "WeChat send options: mentions for group text and quoted group replies, or videoQuality for one video attachment.", additionalProperties: true, properties: {
@@ -50,6 +53,24 @@ export const wechatMediaActions: NonNullable<ChannelPlugin["actions"]> = {
     validateNativeMediaSendOptions({ ...options, forceDocument }, payload.audioAsVoice);
     return payload;
   },
+};
+
+/** Standard message-tool actions, with owner-only Saved sticker discovery. */
+export const wechatMediaActions: NonNullable<ChannelPlugin["actions"]> = {
+  ...mediaActions,
+  writeAuthorityActions:["sticker"],
+  describeMessageTool: context=> {
+    const base=mediaActions.describeMessageTool(context)!;
+    if (context.senderIsOwner!==true) return base;
+    return {...base,actions:["send","sticker"],schema:[...(Array.isArray(base.schema) ? base.schema : base.schema ? [base.schema] : []),
+      {actions:["sticker"],visibility:"all-configured",properties:{
+        stickerId:{type:"array",minItems:1,maxItems:1,items:{type:"string",pattern:"^[0-9a-f]{32}$"},description:"Exactly one Saved sticker ID from wechat_stickers list. Uses the existing reference without downloading and re-uploading. Official packs are outside the OpenClaw sticker actions."},
+        idempotencyKey:{type:"string",minLength:1,maxLength:8192,description:"Stable sticker send key. The host normally supplies it; reuse it after timeouts and inspect the returned durable job before any new send."},
+      }},
+    ]} as Discovery;
+  },
+  supportsAction:({action})=>action==="sticker",
+  handleAction:ctx=>handleNativeStickerAction(ctx),
 };
 
 /** Completed parts remain inspectable if a later attachment cannot finish. */
@@ -85,7 +106,7 @@ export function createWeChatMediaHandlers(send: typeof sendWeChatMedia = sendWeC
     const deliveries: NativeOutboundDelivery[] = [];
     for (const [index, mediaUrl] of (urls.length ? urls : [undefined]).entries()) {
       let delivered: NativeOutboundDelivery;
-      try { delivered = await send(ctx.cfg, ctx.to, index === 0 ? ctx.payload.text ?? ctx.text : "", mediaUrl, audioAsVoice, key(ctx, index), options, guard(ctx)); }
+      try { delivered = await send(ctx.cfg, ctx.to, index === 0 ? ctx.payload.text ?? ctx.text : "", mediaUrl, audioAsVoice, key(ctx, index), options, guard(ctx), { ...ctx.mediaAccess, readFile: ctx.mediaAccess?.readFile ?? ctx.mediaReadFile }); }
       catch (error) {
         if (!deliveries.length) throw error;
         throw new NativeMediaPayloadInspectionError(deliveries, error instanceof NativeMediaJobInspectionError

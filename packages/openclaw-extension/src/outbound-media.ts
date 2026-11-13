@@ -18,6 +18,7 @@ export async function sendWeChatMedia(
   idempotencyKey?: string,
   options: WeChatOutboundSendOptions = {},
   beforeSend?: () => Promise<void>,
+  mediaAccess?: { readFile?: (path: string) => Promise<Buffer> },
 ): Promise<NativeOutboundDelivery> {
   validateWeChatMentionSend(options.mentions, { to, text, mediaUrl, audioAsVoice, ...options });
   const replyToId = parseWeChatReplyTo(options.replyToId);
@@ -38,7 +39,7 @@ export async function sendWeChatMedia(
     return nativeOutboundDelivery(client, account.native.accountId, to, send.localMessageId ? [send.localMessageId] : [],
       { sendId: send.id, state: send.state, serverIds: send.serverId ? [send.serverId] : undefined });
   }
-  const result = await sendNativeAttachment(client, account, to, mediaUrl, audioAsVoice, key, beforeSend, options);
+  const result = await sendNativeAttachment(client, account, to, mediaUrl, audioAsVoice, key, beforeSend, options, mediaAccess);
   if (text) { await beforeSend?.(); await submitNativeText(client, account.native.accountId, to, text, createHash("sha256").update(`${key}\0caption`).digest("hex")); }
   return result;
 }

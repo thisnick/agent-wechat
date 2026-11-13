@@ -1,13 +1,22 @@
 //! Bounded media inspection shared by native transport and official profiles.
-//! Source bytes, including application trailers, are never rewritten here.
+//! Inspection retains source bytes, including application trailers. Explicit
+//! sticker preparation returns a separately validated output and previews.
 //! WXGF inspection decodes a representative still only. Its animation timing,
 //! frame count and alpha semantics remain unknown; the original stays WXGF.
 
 mod image;
+mod sticker_archive;
+mod sticker_export;
+mod sticker_video;
+mod stickers;
 mod video;
 mod wxgf;
 
 pub use image::ImageInspection;
+pub use sticker_archive::*;
+pub use sticker_export::*;
+pub use sticker_video::prepare_sticker;
+pub use stickers::*;
 pub use video::inspect_video_container;
 pub use wxgf::wxgf_preview;
 

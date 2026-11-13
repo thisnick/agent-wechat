@@ -670,3 +670,13 @@ test("recalled or replaced link sources never restore their original metadata th
   const result = await prepareNativeAttachment({ client, account, message: linkMessage, core: {} });
   assert.equal(result.body, "[Message recalled]"); assert.equal(result.reason, "message_recalled");
 });
+test("outbound host reader wins over a different gateway file and its failure never falls back",async t=>{
+  const directory=await mkdtemp(join(tmpdir(),"native-remote-source-"));t.after(()=>rm(directory,{recursive:true,force:true}));
+  const path=join(directory,"fixture.wav");await writeFile(path,Buffer.from("gateway bytes"));let uploads=0;
+  const client={upload:async(_id:string,blob:Blob)=>{uploads++;assert.equal(Buffer.from(await blob.arrayBuffer()).toString(),"execution bytes");return{id:"upload"};},
+    sendMedia:async()=>sendJob({result:{messageIds:["msg"],chunks:[{state:"accepted",serverMessageId:"18446744073709551614"}]}})}as unknown as NativeWeChatClient;
+  await sendNativeAttachment(client,account,"filehelper",path,false,"remote-key",undefined,{}, {readFile:async received=>{assert.equal(received,path);return Buffer.from("execution bytes");}});
+  assert.equal(uploads,1);
+  await assert.rejects(sendNativeAttachment(client,account,"filehelper",path,false,"remote-failure",undefined,{}, {readFile:async()=>{throw Error("node unavailable");}}),/node unavailable/);
+  assert.equal(uploads,1);
+});

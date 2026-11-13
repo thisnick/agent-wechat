@@ -10,6 +10,7 @@
 // scene is also captured in every translation as `<scene>@<viewport>@<language>`
 // (see capture.spec.mjs); `ready` and `actions` stay in English.
 import { ACCOUNT, SPARE } from "./accounts.mjs";
+import { readFile } from "node:fs/promises";
 
 /** Desktop, phone and compact phone sizes for visual review. */
 export const viewports = {
@@ -464,3 +465,72 @@ export const scenes = [
     mask: hubAddress,
   },
 ];
+
+// Synthetic media responses exercise the real picker, dialogs and composer.
+// Native protocol/profile acceptance is covered independently in the isolated lab.
+async function stickerFixtures(page) {
+  await page.route(/\/capabilities$/, async route => {const response=await route.fetch();await route.fulfill({response,json:{...await response.json(),stickers:true}});});
+  const gif = await readFile(new URL('../../native-client-rust/crates/wechat-simulator/fixtures/sticker.gif', import.meta.url));
+  const ids = Array.from({ length: 8 }, (_, index) => String(index + 1).padStart(32, '0'));
+  const asset = id => ({ id: `sticker-${id}`, accountId: ACCOUNT.id, messageId: null, kind: 'sticker', variant: 'original', actualVariant: 'original', state: 'available', contentType: 'image/gif', byteLength: gif.length, sha256: 'a'.repeat(64), filename: `${id}.gif`, retryable: false, contentUrl: `/v1/accounts/${ACCOUNT.id}/media/sticker-${id}/content`, officialWriteback: 'complete' });
+  const pack = (id, name, added) => ({ id, name, description: 'A little encouragement for everyday conversations.', membership: added ? 'added' : 'not_added', contentReadiness: 'available', eligible: true, stickerCount: 8, icon: asset(id), cover: null });
+  const packs = [pack('pack.cats', 'Cozy cats', true), pack('pack.vibes', 'Good vibes', true), pack('pack.hello', 'Little hellos', false)];
+  const saved = { items: ids.slice(0, 6).map(id => ({ id, caption: null, original: asset(id) })), revision: 'b'.repeat(64), freshness: 'profile' };
+  await page.route(/\/custom-stickers(?:\/[^/?]+)?(?:\?.*)?$/, route => {
+    const tail = new URL(route.request().url()).pathname.split('/custom-stickers')[1];
+    if(route.request().method()==='PATCH') {
+      const moving=tail.slice(1),after=route.request().postDataJSON().position.afterId;
+      const item=saved.items.find(item=>item.id===moving);const rest=saved.items.filter(item=>item.id!==moving);
+      rest.splice(after===null ? 0 : rest.findIndex(item=>item.id===after)+1,0,item);saved.items=rest;
+      return route.fulfill({status:202,json:{id:'scene-move',kind:'sticker_saved',state:'available',result:{profileWriteback:'complete'}}});
+    }
+    return route.fulfill({ json: tail ? saved.items.find(item => item.id === tail.slice(1)) : saved });
+  });
+  await page.route(/\/sticker-packs(?:\/[^/?]+(?:\/stickers)?)?(?:\?.*)?$/, route => {
+    const url = new URL(route.request().url()), rest = url.pathname.split('/sticker-packs')[1];
+    if (rest.endsWith('/stickers')) { const packId = rest.split('/')[1]; return route.fulfill({ json: { packId, items: ids.map((id, index) => ({ id, packId, ordinal: index + 1, caption: ['Hello!', 'Thank you', 'You got this', 'Nice work', 'Yes!', 'Good night', 'Please', 'Cheers'][index], captions: [], original: asset(id), thumbnail: null })) } }); }
+    if (rest) return route.fulfill({ json: packs.find(pack => pack.id === rest.slice(1)) });
+    return route.fulfill({ json: { items: url.searchParams.get('membership') === 'added' ? packs.filter(pack => pack.membership === 'added') : packs, nextCursor: null, coverage: url.searchParams.has('membership') ? 'account_added' : 'available_feed' } });
+  });
+  await page.route(/\/media\/sticker-[^/]+\/content(?:\?.*)?$/, route => route.fulfill({ body: gif, contentType: 'image/gif' }));
+}
+for (const mode of ['picker', 'edit', 'packs', 'pack-detail', 'import']) {
+  scenes.push({
+    name: `stickers-${mode}`,
+    route: 'chat',
+    description: { picker: 'Composer-anchored Saved picker with labeled added-pack tabs.', edit: 'Saved edit mode stays inside the composer tray with removal and keyboard placement.', packs: 'Official pack browser shows added and available packs in one dialog.', 'pack-detail': 'Official pack detail has complete contents, captions, membership and a copyable ID.', import: 'Add to Saved reviews prepared files before per-item submission.' }[mode],
+    viewports: ['desktop', 'narrow', 'compact'],
+    setup: standardWorld,
+    target: world => ({ account: ACCOUNT.id, thread: world.mei }),
+    prepare: async ({ page }) => stickerFixtures(page),
+    ready: async ({ page, expect }) => { await expect(page.getByText('I booked the place near the station')).toBeVisible(); },
+    actions: async ({ page, expect }) => {
+      await page.getByRole('button', { name: 'Stickers', exact: true }).click();
+      await expect(page.getByRole('region', { name: 'Sticker picker' })).toBeVisible();
+      await expect(page.getByRole('tab', { name: 'Cozy cats' })).toBeVisible();
+      if (mode === 'edit') {
+        await page.getByRole('button', { name: 'Edit', exact: true }).click(); await expect(page.getByText('Drag to reorder')).toBeVisible();
+        const first=page.locator('.sticker-cell').first(),last=page.locator('.sticker-cell').last();
+        const moving=await first.getAttribute('data-sticker-id');const from=await first.boundingBox(),to=await last.boundingBox();
+        await page.mouse.move(from.x+from.width/2,from.y+from.height/3);await page.mouse.down();
+        await page.mouse.move(to.x+to.width-4,to.y+to.height/3,{steps:8});await page.mouse.up();
+        await expect(page.locator('.sticker-cell').last()).toHaveAttribute('data-sticker-id',moving);
+        await expect(page.locator('.sticker-draft')).toHaveCount(0);
+      }
+      if (mode === 'packs' || mode === 'pack-detail') {
+        await page.getByRole('button', { name: 'Browse packs', exact: true }).click();
+        await expect(page.getByRole('dialog', { name: 'Browse packs' })).toBeVisible();
+        if (mode === 'pack-detail') { await page.getByRole('button', { name: /Little hellos Preview pack/ }).click(); await expect(page.getByRole('dialog', { name: 'Little hellos' })).toBeVisible(); await page.locator('.sticker-pack-item').first().click(); await expect(page.locator('.sticker-draft')).toHaveCount(0); await expect(page.locator('.sticker-detail-cover img')).toBeVisible(); }
+      }
+      if (mode === 'import') {
+        await page.route(/\/media-sources$/, route => route.fulfill({ json: { id: 'source-scene', name: 'wave.gif' } }));
+        const asset = { id: 'sticker-prepared', state: 'available', contentType: 'image/gif', sha256: 'a'.repeat(64), byteLength: 100 };
+        await page.route(/\/sticker-preparations$/, route => route.fulfill({ json: { id: 'prep-scene', state: 'available', result: { id: 'prep-scene', sourceId: 'source-scene', original: asset, preview: asset, contactSheet: asset, width: 96, height: 96, durationMs: 1200, transformations: [], expiresAt: 9999999999 } } }));
+        const fixture=(await readFile(new URL('../../native-client-rust/crates/wechat-simulator/fixtures/sticker.gif', import.meta.url))).toString('base64');
+        await page.locator('.sticker-tray').evaluate((tray,encoded)=>{ const transfer=new DataTransfer(); transfer.items.add(new File([Uint8Array.from(atob(encoded),c=>c.charCodeAt(0))],'wave.gif',{type:'image/gif'}));tray.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:transfer}));},fixture);
+        await expect(page.locator('.composer-attachments')).toHaveCount(0);
+        await expect(page.getByRole('button', { name: 'Add 1', exact: true })).toBeEnabled();
+      }
+    },
+  });
+}

@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
 import { openAsBlob } from "node:fs";
 import { mkdtemp, open, rm } from "node:fs/promises";
@@ -347,7 +348,7 @@ function localOutboundSource(mediaUrl: string, audioAsVoice: boolean, options: N
 function outboundSourceLimit(account: ResolvedWeChatAccount, selectedKind: MediaSendRequest["kind"]): number {
   return Math.min(account.mediaMaxMb * 1024 * 1024, selectedKind === "file" ? NATIVE_MAX_SOURCE_BYTES : selectedKind === "video" ? NATIVE_MAX_VIDEO_SOURCE_BYTES : NATIVE_MAX_ORDINARY_SOURCE_BYTES);
 }
-export async function sendNativeAttachment(client: NativeWeChatClient, account: ResolvedWeChatAccount, threadId: string, mediaUrl: string, audioAsVoice = false, key: string = randomUUID(), beforeSend?: () => Promise<void>, options: NativeMediaSendOptions = {}): Promise<NativeOutboundDelivery> {
+export async function sendNativeAttachment(client: NativeWeChatClient, account: ResolvedWeChatAccount, threadId: string, mediaUrl: string, audioAsVoice = false, key: string = randomUUID(), beforeSend?: () => Promise<void>, options: NativeMediaSendOptions = {}, mediaAccess?: { readFile?: (path: string) => Promise<Buffer> }): Promise<NativeOutboundDelivery> {
   validateNativeMediaSendOptions(options, audioAsVoice);
   // Classify local files before the dispatch mark, so an unsupported pairing fails as not sent.
   const local = /^https?:/.test(mediaUrl) ? undefined : localOutboundSource(mediaUrl, audioAsVoice, options);
@@ -374,6 +375,14 @@ export async function sendNativeAttachment(client: NativeWeChatClient, account: 
         if (!size || length && size !== Number(length)) throw new Error("Native outbound source length mismatch");
       } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); await file?.close(); }
       blob = await openAsBlob(path, { type: mime });
+    } else if (mediaAccess?.readFile) {
+      ({ filename, mime, kind: selectedKind } = local);
+      // This host-bound reader owns the SSH/node path and its authorization.
+      // A failure must propagate; the same path on the gateway is unrelated.
+      const bytes = await mediaAccess.readFile(local.path instanceof URL ? fileURLToPath(local.path) : local.path);
+      const max = outboundSourceLimit(account, selectedKind);
+      if (!bytes.byteLength || bytes.byteLength > max) throw new Error("Native outbound source exceeds selected media kind size");
+      blob = new Blob([new Uint8Array(bytes)], { type: mime });
     } else {
       ({ filename, mime, kind: selectedKind } = local); const max = outboundSourceLimit(account, selectedKind), file = await open(local.path, "r");
       let size: number;

@@ -1,0 +1,87 @@
+---
+title: Use and manage stickers
+description: Import custom media, arrange Saved and browse or export official packs.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Open **Stickers** beside the message box. **Saved** holds custom stickers;
+labeled tabs hold added official packs. **All added** includes packs beyond the
+visible tabs. Choosing a sticker stages a removable draft. The regular **Send**
+button sends it.
+
+## Add and arrange Saved
+
+1. Choose **Add stickers**, or drop files into the open tray. Images, GIFs and
+   MOV/MP4 videos appear in **Add to Saved** for preview and review.
+2. Adjust fit or a video segment when needed. Preparation does not silently
+   resize, trim or stretch a source. Exclude unwanted files, then choose **Add N**.
+   Successful items remain successful if another item needs adjustment or retry.
+3. Choose **Edit**, or hold a Saved sticker. Drag to reorder; arrow controls
+   provide keyboard placement. Remove controls delete individual Saved items.
+   **Done** exits editing. Editing does not stage a send.
+
+A received sticker's message menu also offers **Save to stickers**.
+
+The equivalent CLI workflow uses paths on the CLI's machine:
+
+```sh
+wx stickers list
+wx stickers prepare clip.mp4 --start 1 --duration 2 --fit
+wx stickers preview --prepared PREPARATION_ID --output preview.png
+wx stickers add --prepared PREPARATION_ID
+wx stickers move STICKER_ID --last
+wx stickers download STICKER_ID --output original.gif
+wx stickers remove STICKER_ID
+```
+
+Preparation returns a job. Its completed result includes an original, preview,
+sampled-frame sheet, dimensions, transformations and expiry. Keep the operation's
+idempotency key if its response is uncertain. Use `--detach` to return a job
+immediately or `--wait SECONDS` to wait. `--json` keeps results machine-readable.
+
+## Browse and use official packs
+
+Choose **Browse packs** for available packs, or **Added** for the complete account
+list. Pack details show their contents, optional official captions, previews,
+membership and copyable ID. **Load previews** acquires content separately from
+**Add pack**. Added items can stage a sticker; **Remove pack** removes membership
+while preserving chat history.
+
+```sh
+wx stickers sync --scope all
+wx stickers packs list
+wx stickers packs browse
+wx stickers packs show PACK_ID
+wx stickers packs items PACK_ID
+wx stickers packs add PACK_ID
+wx stickers packs download PACK_ID --output ./pack
+wx stickers send STICKER_ID --pack PACK_ID --to CONTACT_ID
+wx stickers packs remove PACK_ID
+```
+
+`packs list` includes every added pack, independently of catalog coverage.
+`packs browse` returns an available-feed page and an optional continuation cursor;
+use `--cursor` for the next page. The feed is not a guaranteed global inventory.
+
+`packs download` exports **one selected pack**, with `001.gif`, `002.gif`, … and
+`index.json`. The index records IDs, captions, ordering, checksums, transformations
+and per-item outcomes. Existing GIF bytes are preserved; supported alternatives
+are converted. Export does not add membership.
+
+Resume the same export with `--resume`. The CLI verifies the product, ordered
+identities and existing checksums, preserves completed items and leaves unrelated
+files alone.
+
+Individual `stickers download` also accepts `--resume`. A matching `.wx-part`
+file and identity record continue through an authenticated byte-range read. The
+CLI verifies the final checksum before installing the output; it preserves a
+partial file after a failed transfer and never overwrites an unrelated output.
+
+<Aside type="note" title="Good to know">
+Saved captions are optional official metadata, not editable names. Membership and
+media readiness are separate. Free-pack activation does not download its archive.
+Only eligible free packs are supported; purchases and unverified global search
+are excluded. Originals keep their real formats. An image-only preview does not
+mean a model watched the animation.
+</Aside>

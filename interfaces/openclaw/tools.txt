@@ -58,3 +58,18 @@ tool wechat_send_share.idempotencyKey | string, required, min length 1, max leng
 tool wechat_send_share.thumbnailUrl | string, min length 1, max length 8192 | Public HTTP(S) image URL advertised as the card thumbnail; no upload or page scraping.
 tool wechat_send_share.title | string, required, min length 1, max length 16384 | Card title shown in the chat.
 tool wechat_send_share.url | string, required, min length 1, max length 8192 | Link the card opens.
+tool wechat_stickers | enabled by default, catalog direct-only | Manage the configured account's custom Saved stickers and prepare image/GIF/MOV/MP4 files from the active execution workspace. Preparation does not save or send. Preview returns actual image content to model vision: sampled GIF frames or a representative still when animation decoding is unavailable. Download stages verified original bytes into the execution workspace. Mutations and missing-original acquisitions require a stable idempotency key; reuse it after timeouts. Official packs are outside this tool.
+tool wechat_stickers.action | string, required, values list|get|prepare|preview|download|add|move|remove | List/get Saved, preview/download one Saved or prepared item, prepare a source, add, move, or remove membership.
+tool wechat_stickers.afterId | string|null | Required for move: place after this Saved identity, or null for first.
+tool wechat_stickers.assetId | string | Verified original sticker asset belonging to messageId for add.
+tool wechat_stickers.durationMs | integer, min 1, max 10000 | Explicit retained duration in milliseconds; omitted means preserve duration.
+tool wechat_stickers.file | string | Workspace-relative source file for prepare; resolved on the session execution host.
+tool wechat_stickers.fit | boolean | Permit proportional resizing to the sticker output limit.
+tool wechat_stickers.idempotencyKey | string, min length 1, max length 200 | Required stable key for prepare/add/move/remove and downloads that need acquisition. Reuse the key and identical intent after uncertain responses.
+tool wechat_stickers.messageId | string | Received message identity when adding a received original instead of a preparation.
+tool wechat_stickers.output | string | New workspace-relative output for download, using the original format extension; existing files are never replaced.
+tool wechat_stickers.preparationId | string | Preparation job identity for preview/download; returned by prepare.
+tool wechat_stickers.revision | string | Collection revision returned by list; required for move/remove.
+tool wechat_stickers.sourceId | string | Existing daemon-owned upload instead of a workspace file.
+tool wechat_stickers.startMs | integer, min 0, max 4294967295 | Explicit segment start in milliseconds; requires durationMs.
+tool wechat_stickers.stickerId | string | Stable Saved sticker identity for get, preview, download, move, or remove.

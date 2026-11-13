@@ -41,6 +41,21 @@ macro_rules! payloads {
 }
 
 payloads! {
+    "AddCustomStickerRequest" => wechat_core::AddCustomStickerRequest,
+    "MoveCustomStickerRequest" => wechat_core::MoveCustomStickerRequest,
+    "StickerDownloadRequest" => wechat_core::StickerDownloadRequest,
+    "StickerSyncRequest" => wechat_core::StickerSyncRequest,
+    "StickerPackMembershipRequest" => crate::stickers::StickerPackMembershipRequest,
+    "StickerCollections" => wechat_core::StickerCollections,
+    "StickerPack" => wechat_core::StickerPack,
+    "StickerPackList" => wechat_core::StickerPackList,
+    "StickerPackSticker" => wechat_core::StickerPackSticker,
+    "StickerPackStickers" => wechat_core::StickerPackStickers,
+    "StickerPackQuery" => crate::stickers::StickerPackQuery,
+    "StickerLanguageQuery" => crate::stickers::StickerLanguageQuery,
+    "CustomSticker" => wechat_core::CustomSticker,
+    "CustomStickerList" => wechat_core::CustomStickerList,
+    "StickerPreparationRequest" => wechat_core::StickerPreparationRequest,
     "TokenRequest" => crate::TokenRequest,
     "CreateAccountRequest" => crate::CreateAccountRequest,
     "UpdateAccountRequest" => crate::actions::UpdateAccountRequest,
@@ -60,6 +75,7 @@ payloads! {
     "RefreshAvatarRequest" => crate::actions::RefreshAvatarRequest,
     "MediaTransferRequest" => wechat_core::MediaTransferRequest,
     "MediaSendRequest" => wechat_core::MediaSendRequest,
+    "StickerSendRequest" => wechat_core::StickerSendRequest,
     "ShareSendRequest" => wechat_core::ShareSendRequest,
     "MediaJob" => wechat_core::media_types::MediaJob,
     "MediaAsset" => wechat_core::media_types::MediaAsset,
@@ -242,6 +258,7 @@ fn param_doc(path: &str, name: &str) -> String {
         "consumer" => "Name that identifies the event consumer.",
         "username" => "Contact ID of the group member.",
         "call" => "Call ID.",
+        "stickerId" => "Stable content identity of an item in the selected pack.",
         "id" => {
             let before = path.split("/{id}").next().unwrap_or("");
             match before.rsplit('/').next().unwrap_or("") {
@@ -255,6 +272,9 @@ fn param_doc(path: &str, name: &str) -> String {
                 "media" => "Media asset ID.",
                 "jobs" => "Job ID.",
                 "groups" => "Group ID.",
+                "sticker-packs" => "Official product identity.",
+                "custom-stickers" => "Stable Saved sticker identity.",
+                "sticker-preparations" => "Preparation job ID.",
                 other => panic!("describe the {{id}} parameter after /{other}/"),
             }
         }
@@ -379,6 +399,11 @@ fn operation(components: &Components, route: &Route) -> Value {
             "schema": {"type": "string", "minLength": 1, "maxLength": 200},
         })),
     }
+    if route.path.ends_with("/custom-stickers/{id}") && matches!(route.method, "PATCH" | "DELETE") {
+        parameters.push(json!({"name":"If-Match","in":"header","required":true,
+            "description":"Quoted current Saved collection revision from its ETag. Stale revisions return 412 and the current revision.",
+            "schema":{"type":"string","pattern":r#"^"[0-9a-f]{64}"$"#}}));
+    }
     let (security, note) = match &route.scope {
         Scope::None => (json!([]), None),
         Scope::Owner => (json!([{"bearer": ["owner"]}]), None),
@@ -452,6 +477,10 @@ const TAGS: &[(&str, &str)] = &[
     ("events", "The replayable event log and stream."),
     ("groups", "Saved groups, their members and group changes."),
     ("media", "Uploads, media assets, downloads and jobs."),
+    (
+        "stickers",
+        "Saved stickers, official packs and temporary media preparation.",
+    ),
     ("messages", "Saved messages, sending and recall."),
     ("system", "Daemon health, status and shutdown."),
     ("threads", "Chats, read state and chat settings."),

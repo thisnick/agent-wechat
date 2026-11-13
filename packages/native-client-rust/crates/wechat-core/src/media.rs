@@ -23,6 +23,26 @@ use wechat_store::{MediaAssetRecord, MediaJobRecord, OwnedMediaSource};
 mod automatic;
 #[path = "media_identity.rs"]
 mod identity;
+#[path = "sticker_catalog.rs"]
+mod sticker_catalog;
+#[path = "sticker_jobs.rs"]
+mod sticker_jobs;
+#[path = "sticker_media.rs"]
+mod sticker_media;
+#[path = "sticker_pack_download.rs"]
+mod sticker_pack_download;
+#[path = "sticker_pack_jobs.rs"]
+mod sticker_pack_jobs;
+#[path = "sticker_pack_projection.rs"]
+mod sticker_pack_projection;
+#[path = "sticker_preparations.rs"]
+mod sticker_preparations;
+#[path = "sticker_projection.rs"]
+mod sticker_projection;
+#[path = "sticker_send.rs"]
+mod sticker_send;
+#[path = "sticker_sync.rs"]
+mod sticker_sync;
 #[path = "media_storage.rs"]
 mod storage;
 #[path = "media_video.rs"]
@@ -59,6 +79,10 @@ enum DownloadPlan {
     },
     Sticker {
         descriptor: StickerDescriptor,
+    },
+    SavedSticker {
+        id: String,
+        url: String,
     },
     Voice {
         server_id: u64,
@@ -227,7 +251,7 @@ fn completed_upload_binding(plan: &SendPlan) -> Result<String> {
         "progressId":plan.file_upload_progress_id,"uploadedFile":plan.uploaded_file
     }))?))
 }
-fn digest(bytes: &[u8]) -> String {
+pub(crate) fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 fn validate_send_source_sizes(
@@ -384,6 +408,14 @@ impl Core {
         let row = self.store.media_asset(account, id)?;
         self.authorize_media_record(account, &row)?;
         let mut asset: MediaAsset = serde_json::from_value(row.metadata.clone())?;
+        if row.metadata["preparationExpiresAt"]
+            .as_i64()
+            .is_some_and(|expiry| expiry <= chrono::Utc::now().timestamp())
+        {
+            asset.state = "expired".into();
+            asset.reason = Some("sticker_preparation_expired".into());
+            asset.content_url = None;
+        }
         if row.message_id.is_some() {
             asset.advertised_byte_length =
                 automatic::advertised_length(&self.asset_plan(account, &row)?.plan);
@@ -397,8 +429,23 @@ impl Core {
         Ok(asset)
     }
     pub fn media_content(&self, account: &str, id: &str) -> Result<MediaContent> {
+        self.media_content_owned(account, id, false)
+    }
+    fn media_content_owned(
+        &self,
+        account: &str,
+        id: &str,
+        retained_preparation: bool,
+    ) -> Result<MediaContent> {
         let metadata = self.store.media_asset(account, id)?;
         self.authorize_media_record(account, &metadata)?;
+        ensure!(
+            retained_preparation
+                || metadata.metadata["preparationExpiresAt"]
+                    .as_i64()
+                    .is_none_or(|expiry| expiry > chrono::Utc::now().timestamp()),
+            "sticker_preparation_expired"
+        );
         let asset: MediaAsset = serde_json::from_value(metadata.metadata)?;
         ensure!(asset.state == "available", "media_not_available");
         let row = self.store.media_asset_with_payload(account, id)?;
@@ -447,7 +494,11 @@ impl Core {
             preview.source_sha256 == original.sha256,
             "media_integrity_failed"
         );
-        let decoded = Self::wxgf_preview(&original.bytes)?;
+        let decoded = if asset.kind == MediaKind::Sticker {
+            wechat_media::sticker_preview(&original.bytes)?.contact_sheet
+        } else {
+            Self::wxgf_preview(&original.bytes)?
+        };
         let sha256 = digest(&decoded.bytes);
         if sha256 != preview.sha256
             || decoded.bytes.len() as u64 != preview.byte_length
@@ -590,10 +641,11 @@ impl Core {
                     }
                 });
             }
-            if self.media_network_suspended(&account.id)? {
-                continue;
-            }
+            let suspended = self.media_network_suspended(&account.id)?;
             for id in self.store.queued_media_jobs(&account.id)? {
+                if suspended && self.store.media_job(&account.id, &id)?.kind != "sticker_prepare" {
+                    continue;
+                }
                 self.spawn_media_worker(&account.id, &id);
                 n += 1;
             }
@@ -646,6 +698,18 @@ impl Core {
         let msg = reader.message(&source_message_id(message_id)?, own.as_deref())?;
         if !matches!(msg.message_type, 3 | 34 | 43 | 47 | 49) {
             return Ok(vec![]);
+        }
+        if msg.message_type == 47 {
+            let cached = self.store.media_assets(account, message_id)?;
+            if !cached.is_empty() {
+                return cached
+                    .iter()
+                    .map(|row| {
+                        self.authorize_media_record(account, row)?;
+                        self.media_asset(account, &row.id)
+                    })
+                    .collect();
+            }
         }
         let binding = identity::capture(&msg)?;
         let content = msg
@@ -1124,8 +1188,17 @@ impl Core {
             .vault
             .seal_media(account, &format!("asset:{id}"), bytes)?;
         self.authorize_media_record(account, &self.store.media_asset(account, id)?)?;
+        let mut metadata = serde_json::to_value(&asset)?;
+        if let Some(expiry) = self
+            .store
+            .media_asset(account, id)?
+            .metadata
+            .get("preparationExpiresAt")
+        {
+            metadata["preparationExpiresAt"] = expiry.clone();
+        }
         self.store
-            .save_media_asset(account, id, &serde_json::to_value(&asset)?, Some(&sealed))?;
+            .save_media_asset(account, id, &metadata, Some(&sealed))?;
         Ok(asset)
     }
     fn cache_wxgf_preview(
@@ -1166,7 +1239,19 @@ impl Core {
         Ok(disconnected || auto_disabled)
     }
     async fn run_media_worker(self: Arc<Self>, account: &str, id: &str) -> Result<()> {
-        let incoming = self.store.media_job(account, id)?.kind == "download";
+        let kind = self.store.media_job(account, id)?.kind;
+        let incoming = kind == "download";
+        let _preparation_permit = if matches!(kind.as_str(), "sticker_prepare" | "sticker_acquire")
+        {
+            Some(
+                self.sticker_preparation_limit
+                    .clone()
+                    .acquire_owned()
+                    .await?,
+            )
+        } else {
+            None
+        };
         let download_permit = if incoming {
             Some(self.download_permit(account).await?)
         } else {
@@ -1178,7 +1263,7 @@ impl Core {
             Some(self.lock_media_job(account).await?)
         };
         let guard = self.lock_account(account).await?;
-        if self.media_network_suspended(account)? {
+        if kind != "sticker_prepare" && self.media_network_suspended(account)? {
             return Ok(());
         }
         let core = self.clone();
@@ -1196,7 +1281,17 @@ impl Core {
                 return Ok(());
             }
             let row = core.store.media_job(&account, &id)?;
-            let outcome = if row.kind == "download" {
+            let outcome = if row.kind == "sticker_prepare" {
+                core.perform_sticker_preparation(&account, &id, &mut permit)
+            } else if row.kind == "sticker_send" {
+                core.perform_sticker_send(&account, &id, &mut permit)
+            } else if row.kind == "sticker_acquire" {
+                core.perform_sticker_pack_download(&account, &id, &mut permit)
+            } else if row.kind == "sticker_pack" {
+                core.perform_sticker_pack_job(&account, &id)
+            } else if row.kind == "sticker_saved" {
+                core.perform_saved_sticker_job(&account, &id)
+            } else if row.kind == "download" {
                 core.perform_download_guarded(&account, &id, Some(&mut permit))
             } else {
                 core.perform_media_send_guarded(&account, &id, Some(&mut permit))
@@ -1205,6 +1300,7 @@ impl Core {
                 core.record_media_failure_diagnostics(&account, &id, &error)?;
                 core.fail_media_job(&account, &id, &classify_error(&error))?;
             }
+            let _ = core.schedule_sticker_reconciliation(&account);
             Ok(())
         })
         .await
@@ -1317,11 +1413,16 @@ impl Core {
         ) {
             return Ok(());
         }
-        let uncertain = row.kind == "send"
-            && (matches!(row.phase.as_str(), "reserving" | "uploading" | "submitting")
+        let uncertain =
+            matches!(
+                row.kind.as_str(),
+                "send" | "sticker_saved" | "sticker_pack" | "sticker_send" | "sticker_acquire"
+            ) && (matches!(row.phase.as_str(), "reserving" | "uploading" | "submitting")
                 || matches!(
                     code,
-                    "file_reservation_needs_review" | "media_authorization_changed"
+                    "file_reservation_needs_review"
+                        | "media_authorization_changed"
+                        | "sticker_submission_needs_review"
                 ));
         row.state = if uncertain {
             "needs_review"
@@ -1347,6 +1448,14 @@ impl Core {
                     | "auth_required"
             );
         row.error_code = Some(code.into());
+        if matches!(
+            row.kind.as_str(),
+            "sticker_saved" | "sticker_pack" | "sticker_send"
+        ) && row.data["serverAcceptance"] == "accepted"
+        {
+            row.data["result"]["serverAcceptance"] = "accepted".into();
+            row.data["result"]["profileWriteback"] = "blocked".into();
+        }
         self.store.save_media_job(account, &row)?;
         if row.kind == "send" {
             let _ = self.project_media_send_receipts(account, id);
@@ -1520,6 +1629,23 @@ impl Core {
                     Some(inspection.frames),
                 )
             }
+            DownloadPlan::SavedSticker { id: sticker, url } => {
+                let fence = self.media_authorization_fence(account)?;
+                let (bytes, inspection) =
+                    cdn_transfer(permit.as_deref_mut(), self, account, || {
+                        wechat_protocol::media::fetch_sticker_original(&url, &sticker, &progress)
+                    })?;
+                self.resume_media_state(account, id, &fence)?;
+                self.write_saved_cache(account, id, &sticker, &bytes)?;
+                let refreshed = self
+                    .custom_sticker(account, &sticker)?
+                    .original
+                    .context("sticker_source_unavailable")?;
+                ensure!(refreshed.state == "available", "sticker_cache_unreadable");
+                // The official cache is canonical. No second payload is installed.
+                let _ = inspection;
+                return self.complete_download(account, id, &refreshed);
+            }
             DownloadPlan::Voice {
                 server_id,
                 length,
@@ -1618,6 +1744,14 @@ impl Core {
                 self.media_asset(account, id)
                     .and_then(|asset| self.repair_cached_asset(account, asset))
                     .map(|asset| asset.official_writeback == "complete")
+            } else if self.store.media_job(account, id)?.kind == "sticker_send" {
+                self.repair_sticker_send(account, id)
+            } else if self.store.media_job(account, id)?.kind == "sticker_acquire" {
+                self.repair_sticker_pack_download(account, id)
+            } else if self.store.media_job(account, id)?.kind == "sticker_pack" {
+                self.repair_sticker_pack_job(account, id)
+            } else if self.store.media_job(account, id)?.kind == "sticker_saved" {
+                self.repair_saved_sticker_job(account, id)
             } else {
                 self.project_media_send_receipts(account, id)
                     .and_then(|()| self.store.media_job(account, id))
@@ -1945,6 +2079,31 @@ fn classify_error(error: &anyhow::Error) -> String {
     for cause in error.chain() {
         let message = cause.to_string();
         if [
+            "sticker_pack_not_eligible",
+            "sticker_pack_membership_rejected",
+            "sticker_pack_readback_mismatch",
+            "sticker_pack_list_restarted",
+            "sticker_pack_list_invalid",
+            "sticker_submission_needs_review",
+            "sticker_revision_mismatch",
+            "sticker_readback_mismatch",
+            "sticker_version_unavailable",
+            "custom_sticker_mutation_rejected",
+            "sticker_metadata_incomplete",
+            "sticker_cache_unreadable",
+            "sticker_trim_invalid",
+            "sticker_encoder_unavailable",
+            "sticker_encoder_timeout",
+            "sticker_encoder_failed",
+            "sticker_encoder_output_limit",
+            "sticker_duration_changed",
+            "sticker_preparation_expired",
+            "sticker_adjustment_required",
+            "sticker_input_unsupported",
+            "sticker_output_size_limit",
+            "sticker_decoded_size_limit",
+            "sticker_frame_limit",
+            "sticker_timing_invalid",
             "file_reservation_needs_review",
             "media_authorization_changed",
             "source_size_limit",

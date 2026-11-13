@@ -4,6 +4,12 @@
 # `request` and `response` rows list the fields of each typed payload. A type that the SDK declares but the handler does not return is listed too. Query strings are request fields.
 request AccountSettings | object, rejects unknown fields | Hub policy; this is never written into an official WeChat profile.
 request AccountSettings.autoDownloadMaxBytes | integer, required, min 0, format uint64 | Largest advertised size in bytes that the daemon downloads automatically for this account, from 0 to 536870912. Thumbnails and voice notes are always downloaded, and 0 limits automatic downloads to those; the default is 52428800.
+request AddCustomStickerRequest | object, rejects unknown fields | Save a prepared or received sticker; this does not send a chat message.
+request AddCustomStickerRequest.source | object, required | Owned source, validated before the asynchronous operation is admitted.
+request AddCustomStickerRequest.source.assetId | string, required, when kind message | Original sticker asset belonging to that message.
+request AddCustomStickerRequest.source.kind | string, required, values prepared|message | prepared: Validated temporary output created by sticker preparation; message: A verified original attachment belonging to a received sticker message
+request AddCustomStickerRequest.source.messageId | string, required, when kind message | Existing message identity in this account.
+request AddCustomStickerRequest.source.preparationId | string, required, when kind prepared | ID of a completed, unexpired preparation.
 request ContactLookupRequest | object, rejects unknown fields | Request to look up several contacts.
 request ContactLookupRequest.ids | array of string, required | Contact IDs to look up.
 request ContentQuery | object, rejects unknown fields | Options for fetching media bytes.
@@ -42,6 +48,9 @@ request MediaTransferRequest | object, rejects unknown fields | Request to downl
 request MediaTransferRequest.assetId | string, nullable | ID of the specific attachment to download. When null, the daemon picks the attachment that matches `quality`.
 request MediaTransferRequest.messageId | string, required | ID of the message to download from. It must match the message ID in the URL.
 request MediaTransferRequest.quality | string, values best|thumbnail|standard|original|normal|encoded, default best | Which copy to download. The default is `best`.
+request MoveCustomStickerRequest | object, rejects unknown fields | Move one Saved sticker using a collection revision precondition.
+request MoveCustomStickerRequest.position | object, required, rejects unknown fields | Requested relative placement.
+request MoveCustomStickerRequest.position.afterId | string, nullable | Place immediately after this identity; null places the item first.
 request NativeAccountRemovalRequest | object, rejects unknown fields | Request to remove a signed-out account.
 request NativeAccountRemovalRequest.confirmAccountId | string, required | Must repeat the account ID from the URL, to confirm the removal.
 request NativeForgetRequest | object, rejects unknown fields | Request to delete the account's saved login credentials.
@@ -106,6 +115,32 @@ request ShareSendRequest.threadId | string, required | ID of the chat to send to
 request ShareSendRequest.thumbnailUrl | string, nullable, default null | Address of a preview image for the card. It must be an http or https address without a port or fragment.
 request ShareSendRequest.title | string, required | Card title. It must not be blank.
 request ShareSendRequest.url | string, required | Address the card opens. It must be an http or https address.
+request StickerDownloadRequest | object, rejects unknown fields | Explicit target for acquiring a Saved original, one pack item or one pack.
+request StickerDownloadRequest.assetId | string, nullable | Advertised pack icon, cover or thumbnail asset. Exclusive of pack/item IDs.
+request StickerDownloadRequest.packId | string, nullable | Product identity for one official pack. Omit for a Saved original.
+request StickerDownloadRequest.stickerId | string, nullable | Stable item identity. Required for Saved; optional for an entire pack.
+request StickerLanguageQuery | object, rejects unknown fields | Locale used to choose optional official captions.
+request StickerLanguageQuery.language | string, nullable | Exact official locale; literal `default` is the fallback. Defaults to `en`.
+request StickerPackMembershipRequest | object, rejects unknown fields | Empty membership representation. Adding a pack does not purchase it or acquire media.
+request StickerPackQuery | object, rejects unknown fields | Filters for account-added membership or a page of the available feed.
+request StickerPackQuery.cursor | string, nullable | Opaque available-feed continuation returned by the preceding page.
+request StickerPackQuery.membership | string, nullable, values added | Select `added` for the complete canonical account list; omission browses the feed.
+request StickerPreparationRequest | object, rejects unknown fields | Explicit preparation of owned image/GIF/video bytes; never saves or sends a sticker.
+request StickerPreparationRequest.fit | boolean, default false | Permit proportional resizing to the current sticker edge limit.
+request StickerPreparationRequest.sourceId | string, required | ID returned by the existing upload endpoint.
+request StickerPreparationRequest.trim | object, nullable, rejects unknown fields | Optional explicit segment, in milliseconds. Omission preserves the source duration.
+request StickerPreparationRequest.trim.durationMs | integer, required, min 0, format uint32 | Duration of the retained segment in milliseconds, greater than zero.
+request StickerPreparationRequest.trim.startMs | integer, required, min 0, format uint32 | Start of the retained segment in milliseconds.
+request StickerSendRequest | object, rejects unknown fields | Send one prepared or existing sticker through an asynchronous idempotent job.
+request StickerSendRequest.kind | string, required, values sticker | Must be `sticker`.
+request StickerSendRequest.source | object, required | Stable source selection, revalidated before submission.
+request StickerSendRequest.source.kind | string, required, values saved|pack|prepared | saved: Existing member of the account's Saved collection; pack: Existing member of an account-added official pack; prepared: Validated temporary output; sending does not save it to Saved
+request StickerSendRequest.source.packId | string, required, when kind pack | Official product identity.
+request StickerSendRequest.source.preparationId | string, required, when kind prepared | Completed preparation identity.
+request StickerSendRequest.source.stickerId | string, required, when kind saved|pack | Stable sticker content identity.
+request StickerSendRequest.threadId | string, required | Intended chat identity.
+request StickerSyncRequest | object, rejects unknown fields | Request reconciliation of the account's custom Saved collection.
+request StickerSyncRequest.scope | string, values saved|added|all, default saved | Collections to reconcile: `saved`, `added` or `all`.
 request TokenRequest | object, rejects unknown fields | Request to issue an API token.
 request TokenRequest.accounts | array of string, required | Account IDs the token can use, or `*` for every account.
 request TokenRequest.expiresAt | integer, nullable, format int64 | Unix time in seconds when the token stops working. Omit it for no expiry.
@@ -175,6 +210,72 @@ response CallSnapshot.currentPendingOffer.callerId | string, required | Contact 
 response CallSnapshot.currentPendingOffer.kind | string, required, values direct|conference | Whether the call is direct or a conference.
 response CallSnapshot.currentPendingOffer.phase | string, required, values waiting_for_ready|preparing | What the call is waiting for.
 response CallSnapshot.currentPendingOffer.revision | integer, required, min 0, format uint32 | Increases when the offer changes.
+response CustomSticker | object | One saved custom sticker read from the official profile.
+response CustomSticker.caption | string, required, nullable | Optional official caption, not an editable local label.
+response CustomSticker.id | string, required | Official content identity.
+response CustomSticker.original | object, required, nullable | Verified original and visual preview references when the individual item is read.
+response CustomSticker.original.accountId | string, required | ID of the account the attachment belongs to.
+response CustomSticker.original.actualVariant | string, required, nullable, values best|thumbnail|standard|original|normal|encoded | Which copy the cached bytes really are, once checked. Null until bytes are cached.
+response CustomSticker.original.advertisedByteLength | integer, nullable, min 0, format uint64 | Size in bytes the sender advertised, which can differ from the checked size. Omitted when the sender gave none, which does not mean the file is empty.
+response CustomSticker.original.animationFrames | integer, required, nullable, min 0, format uint32 | Number of frames when the attachment is an animated image. Null otherwise.
+response CustomSticker.original.autoDownloadAllowed | boolean, nullable | True when the account's current download setting allows this copy to be downloaded automatically.
+response CustomSticker.original.byteLength | integer, required, nullable, min 0, format uint64 | Size in bytes of the cached bytes that were checked. Null until they are cached.
+response CustomSticker.original.contentType | string, required, nullable | MIME type of the cached bytes. Null until they are cached.
+response CustomSticker.original.contentUrl | string, required, nullable | Path on the daemon to fetch the cached bytes from. Null until the attachment is available.
+response CustomSticker.original.expiresAt | integer, required, nullable, min 0, format uint64 | When WeChat's copy expires, as Unix time in seconds. Null when WeChat gave no expiry.
+response CustomSticker.original.filename | string, required, nullable | File name of the attachment, when it has one. Null otherwise.
+response CustomSticker.original.id | string, required | Attachment ID, used to fetch or request this copy.
+response CustomSticker.original.jobId | string, required, nullable | ID of the job downloading or sending this attachment. Null when there is none.
+response CustomSticker.original.kind | string, required, values image|file|video|voice|sticker | What kind of attachment this is.
+response CustomSticker.original.messageId | string, required, nullable | ID of the message the attachment belongs to. Null when it is not tied to a message.
+response CustomSticker.original.officialWriteback | string, required | Whether the downloaded copy was also saved into the official profile's own media folders: `complete`, `pending`, `blocked`, or `unsupported` for media that is never saved there.
+response CustomSticker.original.preview | object, nullable | A separately hashed still image. Its bytes never replace the source asset.
+response CustomSticker.original.preview.byteLength | integer, required, min 0, format uint64 | Size of the preview in bytes.
+response CustomSticker.original.preview.contentType | string, required | MIME type of the preview.
+response CustomSticker.original.preview.contentUrl | string, required | Path on the daemon to fetch the preview from.
+response CustomSticker.original.preview.filename | string, required | File name of the preview.
+response CustomSticker.original.preview.sha256 | string, required | SHA-256 of the preview bytes, as lowercase hex.
+response CustomSticker.original.preview.sourceSha256 | string, required | SHA-256 of the original image bytes this preview was made from.
+response CustomSticker.original.reason | string, required, nullable | Machine-readable code explaining the state, such as `media_expired`. Null when there is nothing to explain.
+response CustomSticker.original.retryable | boolean, required | True when asking for the download again can still succeed.
+response CustomSticker.original.sha256 | string, required, nullable | SHA-256 of the cached bytes, as lowercase hex. Null until they are cached.
+response CustomSticker.original.state | string, required | `pending` (not downloaded yet), `available` (downloaded and checked), `expired` (WeChat no longer has it) or `unsupported`.
+response CustomSticker.original.variant | string, required, values best|thumbnail|standard|original|normal|encoded | Which copy this is, as advertised by the message.
+response CustomStickerList | object | Saved membership and order read from one profile snapshot.
+response CustomStickerList.freshness | string, required | Origin of the observation, currently `profile`.
+response CustomStickerList.items | array of object, required | Items in picker order.
+response CustomStickerList.items[] | object | One saved custom sticker read from the official profile.
+response CustomStickerList.items[].caption | string, required, nullable | Optional official caption, not an editable local label.
+response CustomStickerList.items[].id | string, required | Official content identity.
+response CustomStickerList.items[].original | object, required, nullable | Verified original and visual preview references when the individual item is read.
+response CustomStickerList.items[].original.accountId | string, required | ID of the account the attachment belongs to.
+response CustomStickerList.items[].original.actualVariant | string, required, nullable, values best|thumbnail|standard|original|normal|encoded | Which copy the cached bytes really are, once checked. Null until bytes are cached.
+response CustomStickerList.items[].original.advertisedByteLength | integer, nullable, min 0, format uint64 | Size in bytes the sender advertised, which can differ from the checked size. Omitted when the sender gave none, which does not mean the file is empty.
+response CustomStickerList.items[].original.animationFrames | integer, required, nullable, min 0, format uint32 | Number of frames when the attachment is an animated image. Null otherwise.
+response CustomStickerList.items[].original.autoDownloadAllowed | boolean, nullable | True when the account's current download setting allows this copy to be downloaded automatically.
+response CustomStickerList.items[].original.byteLength | integer, required, nullable, min 0, format uint64 | Size in bytes of the cached bytes that were checked. Null until they are cached.
+response CustomStickerList.items[].original.contentType | string, required, nullable | MIME type of the cached bytes. Null until they are cached.
+response CustomStickerList.items[].original.contentUrl | string, required, nullable | Path on the daemon to fetch the cached bytes from. Null until the attachment is available.
+response CustomStickerList.items[].original.expiresAt | integer, required, nullable, min 0, format uint64 | When WeChat's copy expires, as Unix time in seconds. Null when WeChat gave no expiry.
+response CustomStickerList.items[].original.filename | string, required, nullable | File name of the attachment, when it has one. Null otherwise.
+response CustomStickerList.items[].original.id | string, required | Attachment ID, used to fetch or request this copy.
+response CustomStickerList.items[].original.jobId | string, required, nullable | ID of the job downloading or sending this attachment. Null when there is none.
+response CustomStickerList.items[].original.kind | string, required, values image|file|video|voice|sticker | What kind of attachment this is.
+response CustomStickerList.items[].original.messageId | string, required, nullable | ID of the message the attachment belongs to. Null when it is not tied to a message.
+response CustomStickerList.items[].original.officialWriteback | string, required | Whether the downloaded copy was also saved into the official profile's own media folders: `complete`, `pending`, `blocked`, or `unsupported` for media that is never saved there.
+response CustomStickerList.items[].original.preview | object, nullable | A separately hashed still image. Its bytes never replace the source asset.
+response CustomStickerList.items[].original.preview.byteLength | integer, required, min 0, format uint64 | Size of the preview in bytes.
+response CustomStickerList.items[].original.preview.contentType | string, required | MIME type of the preview.
+response CustomStickerList.items[].original.preview.contentUrl | string, required | Path on the daemon to fetch the preview from.
+response CustomStickerList.items[].original.preview.filename | string, required | File name of the preview.
+response CustomStickerList.items[].original.preview.sha256 | string, required | SHA-256 of the preview bytes, as lowercase hex.
+response CustomStickerList.items[].original.preview.sourceSha256 | string, required | SHA-256 of the original image bytes this preview was made from.
+response CustomStickerList.items[].original.reason | string, required, nullable | Machine-readable code explaining the state, such as `media_expired`. Null when there is nothing to explain.
+response CustomStickerList.items[].original.retryable | boolean, required | True when asking for the download again can still succeed.
+response CustomStickerList.items[].original.sha256 | string, required, nullable | SHA-256 of the cached bytes, as lowercase hex. Null until they are cached.
+response CustomStickerList.items[].original.state | string, required | `pending` (not downloaded yet), `available` (downloaded and checked), `expired` (WeChat no longer has it) or `unsupported`.
+response CustomStickerList.items[].original.variant | string, required, values best|thumbnail|standard|original|normal|encoded | Which copy this is, as advertised by the message.
+response CustomStickerList.revision | string, required | Ordered-identity digest, returned as the HTTP entity tag.
 response MediaAsset | object | One copy of a message's attachment, and whether its bytes have been downloaded and checked.
 response MediaAsset.accountId | string, required | ID of the account the attachment belongs to.
 response MediaAsset.actualVariant | string, required, nullable, values best|thumbnail|standard|original|normal|encoded | Which copy the cached bytes really are, once checked. Null until bytes are cached.
@@ -203,7 +304,7 @@ response MediaAsset.retryable | boolean, required | True when asking for the dow
 response MediaAsset.sha256 | string, required, nullable | SHA-256 of the cached bytes, as lowercase hex. Null until they are cached.
 response MediaAsset.state | string, required | `pending` (not downloaded yet), `available` (downloaded and checked), `expired` (WeChat no longer has it) or `unsupported`.
 response MediaAsset.variant | string, required, values best|thumbnail|standard|original|normal|encoded | Which copy this is, as advertised by the message.
-response MediaJob | object | A background upload or download of media, with its progress. Poll it by ID until it finishes.
+response MediaJob | object | A background media or sticker operation, with its progress and outcome.
 response MediaJob.accountId | string, required | ID of the account the job belongs to.
 response MediaJob.assetId | string, required, nullable | ID of the attachment being downloaded. Null for sends.
 response MediaJob.attempts | integer, required, min 0, format uint32 | How many times the job has been started. A failed job can be retried only while this is below 3.
@@ -211,14 +312,14 @@ response MediaJob.cancelRequested | boolean, required | True when a cancel has b
 response MediaJob.completedBytes | integer, required, min 0, format uint64 | Bytes transferred so far.
 response MediaJob.createdAt | string, required | When the job was created, as an RFC 3339 time.
 response MediaJob.id | string, required | Job ID.
-response MediaJob.kind | string, required | `send` for an upload to a chat, or `download` for fetching a received attachment.
-response MediaJob.phase | string, required | Current step: `queued`, `preparing`, `downloading`, `reserving`, `uploading`, `submitting`, `readback` or `completed`.
+response MediaJob.kind | string, required | `send`, `download`, `sticker_prepare`, `sticker_saved`, `sticker_pack`, `sticker_acquire` or `sticker_send`.
+response MediaJob.phase | string, required | Current step: `queued`, `preparing`, `downloading`, `reserving`, `uploading`, `submitting`, `readback`, `projecting` or `completed`.
 response MediaJob.reason | string, required, nullable | Error code of the last failure. Null when there has been none.
 response MediaJob.result | any, required | Details of the outcome. Its fields depend on the job, and it is null until there is something to report.
 response MediaJob.retryable | boolean, required | True when the job can be retried.
 response MediaJob.serverMessageId | string, required, nullable | WeChat's ID of the sent message once WeChat accepted it. Null until then.
 response MediaJob.sourceId | string, required, nullable | ID of the uploaded source being sent. Null for downloads.
-response MediaJob.state | string, required | Where the job stands: `queued`, `running`, `available` (download finished), `accepted` (WeChat took the send), `needs_review` (the outcome is unknown, so check before sending again), `cancelled`, `expired`, `unsupported` or `failed`.
+response MediaJob.state | string, required | Where the job stands: `queued`, `running`, `available` (operation finished), `accepted` (WeChat took the send), `needs_review` (the outcome is unknown, so check before sending again), `cancelled`, `expired`, `unsupported` or `failed`.
 response MediaJob.threadId | string, required, nullable | ID of the chat a send goes to. Null for downloads.
 response MediaJob.totalBytes | integer, required, nullable, min 0, format uint64 | Total bytes to transfer, when known. Null otherwise.
 response MediaJob.updatedAt | string, required | When the job last changed, as an RFC 3339 time.
@@ -712,12 +813,280 @@ response OwnedMediaSource.id | string, required | Source ID. Pass it as `sourceI
 response OwnedMediaSource.mediaType | string, required | MIME type given at upload.
 response OwnedMediaSource.name | string, required | File name given at upload.
 response OwnedMediaSource.sha256 | string, required | SHA-256 of the file's bytes, as lowercase hex.
+response StickerCollections | object | All current account-added picker collections, independent of catalog coverage.
+response StickerCollections.items | array of object, required | Saved followed by canonical added packs.
+response StickerCollections.items[] | object | A derived composer collection; only Saved supports individual mutations.
+response StickerCollections.items[].id | string, required | Stable picker identity, `saved` or a pack-prefixed identity.
+response StickerCollections.items[].kind | string, required | `saved` or `pack`.
+response StickerCollections.items[].packId | string, required, nullable | Product identity for an added official pack.
+response StickerCollections.items[].title | string, required | Official display name; clients localize the Saved label themselves.
+response StickerPack | object | Public pack metadata with membership separate from verified media readiness.
+response StickerPack.contentReadiness | string, required | Media readiness; `unverified` does not mean that cached bytes are missing.
+response StickerPack.cover | object, required, nullable | Authenticated cover media reference, when indexed.
+response StickerPack.cover.accountId | string, required | ID of the account the attachment belongs to.
+response StickerPack.cover.actualVariant | string, required, nullable, values best|thumbnail|standard|original|normal|encoded | Which copy the cached bytes really are, once checked. Null until bytes are cached.
+response StickerPack.cover.advertisedByteLength | integer, nullable, min 0, format uint64 | Size in bytes the sender advertised, which can differ from the checked size. Omitted when the sender gave none, which does not mean the file is empty.
+response StickerPack.cover.animationFrames | integer, required, nullable, min 0, format uint32 | Number of frames when the attachment is an animated image. Null otherwise.
+response StickerPack.cover.autoDownloadAllowed | boolean, nullable | True when the account's current download setting allows this copy to be downloaded automatically.
+response StickerPack.cover.byteLength | integer, required, nullable, min 0, format uint64 | Size in bytes of the cached bytes that were checked. Null until they are cached.
+response StickerPack.cover.contentType | string, required, nullable | MIME type of the cached bytes. Null until they are cached.
+response StickerPack.cover.contentUrl | string, required, nullable | Path on the daemon to fetch the cached bytes from. Null until the attachment is available.
+response StickerPack.cover.expiresAt | integer, required, nullable, min 0, format uint64 | When WeChat's copy expires, as Unix time in seconds. Null when WeChat gave no expiry.
+response StickerPack.cover.filename | string, required, nullable | File name of the attachment, when it has one. Null otherwise.
+response StickerPack.cover.id | string, required | Attachment ID, used to fetch or request this copy.
+response StickerPack.cover.jobId | string, required, nullable | ID of the job downloading or sending this attachment. Null when there is none.
+response StickerPack.cover.kind | string, required, values image|file|video|voice|sticker | What kind of attachment this is.
+response StickerPack.cover.messageId | string, required, nullable | ID of the message the attachment belongs to. Null when it is not tied to a message.
+response StickerPack.cover.officialWriteback | string, required | Whether the downloaded copy was also saved into the official profile's own media folders: `complete`, `pending`, `blocked`, or `unsupported` for media that is never saved there.
+response StickerPack.cover.preview | object, nullable | A separately hashed still image. Its bytes never replace the source asset.
+response StickerPack.cover.preview.byteLength | integer, required, min 0, format uint64 | Size of the preview in bytes.
+response StickerPack.cover.preview.contentType | string, required | MIME type of the preview.
+response StickerPack.cover.preview.contentUrl | string, required | Path on the daemon to fetch the preview from.
+response StickerPack.cover.preview.filename | string, required | File name of the preview.
+response StickerPack.cover.preview.sha256 | string, required | SHA-256 of the preview bytes, as lowercase hex.
+response StickerPack.cover.preview.sourceSha256 | string, required | SHA-256 of the original image bytes this preview was made from.
+response StickerPack.cover.reason | string, required, nullable | Machine-readable code explaining the state, such as `media_expired`. Null when there is nothing to explain.
+response StickerPack.cover.retryable | boolean, required | True when asking for the download again can still succeed.
+response StickerPack.cover.sha256 | string, required, nullable | SHA-256 of the cached bytes, as lowercase hex. Null until they are cached.
+response StickerPack.cover.state | string, required | `pending` (not downloaded yet), `available` (downloaded and checked), `expired` (WeChat no longer has it) or `unsupported`.
+response StickerPack.cover.variant | string, required, values best|thumbnail|standard|original|normal|encoded | Which copy this is, as advertised by the message.
+response StickerPack.description | string, required, nullable | Optional official display description.
+response StickerPack.eligible | boolean, required, nullable | Whether this remote observation is in the validated eligible-free class. Null means eligibility has not been established by this view.
+response StickerPack.icon | object, required, nullable | Authenticated icon media reference, when indexed.
+response StickerPack.icon.accountId | string, required | ID of the account the attachment belongs to.
+response StickerPack.icon.actualVariant | string, required, nullable, values best|thumbnail|standard|original|normal|encoded | Which copy the cached bytes really are, once checked. Null until bytes are cached.
+response StickerPack.icon.advertisedByteLength | integer, nullable, min 0, format uint64 | Size in bytes the sender advertised, which can differ from the checked size. Omitted when the sender gave none, which does not mean the file is empty.
+response StickerPack.icon.animationFrames | integer, required, nullable, min 0, format uint32 | Number of frames when the attachment is an animated image. Null otherwise.
+response StickerPack.icon.autoDownloadAllowed | boolean, nullable | True when the account's current download setting allows this copy to be downloaded automatically.
+response StickerPack.icon.byteLength | integer, required, nullable, min 0, format uint64 | Size in bytes of the cached bytes that were checked. Null until they are cached.
+response StickerPack.icon.contentType | string, required, nullable | MIME type of the cached bytes. Null until they are cached.
+response StickerPack.icon.contentUrl | string, required, nullable | Path on the daemon to fetch the cached bytes from. Null until the attachment is available.
+response StickerPack.icon.expiresAt | integer, required, nullable, min 0, format uint64 | When WeChat's copy expires, as Unix time in seconds. Null when WeChat gave no expiry.
+response StickerPack.icon.filename | string, required, nullable | File name of the attachment, when it has one. Null otherwise.
+response StickerPack.icon.id | string, required | Attachment ID, used to fetch or request this copy.
+response StickerPack.icon.jobId | string, required, nullable | ID of the job downloading or sending this attachment. Null when there is none.
+response StickerPack.icon.kind | string, required, values image|file|video|voice|sticker | What kind of attachment this is.
+response StickerPack.icon.messageId | string, required, nullable | ID of the message the attachment belongs to. Null when it is not tied to a message.
+response StickerPack.icon.officialWriteback | string, required | Whether the downloaded copy was also saved into the official profile's own media folders: `complete`, `pending`, `blocked`, or `unsupported` for media that is never saved there.
+response StickerPack.icon.preview | object, nullable | A separately hashed still image. Its bytes never replace the source asset.
+response StickerPack.icon.preview.byteLength | integer, required, min 0, format uint64 | Size of the preview in bytes.
+response StickerPack.icon.preview.contentType | string, required | MIME type of the preview.
+response StickerPack.icon.preview.contentUrl | string, required | Path on the daemon to fetch the preview from.
+response StickerPack.icon.preview.filename | string, required | File name of the preview.
+response StickerPack.icon.preview.sha256 | string, required | SHA-256 of the preview bytes, as lowercase hex.
+response StickerPack.icon.preview.sourceSha256 | string, required | SHA-256 of the original image bytes this preview was made from.
+response StickerPack.icon.reason | string, required, nullable | Machine-readable code explaining the state, such as `media_expired`. Null when there is nothing to explain.
+response StickerPack.icon.retryable | boolean, required | True when asking for the download again can still succeed.
+response StickerPack.icon.sha256 | string, required, nullable | SHA-256 of the cached bytes, as lowercase hex. Null until they are cached.
+response StickerPack.icon.state | string, required | `pending` (not downloaded yet), `available` (downloaded and checked), `expired` (WeChat no longer has it) or `unsupported`.
+response StickerPack.icon.variant | string, required, values best|thumbnail|standard|original|normal|encoded | Which copy this is, as advertised by the message.
+response StickerPack.id | string, required | Official product identity.
+response StickerPack.membership | string, required | `added` or `not_added`, derived from the canonical account profile.
+response StickerPack.name | string, required | Official name, falling back to identity when absent locally.
+response StickerPack.stickerCount | integer, required, nullable, min 0, format uint32 | Item count when a complete detail read supplied it.
+response StickerPackList | object | A bounded public-feed page or the complete canonical account-added list.
+response StickerPackList.coverage | string, required | `available_feed` or `account_added`; neither claims a global inventory.
+response StickerPackList.items | array of object, required | Pack metadata in the view's order.
+response StickerPackList.items[] | object | Public pack metadata with membership separate from verified media readiness.
+response StickerPackList.items[].contentReadiness | string, required | Media readiness; `unverified` does not mean that cached bytes are missing.
+response StickerPackList.items[].cover | object, required, nullable | Authenticated cover media reference, when indexed.
+response StickerPackList.items[].cover.accountId | string, required | ID of the account the attachment belongs to.
+response StickerPackList.items[].cover.actualVariant | string, required, nullable, values best|thumbnail|standard|original|normal|encoded | Which copy the cached bytes really are, once checked. Null until bytes are cached.
+response StickerPackList.items[].cover.advertisedByteLength | integer, nullable, min 0, format uint64 | Size in bytes the sender advertised, which can differ from the checked size. Omitted when the sender gave none, which does not mean the file is empty.
+response StickerPackList.items[].cover.animationFrames | integer, required, nullable, min 0, format uint32 | Number of frames when the attachment is an animated image. Null otherwise.
+response StickerPackList.items[].cover.autoDownloadAllowed | boolean, nullable | True when the account's current download setting allows this copy to be downloaded automatically.
+response StickerPackList.items[].cover.byteLength | integer, required, nullable, min 0, format uint64 | Size in bytes of the cached bytes that were checked. Null until they are cached.
+response StickerPackList.items[].cover.contentType | string, required, nullable | MIME type of the cached bytes. Null until they are cached.
+response StickerPackList.items[].cover.contentUrl | string, required, nullable | Path on the daemon to fetch the cached bytes from. Null until the attachment is available.
+response StickerPackList.items[].cover.expiresAt | integer, required, nullable, min 0, format uint64 | When WeChat's copy expires, as Unix time in seconds. Null when WeChat gave no expiry.
+response StickerPackList.items[].cover.filename | string, required, nullable | File name of the attachment, when it has one. Null otherwise.
+response StickerPackList.items[].cover.id | string, required | Attachment ID, used to fetch or request this copy.
+response StickerPackList.items[].cover.jobId | string, required, nullable | ID of the job downloading or sending this attachment. Null when there is none.
+response StickerPackList.items[].cover.kind | string, required, values image|file|video|voice|sticker | What kind of attachment this is.
+response StickerPackList.items[].cover.messageId | string, required, nullable | ID of the message the attachment belongs to. Null when it is not tied to a message.
+response StickerPackList.items[].cover.officialWriteback | string, required | Whether the downloaded copy was also saved into the official profile's own media folders: `complete`, `pending`, `blocked`, or `unsupported` for media that is never saved there.
+response StickerPackList.items[].cover.preview | object, nullable | A separately hashed still image. Its bytes never replace the source asset.
+response StickerPackList.items[].cover.preview.byteLength | integer, required, min 0, format uint64 | Size of the preview in bytes.
+response StickerPackList.items[].cover.preview.contentType | string, required | MIME type of the preview.
+response StickerPackList.items[].cover.preview.contentUrl | string, required | Path on the daemon to fetch the preview from.
+response StickerPackList.items[].cover.preview.filename | string, required | File name of the preview.
+response StickerPackList.items[].cover.preview.sha256 | string, required | SHA-256 of the preview bytes, as lowercase hex.
+response StickerPackList.items[].cover.preview.sourceSha256 | string, required | SHA-256 of the original image bytes this preview was made from.
+response StickerPackList.items[].cover.reason | string, required, nullable | Machine-readable code explaining the state, such as `media_expired`. Null when there is nothing to explain.
+response StickerPackList.items[].cover.retryable | boolean, required | True when asking for the download again can still succeed.
+response StickerPackList.items[].cover.sha256 | string, required, nullable | SHA-256 of the cached bytes, as lowercase hex. Null until they are cached.
+response StickerPackList.items[].cover.state | string, required | `pending` (not downloaded yet), `available` (downloaded and checked), `expired` (WeChat no longer has it) or `unsupported`.
+response StickerPackList.items[].cover.variant | string, required, values best|thumbnail|standard|original|normal|encoded | Which copy this is, as advertised by the message.
+response StickerPackList.items[].description | string, required, nullable | Optional official display description.
+response StickerPackList.items[].eligible | boolean, required, nullable | Whether this remote observation is in the validated eligible-free class. Null means eligibility has not been established by this view.
+response StickerPackList.items[].icon | object, required, nullable | Authenticated icon media reference, when indexed.
+response StickerPackList.items[].icon.accountId | string, required | ID of the account the attachment belongs to.
+response StickerPackList.items[].icon.actualVariant | string, required, nullable, values best|thumbnail|standard|original|normal|encoded | Which copy the cached bytes really are, once checked. Null until bytes are cached.
+response StickerPackList.items[].icon.advertisedByteLength | integer, nullable, min 0, format uint64 | Size in bytes the sender advertised, which can differ from the checked size. Omitted when the sender gave none, which does not mean the file is empty.
+response StickerPackList.items[].icon.animationFrames | integer, required, nullable, min 0, format uint32 | Number of frames when the attachment is an animated image. Null otherwise.
+response StickerPackList.items[].icon.autoDownloadAllowed | boolean, nullable | True when the account's current download setting allows this copy to be downloaded automatically.
+response StickerPackList.items[].icon.byteLength | integer, required, nullable, min 0, format uint64 | Size in bytes of the cached bytes that were checked. Null until they are cached.
+response StickerPackList.items[].icon.contentType | string, required, nullable | MIME type of the cached bytes. Null until they are cached.
+response StickerPackList.items[].icon.contentUrl | string, required, nullable | Path on the daemon to fetch the cached bytes from. Null until the attachment is available.
+response StickerPackList.items[].icon.expiresAt | integer, required, nullable, min 0, format uint64 | When WeChat's copy expires, as Unix time in seconds. Null when WeChat gave no expiry.
+response StickerPackList.items[].icon.filename | string, required, nullable | File name of the attachment, when it has one. Null otherwise.
+response StickerPackList.items[].icon.id | string, required | Attachment ID, used to fetch or request this copy.
+response StickerPackList.items[].icon.jobId | string, required, nullable | ID of the job downloading or sending this attachment. Null when there is none.
+response StickerPackList.items[].icon.kind | string, required, values image|file|video|voice|sticker | What kind of attachment this is.
+response StickerPackList.items[].icon.messageId | string, required, nullable | ID of the message the attachment belongs to. Null when it is not tied to a message.
+response StickerPackList.items[].icon.officialWriteback | string, required | Whether the downloaded copy was also saved into the official profile's own media folders: `complete`, `pending`, `blocked`, or `unsupported` for media that is never saved there.
+response StickerPackList.items[].icon.preview | object, nullable | A separately hashed still image. Its bytes never replace the source asset.
+response StickerPackList.items[].icon.preview.byteLength | integer, required, min 0, format uint64 | Size of the preview in bytes.
+response StickerPackList.items[].icon.preview.contentType | string, required | MIME type of the preview.
+response StickerPackList.items[].icon.preview.contentUrl | string, required | Path on the daemon to fetch the preview from.
+response StickerPackList.items[].icon.preview.filename | string, required | File name of the preview.
+response StickerPackList.items[].icon.preview.sha256 | string, required | SHA-256 of the preview bytes, as lowercase hex.
+response StickerPackList.items[].icon.preview.sourceSha256 | string, required | SHA-256 of the original image bytes this preview was made from.
+response StickerPackList.items[].icon.reason | string, required, nullable | Machine-readable code explaining the state, such as `media_expired`. Null when there is nothing to explain.
+response StickerPackList.items[].icon.retryable | boolean, required | True when asking for the download again can still succeed.
+response StickerPackList.items[].icon.sha256 | string, required, nullable | SHA-256 of the cached bytes, as lowercase hex. Null until they are cached.
+response StickerPackList.items[].icon.state | string, required | `pending` (not downloaded yet), `available` (downloaded and checked), `expired` (WeChat no longer has it) or `unsupported`.
+response StickerPackList.items[].icon.variant | string, required, values best|thumbnail|standard|original|normal|encoded | Which copy this is, as advertised by the message.
+response StickerPackList.items[].id | string, required | Official product identity.
+response StickerPackList.items[].membership | string, required | `added` or `not_added`, derived from the canonical account profile.
+response StickerPackList.items[].name | string, required | Official name, falling back to identity when absent locally.
+response StickerPackList.items[].stickerCount | integer, required, nullable, min 0, format uint32 | Item count when a complete detail read supplied it.
+response StickerPackList.nextCursor | string, required, nullable | Opaque continuation for the available feed; null when complete.
+response StickerPackSticker | object | One item of an official pack. Captions are optional official metadata.
+response StickerPackSticker.caption | string, required, nullable | Caption selected by exact requested locale then literal default fallback.
+response StickerPackSticker.captions | array of array, required, items min items 2, items max items 2 | All supplied official locale/text pairs.
+response StickerPackSticker.id | string, required | Original content identity.
+response StickerPackSticker.ordinal | integer, required, min 0, format uint32 | One-based pack ordinal.
+response StickerPackSticker.original | object, required, nullable | Verified original metadata and authenticated media reference, when indexed.
+response StickerPackSticker.original.accountId | string, required | ID of the account the attachment belongs to.
+response StickerPackSticker.original.actualVariant | string, required, nullable, values best|thumbnail|standard|original|normal|encoded | Which copy the cached bytes really are, once checked. Null until bytes are cached.
+response StickerPackSticker.original.advertisedByteLength | integer, nullable, min 0, format uint64 | Size in bytes the sender advertised, which can differ from the checked size. Omitted when the sender gave none, which does not mean the file is empty.
+response StickerPackSticker.original.animationFrames | integer, required, nullable, min 0, format uint32 | Number of frames when the attachment is an animated image. Null otherwise.
+response StickerPackSticker.original.autoDownloadAllowed | boolean, nullable | True when the account's current download setting allows this copy to be downloaded automatically.
+response StickerPackSticker.original.byteLength | integer, required, nullable, min 0, format uint64 | Size in bytes of the cached bytes that were checked. Null until they are cached.
+response StickerPackSticker.original.contentType | string, required, nullable | MIME type of the cached bytes. Null until they are cached.
+response StickerPackSticker.original.contentUrl | string, required, nullable | Path on the daemon to fetch the cached bytes from. Null until the attachment is available.
+response StickerPackSticker.original.expiresAt | integer, required, nullable, min 0, format uint64 | When WeChat's copy expires, as Unix time in seconds. Null when WeChat gave no expiry.
+response StickerPackSticker.original.filename | string, required, nullable | File name of the attachment, when it has one. Null otherwise.
+response StickerPackSticker.original.id | string, required | Attachment ID, used to fetch or request this copy.
+response StickerPackSticker.original.jobId | string, required, nullable | ID of the job downloading or sending this attachment. Null when there is none.
+response StickerPackSticker.original.kind | string, required, values image|file|video|voice|sticker | What kind of attachment this is.
+response StickerPackSticker.original.messageId | string, required, nullable | ID of the message the attachment belongs to. Null when it is not tied to a message.
+response StickerPackSticker.original.officialWriteback | string, required | Whether the downloaded copy was also saved into the official profile's own media folders: `complete`, `pending`, `blocked`, or `unsupported` for media that is never saved there.
+response StickerPackSticker.original.preview | object, nullable | A separately hashed still image. Its bytes never replace the source asset.
+response StickerPackSticker.original.preview.byteLength | integer, required, min 0, format uint64 | Size of the preview in bytes.
+response StickerPackSticker.original.preview.contentType | string, required | MIME type of the preview.
+response StickerPackSticker.original.preview.contentUrl | string, required | Path on the daemon to fetch the preview from.
+response StickerPackSticker.original.preview.filename | string, required | File name of the preview.
+response StickerPackSticker.original.preview.sha256 | string, required | SHA-256 of the preview bytes, as lowercase hex.
+response StickerPackSticker.original.preview.sourceSha256 | string, required | SHA-256 of the original image bytes this preview was made from.
+response StickerPackSticker.original.reason | string, required, nullable | Machine-readable code explaining the state, such as `media_expired`. Null when there is nothing to explain.
+response StickerPackSticker.original.retryable | boolean, required | True when asking for the download again can still succeed.
+response StickerPackSticker.original.sha256 | string, required, nullable | SHA-256 of the cached bytes, as lowercase hex. Null until they are cached.
+response StickerPackSticker.original.state | string, required | `pending` (not downloaded yet), `available` (downloaded and checked), `expired` (WeChat no longer has it) or `unsupported`.
+response StickerPackSticker.original.variant | string, required, values best|thumbnail|standard|original|normal|encoded | Which copy this is, as advertised by the message.
+response StickerPackSticker.packId | string, required | Product identity.
+response StickerPackSticker.thumbnail | object, required, nullable | Thumbnail metadata and authenticated media reference, when indexed.
+response StickerPackSticker.thumbnail.accountId | string, required | ID of the account the attachment belongs to.
+response StickerPackSticker.thumbnail.actualVariant | string, required, nullable, values best|thumbnail|standard|original|normal|encoded | Which copy the cached bytes really are, once checked. Null until bytes are cached.
+response StickerPackSticker.thumbnail.advertisedByteLength | integer, nullable, min 0, format uint64 | Size in bytes the sender advertised, which can differ from the checked size. Omitted when the sender gave none, which does not mean the file is empty.
+response StickerPackSticker.thumbnail.animationFrames | integer, required, nullable, min 0, format uint32 | Number of frames when the attachment is an animated image. Null otherwise.
+response StickerPackSticker.thumbnail.autoDownloadAllowed | boolean, nullable | True when the account's current download setting allows this copy to be downloaded automatically.
+response StickerPackSticker.thumbnail.byteLength | integer, required, nullable, min 0, format uint64 | Size in bytes of the cached bytes that were checked. Null until they are cached.
+response StickerPackSticker.thumbnail.contentType | string, required, nullable | MIME type of the cached bytes. Null until they are cached.
+response StickerPackSticker.thumbnail.contentUrl | string, required, nullable | Path on the daemon to fetch the cached bytes from. Null until the attachment is available.
+response StickerPackSticker.thumbnail.expiresAt | integer, required, nullable, min 0, format uint64 | When WeChat's copy expires, as Unix time in seconds. Null when WeChat gave no expiry.
+response StickerPackSticker.thumbnail.filename | string, required, nullable | File name of the attachment, when it has one. Null otherwise.
+response StickerPackSticker.thumbnail.id | string, required | Attachment ID, used to fetch or request this copy.
+response StickerPackSticker.thumbnail.jobId | string, required, nullable | ID of the job downloading or sending this attachment. Null when there is none.
+response StickerPackSticker.thumbnail.kind | string, required, values image|file|video|voice|sticker | What kind of attachment this is.
+response StickerPackSticker.thumbnail.messageId | string, required, nullable | ID of the message the attachment belongs to. Null when it is not tied to a message.
+response StickerPackSticker.thumbnail.officialWriteback | string, required | Whether the downloaded copy was also saved into the official profile's own media folders: `complete`, `pending`, `blocked`, or `unsupported` for media that is never saved there.
+response StickerPackSticker.thumbnail.preview | object, nullable | A separately hashed still image. Its bytes never replace the source asset.
+response StickerPackSticker.thumbnail.preview.byteLength | integer, required, min 0, format uint64 | Size of the preview in bytes.
+response StickerPackSticker.thumbnail.preview.contentType | string, required | MIME type of the preview.
+response StickerPackSticker.thumbnail.preview.contentUrl | string, required | Path on the daemon to fetch the preview from.
+response StickerPackSticker.thumbnail.preview.filename | string, required | File name of the preview.
+response StickerPackSticker.thumbnail.preview.sha256 | string, required | SHA-256 of the preview bytes, as lowercase hex.
+response StickerPackSticker.thumbnail.preview.sourceSha256 | string, required | SHA-256 of the original image bytes this preview was made from.
+response StickerPackSticker.thumbnail.reason | string, required, nullable | Machine-readable code explaining the state, such as `media_expired`. Null when there is nothing to explain.
+response StickerPackSticker.thumbnail.retryable | boolean, required | True when asking for the download again can still succeed.
+response StickerPackSticker.thumbnail.sha256 | string, required, nullable | SHA-256 of the cached bytes, as lowercase hex. Null until they are cached.
+response StickerPackSticker.thumbnail.state | string, required | `pending` (not downloaded yet), `available` (downloaded and checked), `expired` (WeChat no longer has it) or `unsupported`.
+response StickerPackSticker.thumbnail.variant | string, required, values best|thumbnail|standard|original|normal|encoded | Which copy this is, as advertised by the message.
+response StickerPackStickers | object | Complete supplied pack items, with no acquisition started by the read.
+response StickerPackStickers.items | array of object, required | Ordered pack contents.
+response StickerPackStickers.items[] | object | One item of an official pack. Captions are optional official metadata.
+response StickerPackStickers.items[].caption | string, required, nullable | Caption selected by exact requested locale then literal default fallback.
+response StickerPackStickers.items[].captions | array of array, required, items min items 2, items max items 2 | All supplied official locale/text pairs.
+response StickerPackStickers.items[].id | string, required | Original content identity.
+response StickerPackStickers.items[].ordinal | integer, required, min 0, format uint32 | One-based pack ordinal.
+response StickerPackStickers.items[].original | object, required, nullable | Verified original metadata and authenticated media reference, when indexed.
+response StickerPackStickers.items[].original.accountId | string, required | ID of the account the attachment belongs to.
+response StickerPackStickers.items[].original.actualVariant | string, required, nullable, values best|thumbnail|standard|original|normal|encoded | Which copy the cached bytes really are, once checked. Null until bytes are cached.
+response StickerPackStickers.items[].original.advertisedByteLength | integer, nullable, min 0, format uint64 | Size in bytes the sender advertised, which can differ from the checked size. Omitted when the sender gave none, which does not mean the file is empty.
+response StickerPackStickers.items[].original.animationFrames | integer, required, nullable, min 0, format uint32 | Number of frames when the attachment is an animated image. Null otherwise.
+response StickerPackStickers.items[].original.autoDownloadAllowed | boolean, nullable | True when the account's current download setting allows this copy to be downloaded automatically.
+response StickerPackStickers.items[].original.byteLength | integer, required, nullable, min 0, format uint64 | Size in bytes of the cached bytes that were checked. Null until they are cached.
+response StickerPackStickers.items[].original.contentType | string, required, nullable | MIME type of the cached bytes. Null until they are cached.
+response StickerPackStickers.items[].original.contentUrl | string, required, nullable | Path on the daemon to fetch the cached bytes from. Null until the attachment is available.
+response StickerPackStickers.items[].original.expiresAt | integer, required, nullable, min 0, format uint64 | When WeChat's copy expires, as Unix time in seconds. Null when WeChat gave no expiry.
+response StickerPackStickers.items[].original.filename | string, required, nullable | File name of the attachment, when it has one. Null otherwise.
+response StickerPackStickers.items[].original.id | string, required | Attachment ID, used to fetch or request this copy.
+response StickerPackStickers.items[].original.jobId | string, required, nullable | ID of the job downloading or sending this attachment. Null when there is none.
+response StickerPackStickers.items[].original.kind | string, required, values image|file|video|voice|sticker | What kind of attachment this is.
+response StickerPackStickers.items[].original.messageId | string, required, nullable | ID of the message the attachment belongs to. Null when it is not tied to a message.
+response StickerPackStickers.items[].original.officialWriteback | string, required | Whether the downloaded copy was also saved into the official profile's own media folders: `complete`, `pending`, `blocked`, or `unsupported` for media that is never saved there.
+response StickerPackStickers.items[].original.preview | object, nullable | A separately hashed still image. Its bytes never replace the source asset.
+response StickerPackStickers.items[].original.preview.byteLength | integer, required, min 0, format uint64 | Size of the preview in bytes.
+response StickerPackStickers.items[].original.preview.contentType | string, required | MIME type of the preview.
+response StickerPackStickers.items[].original.preview.contentUrl | string, required | Path on the daemon to fetch the preview from.
+response StickerPackStickers.items[].original.preview.filename | string, required | File name of the preview.
+response StickerPackStickers.items[].original.preview.sha256 | string, required | SHA-256 of the preview bytes, as lowercase hex.
+response StickerPackStickers.items[].original.preview.sourceSha256 | string, required | SHA-256 of the original image bytes this preview was made from.
+response StickerPackStickers.items[].original.reason | string, required, nullable | Machine-readable code explaining the state, such as `media_expired`. Null when there is nothing to explain.
+response StickerPackStickers.items[].original.retryable | boolean, required | True when asking for the download again can still succeed.
+response StickerPackStickers.items[].original.sha256 | string, required, nullable | SHA-256 of the cached bytes, as lowercase hex. Null until they are cached.
+response StickerPackStickers.items[].original.state | string, required | `pending` (not downloaded yet), `available` (downloaded and checked), `expired` (WeChat no longer has it) or `unsupported`.
+response StickerPackStickers.items[].original.variant | string, required, values best|thumbnail|standard|original|normal|encoded | Which copy this is, as advertised by the message.
+response StickerPackStickers.items[].packId | string, required | Product identity.
+response StickerPackStickers.items[].thumbnail | object, required, nullable | Thumbnail metadata and authenticated media reference, when indexed.
+response StickerPackStickers.items[].thumbnail.accountId | string, required | ID of the account the attachment belongs to.
+response StickerPackStickers.items[].thumbnail.actualVariant | string, required, nullable, values best|thumbnail|standard|original|normal|encoded | Which copy the cached bytes really are, once checked. Null until bytes are cached.
+response StickerPackStickers.items[].thumbnail.advertisedByteLength | integer, nullable, min 0, format uint64 | Size in bytes the sender advertised, which can differ from the checked size. Omitted when the sender gave none, which does not mean the file is empty.
+response StickerPackStickers.items[].thumbnail.animationFrames | integer, required, nullable, min 0, format uint32 | Number of frames when the attachment is an animated image. Null otherwise.
+response StickerPackStickers.items[].thumbnail.autoDownloadAllowed | boolean, nullable | True when the account's current download setting allows this copy to be downloaded automatically.
+response StickerPackStickers.items[].thumbnail.byteLength | integer, required, nullable, min 0, format uint64 | Size in bytes of the cached bytes that were checked. Null until they are cached.
+response StickerPackStickers.items[].thumbnail.contentType | string, required, nullable | MIME type of the cached bytes. Null until they are cached.
+response StickerPackStickers.items[].thumbnail.contentUrl | string, required, nullable | Path on the daemon to fetch the cached bytes from. Null until the attachment is available.
+response StickerPackStickers.items[].thumbnail.expiresAt | integer, required, nullable, min 0, format uint64 | When WeChat's copy expires, as Unix time in seconds. Null when WeChat gave no expiry.
+response StickerPackStickers.items[].thumbnail.filename | string, required, nullable | File name of the attachment, when it has one. Null otherwise.
+response StickerPackStickers.items[].thumbnail.id | string, required | Attachment ID, used to fetch or request this copy.
+response StickerPackStickers.items[].thumbnail.jobId | string, required, nullable | ID of the job downloading or sending this attachment. Null when there is none.
+response StickerPackStickers.items[].thumbnail.kind | string, required, values image|file|video|voice|sticker | What kind of attachment this is.
+response StickerPackStickers.items[].thumbnail.messageId | string, required, nullable | ID of the message the attachment belongs to. Null when it is not tied to a message.
+response StickerPackStickers.items[].thumbnail.officialWriteback | string, required | Whether the downloaded copy was also saved into the official profile's own media folders: `complete`, `pending`, `blocked`, or `unsupported` for media that is never saved there.
+response StickerPackStickers.items[].thumbnail.preview | object, nullable | A separately hashed still image. Its bytes never replace the source asset.
+response StickerPackStickers.items[].thumbnail.preview.byteLength | integer, required, min 0, format uint64 | Size of the preview in bytes.
+response StickerPackStickers.items[].thumbnail.preview.contentType | string, required | MIME type of the preview.
+response StickerPackStickers.items[].thumbnail.preview.contentUrl | string, required | Path on the daemon to fetch the preview from.
+response StickerPackStickers.items[].thumbnail.preview.filename | string, required | File name of the preview.
+response StickerPackStickers.items[].thumbnail.preview.sha256 | string, required | SHA-256 of the preview bytes, as lowercase hex.
+response StickerPackStickers.items[].thumbnail.preview.sourceSha256 | string, required | SHA-256 of the original image bytes this preview was made from.
+response StickerPackStickers.items[].thumbnail.reason | string, required, nullable | Machine-readable code explaining the state, such as `media_expired`. Null when there is nothing to explain.
+response StickerPackStickers.items[].thumbnail.retryable | boolean, required | True when asking for the download again can still succeed.
+response StickerPackStickers.items[].thumbnail.sha256 | string, required, nullable | SHA-256 of the cached bytes, as lowercase hex. Null until they are cached.
+response StickerPackStickers.items[].thumbnail.state | string, required | `pending` (not downloaded yet), `available` (downloaded and checked), `expired` (WeChat no longer has it) or `unsupported`.
+response StickerPackStickers.items[].thumbnail.variant | string, required, values best|thumbnail|standard|original|normal|encoded | Which copy this is, as advertised by the message.
+response StickerPackStickers.packId | string, required | Product identity.
 route DELETE /v1/access-tokens/{id} | scope owner token, response untyped | Revoke an API token so it stops working.
 route DELETE /v1/accounts/{a} | scope admin, request NativeAccountRemovalRequest, response NativeAccountRemoval, sdk response NativeAccountRemoval | Unregister a signed-out account. Its local files are kept. The body must repeat the account ID to confirm.
+route DELETE /v1/accounts/{a}/custom-stickers/{id} | scope send, idempotency key required, response MediaJob, status 202, sdk response MediaJob | Remove Saved membership asynchronously using If-Match.
 route DELETE /v1/accounts/{a}/groups/{id}/announcement | scope admin, idempotency key required, response NativeOperation, status 202, sdk response NativeOperation | Clear the announcement of a group.
 route DELETE /v1/accounts/{a}/groups/{room}/members | scope admin, idempotency key required, request NativeGroupMembersRequest, response NativeOperation, status 202, sdk response NativeOperation | Remove members from a group.
 route DELETE /v1/accounts/{a}/login-attempts/{id} | scope varies, response NativeOperation, sdk response NativeOperation | Cancel a login attempt. Scope: Needs read, login, media or send to look the operation up, then its kind decides: login, logout and forget_credentials need login; media-writeback needs media; message_recall needs send; sync and metadata need read; every other kind needs admin.
 route DELETE /v1/accounts/{a}/operations/{id} | scope varies, response NativeOperation, sdk response NativeOperation | Ask a background operation to stop. Scope: Needs read, login, media or send to look the operation up, then its kind decides: login, logout and forget_credentials need login; media-writeback needs media; message_recall needs send; sync and metadata need read; every other kind needs admin.
+route DELETE /v1/accounts/{a}/sticker-packs/{id}/membership | scope send, idempotency key required, response MediaJob, status 202, sdk response MediaJob | Remove account membership and reconcile canonical pack storage asynchronously.
 route DELETE /v1/tokens/{id} | scope owner token, response untyped | Revoke an API token so it stops working.
 route GET /health | scope none, response untyped | Report that the daemon is running. This is the only route that needs no token.
 route GET /v1/access-tokens | scope owner token, response untyped | List the API tokens that have been issued, without their secret values.
@@ -730,6 +1099,8 @@ route GET /v1/accounts/{a}/calls/{call}/media | scope calls, upgrade websocket, 
 route GET /v1/accounts/{a}/capabilities | scope read, response untyped | List what this daemon can do for the account, such as media limits and group changes.
 route GET /v1/accounts/{a}/contacts | scope read, query PageQuery, response NativeContactPage, sdk response NativePage<NativeContact> | List the saved contacts.
 route GET /v1/accounts/{a}/contacts/{id} | scope read, response NativeContact, sdk response NativeContact | Show one saved contact.
+route GET /v1/accounts/{a}/custom-stickers | scope media, response CustomStickerList, sdk response CustomStickerList | Read ordered Saved membership from the official profile without a network refresh.
+route GET /v1/accounts/{a}/custom-stickers/{id} | scope media, response CustomSticker, sdk response CustomSticker | Read one Saved sticker by its stable identity.
 route GET /v1/accounts/{a}/event-log | scope read, query EventQuery, response untyped or sse NativeEvent, sdk response NativeEvent | Read events after a cursor as a JSON page. With Accept: text/event-stream it streams them instead.
 route GET /v1/accounts/{a}/events | scope read, query EventQuery, response untyped or sse NativeEvent, sdk response NativeEvent | Read events after a cursor as a JSON page. With Accept: text/event-stream it streams them instead.
 route GET /v1/accounts/{a}/events/stream | scope read, query EventQuery, response sse NativeEvent, sdk response NativeEvent | Stream events as server-sent events, resuming after a cursor or Last-Event-ID.
@@ -739,7 +1110,7 @@ route GET /v1/accounts/{a}/groups/{id} | scope read, response NativeGroup, sdk r
 route GET /v1/accounts/{a}/groups/{id}/members/{username} | scope read, response NativeGroupMemberLookup, sdk response NativeGroupMemberLookup | Show one member of a group.
 route GET /v1/accounts/{a}/groups/{room}/lookup | scope read, query RoomQuery, response untyped | Look up the saved details of one group, optionally at a known member-list version.
 route GET /v1/accounts/{a}/groups/{room}/members | scope read, query PageQuery, response NativeGroupMemberPage, sdk response NativePage<NativeGroupMember> | List the members of a group.
-route GET /v1/accounts/{a}/jobs/{id} | scope varies, response untyped, sdk response MediaJob | Show the state of a media or send job. Scope: Needs media or send, then the job kind decides: send jobs need send and every other job needs media.
+route GET /v1/accounts/{a}/jobs/{id} | scope varies, response untyped, sdk response MediaJob | Show the state of a media or send job. Scope: Needs media or send, then the job kind decides: send, sticker_saved and sticker_pack jobs need send; other jobs need media.
 route GET /v1/accounts/{a}/login-attempts/{id} | scope varies, response NativeOperation, sdk response NativeOperation | Show the state of a login attempt. Scope: Needs read, login, media or send to look the operation up, then its kind decides: login, logout and forget_credentials need login; media-writeback needs media; message_recall needs send; sync and metadata need read; every other kind needs admin.
 route GET /v1/accounts/{a}/login-attempts/{id}/qr | scope login, query QrQuery, response image/png | Get the current QR code of a login attempt as a PNG image.
 route GET /v1/accounts/{a}/media/{id} | scope media, response untyped, sdk response MediaAsset | Show one media asset and whether its bytes are available.
@@ -754,12 +1125,19 @@ route GET /v1/accounts/{a}/schema | scope read, response untyped | Describe the 
 route GET /v1/accounts/{a}/sends/by-idempotency-key | scope send, query SendKeyQuery, response untyped, sdk response NativeSendIntent|MediaJob | Find a send by the Idempotency-Key it was submitted with.
 route GET /v1/accounts/{a}/sends/{id} | scope send, response untyped, sdk response NativeSendIntent | Show the state of a send, including media sends.
 route GET /v1/accounts/{a}/settings | scope read, response AccountSettings, sdk response AccountSettings | Show the account settings.
+route GET /v1/accounts/{a}/sticker-collections | scope media, response StickerCollections, sdk response StickerCollections | Derive Saved and every added official pack for the composer picker.
+route GET /v1/accounts/{a}/sticker-packs | scope media, query StickerPackQuery, response StickerPackList, sdk response StickerPackList | Read one available-feed page, or the complete canonical account-added list.
+route GET /v1/accounts/{a}/sticker-packs/{id} | scope media, response StickerPack, sdk response StickerPack | Read pack metadata and membership independently of media readiness.
+route GET /v1/accounts/{a}/sticker-packs/{id}/stickers | scope media, query StickerLanguageQuery, response StickerPackStickers, sdk response StickerPackStickers | Read ordered pack item identities, optional captions and media references.
+route GET /v1/accounts/{a}/sticker-packs/{id}/stickers/{stickerId} | scope media, query StickerLanguageQuery, response StickerPackSticker, sdk response StickerPackSticker | Read one pack item without starting a media acquisition.
+route GET /v1/accounts/{a}/sticker-preparations/{id} | scope media, response MediaJob, sdk response MediaJob | Read a preparation job and its verified media references.
 route GET /v1/accounts/{a}/threads | scope read, query PageQuery, response NativeThreadPage, sdk response NativePage<NativeThread> | List the chats, newest activity first.
 route GET /v1/accounts/{a}/threads/{id} | scope read, response NativeThread, sdk response NativeThread | Show one chat.
 route GET /v1/accounts/{a}/threads/{thread}/messages | scope read, query PageQuery, response NativeMessagePage, sdk response NativePage<NativeMessage> | List the saved messages of one chat, newest first.
 route GET /v1/status | scope read, response NativeStatus, sdk response NativeStatus | Show the daemon identity, version, data directory and state.
 route GET /v1/tokens | scope owner token, response untyped | List the API tokens that have been issued, without their secret values.
 route PATCH /v1/accounts/{a} | scope admin, request UpdateAccountRequest, response untyped | Change an account alias or whether it connects automatically when the daemon starts.
+route PATCH /v1/accounts/{a}/custom-stickers/{id} | scope send, idempotency key required, request MoveCustomStickerRequest, response MediaJob, status 202, sdk request MoveCustomStickerRequest, sdk response MediaJob | Change Saved placement using If-Match and a relative anchor.
 route PATCH /v1/accounts/{a}/groups/{id} | scope admin, idempotency key required, request NativeGroupNameRequest, response NativeOperation, status 202, sdk response NativeOperation | Rename a group.
 route PATCH /v1/accounts/{a}/settings | scope media, request AccountSettings, response AccountSettings, sdk request AccountSettings, sdk response AccountSettings | Replace the account settings, such as the largest file to download automatically.
 route POST /v1/access-tokens | scope owner token, request TokenRequest, response untyped | Create an API token limited to chosen accounts and scopes. The secret token value is returned only in this response.
@@ -773,6 +1151,7 @@ route POST /v1/accounts/{a}/consumers/{consumer}/ack | scope read, request Event
 route POST /v1/accounts/{a}/contact-sync | scope read, response untyped, status 202, sdk response NativeOperation | Start syncing the contact catalog from WeChat. Poll the returned operation.
 route POST /v1/accounts/{a}/contacts/lookup | scope read, request ContactLookupRequest, response untyped | Look up the saved details of several contacts by ID.
 route POST /v1/accounts/{a}/contacts/{id}/refresh | scope read, response untyped, status 202, sdk response NativeOperation | Ask WeChat for the latest details of one contact. Poll the returned operation.
+route POST /v1/accounts/{a}/custom-stickers | scope send, idempotency key required, request AddCustomStickerRequest, response MediaJob, status 202, sdk request AddCustomStickerRequest, sdk response MediaJob | Save a prepared or received sticker asynchronously without sending a message.
 route POST /v1/accounts/{a}/disconnect | scope login, response untyped | Close the connection to WeChat but keep the saved login trust.
 route POST /v1/accounts/{a}/forget-credentials | scope login, idempotency key required, request NativeForgetRequest, response untyped, status 202, sdk response NativeOperation | Delete the saved login credentials of the account. The body must confirm.
 route POST /v1/accounts/{a}/group-sync | scope read, response untyped, status 202, sdk response NativeOperation | Start syncing the group catalog from WeChat. Poll the returned operation.
@@ -781,8 +1160,8 @@ route POST /v1/accounts/{a}/groups/{id}/leave | scope admin, idempotency key req
 route POST /v1/accounts/{a}/groups/{id}/members/refresh | scope read, response untyped, status 202, sdk response NativeOperation | Ask WeChat for the latest member list of one group. Poll the returned operation.
 route POST /v1/accounts/{a}/groups/{id}/refresh | scope read, response untyped, status 202, sdk response NativeOperation | Ask WeChat for the latest details of one group. Poll the returned operation.
 route POST /v1/accounts/{a}/groups/{room}/members | scope admin, idempotency key required, request NativeGroupMembersRequest, response NativeOperation, status 202, sdk response NativeOperation | Add members to a group.
-route POST /v1/accounts/{a}/jobs/{id}/cancel | scope varies, response untyped, sdk response MediaJob | Ask a media or send job to stop. Scope: Needs media or send, then the job kind decides: send jobs need send and every other job needs media.
-route POST /v1/accounts/{a}/jobs/{id}/retry | scope varies, request NativeMediaJobRetryRequest (optional), response untyped, status 202, sdk response MediaJob | Retry a failed job from the start. The body is optional and cannot ask to reuse a finished upload. Scope: Needs media or send, then the job kind decides: send jobs need send and every other job needs media.
+route POST /v1/accounts/{a}/jobs/{id}/cancel | scope varies, response untyped, sdk response MediaJob | Ask a media or send job to stop. Scope: Needs media or send, then the job kind decides: send, sticker_saved and sticker_pack jobs need send; other jobs need media.
+route POST /v1/accounts/{a}/jobs/{id}/retry | scope varies, request NativeMediaJobRetryRequest (optional), response untyped, status 202, sdk response MediaJob | Retry a failed job from the start. The body is optional and cannot ask to reuse a finished upload. Scope: Needs media or send, then the job kind decides: send, sticker_saved and sticker_pack jobs need send; other jobs need media.
 route POST /v1/accounts/{a}/jobs/{id}/retry-completed-upload | scope send, request NativeMediaJobRetryRequest, response untyped, status 202, sdk request NativeMediaJobRetryRequest, sdk response MediaJob | Retry a send job but reuse the upload that already finished. The body must set reuseCompletedUpload to true.
 route POST /v1/accounts/{a}/login-attempts | scope login, idempotency key optional, request LoginRequest, response NativeOperation, status 202, sdk request LoginRequest, sdk response NativeOperation | Start signing the account in with a saved device or a QR code. Poll the returned operation.
 route POST /v1/accounts/{a}/login-attempts/{id}/cancel | scope varies, response NativeOperation, sdk response NativeOperation | Cancel a login attempt. Scope: Needs read, login, media or send to look the operation up, then its kind decides: login, logout and forget_credentials need login; media-writeback needs media; message_recall needs send; sync and metadata need read; every other kind needs admin.
@@ -792,8 +1171,11 @@ route POST /v1/accounts/{a}/media/lookup | scope media, request NativeMediaBatch
 route POST /v1/accounts/{a}/messages/{id}/media-transfers | scope media, request MediaTransferRequest, response untyped, status 202, sdk request MediaTransferRequest, sdk response MediaJob | Start downloading one media file of a message. Poll the returned job.
 route POST /v1/accounts/{a}/messages/{id}/recall | scope send, idempotency key required, request NativeRecallRequest, response NativeOperation, status 202, sdk response NativeOperation | Recall a message you sent, identified by its exact server ID. Poll the returned operation.
 route POST /v1/accounts/{a}/projection/recover | scope admin, response untyped | Repair the account profile from records the daemon already holds. It never resends messages or starts transfers.
-route POST /v1/accounts/{a}/sends | scope varies, idempotency key required, request untyped, response untyped, status 202, sdk request NativeTextSendRequest|ShareSendRequest|MediaSendRequest, sdk response NativeSendIntent|MediaJob | Send a text, share card or staged media message. The body shape follows its kind; the same Idempotency-Key returns the original send. Scope: send, plus read when a text send quotes a message.
+route POST /v1/accounts/{a}/sends | scope varies, idempotency key required, request untyped, response untyped, status 202, sdk request NativeTextSendRequest|ShareSendRequest|MediaSendRequest|StickerSendRequest, sdk response NativeSendIntent|MediaJob | Send text, a share card, staged media or a stable sticker reference. The body shape follows its kind; the same Idempotency-Key returns the original send. Scope: send, plus read when a text send quotes a message.
 route POST /v1/accounts/{a}/sends/{id}/cancel | scope send, response untyped, sdk response NativeSendIntent|MediaJob | Cancel a send that has not gone out yet.
+route POST /v1/accounts/{a}/sticker-downloads | scope media, idempotency key required, request StickerDownloadRequest, response MediaJob, status 202, sdk request StickerDownloadRequest, sdk response MediaJob | Acquire one Saved original, one pack item, one selected pack or an advertised preview asset, independently of membership.
+route POST /v1/accounts/{a}/sticker-preparations | scope send, idempotency key required, request StickerPreparationRequest, response MediaJob, status 202, sdk request StickerPreparationRequest, sdk response MediaJob | Prepare an uploaded image or GIF without saving or sending it.
+route POST /v1/accounts/{a}/sticker-syncs | scope send, idempotency key required, request StickerSyncRequest, response MediaJob, status 202, sdk request StickerSyncRequest, sdk response MediaJob | Request Saved, account-added packs, or both; GET views do not initiate reconciliation.
 route POST /v1/accounts/{a}/sync | scope login, response untyped, sdk response NativeOperation | Start a sync with WeChat. Poll the returned operation.
 route POST /v1/accounts/{a}/threads/{thread}/read-state | scope read-state, request NativeReadRequest, response untyped | Mark a chat as read when its read-state version still matches the one in the body.
 route POST /v1/accounts/{a}/uploads | scope send, request multipart, response untyped, status 201, sdk response OwnedMediaSource | Stage the bytes of one file as a media source that a later send can use.
@@ -801,5 +1183,6 @@ route POST /v1/daemon/shutdown | scope owner token, request untyped, response un
 route POST /v1/profiles/official | scope admin, request OfficialProfileRequest, response OfficialProfileSelection, sdk request OfficialProfileRequest, sdk response OfficialProfileSelection | Find and attach an official WeChat profile on the daemon host as a new account. The token must cover every account.
 route POST /v1/tokens | scope owner token, request TokenRequest, response untyped | Create an API token limited to chosen accounts and scopes. The secret token value is returned only in this response.
 route PUT /v1/accounts/{a}/groups/{id}/my-name | scope admin, idempotency key required, request NativeGroupMyNameRequest, response NativeOperation, status 202, sdk response NativeOperation | Set your own display name in a group.
+route PUT /v1/accounts/{a}/sticker-packs/{id}/membership | scope send, idempotency key required, request StickerPackMembershipRequest, response MediaJob, status 202, sdk response MediaJob | Establish eligible-free pack membership, independently of content acquisition.
 route PUT /v1/accounts/{a}/threads/{id}/notifications | scope admin, idempotency key required, request NativeThreadNotificationsRequest, response NativeOperation, status 202, sdk response NativeOperation | Mute or unmute notifications for a chat.
 route PUT /v1/accounts/{a}/threads/{id}/pin | scope admin, idempotency key required, request NativeThreadPinRequest, response NativeOperation, status 202, sdk response NativeOperation | Pin or unpin a chat.

@@ -1,0 +1,85 @@
+---
+title: Manage Saved stickers
+description: Prepare workspace media, review sticker previews and manage Saved through OpenClaw.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Use the owner-only `wechat_stickers` tool to manage the configured account's
+Saved stickers. It works with the active session's file transport, so the
+execution workspace can live on a different machine from the Gateway and daemon.
+
+1. List the account's Saved stickers.
+
+   ```json
+   {"action":"list"}
+   ```
+
+   The result includes ordered `items` and a `revision`. Keep that revision for
+   placement or removal; stale revisions fail instead of replacing phone edits.
+
+2. Inspect one sticker visually.
+
+   ```json
+   {"action":"preview","stickerId":"STICKER_ID"}
+   ```
+
+   Preview returns image content to model vision. Animated GIF previews contain
+   sampled frames; a still preview does not establish animation playback.
+   `get` returns metadata and media references without delivering visual input.
+
+3. Download an original into the execution workspace.
+
+   ```json
+   {"action":"download","stickerId":"STICKER_ID","output":"stickers/chosen.gif","idempotencyKey":"chosen-original-1"}
+   ```
+
+   A missing original returns a download job with `staged:false`. After that job
+   completes, repeat the request. A successful staged result includes the actual
+   workspace-relative path, MIME type, byte length and checksum. The extension
+   must match the real original, including `.wxgf` when applicable.
+
+4. Prepare a file made by remote execution.
+
+   ```json
+   {"action":"prepare","file":"stickers/clip.mp4","startMs":1000,"durationMs":2000,"fit":true,"idempotencyKey":"clip-prepare-1"}
+   ```
+
+   Use `preview` with the returned `preparationId`, then save it:
+
+   ```json
+   {"action":"add","preparationId":"PREPARATION_ID","idempotencyKey":"clip-save-1"}
+   ```
+
+   Preparation alone neither saves nor sends. Adding can also use one received
+   `messageId`/`assetId` pair after its original has been downloaded and checked.
+
+| Action | Required selection |
+| --- | --- |
+| `move` | `stickerId`, current `revision`, `afterId` (null for first), stable `idempotencyKey` |
+| `remove` | `stickerId`, current `revision`, stable `idempotencyKey` |
+| Prepared preview/download | `preparationId`, and `output` for download |
+
+The host reads SSH-sandbox files through its filesystem bridge and paired-node
+files through its workspace adapter. The plugin uploads bytes from that reader;
+it does not open a matching Gateway path or establish its own SSH connection.
+Downloads use the same host transport in the other direction. Daemon credentials
+stay on the Gateway. Unsupported host capabilities fail before reporting staging
+success; ordinary unbound local paths are not assumed to be the active workspace.
+
+Send an existing Saved reference through OpenClaw's standard message tool:
+
+```json
+{"action":"sticker","channel":"agent-wechat","target":"CONTACT_ID","stickerId":["STICKER_ID"]}
+```
+
+This owner-only action returns the daemon job. The host supplies its stable
+submission key; keep that key when checking an uncertain result. A queued job is
+not a delivered-message receipt. No original download/re-upload is needed.
+
+<Aside type="note" title="Good to know">
+Saved is one collection. There are no editable custom names or folders, and
+official packs are outside this tool. Keep operation keys and inspect uncertain
+results before submitting another mutation. Existing output files are preserved.
+See [the CLI and composer workflow](/use/stickers/) for official packs.
+</Aside>

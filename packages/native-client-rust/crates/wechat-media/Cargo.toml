@@ -17,9 +17,11 @@ include = ["src/**", "tests/**", "examples/**", "README.md", "LICENSE", "NOTICE"
 wechat-platform = { path = "../wechat-platform", version = "=2.2.0" }
 anyhow.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+gif = "0.14"
+zip = { version = "9.5.1", default-features = false, features = ["deflate"] }
+md-5 = "0.10"
+sha2.workspace = true
 tempfile.workspace = true
 libc.workspace = true
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
-
-[dev-dependencies]
-md-5 = "0.10"

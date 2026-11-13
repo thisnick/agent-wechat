@@ -550,3 +550,116 @@ impl NativeClient {
         .await
     }
 }
+
+impl NativeClient {
+    /// Upload one direct custom-sticker chunk. Journal before submission and
+    /// retain the receipt; failure does not authorize an automatic resend.
+    pub async fn upload_sticker_chunk(
+        &self,
+        source: &[u8],
+        offset: u32,
+    ) -> Result<crate::sticker_upload::StickerUploadAcknowledgement> {
+        let source = source.to_vec();
+        self.account_request(move |transport, state, _| {
+            transport.upload_sticker_chunk_snapshot(state, &source, offset)
+        })
+        .await
+    }
+    /// Read one custom-list page. The caller checks advancing cursors, retains
+    /// the receipt and reconciles official-profile state after a complete list.
+    pub async fn custom_sticker_page(
+        &self,
+        index: u32,
+        data: &[u8],
+    ) -> Result<crate::custom_stickers::CustomStickerPage> {
+        let request = crate::custom_stickers::custom_sticker_list_request(index, data)?;
+        self.account_request(move |transport, state, _| {
+            transport.custom_sticker_read_snapshot(state, &request)
+        })
+        .await
+    }
+    /// Read transport metadata for known custom sticker identities.
+    pub async fn custom_sticker_metadata(
+        &self,
+        ids: &[String],
+    ) -> Result<crate::custom_stickers::CustomStickerPage> {
+        let request = crate::custom_stickers::custom_sticker_metadata_request(ids)?;
+        self.account_request(move |transport, state, _| {
+            transport.custom_sticker_read_snapshot(state, &request)
+        })
+        .await
+    }
+    /// Submit one journaled Saved mutation and return the original response even
+    /// on service rejection. Retain it before decoding and then refresh the list.
+    /// A transport error after submission leaves an uncertain outcome.
+    pub async fn mutate_custom_sticker(
+        &self,
+        id: &str,
+        action: &crate::custom_stickers::CustomStickerMutation,
+    ) -> Result<Vec<u8>> {
+        let request = crate::custom_stickers::custom_sticker_mutation_request(id, action)?;
+        self.account_request(move |transport, state, _| {
+            transport.authenticated_rpc(
+                state,
+                698,
+                "/cgi-bin/micromsg-bin/mmbackupemojioperate",
+                &request,
+            )
+        })
+        .await
+    }
+}
+
+impl NativeClient {
+    /// Read one public or account-added feed page. Check advancing cursors and
+    /// consume the complete added feed before replacing membership in a profile.
+    pub async fn sticker_pack_page(
+        &self,
+        feed: crate::sticker_packs::StickerPackFeed,
+        cursor: &[u8],
+    ) -> Result<crate::sticker_packs::StickerPackPage> {
+        let cursor = cursor.to_vec();
+        self.account_request(move |transport, state, _| {
+            let request = crate::sticker_packs::sticker_pack_list_request(state, feed, &cursor)?;
+            let raw = transport.sticker_pack_rpc_snapshot(state, 411, &request)?;
+            crate::sticker_packs::decode_sticker_pack_page(&raw)
+        })
+        .await
+    }
+    /// Read product details and content references without adding or downloading it.
+    pub async fn sticker_pack_detail(
+        &self,
+        id: &str,
+    ) -> Result<crate::sticker_packs::StickerPackDetail> {
+        let id = id.to_owned();
+        self.account_request(move |transport, state, _| {
+            let request = crate::sticker_packs::sticker_pack_detail_request(state, &id)?;
+            let raw = transport.sticker_pack_rpc_snapshot(state, 412, &request)?;
+            crate::sticker_packs::decode_sticker_pack_detail(&raw, &id)
+        })
+        .await
+    }
+    /// Read localized captions; their presence establishes neither membership nor entitlement.
+    pub async fn sticker_pack_captions(
+        &self,
+        id: &str,
+    ) -> Result<crate::sticker_packs::StickerPackCaptions> {
+        let id = id.to_owned();
+        self.account_request(move |transport, state, _| {
+            let request = crate::sticker_packs::sticker_pack_captions_request(state, &id)?;
+            let raw = transport.sticker_pack_rpc_snapshot(state, 521, &request)?;
+            crate::sticker_packs::decode_sticker_pack_captions(&raw)
+        })
+        .await
+    }
+    /// Submit a single journaled eligible-free membership intent and retain the
+    /// raw acknowledgement before interpreting acceptance. No automatic retry.
+    pub async fn set_sticker_pack_membership_raw(&self, id: &str, added: bool) -> Result<Vec<u8>> {
+        let id = id.to_owned();
+        self.account_request(move |transport, state, _| {
+            let request = crate::sticker_packs::sticker_pack_membership_request(state, &id, added)?;
+            transport.sticker_pack_rpc_snapshot(state, 413, &request)
+        })
+        .await
+    }
+}

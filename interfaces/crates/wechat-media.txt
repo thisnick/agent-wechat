@@ -2,6 +2,8 @@
 # Run `pnpm interfaces` after changing the crate. Format: ITEM | SIGNATURE | DOC SUMMARY
 const wechat_media::MAX_FILE_BYTES | usize | Native ordinary-file plaintext limit, shared by transport and local storage.
 const wechat_media::MAX_IMAGE_BYTES | usize | MISSING DOC
+const wechat_media::MAX_STICKER_BYTES | usize | Maximum accepted prepared GIF size under this application's sticker policy.
+const wechat_media::MAX_STICKER_EDGE | u32 | Maximum prepared edge length under this application's sticker policy.
 const wechat_media::MAX_VIDEO_SOURCE_BYTES | usize | Outgoing video source limit, shared by normal preparation and the unchanged original upload. It matches the ordinary-file limit; the prepared normal playback copy keeps its own smaller output limit.
 field wechat_media::DecodedImage::bytes | alloc::vec::Vec<u8> | MISSING DOC
 field wechat_media::DecodedImage::inspection | wechat_media::image::ImageInspection | MISSING DOC
@@ -10,14 +12,81 @@ field wechat_media::ImageInspection::content_type | alloc::string::String | MISS
 field wechat_media::ImageInspection::frames | u32 | MISSING DOC
 field wechat_media::ImageInspection::height | u32 | MISSING DOC
 field wechat_media::ImageInspection::width | u32 | MISSING DOC
+field wechat_media::PreparedStickerImage::bytes | alloc::vec::Vec<u8> | Original GIF when already compliant, otherwise the encoded GIF output.
+field wechat_media::PreparedStickerImage::contact_sheet | alloc::vec::Vec<u8> | PNG contact sheet sampling up to six displayed frames.
+field wechat_media::PreparedStickerImage::duration_ms | u64 | Sum of retained frame delays, in milliseconds.
+field wechat_media::PreparedStickerImage::inspection | wechat_media::image::ImageInspection | Validated output dimensions and animation information.
+field wechat_media::PreparedStickerImage::preview | alloc::vec::Vec<u8> | PNG containing the first displayed frame.
+field wechat_media::PreparedStickerImage::transformations | alloc::vec::Vec<alloc::string::String> | Changes applied to the input; empty means original GIF bytes were retained.
+field wechat_media::StickerArchive::icon | alloc::vec::Vec<u8> | Independent package icon.
+field wechat_media::StickerArchive::items | alloc::vec::Vec<wechat_media::sticker_archive::StickerArchiveItem> | Complete paired content in numeric order.
+field wechat_media::StickerArchiveItem::file_type | i64 | Native file type: PNG 1, GIF 2 or JPEG 3.
+field wechat_media::StickerArchiveItem::id | alloc::string::String | Original content MD5, checked against the supplied detail list.
+field wechat_media::StickerArchiveItem::ordinal | u32 | One-based ordinal parsed from the numeric archive filename.
+field wechat_media::StickerArchiveItem::original | alloc::vec::Vec<u8> | Verified original bytes, with their original format preserved.
+field wechat_media::StickerArchiveItem::thumbnail | alloc::vec::Vec<u8> | Verified still thumbnail.
+field wechat_media::StickerExportEntry::caption | core::option::Option<alloc::string::String> | Optional official caption.
+field wechat_media::StickerExportEntry::error | core::option::Option<alloc::string::String> | Per-item retrieval/conversion failure, if any.
+field wechat_media::StickerExportEntry::filename | alloc::string::String | Numbered GIF filename relative to this export directory.
+field wechat_media::StickerExportEntry::id | alloc::string::String | Stable original content identity.
+field wechat_media::StickerExportEntry::ordinal | u32 | One-based official ordering.
+field wechat_media::StickerExportEntry::original_sha256 | core::option::Option<alloc::string::String> | Original bytes' SHA-256, when retrieval succeeded.
+field wechat_media::StickerExportEntry::outcome | alloc::string::String | `pending`, `available` or `failed`.
+field wechat_media::StickerExportEntry::sha256 | core::option::Option<alloc::string::String> | Exported GIF SHA-256, when conversion succeeded.
+field wechat_media::StickerExportEntry::transformations | alloc::vec::Vec<alloc::string::String> | Applied shared-media transformations; empty for unchanged GIFs.
+field wechat_media::StickerExportIndex::items | alloc::vec::Vec<wechat_media::sticker_export::StickerExportEntry> | All selected pack items, preserving identities and order.
+field wechat_media::StickerExportIndex::name | alloc::string::String | Official pack name.
+field wechat_media::StickerExportIndex::pack_id | alloc::string::String | Official product identity.
+field wechat_media::StickerExportIndex::version | u32 | Export format version.
+field wechat_media::StickerExportItem::bytes | core::result::Result<alloc::vec::Vec<u8>, alloc::string::String> | Original verified bytes, or the per-item acquisition failure.
+field wechat_media::StickerExportItem::caption | core::option::Option<alloc::string::String> | Optional official caption.
+field wechat_media::StickerExportItem::id | alloc::string::String | Stable content identity.
+field wechat_media::StickerExportItem::ordinal | u32 | One-based official ordering.
+field wechat_media::StickerImageOptions::fit | bool | Authorize proportional resizing when an input exceeds the output edge limit.
+field wechat_media::StickerImageOptions::trim | core::option::Option<wechat_media::stickers::StickerTrim> | Optional explicit animation segment; omitted means preserve all frames.
+field wechat_media::StickerPreview::contact_sheet | wechat_media::DecodedImage | PNG/JPEG of at most six sampled displayed frames.
+field wechat_media::StickerPreview::sampled_frames | u32 | Number of frames actually decoded and shown in the contact sheet.
+field wechat_media::StickerPreview::still | wechat_media::DecodedImage | PNG/JPEG of one representative displayed frame.
+field wechat_media::StickerTrim::duration_ms | u32 | Length of the retained segment, greater than zero.
+field wechat_media::StickerTrim::start_ms | u32 | Start of the retained segment.
+fn wechat_media::decode_sticker_archive | fn(bytes: &[u8], product: &str, ids: &[alloc::string::String]) -> anyhow::Result<wechat_media::sticker_archive::StickerArchive> | Decode a supported ZIP with exact product root, bounded expansion, regular files, unique paths, CRC verification and MD5/detail ordinal correspondence.
+fn wechat_media::export_sticker_pack | fn(directory: &std::path::Path, pack_id: &str, name: &str, items: alloc::vec::Vec<wechat_media::sticker_export::StickerExportItem>, resume: bool) -> anyhow::Result<wechat_media::sticker_export::StickerExportIndex> | Export one selected pack as numbered GIFs plus index.json. Resumption checks product, ordered identities and checksums; unrelated files are never replaced.
 fn wechat_media::inspect_image | fn(bytes: &[u8]) -> anyhow::Result<wechat_media::image::ImageInspection> | Inspect the retained source. For WXGF, dimensions describe its still preview; `frames` does not establish the source's animation frame count.
 fn wechat_media::inspect_video_container | fn(input: &[u8]) -> anyhow::Result<&'static str> | Check the top-level movie boxes before invoking the MOV-family demuxer. Older QuickTime movies may omit `ftyp`; both layouts still need owned movie metadata and media bytes. This only checks container structure; callers must separately decode and validate streams before sending.
+fn wechat_media::prepare_sticker | fn(input: &[u8], options: &wechat_media::stickers::StickerImageOptions, cancelled: impl core::ops::function::FnMut() -> anyhow::Result<()>) -> anyhow::Result<wechat_media::stickers::PreparedStickerImage> | Prepare a supported still image/GIF or a bounded MOV/MP4 video. Video timing and shape are probed first; shortening and resizing require caller choices. The resulting animation contains no audio and uses a 10 fps conversion policy.
+fn wechat_media::prepare_sticker_image | fn(bytes: &[u8], options: &wechat_media::stickers::StickerImageOptions) -> anyhow::Result<wechat_media::stickers::PreparedStickerImage> | Convert a bounded still image or GIF into a validated sticker. Oversized dimensions require `fit`; duration/frame limits fail rather than silently trimming. Existing compliant GIFs are preserved byte-for-byte.
+fn wechat_media::sticker_export_gif | fn(bytes: &[u8]) -> anyhow::Result<(alloc::vec::Vec<u8>, alloc::vec::Vec<alloc::string::String>)> | Convert an original to GIF for export. Valid GIFs retain their exact bytes.
+fn wechat_media::sticker_preview | fn(bytes: &[u8]) -> anyhow::Result<wechat_media::stickers::StickerPreview> | Produce bounded visual input. WXGF currently supplies one decoded still; this does not claim that its full animation was watched or sampled.
 fn wechat_media::wxgf_preview | fn(bytes: &[u8]) -> anyhow::Result<wechat_media::DecodedImage> | Decode one representative JPEG without changing the WXGF source. This is a still preview, not a reconstruction of source animation timing or alpha.
 impl core::clone::Clone for wechat_media::ImageInspection | impl | -
+impl core::clone::Clone for wechat_media::StickerExportEntry | impl | -
+impl core::clone::Clone for wechat_media::StickerExportIndex | impl | -
+impl core::clone::Clone for wechat_media::StickerImageOptions | impl | -
+impl core::clone::Clone for wechat_media::StickerTrim | impl | -
+impl core::default::Default for wechat_media::StickerImageOptions | impl | -
 impl core::fmt::Debug for wechat_media::DecodedImage | impl | -
 impl core::fmt::Debug for wechat_media::ImageInspection | impl | -
+impl core::fmt::Debug for wechat_media::StickerImageOptions | impl | -
+impl core::fmt::Debug for wechat_media::StickerTrim | impl | -
 impl serde_core::de::Deserialize<'de> for wechat_media::ImageInspection | impl<'de> | -
+impl serde_core::de::Deserialize<'de> for wechat_media::StickerExportEntry | impl<'de> | -
+impl serde_core::de::Deserialize<'de> for wechat_media::StickerExportIndex | impl<'de> | -
+impl serde_core::de::Deserialize<'de> for wechat_media::StickerImageOptions | impl<'de> | -
+impl serde_core::de::Deserialize<'de> for wechat_media::StickerTrim | impl<'de> | -
 impl serde_core::ser::Serialize for wechat_media::ImageInspection | impl | -
-mod wechat_media | - | Bounded media inspection shared by native transport and official profiles. Source bytes, including application trailers, are never rewritten here. WXGF inspection decodes a representative still only. Its animation timing, frame count and alpha semantics remain unknown; the original stays WXGF.
+impl serde_core::ser::Serialize for wechat_media::StickerExportEntry | impl | -
+impl serde_core::ser::Serialize for wechat_media::StickerExportIndex | impl | -
+impl serde_core::ser::Serialize for wechat_media::StickerImageOptions | impl | -
+impl serde_core::ser::Serialize for wechat_media::StickerTrim | impl | -
+mod wechat_media | - | Bounded media inspection shared by native transport and official profiles. Inspection retains source bytes, including application trailers. Explicit sticker preparation returns a separately validated output and previews. WXGF inspection decodes a representative still only. Its animation timing, frame count and alpha semantics remain unknown; the original stays WXGF.
 struct wechat_media::DecodedImage | struct { public fields } | MISSING DOC
 struct wechat_media::ImageInspection | struct { public fields } | MISSING DOC
+struct wechat_media::PreparedStickerImage | struct { public fields } | Validated GIF plus PNG images suitable for visual model input.
+struct wechat_media::StickerArchive | struct { public fields } | Fully verified supported pack content. Membership is a separate operation.
+struct wechat_media::StickerArchiveItem | struct { public fields } | One original and its paired thumbnail in canonical one-based order.
+struct wechat_media::StickerExportEntry | struct { public fields } | One numbered output and its integrity/transformation record.
+struct wechat_media::StickerExportIndex | struct { public fields } | Machine-readable index for exactly one pack, including partial outcomes.
+struct wechat_media::StickerExportItem | struct { public fields } | One selected pack item, including a retrieval failure for partial exports.
+struct wechat_media::StickerImageOptions | struct { public fields } | Explicit adjustments for image/GIF preparation.
+struct wechat_media::StickerPreview | struct { public fields } | Visual images derived from an original without changing its format or timing.
+struct wechat_media::StickerTrim | struct { public fields } | A segment requested by the caller, in milliseconds.

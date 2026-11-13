@@ -49,7 +49,7 @@ fn fresh_encrypted_layout_reopens_with_password_and_private_keys() {
     let d = tempfile::tempdir().unwrap();
     let target = d.path().join("synthetic_account");
     let (location, keys, report) = initialize_profile(&target, &[42; 32]).unwrap();
-    assert_eq!(keys.databases.len(), 7);
+    assert_eq!(keys.databases.len(), 8);
     assert!(report.encrypted);
     assert!(!report.official_startup_verified);
     let options = ReadOptions {
@@ -68,14 +68,14 @@ fn fresh_encrypted_layout_reopens_with_password_and_private_keys() {
     assert_eq!(reader.groups(&ListQuery::default()).unwrap().items.len(), 0);
     assert_eq!(
         verify_profile_password(&location, &keys, &[42; 32]).unwrap(),
-        7
+        8
     );
     assert!(matches!(
         verify_profile_password(&location, &keys, &[43; 32]),
         Err(ProfileError::KeyMismatch(_))
     ));
     let derived = keys_from_password(location, &[42; 32], options).unwrap();
-    assert_eq!(derived.databases.len(), 7);
+    assert_eq!(derived.databases.len(), 8);
     assert!(initialize_profile(&target, &[42; 32]).is_err());
 }
 #[test]

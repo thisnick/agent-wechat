@@ -2,7 +2,7 @@
 //!
 //! An image, file, video or voice note that was written into the official
 //! profile is read back from there; this store keeps no second copy. Media the
-//! profile has no place for (stickers, link thumbnails, quoted images) stays in
+//! profile has no supported place for (received sticker attachments, link thumbnails, quoted images) stays in
 //! an encrypted file owned by the account. A copy is released only after the
 //! profile returned the same bytes through the reader that later serves them.
 //!
@@ -29,6 +29,48 @@ impl Core {
         asset: &MediaAsset,
         key: &str,
     ) -> Result<Vec<u8>> {
+        if let Some(reference) = key.strip_prefix("sticker-message:") {
+            let (month, id) = reference
+                .split_once(':')
+                .context("unsupported_media_profile")?;
+            let identity = self.profile_identity(account)?;
+            let (location, _) = self.profile_location_keys(account)?;
+            let bytes = wechat_profile::read_message_sticker_cache(
+                &location,
+                identity.uin,
+                &identity.username,
+                month,
+                id,
+            )?;
+            ensure!(
+                asset.kind == MediaKind::Sticker
+                    && asset.byte_length == Some(bytes.len() as u64)
+                    && asset.sha256.as_deref() == Some(digest(&bytes).as_str()),
+                "media_integrity_failed"
+            );
+            return Ok(bytes);
+        }
+        if asset.kind == MediaKind::Sticker
+            && asset.message_id.is_none()
+            && (key.starts_with("sticker-saved:") || key.starts_with("sticker-pack:"))
+        {
+            let bytes = if let Some(id) = key.strip_prefix("sticker-saved:") {
+                self.saved_cache_bytes(account, id)?
+            } else if let Some(encoded) = key.strip_prefix("sticker-pack:") {
+                use base64::Engine;
+                let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded)?;
+                let (pack, item, role): (String, String, String) = serde_json::from_slice(&bytes)?;
+                self.pack_cache_item(account, &pack, &item, &role)?
+            } else {
+                bail!("unsupported_media_profile");
+            };
+            ensure!(
+                asset.byte_length == Some(bytes.len() as u64)
+                    && asset.sha256.as_deref() == Some(digest(&bytes).as_str()),
+                "media_integrity_failed"
+            );
+            return Ok(bytes);
+        }
         let read = || -> Result<Vec<u8>> {
             let source = source_message_id(
                 asset
@@ -214,6 +256,11 @@ impl Core {
                 break;
             }
         }
+        self.store.expire_sticker_preparation_assets(
+            account,
+            chrono::Utc::now().timestamp(),
+            1000,
+        )?;
         let uploads = self.release_finished_uploads(account)?;
         let compacted = self.store.compact_control(account).unwrap_or(false);
         Ok((removed_previews, uploads, compacted))
@@ -264,6 +311,16 @@ impl Core {
             ];
             let set = if done { &mut finished } else { &mut needed };
             set.extend(ids.into_iter().flatten());
+        }
+        for (source, done) in self
+            .store
+            .sticker_preparation_sources_for_release(account, UPLOAD_GRACE_SECONDS)?
+        {
+            if done {
+                finished.insert(source);
+            } else {
+                needed.insert(source);
+            }
         }
         let mut removed = 0;
         for id in finished.difference(&needed) {

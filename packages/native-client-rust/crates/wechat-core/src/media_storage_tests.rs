@@ -18,7 +18,7 @@ fn control(dir: &tempfile::TempDir) -> rusqlite::Connection {
     rusqlite::Connection::open(dir.path().join("data/accounts/one/agent/control.sqlite")).unwrap()
 }
 /// An account with a managed official profile that accepts writes.
-fn profile_core() -> (tempfile::TempDir, Arc<Core>) {
+pub(super) fn profile_core() -> (tempfile::TempDir, Arc<Core>) {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(wechat_store::Store::open(&dir.path().join("data")).unwrap());
     store.create_account("one").unwrap();

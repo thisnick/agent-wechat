@@ -21,6 +21,7 @@ mod output;
 mod profile_cli;
 mod profile_export;
 mod settings;
+mod stickers_cli;
 use outcome::{failure, set_exit};
 use output::Output;
 
@@ -87,6 +88,11 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Read Saved stickers and prepare local sticker media.
+    Stickers {
+        #[command(subcommand)]
+        command: stickers_cli::StickerCommand,
+    },
     /// Show the CLI version, build target and API capabilities.
     Version,
     /// Show bundled third-party license notices.
@@ -1268,6 +1274,18 @@ impl Remote {
         key: Option<&str>,
         timeout: Duration,
     ) -> Result<reqwest::Response> {
+        self.response_with_revision(method, path, body, key, timeout, None)
+            .await
+    }
+    async fn response_with_revision(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+        key: Option<&str>,
+        timeout: Duration,
+        revision: Option<&str>,
+    ) -> Result<reqwest::Response> {
         let mut request = self
             .http
             .request(method, self.base.join(path)?)
@@ -1278,6 +1296,9 @@ impl Remote {
         }
         if let Some(key) = key {
             request = request.header("idempotency-key", key);
+        }
+        if let Some(revision) = revision {
+            request = request.header("if-match", format!("\"{revision}\""));
         }
         let response = request.send().await?;
         if !response.status().is_success() {
@@ -1711,6 +1732,7 @@ async fn run(cli: Cli) -> Result<()> {
     use reqwest::Method;
     let result = match cli.command {
         Command::Status => r.get("v1/status").await?,
+        Command::Stickers { command } => stickers_cli::run(&r, command).await?,
         Command::Calls { command } => {
             return calls_cli::run(&r, command.context("choose a calls command")?, cli.json).await;
         }

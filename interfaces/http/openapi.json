@@ -29,6 +29,20 @@
         ],
         "type": "object"
       },
+      "AddCustomStickerRequest": {
+        "additionalProperties": false,
+        "description": "Save a prepared or received sticker; this does not send a chat message.",
+        "properties": {
+          "source": {
+            "$ref": "#/components/schemas/CustomStickerSource",
+            "description": "Owned source, validated before the asynchronous operation is admitted."
+          }
+        },
+        "required": [
+          "source"
+        ],
+        "type": "object"
+      },
       "ApiError": {
         "description": "The body of every failed request.",
         "properties": {
@@ -731,6 +745,127 @@
         },
         "type": "object"
       },
+      "CustomSticker": {
+        "description": "One saved custom sticker read from the official profile.",
+        "properties": {
+          "caption": {
+            "description": "Optional official caption, not an editable local label.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "Official content identity.",
+            "type": "string"
+          },
+          "original": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MediaAsset"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Verified original and visual preview references when the individual item is read."
+          }
+        },
+        "required": [
+          "id",
+          "caption",
+          "original"
+        ],
+        "type": "object"
+      },
+      "CustomStickerList": {
+        "description": "Saved membership and order read from one profile snapshot.",
+        "properties": {
+          "freshness": {
+            "description": "Origin of the observation, currently `profile`.",
+            "type": "string"
+          },
+          "items": {
+            "description": "Items in picker order.",
+            "items": {
+              "$ref": "#/components/schemas/CustomSticker"
+            },
+            "type": "array"
+          },
+          "revision": {
+            "description": "Ordered-identity digest, returned as the HTTP entity tag.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "items",
+          "revision",
+          "freshness"
+        ],
+        "type": "object"
+      },
+      "CustomStickerPosition": {
+        "additionalProperties": false,
+        "description": "Relative placement within Saved, avoiding stale numeric indexes.",
+        "properties": {
+          "afterId": {
+            "description": "Place immediately after this identity; null places the item first.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "CustomStickerSource": {
+        "description": "Source to save into the account's one custom Saved collection.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Validated temporary output created by sticker preparation.",
+            "properties": {
+              "kind": {
+                "const": "prepared",
+                "type": "string"
+              },
+              "preparationId": {
+                "description": "ID of a completed, unexpired preparation.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "preparationId"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A verified original attachment belonging to a received sticker message.",
+            "properties": {
+              "assetId": {
+                "description": "Original sticker asset belonging to that message.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "message",
+                "type": "string"
+              },
+              "messageId": {
+                "description": "Existing message identity in this account.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "messageId",
+              "assetId"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "EventAckRequest": {
         "additionalProperties": false,
         "description": "Request to record how far a consumer has read the events.",
@@ -1164,7 +1299,7 @@
         "type": "object"
       },
       "MediaJob": {
-        "description": "A background upload or download of media, with its progress. Poll it by ID until it finishes.",
+        "description": "A background media or sticker operation, with its progress and outcome.",
         "properties": {
           "accountId": {
             "description": "ID of the account the job belongs to.",
@@ -1202,11 +1337,11 @@
             "type": "string"
           },
           "kind": {
-            "description": "`send` for an upload to a chat, or `download` for fetching a received attachment.",
+            "description": "`send`, `download`, `sticker_prepare`, `sticker_saved`, `sticker_pack`,\n`sticker_acquire` or `sticker_send`.",
             "type": "string"
           },
           "phase": {
-            "description": "Current step: `queued`, `preparing`, `downloading`, `reserving`, `uploading`, `submitting`,\n`readback` or `completed`.",
+            "description": "Current step: `queued`, `preparing`, `downloading`, `reserving`, `uploading`, `submitting`,\n`readback`, `projecting` or `completed`.",
             "type": "string"
           },
           "reason": {
@@ -1238,7 +1373,7 @@
             ]
           },
           "state": {
-            "description": "Where the job stands: `queued`, `running`, `available` (download finished), `accepted`\n(WeChat took the send), `needs_review` (the outcome is unknown, so check before sending\nagain), `cancelled`, `expired`, `unsupported` or `failed`.",
+            "description": "Where the job stands: `queued`, `running`, `available` (operation finished), `accepted`\n(WeChat took the send), `needs_review` (the outcome is unknown, so check before sending\nagain), `cancelled`, `expired`, `unsupported` or `failed`.",
             "type": "string"
           },
           "threadId": {
@@ -1455,6 +1590,20 @@
             "type": "string"
           }
         ]
+      },
+      "MoveCustomStickerRequest": {
+        "additionalProperties": false,
+        "description": "Move one Saved sticker using a collection revision precondition.",
+        "properties": {
+          "position": {
+            "$ref": "#/components/schemas/CustomStickerPosition",
+            "description": "Requested relative placement."
+          }
+        },
+        "required": [
+          "position"
+        ],
+        "type": "object"
       },
       "NativeAccountRemoval": {
         "description": "Result of removing an account.",
@@ -3574,6 +3723,514 @@
         ],
         "type": "object"
       },
+      "StickerCollection": {
+        "description": "A derived composer collection; only Saved supports individual mutations.",
+        "properties": {
+          "id": {
+            "description": "Stable picker identity, `saved` or a pack-prefixed identity.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "`saved` or `pack`.",
+            "type": "string"
+          },
+          "packId": {
+            "description": "Product identity for an added official pack.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "description": "Official display name; clients localize the Saved label themselves.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "title",
+          "packId"
+        ],
+        "type": "object"
+      },
+      "StickerCollections": {
+        "description": "All current account-added picker collections, independent of catalog coverage.",
+        "properties": {
+          "items": {
+            "description": "Saved followed by canonical added packs.",
+            "items": {
+              "$ref": "#/components/schemas/StickerCollection"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
+      "StickerDownloadRequest": {
+        "additionalProperties": false,
+        "description": "Explicit target for acquiring a Saved original, one pack item or one pack.",
+        "properties": {
+          "assetId": {
+            "description": "Advertised pack icon, cover or thumbnail asset. Exclusive of pack/item IDs.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "packId": {
+            "description": "Product identity for one official pack. Omit for a Saved original.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stickerId": {
+            "description": "Stable item identity. Required for Saved; optional for an entire pack.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "StickerLanguageQuery": {
+        "additionalProperties": false,
+        "description": "Locale used to choose optional official captions.",
+        "properties": {
+          "language": {
+            "description": "Exact official locale; literal `default` is the fallback. Defaults to `en`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "StickerMembershipFilter": {
+        "const": "added",
+        "description": "Supported membership list filter.",
+        "type": "string"
+      },
+      "StickerPack": {
+        "description": "Public pack metadata with membership separate from verified media readiness.",
+        "properties": {
+          "contentReadiness": {
+            "description": "Media readiness; `unverified` does not mean that cached bytes are missing.",
+            "type": "string"
+          },
+          "cover": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MediaAsset"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Authenticated cover media reference, when indexed."
+          },
+          "description": {
+            "description": "Optional official display description.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "eligible": {
+            "description": "Whether this remote observation is in the validated eligible-free class.\nNull means eligibility has not been established by this view.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "icon": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MediaAsset"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Authenticated icon media reference, when indexed."
+          },
+          "id": {
+            "description": "Official product identity.",
+            "type": "string"
+          },
+          "membership": {
+            "description": "`added` or `not_added`, derived from the canonical account profile.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Official name, falling back to identity when absent locally.",
+            "type": "string"
+          },
+          "stickerCount": {
+            "description": "Item count when a complete detail read supplied it.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description",
+          "membership",
+          "contentReadiness",
+          "eligible",
+          "stickerCount",
+          "icon",
+          "cover"
+        ],
+        "type": "object"
+      },
+      "StickerPackList": {
+        "description": "A bounded public-feed page or the complete canonical account-added list.",
+        "properties": {
+          "coverage": {
+            "description": "`available_feed` or `account_added`; neither claims a global inventory.",
+            "type": "string"
+          },
+          "items": {
+            "description": "Pack metadata in the view's order.",
+            "items": {
+              "$ref": "#/components/schemas/StickerPack"
+            },
+            "type": "array"
+          },
+          "nextCursor": {
+            "description": "Opaque continuation for the available feed; null when complete.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items",
+          "nextCursor",
+          "coverage"
+        ],
+        "type": "object"
+      },
+      "StickerPackMembershipRequest": {
+        "additionalProperties": false,
+        "description": "Empty membership representation. Adding a pack does not purchase it or acquire media.",
+        "type": "object"
+      },
+      "StickerPackQuery": {
+        "additionalProperties": false,
+        "description": "Filters for account-added membership or a page of the available feed.",
+        "properties": {
+          "cursor": {
+            "description": "Opaque available-feed continuation returned by the preceding page.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "membership": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StickerMembershipFilter"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Select `added` for the complete canonical account list; omission browses the feed."
+          }
+        },
+        "type": "object"
+      },
+      "StickerPackSticker": {
+        "description": "One item of an official pack. Captions are optional official metadata.",
+        "properties": {
+          "caption": {
+            "description": "Caption selected by exact requested locale then literal default fallback.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "captions": {
+            "description": "All supplied official locale/text pairs.",
+            "items": {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "string"
+                }
+              ],
+              "type": "array"
+            },
+            "type": "array"
+          },
+          "id": {
+            "description": "Original content identity.",
+            "type": "string"
+          },
+          "ordinal": {
+            "description": "One-based pack ordinal.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "original": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MediaAsset"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Verified original metadata and authenticated media reference, when indexed."
+          },
+          "packId": {
+            "description": "Product identity.",
+            "type": "string"
+          },
+          "thumbnail": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MediaAsset"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Thumbnail metadata and authenticated media reference, when indexed."
+          }
+        },
+        "required": [
+          "id",
+          "packId",
+          "ordinal",
+          "caption",
+          "captions",
+          "original",
+          "thumbnail"
+        ],
+        "type": "object"
+      },
+      "StickerPackStickers": {
+        "description": "Complete supplied pack items, with no acquisition started by the read.",
+        "properties": {
+          "items": {
+            "description": "Ordered pack contents.",
+            "items": {
+              "$ref": "#/components/schemas/StickerPackSticker"
+            },
+            "type": "array"
+          },
+          "packId": {
+            "description": "Product identity.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "packId",
+          "items"
+        ],
+        "type": "object"
+      },
+      "StickerPreparationRequest": {
+        "additionalProperties": false,
+        "description": "Explicit preparation of owned image/GIF/video bytes; never saves or sends a sticker.",
+        "properties": {
+          "fit": {
+            "default": false,
+            "description": "Permit proportional resizing to the current sticker edge limit.",
+            "type": "boolean"
+          },
+          "sourceId": {
+            "description": "ID returned by the existing upload endpoint.",
+            "type": "string"
+          },
+          "trim": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StickerPreparationTrim"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional explicit segment, in milliseconds. Omission preserves the source duration."
+          }
+        },
+        "required": [
+          "sourceId"
+        ],
+        "type": "object"
+      },
+      "StickerPreparationTrim": {
+        "additionalProperties": false,
+        "description": "Explicit segment retained when preparing an animation or video.",
+        "properties": {
+          "durationMs": {
+            "description": "Duration of the retained segment in milliseconds, greater than zero.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "startMs": {
+            "description": "Start of the retained segment in milliseconds.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "startMs",
+          "durationMs"
+        ],
+        "type": "object"
+      },
+      "StickerSendKind": {
+        "const": "sticker",
+        "description": "Discriminator for a sticker request on the existing sends resource.",
+        "type": "string"
+      },
+      "StickerSendRequest": {
+        "additionalProperties": false,
+        "description": "Send one prepared or existing sticker through an asynchronous idempotent job.",
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/StickerSendKind",
+            "description": "Must be `sticker`."
+          },
+          "source": {
+            "$ref": "#/components/schemas/StickerSendSource",
+            "description": "Stable source selection, revalidated before submission."
+          },
+          "threadId": {
+            "description": "Intended chat identity.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "threadId",
+          "source"
+        ],
+        "type": "object"
+      },
+      "StickerSendSource": {
+        "description": "Stable selection to send; it does not require downloading and re-uploading in a client.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Existing member of the account's Saved collection.",
+            "properties": {
+              "kind": {
+                "const": "saved",
+                "type": "string"
+              },
+              "stickerId": {
+                "description": "Stable sticker content identity.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "stickerId"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Existing member of an account-added official pack.",
+            "properties": {
+              "kind": {
+                "const": "pack",
+                "type": "string"
+              },
+              "packId": {
+                "description": "Official product identity.",
+                "type": "string"
+              },
+              "stickerId": {
+                "description": "Stable sticker content identity.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "packId",
+              "stickerId"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Validated temporary output; sending does not save it to Saved.",
+            "properties": {
+              "kind": {
+                "const": "prepared",
+                "type": "string"
+              },
+              "preparationId": {
+                "description": "Completed preparation identity.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "preparationId"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "StickerSyncRequest": {
+        "additionalProperties": false,
+        "description": "Request reconciliation of the account's custom Saved collection.",
+        "properties": {
+          "scope": {
+            "$ref": "#/components/schemas/StickerSyncScope",
+            "default": "saved",
+            "description": "Collections to reconcile: `saved`, `added` or `all`."
+          }
+        },
+        "type": "object"
+      },
+      "StickerSyncScope": {
+        "description": "Collection selected for a reconciliation operation.",
+        "oneOf": [
+          {
+            "const": "saved",
+            "description": "The account's custom Saved collection.",
+            "type": "string"
+          },
+          {
+            "const": "added",
+            "description": "Every account-added official pack, independently of the public feed.",
+            "type": "string"
+          },
+          {
+            "const": "all",
+            "description": "Saved and all account-added packs in one reconciliation job.",
+            "type": "string"
+          }
+        ]
+      },
       "TextMentionPosition": {
         "additionalProperties": false,
         "description": "UTF-16 offsets into the submitted text, with an exclusive end.",
@@ -4953,6 +5610,360 @@
         "x-agent-wechat-sdk-response": [
           {
             "$ref": "#/components/schemas/NativeOperation"
+          }
+        ]
+      }
+    },
+    "/v1/accounts/{a}/custom-stickers": {
+      "get": {
+        "operationId": "listCustomStickers",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomStickerList"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "media"
+            ]
+          }
+        ],
+        "summary": "Read ordered Saved membership from the official profile without a network refresh.",
+        "tags": [
+          "stickers"
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/CustomStickerList"
+          }
+        ]
+      },
+      "post": {
+        "operationId": "addCustomSticker",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Repeating a request with the same key returns the original result instead of repeating the work.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddCustomStickerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MediaJob"
+                }
+              }
+            },
+            "description": "Accepted. The work continues in the background."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "send"
+            ]
+          }
+        ],
+        "summary": "Save a prepared or received sticker asynchronously without sending a message.",
+        "tags": [
+          "stickers"
+        ],
+        "x-agent-wechat-sdk-request": [
+          {
+            "$ref": "#/components/schemas/AddCustomStickerRequest"
+          }
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/MediaJob"
+          }
+        ]
+      }
+    },
+    "/v1/accounts/{a}/custom-stickers/{id}": {
+      "delete": {
+        "operationId": "removeCustomSticker",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Stable Saved sticker identity.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Repeating a request with the same key returns the original result instead of repeating the work.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Quoted current Saved collection revision from its ETag. Stale revisions return 412 and the current revision.",
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "pattern": "^\"[0-9a-f]{64}\"$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MediaJob"
+                }
+              }
+            },
+            "description": "Accepted. The work continues in the background."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "send"
+            ]
+          }
+        ],
+        "summary": "Remove Saved membership asynchronously using If-Match.",
+        "tags": [
+          "stickers"
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/MediaJob"
+          }
+        ]
+      },
+      "get": {
+        "operationId": "getCustomSticker",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Stable Saved sticker identity.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomSticker"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "media"
+            ]
+          }
+        ],
+        "summary": "Read one Saved sticker by its stable identity.",
+        "tags": [
+          "stickers"
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/CustomSticker"
+          }
+        ]
+      },
+      "patch": {
+        "operationId": "moveCustomSticker",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Stable Saved sticker identity.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Repeating a request with the same key returns the original result instead of repeating the work.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Quoted current Saved collection revision from its ETag. Stale revisions return 412 and the current revision.",
+            "in": "header",
+            "name": "If-Match",
+            "required": true,
+            "schema": {
+              "pattern": "^\"[0-9a-f]{64}\"$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MoveCustomStickerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MediaJob"
+                }
+              }
+            },
+            "description": "Accepted. The work continues in the background."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "send"
+            ]
+          }
+        ],
+        "summary": "Change Saved placement using If-Match and a relative anchor.",
+        "tags": [
+          "stickers"
+        ],
+        "x-agent-wechat-sdk-request": [
+          {
+            "$ref": "#/components/schemas/MoveCustomStickerRequest"
+          }
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/MediaJob"
           }
         ]
       }
@@ -6345,7 +7356,7 @@
     },
     "/v1/accounts/{a}/jobs/{id}": {
       "get": {
-        "description": "Scope: Needs media or send, then the job kind decides: send jobs need send and every other job needs media.",
+        "description": "Scope: Needs media or send, then the job kind decides: send, sticker_saved and sticker_pack jobs need send; other jobs need media.",
         "operationId": "getJob",
         "parameters": [
           {
@@ -6403,7 +7414,7 @@
     },
     "/v1/accounts/{a}/jobs/{id}/cancel": {
       "post": {
-        "description": "Scope: Needs media or send, then the job kind decides: send jobs need send and every other job needs media.",
+        "description": "Scope: Needs media or send, then the job kind decides: send, sticker_saved and sticker_pack jobs need send; other jobs need media.",
         "operationId": "cancelJob",
         "parameters": [
           {
@@ -6461,7 +7472,7 @@
     },
     "/v1/accounts/{a}/jobs/{id}/retry": {
       "post": {
-        "description": "Scope: Needs media or send, then the job kind decides: send jobs need send and every other job needs media.",
+        "description": "Scope: Needs media or send, then the job kind decides: send, sticker_saved and sticker_pack jobs need send; other jobs need media.",
         "operationId": "retryJob",
         "parameters": [
           {
@@ -7940,7 +8951,7 @@
             ]
           }
         ],
-        "summary": "Send a text, share card or staged media message. The body shape follows its kind; the same Idempotency-Key returns the original send.",
+        "summary": "Send text, a share card, staged media or a stable sticker reference. The body shape follows its kind; the same Idempotency-Key returns the original send.",
         "tags": [
           "messages"
         ],
@@ -7954,6 +8965,9 @@
           },
           {
             "$ref": "#/components/schemas/MediaSendRequest"
+          },
+          {
+            "$ref": "#/components/schemas/StickerSendRequest"
           }
         ],
         "x-agent-wechat-sdk-response": [
@@ -8256,6 +9270,757 @@
         "x-agent-wechat-sdk-response": [
           {
             "$ref": "#/components/schemas/AccountSettings"
+          }
+        ]
+      }
+    },
+    "/v1/accounts/{a}/sticker-collections": {
+      "get": {
+        "operationId": "stickerCollections",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StickerCollections"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "media"
+            ]
+          }
+        ],
+        "summary": "Derive Saved and every added official pack for the composer picker.",
+        "tags": [
+          "stickers"
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/StickerCollections"
+          }
+        ]
+      }
+    },
+    "/v1/accounts/{a}/sticker-downloads": {
+      "post": {
+        "operationId": "downloadSticker",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Repeating a request with the same key returns the original result instead of repeating the work.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StickerDownloadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MediaJob"
+                }
+              }
+            },
+            "description": "Accepted. The work continues in the background."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "media"
+            ]
+          }
+        ],
+        "summary": "Acquire one Saved original, one pack item, one selected pack or an advertised preview asset, independently of membership.",
+        "tags": [
+          "stickers"
+        ],
+        "x-agent-wechat-sdk-request": [
+          {
+            "$ref": "#/components/schemas/StickerDownloadRequest"
+          }
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/MediaJob"
+          }
+        ]
+      }
+    },
+    "/v1/accounts/{a}/sticker-packs": {
+      "get": {
+        "operationId": "stickerPacks",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The fields of this object are separate query parameters.",
+            "explode": true,
+            "in": "query",
+            "name": "stickerPackQuery",
+            "schema": {
+              "$ref": "#/components/schemas/StickerPackQuery"
+            },
+            "style": "form"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StickerPackList"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "media"
+            ]
+          }
+        ],
+        "summary": "Read one available-feed page, or the complete canonical account-added list.",
+        "tags": [
+          "stickers"
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/StickerPackList"
+          }
+        ]
+      }
+    },
+    "/v1/accounts/{a}/sticker-packs/{id}": {
+      "get": {
+        "operationId": "stickerPack",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Official product identity.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StickerPack"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "media"
+            ]
+          }
+        ],
+        "summary": "Read pack metadata and membership independently of media readiness.",
+        "tags": [
+          "stickers"
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/StickerPack"
+          }
+        ]
+      }
+    },
+    "/v1/accounts/{a}/sticker-packs/{id}/membership": {
+      "delete": {
+        "operationId": "removeStickerPack",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Official product identity.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Repeating a request with the same key returns the original result instead of repeating the work.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MediaJob"
+                }
+              }
+            },
+            "description": "Accepted. The work continues in the background."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "send"
+            ]
+          }
+        ],
+        "summary": "Remove account membership and reconcile canonical pack storage asynchronously.",
+        "tags": [
+          "stickers"
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/MediaJob"
+          }
+        ]
+      },
+      "put": {
+        "operationId": "addStickerPack",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Official product identity.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Repeating a request with the same key returns the original result instead of repeating the work.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StickerPackMembershipRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MediaJob"
+                }
+              }
+            },
+            "description": "Accepted. The work continues in the background."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "send"
+            ]
+          }
+        ],
+        "summary": "Establish eligible-free pack membership, independently of content acquisition.",
+        "tags": [
+          "stickers"
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/MediaJob"
+          }
+        ]
+      }
+    },
+    "/v1/accounts/{a}/sticker-packs/{id}/stickers": {
+      "get": {
+        "operationId": "stickerPackItems",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Official product identity.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The fields of this object are separate query parameters.",
+            "explode": true,
+            "in": "query",
+            "name": "stickerLanguageQuery",
+            "schema": {
+              "$ref": "#/components/schemas/StickerLanguageQuery"
+            },
+            "style": "form"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StickerPackStickers"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "media"
+            ]
+          }
+        ],
+        "summary": "Read ordered pack item identities, optional captions and media references.",
+        "tags": [
+          "stickers"
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/StickerPackStickers"
+          }
+        ]
+      }
+    },
+    "/v1/accounts/{a}/sticker-packs/{id}/stickers/{stickerId}": {
+      "get": {
+        "operationId": "stickerPackItem",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Official product identity.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Stable content identity of an item in the selected pack.",
+            "in": "path",
+            "name": "stickerId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The fields of this object are separate query parameters.",
+            "explode": true,
+            "in": "query",
+            "name": "stickerLanguageQuery",
+            "schema": {
+              "$ref": "#/components/schemas/StickerLanguageQuery"
+            },
+            "style": "form"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StickerPackSticker"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "media"
+            ]
+          }
+        ],
+        "summary": "Read one pack item without starting a media acquisition.",
+        "tags": [
+          "stickers"
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/StickerPackSticker"
+          }
+        ]
+      }
+    },
+    "/v1/accounts/{a}/sticker-preparations": {
+      "post": {
+        "operationId": "createStickerPreparation",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Repeating a request with the same key returns the original result instead of repeating the work.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StickerPreparationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MediaJob"
+                }
+              }
+            },
+            "description": "Accepted. The work continues in the background."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "send"
+            ]
+          }
+        ],
+        "summary": "Prepare an uploaded image or GIF without saving or sending it.",
+        "tags": [
+          "stickers"
+        ],
+        "x-agent-wechat-sdk-request": [
+          {
+            "$ref": "#/components/schemas/StickerPreparationRequest"
+          }
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/MediaJob"
+          }
+        ]
+      }
+    },
+    "/v1/accounts/{a}/sticker-preparations/{id}": {
+      "get": {
+        "operationId": "getStickerPreparation",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Preparation job ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MediaJob"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "media"
+            ]
+          }
+        ],
+        "summary": "Read a preparation job and its verified media references.",
+        "tags": [
+          "stickers"
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/MediaJob"
+          }
+        ]
+      }
+    },
+    "/v1/accounts/{a}/sticker-syncs": {
+      "post": {
+        "operationId": "syncStickers",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Repeating a request with the same key returns the original result instead of repeating the work.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StickerSyncRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MediaJob"
+                }
+              }
+            },
+            "description": "Accepted. The work continues in the background."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "send"
+            ]
+          }
+        ],
+        "summary": "Request Saved, account-added packs, or both; GET views do not initiate reconciliation.",
+        "tags": [
+          "stickers"
+        ],
+        "x-agent-wechat-sdk-request": [
+          {
+            "$ref": "#/components/schemas/StickerSyncRequest"
+          }
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/MediaJob"
           }
         ]
       }
@@ -9077,6 +10842,10 @@
     {
       "description": "Uploads, media assets, downloads and jobs.",
       "name": "media"
+    },
+    {
+      "description": "Saved stickers, official packs and temporary media preparation.",
+      "name": "stickers"
     },
     {
       "description": "Saved messages, sending and recall.",
