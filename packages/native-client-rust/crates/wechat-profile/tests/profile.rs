@@ -1154,3 +1154,89 @@ fn selected_message_ids_keep_shard_namespaces_and_skip_only_missing_rows() {
         Err(ProfileError::InvalidQuery)
     ));
 }
+
+#[test]
+fn contact_and_member_search_preserves_non_ascii_exact_case_and_cross_field_terms() {
+    let d = fixture();
+    let c = Connection::open(d.path().join("account/db_storage/contact/contact.db")).unwrap();
+    c.execute(
+        "UPDATE contact SET nick_name=?1,remark=?2,alias=?3 WHERE username='peer'",
+        params!["ÉLODIE", "Team ONE", "synthetic_alias"],
+    )
+    .unwrap();
+    drop(c);
+    let r = reader(d.path());
+    for search in ["TEAM peer", "peer one", "ÉLODIE", "élodie team peer"] {
+        let q = ListQuery {
+            search: Some(search.into()),
+            ..Default::default()
+        };
+        assert_eq!(r.contacts(&q).unwrap().items.len(), 1, "contacts: {search}");
+        assert_eq!(
+            r.group_members("room@chatroom", &q).unwrap().items.len(),
+            1,
+            "members: {search}"
+        );
+    }
+}
+
+#[test]
+fn multi_term_profile_search_keeps_pagination_and_literal_matching() {
+    let d = fixture();
+    let c = Connection::open(d.path().join("account/db_storage/contact/contact.db")).unwrap();
+    c.execute_batch("UPDATE contact SET nick_name='ÉLODIE 星',remark='Team ONE 100%',alias='shared_alias' WHERE username='peer'; INSERT INTO contact VALUES(4,'peer_b','Élodie 星','Team ONE','shared_alias',1); INSERT INTO chatroom_member VALUES(3,4); UPDATE chat_room SET ext_buffer=NULL;").unwrap();
+    drop(c);
+    let r = reader(d.path());
+    let query = ListQuery {
+        limit: Some(1),
+        search: Some("team ÉLODIE 星".into()),
+        ..Default::default()
+    };
+    let first = r.contacts(&query).unwrap();
+    assert_eq!(first.items[0].username, "peer");
+    let next = ListQuery {
+        cursor: first.next_cursor.clone(),
+        ..query.clone()
+    };
+    let second = r.contacts(&next).unwrap();
+    assert_eq!(second.items[0].username, "peer_b");
+    assert!(second.next_cursor.is_none());
+    let different = ListQuery {
+        search: Some("other".into()),
+        ..next
+    };
+    assert!(matches!(
+        r.contacts(&different),
+        Err(ProfileError::InvalidCursor)
+    ));
+    let first = r.group_members("room@chatroom", &query).unwrap();
+    assert_eq!(first.items[0].username, "peer");
+    let second = r
+        .group_members(
+            "room@chatroom",
+            &ListQuery {
+                cursor: first.next_cursor,
+                ..query
+            },
+        )
+        .unwrap();
+    assert_eq!(second.items[0].username, "peer_b");
+    assert!(second.next_cursor.is_none());
+    for search in ["peer shared_alias", "100%", "  Élodie   ONE  "] {
+        let found = r
+            .contacts(&ListQuery {
+                search: Some(search.into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(found.items.len(), if search == "100%" { 1 } else { 2 });
+    }
+    assert!(r
+        .contacts(&ListQuery {
+            search: Some("' OR 1=1 --".into()),
+            ..Default::default()
+        })
+        .unwrap()
+        .items
+        .is_empty());
+}

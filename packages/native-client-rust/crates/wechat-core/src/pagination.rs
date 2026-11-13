@@ -309,21 +309,13 @@ impl Core {
                 .context("resource ordering missing")?;
             let mut ids = Vec::new();
             let mut seen = BTreeSet::new();
+            let terms = catalog_search_terms(q.search.as_deref());
             for id in order {
                 let id = id.as_str().context("resource identity missing")?;
                 let Some(item) = current.get(id) else {
                     bail!("resource identity missing");
                 };
-                let search = q.search.as_ref().map(|s| s.to_lowercase());
-                let matches_search = search.as_ref().is_none_or(|s| {
-                    ["id", "displayName", "nickname", "remark", "alias", "body"]
-                        .iter()
-                        .any(|key| {
-                            item[key]
-                                .as_str()
-                                .is_some_and(|v| v.to_lowercase().contains(s))
-                        })
-                });
+                let matches_search = catalog_item_matches(item, &terms);
                 let matches_kind = q
                     .thread_kind
                     .as_ref()
@@ -567,6 +559,38 @@ fn metadata_version(metadata: &Value) -> Value {
         .get("sourceGeneration")
         .cloned()
         .unwrap_or(Value::Null)
+}
+
+/// Fields consulted by the saved-catalog text search.
+const CATALOG_SEARCH_FIELDS: [&str; 6] =
+    ["id", "displayName", "nickname", "remark", "alias", "body"];
+
+/// Split a user query into lowercased terms. Whitespace-separated terms are
+/// combined with AND semantics, so a nickname and a WeChat ID can be supplied
+/// together (for example `"Mira wxid_example"`). An empty query matches all.
+fn catalog_search_terms(search: Option<&str>) -> Vec<String> {
+    search
+        .map(|s| {
+            s.split_whitespace()
+                .map(str::to_lowercase)
+                .filter(|t| !t.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// True when every term is a case-insensitive substring of at least one
+/// searchable field. Single-term queries keep the original behavior of matching
+/// any field; multiple terms may match different fields.
+fn catalog_item_matches(item: &Value, terms: &[String]) -> bool {
+    terms.is_empty()
+        || terms.iter().all(|term| {
+            CATALOG_SEARCH_FIELDS.iter().any(|key| {
+                item[*key]
+                    .as_str()
+                    .is_some_and(|v| v.to_lowercase().contains(term.as_str()))
+            })
+        })
 }
 
 #[cfg(test)]
@@ -1044,5 +1068,55 @@ mod tests {
                 metadata(&[])
             )
             .is_err());
+    }
+
+    #[test]
+    fn catalog_search_single_term_matches_any_field() {
+        let item = json!({"id":"wxid_example","displayName":"Mira"});
+        assert!(catalog_item_matches(
+            &item,
+            &catalog_search_terms(Some("wxid_"))
+        ));
+        assert!(catalog_item_matches(
+            &item,
+            &catalog_search_terms(Some("MIRA"))
+        ));
+        assert!(!catalog_item_matches(
+            &item,
+            &catalog_search_terms(Some("nobody"))
+        ));
+    }
+
+    #[test]
+    fn catalog_search_terms_are_anded_across_fields() {
+        let item = json!({"id":"wxid_example","displayName":"Mira","nickname":"Mira"});
+        // Nickname and WeChat ID may be combined in either order.
+        assert!(catalog_item_matches(
+            &item,
+            &catalog_search_terms(Some("mira wxid_example"))
+        ));
+        assert!(catalog_item_matches(
+            &item,
+            &catalog_search_terms(Some("wxid_example mira"))
+        ));
+        // A term that matches no field rejects the whole query.
+        assert!(!catalog_item_matches(
+            &item,
+            &catalog_search_terms(Some("mira otherid"))
+        ));
+    }
+
+    #[test]
+    fn catalog_search_ignores_extra_whitespace_and_empty_queries() {
+        let item = json!({"id":"wxid_example","displayName":"Mira"});
+        assert!(catalog_item_matches(
+            &item,
+            &catalog_search_terms(Some("  mira   wxid_example  "))
+        ));
+        assert!(catalog_item_matches(
+            &item,
+            &catalog_search_terms(Some("   "))
+        ));
+        assert!(catalog_item_matches(&item, &catalog_search_terms(None)));
     }
 }
