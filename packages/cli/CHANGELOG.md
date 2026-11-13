@@ -1,5 +1,33 @@
 # @agent-wechat/cli
 
+## 2.4.0
+
+### Minor Changes
+
+- [#477](https://github.com/thisnick/agent-wechat/pull/477) [`28290b3`](https://github.com/thisnick/agent-wechat/commit/28290b31140fd9bf027bb3237d995fc98be8220b) Thanks [@thisnick](https://github.com/thisnick)! - Images can now be sent at full resolution. Pass `--image-quality original` to `wx messages send --image`, or `"imageQuality": "original"` to `POST /sends`. A JPEG within the supported source limits is then sent unchanged as the image's original copy, and other formats are converted to JPEG once at full resolution. The CLI and HTTP API default to `standard`, offering only compressed standard and thumbnail copies without an Original download option. Existing saved upload receipts retain their previous original availability. OpenClaw image sends automatically request original quality and allow large image transfers and delayed local receipts to finish without resubmitting the send.
+
+  JPEG images up to 8,192 pixels per edge and 64 million pixels can now also be downloaded and read back; previously images wider or taller than 4,096 pixels were rejected.
+
+  Rust image sends now use one `NativeClient::send_image` method for both qualities, matching video sends. `UploadedImage.original` is now `Option<UploadedMedia>`: use `None` for standard and thumbnail only, or `Some(original)` to include an original. This is a breaking Rust API change included in this minor release; callers constructing the struct must wrap their original in `Some(...)` and handle its possible absence when reading it. The account-scoped method, request builder and local metadata helper use the same optional-original model.
+
+- [#481](https://github.com/thisnick/agent-wechat/pull/481) [`e9f2b12`](https://github.com/thisnick/agent-wechat/commit/e9f2b126cbf61869f8fe21214847742c4f276fa2) Thanks [@thisnick](https://github.com/thisnick)! - Add Saved sticker import, placement, removal, preparation and sends, plus official pack browsing, details, membership, media acquisition and one-pack GIF export. The composer gains a sticker tray, in-tray editing, import review and pack browsing. REST resources, generated contracts and account-bound Rust operations share durable jobs and official profile storage. OpenClaw manages Saved, sends existing references through the standard message action, delivers visual previews and transfers files through the host's execution-workspace bridge. Outbound media honors the host's remote file reader.
+
+### Patch Changes
+
+- [#481](https://github.com/thisnick/agent-wechat/pull/481) [`6098ebf`](https://github.com/thisnick/agent-wechat/commit/6098ebfa592b4695617f09b52f39297ed796e904) Thanks [@thisnick](https://github.com/thisnick)! - Share recent sticker catalog metadata across clients and release the account writer during sticker operations, contact and room lookups, group mutations and recalls. Preserve operation ordering, accepted receipts and session fences. Read added packs and already indexed message media on consistent snapshots. Show confirmed pack membership before refreshing previews.
+
+- [#482](https://github.com/thisnick/agent-wechat/pull/482) [`527f766`](https://github.com/thisnick/agent-wechat/commit/527f766aff88e5c8fc946d3edbbfb73a713a51ad) Thanks [@juangrukat](https://github.com/juangrukat)! - Match catalog searches without regard to letter case, combining words across saved contact fields. Keep Unicode matching consistent between profile queries and the account catalog, including paginated contact and group-member results.
+
+- [#489](https://github.com/thisnick/agent-wechat/pull/489) [`c765365`](https://github.com/thisnick/agent-wechat/commit/c7653653809aee3baf842825eac83f3d7e75df43) Thanks [@juangrukat](https://github.com/juangrukat)! - Exclude deleted rows from the saved contact catalog when the official profile exposes a deletion marker. Keep nullable markers and readable layouts without that column working, and preserve historical chat labels and group rosters.
+
+  Add `ProfileReader::contact` for exact reads of retained contact and group rows. Group admission uses this lookup so hiding deleted catalog entries preserves its existing eligibility checks and errors. Ambiguous stored usernames are rejected.
+
+- [#487](https://github.com/thisnick/agent-wechat/pull/487) [`f62795a`](https://github.com/thisnick/agent-wechat/commit/f62795a1a2d7de4a56df9a9a37cef2d57c9e8903) Thanks [@juangrukat](https://github.com/juangrukat)! - Retrieve normal videos when WeChat selects a different verified response representation. Preserve strict original identity checks, range and response-metadata validation, transfer limits and unsupported representation rejection.
+
+- [#481](https://github.com/thisnick/agent-wechat/pull/481) [`cc3de22`](https://github.com/thisnick/agent-wechat/commit/cc3de2290c243e4a8d5084c8943bd4eb454de061) Thanks [@thisnick](https://github.com/thisnick)! - Use the cross-platform file identity check when cleaning up a resumed sticker download, fixing the Windows CLI build.
+
+- [#481](https://github.com/thisnick/agent-wechat/pull/481) [`d0a391c`](https://github.com/thisnick/agent-wechat/commit/d0a391c29441600dbf5be82dbc3782e92d2aa07d) Thanks [@thisnick](https://github.com/thisnick)! - Preserve successful operations when concurrent requests re-encrypt identical session credentials. Continue to reject stale credential, cookie, connection and logout state.
+
 ## 2.3.2
 
 ### Patch Changes
