@@ -50,6 +50,9 @@ pub struct PreparedSticker {
     pub duration_ms: u64,
     /// Applied transformations, empty when original GIF bytes were retained.
     pub transformations: Vec<String>,
+    /// Advisories about the prepared output; empty when none apply.
+    #[serde(default)]
+    pub warnings: Vec<String>,
     /// Local preparation expiry as Unix seconds; this is not a WeChat CDN expiry.
     #[ts(type = "number")]
     pub expires_at: i64,

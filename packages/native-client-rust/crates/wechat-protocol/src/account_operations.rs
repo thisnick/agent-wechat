@@ -294,6 +294,7 @@ impl NativeClient {
         .await
     }
 
+    /// Submit the uploaded standard and thumbnail copies, including an original when present.
     pub async fn send_image(
         &self,
         destination: &str,

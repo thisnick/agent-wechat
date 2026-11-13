@@ -57,7 +57,11 @@ impl MediaTransport for PausedCdn {
     ) -> Result<UploadedMedia> {
         bail!("unexpected upload")
     }
-    fn upload_image(&self, _: &PreparedImageUpload) -> Result<UploadedImage> {
+    fn upload_image(
+        &self,
+        _: &PreparedImageUpload,
+        _: crate::upstream::media::Progress<'_>,
+    ) -> Result<UploadedImage> {
         bail!("unexpected upload")
     }
     fn upload_video(

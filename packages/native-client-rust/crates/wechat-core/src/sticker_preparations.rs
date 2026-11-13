@@ -169,6 +169,7 @@ impl Core {
             height: output.inspection.height,
             duration_ms: output.duration_ms,
             transformations: output.transformations,
+            warnings: vec![],
             expires_at,
         };
         row.state = "available".into();

@@ -25,3 +25,4 @@ sha2.workspace = true
 tempfile.workspace = true
 libc.workspace = true
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+jpeg-decoder = { version = "0.3.2", default-features = false }

@@ -7,11 +7,12 @@
     "direnv@latest",
     "rustup",
     "cargo-watch",
-    "sqlcipher"
+    "sqlcipher",
+    "cmake@latest"
   ],
   "shell": {
     "init_hook": [
-      "export DOCKER_HOST=unix://$HOME/.colima/default/docker.sock",
+      "if [ \"$(uname -s)\" = Darwin ] && [ -z \"${DOCKER_HOST:-}\" ]; then export DOCKER_HOST=unix://$HOME/.colima/default/docker.sock; fi",
       "if ! rustup show active-toolchain &>/dev/null; then rustup default stable &>/dev/null; fi",
       "export PATH=\"$HOME/.cargo/bin:$PATH\""
     ],

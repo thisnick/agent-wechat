@@ -2579,6 +2579,7 @@ mod tests {
         })
         .await
         .unwrap();
+        assert_eq!(completed["result"]["warnings"], json!([]));
         let url = completed["result"]["preview"]["contentUrl"]
             .as_str()
             .unwrap();

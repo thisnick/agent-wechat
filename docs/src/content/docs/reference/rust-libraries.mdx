@@ -116,11 +116,22 @@ missing media.
 Within this workspace, `wechat-core` provides `core.stickers(account)?`, an
 account-bound asynchronous handle for `list`, `get`, `media`, `prepare`,
 `add_prepared`, `save_received`, `move_after`, `remove`, `packs`, `browse`, `pack`,
-`items`, `add_pack`, `remove_pack`, `acquire`, `acquire_pack`, `send`, `sync` and
+`items`, `add_pack`, `remove_pack`, `acquire`, `acquire_pack`, `acquire_preview`, `send`, `sync` and
 `job`. It owns account gating and uses existing jobs; filesystem export stays
 outside that handle. `wechat-core` is the daemon implementation, not a separately
 published HTTP client crate. External applications can use the
 [sticker REST resources](/reference/stickers/).
+
+## Send images and videos
+
+Prepare and upload the copies before calling the protocol send method. Each method handles both qualities:
+
+| Method | `upload.original: None` | `upload.original: Some(...)` |
+| --- | --- | --- |
+| `NativeClient::send_image` | Standard and thumbnail | Also includes the original image |
+| `NativeClient::send_video` | Playback and thumbnail | Also includes the original video |
+
+`UploadedImage.original` is now `Option<UploadedMedia>`. When migrating Rust callers, wrap an existing original in `Some(...)` and handle `None` when reading the field. Applications using the daemon's [media API](/use/quality/) select quality in the send request instead.
 
 ## Use calling media
 

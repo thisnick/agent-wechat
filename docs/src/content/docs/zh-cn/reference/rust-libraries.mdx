@@ -3,7 +3,7 @@ title: Rust 开发库
 description: 在 Rust 中使用原生微信协议、Profile 与语音媒体库。
 banner:
   content: "本页面由机器翻译，尚未经过人工审校。"
-sourceHash: 50befadd23ae
+sourceHash: 77cc3c81c0bf
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -82,6 +82,17 @@ cargo run --manifest-path packages/native-client-rust/Cargo.toml -p wechat-proto
 ```
 
 服务端接收后会输出 `"accepted": true`。`--help` 不会发起任何网络请求。`qr_login`、`sync_once` 与 `protobuf` 分别演示登录、单页同步以及本地编解码。`sync_once` 不保存游标；持续接收消息的程序必须先保留同步命令，然后再推进游标。
+
+## 发送图片与视频 \{#send-images-and-videos}
+
+在调用协议发送方法之前，请先准备并上传各个副本。每个方法都会处理两种画质：
+
+| 方法 | `upload.original: None` | `upload.original: Some(...)` |
+| --- | --- | --- |
+| `NativeClient::send_image` | 高清与缩略图 | 另包含原图 |
+| `NativeClient::send_video` | 播放版与缩略图 | 另包含原始视频 |
+
+`UploadedImage.original` 现为 `Option<UploadedMedia>`。迁移 Rust 调用方时，请将已有的原图包装为 `Some(...)`，并在读取该字段时处理 `None` 的情况。使用 Daemon [媒体 API](/use/quality/) 的应用程序则改为在发送请求中选择画质。
 
 ## 使用通话媒体 \{#use-calling-media}
 

@@ -516,6 +516,13 @@ for (const mode of ['picker', 'edit', 'packs', 'pack-detail', 'import']) {
         await page.mouse.move(to.x+to.width-4,to.y+to.height/3,{steps:8});await page.mouse.up();
         await expect(page.locator('.sticker-cell').last()).toHaveAttribute('data-sticker-id',moving);
         await expect(page.locator('.sticker-draft')).toHaveCount(0);
+        await page.getByRole('button',{name:'Done',exact:true}).focus();await page.keyboard.press('Enter');
+        await page.locator('.sticker-tile').first().focus();await page.keyboard.press('Enter');
+        await expect(page.locator('.sticker-draft')).toHaveCount(1);
+        await page.locator('.sticker-draft button').click();
+        await page.getByRole('button',{name:'Stickers',exact:true}).click();
+        await expect(page.getByRole('button',{name:'Edit',exact:true})).toBeEnabled();
+        await page.getByRole('button',{name:'Edit',exact:true}).click();
       }
       if (mode === 'packs' || mode === 'pack-detail') {
         await page.getByRole('button', { name: 'Browse packs', exact: true }).click();

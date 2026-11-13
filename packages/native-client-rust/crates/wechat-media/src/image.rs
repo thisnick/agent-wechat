@@ -144,13 +144,77 @@ fn png_has_end_chunk(bytes: &[u8]) -> bool {
     false
 }
 
-pub(crate) fn inspect_standard_image(bytes: &[u8]) -> Result<ImageInspection> {
+/// Largest JPEG accepted for inspection: one ordinary image transfer.
+const MAX_JPEG_BYTES: usize = 25 * 1024 * 1024 - 17;
+/// JPEGs above this many pixels are checked with a reduced-resolution decode.
+const FULL_DECODE_PIXELS: u64 = 16_777_216;
+
+/// Inspect a still JPEG of up to 8,192 pixels per edge and 64 million pixels,
+/// the size of an unchanged camera original. Every scan is decoded; photos
+/// above [`FULL_DECODE_PIXELS`] decode at one-eighth scale so checking one does
+/// not allocate the full pixel buffer.
+fn inspect_jpeg(bytes: &[u8]) -> Result<ImageInspection> {
+    ensure!(bytes.len() <= MAX_JPEG_BYTES, "image_size_limit");
+    ensure!(jpeg_has_end_marker(bytes), "jpeg_trailer_missing");
+    let failed = || anyhow::anyhow!("image_decode_failed");
+    let (width, height) =
+        image::ImageReader::with_format(Cursor::new(bytes), image::ImageFormat::Jpeg)
+            .into_dimensions()
+            .map_err(|_| failed())?;
+    let pixels = u64::from(width) * u64::from(height);
     ensure!(
-        !bytes.is_empty() && bytes.len() <= 16 * 1024 * 1024,
-        "image_size_limit"
+        width > 0 && height > 0 && width <= 8192 && height <= 8192 && pixels <= 64_000_000,
+        "image_decode_limit"
     );
+    if pixels <= FULL_DECODE_PIXELS {
+        let mut reader =
+            image::ImageReader::with_format(Cursor::new(bytes), image::ImageFormat::Jpeg);
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(8192);
+        limits.max_image_height = Some(8192);
+        limits.max_alloc = Some(64 * 1024 * 1024);
+        reader.limits(limits);
+        let decoded = reader.decode().map_err(|_| failed())?;
+        ensure!(
+            (decoded.width(), decoded.height()) == (width, height),
+            "image_decode_failed"
+        );
+    } else {
+        let mut decoder = jpeg_decoder::Decoder::new(Cursor::new(bytes));
+        decoder.set_max_decoding_buffer_size(128 * 1024 * 1024);
+        decoder.read_info().map_err(|_| failed())?;
+        let info = decoder.info().ok_or_else(failed)?;
+        ensure!(
+            (u32::from(info.width), u32::from(info.height)) == (width, height),
+            "image_decode_failed"
+        );
+        ensure!(
+            matches!(
+                info.pixel_format,
+                jpeg_decoder::PixelFormat::L8 | jpeg_decoder::PixelFormat::RGB24
+            ),
+            "image_format_unsupported"
+        );
+        decoder.scale(1, 1).map_err(|_| failed())?;
+        decoder.decode().map_err(|_| failed())?;
+    }
+    Ok(ImageInspection {
+        content_type: "image/jpeg".into(),
+        width,
+        height,
+        frames: 1,
+        animation_preserved: false,
+    })
+}
+
+pub(crate) fn inspect_standard_image(bytes: &[u8]) -> Result<ImageInspection> {
+    ensure!(!bytes.is_empty(), "image_size_limit");
     let format =
         image::guess_format(bytes).map_err(|_| anyhow::anyhow!("image_format_unsupported"))?;
+    if format == image::ImageFormat::Jpeg {
+        return inspect_jpeg(bytes);
+    }
+    ensure!(bytes.len() <= 16 * 1024 * 1024, "image_size_limit");
     let limits = || {
         let mut l = image::Limits::default();
         l.max_image_width = Some(4096);
@@ -217,12 +281,8 @@ pub(crate) fn inspect_standard_image(bytes: &[u8]) -> Result<ImageInspection> {
             }
             "image/webp"
         }
-        image::ImageFormat::Jpeg | image::ImageFormat::Png => {
-            if format == image::ImageFormat::Jpeg {
-                ensure!(jpeg_has_end_marker(bytes), "jpeg_trailer_missing");
-            } else {
-                ensure!(png_has_end_chunk(bytes), "png_trailer_missing");
-            }
+        image::ImageFormat::Png => {
+            ensure!(png_has_end_chunk(bytes), "png_trailer_missing");
             let mut reader = image::ImageReader::with_format(Cursor::new(bytes), format);
             reader.limits(limits());
             let decoded = reader
@@ -235,11 +295,7 @@ pub(crate) fn inspect_standard_image(bytes: &[u8]) -> Result<ImageInspection> {
                 "image_decode_limit"
             );
             frames = 1;
-            if format == image::ImageFormat::Png {
-                "image/png"
-            } else {
-                "image/jpeg"
-            }
+            "image/png"
         }
         _ => anyhow::bail!("image_format_unsupported"),
     };
@@ -381,6 +437,29 @@ mod tests {
         bytes.into_inner()
     }
 
+    #[test]
+    fn jpeg_originals_larger_than_other_formats_are_inspected() {
+        let encode = |width, height, format| {
+            let mut bytes = Cursor::new(vec![]);
+            image::DynamicImage::new_rgb8(width, height)
+                .write_to(&mut bytes, format)
+                .unwrap();
+            bytes.into_inner()
+        };
+        // Past the 4,096-pixel edge, then past the full-decode pixel count.
+        for (width, height) in [(5000, 16), (8192, 2064)] {
+            let inspection = inspect_image(&encode(width, height, image::ImageFormat::Jpeg));
+            let inspection = inspection.unwrap();
+            assert_eq!((inspection.width, inspection.height), (width, height));
+            assert_eq!(inspection.content_type, "image/jpeg");
+        }
+        let too_wide = encode(8193, 16, image::ImageFormat::Jpeg);
+        assert!(inspect_image(&too_wide).is_err());
+        let mut truncated = encode(8192, 2064, image::ImageFormat::Jpeg);
+        truncated.truncate(truncated.len() / 2);
+        assert!(inspect_image(&truncated).is_err());
+        assert!(inspect_image(&encode(5000, 16, image::ImageFormat::Png)).is_err());
+    }
     #[test]
     fn jpeg_with_trailing_data_decodes_without_changing_source_bytes() {
         let mut bytes = jpeg();

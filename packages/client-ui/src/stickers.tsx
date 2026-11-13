@@ -83,6 +83,7 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
   const scope = useRef(new AbortController()), keys = useRef(new Map<string, string>()), id = useId();
   const preparing = useRef(false);
   const pointerDrag=useRef<{id:string;x:number;y:number;moved:boolean}|null>(null);
+  useEffect(()=>{if(!edit) held.current=false;},[edit]);
   useEffect(() => { const abort = new AbortController(); scope.current = abort; return () => abort.abort(); }, [account, connection]);
   const signal = () => scope.current.signal;
   const guard = () => signal().throwIfAborted();
@@ -141,6 +142,7 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
       let asset = item.original;
       if (asset?.state !== "available") {
         await waitStickerJob(client, account, await client.downloadSticker(account, { stickerId: item.id, ...(pack ? { packId: pack } : {}) }, key(`download:${pack ?? "saved"}:${item.id}`), signal()), signal());
+        keys.current.delete(`download:${pack ?? "saved"}:${item.id}`);
         asset = pack ? (await client.stickerPackItem(account, pack, item.id, "en", signal())).original : (await client.customSticker(account, item.id, signal())).original;
       }
       guard(); if (!asset || asset.state !== "available") throw Error(t("stickers.originalUnavailable"));
@@ -177,6 +179,7 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
   async function acquire(pack: string, selected?: string) {
     await act(async () => {
       await waitStickerJob(client, account, await client.downloadSticker(account, { packId: pack }, key(`pack-download:${pack}`), signal()), signal());
+      keys.current.delete(`pack-download:${pack}`);
       const contents = await client.stickerPackItems(account, pack, "en", signal()); guard(); setDetailItems(contents.items);
       if(selected) setDetailPreview(contents.items.find(item=>item.id===selected) ?? null);
     });
@@ -186,7 +189,8 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
       const intent = `membership:${pack.id}:${add}`;
       await waitStickerJob(client, account, await (add ? client.addStickerPack(account, pack.id, key(intent), signal()) : client.removeStickerPack(account, pack.id, key(intent), signal())), signal());
       keys.current.delete(intent); await refresh();
-      const fresh = await client.stickerPack(account, pack.id, signal()); guard(); setDetail(fresh);
+      const [fresh,contents] = await Promise.all([client.stickerPack(account, pack.id, signal()),client.stickerPackItems(account,pack.id,"en",signal())]);
+      guard(); setDetail(fresh); setDetailItems(contents.items); setDetailPreview(null);
       setCatalog(old => old.map(item => item.id === pack.id ? fresh : item));
       if (!add && tab === pack.id) setTab("saved");
     });

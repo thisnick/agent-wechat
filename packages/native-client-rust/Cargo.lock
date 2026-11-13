@@ -2934,6 +2934,7 @@ dependencies = [
  "anyhow",
  "gif",
  "image",
+ "jpeg-decoder",
  "libc",
  "md-5",
  "serde",
