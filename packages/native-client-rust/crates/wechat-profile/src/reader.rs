@@ -424,6 +424,22 @@ impl ProfileReader {
             coverage: self.coverage(),
         })
     }
+    /// Read one retained contact or group row by its exact username, including
+    /// deleted rows. Callers must check its flags before admitting mutations.
+    /// Missing rows return `NotCached`; duplicate usernames return `InvalidMetadata`.
+    pub fn contact(&self, username: &str) -> Result<Contact> {
+        validate_name(username)?;
+        let c = self.snapshot.open(self.role("contact.db", "contacts")?)?;
+        let mut statement =
+            c.prepare("SELECT * FROM contact WHERE username=?1 COLLATE BINARY LIMIT 2")?;
+        let mut rows = statement.query_map([username], raw)?;
+        let record = rows.next().transpose()?.ok_or(ProfileError::NotCached)?;
+        if rows.next().transpose()?.is_some() {
+            return Err(ProfileError::InvalidMetadata);
+        }
+        contact(record)
+    }
+
     pub fn contacts(&self, q: &ListQuery) -> Result<Page<Contact>> {
         let n = limit(q.limit)?;
         let hash = query_hash("contacts", &q.search)?;

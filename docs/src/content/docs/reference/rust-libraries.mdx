@@ -57,6 +57,10 @@ fn contacts(profile: &str, keys_path: &str) -> wechat_profile::Result<()> {
 Cached-media reads never initiate downloads. An application owning the profile
 can use `OwnedReaderCache` with its own synchronization.
 
+`contacts` lists current rows. Use `reader.contact(username)` for an exact stored
+identity, including retained deleted contact or group rows. Check the returned
+flags before changing a contact or group; a stored row alone does not make it eligible.
+
 ## Send one text message
 
 Operations are methods on `NativeClient`. The application owns credential

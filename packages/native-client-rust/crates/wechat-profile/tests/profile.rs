@@ -452,6 +452,10 @@ fn contact_catalog_filters_deleted_rows_before_search_pagination() {
         .unwrap()
         .items
         .is_empty());
+    assert_eq!(
+        r.contact("peer").unwrap().raw_fields["delete_flag"],
+        SqlValue::Integer("1".into())
+    );
     assert_eq!(r.labels().unwrap()["peer"], "Work");
     assert_eq!(
         r.group_members("room@chatroom", &ListQuery::default())
@@ -464,6 +468,55 @@ fn contact_catalog_filters_deleted_rows_before_search_pagination() {
         r.threads(&ListQuery::default()).unwrap().items[0].label,
         "Work"
     );
+}
+
+#[test]
+fn contact_lookup_uses_exact_retained_identity_and_rejects_duplicates() {
+    let d = fixture();
+    let c = Connection::open(d.path().join("account/db_storage/contact/contact.db")).unwrap();
+    c.execute_batch(
+        "DROP TABLE contact;
+         CREATE TABLE contact(id INTEGER PRIMARY KEY,username TEXT COLLATE NOCASE,
+           nick_name TEXT,remark TEXT,alias TEXT,local_type INTEGER,delete_flag INTEGER);
+         INSERT INTO contact(username,nick_name,remark,alias,local_type,delete_flag) VALUES
+         ('wxid_peer','Display name','Remark','alias-peer',1,1),
+         ('wxid_peer_extra','Display name','Remark','alias-extra',1,0),
+         ('duplicate','First','','',1,0),
+         ('duplicate','Second','','',1,1);",
+    )
+    .unwrap();
+    drop(c);
+    let r = reader(d.path());
+    let retained = r.contact("wxid_peer").unwrap();
+    assert_eq!(retained.username, "wxid_peer");
+    assert_eq!(retained.label, "Remark");
+    assert_eq!(
+        retained.raw_fields["delete_flag"],
+        SqlValue::Integer("1".into())
+    );
+    for absent in [
+        "WXID_PEER",
+        "Display name",
+        "Remark",
+        "alias-peer",
+        "wxid_peer%",
+        "missing",
+    ] {
+        assert!(
+            matches!(r.contact(absent), Err(ProfileError::NotCached)),
+            "{absent}"
+        );
+    }
+    assert!(matches!(
+        r.contact("duplicate"),
+        Err(ProfileError::InvalidMetadata)
+    ));
+    for invalid in ["", "invalid\0name"] {
+        assert!(matches!(
+            r.contact(invalid),
+            Err(ProfileError::InvalidQuery)
+        ));
+    }
 }
 
 #[test]
