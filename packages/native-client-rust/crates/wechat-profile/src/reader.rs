@@ -444,7 +444,7 @@ impl ProfileReader {
         let limit = values.len() + 1;
         values.push(Value::Integer((n + 1) as i64));
         let mut s = c.prepare(&format!(
-            "SELECT * FROM contact WHERE username>?1{clause} ORDER BY username LIMIT ?{limit}"
+            "SELECT * FROM contact WHERE username>?1 AND coalesce(delete_flag,0)=0{clause} ORDER BY username LIMIT ?{limit}"
         ))?;
         let records = s
             .query_map(rusqlite::params_from_iter(values.iter()), raw)?
