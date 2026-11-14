@@ -93,23 +93,25 @@ See [CLI examples](https://thisnick.github.io/agent-wechat/use/cli/),
 | --- | --- |
 | Conversations | Use DMs and groups; browse and search locally stored history; read unread counts and mark chats read. |
 | Messages | Send and receive text, images, videos, files, and voice notes; recall eligible own messages and display incoming recalls. |
-| Images and video | Preview and download available quality variants, including original images/video; send normal or original-quality video. |
+| Images and video | Preview and download available quality variants, including original images/video; send compressed or full-resolution original images, and normal or original-quality video. |
 | Voice notes | Play received notes and send audio as native voice notes. Longer audio can split into multiple notes; playback validation for longer notes remains incomplete. |
 | Voice calls | Make and answer direct WeChat voice calls with the [`wx calls` CLI](https://thisnick.github.io/agent-wechat/reference/calls/) or the [OpenClaw plugin](https://thisnick.github.io/agent-wechat/openclaw/calling/) after enabling voice calling in the plugin. Desktop voice calling is coming soon. |
 | Rich content | Read embedded quotes, link-card metadata, and forwarded conversations. Forwarded bundles become text; their nested attachments remain placeholders. |
-| Stickers | Retrieve supported ordinary/shared stickers, including animated originals. Sending stickers and managing packs are unsupported. |
+| WeChat Channels | Receive Channels cards with their cover, publisher, description, and length, and download the post's video. |
+| Stickers | Receive stickers, including animated originals. Save images, GIFs, and MOV/MP4 clips as custom stickers; reorder or remove Saved stickers; browse and add eligible free official packs and export a pack as GIFs; send stickers from Saved or added packs. Sends use GIF originals; paid packs are unsupported. |
 | Mentions | Send real member mentions or mention everyone where permitted; inspect incoming mention metadata. |
-| Contacts and groups | Find contacts/groups, read member lists and avatars, and refresh saved metadata. |
+| Contacts and groups | Find contacts/groups, search a group's members, read member lists and avatars, and refresh saved metadata. |
 | Group management | Create/rename/leave groups, add/remove members, set your group display name, clear announcements, and mute notifications, subject to account permissions. Some profile updates remain partial. |
 | Organization | Pin/unpin supported chats and mute/unmute ordinary contacts and groups. |
 | Media storage | Configure per-account automatic downloads, save verified media, and inspect transfer progress and unavailable-media status. |
-| Desktop | Conversation search, media views, quote navigation, mention picker, native file saving, tray behavior, and notifications. See platform acceptance status above. |
+| Desktop | Conversation search and category filters, media views, quote navigation, mention picker, sticker picker, native file saving, tray behavior, and notifications, in English or Simplified Chinese. See platform acceptance status above. |
 | Automation | Use the `wx` CLI or authenticated HTTP API; follow replayable events and inspect send/download jobs. |
 
 Media availability depends on the received source, supported formats, and size
 limits. Search covers stored history, not all remote history.
 See [message types](https://thisnick.github.io/agent-wechat/how-it-works/message-types/),
-[media](https://thisnick.github.io/agent-wechat/use/media/), and
+[media](https://thisnick.github.io/agent-wechat/use/media/),
+[stickers](https://thisnick.github.io/agent-wechat/use/stickers/), and
 [groups](https://thisnick.github.io/agent-wechat/use/groups/).
 
 ## Use your existing official profile
@@ -153,13 +155,14 @@ DMs and groups are disabled until configured. Replies use the connected account.
 | Feature | Support |
 | --- | --- |
 | DMs and groups | Receive allowed messages and reply in the same WeChat thread. |
-| Multimodal input | Images for compatible vision models; local file/video/voice attachments; voice transcription through OpenClaw's configured runtime. |
-| Multimodal output | Text, images, videos, files, and native voice notes. Ordinary audio can remain a file. |
+| Multimodal input | Images for compatible vision models; received files, videos, and voice notes as attachments, copied into sandboxed agents' workspaces; voice transcription through OpenClaw's configured runtime. |
+| Multimodal output | Text, images, videos, files, stickers, and native voice notes. Ordinary audio can remain a file. |
 | Group context and mentions | Per-group behavior, real @mention gating, permitted unmentioned messages as context, and outgoing member/everyone mentions. |
 | Access policies | Separate DM/group policies, sender allowlists, and per-group overrides. |
 | Current-chat tools | `wechat_history`, `wechat_search`, `wechat_message`, and `wechat_media` for stored history and verified attachment retrieval. |
 | Optional archive access | `wechat_archive_*` tools can list/search/read all chats in the configured account when granted by agent tool policy. |
 | Message actions | `wechat_recall`, quoted replies through `message.replyTo`, and link cards through `wechat_send_share`. |
+| Stickers | The owner-only `wechat_stickers` tool lists, previews, saves, reorders, and removes Saved stickers; the message tool's `sticker` action sends a Saved sticker. Official packs are not exposed. |
 | Login assistance | `wechat_login` can inspect status, show a login QR, wait for approval, disconnect, log out, or explicitly forget local authentication. |
 | Group information | `wechat_group_info` provides owner/admin-authorized cached group/member reads. Group mutation tools are not exposed. |
 | Read behavior | Mark chats read after inbound handling, after confirmed model dispatch, or never. This acts on the whole chat through its read boundary. |
