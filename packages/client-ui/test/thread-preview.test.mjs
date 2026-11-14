@@ -176,3 +176,12 @@ test("equal and unknown activity times keep their existing relative order", () =
   assert.deepEqual(orderThreads(rows), rows);
   assert.notEqual(orderThreads(rows), rows);
 });
+
+test("Channels cards preview as a Channels video with the post description", () => {
+  const card = { type: 49, appMessageType: 51, body: "[Channels video] Publisher: Post (1:36)",
+    link: { title: null, description: "Post", url: null, sourceName: "Publisher", durationSeconds: 96 } };
+  assert.equal(messageSummary(card, "Peer").text, "Channels video: Post");
+  assert.equal(messageSummary({ ...card, link: { ...card.link, description: null } }, "Peer").text, "Channels video");
+  const article = { type: 49, appMessageType: 5, body: "[Link] Title", link: { title: "Title", description: null, url: null, sourceName: null } };
+  assert.equal(messageSummary(article, "Peer").text, "Title");
+});
