@@ -152,29 +152,13 @@ fn deleted_contact_username(payload: &[u8]) -> Result<String> {
     Ok(username)
 }
 fn contact_absent(reader: &wechat_profile::ProfileReader, username: &str) -> Result<bool> {
-    let mut query = wechat_profile::ListQuery {
-        search: Some(username.into()),
-        limit: Some(200),
-        ..Default::default()
-    };
-    // The official contacts reader queries every Contact row, including groups
-    // and nonfriend categories. Absence is established only after a complete
-    // exact-name search over one coherent snapshot, never from a friend list.
-    for _ in 0..100 {
-        let page = reader.contacts(&query)?;
-        if page
-            .items
-            .iter()
-            .any(|contact| contact.username == username)
-        {
-            return Ok(false);
-        }
-        match page.next_cursor {
-            Some(cursor) => query.cursor = Some(cursor),
-            None => return Ok(true),
-        }
+    // A hidden catalog entry still exists. Check the retained identity across
+    // all categories before treating a deletion command as an absent-row no-op.
+    match reader.contact(username) {
+        Ok(_) => Ok(false),
+        Err(wechat_profile::ProfileError::NotCached) => Ok(true),
+        Err(error) => Err(error.into()),
     }
-    bail!("contact_absence_scan_bound")
 }
 
 fn identity(value: &str) -> Result<()> {
@@ -855,7 +839,13 @@ mod tests {
             "../../wechat-profile/src/layout/contact.db.sql"
         ))
         .unwrap();
-        db.execute_batch("INSERT INTO contact(id,username,local_type)VALUES(1,'peer-long',1),(2,'room@chatroom',2),(3,'other',4)").unwrap();
+        db.execute_batch(
+            "INSERT INTO contact(id,username,local_type,delete_flag)VALUES
+             (1,'peer-long',1,0),(2,'room@chatroom',2,0),(3,'other',4,0),
+             (4,'deleted-peer',1,1),(5,'deleted-room@chatroom',2,1),
+             (6,'deleted-other',4,1),(7,'malformed',1,'invalid');",
+        )
+        .unwrap();
         drop(db);
         let before = std::fs::read(&path).unwrap();
         let reader = wechat_profile::ProfileReader::open(
@@ -869,7 +859,15 @@ mod tests {
         )
         .unwrap();
         assert!(contact_absent(&reader, "peer").unwrap());
-        for name in ["peer-long", "room@chatroom", "other"] {
+        for name in [
+            "peer-long",
+            "room@chatroom",
+            "other",
+            "deleted-peer",
+            "deleted-room@chatroom",
+            "deleted-other",
+            "malformed",
+        ] {
             assert!(!contact_absent(&reader, name).unwrap());
         }
         assert_eq!(std::fs::read(path).unwrap(), before);

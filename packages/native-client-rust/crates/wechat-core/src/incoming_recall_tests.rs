@@ -53,6 +53,61 @@ fn retain_original(core: &Core, store: &Store, id: &str, command: SyncCommand) {
 }
 
 #[test]
+fn quotes_keep_retained_contact_names_after_catalog_removal() {
+    let (_temporary, _store, core) = fixture();
+    core.apply_sync_command(
+        "one",
+        &add(1, "peer", "synthetic_self", b"Original", 123, 100),
+        "retained-name-source",
+        "live",
+    )
+    .unwrap();
+    let original = first(&core);
+    let (location, keys) = core.profile_location_keys("one").unwrap();
+    wechat_profile::apply_contact_patch(
+        &location,
+        &keys,
+        &wechat_profile::ContactProjection {
+            username: "peer".into(),
+            fields: [
+                (
+                    "remark".into(),
+                    wechat_profile::SqlValue::Text("Former & friend".into()),
+                ),
+                (
+                    "delete_flag".into(),
+                    wechat_profile::SqlValue::Integer("1".into()),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        },
+        &core.write_options("one", "retained-name").unwrap(),
+    )
+    .unwrap();
+    assert!(core.contacts("one", &Default::default()).unwrap()["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|contact| contact["id"] != "peer"));
+    let quote = core
+        .resolve_quote(
+            "one",
+            "peer",
+            "Reply",
+            &crate::QuoteSendReference {
+                message_id: original["id"].as_str().unwrap().into(),
+                server_id: "123".into(),
+            },
+            "synthetic_self",
+        )
+        .unwrap();
+    assert!(quote
+        .xml
+        .contains("<displayname>Former &amp; friend</displayname>"));
+}
+
+#[test]
 fn application_text_share_keeps_raw_content_and_roundtrips_quotes_until_recalled() {
     for (subtype, xml, expected) in [
         (1, "<msg><appmsg appid='synthetic'><type>1</type><title><![CDATA[https://example.invalid/shared?a=1&b=2]]></title><des>Not the shared text</des><url/><appattach><aeskey>private-transport</aeskey></appattach></appmsg></msg>", "https://example.invalid/shared?a=1&b=2"),

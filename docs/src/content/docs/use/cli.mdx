@@ -27,7 +27,7 @@ Book club  books@chatroom   group  2       See you Friday
 
 `wx messages list` shows the sender, message preview, timestamp and a shortened message ID in a table. If history is partial, a note appears below the table. Use `--json` for full text, IDs and database coverage.
 
-Saved contact lists and searches omit entries the profile marks as deleted. Their names remain available in existing chats and group member lists.
+Saved contact lists and searches omit entries the profile marks as deleted. Their names remain available in existing chats, quoted replies, and group member lists.
 
 Chat notification preferences come from the saved profile. The daemon receives phone contact changes through its contact sync stream. `null` means missing or unresolved preference data; notification consumers should stay silent for that chat. Use `wx contacts refresh CONTACT_ID` for a manual refresh. `wx chats mute/unmute` edits direct chats and groups. Each direct edit reads the current contact first so unrelated contact fields are preserved.
 
