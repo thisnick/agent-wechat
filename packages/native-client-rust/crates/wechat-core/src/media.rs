@@ -2293,6 +2293,11 @@ fn classify_error(error: &anyhow::Error) -> String {
             "sticker_version_unavailable",
             "custom_sticker_mutation_rejected",
             "sticker_metadata_incomplete",
+            "sticker_upload_rejected",
+            "sticker_upload_item_rejected",
+            "sticker_upload_reply_invalid",
+            "sticker_upload_identity_mismatch",
+            "sticker_upload_progress_invalid",
             "sticker_cache_unreadable",
             "sticker_trim_invalid",
             "sticker_encoder_unavailable",
@@ -4373,6 +4378,21 @@ mod tests {
             classify_error(&anyhow::anyhow!("Inconsistent CDN range response")),
             "media_processing_failed"
         );
+    }
+    #[test]
+    fn sticker_upload_validation_keeps_safe_diagnostic_codes() {
+        for code in [
+            "sticker_upload_rejected",
+            "sticker_upload_item_rejected",
+            "sticker_upload_reply_invalid",
+            "sticker_upload_identity_mismatch",
+            "sticker_upload_progress_invalid",
+        ] {
+            assert_eq!(
+                classify_error(&anyhow::anyhow!(code).context("upload failed")),
+                code
+            );
+        }
     }
     // Large metadata with a tiny sealed fixture keeps admission tests from
     // allocating hundreds of MiB. Full worker source authentication is tested

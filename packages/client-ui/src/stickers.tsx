@@ -1,27 +1,16 @@
 import { useEffect, useId, useRef, useState, type DragEvent } from "react";
 import { createPortal } from "react-dom";
-import type { CustomSticker, CustomStickerList, MediaAsset, MediaJob, NativeWeChatClient, PreparedSticker, StickerPack, StickerPackSticker, StickerSendSource } from "@agent-wechat/shared";
+import type { CustomSticker, CustomStickerList, MediaAsset, NativeWeChatClient, PreparedSticker, StickerPack, StickerPackSticker, StickerSendSource } from "@agent-wechat/shared";
 import { NativeApiError } from "@agent-wechat/shared";
 import type { Connection } from "./connection.ts";
 import { readableError } from "./session.ts";
 import { t } from "./i18n.ts";
 import { Button, Icon } from "./ui.tsx";
+import { waitStickerJob } from "./sticker-jobs.ts";
 import "./stickers.css";
+export { waitStickerJob } from "./sticker-jobs.ts";
 
 export type StickerDraft = { source: StickerSendSource; asset: MediaAsset; label: string; key: string; jobId?: string; busy?: boolean; error?: string };
-const ended = new Set(["available", "accepted", "failed", "cancelled", "needs_review", "partial", "expired", "unsupported"]);
-/** Watch one submitted job. Collection views refresh on events or user intent. */
-export async function waitStickerJob(client: NativeWeChatClient, account: string, job: MediaJob, signal?: AbortSignal): Promise<MediaJob> {
-  const until = Date.now() + 60_000;
-  while (!ended.has(job.state)) {
-    signal?.throwIfAborted();
-    if (Date.now() >= until) throw Error(t("stickers.jobStillRunning", { id: job.id }));
-    await new Promise(resolve => setTimeout(resolve, 400));
-    job = await client.job(account, job.id, signal);
-  }
-  if (!["available", "accepted"].includes(job.state)) throw Error(t("stickers.jobFailed", { state: job.state, id: job.id, reason: job.reason ?? "" }));
-  return job;
-}
 
 let previewTransfers = 0;
 const previewQueue: Array<() => void> = [];
@@ -116,7 +105,8 @@ export function StickerDraftPreview({ connection, account, draft, remove }: { co
   </section>;
 }
 
-type ImportItem = { id: string; file: File; key: string; prepareKey: string; sourceId?: string; selected: boolean; prepared?: PreparedSticker; error?: string; busy?: boolean; added?: boolean; fit: boolean; start: string; duration: string };
+type ImportItem = { id: string; file: File; key: string; prepareKey: string; sourceId?: string; selected: boolean; prepared?: PreparedSticker; error?: string; busy?: boolean; added?: boolean };
+type DragPreview = { id: string; x: number; y: number; width: number; height: number; src?: string; dropId?: string; side?: "before" | "after" };
 type Props = { connection: Connection; account: string; enabled: boolean; stage: (draft: StickerDraft) => void };
 export function StickerPicker({ connection, account, enabled, stage }: Props) {
   const client = connection.session.client;
@@ -137,7 +127,31 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
   const packViews = useRef(new Map<string, { at: number; detail: StickerPack; items: StickerPackSticker[] }>());
   const viewEpoch = useRef(0);
   const clearPackViews = () => { viewEpoch.current++; packViews.current.clear(); catalogLoaded.current = 0; };
-  const pointerDrag=useRef<{id:string;x:number;y:number;moved:boolean}|null>(null);
+  const pointerDrag=useRef<{id:string;x:number;y:number;moved:boolean;pointer:number;target:HTMLButtonElement;offsetX:number;offsetY:number;width:number;height:number}|null>(null);
+  const [dragPreview, setDragPreview] = useState<DragPreview | null>(null);
+  function clearDrag() {
+    clearTimeout(hold.current);
+    const drag = pointerDrag.current; pointerDrag.current = null;
+    if (drag?.target.hasPointerCapture(drag.pointer)) drag.target.releasePointerCapture(drag.pointer);
+    setDragPreview(null);
+  }
+  function dragPlacement(x: number, y: number, moving: string) {
+    const cell = document.elementFromPoint(x,y)?.closest<HTMLElement>("[data-sticker-id]");
+    const target = cell?.dataset.stickerId;
+    if (!cell || !root.current?.contains(cell) || !target || target === moving) return null;
+    const others = saved.items.filter(item => item.id !== moving), index = others.findIndex(item => item.id === target);
+    if (index < 0) return null;
+    const rect = cell.getBoundingClientRect(), before = x < rect.x + rect.width / 2;
+    return { id: target, side: before ? "before" as const : "after" as const, afterId: before ? (index > 0 ? others[index-1].id : null) : target };
+  }
+  function showDrag(x: number, y: number) {
+    const drag = pointerDrag.current;
+    if (!drag) return;
+    const placement = dragPlacement(x,y,drag.id);
+    setDragPreview({ id:drag.id, x:Math.max(8,Math.min(innerWidth-drag.width-8,x-drag.offsetX)), y:Math.max(8,Math.min(innerHeight-drag.height-8,y-drag.offsetY)), width:drag.width, height:drag.height, src:drag.target.querySelector("img")?.src, dropId:placement?.id, side:placement?.side });
+  }
+  useEffect(() => { clearDrag(); }, [account, connection]);
+  useEffect(() => { if (!edit || !open) clearDrag(); }, [edit, open]);
   useEffect(()=>{if(!edit) held.current=false;},[edit]);
   useEffect(() => { const abort = new AbortController(); scope.current = abort; return () => abort.abort(); }, [account, connection]);
   const signal = () => scope.current.signal;
@@ -268,9 +282,10 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
     if (event.dataTransfer.files.length) review(Array.from(event.dataTransfer.files));
   }
   function review(files: File[]) {
+    if (busy) return;
     setEdit(false);
     const count=(imports?.length ?? 0)+files.length;
-    setImports(old => [...(old ?? []),...files.slice(0,Math.max(0,20-(old?.length ?? 0))).map(file => ({ id: crypto.randomUUID(), file, key: crypto.randomUUID(), prepareKey: crypto.randomUUID(), selected: true, fit: false, start: "", duration: "" }))]);
+    setImports(old => [...(old ?? []),...files.slice(0,Math.max(0,20-(old?.length ?? 0))).map(file => ({ id: crypto.randomUUID(), file, key: crypto.randomUUID(), prepareKey: crypto.randomUUID(), selected: true }))]);
     if (count > 20) setError(t("stickers.batchLimit"));
   }
   function updateImport(id: string, update: Partial<ImportItem>) { setImports(old => old?.map(item => item.id === id ? { ...item, ...update } : item) ?? null); }
@@ -282,9 +297,7 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
       if (item.file.size===0 || item.file.size>64*1024*1024) throw Error(t("stickers.sourceSize"));
       const sourceId = item.sourceId ?? (await client.upload(account, item.file, item.file.name, item.file.type || "application/octet-stream", signal())).id;
       guard();updateImport(item.id,{sourceId});
-      const start = Number(item.start || 0), duration = item.duration ? Number(item.duration) : undefined;
-      if (!Number.isFinite(start) || start < 0 || item.start!=="" && duration===undefined || (duration !== undefined && (!Number.isFinite(duration) || duration <= 0 || duration > 10))) throw Error(t("stickers.invalidTrim"));
-      const job = await waitStickerJob(client, account, await client.prepareSticker(account, { sourceId, fit: item.fit, trim: duration === undefined ? null : { startMs: Math.round(start * 1000), durationMs: Math.round(duration * 1000) } }, item.prepareKey, signal()), signal());
+      const job = await waitStickerJob(client, account, await client.prepareSticker(account, { sourceId, fit: false, trim: null }, item.prepareKey, signal()), signal());
       guard(); updateImport(item.id, { prepared: job.result as unknown as PreparedSticker, busy: false });
     } catch (error) { if (!signal().aborted) updateImport(item.id, { error: readableError(error), busy: false }); }
     finally {preparing.current=false;}
@@ -295,20 +308,25 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
   },[imports]);
   async function addBatch() {
     await act(async () => {
-      for (const item of imports ?? []) {
-        if (!item.selected || !item.prepared || item.added) continue;
+      const selected = (imports ?? []).filter(item => item.selected);
+      let allAdded = selected.length > 0;
+      for (const item of selected) {
+        if (item.added) continue;
+        if (!item.prepared) { allAdded = false; continue; }
         try {
           await waitStickerJob(client, account, await client.addCustomSticker(account, { source: { kind: "prepared", preparationId: item.prepared.id } }, item.key, signal()), signal());
           guard(); updateImport(item.id, { added: true, error: undefined });
-        } catch (error) { if (!signal().aborted) updateImport(item.id, { error: readableError(error) }); }
+        } catch (error) { allAdded = false; if (!signal().aborted) updateImport(item.id, { error: readableError(error) }); }
       }
       await refresh();
+      guard();
+      if (allAdded) { setTab("saved"); setImports(null); }
     });
   }
   const visible = tab === "saved" ? saved.items.slice(0,savedLimit) : packItems.id === tab ? packItems.items : [];
   const loading = tab === "saved" ? !savedLoaded || busy : packItems.id !== tab || packItems.loading;
   const ready = imports?.filter(item => item.selected && item.prepared && !item.added).length ?? 0;
-  return <div className="sticker-picker" ref={root} onKeyDown={event => { if (event.key === "Escape" && !browser && !imports) { setOpen(false); event.stopPropagation(); } }}>
+  return <div className="sticker-picker" ref={root} onKeyDown={event => { if (event.key === "Escape" && pointerDrag.current) { clearDrag(); event.preventDefault(); event.stopPropagation(); } else if (event.key === "Escape" && !browser && !imports) { setOpen(false); event.stopPropagation(); } }}>
     <button type="button" className="icon-btn" aria-label={t("stickers.open")} title={t("stickers.open")} aria-expanded={open} aria-controls={id} disabled={!enabled} onClick={() => setOpen(value => !value)}><Icon name="smile" /></button>
     {open && !browser && !imports && <section id={id} className="sticker-tray" data-composer-file-drop aria-label={t("stickers.picker")} onDragOver={event => { event.preventDefault(); event.stopPropagation(); }} onDrop={drop}>
       <div className="sticker-tabs" role="tablist" aria-label={t("stickers.collections")}>
@@ -317,27 +335,23 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
         <button disabled={busy} onClick={() => void browse("added")}>{t("stickers.allAdded")}</button>
       </div>
       <div key={tab} className={`sticker-grid ${edit ? "is-editing" : ""}`} role="group" aria-label={edit ? t("stickers.editSaved") : t("stickers.choose")}>
-        {visible.map((item, index) => <div className="sticker-cell" data-sticker-id={item.id} key={item.id}>
-          <button type="button" className="sticker-tile" disabled={busy} aria-label={item.caption || t("stickers.item", { index: index + 1 })}
+        {visible.map((item, index) => <div className={`sticker-cell${dragPreview?.id === item.id ? " is-drag-source" : ""}`} data-sticker-id={item.id} data-drop-side={dragPreview?.dropId === item.id ? dragPreview.side : undefined} key={item.id}>
+          <button type="button" className="sticker-tile" draggable={false} disabled={busy} aria-label={item.caption || t("stickers.item", { index: index + 1 })}
             onPointerDown={event => {
+              if (event.button !== 0 || !event.isPrimary) return;
               held.current=false;
               if(tab!=="saved" || busy) return;
-              const target=event.currentTarget,pointer=event.pointerId,x=event.clientX,y=event.clientY;
-              const begin=()=>{held.current=true;setEdit(true);pointerDrag.current={id:item.id,x,y,moved:false};try{target.setPointerCapture(pointer);}catch{}};
+              const target=event.currentTarget,pointer=event.pointerId,x=event.clientX,y=event.clientY,touch=event.pointerType==="touch";
+              const begin=()=>{const rect=target.getBoundingClientRect();held.current=true;setEdit(true);pointerDrag.current={id:item.id,x,y,moved:false,pointer,target,width:rect.width,height:rect.height,offsetX:touch ? rect.width/2 : x-rect.x,offsetY:touch ? rect.height+14 : y-rect.y};try{target.setPointerCapture(pointer);}catch{}showDrag(x,y);};
               if(edit) begin();else hold.current=setTimeout(begin,500);
             }}
-            onPointerMove={event=>{const drag=pointerDrag.current;if(drag && Math.hypot(event.clientX-drag.x,event.clientY-drag.y)>6) drag.moved=true;}}
+            onPointerMove={event=>{const drag=pointerDrag.current;if(!drag) return;if(Math.hypot(event.clientX-drag.x,event.clientY-drag.y)>6) drag.moved=true;showDrag(event.clientX,event.clientY);}}
             onPointerUp={event=> {
-              clearTimeout(hold.current);const drag=pointerDrag.current;pointerDrag.current=null;
+              const drag=pointerDrag.current;clearDrag();
               if(!drag?.moved) return;
-              const cell=document.elementFromPoint(event.clientX,event.clientY)?.closest<HTMLElement>("[data-sticker-id]");
-              const target=cell?.dataset.stickerId;
-              if(!cell || !root.current?.contains(cell) || !target || target===drag.id) return;
-              const rect=cell.getBoundingClientRect();
-              const others=saved.items.filter(item=>item.id!==drag.id);const index=others.findIndex(item=>item.id===target);
-              const after=event.clientX<rect.x+rect.width/2 ? (index>0 ? others[index-1].id : null) : target;
-              void move(drag.id,after);
-            }} onPointerCancel={()=>{clearTimeout(hold.current);pointerDrag.current=null;}} onPointerLeave={()=>clearTimeout(hold.current)}
+              const placement=dragPlacement(event.clientX,event.clientY,drag.id);
+              if(placement) void move(drag.id,placement.afterId);
+            }} onPointerCancel={clearDrag} onLostPointerCapture={clearDrag} onPointerLeave={()=>clearTimeout(hold.current)}
             onClick={() => void choose(item, tab === "saved" ? undefined : tab)}>
             <StickerTileImage key={`${account}:${tab}:${item.id}`} client={client} account={account} item={item} pack={tab === "saved" ? undefined : tab} />
           </button>
@@ -351,6 +365,7 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
       <footer>{edit ? <><span>{t("stickers.dragToReorder")}</span><button onClick={() => setEdit(false)}>{t("stickers.done")}</button></> : <><button disabled={busy} onClick={() => { setImports([]); fileInput.current?.click(); }}>{t("stickers.addStickers")}</button><button disabled={busy} onClick={() => void browse("browse")}>{t("stickers.browsePacks")}</button>{tab === "saved" && <button disabled={busy} onClick={() => setEdit(true)}>{t("stickers.edit")}</button>}</>}</footer>
     </section>}
     <input className="attachment-input" ref={fileInput} type="file" multiple accept="image/*,video/mp4,video/quicktime" aria-label={t("stickers.chooseFiles")} onChange={event => { const files = Array.from(event.target.files ?? []); event.target.value = ""; if (files.length) review(files); }} />
+    {dragPreview && createPortal(<div className="sticker-drag-preview" data-sticker-drag-id={dragPreview.id} aria-hidden="true" style={{ width:dragPreview.width, height:dragPreview.height, transform:`translate3d(${dragPreview.x}px,${dragPreview.y}px,0)` }}>{dragPreview.src ? <img src={dragPreview.src} alt="" draggable={false} /> : <span className="sticker-unloaded"><Icon name="smile" /></span>}</div>,document.body)}
     {browser && <StickerModal label={detail?.name || t("stickers.browsePacks")} close={() => { setBrowser(null); setDetail(null); }}>
       <header><div><h2>{detail?.name || t("stickers.browsePacks")}</h2>{detail && <p>{detail.description}</p>}</div><Button icon="close" label={t("stickers.close")} onClick={() => { setBrowser(null); setDetail(null); }} /></header>
       {detail ? <><div className="sticker-detail-cover"><StickerImage client={client} account={account} asset={detailPreview?.original || detailPreview?.thumbnail || detail.cover || detail.icon} label={detailPreview?.caption || detail.name} acquire /></div><div className="sticker-pack-actions"><button onClick={() => setDetail(null)}>{t("stickers.back")}</button><span>{detail.membership === "added" ? t("stickers.added") : t("stickers.notAdded")}</span><button disabled={busy || (detail.membership !== "added" && detail.eligible !== true)} onClick={() => void membership(detail, detail.membership !== "added")}>{detail.membership === "added" ? t("stickers.removePack") : t("stickers.addPack")}</button></div>
@@ -359,13 +374,12 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
       </> : <><nav className="sticker-browser-tabs"><button aria-pressed={browser === "browse"} onClick={() => void browse("browse")}>{t("stickers.browse")}</button><button aria-pressed={browser === "added"} onClick={() => void browse("added")}>{t("stickers.added")}</button></nav><div className="sticker-pack-cards">{(browser === "added" ? added : catalog).map(pack => <button key={pack.id} onClick={() => void inspect(pack)} className="sticker-pack-card" disabled={busy}><StickerImage client={client} account={account} asset={pack.icon} label={pack.name} acquire /><span><strong>{pack.name}</strong><small>{pack.membership === "added" ? t("stickers.added") : t("stickers.previewPack")}</small></span><Icon name="chevron" /></button>)}</div>{browser === "browse" && cursor && <button disabled={busy} onClick={() => void browse("browse", cursor)}>{t("stickers.morePacks")}</button>}</>}
       {busy && <p role="status">{t("stickers.working")}</p>}{error && <p role="alert" className="sticker-error">{error}</p>}
     </StickerModal>}
-    {imports && <StickerModal label={t("stickers.addToSaved")} close={() => setImports(null)} onDrop={drop}>
-      <header><div><h2>{t("stickers.addToSaved")}</h2><p>{t("stickers.importHint")}</p></div><Button icon="close" label={t("stickers.close")} onClick={() => setImports(null)} /></header>
+    {imports && <StickerModal label={t("stickers.addToSaved")} close={() => { if (!busy) setImports(null); }} onDrop={drop}>
+      <header><div><h2>{t("stickers.addToSaved")}</h2><p>{t("stickers.importHint")}</p></div><Button icon="close" label={t("stickers.close")} disabled={busy} onClick={() => setImports(null)} /></header>
       <div className="sticker-import-list">{imports.map(item => <article key={item.id} className="sticker-import-item"><input type="checkbox" aria-label={t("stickers.includeFile", { name: item.file.name })} checked={item.selected} disabled={busy || item.added} onChange={event => updateImport(item.id, { selected: event.target.checked })} /><StickerImage client={client} account={account} asset={item.prepared?.original} label={item.file.name} /><div><strong>{item.file.name}</strong>{item.added ? <p>{t("stickers.added")}</p> : item.prepared ? <p>{t("stickers.preparedDimensions", { width: item.prepared.width, height: item.prepared.height, seconds: item.prepared.durationMs / 1000 })}</p> : <button disabled={item.busy || busy} onClick={() => void prepare(item)}>{item.busy ? t("stickers.preparing") : t("stickers.prepare")}</button>}
         {item.error && <p role="alert" className="sticker-error">{item.error}</p>}
-        {!item.added && <details><summary>{t("stickers.adjust")}</summary><label><input type="checkbox" checked={item.fit} onChange={event => updateImport(item.id, { fit: event.target.checked, prepared: undefined, prepareKey: crypto.randomUUID(), key: crypto.randomUUID() })} />{t("stickers.fit")}</label><label>{t("stickers.startSeconds")}<input type="number" min="0" step="0.1" value={item.start} onChange={event => updateImport(item.id, { start: event.target.value, prepared: undefined, prepareKey: crypto.randomUUID(), key: crypto.randomUUID() })} /></label><label>{t("stickers.durationSeconds")}<input type="number" min="0.1" max="10" step="0.1" value={item.duration} onChange={event => updateImport(item.id, { duration: event.target.value, prepared: undefined, prepareKey: crypto.randomUUID(), key: crypto.randomUUID() })} /></label></details>}
       </div></article>)}</div>
-      <footer><button disabled={busy} onClick={() => fileInput.current?.click()}>{t("stickers.chooseFiles")}</button><button disabled={busy || !ready} onClick={() => void addBatch()}>{t("stickers.addCount", { count: ready })}</button><button disabled={busy} onClick={() => setImports(null)}>{t("stickers.done")}</button></footer>{error && <p role="alert">{error}</p>}
+      <footer><button disabled={busy} onClick={() => fileInput.current?.click()}>{t("stickers.chooseFiles")}</button><button className="sticker-add-submit" disabled={busy || !ready} onClick={() => void addBatch()}>{busy ? t("stickers.saving") : t("stickers.addCount", { count: ready })}</button></footer>{error && <p role="alert">{error}</p>}
     </StickerModal>}
   </div>;
 }

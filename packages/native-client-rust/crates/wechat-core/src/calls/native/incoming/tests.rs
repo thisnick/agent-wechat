@@ -141,12 +141,12 @@ impl TestCallIo for Host {
         if route == CallHostRoute::LiveSync
             && joined
             && matches!(self.case, Case::HoldJoinedSync | Case::HoldJoinAndPoll)
-            && !self.sync_held.swap(true, Ordering::AcqRel)
         {
-            if matches!(self.case, Case::HoldJoinAndPoll) {
-                self.post_join_gate.wait()?;
-            } else {
+            let first = !self.sync_held.swap(true, Ordering::AcqRel);
+            if first && matches!(self.case, Case::HoldJoinedSync) {
                 self.gate.wait()?;
+            } else if first || matches!(self.case, Case::HoldJoinedSync) {
+                self.post_join_gate.wait()?;
             }
         }
         if route == CallHostRoute::LiveSync
@@ -699,7 +699,24 @@ async fn incoming_call_can_answer_then_exit_without_media() {
     .await
     .unwrap();
     f.host.gate.release();
-    tokio::time::sleep(Duration::from_millis(40)).await;
+    // Cancel fences the first poll; hold the next fresh poll before handoff so
+    // Hangup exercises its own admission fence without depending on a sleep.
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        f.host.post_join_gate.entered.notified(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        f.core
+            .store
+            .call_action_records("one", &offer.call_id)
+            .unwrap()
+            .iter()
+            .filter(|action| action.outcome == "not_submitted")
+            .count(),
+        1
+    );
     assert!(f.snapshot().await.availability.busy);
     assert!(f
         .backend
@@ -730,6 +747,7 @@ async fn incoming_call_can_answer_then_exit_without_media() {
         result(&mut client, "end").await,
         CallCommandStatus::Accepted
     );
+    f.host.post_join_gate.release();
     f.finished().await;
     assert!(!f.snapshot().await.availability.busy);
     assert!(f.backend.capabilities("one").direct_audio);
@@ -759,9 +777,11 @@ async fn incoming_call_can_answer_then_exit_without_media() {
         .iter()
         .filter(|action| action.outcome == "not_submitted")
         .collect::<Vec<_>>();
-    assert_eq!(unsent.len(), 1);
-    assert_eq!(unsent[0].route, 9262);
-    assert!(unsent[0].encrypted_request.is_some() && unsent[0].encrypted_reply.is_none());
+    assert_eq!(unsent.len(), 2);
+    assert_ne!(unsent[0].action_id, unsent[1].action_id);
+    assert!(unsent.iter().all(|action| action.route == 9262
+        && action.encrypted_request.is_some()
+        && action.encrypted_reply.is_none()));
 }
 
 #[tokio::test]

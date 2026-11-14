@@ -34,8 +34,8 @@ pub fn sticker_upload_request(source: &[u8], offset: u32) -> Result<Vec<u8>> {
     ])?;
     p::message(&[p::bytes(1, &item), p::uint(3, 1)])
 }
-/// Validate progress against the exact chunk submitted. Rejected, stale,
-/// nonadvancing and mismatched replies must not trigger an automatic resend.
+/// Validate chunk progress or identity-bound completion of an existing upload.
+/// Rejected, stale, nonadvancing and mismatched replies never grant a resend.
 pub fn decode_sticker_upload(
     raw: &[u8],
     offset: u32,
@@ -51,7 +51,8 @@ pub fn decode_sticker_upload(
     ensure!(items.len() == 1, "sticker_upload_reply_invalid");
     let item = p::decode(p::data(&fields, 2)?)?;
     ensure!(p::scalar(&item, 1)? == 0, "sticker_upload_item_rejected");
-    if let Some(identity) = p::optional_data(&item, 4)? {
+    let identity = p::optional_data(&item, 4)?;
+    if let Some(identity) = identity {
         ensure!(
             std::str::from_utf8(identity)?.eq_ignore_ascii_case(expected_md5),
             "sticker_upload_identity_mismatch"
@@ -59,11 +60,17 @@ pub fn decode_sticker_upload(
     }
     let next_offset = u32::try_from(p::scalar(&item, 2)?)?;
     let returned_total = u32::try_from(p::scalar(&item, 3)?)?;
+    // The service may already own the complete content. Only a successful
+    // full-length acknowledgement bound to the original MD5 can skip chunks;
+    // unassigned optional flags are not evidence of completion.
+    let verified_complete = next_offset == total
+        && identity
+            .is_some_and(|value| value.len() == 32 && value.iter().all(u8::is_ascii_hexdigit));
     ensure!(
         returned_total == total
             && next_offset > offset
             && next_offset <= total
-            && next_offset - offset <= STICKER_UPLOAD_CHUNK_BYTES as u32,
+            && (next_offset - offset <= STICKER_UPLOAD_CHUNK_BYTES as u32 || verified_complete),
         "sticker_upload_progress_invalid"
     );
     Ok(StickerUploadAcknowledgement {
@@ -94,6 +101,65 @@ impl NativeClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Synthetic successful upload replies use the independently established
+    // BaseResponse and item layout, rather than the request serializer.
+    fn acknowledgement(next: u32, total: u32, identity: Option<&str>) -> Vec<u8> {
+        let mut item = vec![
+            p::uint(1, 0),
+            p::uint(2, next.into()),
+            p::uint(3, total.into()),
+        ];
+        if let Some(identity) = identity {
+            item.push(p::bytes(4, identity.as_bytes()));
+        }
+        p::message(&[
+            p::bytes(1, &p::uint(1, 0)),
+            p::bytes(2, &p::message(&item).unwrap()),
+        ])
+        .unwrap()
+    }
+    #[test]
+    fn complete_owned_identity_can_acknowledge_previously_uploaded_bytes() {
+        let identity = "0123456789abcdef0123456789abcdef";
+        for offset in [0, 1024] {
+            let raw = acknowledgement(150_000, 150_000, Some(identity));
+            let reply = decode_sticker_upload(&raw, offset, 150_000, identity).unwrap();
+            assert_eq!(reply.next_offset, 150_000);
+            assert_eq!(reply.raw, raw);
+        }
+        // Completion without an identity, a mismatched identity, intermediate
+        // jumps, and impossible sizes remain unverified.
+        for (next, returned_total, echoed) in [
+            (150_000, 150_000, None),
+            (150_000, 150_000, Some("ffffffffffffffffffffffffffffffff")),
+            (120_000, 150_000, Some(identity)),
+            (150_001, 150_000, Some(identity)),
+            (150_000, 150_001, Some(identity)),
+            (0, 150_000, Some(identity)),
+        ] {
+            assert!(decode_sticker_upload(
+                &acknowledgement(next, returned_total, echoed),
+                0,
+                150_000,
+                identity,
+            )
+            .is_err());
+        }
+        assert!(decode_sticker_upload(
+            &acknowledgement(150_000, 150_000, Some(identity)),
+            150_000,
+            150_000,
+            identity
+        )
+        .is_err());
+        assert!(decode_sticker_upload(
+            &acknowledgement(150_000, 150_000, Some("")),
+            0,
+            150_000,
+            ""
+        )
+        .is_err());
+    }
     #[test]
     fn initial_continuation_and_final_shapes_keep_raw_chunk_boundaries() {
         assert_eq!(hex::encode(sticker_upload_request(b"abc", 0).unwrap()), "0a2b0a2039303031353039383363643234666230643639363366376432386531376637321000180322036162631801");
