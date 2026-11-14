@@ -65,6 +65,9 @@ export function SharedLink({
             <Play size={18} fill="currentColor" />
           </span>
         )}
+        {video && duration && (
+          <span className="shared-link-duration">{duration}</span>
+        )}
       </span>
       <span className="shared-link-copy">
         <strong>{emojiText(title)}</strong>
@@ -74,7 +77,11 @@ export function SharedLink({
         <span className="shared-link-source">
           <span>
             {channels
-              ? [t("sharedLink.wechatChannels"), link.sourceName, duration]
+              ? [
+                  t("sharedLink.wechatChannels"),
+                  link.sourceName,
+                  video ? undefined : duration,
+                ]
                   .filter(Boolean)
                   .join(" · ")
               : target?.host ||

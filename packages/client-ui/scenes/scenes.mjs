@@ -375,6 +375,68 @@ export const scenes = [
     },
   },
   {
+    name: "channels-video-cards",
+    route: "chat",
+    description: "Received WeChat Channels cards with their cover, play button, publisher and length.",
+    viewports: ["desktop", "narrow"],
+    setup: standardWorld,
+    target: (world) => ({ account: ACCOUNT.id, thread: world.mei }),
+    prepare: async ({ page }) => {
+      // Synthetic card and media payloads exercise the normal message and preview paths.
+      const cover = await readFile(new URL("./fixtures/channels-cover.jpg", import.meta.url));
+      const cards = [
+        { description: "Sunset from the harbour ferry, all the way across #travel", sourceName: "Harbour Walks", durationSeconds: 96 },
+        { description: "A three-minute noodle recipe for busy weeknights", sourceName: "Kitchen Notes", durationSeconds: 158 },
+      ];
+      const ids = new Map();
+      const assets = (messageId, index) => [
+        { id: `channels-cover-${index}`, accountId: ACCOUNT.id, messageId, kind: "image", variant: "thumbnail", actualVariant: "thumbnail",
+          state: "available", contentType: "image/jpeg", byteLength: cover.length, sha256: "c".repeat(64), filename: "link-preview",
+          expiresAt: null, reason: null, retryable: false, jobId: null, autoDownloadAllowed: true,
+          contentUrl: `/v1/accounts/${ACCOUNT.id}/media/channels-cover-${index}/content`, officialWriteback: "unsupported" },
+        { id: `channels-video-${index}`, accountId: ACCOUNT.id, messageId, kind: "video", variant: "normal", actualVariant: null,
+          state: "pending", contentType: null, byteLength: null, sha256: null, filename: "channels-video.mp4", expiresAt: null,
+          reason: null, retryable: true, jobId: null, autoDownloadAllowed: false, contentUrl: null, officialWriteback: "unsupported" },
+      ];
+      await page.route(/\/threads\/[^/]+\/messages(?:\?.*)?$/, async (route) => {
+        const response = await route.fetch();
+        if (!response.ok()) return route.fulfill({ response });
+        const data = await response.json();
+        data.items = data.items.map((message, index) => {
+          if (index >= cards.length) return message;
+          const card = cards[index];
+          ids.set(message.id, index);
+          return { ...message, type: 49, appMessageType: 51, quote: null,
+            body: `[Channels video] ${card.sourceName}: ${card.description}`,
+            link: { title: null, url: null, ...card } };
+        });
+        await route.fulfill({ response, json: data });
+      });
+      await page.route(/\/media\/lookup$/, async (route) => {
+        const { messageIds } = route.request().postDataJSON();
+        if (!messageIds.some((id) => ids.has(id))) return route.fallback();
+        const response = await route.fetch();
+        const data = response.ok() ? await response.json() : { items: messageIds.map((messageId) => ({ messageId, assets: [], error: null })) };
+        data.items = data.items.map((item) => ids.has(item.messageId) ? { messageId: item.messageId, assets: assets(item.messageId, ids.get(item.messageId)), error: null } : item);
+        await route.fulfill({ json: data });
+      });
+      await page.route(/\/messages\/[^/]+\/media(?:\?.*)?$/, async (route) => {
+        const messageId = decodeURIComponent(new URL(route.request().url()).pathname.split("/").at(-2));
+        if (!ids.has(messageId)) return route.fallback();
+        await route.fulfill({ json: { items: assets(messageId, ids.get(messageId)) } });
+      });
+      await page.route(/\/media\/channels-cover-\d+\/content(?:\?.*)?$/, (route) => route.fulfill({ body: cover, contentType: "image/jpeg" }));
+    },
+    ready: async ({ page, expect }) => {
+      const cards = page.locator(".channels-video-card");
+      await expect(cards).toHaveCount(2);
+      await expect(page.getByText("WeChat Channels · Harbour Walks", { exact: true })).toBeVisible();
+      await expect(page.getByText("WeChat Channels · Kitchen Notes", { exact: true })).toBeVisible();
+      await expect(cards.locator(".shared-link-duration")).toHaveText(["2:38", "1:36"]);
+      await expect(cards.locator(".shared-link-art img")).toHaveCount(2);
+    },
+  },
+  {
     name: "chat-info",
     route: "info",
     description: "Details of a group conversation with its pin, mute and group settings.",
