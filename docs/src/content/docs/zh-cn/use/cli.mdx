@@ -3,7 +3,7 @@ title: CLI 常用命令
 description: 用于读取会话、收发消息与媒体附件、编写自动化脚本的常用 wx 命令。
 banner:
   content: "本页面由机器翻译，尚未经过人工审校。"
-sourceHash: 618825aab5d8
+sourceHash: ee4911c8c1a6
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -14,7 +14,7 @@ import { Aside } from '@astrojs/starlight/components';
 
 ```bash
 wx chats list --limit 20                  # 查看最近会话列表及未读消息数
-wx chats get CHAT_ID                     # 查看会话详情，包含静音与置顶设置
+wx chats get CHAT_ID                     # 查看会话详情，包含消息免打扰与置顶设置
 wx chats find "读书俱乐部"                 # 按名称搜索会话
 wx messages list CHAT_ID --limit 50       # 分页获取消息（最新在前），可通过 --cursor 翻页
 wx contacts find Alice                    # 查找联系人
@@ -32,18 +32,18 @@ Book club  books@chatroom   group  2       See you Friday
 
 已保存的联系人列表与搜索结果会省略 Profile 标记为已删除的条目。这些联系人的名称在已有会话和群成员列表中仍可查看。
 
-会话通知静音设置直接读取自本地已保存的 Profile。Daemon 通过联系人同步流实时接收手机端联系人变更。若返回 `null`，表示该字段缺失或尚未确定，通知消费端在此期间应对该会话保持静音。可执行 `wx contacts refresh CONTACT_ID` 手动拉取最新信息。`wx chats mute/unmute` 可修改单聊或群聊设置，单聊修改会优先拉取当前联系人信息以保证无关字段不被覆盖。
+会话的消息免打扰设置直接读取自本地已保存的 Profile。Daemon 通过联系人同步流实时接收手机端联系人变更。若返回 `null`，表示该字段缺失或尚未确定，通知消费端在此期间应对该会话保持静默。可执行 `wx contacts refresh CONTACT_ID` 手动拉取最新信息。`wx chats mute/unmute` 可开启或关闭单聊和群聊的消息免打扰；修改单聊时会先读取当前联系人信息，以保证无关字段不被覆盖。
 
 `filehelper` 为文件传输助手，非常适合用来测试。群聊编辑与成员查询请参考[管理群聊](/use/groups/)。
 
-## 置顶会话 \{#pin-chats}
+## 置顶聊天 \{#pin-chats}
 
 ```bash
 wx chats pin CHAT_ID --idempotency-key pin-001
 wx chats unpin CHAT_ID --idempotency-key unpin-001
 ```
 
-需要 `admin` 权限令牌，且目标需为已在本地会话列表中存在的普通单聊或活跃群聊。命令执行后将打印对应的操作记录和本地收据路径。请检查 `remoteOutcome` 和 `profileProjection`；若因网络异常未收到响应，请复用相同的参数与幂等键重试。重新调用 `chats list` 时置顶会话将排在最前。系统内置会话（如文件传输助手）不支持置顶修改。
+需要 `admin` 权限范围，且目标需为已在本地会话列表中存在的普通单聊或活跃群聊。命令执行后将打印对应的操作记录和本地收据路径。请检查 `remoteOutcome` 和 `profileProjection`；若因网络异常未收到响应，请复用相同的参数与幂等键重试。重新调用 `chats list` 时置顶会话将排在最前。系统内置会话（如文件传输助手）不支持置顶修改。
 
 ## 发送消息 \{#send}
 
@@ -124,6 +124,6 @@ wx config servers select box
 - **语音** 由 `wx` 自行编码。单条语音最长支持 60 秒；超过部分会自动切分为等长的连续语音条。**视频** 必须为 MP4 格式。这两者均要求 Daemon 所在环境安装有 FFmpeg。
 - **附件体积限制视类型而定。** 参见[发送附件与媒体](/use/media/)获取 512 MiB 普通文件限制以及视频、图片、语音的对应规格。表情无法发送。
 - **引用回复为实验性特性。** 服务端接收与手机端渲染效果仍未经验证。原消息缺失、已被撤回或会话不匹配的引用将被拒绝；被引用的原内容上限 128 KiB。引用仅支持附加纯文本回复：非空白内容（含解析后的被 @ 成员姓名）上限 16 KiB，转义后上限 256 KiB。引用媒体消息并不保证其附件可以被成功下载。
-- **置顶折叠群聊会将其展开移出折叠项。** 系统内置会话不支持置顶。折叠群聊行为已具有离线覆盖测试；手机端真机验证覆盖了普通单聊及展开的普通群聊。
+- **置顶折叠的群聊会使其展开。** 系统内置会话不支持置顶。折叠群聊行为已具有离线覆盖测试；手机端真机验证覆盖了普通单聊及展开的普通群聊。
 - **退出状态码 (Exit Codes)** 让你无需解析 JSON 即可快速感知执行结果。参考 [CLI 退出状态码参考](/reference/cli/#exit-codes)。
 </Aside>
