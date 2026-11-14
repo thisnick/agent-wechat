@@ -15,6 +15,7 @@ WeChat client's Simplified Chinese so the app reads like WeChat.
 | Official Account | 公众号 | |
 | service account | 服务号 | Never use 服务 alone for the hub |
 | Moments | 朋友圈 | |
+| WeChat Channels, Channels | 微信视频号, 视频号 | 视频号 in compounds: "Channels card" 视频号卡片, "Channels video" 视频号视频. Not 频道 |
 | mute notifications (a chat) | 消息免打扰 | 静音 only for a microphone |
 | pin a chat | 置顶聊天 | |
 | recall a message | 撤回 | |
