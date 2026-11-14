@@ -30,7 +30,7 @@ impl Upstream for Arc<PausedDownloads> {
         max_bytes: usize,
         checkpoint: &mut dyn FnMut() -> Result<()>,
         progress: crate::upstream::media::Progress<'_>,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<wechat_protocol::media::ChannelsVideo> {
         self.channels_count.fetch_add(1, Ordering::SeqCst);
         assert_eq!(post.object_id, 18_446_744_073_709_551_000);
         assert_eq!(post.nonce, "12345678901234567890_0_38_12_4_context");
@@ -44,7 +44,14 @@ impl Upstream for Arc<PausedDownloads> {
             .unwrap_or_else(|| Err("no synthetic Channels reply".into()));
         let bytes = reply.map_err(|code| anyhow::anyhow!(code))?;
         progress(bytes.len() as u64, Some(bytes.len() as u64))?;
-        Ok(bytes)
+        Ok(wechat_protocol::media::ChannelsVideo {
+            facts: wechat_protocol::media::ChannelsDownloadFacts {
+                received_bytes: bytes.len() as u64,
+                decoded_box: wechat_protocol::media::channels_box_type(&bytes),
+                ..Default::default()
+            },
+            bytes,
+        })
     }
 }
 impl MediaTransport for PausedCdn {
@@ -619,6 +626,10 @@ async fn channels_failures_publish_nothing_and_a_new_request_resolves_again() {
             .as_deref(),
         Some("channels_integrity_failed")
     );
+    let row = core.store.media_job("one", &invalid.id).unwrap();
+    let detail = &row.data["result"]["channelsDownloadFailure"];
+    assert_eq!(detail["check"], "container");
+    assert_eq!(detail["receivedBytes"], 24);
     assert!(channels_files(&tmp).is_empty());
 
     upstream

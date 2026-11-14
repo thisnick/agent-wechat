@@ -404,7 +404,7 @@ pub trait Upstream: Send + Sync {
         _max_bytes: usize,
         _checkpoint: &mut dyn FnMut() -> Result<()>,
         _progress: media::Progress<'_>,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<wechat_protocol::media::ChannelsVideo> {
         bail!(
             "{}",
             if self.kind() == UpstreamKind::Simulator {

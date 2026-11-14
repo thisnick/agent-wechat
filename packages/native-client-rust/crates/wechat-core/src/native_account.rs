@@ -411,7 +411,7 @@ impl crate::upstream::Upstream for BoundUpstream {
         max_bytes: usize,
         checkpoint: &mut dyn FnMut() -> Result<()>,
         progress: crate::upstream::media::Progress<'_>,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<wechat_protocol::media::ChannelsVideo> {
         // A fresh page address and ticket per retrieval: retrievals are user-requested and rare,
         // and nothing credential-bearing outlives the transfer. The page address comes first and
         // the ticket after it, as in the accepted native sequence.

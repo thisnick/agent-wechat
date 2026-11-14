@@ -1579,7 +1579,8 @@ impl Core {
     ) -> Result<()> {
         let service = service_diagnostic(error);
         let cdn = cdn_download_failure(error);
-        if service.is_none() && cdn.is_none() {
+        let channels = channels_download_failure(error);
+        if service.is_none() && cdn.is_none() && channels.is_none() {
             return Ok(());
         }
         let mut row = self.store.media_job(account, id)?;
@@ -1589,6 +1590,9 @@ impl Core {
         }
         if let Some(detail) = cdn {
             row.data["result"]["cdnDownloadFailure"] = detail;
+        }
+        if let Some(detail) = channels {
+            row.data["result"]["channelsDownloadFailure"] = detail;
         }
         self.store.save_media_job(account, &row)?;
         Ok(())
@@ -1911,11 +1915,16 @@ impl Core {
                     }
                 }
                 self.save_state(account, &state)?;
-                let bytes = fetched?;
+                let video = fetched?;
                 let (mime, frames) =
-                    validate_asset_bytes(MediaKind::Video, MediaVariant::Normal, &bytes)
-                        .map_err(|_| anyhow::anyhow!("channels_integrity_failed"))?;
-                (bytes, mime, Some(MediaVariant::Normal), frames)
+                    validate_asset_bytes(MediaKind::Video, MediaVariant::Normal, &video.bytes)
+                        .map_err(|_| {
+                            anyhow::Error::new(wechat_protocol::media::ChannelsDownloadFailure {
+                                check: "container",
+                                facts: video.facts.clone(),
+                            })
+                        })?;
+                (video.bytes, mime, Some(MediaVariant::Normal), frames)
             }
             DownloadPlan::Sticker { descriptor } => {
                 let mut state = self.account_state(account)?;
@@ -2294,6 +2303,24 @@ impl Core {
 
 // Only a whole numeric suffix on these fixed library messages may cross the
 // protected boundary. General error strings can contain URLs or account data.
+/// Sizes, media type and box types of a Channels video that failed a check. Holds no address,
+/// token, key or video bytes.
+fn channels_download_failure(error: &anyhow::Error) -> Option<serde_json::Value> {
+    let failure = error.chain().find_map(|cause| {
+        cause.downcast_ref::<wechat_protocol::media::ChannelsDownloadFailure>()
+    })?;
+    let facts = &failure.facts;
+    Some(json!({
+        "check": failure.check,
+        "advertisedBytes": facts.advertised_bytes,
+        "advertisedCdnBytes": facts.advertised_cdn_bytes,
+        "contentLength": facts.content_length,
+        "receivedBytes": facts.received_bytes,
+        "contentType": facts.content_type,
+        "encodedBox": facts.encoded_box,
+        "decodedBox": facts.decoded_box,
+    }))
+}
 fn cdn_download_failure(error: &anyhow::Error) -> Option<serde_json::Value> {
     use wechat_protocol::media::{LargeFileDownloadError, SourceEvidence};
     if let Some(mismatch) = video_representation_mismatch(error) {

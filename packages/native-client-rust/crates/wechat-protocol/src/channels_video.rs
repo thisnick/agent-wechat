@@ -15,6 +15,69 @@ const LEGACY_HOST: &str = "wxapp.tc.qq.com";
 const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36 MicroMessenger";
 const REFERER: &str = "https://channels.weixin.qq.com/";
 
+/// What the CDN delivered, kept for checks and failure diagnostics. Holds no address, token or
+/// key.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChannelsDownloadFacts {
+    /// Video size the detail reply advertised, when present.
+    pub advertised_bytes: Option<u64>,
+    /// CDN copy size the detail reply advertised, when present.
+    pub advertised_cdn_bytes: Option<u64>,
+    /// `Content-Length` of the response, when present.
+    pub content_length: Option<u64>,
+    /// Bytes actually received.
+    pub received_bytes: u64,
+    /// Media type of the response, when it is a plain `type/subtype`.
+    pub content_type: Option<String>,
+    /// Box type at offset 4 as received, when printable.
+    pub encoded_box: Option<String>,
+    /// Box type at offset 4 after decoding the prefix, when printable.
+    pub decoded_box: Option<String>,
+}
+
+/// A downloaded Channels video: the decoded bytes and what the CDN delivered.
+pub struct ChannelsVideo {
+    /// Decoded MP4 bytes.
+    pub bytes: Vec<u8>,
+    /// Sizes, media type and box types observed during the download.
+    pub facts: ChannelsDownloadFacts,
+}
+
+impl std::fmt::Debug for ChannelsVideo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChannelsVideo")
+            .field("bytes", &self.bytes.len())
+            .field("facts", &self.facts)
+            .finish()
+    }
+}
+
+/// A downloaded video failed a check. Its message is the stable code
+/// `channels_integrity_failed`; `check` names which check and `facts` say what arrived.
+#[derive(Debug, Clone)]
+pub struct ChannelsDownloadFailure {
+    /// `empty`, `length` (fewer or more bytes than `Content-Length`) or `container`.
+    pub check: &'static str,
+    /// What the CDN delivered.
+    pub facts: ChannelsDownloadFacts,
+}
+
+impl std::fmt::Display for ChannelsDownloadFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("channels_integrity_failed")
+    }
+}
+
+impl std::error::Error for ChannelsDownloadFailure {}
+
+/// The four-byte box type at offset 4, when it is printable ASCII.
+pub fn channels_box_type(bytes: &[u8]) -> Option<String> {
+    let kind = bytes.get(4..8)?;
+    kind.iter()
+        .all(|b| b.is_ascii_alphanumeric() || *b == b' ')
+        .then(|| String::from_utf8_lossy(kind).into_owned())
+}
+
 /// Build the download address the way the official player does: the returned address with its
 /// token appended, over HTTPS, on the video host.
 pub fn channels_video_url(media: &crate::ChannelsMedia) -> Result<reqwest::Url> {
@@ -50,7 +113,7 @@ pub fn fetch_channels_video(
     media: &crate::ChannelsMedia,
     max_bytes: usize,
     progress: impl FnMut(u64, Option<u64>) -> Result<()>,
-) -> Result<Vec<u8>> {
+) -> Result<ChannelsVideo> {
     let url = channels_video_url(media)?;
     let address = super::link_thumbnail::public_address(
         &url,
@@ -72,7 +135,7 @@ fn download_at(
     media: &crate::ChannelsMedia,
     max_bytes: usize,
     mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
-) -> Result<Vec<u8>> {
+) -> Result<ChannelsVideo> {
     let cap = max_bytes.min(MAX_CHANNELS_VIDEO_BYTES) as u64;
     let advertised = [media.file_size, media.cdn_file_size];
     ensure!(
@@ -118,18 +181,23 @@ fn download_at(
         ),
         "channels_download_failed"
     );
+    let content_type = header("content-type")
+        .map(|kind| kind.split(';').next().unwrap_or_default().trim().to_owned())
+        .filter(|kind| {
+            kind.len() <= 64
+                && kind.contains('/')
+                && kind
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"/.+-".contains(&b))
+        });
     let total = response.content_length();
     if let Some(length) = total {
         ensure!(length <= cap, "channels_media_too_large");
-        ensure!(
-            advertised.iter().flatten().next().is_none()
-                || advertised.iter().flatten().any(|size| *size == length),
-            "channels_integrity_failed"
-        );
     }
     let stream = channels_prefix_keystream(media.decode_key());
     let mut bytes = Vec::with_capacity(total.unwrap_or(0).min(cap) as usize);
     let mut chunk = vec![0u8; 64 * 1024];
+    let mut head = Vec::with_capacity(8);
     loop {
         progress(bytes.len() as u64, total)?;
         let n = response
@@ -139,21 +207,36 @@ fn download_at(
             break;
         }
         ensure!((bytes.len() + n) as u64 <= cap, "channels_media_too_large");
+        if head.len() < 8 {
+            let wanted = (8 - head.len()).min(n);
+            head.extend_from_slice(&chunk[..wanted]);
+        }
         let offset = bytes.len() as u64;
         apply_channels_prefix(&mut chunk[..n], offset, &stream);
         bytes.extend_from_slice(&chunk[..n]);
     }
-    let received = bytes.len() as u64;
-    ensure!(
-        received > 0 && total.is_none_or(|n| n == received),
-        "channels_integrity_failed"
-    );
-    ensure!(
-        advertised.iter().flatten().next().is_none()
-            || advertised.iter().flatten().any(|size| *size == received),
-        "channels_integrity_failed"
-    );
-    Ok(bytes)
+    let facts = ChannelsDownloadFacts {
+        advertised_bytes: media.file_size,
+        advertised_cdn_bytes: media.cdn_file_size,
+        content_length: total,
+        received_bytes: bytes.len() as u64,
+        content_type,
+        encoded_box: channels_box_type(&head),
+        decoded_box: channels_box_type(&bytes),
+    };
+    // An advertised size that differs is recorded, not fatal: the container check decides
+    // whether the bytes are the expected video.
+    let check = if bytes.is_empty() {
+        Some("empty")
+    } else if total.is_some_and(|n| n != facts.received_bytes) {
+        Some("length")
+    } else {
+        None
+    };
+    if let Some(check) = check {
+        return Err(ChannelsDownloadFailure { check, facts }.into());
+    }
+    Ok(ChannelsVideo { bytes, facts })
 }
 
 #[cfg(test)]
@@ -221,9 +304,10 @@ mod tests {
 
     #[test]
     fn decodes_the_prefix_and_checks_length_type_and_redirects() {
-        let plain: Vec<u8> = (0..CHANNELS_PREFIX_BYTES + 1000)
+        let mut plain: Vec<u8> = (0..CHANNELS_PREFIX_BYTES + 1000)
             .map(|i| (i % 253) as u8)
             .collect();
+        plain[..8].copy_from_slice(&[0, 0, 0, 32, b'f', b't', b'y', b'p']);
         let mut encrypted = plain.clone();
         let stream = channels_prefix_keystream(42);
         apply_channels_prefix(&mut encrypted, 0, &stream);
@@ -234,7 +318,7 @@ mod tests {
         let (url, address, server) = serve(ok.clone(), encrypted.clone());
         let size = Some(encrypted.len() as u64);
         let mut seen = 0;
-        let bytes = download_at(
+        let video = download_at(
             url,
             address,
             &media("u", "", 42, size),
@@ -245,7 +329,12 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(bytes, plain);
+        assert_eq!(video.bytes, plain);
+        assert_eq!(video.facts.received_bytes, plain.len() as u64);
+        assert_eq!(video.facts.content_length, size);
+        assert_eq!(video.facts.content_type.as_deref(), Some("video/mp4"));
+        assert_eq!(video.facts.decoded_box.as_deref(), Some("ftyp"));
+        assert_ne!(video.facts.encoded_box.as_deref(), Some("ftyp"));
         assert_eq!(seen, plain.len() as u64);
         let request = server.join().unwrap();
         assert!(
@@ -258,7 +347,6 @@ mod tests {
             ("HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n".to_string(), vec![], size, "CDN HTTP status 403"),
             ("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: text/html\r\nContent-Length: 4\r\n\r\n".to_string(), b"<ht>".to_vec(), None, "channels_download_failed"),
             ("HTTP/1.1 200 OK\r\nConnection: close\r\nX-ErrNo: -5103144\r\nContent-Length: 4\r\n\r\n".to_string(), b"abcd".to_vec(), None, "channels_download_failed"),
-            ("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: video/mp4\r\nContent-Length: 4\r\n\r\n".to_string(), b"abcd".to_vec(), Some(5), "channels_integrity_failed"),
             ("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: video/mp4\r\n\r\n".to_string(), vec![1; 64], Some(32), "channels_media_too_large"),
         ];
         for (head, body, advertised, expected) in cases {
@@ -275,6 +363,40 @@ mod tests {
             assert_eq!(error.to_string(), expected);
             let _ = server.join();
         }
+    }
+
+    #[test]
+    fn a_different_advertised_size_is_recorded_and_a_short_body_is_a_length_failure() {
+        let head = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: video/mp4\r\nContent-Length: 16\r\n\r\n";
+        let (url, address, server) = serve(head.into(), vec![7; 16]);
+        let video = download_at(
+            url,
+            address,
+            &media("u", "", 1, Some(99)),
+            usize::MAX,
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        let _ = server.join();
+        assert_eq!(video.facts.advertised_bytes, Some(99));
+        assert_eq!(video.facts.received_bytes, 16);
+
+        let (url, address, server) = serve(
+            "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: video/mp4\r\n\r\n".into(),
+            vec![],
+        );
+        let error = download_at(
+            url,
+            address,
+            &media("u", "", 1, None),
+            usize::MAX,
+            |_, _| Ok(()),
+        )
+        .unwrap_err();
+        let _ = server.join();
+        let failure = error.downcast_ref::<ChannelsDownloadFailure>().unwrap();
+        assert_eq!(failure.check, "empty");
+        assert_eq!(error.to_string(), "channels_integrity_failed");
     }
 
     #[test]
