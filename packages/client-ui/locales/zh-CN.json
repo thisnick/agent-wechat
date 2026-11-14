@@ -714,7 +714,6 @@
     "wechatChannels": "微信视频号"
   },
   "stickers": {
-    "adjust": "调整",
     "addCount": "添加 {{count}} 个",
     "addPack": "添加表情包",
     "addStickers": "添加表情",
@@ -735,14 +734,11 @@
     "done": "完成",
     "dragToReorder": "拖动以调整顺序",
     "draft": "表情草稿",
-    "durationSeconds": "时长（秒）",
     "edit": "编辑",
     "editSaved": "编辑我的表情",
     "empty": "这里还没有表情",
-    "fit": "按比例适配",
     "importHint": "将图片、GIF 或视频拖放到此处。添加前请检查每个预览。",
     "includeFile": "包含 {{name}}",
-    "invalidTrim": "请选择开始时间，并将时长设为不超过 10 秒。",
     "item": "表情 {{index}}",
     "jobFailed": "操作 {{id}}：{{state}} {{reason}}",
     "jobStillRunning": "此操作仍在进行中（{{id}}）。请先检查其状态再重试。",
@@ -771,7 +767,6 @@
     "saving": "正在保存…",
     "sending": "正在发送表情…",
     "sourceSize": "请选择不超过 64 MiB 的非空文件。",
-    "startSeconds": "开始时间（秒）",
     "sticker": "表情",
     "useItem": "使用 {{name}}",
     "working": "处理中…"

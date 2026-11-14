@@ -20,7 +20,7 @@ scene quoted-sender-names | route /{server}/{account}/chats/{thread}, viewports 
 scene settings | route /{server}/{account}/settings, viewports desktop+narrow | Settings for the app, the hub and the signed-in account.
 scene stickers-dragging | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Holding a Saved sticker shows its existing image under the pointer, dims the source and marks its drop position without staging a send.
 scene stickers-edit | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Saved edit mode stays inside the composer tray with removal, visible drag feedback, Escape cancellation and keyboard placement.
-scene stickers-import | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Add to Saved has one primary Add action after preview review.
+scene stickers-import | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Add to Saved offers previews, file selection and one primary Add action without fit or trim controls.
 scene stickers-import-retry | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | A partial import keeps its per-file results open; retry submits only the remaining item before returning to Saved.
 scene stickers-import-saved | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | A completed asynchronous import closes the dialog and selects Saved without reopening the picker or resubmitting the item.
 scene stickers-lazy-loading | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Missing Saved originals and pack thumbnails load on visibility, including after scrolling.

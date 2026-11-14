@@ -105,7 +105,7 @@ export function StickerDraftPreview({ connection, account, draft, remove }: { co
   </section>;
 }
 
-type ImportItem = { id: string; file: File; key: string; prepareKey: string; sourceId?: string; selected: boolean; prepared?: PreparedSticker; error?: string; busy?: boolean; added?: boolean; fit: boolean; start: string; duration: string };
+type ImportItem = { id: string; file: File; key: string; prepareKey: string; sourceId?: string; selected: boolean; prepared?: PreparedSticker; error?: string; busy?: boolean; added?: boolean };
 type DragPreview = { id: string; x: number; y: number; width: number; height: number; src?: string; dropId?: string; side?: "before" | "after" };
 type Props = { connection: Connection; account: string; enabled: boolean; stage: (draft: StickerDraft) => void };
 export function StickerPicker({ connection, account, enabled, stage }: Props) {
@@ -285,7 +285,7 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
     if (busy) return;
     setEdit(false);
     const count=(imports?.length ?? 0)+files.length;
-    setImports(old => [...(old ?? []),...files.slice(0,Math.max(0,20-(old?.length ?? 0))).map(file => ({ id: crypto.randomUUID(), file, key: crypto.randomUUID(), prepareKey: crypto.randomUUID(), selected: true, fit: false, start: "", duration: "" }))]);
+    setImports(old => [...(old ?? []),...files.slice(0,Math.max(0,20-(old?.length ?? 0))).map(file => ({ id: crypto.randomUUID(), file, key: crypto.randomUUID(), prepareKey: crypto.randomUUID(), selected: true }))]);
     if (count > 20) setError(t("stickers.batchLimit"));
   }
   function updateImport(id: string, update: Partial<ImportItem>) { setImports(old => old?.map(item => item.id === id ? { ...item, ...update } : item) ?? null); }
@@ -297,9 +297,7 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
       if (item.file.size===0 || item.file.size>64*1024*1024) throw Error(t("stickers.sourceSize"));
       const sourceId = item.sourceId ?? (await client.upload(account, item.file, item.file.name, item.file.type || "application/octet-stream", signal())).id;
       guard();updateImport(item.id,{sourceId});
-      const start = Number(item.start || 0), duration = item.duration ? Number(item.duration) : undefined;
-      if (!Number.isFinite(start) || start < 0 || item.start!=="" && duration===undefined || (duration !== undefined && (!Number.isFinite(duration) || duration <= 0 || duration > 10))) throw Error(t("stickers.invalidTrim"));
-      const job = await waitStickerJob(client, account, await client.prepareSticker(account, { sourceId, fit: item.fit, trim: duration === undefined ? null : { startMs: Math.round(start * 1000), durationMs: Math.round(duration * 1000) } }, item.prepareKey, signal()), signal());
+      const job = await waitStickerJob(client, account, await client.prepareSticker(account, { sourceId, fit: false, trim: null }, item.prepareKey, signal()), signal());
       guard(); updateImport(item.id, { prepared: job.result as unknown as PreparedSticker, busy: false });
     } catch (error) { if (!signal().aborted) updateImport(item.id, { error: readableError(error), busy: false }); }
     finally {preparing.current=false;}
@@ -380,7 +378,6 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
       <header><div><h2>{t("stickers.addToSaved")}</h2><p>{t("stickers.importHint")}</p></div><Button icon="close" label={t("stickers.close")} disabled={busy} onClick={() => setImports(null)} /></header>
       <div className="sticker-import-list">{imports.map(item => <article key={item.id} className="sticker-import-item"><input type="checkbox" aria-label={t("stickers.includeFile", { name: item.file.name })} checked={item.selected} disabled={busy || item.added} onChange={event => updateImport(item.id, { selected: event.target.checked })} /><StickerImage client={client} account={account} asset={item.prepared?.original} label={item.file.name} /><div><strong>{item.file.name}</strong>{item.added ? <p>{t("stickers.added")}</p> : item.prepared ? <p>{t("stickers.preparedDimensions", { width: item.prepared.width, height: item.prepared.height, seconds: item.prepared.durationMs / 1000 })}</p> : <button disabled={item.busy || busy} onClick={() => void prepare(item)}>{item.busy ? t("stickers.preparing") : t("stickers.prepare")}</button>}
         {item.error && <p role="alert" className="sticker-error">{item.error}</p>}
-        {!item.added && <details><summary>{t("stickers.adjust")}</summary><label><input type="checkbox" disabled={busy} checked={item.fit} onChange={event => updateImport(item.id, { fit: event.target.checked, prepared: undefined, prepareKey: crypto.randomUUID(), key: crypto.randomUUID() })} />{t("stickers.fit")}</label><label>{t("stickers.startSeconds")}<input type="number" disabled={busy} min="0" step="0.1" value={item.start} onChange={event => updateImport(item.id, { start: event.target.value, prepared: undefined, prepareKey: crypto.randomUUID(), key: crypto.randomUUID() })} /></label><label>{t("stickers.durationSeconds")}<input type="number" disabled={busy} min="0.1" max="10" step="0.1" value={item.duration} onChange={event => updateImport(item.id, { duration: event.target.value, prepared: undefined, prepareKey: crypto.randomUUID(), key: crypto.randomUUID() })} /></label></details>}
       </div></article>)}</div>
       <footer><button disabled={busy} onClick={() => fileInput.current?.click()}>{t("stickers.chooseFiles")}</button><button className="sticker-add-submit" disabled={busy || !ready} onClick={() => void addBatch()}>{busy ? t("stickers.saving") : t("stickers.addCount", { count: ready })}</button></footer>{error && <p role="alert">{error}</p>}
     </StickerModal>}
