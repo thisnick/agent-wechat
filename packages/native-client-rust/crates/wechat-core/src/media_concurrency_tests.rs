@@ -38,6 +38,11 @@ impl MediaTransport for PausedCdn {
             .unwrap();
         ensure!(*released, "synthetic transfer timed out");
         if let Some(bytes) = self.0.video_reply.lock().unwrap().clone() {
+            assert_eq!(
+                descriptor.strict_size,
+                !descriptor.file_id.ends_with("normal"),
+                "only a normal-video request may select the CDN representation"
+            );
             progress(bytes.len() as u64, Some(bytes.len() as u64))?;
             return Ok(DownloadedMedia {
                 md5: hex_string(&wechat_protocol::crypto::md5(&bytes)),
@@ -312,7 +317,11 @@ async fn logout_during_an_image_download_rejects_the_late_result() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn selected_normal_video_is_published_but_cannot_replace_an_original() {
-    for variant in [MediaVariant::Normal, MediaVariant::Original] {
+    for variant in [
+        MediaVariant::Normal,
+        MediaVariant::Original,
+        MediaVariant::Thumbnail,
+    ] {
         let (tmp, core, upstream, _received) = fixture();
         let source = tmp.path().join("synthetic.mp4");
         assert!(std::process::Command::new("ffmpeg")
@@ -338,10 +347,11 @@ async fn selected_normal_video_is_published_but_cannot_replace_an_original() {
             .success());
         let bytes = std::fs::read(source).unwrap();
         *upstream.video_reply.lock().unwrap() = Some(bytes.clone());
-        let variant_name = if variant == MediaVariant::Normal {
-            "normal"
-        } else {
-            "original"
+        let variant_name = match variant {
+            MediaVariant::Normal => "normal",
+            MediaVariant::Original => "original",
+            MediaVariant::Thumbnail => "thumbnail",
+            _ => unreachable!(),
         };
         let job = queue_download(
             &core,
@@ -349,12 +359,17 @@ async fn selected_normal_video_is_published_but_cannot_replace_an_original() {
             "video",
             variant_name,
             MediaDescriptor {
-                file_id: "synthetic-video".into(),
+                file_id: format!("synthetic-video-{variant_name}"),
                 aes_key: vec![1; 16],
-                quality: MediaQuality::Video,
+                quality: if variant == MediaVariant::Thumbnail {
+                    MediaQuality::Thumbnail
+                } else {
+                    MediaQuality::Video
+                },
                 expected_bytes: Some(bytes.len() as u64 + 32),
                 expected_md5: Some("0".repeat(32)),
-                strict_size: variant == MediaVariant::Original,
+                // Old discovery persisted strict normal-video plans as well.
+                strict_size: true,
                 expires_at: None,
             },
         );
