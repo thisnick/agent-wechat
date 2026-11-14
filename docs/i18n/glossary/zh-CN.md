@@ -20,6 +20,7 @@ WeChat client's Simplified Chinese so the app reads like WeChat.
 | recall a message | 撤回 | |
 | mention, @ | @ 提醒 | "mention everyone": @所有人 |
 | sticker | 表情 | |
+| Saved (the account's own stickers) | 我的表情 | "Add to Saved": 添加到我的表情. Not 收藏 (WeChat Favorites) or 已保存 |
 | voice message | 语音消息 | |
 | File Transfer | 文件传输助手 | |
 | group announcement | 群公告 | |

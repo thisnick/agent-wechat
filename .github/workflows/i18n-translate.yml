@@ -109,13 +109,10 @@ jobs:
               client's wording in that language.
             - Edit only the files named in work.json.
 
-            Finally write two files in ${{ runner.temp }}:
-            - back-translation.md: for each language, a `### <tag>` heading, then each new or changed UI
-              string as "- `key`: <your translation, translated back into English>", and for each docs
-              page "- `page`: <two sentences in English on what the translation says, noting anything
-              that differs in meaning from the English>".
-            - notices.json: {"<tag>": "<'This page was translated by machine and not yet reviewed by a
-              person.' in that language>"} for each language with docs pages.
+            Finally write ${{ runner.temp }}/back-translation.md: for each language, a `### <tag>` heading,
+            then each new or changed UI string as "- `key`: <your translation, translated back into
+            English>", and for each docs page "- `page`: <two sentences in English on what the translation
+            says, noting anything that differs in meaning from the English>".
           claude_args: |
             --model claude-haiku-5-5
             --add-dir ${{ runner.temp }}
