@@ -1,5 +1,7 @@
 # @agent-wechat/rust-crates
 
+## 2.4.2
+
 ## 2.4.1
 
 ### Patch Changes

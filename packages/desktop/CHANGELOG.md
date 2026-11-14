@@ -1,5 +1,11 @@
 # @agent-wechat/desktop
 
+## 2.4.2
+
+### Patch Changes
+
+- [#509](https://github.com/thisnick/agent-wechat/pull/509) [`1cb9d4a`](https://github.com/thisnick/agent-wechat/commit/1cb9d4a274ef1877071760ae4324f8ab7b7b3e14) Thanks [@thisnick](https://github.com/thisnick)! - Add `wx groups members list --search` to find members of one group by ID, WeChat ID, nickname, remark or name in the group. Member search now also matches a member's nickname, WeChat ID and name in the group when you have given them a remark, so mention suggestions find them too. Group member rows now include `nickname` and `alias`. Correct the help text for `wx contacts lookup` and `wx groups lookup`: both ask WeChat directly and don't save the result, and contact lookup accepts one or two IDs.
+
 ## 2.4.1
 
 ### Patch Changes
