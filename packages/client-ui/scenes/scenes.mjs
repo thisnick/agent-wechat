@@ -518,12 +518,13 @@ async function stickerFixtures(page, cold = false) {
   await page.route(/\/media\/sticker_preview_[^/]+$/, route => route.fulfill({json:{...asset('preview'),id:new URL(route.request().url()).pathname.split('/').pop()}}));
   await page.route(/\/media\/sticker(?:-|_preview_)[^/]+\/content(?:\?.*)?$/, route => route.fulfill({ body: gif, contentType: 'image/gif' }));
 }
-for (const mode of ['picker', 'edit', 'packs', 'pack-detail', 'import', 'import-saved', 'import-retry', 'lazy-loading', 'loading']) {
+for (const mode of ['picker', 'edit', 'dragging', 'packs', 'pack-detail', 'import', 'import-saved', 'import-retry', 'lazy-loading', 'loading']) {
   scenes.push({
     name: `stickers-${mode}`,
     route: 'chat',
-    description: { loading: 'Added pack contents show loading until the response arrives, with empty state only after an empty response.', 'lazy-loading': 'Missing Saved originals and pack thumbnails load on visibility, including after scrolling.', picker: 'Composer-anchored Saved picker with labeled added-pack tabs.', edit: 'Saved edit mode stays inside the composer tray with removal and keyboard placement.', packs: 'Official pack browser shows added and available packs in one dialog.', 'pack-detail': 'Official pack detail has complete contents, captions, membership and a copyable ID.', import: 'Add to Saved has one primary Add action after preview review.', 'import-saved': 'A completed asynchronous import closes the dialog and selects Saved without reopening the picker or resubmitting the item.', 'import-retry': 'A partial import keeps its per-file results open; retry submits only the remaining item before returning to Saved.' }[mode],
+    description: { loading: 'Added pack contents show loading until the response arrives, with empty state only after an empty response.', 'lazy-loading': 'Missing Saved originals and pack thumbnails load on visibility, including after scrolling.', picker: 'Composer-anchored Saved picker with labeled added-pack tabs.', edit: 'Saved edit mode stays inside the composer tray with removal, visible drag feedback, Escape cancellation and keyboard placement.', dragging: 'Holding a Saved sticker shows its existing image under the pointer, dims the source and marks its drop position without staging a send.', packs: 'Official pack browser shows added and available packs in one dialog.', 'pack-detail': 'Official pack detail has complete contents, captions, membership and a copyable ID.', import: 'Add to Saved has one primary Add action after preview review.', 'import-saved': 'A completed asynchronous import closes the dialog and selects Saved without reopening the picker or resubmitting the item.', 'import-retry': 'A partial import keeps its per-file results open; retry submits only the remaining item before returning to Saved.' }[mode],
     viewports: ['desktop', 'narrow', 'compact'],
+    preservePointer: mode === 'dragging',
     setup: standardWorld,
     target: world => ({ account: ACCOUNT.id, thread: world.mei }),
     prepare: async ({ page }) => stickerFixtures(page, mode === "lazy-loading"),
@@ -573,21 +574,43 @@ for (const mode of ['picker', 'edit', 'packs', 'pack-detail', 'import', 'import-
         await expect(page.locator('.sticker-draft')).toHaveCount(0);
         await page.locator('.sticker-grid').evaluate(el=>el.scrollTop=0);
       }
-      if (mode === 'edit') {
-        await page.getByRole('button', { name: 'Edit', exact: true }).click(); await expect(page.getByText('Drag to reorder')).toBeVisible();
+      if (mode === 'edit' || mode === 'dragging') {
+        await expect(page.getByRole('button', { name: 'Edit', exact: true })).toBeEnabled();
+        if (mode === 'edit') await page.getByRole('button', { name: 'Edit', exact: true }).click();
         const first=page.locator('.sticker-cell').first(),last=page.locator('.sticker-cell').last();
-        const moving=await first.getAttribute('data-sticker-id');const from=await first.boundingBox(),to=await last.boundingBox();
+        await expect(first.locator('img')).toBeVisible();
+        const moving=await first.getAttribute('data-sticker-id'),src=await first.locator('img').getAttribute('src');
+        const from=await first.boundingBox();
         await page.mouse.move(from.x+from.width/2,from.y+from.height/3);await page.mouse.down();
-        await page.mouse.move(to.x+to.width-4,to.y+to.height/3,{steps:8});await page.mouse.up();
-        await expect(page.locator('.sticker-cell').last()).toHaveAttribute('data-sticker-id',moving);
+        await expect(page.getByText('Drag to reorder')).toBeVisible();
+        const to=await last.boundingBox(),ghost=page.locator('.sticker-drag-preview');
+        await page.mouse.move(to.x+to.width-4,to.y+to.height/3,{steps:8});
+        await expect(ghost).toBeVisible();
+        await expect(ghost).toHaveAttribute('data-sticker-drag-id',moving);
+        await expect(ghost.locator('img')).toHaveAttribute('src',src);
+        await expect(first).toHaveClass(/is-drag-source/);
+        await expect(last).toHaveAttribute('data-drop-side','after');
+        const previewBox = await ghost.boundingBox();
+        expect(previewBox.x).toBeLessThan(to.x+to.width-4);
+        expect(previewBox.x+previewBox.width).toBeGreaterThan(to.x+to.width-4);
         await expect(page.locator('.sticker-draft')).toHaveCount(0);
-        await page.getByRole('button',{name:'Done',exact:true}).focus();await page.keyboard.press('Enter');
-        await page.locator('.sticker-tile').first().focus();await page.keyboard.press('Enter');
-        await expect(page.locator('.sticker-draft')).toHaveCount(1);
-        await page.locator('.sticker-draft button').click();
-        await page.getByRole('button',{name:'Stickers',exact:true}).click();
-        await expect(page.getByRole('button',{name:'Edit',exact:true})).toBeEnabled();
-        await page.getByRole('button',{name:'Edit',exact:true}).click();
+        if (mode === 'edit') {
+          await page.keyboard.press('Escape'); await expect(ghost).toHaveCount(0); await page.mouse.up();
+          await expect(page.locator('.sticker-cell').first()).toHaveAttribute('data-sticker-id',moving);
+          await expect(page.getByRole('region',{name:'Sticker picker'})).toBeVisible();
+          await page.mouse.move(from.x+from.width/2,from.y+from.height/3);await page.mouse.down();
+          await page.mouse.move(to.x+to.width-4,to.y+to.height/3,{steps:8});await page.mouse.up();
+          await expect(ghost).toHaveCount(0);
+          await expect(page.locator('.sticker-cell').last()).toHaveAttribute('data-sticker-id',moving);
+          await expect(page.locator('.sticker-draft')).toHaveCount(0);
+          await page.getByRole('button',{name:'Done',exact:true}).focus();await page.keyboard.press('Enter');
+          await page.locator('.sticker-tile').first().focus();await page.keyboard.press('Enter');
+          await expect(page.locator('.sticker-draft')).toHaveCount(1);
+          await page.locator('.sticker-draft button').click();
+          await page.getByRole('button',{name:'Stickers',exact:true}).click();
+          await expect(page.getByRole('button',{name:'Edit',exact:true})).toBeEnabled();
+          await page.getByRole('button',{name:'Edit',exact:true}).click();
+        }
       }
       if (mode === 'packs' || mode === 'pack-detail') {
         await page.getByRole('button', { name: 'Browse packs', exact: true }).click();

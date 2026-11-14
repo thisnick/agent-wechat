@@ -134,6 +134,8 @@ for (const scene of scenes) {
         await settle(page, requests, sim.avatarInitials);
         const capture = async (name) => {
           const attachments = await argosScreenshot(page, name, {
+            // Moving the pointer to suppress hover would move an active drag too.
+            disableHover: !scene.preservePointer,
             mask: scene.mask?.(page, world) ?? [],
             maskColor: "#000000",
           });

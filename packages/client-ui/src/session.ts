@@ -20,6 +20,7 @@ import { t } from "./i18n.ts";
 import { messageSummary } from "./thread-preview.ts";
 import { canReply } from "./reply.ts";
 import { quotedText, quoteTargetMatches } from "./quote-preview.ts";
+import { StickerJobError } from "./sticker-jobs.ts";
 
 export type Account = {
   id: string;
@@ -91,6 +92,7 @@ function isSignOut(event: NativeEvent): boolean {
   );
 }
 export function readableError(error: unknown): string {
+  if (error instanceof StickerJobError) return error.message;
   if (error instanceof NativeApiError)
     return (
       (
