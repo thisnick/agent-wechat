@@ -412,20 +412,10 @@ impl crate::upstream::Upstream for BoundUpstream {
         checkpoint: &mut dyn FnMut() -> Result<()>,
         progress: crate::upstream::media::Progress<'_>,
     ) -> Result<Vec<u8>> {
-        // A fresh ticket and page per retrieval: retrievals are user-requested and rare, and
-        // nothing credential-bearing outlives the transfer.
+        // A fresh page address and ticket per retrieval: retrievals are user-requested and rare,
+        // and nothing credential-bearing outlives the transfer. The page address comes first and
+        // the ticket after it, as in the accepted native sequence.
         let mut renewed = false;
-        let ticket = loop {
-            match mirror(&self.client, state, |request| request.channels_ticket()) {
-                Ok(ticket) => break ticket,
-                Err(error) if !renewed && crate::media::is_media_auth_rejected(&error) => {
-                    *state = self.renew_session(state, "agent-wechat media")?;
-                    renewed = true;
-                }
-                Err(error) => return Err(channels_stage(error, "channels_ticket_failed")),
-            }
-        };
-        checkpoint()?;
         let page = loop {
             match mirror(&self.client, state, |request| request.channels_page(post)) {
                 Ok(page) => break page,
@@ -434,6 +424,17 @@ impl crate::upstream::Upstream for BoundUpstream {
                     renewed = true;
                 }
                 Err(error) => return Err(channels_stage(error, "channels_page_failed")),
+            }
+        };
+        checkpoint()?;
+        let ticket = loop {
+            match mirror(&self.client, state, |request| request.channels_ticket()) {
+                Ok(ticket) => break ticket,
+                Err(error) if !renewed && crate::media::is_media_auth_rejected(&error) => {
+                    *state = self.renew_session(state, "agent-wechat media")?;
+                    renewed = true;
+                }
+                Err(error) => return Err(channels_stage(error, "channels_ticket_failed")),
             }
         };
         checkpoint()?;
