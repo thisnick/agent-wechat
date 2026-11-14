@@ -1,5 +1,15 @@
 # @agent-wechat/desktop
 
+## 2.4.2
+
+### Patch Changes
+
+- [#515](https://github.com/thisnick/agent-wechat/pull/515) [`f9ce53a`](https://github.com/thisnick/agent-wechat/commit/f9ce53a3cfee711d7cfe51008b385bf56b116e7f) Thanks [@thisnick](https://github.com/thisnick)! - Received WeChat Channels cards now show the post's cover, publisher, description and length instead of WeChat's "please upgrade" notice, and the message body no longer contains that notice or its link. The post's video is listed as a `video` asset that downloads only on request: open it in the desktop app, run `wx messages media CHAT MESSAGE_ID --quality normal`, or have an OpenClaw agent call `wechat_media`. Each request fetches a fresh copy from WeChat, and the downloaded video is kept in the daemon's media files. OpenClaw agents get the post text and cover by default. Media tools in a sandboxed OpenClaw agent now say a downloaded file isn't reachable from the agent's shell instead of returning a path it can't open.
+
+- [#509](https://github.com/thisnick/agent-wechat/pull/509) [`1cb9d4a`](https://github.com/thisnick/agent-wechat/commit/1cb9d4a274ef1877071760ae4324f8ab7b7b3e14) Thanks [@thisnick](https://github.com/thisnick)! - Add `wx groups members list --search` to find members of one group by ID, WeChat ID, nickname, remark or name in the group. Member search now also matches a member's nickname, WeChat ID and name in the group when you have given them a remark, so mention suggestions find them too. Group member rows now include `nickname` and `alias`. Correct the help text for `wx contacts lookup` and `wx groups lookup`: both ask WeChat directly and don't save the result, and contact lookup accepts one or two IDs.
+
+- [#518](https://github.com/thisnick/agent-wechat/pull/518) [`ae198c0`](https://github.com/thisnick/agent-wechat/commit/ae198c04c4a5642d8d69ab168aa3b6b699c51bca) Thanks [@thisnick](https://github.com/thisnick)! - Keep a conversation scrolled to the newest message when a photo near the bottom finishes loading. The photo used to replace its placeholder before its size was known, which could leave the conversation scrolled up with the photo out of view.
+
 ## 2.4.1
 
 ### Patch Changes

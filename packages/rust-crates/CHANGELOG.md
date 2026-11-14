@@ -1,5 +1,11 @@
 # @agent-wechat/rust-crates
 
+## 2.4.2
+
+### Patch Changes
+
+- [#514](https://github.com/thisnick/agent-wechat/pull/514) [`ccdaa7b`](https://github.com/thisnick/agent-wechat/commit/ccdaa7b2e467ae8456cbeb1ec9f3e863d87c0b07) Thanks [@HypoxanthineOvO](https://github.com/HypoxanthineOvO)! - Fix received normal-quality videos that failed to download with `media_integrity_failed` when WeChat served a different playback copy than the message advertised. The daemon now accepts that copy after checking it against the checksum WeChat sends with it, including for videos received before this release. A reply that marks a different copy but has no valid checksum still fails, and original-quality copies must still match the message exactly.
+
 ## 2.4.1
 
 ### Patch Changes
