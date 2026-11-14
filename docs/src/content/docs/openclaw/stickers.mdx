@@ -51,8 +51,16 @@ execution workspace can live on a different machine from the Gateway and daemon.
    {"action":"add","preparationId":"PREPARATION_ID","idempotencyKey":"clip-save-1"}
    ```
 
-   Preparation alone neither saves nor sends. Adding can also use one received
-   `messageId`/`assetId` pair after its original has been downloaded and checked.
+   Preparation alone neither saves nor sends.
+
+5. Save a sticker someone sent you by its message ID.
+
+   ```json
+   {"action":"add","messageId":"MESSAGE_ID","idempotencyKey":"received-save-1"}
+   ```
+
+   The plugin finds that message's original sticker. It fails when the message
+   has no received sticker, or more than one original.
 
 | Action | Required selection |
 | --- | --- |

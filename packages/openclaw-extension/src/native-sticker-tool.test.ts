@@ -69,3 +69,27 @@ test("custom mutations retain revision, relative placement and stable submission
   assert.deepEqual((calls[1] as any[]).slice(0,5),["a","chosen",{position:{afterId:null}},"revision","move"]);
   await assert.rejects(f.run({action:"move",stickerId:"chosen",revision:"revision",idempotencyKey:"incomplete"}),/afterId/);
 });
+test("adding a received sticker finds the message's original when no asset is given", async()=>{
+  const f=fixture();const added:any[]=[];const lookups:string[]=[];
+  const media=(id:string,messageId:string,kind:string,variant:string)=>({id,accountId:"a",messageId,kind,variant,actualVariant:variant,state:"available"});
+  f.client.mediaAssets=async(_account:string,messageId:string)=>{lookups.push(messageId);
+    return {items:[media("thumb","msg_1","sticker","thumbnail"),media("asset_original","msg_1","sticker","original"),media("other","msg_2","sticker","original"),media("photo","msg_1","image","original")]};};
+  f.client.addCustomSticker=async(...args:any[])=>{added.push(args);return {id:"add",state:"queued"};};
+  await f.run({action:"add",messageId:"msg_1",idempotencyKey:"save-received"});
+  assert.deepEqual(lookups,["msg_1"]);
+  assert.deepEqual(added[0].slice(0,3),["a",{source:{kind:"message",messageId:"msg_1",assetId:"asset_original"}},"save-received"]);
+  // A supplied asset is passed through without a lookup.
+  await f.run({action:"add",messageId:"msg_1",assetId:"asset_given",idempotencyKey:"save-given"});
+  assert.equal(lookups.length,1);assert.equal(added[1][1].source.assetId,"asset_given");
+});
+test("received sticker adds stop when the message has no single original sticker", async()=>{
+  const f=fixture();let adds=0;
+  f.client.addCustomSticker=async()=>{adds++;return {id:"add",state:"queued"};};
+  const media=(id:string,variant:string)=>({id,accountId:"a",messageId:"msg_1",kind:"sticker",variant,actualVariant:null,state:"pending"});
+  f.client.mediaAssets=async()=>({items:[media("thumb","thumbnail")]});
+  await assert.rejects(f.run({action:"add",messageId:"msg_1",idempotencyKey:"none"}),/no received sticker/);
+  f.client.mediaAssets=async()=>({items:[media("one","original"),media("two","original")]});
+  await assert.rejects(f.run({action:"add",messageId:"msg_1",idempotencyKey:"two"}),/more than one/);
+  await assert.rejects(f.run({action:"add",preparationId:"prep",messageId:"msg_1",idempotencyKey:"both"}),/preparation or a received sticker message/);
+  assert.equal(adds,0);
+});

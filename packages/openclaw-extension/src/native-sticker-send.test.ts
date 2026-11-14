@@ -33,3 +33,18 @@ test("unverified completed jobs retain inspection status without exposing a fabr
   f.client.message=async()=>({id:"wrong",accountId:"other",threadId:"wxid_peer",direction:"outgoing",serverId:"42"});
   const result=await f.run();assert.ok("status" in result.details && "job" in result.details);assert.equal(result.details.status,"needs_review");assert.equal(Object.hasOwn(result.details.job,"result"),false);assert.equal(Object.hasOwn(result.details,"delivery"),false);
 });
+test("chat turns send without the scheduled dispatch hook; scheduled turns still call it first",async()=> {
+  // OpenClaw's message tool passes assertDirectAdapterHandoff on every turn and
+  // onPlatformSendDispatch only on scheduled turns.
+  const chat=fixture();let handoffs=0;
+  chat.ctx.onPlatformSendDispatch=undefined;chat.ctx.assertDirectAdapterHandoff=()=>{handoffs++;};
+  const result=await chat.run();
+  assert.equal(chat.sends(),1);assert.ok(handoffs>0);assert.ok("status" in result.details);assert.equal(result.details.status,"pending");
+  const scheduled=fixture();const order:string[]=[];
+  scheduled.ctx.onPlatformSendDispatch=async()=>{order.push("dispatch");};
+  scheduled.client.sendSticker=async()=>{order.push("send");return {id:"job",accountId:"a",threadId:"wxid_peer",kind:"sticker_send",state:"queued",result:{}};};
+  await scheduled.run();
+  assert.equal(order[0],"dispatch");assert.ok(order.includes("send"));
+  const stale=fixture();stale.ctx.onPlatformSendDispatch=async()=>{throw Error("scheduled run superseded");};
+  await assert.rejects(stale.run(),/superseded/);assert.equal(stale.sends(),0);
+});
