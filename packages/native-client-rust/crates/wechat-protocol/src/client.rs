@@ -9,6 +9,8 @@ mod group_inventory;
 pub use group_inventory::*;
 #[path = "account.rs"]
 mod account;
+#[path = "channels.rs"]
+mod channels;
 #[path = "logout.rs"]
 mod logout;
 #[path = "revoke.rs"]
@@ -32,6 +34,7 @@ pub use account::{
     TextSendOptions,
 };
 use anyhow::{bail, ensure, Result};
+pub use channels::{ChannelsMedia, ChannelsPage, ChannelsPost, ChannelsTicket};
 pub use logout::*;
 use openssl::{nid::Nid, pkey::PKey, rsa::Rsa};
 pub use revoke::*;

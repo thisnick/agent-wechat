@@ -313,7 +313,7 @@ pub(crate) fn embedded_quote(app: &AppMessage, own: Option<&str>) -> Option<Valu
     } else {
         card.as_ref().and_then(|card| match card.subtype {
             1 | 74 | 87 => card.text.clone(),
-            3..=5 | 51 => card.link.as_ref().map(|link| link.card.body()),
+            3..=5 | 51 => card.link.as_ref().map(|link| link.body()),
             6 | 57 => card.title.clone(),
             19 => card.text.clone(),
             _ => None,

@@ -394,6 +394,46 @@ impl crate::upstream::Upstream for BoundUpstream {
         configuration.auth_key.fill(0);
         Ok(Box::new(transport))
     }
+    fn fetch_channels_video(
+        &self,
+        state: &mut AccountState,
+        post: &wechat_protocol::ChannelsPost,
+        max_bytes: usize,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+        progress: crate::upstream::media::Progress<'_>,
+    ) -> Result<Vec<u8>> {
+        // A fresh ticket and page per retrieval: retrievals are user-requested and rare, and
+        // nothing credential-bearing outlives the transfer.
+        let mut renewed = false;
+        let ticket = loop {
+            match mirror(&self.client, state, |request| request.channels_ticket()) {
+                Ok(ticket) => break ticket,
+                Err(error) if !renewed && crate::media::is_media_auth_rejected(&error) => {
+                    *state = self.renew_session(state, "agent-wechat media")?;
+                    renewed = true;
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        checkpoint()?;
+        let page = loop {
+            match mirror(&self.client, state, |request| request.channels_page(post)) {
+                Ok(page) => break page,
+                Err(error) if !renewed && crate::media::is_media_auth_rejected(&error) => {
+                    *state = self.renew_session(state, "agent-wechat media")?;
+                    renewed = true;
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        checkpoint()?;
+        let media = mirror(&self.client, state, |request| {
+            request.channels_media(post, &ticket, &page)
+        })?;
+        drop((ticket, page));
+        checkpoint()?;
+        wechat_protocol::media::fetch_channels_video(&media, max_bytes, progress)
+    }
     fn submit_media(
         &self,
         state: &mut AccountState,

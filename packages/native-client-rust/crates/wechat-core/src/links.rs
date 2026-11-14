@@ -80,9 +80,14 @@ pub struct LinkCard {
     /// Name of the site or account that published the card, such as a Channels account. Null when
     /// there is none.
     pub source_name: Option<String>,
+    /// Length of a Channels video in seconds. Omitted for other cards and when the card does not
+    /// say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub duration_seconds: Option<u32>,
 }
 impl LinkCard {
-    pub(crate) fn body(&self) -> String {
+    fn link_body(&self) -> String {
         let mut parts = vec![self
             .title
             .as_ref()
@@ -92,15 +97,63 @@ impl LinkCard {
         parts.extend(self.url.iter().cloned());
         parts.join("\n")
     }
+    fn channels_body(&self, video: bool) -> String {
+        let mut body = String::from(if video {
+            "[Channels video]"
+        } else {
+            "[Channels]"
+        });
+        if let Some(name) = &self.source_name {
+            body.push(' ');
+            body.push_str(name);
+        }
+        if let Some(description) = &self.description {
+            body.push_str(if self.source_name.is_some() {
+                ": "
+            } else {
+                " "
+            });
+            body.push_str(description);
+        }
+        if let Some(seconds) = self.duration_seconds {
+            body.push_str(&format!(" ({}:{:02})", seconds / 60, seconds % 60));
+        }
+        body
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) enum LinkThumbnail {
     Cdn(MediaDescriptor),
     Http(String),
 }
+/// A Channels post that carries exactly one video this client can retrieve on request.
+///
+/// The identifiers locate the post through the authenticated detail request. They are not
+/// public card fields.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ChannelsVideo {
+    pub object_id: u64,
+    pub nonce: String,
+}
+impl std::fmt::Debug for ChannelsVideo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ChannelsVideo(<redacted>)")
+    }
+}
 pub(crate) struct ParsedLink {
     pub card: LinkCard,
     pub thumbnail: Option<LinkThumbnail>,
+    /// Set for a subtype-51 Channels card, with the retrievable video when there is one.
+    pub channels: Option<Option<ChannelsVideo>>,
+}
+impl ParsedLink {
+    /// Plain-text rendering used as the message body and quote text.
+    pub(crate) fn body(&self) -> String {
+        match &self.channels {
+            Some(video) => self.card.channels_body(video.is_some()),
+            None => self.card.link_body(),
+        }
+    }
 }
 pub(crate) fn text(node: roxmltree::Node<'_, '_>, name: &str, max: usize) -> Option<String> {
     let value = leaf(child(node, name)?)?;
@@ -113,24 +166,18 @@ pub(crate) fn text(node: roxmltree::Node<'_, '_>, name: &str, max: usize) -> Opt
     .then(|| value.to_owned())
 }
 pub(crate) fn parse(app: roxmltree::Node<'_, '_>, subtype: i32) -> Option<ParsedLink> {
-    if !matches!(subtype, 3..=5 | 51) {
-        return None;
+    match subtype {
+        3..=5 => {}
+        51 => return parse_channels(app),
+        _ => return None,
     }
-    let finder = if subtype == 51 {
-        Some(child(app, "finderFeed")?)
-    } else {
-        None
-    };
     let card = LinkCard {
         title: text(app, "title", 16384),
-        description: finder
-            .and_then(|node| text(node, "desc", 16384))
-            .or_else(|| text(app, "des", 16384)),
+        description: text(app, "des", 16384),
         url: text(app, "url", 8192)
             .filter(|s| wechat_protocol::media::validate_shared_link_url(s).is_ok()),
-        source_name: finder
-            .and_then(|node| text(node, "nickname", 1024))
-            .or_else(|| text(app, "sourcedisplayname", 1024)),
+        source_name: text(app, "sourcedisplayname", 1024),
+        duration_seconds: None,
     };
     if card.title.is_none() && card.description.is_none() && card.url.is_none() {
         return None;
@@ -138,6 +185,61 @@ pub(crate) fn parse(app: roxmltree::Node<'_, '_>, subtype: i32) -> Option<Parsed
     Some(ParsedLink {
         card,
         thumbnail: thumbnail(app),
+        channels: None,
+    })
+}
+
+fn canonical_u64(value: &str) -> Option<u64> {
+    let number = value.parse::<u64>().ok()?;
+    (number != 0 && number.to_string() == value).then_some(number)
+}
+
+/// A Channels card's own `title` and `url` hold WeChat's upgrade notice for clients that cannot
+/// render the post, so the card is built from `finderFeed` instead.
+fn parse_channels(app: roxmltree::Node<'_, '_>) -> Option<ParsedLink> {
+    let finder = child(app, "finderFeed")?;
+    let media = child(finder, "mediaList").and_then(|list| child(list, "media"));
+    let number = |node: roxmltree::Node<'_, '_>, name: &str| {
+        text(node, name, 20).and_then(|value| value.parse::<u64>().ok())
+    };
+    let duration_seconds = media
+        .and_then(|media| number(media, "videoPlayDuration"))
+        .filter(|seconds| *seconds > 0)
+        .and_then(|seconds| u32::try_from(seconds).ok());
+    let card = LinkCard {
+        title: None,
+        description: text(finder, "desc", 16384),
+        url: None,
+        source_name: text(finder, "nickname", 1024),
+        duration_seconds,
+    };
+    let video = (|| {
+        let object_id = canonical_u64(&text(finder, "objectId", 20)?)?;
+        let nonce = text(finder, "objectNonceId", 256)?;
+        let prefix = nonce.split('_').next()?;
+        if prefix.is_empty() || !prefix.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        prefix.parse::<u64>().ok()?;
+        let media = media?;
+        let video_shape = number(finder, "feedType") == Some(4)
+            && number(finder, "mediaCount") == Some(1)
+            && number(media, "mediaType") == Some(4);
+        video_shape.then_some(ChannelsVideo { object_id, nonce })
+    })();
+    if card.description.is_none() && card.source_name.is_none() && video.is_none() {
+        return None;
+    }
+    let cover = media.and_then(|media| {
+        ["coverUrl", "thumbUrl"].into_iter().find_map(|name| {
+            text(media, name, 8192)
+                .filter(|url| wechat_protocol::media::validate_link_thumbnail_url(url).is_ok())
+        })
+    });
+    Some(ParsedLink {
+        card,
+        thumbnail: cover.map(LinkThumbnail::Http).or_else(|| thumbnail(app)),
+        channels: Some(video),
     })
 }
 
@@ -198,33 +300,88 @@ mod tests {
     const CARD: &str = include_str!("../tests/fixtures/shared-link.xml");
 
     #[test]
-    fn channels_cards_expose_display_fields_without_media_transport_or_playback_claims() {
-        let xml = "<msg><appmsg><type>51</type><title>Channels post</title><url>https://example.invalid/channels</url><finderFeed><desc>Post &amp; description</desc><nickname>Publisher</nickname><objectNonceId>private-nonce</objectNonceId><mediaList><media><url>https://example.invalid/private-video</url><coverUrl>https://example.invalid/private-cover</coverUrl></media></mediaList></finderFeed></appmsg></msg>";
+    fn channels_cards_use_the_post_and_keep_transport_private() {
+        // WeChat fills a Channels card's own title and url with an upgrade notice for clients
+        // that cannot render the post; the card comes from finderFeed instead.
+        let xml = "<msg><appmsg><type>51</type><title>Upgrade notice</title><url>https://example.invalid/update/</url><finderFeed><objectId>18446744073709551000</objectId><feedType>4</feedType><nickname>Publisher</nickname><desc>Post &amp; description</desc><mediaCount>1</mediaCount><objectNonceId>12345678901234567890_0_38_12_4_private-context</objectNonceId><mediaList><media><thumbUrl>https://example.invalid/private-thumb</thumbUrl><videoPlayDuration>96</videoPlayDuration><url>https://example.invalid/private-video</url><coverUrl>https://example.invalid/private-cover</coverUrl><mediaType>4</mediaType></media></mediaList></finderFeed></appmsg></msg>";
         let link = app_message(xml).unwrap().link.unwrap();
+        assert_eq!(link.card.title, None);
+        assert_eq!(link.card.url, None);
         assert_eq!(link.card.description.as_deref(), Some("Post & description"));
         assert_eq!(link.card.source_name.as_deref(), Some("Publisher"));
+        assert_eq!(link.card.duration_seconds, Some(96));
         assert_eq!(
-            link.card.url.as_deref(),
-            Some("https://example.invalid/channels")
+            link.body(),
+            "[Channels video] Publisher: Post & description (1:36)"
         );
-        assert!(link.thumbnail.is_none());
+        let video = link.channels.clone().unwrap().unwrap();
+        assert_eq!(video.object_id, 18_446_744_073_709_551_000);
+        assert_eq!(
+            video.nonce,
+            "12345678901234567890_0_38_12_4_private-context"
+        );
+        assert_eq!(format!("{video:?}"), "ChannelsVideo(<redacted>)");
+        assert!(matches!(
+            link.thumbnail,
+            Some(LinkThumbnail::Http(ref url)) if url == "https://example.invalid/private-cover"
+        ));
         let public = serde_json::to_string(&link.card).unwrap();
-        for private in ["private-nonce", "private-video", "private-cover"] {
-            assert!(!public.contains(private));
+        assert!(public.contains("\"durationSeconds\":96"));
+        for private in [
+            "Upgrade notice",
+            "update/",
+            "18446744073709551000",
+            "private-context",
+            "private-video",
+            "private-cover",
+            "private-thumb",
+        ] {
+            assert!(!public.contains(private), "{private}");
         }
+
+        // A missing or unsafe cover falls back to the thumbnail URL.
+        let thumb = app_message(&xml.replace(
+            "https://example.invalid/private-cover",
+            "https://example.invalid:8443/cover",
+        ))
+        .unwrap()
+        .link
+        .unwrap();
+        assert!(matches!(
+            thumb.thumbnail,
+            Some(LinkThumbnail::Http(ref url)) if url == "https://example.invalid/private-thumb"
+        ));
+
+        // Shapes this client cannot play stay text-only cards.
+        for unsupported in [
+            xml.replace("<feedType>4</feedType>", "<feedType>2</feedType>"),
+            xml.replace("<mediaCount>1</mediaCount>", "<mediaCount>3</mediaCount>"),
+            xml.replace("<mediaType>4</mediaType>", "<mediaType>2</mediaType>"),
+            xml.replace("18446744073709551000", "018446744073709551000"),
+            xml.replace("18446744073709551000", "18446744073709551616"),
+            xml.replace("12345678901234567890_", "not-a-number_"),
+            xml.replace("<objectId>18446744073709551000</objectId>", ""),
+        ] {
+            let link = app_message(&unsupported).unwrap().link.unwrap();
+            assert_eq!(link.channels, Some(None), "{unsupported}");
+            assert!(link.body().starts_with("[Channels] Publisher: "));
+        }
+        let silent = app_message(&xml.replace("<videoPlayDuration>96</videoPlayDuration>", ""))
+            .unwrap()
+            .link
+            .unwrap();
+        assert_eq!(silent.card.duration_seconds, None);
+        assert_eq!(
+            silent.body(),
+            "[Channels video] Publisher: Post & description"
+        );
+
         for bad in [
             xml.replace("<finderFeed>", "<finderFeed/><finderFeed>"),
             xml.replace("finderFeed", "unknownFeed"),
         ] {
             assert!(app_message(&bad).unwrap().link.is_none());
         }
-        let unsafe_url =
-            app_message(&xml.replace("https://example.invalid/channels", "javascript:alert(1)"))
-                .unwrap()
-                .link
-                .unwrap();
-        assert!(unsafe_url.card.url.is_none());
-        assert!(unsafe_url.card.title.is_some());
     }
 
     #[test]
@@ -335,7 +492,7 @@ mod tests {
                 Some("https://example.invalid/article?a=1&b=2")
             );
             assert_eq!(link.card.source_name.as_deref(), Some("Example publisher"));
-            assert_eq!(link.card.body(), "[Link] Title & preview\nDescription <kept as text>\nhttps://example.invalid/article?a=1&b=2");
+            assert_eq!(link.body(), "[Link] Title & preview\nDescription <kept as text>\nhttps://example.invalid/article?a=1&b=2");
             let LinkThumbnail::Cdn(descriptor) = link.thumbnail.unwrap() else {
                 panic!("expected CDN thumbnail");
             };
@@ -370,11 +527,11 @@ mod tests {
         ] {
             let link = app_message(&xml).unwrap().link.unwrap();
             assert!(matches!(link.thumbnail, Some(LinkThumbnail::Http(_))));
-            assert!(link.card.body().contains("Title & preview"));
+            assert!(link.body().contains("Title & preview"));
         }
         let minimal = "<msg><appmsg><type>5</type><title>Only title</title><url>javascript:alert(1)</url><thumburl>http://127.0.0.1/private</thumburl></appmsg></msg>";
         let link = app_message(minimal).unwrap().link.unwrap();
-        assert_eq!(link.card.body(), "[Link] Only title");
+        assert_eq!(link.body(), "[Link] Only title");
         assert!(link.card.url.is_none());
         assert!(link.thumbnail.is_none());
         assert!(

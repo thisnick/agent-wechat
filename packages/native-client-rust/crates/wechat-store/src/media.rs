@@ -636,6 +636,22 @@ impl Store {
             Ok(row)
         })
     }
+    /// Whether this store still holds the asset's own copy: an embedded payload or a payload
+    /// file that has not been deleted. Reads no payload bytes.
+    pub fn media_asset_cached(&self, account: &str, id: &str) -> Result<bool> {
+        let files = self.media_directory(account)?;
+        self.control(account, |db| {
+            let (file, embedded): (Option<String>, bool) = db.query_row(
+                "SELECT payload_file, payload IS NOT NULL FROM media_assets WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            match file {
+                Some(file) => media_files::present(&files, &file),
+                None => Ok(embedded),
+            }
+        })
+    }
     /// The official-profile lookup key recorded when this attachment's own copy
     /// was released, or `None` while its bytes are kept by this store.
     pub fn media_asset_profile_key(&self, account: &str, id: &str) -> Result<Option<String>> {

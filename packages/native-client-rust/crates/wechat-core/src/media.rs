@@ -55,6 +55,47 @@ struct MediaAuthorizationFence {
     authorization: [u8; 32],
     logout_epoch: Option<Vec<u8>>,
 }
+type MediaPlan = (MediaKind, MediaVariant, DownloadPlan, Option<String>);
+
+/// The shared card a message carries, and whether it is the message's own card rather than one
+/// embedded in a quote.
+fn message_card(msg: &wechat_profile::Message) -> Option<(crate::links::ParsedLink, bool)> {
+    let app = crate::quotes::message_app(msg)?;
+    match crate::quotes::quoted_link(&app) {
+        Some(quoted) => Some((quoted, false)),
+        None => app.link.map(|own| (own, true)),
+    }
+}
+
+/// A card's thumbnail, plus the video of a message's own Channels card. A quoted Channels card
+/// shows only its cover.
+fn card_plans(link: crate::links::ParsedLink, direct: bool) -> Vec<MediaPlan> {
+    let mut plans: Vec<MediaPlan> = link
+        .thumbnail
+        .into_iter()
+        .map(|source| {
+            (
+                MediaKind::Image,
+                MediaVariant::Thumbnail,
+                DownloadPlan::LinkThumbnail { source },
+                Some("link-preview".into()),
+            )
+        })
+        .collect();
+    if let (true, Some(Some(video))) = (direct, link.channels) {
+        plans.push((
+            MediaKind::Video,
+            MediaVariant::Normal,
+            DownloadPlan::Channels {
+                object_id: video.object_id,
+                nonce: video.nonce,
+            },
+            Some("channels-video.mp4".into()),
+        ));
+    }
+    plans
+}
+
 fn cdn_transfer<T>(
     permit: Option<&mut MediaAccountPermit>,
     core: &Core,
@@ -76,6 +117,12 @@ enum DownloadPlan {
     },
     Cdn {
         descriptor: MediaDescriptor,
+    },
+    /// A Channels post's video. Only the post identity is kept; playback material is resolved
+    /// fresh for each transfer and never stored.
+    Channels {
+        object_id: u64,
+        nonce: String,
     },
     Sticker {
         descriptor: StickerDescriptor,
@@ -817,20 +864,8 @@ impl Core {
             .as_deref()
             .context("media_metadata_unavailable")?;
         let mut quoted = msg.clone();
-        let plans = if let Some(link) = crate::quotes::message_app(&msg)
-            .and_then(|app| crate::quotes::quoted_link(&app).or(app.link))
-        {
-            link.thumbnail
-                .into_iter()
-                .map(|source| {
-                    (
-                        MediaKind::Image,
-                        MediaVariant::Thumbnail,
-                        DownloadPlan::LinkThumbnail { source },
-                        Some("link-preview".into()),
-                    )
-                })
-                .collect()
+        let plans = if let Some((link, direct)) = message_card(&msg) {
+            card_plans(link, direct)
         } else if let Some(content) = crate::quotes::quoted_image_content(&msg) {
             quoted.message_type = 3;
             discover(&quoted, &content)?
@@ -919,25 +954,14 @@ impl Core {
             .context("media_metadata_unavailable")?;
         let quoted_image = crate::quotes::quoted_image_content(&msg);
         let quoted_sticker = crate::quotes::quoted_sticker_content(&msg);
-        let link = crate::quotes::message_app(&msg)
-            .and_then(|app| crate::quotes::quoted_link(&app).or(app.link));
+        let link = message_card(&msg);
         let sidecar_only = quoted_image.is_some()
             || quoted_sticker.is_some()
             || link.is_some()
             || crate::quotes::message_app(&msg).is_some_and(|app| app.sticker.is_some());
         let mut quoted = msg.clone();
-        let mut plans = if let Some(link) = link {
-            link.thumbnail
-                .into_iter()
-                .map(|source| {
-                    (
-                        MediaKind::Image,
-                        MediaVariant::Thumbnail,
-                        DownloadPlan::LinkThumbnail { source },
-                        Some("link-preview".into()),
-                    )
-                })
-                .collect()
+        let mut plans = if let Some((link, direct)) = link {
+            card_plans(link, direct)
         } else if let Some(content) = &quoted_image {
             quoted.message_type = 3;
             discover(&quoted, content)?
@@ -1172,6 +1196,14 @@ impl Core {
         }
         Ok(None)
     }
+    /// Whether an asset is a Channels video, whose playback material is resolved per transfer.
+    fn channels_asset(&self, account: &str, id: &str) -> Result<bool> {
+        let stored = self.store.media_asset(account, id)?;
+        Ok(matches!(
+            self.asset_plan(account, &stored)?.plan,
+            DownloadPlan::Channels { .. }
+        ))
+    }
     pub fn start_media_transfer(
         self: &Arc<Self>,
         account: &str,
@@ -1206,7 +1238,40 @@ impl Core {
                 asset.reason.unwrap_or_else(|| "unsupported_media".into())
             );
         }
-        let key = format!("download:{}", asset.id);
+        let mut asset = asset;
+        let mut key = format!("download:{}", asset.id);
+        if self.channels_asset(account, &asset.id)? {
+            // A Channels video is renewable: when its cached file is gone, or its last transfer
+            // failed in a retryable way, a new request resolves fresh material in one new job.
+            if asset.state == "available" && !self.store.media_asset_cached(account, &asset.id)? {
+                asset.state = "pending".into();
+                asset.actual_variant = None;
+                asset.content_type = None;
+                asset.byte_length = None;
+                asset.sha256 = None;
+                asset.content_url = None;
+                asset.reason = None;
+                asset.retryable = true;
+                self.store.save_media_asset(
+                    account,
+                    &asset.id,
+                    &serde_json::to_value(&asset)?,
+                    None,
+                )?;
+            }
+            while let Ok(previous) = self.store.media_job_by_key(account, &key) {
+                let renewable = match previous.state.as_str() {
+                    "available" => asset.state != "available",
+                    "failed" => previous.retryable,
+                    "cancelled" | "expired" => true,
+                    _ => false,
+                };
+                if !renewable {
+                    break;
+                }
+                key = format!("download:{}:after:{}", asset.id, previous.id);
+            }
+        }
         let id = format!("job_{}", uuid::Uuid::new_v4());
         let hash = digest(asset.id.as_bytes());
         let (row, created) = self.store.create_media_job(
@@ -1646,6 +1711,8 @@ impl Core {
                     | "media_cancelled"
                     | "media_disconnected"
                     | "auth_required"
+                    | "channels_download_failed"
+                    | "channels_integrity_failed"
             );
         row.error_code = Some(code.into());
         if matches!(
@@ -1810,6 +1877,45 @@ impl Core {
                 let (mime, frames) =
                     validate_asset_bytes(MediaKind::Image, MediaVariant::Thumbnail, &bytes)?;
                 (bytes, mime, Some(MediaVariant::Thumbnail), frames)
+            }
+            DownloadPlan::Channels { object_id, nonce } => {
+                let post = wechat_protocol::ChannelsPost { object_id, nonce };
+                let mut state = self.account_state(account)?;
+                let upstream = self.account_upstream(account)?;
+                let fence = permit
+                    .as_ref()
+                    .map(|_| self.media_authorization_fence(account))
+                    .transpose()?;
+                let before = serde_json::to_vec(&state)?;
+                let fetched = cdn_transfer(permit.as_deref_mut(), self, account, || {
+                    let mut checkpoint = || match &fence {
+                        Some(fence) => self.resume_media_state(account, id, fence).map(|_| ()),
+                        None => self.authorize_media_record(
+                            account,
+                            &self.store.media_asset(account, asset_id)?,
+                        ),
+                    };
+                    upstream.fetch_channels_video(
+                        &mut state,
+                        &post,
+                        wechat_protocol::media::MAX_CHANNELS_VIDEO_BYTES,
+                        &mut checkpoint,
+                        &progress,
+                    )
+                });
+                if let Some(fence) = &fence {
+                    let current = self.resume_media_state(account, id, fence)?;
+                    // A push may refresh cookies while the transfer is in flight.
+                    if serde_json::to_vec(&current)? != before {
+                        state = current;
+                    }
+                }
+                self.save_state(account, &state)?;
+                let bytes = fetched?;
+                let (mime, frames) =
+                    validate_asset_bytes(MediaKind::Video, MediaVariant::Normal, &bytes)
+                        .map_err(|_| anyhow::anyhow!("channels_integrity_failed"))?;
+                (bytes, mime, Some(MediaVariant::Normal), frames)
             }
             DownloadPlan::Sticker { descriptor } => {
                 let mut state = self.account_state(account)?;
@@ -2238,6 +2344,9 @@ fn service_diagnostic(error: &anyhow::Error) -> Option<(&'static str, i32)> {
             }
             Service::Voice => Some("voice"),
             Service::NativeEnvelope => Some("native_envelope"),
+            Service::ChannelsAuthorization => Some("channels_authorization"),
+            Service::ChannelsPage => Some("channels_page"),
+            Service::Channels => Some("channels"),
             _ => None,
         };
         if let Some(stage) = stage {
@@ -2261,7 +2370,12 @@ pub(crate) fn is_media_auth_rejected(error: &anyhow::Error) -> bool {
     matches!(
         service_diagnostic(error),
         Some((
-            "bootstrap" | "authentication" | "voice" | "native_envelope",
+            "bootstrap"
+                | "authentication"
+                | "voice"
+                | "native_envelope"
+                | "channels_authorization"
+                | "channels_page",
             -13
         ))
     )
@@ -2274,6 +2388,9 @@ fn classify_error(error: &anyhow::Error) -> String {
         if stage == "http" && (500..600).contains(&code) {
             return "transport_unavailable".into();
         }
+        if stage.starts_with("channels") {
+            return "channels_rejected".into();
+        }
         return "media_service_rejected".into();
     }
     if video_representation_mismatch(error).is_some() {
@@ -2282,6 +2399,13 @@ fn classify_error(error: &anyhow::Error) -> String {
     for cause in error.chain() {
         let message = cause.to_string();
         if [
+            "channels_post_unavailable",
+            "channels_unsupported_media",
+            "channels_route_unsupported",
+            "channels_rejected",
+            "channels_media_too_large",
+            "channels_download_failed",
+            "channels_integrity_failed",
             "sticker_pack_not_eligible",
             "sticker_pack_membership_rejected",
             "sticker_pack_readback_mismatch",

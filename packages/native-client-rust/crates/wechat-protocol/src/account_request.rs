@@ -181,6 +181,9 @@ impl AccountRequest<'_> {
     operation!(download_avatars(ids: &[String]) -> Vec<crate::AvatarBytes> => download_avatars_snapshot);
     operation!(download_voice_chunk(server_id: u64, length: u32, offset: u32) -> crate::VoiceChunk => download_voice_chunk_snapshot);
     operation!(cdn_config() -> crate::media::CdnConfig => cdn_config_snapshot);
+    operation!(channels_ticket() -> crate::ChannelsTicket => channels_ticket_snapshot);
+    operation!(channels_page(post: &crate::ChannelsPost) -> crate::ChannelsPage => channels_page_snapshot);
+    operation!(channels_media(post: &crate::ChannelsPost, ticket: &crate::ChannelsTicket, page: &crate::ChannelsPage) -> crate::ChannelsMedia => channels_media_snapshot);
     operation!(large_cdn_config(route: crate::media::LargeCdnRoute) -> crate::media::CdnConfig => large_cdn_config_snapshot);
     operation!(group_inventory(cursor: &[u8]) -> crate::GroupMetadataPage => group_inventory_snapshot);
     operation!(lookup_contacts_raw(ids: &[String]) -> Vec<u8> => lookup_contacts_raw_snapshot);
