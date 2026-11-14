@@ -1,6 +1,6 @@
 [package]
 name = "wechat-media"
-version = "2.4.1"
+version = "2.4.2"
 edition.workspace = true
 license.workspace = true
 publish = ["crates-io"]
@@ -14,7 +14,7 @@ categories = ["network-programming"]
 include = ["src/**", "tests/**", "examples/**", "README.md", "LICENSE", "NOTICE", "build.rs", "fixtures/**", "vendor/silk/**"]
 
 [dependencies]
-wechat-platform = { path = "../wechat-platform", version = "=2.4.1" }
+wechat-platform = { path = "../wechat-platform", version = "=2.4.2" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

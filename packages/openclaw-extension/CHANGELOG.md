@@ -1,5 +1,15 @@
 # @agent-wechat/wechat
 
+## 2.4.2
+
+### Patch Changes
+
+- [#515](https://github.com/thisnick/agent-wechat/pull/515) [`f9ce53a`](https://github.com/thisnick/agent-wechat/commit/f9ce53a3cfee711d7cfe51008b385bf56b116e7f) Thanks [@thisnick](https://github.com/thisnick)! - Received WeChat Channels cards now show the post's cover, publisher, description and length instead of WeChat's "please upgrade" notice, and the message body no longer contains that notice or its link. The post's video is listed as a `video` asset that downloads only on request: open it in the desktop app, run `wx messages media CHAT MESSAGE_ID --quality normal`, or have an OpenClaw agent call `wechat_media`. Each request fetches a fresh copy from WeChat, and the downloaded video is kept in the daemon's media files. OpenClaw agents get the post text and cover by default. Media tools in a sandboxed OpenClaw agent now say a downloaded file isn't reachable from the agent's shell instead of returning a path it can't open.
+
+- [#508](https://github.com/thisnick/agent-wechat/pull/508) [`eb6b50f`](https://github.com/thisnick/agent-wechat/commit/eb6b50f70e279255bc74735b9479cb2c91dc76b2) Thanks [@thisnick](https://github.com/thisnick)! - Stop warning forever about OpenClaw messages held after an uncertain reply. The plugin never retries a message whose model dispatch or reply it can't confirm, because resending could reply twice. It used to keep each one, plus answered messages whose phone read receipt came back uncertain, as a permanent "needs review" warning in `openclaw channels status` and never pruned them. It now logs a warning when it holds a message, and prunes held messages with the rest of the finished ones.
+
+- [#502](https://github.com/thisnick/agent-wechat/pull/502) [`d1a0f77`](https://github.com/thisnick/agent-wechat/commit/d1a0f772167a1c6c65fb275e15ae988456bbb605) Thanks [@thisnick](https://github.com/thisnick)! - Fix sending and saving stickers from OpenClaw. Sending a Saved sticker with the message tool's `sticker` action failed on every chat turn with "requires live host handoff authority", because the plugin required a dispatch hook that OpenClaw only passes on scheduled turns. It now calls that hook when it is present, as ordinary sends do. `wechat_stickers` `add` now accepts just the `messageId` of a received sticker and finds that message's original sticker; received messages never showed the model an `assetId`.
+
 ## 2.4.1
 
 ## 2.4.0
