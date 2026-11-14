@@ -1,8 +1,6 @@
 ---
 title: 发送与下载附件
 description: 文件、图片、视频与语音的大小限制、较长的发送时间，以及 CLI、API 和 SDK 接口。
-banner:
-  content: "本页面由机器翻译，尚未经过人工审校。"
 sourceHash: ae8e50b12f4b
 ---
 
@@ -17,7 +15,7 @@ import { Aside } from '@astrojs/starlight/components';
 | 普通文件 (File) | 536,870,912 字节 |
 | 视频 (Video) | 536,870,912 字节 |
 | 图片 (Image) 或语音 (Voice) | 各 26,214,383 字节 (25 MiB 减 17 字节) |
-| 表情 (Sticker) | 准备好的 GIF，以及可用的收藏表情或已添加表情包引用；参见[表情](/use/stickers/) |
+| 表情 (Sticker) | 准备好的 GIF，以及可用的“我的表情”或已添加表情包引用；参见[表情](/use/stickers/) |
 
 文件附件会严格保留源文件的每一个原始字节。发送图片时可能会缩放或重新编码。语音发送支持 WAV、MP3、M4A、AAC、FLAC、Ogg（包含 `.opus`）、WebM、CAF 或 AMR 音频，并将其转为语音消息。参考[视频与图片画质](/use/quality/)了解发送前的预处理，以及接收时如何选择画质副本。
 
