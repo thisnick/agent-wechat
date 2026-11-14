@@ -1919,8 +1919,9 @@ variant wechat_protocol::Service::Avatar | - | Avatar lookup.
 variant wechat_protocol::Service::CdnBootstrap | - | CDN credential bootstrap.
 variant wechat_protocol::Service::CdnDownload | - | CDN download.
 variant wechat_protocol::Service::CdnUpload | - | CDN upload.
-variant wechat_protocol::Service::Channels | - | Channels post detail through the H5 transfer proxy.
+variant wechat_protocol::Service::Channels | - | The H5 transfer proxy that carries Channels requests.
 variant wechat_protocol::Service::ChannelsAuthorization | - | H5 ticket request for Channels post lookups.
+variant wechat_protocol::Service::ChannelsDetail | - | The Channels post detail request carried by the proxy.
 variant wechat_protocol::Service::ChannelsPage | - | Authenticated page address for a Channels post.
 variant wechat_protocol::Service::Contact | - | Contact lookup.
 variant wechat_protocol::Service::ContactBootstrap | - | Initial contact catalog.

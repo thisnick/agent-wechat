@@ -286,7 +286,13 @@ fn page_response(bytes: &[u8]) -> Result<ChannelsPage> {
 }
 
 fn detail_json(post: &ChannelsPost) -> Result<String> {
-    let request_id: u64 = u64::from_be_bytes(crate::crypto::random::<8>()?) >> 1;
+    // Milliseconds since the epoch followed by six random digits, as the web client forms it.
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| anyhow::anyhow!("channels_unsupported_media"))?
+        .as_millis() as u64;
+    let suffix = u64::from(u32::from_be_bytes(crate::crypto::random::<4>()?)) % 1_000_000;
+    let request_id = millis * 1_000_000 + suffix;
     Ok(serde_json::json!({
         "direction": 2,
         "finder_basereq": {
@@ -344,7 +350,7 @@ fn transfer_response(bytes: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
             _ => None,
         })
         .unwrap_or(0);
-    ServiceRejected::check(Service::Channels, status)?;
+    ServiceRejected::check(Service::ChannelsDetail, status)?;
     let json =
         bytes_field(&inner, 3).ok_or_else(|| anyhow::anyhow!("channels_detail_unreadable"))?;
     ensure!(json.len() <= MAX_DETAIL_JSON, "channels_detail_unreadable");
@@ -707,8 +713,15 @@ mod tests {
             body["finder_basereq"]["ctx_info"]["client_report_buff"],
             "{\"entranceId\":\"1002\"}"
         );
-        let request_id = body["finder_basereq"]["request_id"].as_str().unwrap();
-        assert!(request_id.parse::<u64>().is_ok());
+        let request_id: u64 = body["finder_basereq"]["request_id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(
+            request_id > 1_700_000_000_000 * 1_000_000,
+            "time-based request ID"
+        );
     }
 
     fn transfer_reply(status: i64, json: &serde_json::Value) -> Vec<u8> {
@@ -787,7 +800,10 @@ mod tests {
 
         let error = transfer_response(&transfer_reply(-2, &serde_json::json!({}))).unwrap_err();
         let failure = ServiceRejected::find(&error).unwrap();
-        assert_eq!((failure.service, failure.code), (Service::Channels, -2));
+        assert_eq!(
+            (failure.service, failure.code),
+            (Service::ChannelsDetail, -2)
+        );
         assert_eq!(
             parse_detail(b"not json", &post()).unwrap_err().to_string(),
             "channels_detail_unreadable"

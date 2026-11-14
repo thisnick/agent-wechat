@@ -2347,6 +2347,7 @@ fn service_diagnostic(error: &anyhow::Error) -> Option<(&'static str, i32)> {
             Service::ChannelsAuthorization => Some("channels_authorization"),
             Service::ChannelsPage => Some("channels_page"),
             Service::Channels => Some("channels"),
+            Service::ChannelsDetail => Some("channels_detail"),
             _ => None,
         };
         if let Some(stage) = stage {

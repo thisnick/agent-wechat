@@ -50,8 +50,10 @@ pub enum Service {
     ChannelsAuthorization,
     /// Authenticated page address for a Channels post.
     ChannelsPage,
-    /// Channels post detail through the H5 transfer proxy.
+    /// The H5 transfer proxy that carries Channels requests.
     Channels,
+    /// The Channels post detail request carried by the proxy.
+    ChannelsDetail,
 }
 
 impl Service {
@@ -81,6 +83,7 @@ impl Service {
             Self::ChannelsAuthorization => "Channels authorization",
             Self::ChannelsPage => "Channels page",
             Self::Channels => "Channels service",
+            Self::ChannelsDetail => "Channels detail",
         }
     }
 }
