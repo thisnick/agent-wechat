@@ -1,7 +1,7 @@
 ---
 title: CLI 命令参考
 description: wx 命令分组、全局标志与退出状态码。
-sourceHash: fb31e2455fed
+sourceHash: 2826e5bb38f9
 ---
 
 执行 `wx --help` 可查看顶级命令分组，`wx accounts --help` 查看某个命令组的子命令，或者 `wx accounts select --help` 查看具体操作参数。帮助信息按字母顺序排列并详细解释功能。所有命令默认输出易读的文本结果，添加 `--json` 可获得便于脚本解析的机器可读 JSON 输出。
@@ -29,7 +29,7 @@ sourceHash: fb31e2455fed
 | `wx store` | 实验性：复制、导入与导出 Profile |
 | `wx version` | 查看版本与编译目标平台 |
 
-`contacts find` 与 `groups find` 用于在已保存的本地目录中搜索。搜索不区分大小写，并会组合匹配以空格分隔的多个词语：`wx contacts find "Mira work"` 可以在同一联系人的昵称和备注中同时匹配。`contacts lookup` 向微信服务端请求一个或多个确切联系人 ID 的最新详情。如果好友备注和昵称均为空，则显示名称默认取用其联系人 ID。`groups lookup` 向微信服务端请求指定群聊 ID 的完整成员名册。
+`contacts find`、`groups find` 与 `groups members list --search` 用于在已保存的本地目录中搜索。搜索不区分大小写，并会组合匹配以空格分隔的多个词语：`wx contacts find "Mira work"` 可以在同一联系人的昵称和备注中同时匹配。`contacts lookup` 向微信服务端实时请求一个或两个确切联系人 ID 的详情。如果好友备注和昵称均为空，则显示名称默认取用其联系人 ID。`groups lookup` 向微信服务端实时请求指定群聊 ID 的完整成员名册。两种查询都不会保存结果；如需更新本地数据，请使用 `contacts refresh` 或 `groups members refresh`。
 
 `select` 命令用于在 CLI 本地配置中持久化默认偏好：
 

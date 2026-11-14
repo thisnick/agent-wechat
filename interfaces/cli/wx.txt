@@ -171,8 +171,8 @@ wx contacts get <ID> | position 1, required | ID of the contact or group, from t
 wx contacts list | - | List saved entries with optional pagination
 wx contacts list --cursor | takes <CURSOR> | Continue from the next-page cursor of the previous result
 wx contacts list --limit | takes <LIMIT> | Return at most this many items
-wx contacts lookup | - | Look up one or more known contact IDs on WeChat
-wx contacts lookup <IDS> | position 1, required, repeatable | Contact IDs to look up on WeChat; give one or more
+wx contacts lookup | - | Look up one or two known contact IDs live on WeChat without saving the result
+wx contacts lookup <IDS> | position 1, required, repeatable | One or two distinct contact IDs to look up live on WeChat
 wx contacts members | hidden | List, inspect or update a group's members
 wx contacts members add | - | Add one or more contacts to a group
 wx contacts members add --detach | switch | Return as soon as the work is queued instead of waiting for it
@@ -186,6 +186,7 @@ wx contacts members get <USERNAME> | position 2, required | Member's contact ID,
 wx contacts members list | - | List saved members of a group
 wx contacts members list --cursor | takes <CURSOR> | Continue from the next-page cursor of the previous result
 wx contacts members list --limit | takes <LIMIT> | Return at most this many items
+wx contacts members list --search | takes <SEARCH> | Only list members whose ID, WeChat ID, nickname, remark or name in this group contains this text; repeat it with --cursor
 wx contacts members list <ID> | position 1, required | Group ID from wx groups list
 wx contacts members refresh | - | Refresh a group's member list from WeChat
 wx contacts members refresh --detach | switch | Return as soon as the work is queued instead of waiting for it
@@ -255,7 +256,7 @@ wx groups leave <ID> | position 1, required | Group ID from wx groups list
 wx groups list | - | List saved entries with optional pagination
 wx groups list --cursor | takes <CURSOR> | Continue from the next-page cursor of the previous result
 wx groups list --limit | takes <LIMIT> | Return at most this many items
-wx groups lookup | - | Fetch the member roster for a known group ID from WeChat
+wx groups lookup | - | Fetch the member roster for a known group ID live from WeChat without saving it
 wx groups lookup --version | takes <VERSION>, default 0 | Roster version to request from WeChat; the reply shows the current version
 wx groups lookup <ROOM> | position 1, required | Group ID, ending in @chatroom, to fetch the member roster for
 wx groups members | - | List, inspect or update a group's members
@@ -271,6 +272,7 @@ wx groups members get <USERNAME> | position 2, required | Member's contact ID, f
 wx groups members list | - | List saved members of a group
 wx groups members list --cursor | takes <CURSOR> | Continue from the next-page cursor of the previous result
 wx groups members list --limit | takes <LIMIT> | Return at most this many items
+wx groups members list --search | takes <SEARCH> | Only list members whose ID, WeChat ID, nickname, remark or name in this group contains this text; repeat it with --cursor
 wx groups members list <ID> | position 1, required | Group ID from wx groups list
 wx groups members refresh | - | Refresh a group's member list from WeChat
 wx groups members refresh --detach | switch | Return as soon as the work is queued instead of waiting for it
@@ -316,7 +318,7 @@ wx jobs retry <ID> | position 1, required | ID printed when the job, operation o
 wx jobs status | hidden alias | Alias of wx jobs get
 wx licenses | - | Show bundled third-party license notices
 wx lookup-contacts | hidden | Look up known contact IDs on the selected account
-wx lookup-contacts <IDS> | position 1, required, repeatable | Contact IDs to look up on WeChat; give one or more
+wx lookup-contacts <IDS> | position 1, required, repeatable | One or two distinct contact IDs to look up live on WeChat
 wx lookup-group | hidden | Look up a known group ID on the selected account
 wx lookup-group --version | takes <VERSION>, default 0 | Roster version to request from WeChat; the reply shows the current version
 wx lookup-group <ROOM> | position 1, required | Group ID, ending in @chatroom, to fetch the member roster for

@@ -125,8 +125,8 @@ enum Command {
     /// Look up known contact IDs on the selected account.
     #[command(hide = true)]
     LookupContacts {
-        /// Contact IDs to look up on WeChat; give one or more.
-        #[arg(required = true)]
+        /// One or two distinct contact IDs to look up live on WeChat.
+        #[arg(required = true, num_args = 1..=2)]
         ids: Vec<String>,
     },
     /// Look up a known group ID on the selected account.
@@ -376,10 +376,10 @@ enum ResourceAction {
 enum ContactCommand {
     #[command(flatten)]
     Catalog(CatalogCommand),
-    /// Look up one or more known contact IDs on WeChat.
+    /// Look up one or two known contact IDs live on WeChat without saving the result.
     Lookup {
-        /// Contact IDs to look up on WeChat; give one or more.
-        #[arg(required = true)]
+        /// One or two distinct contact IDs to look up live on WeChat.
+        #[arg(required = true, num_args = 1..=2)]
         ids: Vec<String>,
     },
 }
@@ -535,7 +535,7 @@ struct MutationOptions {
 enum GroupCommand {
     #[command(flatten)]
     Catalog(CatalogCommand),
-    /// Fetch the member roster for a known group ID from WeChat.
+    /// Fetch the member roster for a known group ID live from WeChat without saving it.
     Lookup {
         /// Group ID, ending in @chatroom, to fetch the member roster for.
         room: String,
@@ -593,6 +593,9 @@ enum MemberCommand {
     List {
         /// Group ID from wx groups list.
         id: String,
+        /// Only list members whose ID, WeChat ID, nickname, remark or name in this group contains this text; repeat it with --cursor.
+        #[arg(long)]
+        search: Option<String>,
         /// Return at most this many items.
         #[arg(long)]
         limit: Option<usize>,

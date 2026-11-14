@@ -10,8 +10,8 @@ request AddCustomStickerRequest.source.assetId | string, required, when kind mes
 request AddCustomStickerRequest.source.kind | string, required, values prepared|message | prepared: Validated temporary output created by sticker preparation; message: A verified original attachment belonging to a received sticker message
 request AddCustomStickerRequest.source.messageId | string, required, when kind message | Existing message identity in this account.
 request AddCustomStickerRequest.source.preparationId | string, required, when kind prepared | ID of a completed, unexpired preparation.
-request ContactLookupRequest | object, rejects unknown fields | Request to look up several contacts.
-request ContactLookupRequest.ids | array of string, required | Contact IDs to look up.
+request ContactLookupRequest | object, rejects unknown fields | Request to look up one or two contacts live on WeChat.
+request ContactLookupRequest.ids | array of string, required | One or two distinct contact IDs to look up.
 request ContentQuery | object, rejects unknown fields | Options for fetching media bytes.
 request ContentQuery.representation | string, values original|preview | The file itself or its preview. Defaults to the original.
 request CreateAccountRequest | object, rejects unknown fields | Request to register a new account.
@@ -429,6 +429,7 @@ response NativeGroupMemberLookup | object | Result of looking up one person in a
 response NativeGroupMemberLookup.coverage | string, required | How the answer was obtained. It is currently always `cached`, meaning saved data only.
 response NativeGroupMemberLookup.groupId | string, required | ID of the group that was searched.
 response NativeGroupMemberLookup.member | object, required, nullable | The member's details when `state` is `present`, otherwise null.
+response NativeGroupMemberLookup.member.alias | string, required, nullable | The custom WeChat ID the member chose, which they can change. Null when none is saved.
 response NativeGroupMemberLookup.member.classification | object, nullable | What kind of peer this is, worked out from the saved profile each time it is read. Missing details do not mean the peer is an ordinary person or that you are not subscribed to it.
 response NativeGroupMemberLookup.member.classification.businessKind | string, required, nullable, values official_account|service_account|enterprise|enterprise_child|photo_account | Kind of business account, worked out from the numeric `businessType`.
 response NativeGroupMemberLookup.member.classification.businessType | integer, required, nullable, format int32 | Numeric service type saved for a business account: 0 official account, 1 service account, 2 enterprise, 3 enterprise child, 5 photo account. Null for other peers and when the saved values conflict.
@@ -449,6 +450,7 @@ response NativeGroupMemberLookup.member.classification.openIm.wordings[].text | 
 response NativeGroupMemberLookup.member.displayName | string, required, nullable | Name to show for the member: your remark, else their name in this group, else their nickname, else their username.
 response NativeGroupMemberLookup.member.id | string, required | Member ID. It is the same as `username`.
 response NativeGroupMemberLookup.member.mentionName | string, nullable | Name used for this member in mention text. It comes from their name in the group or their nickname, never from your private remark, and falls back to the username.
+response NativeGroupMemberLookup.member.nickname | string, required, nullable | The name the member chose for themselves. Null when none is saved.
 response NativeGroupMemberLookup.member.roomDisplayName | string, required, nullable | The member's own display name in this group. Null when none is saved.
 response NativeGroupMemberLookup.member.username | string, required | The member's WeChat username.
 response NativeGroupMemberLookup.state | string, required | `present` when the person is in the saved member list and `unconfirmed` when they are not. A missing row does not prove they left, because the saved list can be incomplete.
@@ -459,6 +461,7 @@ response NativeGroupMemberPage.coverage | any, required | Which saved databases 
 response NativeGroupMemberPage.items | array of object, required | The entries on this page, in list order.
 response NativeGroupMemberPage.items[] | object | One entry on a page: the resource itself, or a tombstone when the resource has been removed since the list was first read.
 response NativeGroupMemberPage.items[]<NativeGroupMember> | object | A member of a group, as saved in the account's profile.
+response NativeGroupMemberPage.items[]<NativeGroupMember>.alias | string, required, nullable | The custom WeChat ID the member chose, which they can change. Null when none is saved.
 response NativeGroupMemberPage.items[]<NativeGroupMember>.classification | object, nullable | What kind of peer this is, worked out from the saved profile each time it is read. Missing details do not mean the peer is an ordinary person or that you are not subscribed to it.
 response NativeGroupMemberPage.items[]<NativeGroupMember>.classification.businessKind | string, required, nullable, values official_account|service_account|enterprise|enterprise_child|photo_account | Kind of business account, worked out from the numeric `businessType`.
 response NativeGroupMemberPage.items[]<NativeGroupMember>.classification.businessType | integer, required, nullable, format int32 | Numeric service type saved for a business account: 0 official account, 1 service account, 2 enterprise, 3 enterprise child, 5 photo account. Null for other peers and when the saved values conflict.
@@ -479,6 +482,7 @@ response NativeGroupMemberPage.items[]<NativeGroupMember>.classification.openIm.
 response NativeGroupMemberPage.items[]<NativeGroupMember>.displayName | string, required, nullable | Name to show for the member: your remark, else their name in this group, else their nickname, else their username.
 response NativeGroupMemberPage.items[]<NativeGroupMember>.id | string, required | Member ID. It is the same as `username`.
 response NativeGroupMemberPage.items[]<NativeGroupMember>.mentionName | string, nullable | Name used for this member in mention text. It comes from their name in the group or their nickname, never from your private remark, and falls back to the username.
+response NativeGroupMemberPage.items[]<NativeGroupMember>.nickname | string, required, nullable | The name the member chose for themselves. Null when none is saved.
 response NativeGroupMemberPage.items[]<NativeGroupMember>.roomDisplayName | string, required, nullable | The member's own display name in this group. Null when none is saved.
 response NativeGroupMemberPage.items[]<NativeGroupMember>.username | string, required | The member's WeChat username.
 response NativeGroupMemberPage.items[]<NativeTombstone> | object | Stands in for a resource that was in the list when it was first read but is no longer in the saved profile. It keeps the resource's place in the list.
@@ -1109,7 +1113,7 @@ route GET /v1/accounts/{a}/group-mutations/by-idempotency-key | scope admin, que
 route GET /v1/accounts/{a}/groups | scope read, query PageQuery, response NativeGroupPage, sdk response NativePage<NativeGroup> | List the saved groups.
 route GET /v1/accounts/{a}/groups/{id} | scope read, response NativeGroup, sdk response NativeGroup | Show one saved group.
 route GET /v1/accounts/{a}/groups/{id}/members/{username} | scope read, response NativeGroupMemberLookup, sdk response NativeGroupMemberLookup | Show one member of a group.
-route GET /v1/accounts/{a}/groups/{room}/lookup | scope read, query RoomQuery, response untyped | Look up the saved details of one group, optionally at a known member-list version.
+route GET /v1/accounts/{a}/groups/{room}/lookup | scope read, query RoomQuery, response untyped | Fetch one group's member list live from WeChat, without saving it, optionally from a known member-list version.
 route GET /v1/accounts/{a}/groups/{room}/members | scope read, query PageQuery, response NativeGroupMemberPage, sdk response NativePage<NativeGroupMember> | List the members of a group.
 route GET /v1/accounts/{a}/jobs/{id} | scope varies, response untyped, sdk response MediaJob | Show the state of a media or send job. Scope: Needs media or send, then the job kind decides: send, sticker_saved and sticker_pack jobs need send; other jobs need media.
 route GET /v1/accounts/{a}/login-attempts/{id} | scope varies, response NativeOperation, sdk response NativeOperation | Show the state of a login attempt. Scope: Needs read, login, media or send to look the operation up, then its kind decides: login, logout and forget_credentials need login; media-writeback needs media; message_recall needs send; sync and metadata need read; every other kind needs admin.
@@ -1150,7 +1154,7 @@ route POST /v1/accounts/{a}/avatars/{id}/refresh | scope media and read, request
 route POST /v1/accounts/{a}/connect | scope login, response untyped, status 202, sdk response NativeOperation | Connect the signed-in account to WeChat. Poll the returned operation.
 route POST /v1/accounts/{a}/consumers/{consumer}/ack | scope read, request EventAckRequest, response untyped | Record how far a named consumer has read the event stream. It never marks messages read.
 route POST /v1/accounts/{a}/contact-sync | scope read, response untyped, status 202, sdk response NativeOperation | Start syncing the contact catalog from WeChat. Poll the returned operation.
-route POST /v1/accounts/{a}/contacts/lookup | scope read, request ContactLookupRequest, response untyped | Look up the saved details of several contacts by ID.
+route POST /v1/accounts/{a}/contacts/lookup | scope read, request ContactLookupRequest, response untyped | Look up one or two contacts by ID live on WeChat, without saving the result.
 route POST /v1/accounts/{a}/contacts/{id}/refresh | scope read, response untyped, status 202, sdk response NativeOperation | Ask WeChat for the latest details of one contact. Poll the returned operation.
 route POST /v1/accounts/{a}/custom-stickers | scope send, idempotency key required, request AddCustomStickerRequest, response MediaJob, status 202, sdk request AddCustomStickerRequest, sdk response MediaJob | Save a prepared or received sticker asynchronously without sending a message.
 route POST /v1/accounts/{a}/disconnect | scope login, response untyped | Close the connection to WeChat but keep the saved login trust.

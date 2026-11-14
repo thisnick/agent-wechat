@@ -992,11 +992,11 @@ async fn image(
     )
         .into_response())
 }
-/// Request to look up several contacts.
+/// Request to look up one or two contacts live on WeChat.
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ContactLookupRequest {
-    /// Contact IDs to look up.
+    /// One or two distinct contact IDs to look up.
     ids: Vec<String>,
 }
 async fn lookup_contacts(

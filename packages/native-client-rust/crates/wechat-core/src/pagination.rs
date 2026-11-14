@@ -507,7 +507,7 @@ impl Core {
                 }
                 "members" => {
                     let page = reader.group_members(subject.context("room required")?, &q)?;
-                    (page.items.into_iter().map(|m|json!({"id":m.username,"username":m.username,"displayName":m.label,"roomDisplayName":m.room_display_name,"mentionName":crate::mention_send::mention_name(&m),"version":reader.generation()})).collect(),page.next_cursor)
+                    (page.items.into_iter().map(|m|json!({"id":m.username,"username":m.username,"displayName":m.label,"roomDisplayName":m.room_display_name,"nickname":m.contact.nickname,"alias":m.contact.alias,"mentionName":crate::mention_send::mention_name(&m),"version":reader.generation()})).collect(),page.next_cursor)
                 }
                 "messages" => {
                     let page = reader.messages(&MessageQuery {
@@ -562,8 +562,15 @@ fn metadata_version(metadata: &Value) -> Value {
 }
 
 /// Fields consulted by the saved-catalog text search.
-const CATALOG_SEARCH_FIELDS: [&str; 6] =
-    ["id", "displayName", "nickname", "remark", "alias", "body"];
+const CATALOG_SEARCH_FIELDS: [&str; 7] = [
+    "id",
+    "displayName",
+    "roomDisplayName",
+    "nickname",
+    "remark",
+    "alias",
+    "body",
+];
 
 /// Split a user query into lowercased terms. Whitespace-separated terms are
 /// combined with AND semantics, so a nickname and a WeChat ID can be supplied
@@ -784,6 +791,105 @@ mod tests {
         assert_eq!(later["order"], old_order);
         assert_eq!(later["items"][0]["id"], "peer202");
         assert_eq!(later["items"][1]["id"], "peer000");
+    }
+
+    #[test]
+    fn member_search_matches_nickname_alias_and_name_in_group_behind_a_remark() {
+        let temp = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let profile = temp.path().join("fixture");
+        let password = [42u8; 32];
+        let (_, keys, _) = wechat_profile::initialize_profile(&profile, &password).unwrap();
+        let contact =
+            rusqlite::Connection::open(profile.join("db_storage/contact/contact.db")).unwrap();
+        assert_eq!(
+            unsafe { rusqlite::ffi::sqlite3_key(contact.handle(), password.as_ptr().cast(), 32) },
+            0
+        );
+        contact
+            .execute_batch(
+                "PRAGMA cipher_compatibility=4;PRAGMA cipher_page_size=4096;PRAGMA kdf_iter=256000;",
+            )
+            .unwrap();
+        // Each member's saved name in the group, encoded as the official
+        // chat_room.ext_buffer stores it.
+        let mut names_in_group = Vec::new();
+        for (username, name) in [("wxid_a1", "Lantern"), ("wxid_b2", "Quiet")] {
+            let mut entry = vec![0x0a, username.len() as u8];
+            entry.extend_from_slice(username.as_bytes());
+            entry.extend([0x12, name.len() as u8]);
+            entry.extend_from_slice(name.as_bytes());
+            names_in_group.extend([0x0a, entry.len() as u8]);
+            names_in_group.extend(entry);
+        }
+        contact
+            .execute_batch(
+                "INSERT INTO contact(id,username,nick_name,remark,alias,local_type,delete_flag) VALUES
+                 (1,'room@chatroom','Room',NULL,NULL,2,0),
+                 (2,'wxid_a1','Serena','Book club','sreads42',1,0),
+                 (3,'wxid_b2','Other',NULL,NULL,1,0);
+                 INSERT INTO chatroom_member(room_id,member_id) VALUES(1,2),(1,3);",
+            )
+            .unwrap();
+        contact
+            .execute(
+                "INSERT INTO chat_room(id,username,owner,ext_buffer) VALUES(1,'room@chatroom','wxid_b2',?1)",
+                [names_in_group],
+            )
+            .unwrap();
+        drop(contact);
+        let store = Arc::new(wechat_store::Store::open(&temp.path().join("data")).unwrap());
+        store.attach("a", &profile, true).unwrap();
+        let key_path = temp.path().join("keys.json");
+        keys.write_new(&key_path).unwrap();
+        store.set_keys_file("a", &key_path).unwrap();
+        let core = Core::new(store, None).unwrap();
+        let search = |text: &str| {
+            let page = core
+                .catalog_page(
+                    "a",
+                    "members",
+                    Some("room@chatroom"),
+                    &CatalogQuery {
+                        search: Some(text.to_owned()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["id"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        // The remark is the display name, so the nickname, WeChat ID and name
+        // in the group are only searchable as their own fields.
+        assert_eq!(search("book"), ["wxid_a1"]);
+        assert_eq!(search("SERENA"), ["wxid_a1"]);
+        assert_eq!(search("sreads42"), ["wxid_a1"]);
+        assert_eq!(search("lantern"), ["wxid_a1"]);
+        assert_eq!(search("serena lantern"), ["wxid_a1"]);
+        assert_eq!(search("quiet"), ["wxid_b2"]);
+        assert!(search("serena quiet").is_empty());
+        let page = core
+            .catalog_page(
+                "a",
+                "members",
+                Some("room@chatroom"),
+                &CatalogQuery::default(),
+            )
+            .unwrap();
+        let member = &page["items"][0];
+        assert_eq!(member["displayName"], "Book club");
+        assert_eq!(member["nickname"], "Serena");
+        assert_eq!(member["alias"], "sreads42");
+        assert_eq!(member["roomDisplayName"], "Lantern");
+        assert_eq!(page["items"][1]["alias"], Value::Null);
     }
 
     #[test]

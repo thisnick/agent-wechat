@@ -69,10 +69,19 @@ pub async fn catalog(
                 bail!("unsupported_capability: only groups have members");
             }
             match command {
-                MemberCommand::List { id, limit, cursor } => {
+                MemberCommand::List {
+                    id,
+                    search,
+                    limit,
+                    cursor,
+                } => {
                     r.get(&query(
                         r.path(&format!("groups/{}/members", encode(&id)))?,
-                        &[("limit", limit.map(|n| n.to_string())), ("cursor", cursor)],
+                        &[
+                            ("search", search),
+                            ("limit", limit.map(|n| n.to_string())),
+                            ("cursor", cursor),
+                        ],
                     ))
                     .await
                 }
