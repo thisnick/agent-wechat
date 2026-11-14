@@ -1434,6 +1434,14 @@ displayName: string | null,
  */
 roomDisplayName: string | null,
 /**
+ * The name the member chose for themselves. Null when none is saved.
+ */
+nickname?: string | null,
+/**
+ * The custom WeChat ID the member chose, which they can change. Null when none is saved.
+ */
+alias?: string | null,
+/**
  * Name used for this member in mention text. It comes from their name in the group or their
  * nickname, never from your private remark, and falls back to the username.
  */

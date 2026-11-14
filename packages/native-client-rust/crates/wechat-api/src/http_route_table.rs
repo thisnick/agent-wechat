@@ -392,7 +392,7 @@ pub(crate) const ROUTES: &[Route] = &[
         response: Body::Untyped,
         status: 200,
         sdk: &[],
-        summary: "Look up the saved details of several contacts by ID.",
+        summary: "Look up one or two contacts by ID live on WeChat, without saving the result.",
     },
     Route {
         method: "GET",
@@ -406,7 +406,7 @@ pub(crate) const ROUTES: &[Route] = &[
         response: Body::Untyped,
         status: 200,
         sdk: &[],
-        summary: "Look up the saved details of one group, optionally at a known member-list version.",
+        summary: "Fetch one group's member list live from WeChat, without saving it, optionally from a known member-list version.",
     },
     Route {
         method: "POST",

@@ -357,6 +357,14 @@ pub struct NativeGroupMember {
     pub display_name: Option<String>,
     /// The member's own display name in this group. Null when none is saved.
     pub room_display_name: Option<String>,
+    /// The name the member chose for themselves. Null when none is saved.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub nickname: Option<String>,
+    /// The custom WeChat ID the member chose, which they can change. Null when none is saved.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub alias: Option<String>,
     /// Name used for this member in mention text. It comes from their name in the group or their
     /// nickname, never from your private remark, and falls back to the username.
     #[serde(default, skip_serializing_if = "Option::is_none")]

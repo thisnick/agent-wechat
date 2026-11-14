@@ -683,10 +683,10 @@
       },
       "ContactLookupRequest": {
         "additionalProperties": false,
-        "description": "Request to look up several contacts.",
+        "description": "Request to look up one or two contacts live on WeChat.",
         "properties": {
           "ids": {
-            "description": "Contact IDs to look up.",
+            "description": "One or two distinct contact IDs to look up.",
             "items": {
               "type": "string"
             },
@@ -1971,6 +1971,14 @@
       "NativeGroupMember": {
         "description": "A member of a group, as saved in the account's profile.",
         "properties": {
+          "alias": {
+            "default": null,
+            "description": "The custom WeChat ID the member chose, which they can change. Null when none is saved.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "classification": {
             "anyOf": [
               {
@@ -1999,6 +2007,14 @@
               "null"
             ]
           },
+          "nickname": {
+            "default": null,
+            "description": "The name the member chose for themselves. Null when none is saved.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "roomDisplayName": {
             "description": "The member's own display name in this group. Null when none is saved.",
             "type": [
@@ -2015,7 +2031,9 @@
           "id",
           "username",
           "displayName",
-          "roomDisplayName"
+          "roomDisplayName",
+          "nickname",
+          "alias"
         ],
         "type": "object"
       },
@@ -5517,7 +5535,7 @@
             ]
           }
         ],
-        "summary": "Look up the saved details of several contacts by ID.",
+        "summary": "Look up one or two contacts by ID live on WeChat, without saving the result.",
         "tags": [
           "contacts"
         ]
@@ -7149,7 +7167,7 @@
             ]
           }
         ],
-        "summary": "Look up the saved details of one group, optionally at a known member-list version.",
+        "summary": "Fetch one group's member list live from WeChat, without saving it, optionally from a known member-list version.",
         "tags": [
           "groups"
         ]

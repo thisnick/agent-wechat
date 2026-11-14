@@ -30,7 +30,7 @@ and explains what they do. Commands show readable results by default. Use `--jso
 | `wx store` | Experimental: copy, import and export profiles |
 | `wx version` | Version and build target |
 
-`contacts find` and `groups find` search the saved catalog. Search ignores letter case and combines whitespace-separated words: `wx contacts find "Mira work"` can match a nickname and remark on the same contact. `contacts lookup` requests one or more exact contact IDs from WeChat. The display name uses the contact ID if both the remark and nickname are blank. `groups lookup` requests the member roster for an exact group ID from WeChat.
+`contacts find`, `groups find` and `groups members list --search` search the saved catalog. Search ignores letter case and combines whitespace-separated words: `wx contacts find "Mira work"` can match a nickname and remark on the same contact. `contacts lookup` requests one or two exact contact IDs live from WeChat. The display name uses the contact ID if both the remark and nickname are blank. `groups lookup` requests the member roster for an exact group ID live from WeChat. Neither lookup saves its result; use `contacts refresh` or `groups members refresh` to update saved data.
 
 `select` saves a default in this CLI's configuration:
 

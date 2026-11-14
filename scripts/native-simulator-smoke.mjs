@@ -175,6 +175,8 @@ async function pinJourney(streams) {
   assert.deepEqual(groupInfo.administratorIds, []);
   assert.equal(groupInfo.canMentionAll, true);
   assert.equal((await cli("groups", "get", room)).canMentionAll, true);
+  assert.deepEqual((await cli("groups", "members", "list", room, "--search", "MEI chen")).items.map(member => member.id), ["sim_mei"]);
+  assert.deepEqual((await cli("groups", "members", "list", room, "--search", "nobody-matches")).items, []);
   await waitFor("pin regression group thread", async () => (await b.thread("personal", room)).pinned === false);
   await waitFor("both clients see created group", () => streams.every(stream => stream.events.some(event => event.kind === "message.committed" && event.data.threadId === room)));
   for (const threadId of ["sim_mei", room]) {
