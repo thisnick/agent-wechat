@@ -95,6 +95,7 @@ export default defineConfig({
             { label: 'Manage Saved stickers', slug: 'openclaw/stickers' },
             { label: 'Read receipts', translations: { 'zh-CN': '已读回执' }, slug: 'openclaw/read-receipts' },
           ] },
+          { label: 'Skills', slug: 'use/skills' },
           { label: 'HTTP API', translations: { 'zh-CN': 'HTTP API' }, slug: 'use/api' },
         ] },
         { label: 'How it works', translations: { 'zh-CN': '工作原理' }, items: [
