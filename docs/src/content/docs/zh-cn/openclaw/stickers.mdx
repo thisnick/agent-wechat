@@ -3,7 +3,7 @@ title: 管理“我的表情”
 description: 通过 OpenClaw 准备工作区媒体、预览表情并管理“我的表情”。
 banner:
   content: "本页面由机器翻译，尚未经过人工审校。"
-sourceHash: 4ceabe4ef8a3
+sourceHash: 23af0e5347c6
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -46,7 +46,15 @@ import { Aside } from '@astrojs/starlight/components';
    {"action":"add","preparationId":"PREPARATION_ID","idempotencyKey":"clip-save-1"}
    ```
 
-   仅准备不会保存或发送。在原图已下载并校验后，也可以使用一个收到的 `messageId`/`assetId` 组合进行添加。
+   仅准备不会保存或发送。
+
+5. 通过消息 ID 保存对方发给你的表情。
+
+   ```json
+   {"action":"add","messageId":"MESSAGE_ID","idempotencyKey":"received-save-1"}
+   ```
+
+   插件会找到该消息中的原图表情。如果该消息没有收到的表情，或包含多个原图，操作将失败。
 
 | 操作 | 必需的参数 |
 | --- | --- |
