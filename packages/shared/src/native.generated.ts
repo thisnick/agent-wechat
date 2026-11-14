@@ -1044,7 +1044,12 @@ url: string | null,
  * Name of the site or account that published the card, such as a Channels account. Null when
  * there is none.
  */
-sourceName: string | null, };
+sourceName: string | null,
+/**
+ * Length of a Channels video in seconds. Omitted for other cards and when the card does not
+ * say.
+ */
+durationSeconds?: number, };
 export type LocationCoordinateSystem = "unknown";
 export type LocationCard = {
 /**

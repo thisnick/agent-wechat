@@ -1,0 +1,36 @@
+{
+  "description": "Synthetic WeChat Channels video prefix keystream vectors. Seeds are synthetic; no account or media data.",
+  "prefixBytes": 131072,
+  "vectors": [
+    {
+      "seed": "0",
+      "first64Hex": "9d39247e33776d412af7398005aaa5c744db0150246235479c15f73e62a76ae275834465489c0c893290ac3a203001bf0fbbad1f61042279e83a908ff2fb60ca",
+      "bytes2040To2063Hex": "48cbff086ddf285a7f9b6af1ebf78baf58627e1a149bba21",
+      "prefixSha256": "e1662af3b7e59867c919ad19055fc8cecea2b154d37e1459b2f96d1da14cef1f"
+    },
+    {
+      "seed": "1",
+      "first64Hex": "e19ed5d2ca98af2da7a18d07cab39b52a0ab0232d180af1472b36dcf1af5e46feec16938b4f998bf9670cac455266b7798fbb5a446e47c37d55717c8e4901d40",
+      "bytes2040To2063Hex": "c3bee27657f8eb684f248babbf324897419fb0ecfdd719e5",
+      "prefixSha256": "39d98f5b25cc52f0996f7ef9e1022156cb029901be6a11ebbdd7469c6ffd5839"
+    },
+    {
+      "seed": "42",
+      "first64Hex": "bbd61fa5105a596a9b3cc89c4acb57baf2469ccfa2bc2790c84d04a408160c5d6ef7a3bd4b47bd78772b307de053be9a9f867e3b17f7d5935722e31b375f9c62",
+      "bytes2040To2063Hex": "cb713848c3cb3ad2074ee3cee3bf5fbe6f6a3ada3dc10bd6",
+      "prefixSha256": "6684f1c8b8bc473ce2156c9ca6e1cbb724e5ca7e9c6f6214ab3103f7e8d6a51e"
+    },
+    {
+      "seed": "9007199254740993",
+      "first64Hex": "8d41a8453b2fbc42494b749b96a725792f6c61e8da428f1b02f60efa0c0e8c55d2164d7813f9fc4c8ac287429026c543b71cf5b683f2aae69b3c5068b0d51017",
+      "bytes2040To2063Hex": "1880c8c2b4658785883ab153ad217d6bd872f9465e2e6361",
+      "prefixSha256": "520917d54d3d8d27ec1fcd34479f0942376bbd4979039bf9315b22c9987149f1"
+    },
+    {
+      "seed": "18446744073709551615",
+      "first64Hex": "7c38fd3a2e7cd8ad64081892c82430f3a8eca8122a6f4607f6943b85ac39b6f0b4817da09f07ddedfa98a9882a092a0e808419a97325e29ff7eb58ff7084d170",
+      "bytes2040To2063Hex": "8a6d76ba7179bfdd5e47a600222f7310d8c88a61a443b22e",
+      "prefixSha256": "5afbffd76305e81467f97c6370fa07916e9b197611bf5c357a854eb92a6354a1"
+    }
+  ]
+}

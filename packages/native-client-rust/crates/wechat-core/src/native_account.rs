@@ -272,6 +272,16 @@ fn mirror<T>(
     }
 }
 
+/// Name the Channels lookup step for a failure that has no more specific media code, so a
+/// failed job says where it stopped. The code is static; error details stay out of it.
+fn channels_stage(error: anyhow::Error, stage: &'static str) -> anyhow::Error {
+    if crate::media::classify_error(&error) == "media_processing_failed" {
+        error.context(stage)
+    } else {
+        error
+    }
+}
+
 macro_rules! forward {
     ($name:ident($($arg:ident: $ty:ty),*) -> $result:ty => $method:ident) => {
         fn $name(&self, state: &mut AccountState, $($arg: $ty),*) -> Result<$result> {
@@ -393,6 +403,48 @@ impl crate::upstream::Upstream for BoundUpstream {
             wechat_protocol::media::CdnClient::new(configuration.clone(), Duration::from_secs(25))?;
         configuration.auth_key.fill(0);
         Ok(Box::new(transport))
+    }
+    fn fetch_channels_video(
+        &self,
+        state: &mut AccountState,
+        post: &wechat_protocol::ChannelsPost,
+        max_bytes: usize,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+        progress: crate::upstream::media::Progress<'_>,
+    ) -> Result<wechat_protocol::media::ChannelsVideo> {
+        // A fresh page address and ticket per retrieval: retrievals are user-requested and rare,
+        // and nothing credential-bearing outlives the transfer. The page address comes first and
+        // the ticket after it, as in the accepted native sequence.
+        let mut renewed = false;
+        let page = loop {
+            match mirror(&self.client, state, |request| request.channels_page(post)) {
+                Ok(page) => break page,
+                Err(error) if !renewed && crate::media::is_media_auth_rejected(&error) => {
+                    *state = self.renew_session(state, "agent-wechat media")?;
+                    renewed = true;
+                }
+                Err(error) => return Err(channels_stage(error, "channels_page_failed")),
+            }
+        };
+        checkpoint()?;
+        let ticket = loop {
+            match mirror(&self.client, state, |request| request.channels_ticket()) {
+                Ok(ticket) => break ticket,
+                Err(error) if !renewed && crate::media::is_media_auth_rejected(&error) => {
+                    *state = self.renew_session(state, "agent-wechat media")?;
+                    renewed = true;
+                }
+                Err(error) => return Err(channels_stage(error, "channels_ticket_failed")),
+            }
+        };
+        checkpoint()?;
+        let media = mirror(&self.client, state, |request| {
+            request.channels_media(post, &ticket, &page)
+        })
+        .map_err(|error| channels_stage(error, "channels_detail_failed"))?;
+        drop((ticket, page));
+        checkpoint()?;
+        wechat_protocol::media::fetch_channels_video(&media, max_bytes, progress)
     }
     fn submit_media(
         &self,

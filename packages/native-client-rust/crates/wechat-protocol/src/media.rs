@@ -38,6 +38,9 @@ pub use avatar::*;
 #[path = "link_thumbnail.rs"]
 mod link_thumbnail;
 pub use link_thumbnail::*;
+#[path = "channels_video.rs"]
+mod channels_video;
+pub use channels_video::*;
 #[path = "sticker.rs"]
 mod sticker;
 pub use sticker::*;

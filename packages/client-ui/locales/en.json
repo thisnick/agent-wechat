@@ -713,6 +713,7 @@
   },
   "sharedLink": {
     "open": "Open {{title}} ({{host}})",
+    "playChannelsVideo": "Play Channels video: {{title}}",
     "sharedLink": "Shared link",
     "wechatChannels": "WeChat Channels"
   },
@@ -753,6 +754,7 @@
   },
   "threadPreview": {
     "attachment": "Attachment",
+    "channelsVideo": "Channels video",
     "fileTransfer": "File Transfer",
     "forwardedMessages": "Forwarded messages",
     "groupChatNames": "Group chat · {{names}}",

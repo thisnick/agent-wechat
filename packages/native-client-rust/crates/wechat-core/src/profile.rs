@@ -348,9 +348,10 @@ pub(crate) fn normalized_message(
         .as_ref()
         .filter(|a| a.subtype == 57)
         .and_then(|a| crate::quotes::embedded_quote(a, own));
-    let link = app.as_ref().and_then(|a| a.link.as_ref()).map(|l| &l.card);
-    if let Some(link) = link {
-        text = Some(link.body());
+    let parsed_link = app.as_ref().and_then(|a| a.link.as_ref());
+    let link = parsed_link.map(|l| &l.card);
+    if let Some(parsed) = parsed_link {
+        text = Some(parsed.body());
     }
     if let Some(body) = app.as_ref().and_then(|a| a.text.as_ref()) {
         text = Some(body.clone());

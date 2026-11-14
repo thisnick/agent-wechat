@@ -4,6 +4,7 @@
 //! WXGF inspection decodes a representative still only. Its animation timing,
 //! frame count and alpha semantics remain unknown; the original stays WXGF.
 
+pub mod channels;
 mod image;
 mod sticker_archive;
 mod sticker_export;

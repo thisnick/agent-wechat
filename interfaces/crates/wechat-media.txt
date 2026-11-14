@@ -5,6 +5,7 @@ const wechat_media::MAX_IMAGE_BYTES | usize | MISSING DOC
 const wechat_media::MAX_STICKER_BYTES | usize | Maximum accepted prepared GIF size under this application's sticker policy.
 const wechat_media::MAX_STICKER_EDGE | u32 | Maximum prepared edge length under this application's sticker policy.
 const wechat_media::MAX_VIDEO_SOURCE_BYTES | usize | Outgoing video source limit, shared by normal preparation and the unchanged original upload. It matches the ordinary-file limit; the prepared normal playback copy keeps its own smaller output limit.
+const wechat_media::channels::CHANNELS_PREFIX_BYTES | usize | Number of leading video bytes covered by the keystream.
 field wechat_media::DecodedImage::bytes | alloc::vec::Vec<u8> | MISSING DOC
 field wechat_media::DecodedImage::inspection | wechat_media::image::ImageInspection | MISSING DOC
 field wechat_media::ImageInspection::animation_preserved | bool | MISSING DOC
@@ -49,6 +50,9 @@ field wechat_media::StickerPreview::sampled_frames | u32 | Number of frames actu
 field wechat_media::StickerPreview::still | wechat_media::DecodedImage | PNG/JPEG of one representative displayed frame.
 field wechat_media::StickerTrim::duration_ms | u32 | Length of the retained segment, greater than zero.
 field wechat_media::StickerTrim::start_ms | u32 | Start of the retained segment.
+fn wechat_media::channels::ChannelsPrefixStream::as_bytes | fn(&self) -> &[u8; 131072] | The raw keystream bytes.
+fn wechat_media::channels::apply_channels_prefix | fn(data: &mut [u8], offset: u64, stream: &wechat_media::channels::ChannelsPrefixStream) | XOR the part of `data` that overlaps the encrypted prefix.
+fn wechat_media::channels::channels_prefix_keystream | fn(seed: u64) -> wechat_media::channels::ChannelsPrefixStream | Derive the full prefix keystream for a Channels `decode_key`.
 fn wechat_media::decode_sticker_archive | fn(bytes: &[u8], product: &str, ids: &[alloc::string::String]) -> anyhow::Result<wechat_media::sticker_archive::StickerArchive> | Decode a supported ZIP with exact product root, bounded expansion, regular files, unique paths, CRC verification and MD5/detail ordinal correspondence.
 fn wechat_media::export_sticker_pack | fn(directory: &std::path::Path, pack_id: &str, name: &str, items: alloc::vec::Vec<wechat_media::sticker_export::StickerExportItem>, resume: bool) -> anyhow::Result<wechat_media::sticker_export::StickerExportIndex> | Export one selected pack as numbered GIFs plus index.json. Resumption checks product, ordered identities and checksums; unrelated files are never replaced.
 fn wechat_media::inspect_image | fn(bytes: &[u8]) -> anyhow::Result<wechat_media::image::ImageInspection> | Inspect the retained source. For WXGF, dimensions describe its still preview; `frames` does not establish the source's animation frame count.
@@ -68,6 +72,8 @@ impl core::fmt::Debug for wechat_media::DecodedImage | impl | -
 impl core::fmt::Debug for wechat_media::ImageInspection | impl | -
 impl core::fmt::Debug for wechat_media::StickerImageOptions | impl | -
 impl core::fmt::Debug for wechat_media::StickerTrim | impl | -
+impl core::fmt::Debug for wechat_media::channels::ChannelsPrefixStream | impl | -
+impl core::ops::drop::Drop for wechat_media::channels::ChannelsPrefixStream | impl | -
 impl serde_core::de::Deserialize<'de> for wechat_media::ImageInspection | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_media::StickerExportEntry | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_media::StickerExportIndex | impl<'de> | -
@@ -79,6 +85,7 @@ impl serde_core::ser::Serialize for wechat_media::StickerExportIndex | impl | -
 impl serde_core::ser::Serialize for wechat_media::StickerImageOptions | impl | -
 impl serde_core::ser::Serialize for wechat_media::StickerTrim | impl | -
 mod wechat_media | - | Bounded media inspection shared by native transport and official profiles. Inspection retains source bytes, including application trailers. Explicit sticker preparation returns a separately validated output and previews. WXGF inspection decodes a representative still only. Its animation timing, frame count and alpha semantics remain unknown; the original stays WXGF.
+mod wechat_media::channels | - | Prefix codec for WeChat Channels videos.
 struct wechat_media::DecodedImage | struct { public fields } | MISSING DOC
 struct wechat_media::ImageInspection | struct { public fields } | MISSING DOC
 struct wechat_media::PreparedStickerImage | struct { public fields } | Validated GIF plus PNG images suitable for visual model input.
@@ -90,3 +97,4 @@ struct wechat_media::StickerExportItem | struct { public fields } | One selected
 struct wechat_media::StickerImageOptions | struct { public fields } | Explicit adjustments for image/GIF preparation.
 struct wechat_media::StickerPreview | struct { public fields } | Visual images derived from an original without changing its format or timing.
 struct wechat_media::StickerTrim | struct { public fields } | A segment requested by the caller, in milliseconds.
+struct wechat_media::channels::ChannelsPrefixStream | struct (_) | The complete prefix keystream for one decode key.

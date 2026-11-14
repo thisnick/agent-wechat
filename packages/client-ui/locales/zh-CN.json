@@ -710,6 +710,7 @@
   },
   "sharedLink": {
     "open": "打开 {{title}} ({{host}})",
+    "playChannelsVideo": "播放视频号视频：{{title}}",
     "sharedLink": "分享的链接",
     "wechatChannels": "微信视频号"
   },
@@ -808,6 +809,7 @@
   },
   "threadPreview": {
     "attachment": "附件",
+    "channelsVideo": "视频号视频",
     "fileTransfer": "文件传输助手",
     "forwardedMessages": "聊天记录",
     "groupChatNames": "群聊 · {{names}}",

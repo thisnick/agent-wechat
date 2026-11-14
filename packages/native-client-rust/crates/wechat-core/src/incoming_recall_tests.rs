@@ -111,7 +111,7 @@ fn quotes_keep_retained_contact_names_after_catalog_removal() {
 fn application_text_share_keeps_raw_content_and_roundtrips_quotes_until_recalled() {
     for (subtype, xml, expected) in [
         (1, "<msg><appmsg appid='synthetic'><type>1</type><title><![CDATA[https://example.invalid/shared?a=1&b=2]]></title><des>Not the shared text</des><url/><appattach><aeskey>private-transport</aeskey></appattach></appmsg></msg>", "https://example.invalid/shared?a=1&b=2"),
-        (51, "<msg><appmsg><type>51</type><title>Channels post</title><url>https://example.invalid/channels</url><finderFeed><desc>Post description</desc><nickname>Publisher</nickname><objectNonceId>private-transport</objectNonceId></finderFeed></appmsg></msg>", "[Link] Channels post\nPost description\nhttps://example.invalid/channels"),
+        (51, "<msg><appmsg><type>51</type><title>Channels post</title><url>https://example.invalid/channels</url><finderFeed><desc>Post description</desc><nickname>Publisher</nickname><objectNonceId>private-transport</objectNonceId></finderFeed></appmsg></msg>", "[Channels] Publisher: Post description"),
         (74, "<msg><appmsg><type>74</type><title>report.pdf</title><appattach><status>0</status><fileuploadtoken>private-transport</fileuploadtoken></appattach></appmsg></msg>", "[File upload notice]\nreport.pdf"),
         (87, "<msg><appmsg><type>87</type><announcement><![CDATA[<p>private-transport</p>]]></announcement><textannouncement>Plain announcement</textannouncement></appmsg></msg>", "[Group announcement]\nPlain announcement"),
     ] {

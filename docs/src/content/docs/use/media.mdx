@@ -99,6 +99,14 @@ wx messages media filehelper MESSAGE_ID --output ./saved.pdf --wait 3600
 
 The CLI verifies size and SHA-256 before publishing the output. SDK clients can use `mediaContentStream` with `{ maxBytes: NATIVE_MAX_SOURCE_BYTES }`; the default retrieval bound is 128 MiB. Check the selected asset’s size and SHA-256 when saving the stream.
 
+A WeChat Channels card lists two assets: its cover (an `image` thumbnail) and the post's video (`video`, `normal`). The video is never downloaded automatically. Request it like any other attachment:
+
+```bash
+wx messages media filehelper MESSAGE_ID --quality normal --output ./post.mp4 --wait 600
+```
+
+Each request asks WeChat for a fresh copy of the post, so a deleted or private post fails with `channels_post_unavailable`. A downloaded video stays in the daemon's own media files, not in the WeChat profile. If that file is removed, the next request downloads it again.
+
 ## OpenClaw
 
 Set [`channels.agent-wechat.mediaMaxMb`](/reference/configuration/#openclaw) to allow the intended attachment size. For example, `512` permits files up to 512 MiB. The extension applies the smaller of this setting and the selected send kind's limit before staging. Raising it cannot extend the daemon’s per-kind limits.
@@ -106,6 +114,8 @@ Set [`channels.agent-wechat.mediaMaxMb`](/reference/configuration/#openclaw) to 
 Ordinary audio is sent as a file; `audioAsVoice` selects voice. Larger ordinary files get up to an hour of job polling. If polling ends, retain the reported job ID and inspect it instead of starting another send.
 
 Use OpenClaw’s `asDocument`/`forceDocument` option to send media as an ordinary file. Video quality options apply only to video sends.
+
+When someone sends a Channels card, the agent gets the post's publisher, description and length, plus the cover image. It downloads the video only by calling `wechat_media` (or `wechat_archive_media`) with the card's message ID; `quality: "thumbnail"` returns the cover instead.
 
 <Aside title="Good to know">
 - File detection uses the browser's media type first, then the extension when the type is missing or generic. A supported video container can still contain an unsupported codec; export it as MP4 if preparation fails. Some videos cannot be previewed by the browser before sending.
@@ -116,4 +126,5 @@ Use OpenClaw’s `asDocument`/`forceDocument` option to send media as an ordinar
 - Gateway and proxy timeouts also apply. After a lost response, inspect the same key; see [Sends and recovery](/how-it-works/sends/).
 - A normal video whose verified bytes differ from the message metadata can be downloaded through the daemon while its `officialWriteback` remains `blocked`. The official-profile cache keeps its existing identity checks.
 - Unrecognized video responses that differ from the message's size or MD5 stop the download. The job may include `result.cdnDownloadFailure` with advertised and delivered sizes and which checks matched. These diagnostics exclude file bytes and hashes.
+- A sandboxed OpenClaw agent, such as one that runs its shell over SSH, can't open files the media tools download. The tool result says so (`reachableFromSandbox: false`) instead of giving a path. Received attachments still reach a sandbox with the message.
 </Aside>

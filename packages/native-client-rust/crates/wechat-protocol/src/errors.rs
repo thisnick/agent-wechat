@@ -46,6 +46,14 @@ pub enum Service {
     CdnUpload,
     /// Large-file upload.
     LargeFileUpload,
+    /// H5 ticket request for Channels post lookups.
+    ChannelsAuthorization,
+    /// Authenticated page address for a Channels post.
+    ChannelsPage,
+    /// The H5 transfer proxy that carries Channels requests.
+    Channels,
+    /// The Channels post detail request carried by the proxy.
+    ChannelsDetail,
 }
 
 impl Service {
@@ -72,6 +80,10 @@ impl Service {
             Self::CdnDownload => "CDN download",
             Self::CdnUpload => "CDN upload",
             Self::LargeFileUpload => "Large-file upload",
+            Self::ChannelsAuthorization => "Channels authorization",
+            Self::ChannelsPage => "Channels page",
+            Self::Channels => "Channels service",
+            Self::ChannelsDetail => "Channels detail",
         }
     }
 }

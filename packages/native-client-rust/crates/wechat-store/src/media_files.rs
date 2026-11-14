@@ -55,6 +55,15 @@ pub(crate) fn write(directory: &Path, sealed: &[u8]) -> Result<String> {
     }
     Ok(name)
 }
+/// Whether a payload file is still present as a regular file, without reading it.
+pub(crate) fn present(directory: &Path, name: &str) -> Result<bool> {
+    ensure!(valid(name), "invalid media file name");
+    match fs::symlink_metadata(directory.join(name)) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+        Ok(metadata) => Ok(metadata.is_file() && !wechat_platform::is_link(&metadata)),
+    }
+}
 /// Read one payload. A file that was deleted is reported as `media_not_cached`;
 /// nothing is downloaded or rebuilt to replace it.
 pub(crate) fn read(directory: &Path, name: &str) -> Result<Vec<u8>> {

@@ -35,12 +35,13 @@ function messageResult(message: NativeMessage, retrievalTool = "wechat_media", q
   const isQuote = message.type === 49 && message.appMessageType === 57;
   const isForward = message.type === 49 && message.appMessageType === 19;
   const isLink = message.type === 49 && [3, 4, 5].includes(message.appMessageType ?? 0) && !!message.link;
-  const kind = isQuote ? "quote" : isForward ? "forwarded_history" : isLink ? "link_preview" : message.type === 3 ? "image" : message.type === 47 ? "sticker" : message.type === 34 ? "voice" : message.type === 43 ? "video" : message.type === 49 && (message.appMessageType == null || message.appMessageType === 6) ? "file" : "unsupported";
-  const body = message.type === 1 || isForward || isLink ? message.body ?? "" : isQuote ? renderEmbeddedQuote(message, quotePermitted).body : `[WeChat ${kind} message; attachment content has not been retrieved by this tool]`;
+  const isChannels = message.type === 49 && message.appMessageType === 51 && !!message.link;
+  const kind = isQuote ? "quote" : isForward ? "forwarded_history" : isLink ? "link_preview" : isChannels ? "channels_video" : message.type === 3 ? "image" : message.type === 47 ? "sticker" : message.type === 34 ? "voice" : message.type === 43 ? "video" : message.type === 49 && (message.appMessageType == null || message.appMessageType === 6) ? "file" : "unsupported";
+  const body = message.type === 1 || isForward || isLink || isChannels ? message.body ?? "" : isQuote ? renderEmbeddedQuote(message, quotePermitted).body : `[WeChat ${kind} message; attachment content has not been retrieved by this tool]`;
   const quote = message.quote && { serverId: message.quote.serverId, type: message.quote.type, state: quotePermitted ? message.quote.state : "not permitted",
     senderId: message.quote.senderId, appMessageType: message.quote.appMessageType, embeddedImage: quotePermitted ? message.quote.embeddedImage : undefined };
   return { id: message.id, threadId: message.threadId, serverId: message.serverId, senderId: message.senderId,
-    direction: message.direction, type: message.type, appMessageType: message.appMessageType, quote, link: isLink ? message.link : undefined, createdAt: message.createdAt, body: body.slice(0, 4000), bodyTruncated: body.length > 4000,
+    direction: message.direction, type: message.type, appMessageType: message.appMessageType, quote, link: isLink || isChannels ? message.link : undefined, createdAt: message.createdAt, body: body.slice(0, 4000), bodyTruncated: body.length > 4000,
     attachment: message.type !== 1 && !isForward && kind !== "unsupported" ? { kind, retrievalTool, messageId: message.id } : undefined };
 }
 
@@ -161,7 +162,7 @@ function createLookupTools(context: OpenClawPluginToolContext, dependencies: Dep
           };
           let prepared: Awaited<ReturnType<typeof prepareNativeAttachment>>;
           try { prepared = await prepareNativeAttachment({ client, account, message, core, cfg,
-            quality: quality as typeof qualities[number], download: args.download !== false, waitMs: 2000, signal, assertCurrent: guard,
+            quality: quality as typeof qualities[number], download: args.download !== false, waitMs: 2000, signal, assertCurrent: guard, channelsVideo: true,
             allowQuotedMessage: async original => original.direction === "outgoing" || await allowed(original.senderId ?? undefined),
             beforeMediaAccess: async () => {
               if (!await allowed(requesterSenderId) || (message.direction !== "outgoing" && !await allowed(message.senderId ?? undefined))) throw Error("WeChat conversation access is no longer allowed");
@@ -177,8 +178,12 @@ function createLookupTools(context: OpenClawPluginToolContext, dependencies: Dep
           }
           guard();
           if (!await allowed(requesterSenderId) || (message.direction !== "outgoing" && !await allowed(message.senderId ?? undefined))) throw Error("WeChat conversation access is no longer allowed");
+          // A sandboxed agent cannot open gateway paths, and OpenClaw stages files into a sandbox
+          // only with an inbound turn. Say so instead of returning a path it cannot read.
+          const unreachable = context.sandboxed === true && prepared.attachment?.status === "ready" && prepared.attachment.kind !== "image";
+          const attachment = unreachable ? { ...prepared.attachment, path: undefined, reachableFromSandbox: false } : prepared.attachment;
           const details = { messageId: message.id, threadId: message.threadId, status: prepared.reason === "message_recalled" ? "recalled" : prepared.pending ? "pending" : prepared.attachment?.status ?? prepared.quote?.state ?? "unsupported",
-            attachment: prepared.attachment, quote: prepared.quote, link: ["message_recalled", "media_identity_unavailable", "media_source_changed"].includes(prepared.reason ?? "") ? undefined : message.link,
+            attachment, quote: prepared.quote, link: ["message_recalled", "media_identity_unavailable", "media_source_changed"].includes(prepared.reason ?? "") ? undefined : message.link,
             variant: prepared.variant, jobId: prepared.jobId, retryable: prepared.retryable ?? false, reason: prepared.reason, body: prepared.body };
           const image = prepared.suppliedAssets?.find(asset => asset.role === "model_image");
           const output = image ? await imageResultFromFile({ label: "WeChat attachment", path: image.path, extraText: JSON.stringify(details), details })
@@ -219,13 +224,13 @@ function createLookupTools(context: OpenClawPluginToolContext, dependencies: Dep
     tool(archiveNames[1], "search", "Search locally stored messages across every thread in the configured WeChat account, including other senders. Optional threadId narrows the search. Follow nextCursor with the same query and thread selection; no remote backfill or read marking.", { query: querySchema, threadId: threadIdSchema, ...pageSchema }, ["query"]),
     tool(archiveNames[2], "history", "Read the locally stored history of any thread in the configured WeChat account, newest first, without sender filtering or read marking. Use wechat_archive_threads to find thread IDs.", { threadId: threadIdSchema, ...pageSchema }, ["threadId"]),
     tool(archiveNames[3], "message", "Look up a stored message in any thread of the configured WeChat account by its exact opaque message ID. Use wechat_archive_media to retrieve its attachment.", { messageId: messageIdSchema }, ["messageId"]),
-    tool(archiveNames[4], "media", "Retrieve an attachment or quoted text/image/link from any thread in the configured WeChat account by its message ID. Use the parent quote message ID for quotes. Returns verified managed file paths and an image preview for vision. Cached bytes first; missing media requests a bounded server-owned download unless download=false. Preserve pending/expired/unavailable results and never automatically retry retryable=false. No sends or read marking.", mediaSchema, ["messageId"]),
+    tool(archiveNames[4], "media", "Retrieve an attachment, a Channels card's video, or quoted text/image/link from any thread in the configured WeChat account by its message ID. Use the parent quote message ID for quotes; quality thumbnail returns a Channels card's cover. Returns verified managed file paths and an image preview for vision. Cached bytes first; missing media requests a bounded server-owned download unless download=false. Preserve pending/expired/unavailable results and never automatically retry retryable=false. No sends or read marking.", mediaSchema, ["messageId"]),
   ];
   return [
     tool(names[0], "history", "Read the current WeChat conversation's locally stored messages, newest first, beyond the recent inbound buffer. Follow nextCursor for older history; no remote history backfill or read marking.", { ...pageSchema }),
     tool(names[1], "search", "Search the current WeChat conversation's locally stored message text by case-insensitive substring, beyond buffered messages. Follow nextCursor with the same query in this conversation.", { query: querySchema, ...pageSchema }, ["query"]),
     tool(names[2], "message", "Look up a stored message by its exact opaque message ID in the current WeChat conversation. Media is described without downloading it; use wechat_media to retrieve its attachment. Long text is bounded.", { messageId: messageIdSchema }, ["messageId"]),
-    tool(names[3], "media", "Retrieve a message attachment or quoted text/image/link from the current WeChat conversation. Use the parent quote message ID for quotes. Returns a verified local file path and an image preview for vision when applicable. Uses cached bytes first; download defaults to true and requests a bounded server-owned transfer if missing. Pending results may be checked again; never automatically retry confirmed expiry or retryable=false. Does not send messages or mark the thread read.", mediaSchema, ["messageId"]),
+    tool(names[3], "media", "Retrieve a message attachment, a Channels card's video, or quoted text/image/link from the current WeChat conversation. Use the parent quote message ID for quotes; quality thumbnail returns a Channels card's cover. Returns a verified local file path and an image preview for vision when applicable. Uses cached bytes first; download defaults to true and requests a bounded server-owned transfer if missing. Pending results may be checked again; never automatically retry confirmed expiry or retryable=false. Does not send messages or mark the thread read.", mediaSchema, ["messageId"]),
   ];
 }
 export function registerNativeHistoryTools(api: OpenClawPluginApi): void {

@@ -1,7 +1,7 @@
 ---
 title: 发送与下载附件
 description: 文件、图片、视频与语音的大小限制、较长的发送时间，以及 CLI、API 和 SDK 接口。
-sourceHash: ae8e50b12f4b
+sourceHash: 5a0dbb9d09c8
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -100,6 +100,14 @@ wx messages media filehelper MESSAGE_ID --output ./saved.pdf --wait 3600
 
 CLI 会在发布输出文件前校验大小与 SHA-256。SDK 客户端可以使用 `mediaContentStream` 并传入 `{ maxBytes: NATIVE_MAX_SOURCE_BYTES }`；默认拉取上限为 128 MiB。保存数据流时请检查所选资源的大小和 SHA-256。
 
+微信视频号卡片包含两项资源：封面（`image` 缩略图）和帖子中的视频（`video`，`normal`）。视频不会自动下载。请像请求其他附件一样请求它：
+
+```bash
+wx messages media filehelper MESSAGE_ID --quality normal --output ./post.mp4 --wait 600
+```
+
+每次请求都会向微信重新获取一份帖子副本，因此已删除或设为私密的帖子会返回 `channels_post_unavailable`。已下载的视频保存在 Daemon 自己的媒体文件中，而不在微信 Profile 中。如果该文件被删除，下次请求时会重新下载。
+
 ## OpenClaw \{#openclaw}
 
 在配置中设置 [`channels.agent-wechat.mediaMaxMb`](/reference/configuration/#openclaw) 以放行预期的附件大小。例如设为 `512` 允许最高 512 MiB 的文件。扩展在暂存前会取该配置与具体发送类型上限的较小值。调高该值无法突破 Daemon 对各发送类型的限制。
@@ -107,6 +115,8 @@ CLI 会在发布输出文件前校验大小与 SHA-256。SDK 客户端可以使�
 普通音频文件将作为文件发送；若指定 `audioAsVoice` 则作为语音消息发送。对于较大的普通文件，OpenClaw 会进行最长一小时的任务轮询。若轮询超时，请记录返回的任务 ID 并主动查询，切勿直接重复发起发送。
 
 使用 OpenClaw 的 `asDocument`/`forceDocument` 选项可以将媒体文件作为普通文件发送。视频质量选项仅适用于视频发送。
+
+当有人发送视频号卡片时，智能体会获得该帖子的发布者、描述和时长，以及封面图片。只有通过卡片的消息 ID 调用 `wechat_media`（或 `wechat_archive_media`）时，它才会下载视频；`quality: "thumbnail"` 则返回封面。
 
 <Aside title="使用提示">
 - 文件类型检测优先使用浏览器识别的媒体类型，当类型缺失或宽泛时则回退到文件扩展名判断。即使视频容器格式受支持，也可能包含不受支持的编码格式；若发送预处理失败，可导出为 MP4 后重试。部分视频在发送前可能无法在浏览器中直接预览。
@@ -117,4 +127,5 @@ CLI 会在发布输出文件前校验大小与 SHA-256。SDK 客户端可以使�
 - 网关和代理的超时同样适用。若响应丢失，请使用相同的幂等键进行查询；详见[发送与恢复](/how-it-works/sends/)。
 - 普通视频的已校验字节若与消息元数据不一致，仍可通过 Daemon 下载，但其 `officialWriteback` 会保持 `blocked` 状态。官方 Profile 缓存仍会执行原有的身份校验。
 - 无法识别的视频响应若与消息中声明的大小或 MD5 不一致，下载将停止。任务可能包含 `result.cdnDownloadFailure`，其中列出声明的大小、实际交付的大小以及哪些校验项匹配。这些诊断信息不包含文件内容或哈希值。
+- 沙箱中的 OpenClaw 智能体（例如通过 SSH 运行 shell 的智能体）无法打开媒体工具下载的文件。工具结果会通过 `reachableFromSandbox: false` 说明这一点，而不是给出路径。收到的附件仍会随消息送达沙箱。
 </Aside>

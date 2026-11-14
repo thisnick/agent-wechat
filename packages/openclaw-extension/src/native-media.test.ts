@@ -656,6 +656,51 @@ test("shared link previews supply verified thumbnails under the stored parent ID
     assert.notEqual(manifest.newInputs[0].contentSha256, changed.newInputs[0].contentSha256);
   }
 });
+const channelsMessage = { ...message, type: 49, appMessageType: 51, body: "[Channels video] Publisher: Synthetic post (1:36)",
+  link: { title: null, description: "Synthetic post", url: null, sourceName: "Publisher", durationSeconds: 96 } } as NativeMessage;
+test("Channels cards give agents the post text and cover; only the media tools fetch the video", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "native-channels-")); t.after(() => rm(directory, { recursive: true, force: true }));
+  const png = await readFile(new URL("../test/fixtures/native-model.png", import.meta.url));
+  const video = new Uint8Array([0, 0, 0, 16, 102, 116, 121, 112, 105, 115, 111, 109, 0, 0, 2, 0]);
+  const digest = (value: Uint8Array) => createHash("sha256").update(value).digest("hex");
+  const saveMediaBuffer = async (buffer: Buffer) => { const path = join(directory, `${digest(buffer)}.bin`); await writeFile(path, buffer); return { path }; };
+  const cover = (ready: boolean) => asset({ id: "cover", kind: "image", variant: "thumbnail", actualVariant: ready ? "thumbnail" : null, state: ready ? "available" : "pending",
+    contentType: "image/png", filename: "link-preview", byteLength: png.length, sha256: digest(png), officialWriteback: "unsupported" });
+  const clip = (ready: boolean) => asset({ id: "clip", kind: "video", variant: "normal", actualVariant: ready ? "normal" : null, state: ready ? "available" : "pending",
+    contentType: ready ? "video/mp4" : null, filename: "channels-video.mp4", byteLength: ready ? video.length : null, sha256: ready ? digest(video) : null,
+    animationFrames: null, officialWriteback: "unsupported" });
+
+  // Inbound delivery: text from the daemon, the cover as a preview, no video transfer.
+  let coverReady = false; const inbound: string[] = [];
+  const inboundClient = { mediaAssets: async () => ({ items: [cover(coverReady), clip(false)] }),
+    transferMedia: async (_: string, request: any) => { inbound.push(request.quality); coverReady = true; return { id: "job", state: "available" }; },
+    mediaContent: async (_: string, id: string) => { assert.equal(id, "cover"); return { bytes: png, contentType: "image/png" }; },
+  } as unknown as NativeWeChatClient;
+  const preview = await prepareNativeAttachment({ client: inboundClient, account, message: channelsMessage, cfg: {}, core: { channel: { media: { saveMediaBuffer } } } });
+  assert.deepEqual(inbound, ["thumbnail"]);
+  assert.equal(preview.attachment?.kind, "image"); assert.equal(preview.variant, "thumbnail");
+  assert.match(preview.body, /^\[Channels video\] Publisher: Synthetic post \(1:36\)\n\[Video not downloaded: call wechat_media/);
+  assert.doesNotMatch(preview.body, /\[Link\]|support\.weixin|update/);
+
+  // Media tools: the same card retrieves the post's video.
+  let videoReady = false; const tool: any[] = [];
+  const toolClient = { mediaAssets: async () => ({ items: [cover(true), clip(videoReady)] }),
+    transferMedia: async (_: string, request: any) => { tool.push(request); videoReady = true; return { id: "job", state: "available" }; },
+    mediaContent: async (_: string, id: string) => id === "clip" ? { bytes: video, contentType: "video/mp4" } : { bytes: png, contentType: "image/png" },
+  } as unknown as NativeWeChatClient;
+  const fetched = await prepareNativeAttachment({ client: toolClient, account, message: channelsMessage, cfg: {}, channelsVideo: true,
+    core: { channel: { media: { saveMediaBuffer } } } });
+  assert.deepEqual(tool, [{ messageId: "m", assetId: null, quality: "normal" }]);
+  assert.equal(fetched.attachment?.kind, "video"); assert.equal(fetched.attachment?.status, "ready");
+  assert.deepEqual(new Uint8Array(await readFile(fetched.attachment!.path!)), video);
+  assert.match(fetched.body, /^\[Channels video\] Publisher: Synthetic post \(1:36\)\n/);
+
+  // Asking the tools for a thumbnail still returns the cover.
+  const thumbnail = await prepareNativeAttachment({ client: toolClient, account, message: channelsMessage, cfg: {}, channelsVideo: true, quality: "thumbnail",
+    core: { channel: { media: { saveMediaBuffer } } } });
+  assert.equal(thumbnail.attachment?.kind, "image"); assert.equal(thumbnail.variant, "thumbnail");
+  assert.equal(tool.length, 1);
+});
 test("optional absent, pending, expired and failed link previews preserve card text", async () => {
   for (const state of ["absent", "pending", "expired", "unsupported", "failed", "api-error"]) {
     let transfers = 0;

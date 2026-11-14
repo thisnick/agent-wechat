@@ -3,6 +3,7 @@
 # `desktop` (1280x800), `narrow` (390x844), `compact` (320x700), joined by `+` for multiple sizes.
 # Format: ITEM | ATTRIBUTES | DESCRIPTION
 scene account-list | route /{server}/accounts, viewports desktop+narrow | The accounts on a hub: one signed in and one that still needs a QR code.
+scene channels-video-cards | route /{server}/{account}/chats/{thread}, viewports desktop+narrow | Received WeChat Channels cards with their cover, play button, publisher and length.
 scene chat-filters | route /{server}/{account}/chats, viewports desktop+compact | The conversation filter bar with All pinned beside the scrolling categories and unread badges for categories with new messages.
 scene chat-info | route /{server}/{account}/chats/{thread}/info, viewports desktop+narrow | Details of a group conversation with its pin, mute and group settings.
 scene chat-list | route /{server}/{account}/chats, viewports desktop+narrow | The full inbox with category and conversation unread counts and the newest conversation open beside it.

@@ -8,6 +8,7 @@ const wechat_protocol::calls::signaling::MAX_SIGNALING_BYTES | usize | Local bud
 const wechat_protocol::contact_sync::CONTACT_SELECTOR | u64 | MISSING DOC
 const wechat_protocol::file_upload::MAX_RESERVED_FILE_BYTES | usize | MISSING DOC
 const wechat_protocol::media::MAX_CDN_TRANSFER_BYTES | usize | MISSING DOC
+const wechat_protocol::media::MAX_CHANNELS_VIDEO_BYTES | usize | Upper bound on a Channels video download.
 const wechat_protocol::media::MAX_LARGE_FILE_BYTES | usize | MISSING DOC
 const wechat_protocol::media::MAX_LINK_THUMBNAIL_BYTES | usize | MISSING DOC
 const wechat_protocol::media::MAX_NATIVE_UPLOAD_BYTES | usize | MISSING DOC
@@ -97,6 +98,14 @@ field wechat_protocol::AuthSnapshot::response | alloc::vec::Vec<u8> | MISSING DO
 field wechat_protocol::AuthSnapshot::update_mask | u32 | MISSING DOC
 field wechat_protocol::AvatarBytes::bytes | alloc::vec::Vec<u8> | MISSING DOC
 field wechat_protocol::AvatarBytes::username | alloc::string::String | MISSING DOC
+field wechat_protocol::ChannelsMedia::cdn_file_size | core::option::Option<u64> | Byte length the reply advertises for the CDN copy, when present.
+field wechat_protocol::ChannelsMedia::duration_seconds | core::option::Option<u32> | Play length in seconds, when present.
+field wechat_protocol::ChannelsMedia::file_size | core::option::Option<u64> | Byte length the reply advertises for the video, when present.
+field wechat_protocol::ChannelsMedia::height | core::option::Option<u32> | Video height in pixels, when present.
+field wechat_protocol::ChannelsMedia::width | core::option::Option<u32> | Video width in pixels, when present.
+field wechat_protocol::ChannelsPost::nonce | alloc::string::String | The card's full `objectNonceId`; requests use its numeric prefix.
+field wechat_protocol::ChannelsPost::object_id | u64 | Post object ID from the card.
+field wechat_protocol::ChannelsTicket::lifetime_seconds | core::option::Option<u64> | Seconds the ticket stays valid, when the reply says.
 field wechat_protocol::ContactLookup::contacts | alloc::vec::Vec<wechat_protocol::wire::ContactRecord> | MISSING DOC
 field wechat_protocol::ContactLookup::results | alloc::vec::Vec<i32> | MISSING DOC
 field wechat_protocol::ContactRecord::alias | core::option::Option<alloc::string::String> | MISSING DOC
@@ -471,6 +480,17 @@ field wechat_protocol::media::CdnConfig::version | u32 | MISSING DOC
 field wechat_protocol::media::CdnLocation::city | u32 | MISSING DOC
 field wechat_protocol::media::CdnLocation::isp | u32 | MISSING DOC
 field wechat_protocol::media::CdnLocation::province | u32 | MISSING DOC
+field wechat_protocol::media::ChannelsDownloadFacts::advertised_bytes | core::option::Option<u64> | Video size the detail reply advertised, when present.
+field wechat_protocol::media::ChannelsDownloadFacts::advertised_cdn_bytes | core::option::Option<u64> | CDN copy size the detail reply advertised, when present.
+field wechat_protocol::media::ChannelsDownloadFacts::content_length | core::option::Option<u64> | `Content-Length` of the response, when present.
+field wechat_protocol::media::ChannelsDownloadFacts::content_type | core::option::Option<alloc::string::String> | Media type of the response, when it is a plain `type/subtype`.
+field wechat_protocol::media::ChannelsDownloadFacts::decoded_box | core::option::Option<alloc::string::String> | Box type at offset 4 after decoding the prefix, when printable.
+field wechat_protocol::media::ChannelsDownloadFacts::encoded_box | core::option::Option<alloc::string::String> | Box type at offset 4 as received, when printable.
+field wechat_protocol::media::ChannelsDownloadFacts::received_bytes | u64 | Bytes actually received.
+field wechat_protocol::media::ChannelsDownloadFailure::check | &'static str | `empty`, `length` (fewer or more bytes than `Content-Length`) or `container`.
+field wechat_protocol::media::ChannelsDownloadFailure::facts | wechat_protocol::media::channels_video::ChannelsDownloadFacts | What the CDN delivered.
+field wechat_protocol::media::ChannelsVideo::bytes | alloc::vec::Vec<u8> | Decoded MP4 bytes.
+field wechat_protocol::media::ChannelsVideo::facts | wechat_protocol::media::channels_video::ChannelsDownloadFacts | Sizes, media type and box types observed during the download.
 field wechat_protocol::media::DownloadedMedia::advertised_size_matches | core::option::Option<bool> | MISSING DOC
 field wechat_protocol::media::DownloadedMedia::bytes | alloc::vec::Vec<u8> | MISSING DOC
 field wechat_protocol::media::DownloadedMedia::md5 | alloc::string::String | MISSING DOC
@@ -702,6 +722,9 @@ fn wechat_protocol::AccountRequest::account | fn(&self) -> &wechat_protocol::cli
 fn wechat_protocol::AccountRequest::call_live_sync | fn(&mut self, request: &[u8], wait_timeout: core::time::Duration, before_submit: impl core::ops::function::FnOnce() -> anyhow::Result<()>, wait: impl for<'a> core::ops::function::FnOnce(core::pin::Pin<alloc::boxed::Box<dyn core::future::future::Future<Output = anyhow::Result<alloc::vec::Vec<u8>>> + core::marker::Send + 'a>>) -> anyhow::Result<alloc::vec::Vec<u8>>, retain_reply: impl core::ops::function::FnOnce(&[u8]) -> anyhow::Result<()>) -> anyhow::Result<alloc::vec::Vec<u8>> | Read-only call polling on an existing blocking worker. The caller owns the async wait/cancellation mechanism; this context retains the account lease until that transport future is dropped or completes.
 fn wechat_protocol::AccountRequest::call_rpc | fn(&mut self, route: wechat_protocol::calls::host_policy::CallHostRoute, request: &[u8], before_submit: impl core::ops::function::FnOnce() -> anyhow::Result<()>, retain_reply: impl core::ops::function::FnOnce(&[u8]) -> anyhow::Result<()>) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
 fn wechat_protocol::AccountRequest::cdn_config | fn(&mut self) -> anyhow::Result<wechat_protocol::media::CdnConfig> | MISSING DOC
+fn wechat_protocol::AccountRequest::channels_media | fn(&mut self, post: &wechat_protocol::client::channels::ChannelsPost, ticket: &wechat_protocol::client::channels::ChannelsTicket, page: &wechat_protocol::client::channels::ChannelsPage) -> anyhow::Result<wechat_protocol::client::channels::ChannelsMedia> | Request a Channels post's detail and return its single video's fresh playback material. Submitted once.
+fn wechat_protocol::AccountRequest::channels_page | fn(&mut self, post: &wechat_protocol::client::channels::ChannelsPost) -> anyhow::Result<wechat_protocol::client::channels::ChannelsPage> | Request the authenticated page address for a Channels post. Submitted once.
+fn wechat_protocol::AccountRequest::channels_ticket | fn(&mut self) -> anyhow::Result<wechat_protocol::client::channels::ChannelsTicket> | Request a new H5 ticket for Channels post lookups. Submitted once, without renewal or retry.
 fn wechat_protocol::AccountRequest::contact_sync | fn(&mut self, cursor: &[u8], message_cursor: &[u8], continuation: bool) -> anyhow::Result<wechat_protocol::contact_sync::ContactSyncBatch> | MISSING DOC
 fn wechat_protocol::AccountRequest::custom_stickers_raw | fn(&mut self, request: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Return one custom-list or metadata reply for caller-owned receipt retention. The request must come from the bounded custom-sticker builders.
 fn wechat_protocol::AccountRequest::download_avatars | fn(&mut self, ids: &[alloc::string::String]) -> anyhow::Result<alloc::vec::Vec<wechat_protocol::wire::AvatarBytes>> | MISSING DOC
@@ -745,6 +768,10 @@ fn wechat_protocol::AccountRequest::upload_sticker_chunk | fn(&mut self, source:
 fn wechat_protocol::AccountRequest::upload_sticker_chunk_raw | fn(&mut self, source: &[u8], offset: u32) -> anyhow::Result<alloc::vec::Vec<u8>> | Submit one direct upload chunk and return its raw acknowledgement for retention before validation. Callers must journal each attempted offset.
 fn wechat_protocol::AccountState::from_baseline_json | fn(input: &[u8]) -> anyhow::Result<Self> | Import an operator-selected private baseline checkpoint. This only converts explicit standalone credentials; it never searches or reads official files. Return diagnostics contain field names, never supplied credential values.
 fn wechat_protocol::AccountState::validate | fn(&self) -> anyhow::Result<()> | MISSING DOC
+fn wechat_protocol::ChannelsMedia::decode_key | fn(&self) -> u64 | Seed of the prefix keystream.
+fn wechat_protocol::ChannelsMedia::transport | fn(&self) -> (&str, &str) | Address and token as returned, for building the download request.
+fn wechat_protocol::ChannelsPost::nonce_number | fn(&self) -> anyhow::Result<u64> | Numeric prefix of the nonce, before the first `_`.
+fn wechat_protocol::ChannelsPost::page_url | fn(&self) -> anyhow::Result<alloc::string::String> | The unsigned page address for the post, as the client builds it locally.
 fn wechat_protocol::DeviceProfile::generate | fn(device_type: alloc::string::String) -> anyhow::Result<Self> | MISSING DOC
 fn wechat_protocol::DeviceProfile::validate | fn(&self) -> anyhow::Result<()> | MISSING DOC
 fn wechat_protocol::GroupMutation::target | fn(&self) -> core::option::Option<&str> | MISSING DOC
@@ -1017,11 +1044,14 @@ fn wechat_protocol::media::PreparedUpload::with_material | fn(raw: &[u8], kind: 
 fn wechat_protocol::media::PreparedVideoUpload::prepare | fn(video: &[u8], thumbnail: &[u8], file_name: &str, destination: &str) -> anyhow::Result<Self> | MISSING DOC
 fn wechat_protocol::media::PreparedVideoUpload::with_material | fn(video: &[u8], thumbnail: &[u8], file_name: &str, destination: &str, key: &[u8], file_key: &str) -> anyhow::Result<Self> | MISSING DOC
 fn wechat_protocol::media::adler32_zero | fn(bytes: &[u8]) -> u32 | MISSING DOC
+fn wechat_protocol::media::channels_box_type | fn(bytes: &[u8]) -> core::option::Option<alloc::string::String> | The four-byte box type at offset 4, when it is printable ASCII.
+fn wechat_protocol::media::channels_video_url | fn(media: &wechat_protocol::client::channels::ChannelsMedia) -> anyhow::Result<url::Url> | Build the download address the way the official player does: the returned address with its token appended, over HTTPS, on the video host.
 fn wechat_protocol::media::decode_cdn_config | fn(input: &[u8], account: &wechat_protocol::client::AccountState) -> anyhow::Result<wechat_protocol::media::CdnConfig> | MISSING DOC
 fn wechat_protocol::media::decode_large_cdn_config | fn(input: &[u8], account: &wechat_protocol::client::AccountState, route: wechat_protocol::media::large_cdn_config::LargeCdnRoute) -> anyhow::Result<wechat_protocol::media::CdnConfig> | Decode the safe C2C routing table in an authenticated GetCDNDns response. The safe CDN UIN belongs to that routing table and may differ from the account UIN.
 fn wechat_protocol::media::decrypt_cdn | fn(encrypted: &[u8], key: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
 fn wechat_protocol::media::download_advertised_avatar | fn(value: &str) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
 fn wechat_protocol::media::encrypt_recipient | fn(destination: &str) -> anyhow::Result<alloc::string::String> | MISSING DOC
+fn wechat_protocol::media::fetch_channels_video | fn(media: &wechat_protocol::client::channels::ChannelsMedia, max_bytes: usize, progress: impl core::ops::function::FnMut(u64, core::option::Option<u64>) -> anyhow::Result<()>) -> anyhow::Result<wechat_protocol::media::channels_video::ChannelsVideo> | Download the post's video and return the decoded MP4 bytes.
 fn wechat_protocol::media::fetch_link_thumbnail | fn(value: &str, progress: impl core::ops::function::FnMut(u64, core::option::Option<u64>) -> anyhow::Result<()>) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
 fn wechat_protocol::media::fetch_sticker | fn(descriptor: &wechat_protocol::media::sticker::StickerDescriptor, progress: impl core::ops::function::FnMut(u64, core::option::Option<u64>) -> anyhow::Result<()>) -> anyhow::Result<(alloc::vec::Vec<u8>, wechat_media::image::ImageInspection)> | MISSING DOC
 fn wechat_protocol::media::fetch_sticker_original | fn(url: &str, expected_md5: &str, progress: impl core::ops::function::FnMut(u64, core::option::Option<u64>) -> anyhow::Result<()>) -> anyhow::Result<(alloc::vec::Vec<u8>, wechat_media::image::ImageInspection)> | Fetch an original whose metadata has no advertised length. Enforces the same host, DNS, stream-size, MD5 and image checks without inventing a source length.
@@ -1152,6 +1182,8 @@ impl core::clone::Clone for wechat_protocol::AccountStatus | impl | -
 impl core::clone::Clone for wechat_protocol::AddMessage | impl | -
 impl core::clone::Clone for wechat_protocol::AuthSnapshot | impl | -
 impl core::clone::Clone for wechat_protocol::AvatarBytes | impl | -
+impl core::clone::Clone for wechat_protocol::ChannelsPost | impl | -
+impl core::clone::Clone for wechat_protocol::ChannelsTicket | impl | -
 impl core::clone::Clone for wechat_protocol::ContactLookup | impl | -
 impl core::clone::Clone for wechat_protocol::ContactRecord | impl | -
 impl core::clone::Clone for wechat_protocol::DeviceProfile | impl | -
@@ -1210,6 +1242,8 @@ impl core::clone::Clone for wechat_protocol::custom_stickers::CustomStickerPage 
 impl core::clone::Clone for wechat_protocol::file_upload::FileUploadReservation | impl | -
 impl core::clone::Clone for wechat_protocol::media::CdnConfig | impl | -
 impl core::clone::Clone for wechat_protocol::media::CdnLocation | impl | -
+impl core::clone::Clone for wechat_protocol::media::ChannelsDownloadFacts | impl | -
+impl core::clone::Clone for wechat_protocol::media::ChannelsDownloadFailure | impl | -
 impl core::clone::Clone for wechat_protocol::media::LargeCdnRoute | impl | -
 impl core::clone::Clone for wechat_protocol::media::LargeFileDownloadControl | impl | -
 impl core::clone::Clone for wechat_protocol::media::LargeFileDownloadError | impl | -
@@ -1260,6 +1294,7 @@ impl core::cmp::Eq for wechat_protocol::AccountIdentity | impl | -
 impl core::cmp::Eq for wechat_protocol::AccountInterrupted | impl | -
 impl core::cmp::Eq for wechat_protocol::AccountLifecycle | impl | -
 impl core::cmp::Eq for wechat_protocol::AccountStatus | impl | -
+impl core::cmp::Eq for wechat_protocol::ChannelsPost | impl | -
 impl core::cmp::Eq for wechat_protocol::GroupMemberResult | impl | -
 impl core::cmp::Eq for wechat_protocol::GroupMutation | impl | -
 impl core::cmp::Eq for wechat_protocol::LoginStatus | impl | -
@@ -1289,6 +1324,7 @@ impl core::cmp::Eq for wechat_protocol::calls::personal::VoiceRoom | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::relay::RelayEpoch | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::relay::RelayProgress | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::signaling::CallOperation | impl | -
+impl core::cmp::Eq for wechat_protocol::media::ChannelsDownloadFacts | impl | -
 impl core::cmp::Eq for wechat_protocol::media::LargeCdnRoute | impl | -
 impl core::cmp::Eq for wechat_protocol::media::LargeFileDownloadControl | impl | -
 impl core::cmp::Eq for wechat_protocol::media::LargeFileDownloadError | impl | -
@@ -1308,6 +1344,7 @@ impl core::cmp::PartialEq for wechat_protocol::AccountIdentity | impl | -
 impl core::cmp::PartialEq for wechat_protocol::AccountInterrupted | impl | -
 impl core::cmp::PartialEq for wechat_protocol::AccountLifecycle | impl | -
 impl core::cmp::PartialEq for wechat_protocol::AccountStatus | impl | -
+impl core::cmp::PartialEq for wechat_protocol::ChannelsPost | impl | -
 impl core::cmp::PartialEq for wechat_protocol::GroupMemberResult | impl | -
 impl core::cmp::PartialEq for wechat_protocol::GroupMutation | impl | -
 impl core::cmp::PartialEq for wechat_protocol::LoginStatus | impl | -
@@ -1337,6 +1374,7 @@ impl core::cmp::PartialEq for wechat_protocol::calls::personal::VoiceRoom | impl
 impl core::cmp::PartialEq for wechat_protocol::calls::relay::RelayEpoch | impl | -
 impl core::cmp::PartialEq for wechat_protocol::calls::relay::RelayProgress | impl | -
 impl core::cmp::PartialEq for wechat_protocol::calls::signaling::CallOperation | impl | -
+impl core::cmp::PartialEq for wechat_protocol::media::ChannelsDownloadFacts | impl | -
 impl core::cmp::PartialEq for wechat_protocol::media::LargeCdnRoute | impl | -
 impl core::cmp::PartialEq for wechat_protocol::media::LargeFileDownloadControl | impl | -
 impl core::cmp::PartialEq for wechat_protocol::media::LargeFileDownloadError | impl | -
@@ -1365,6 +1403,7 @@ impl core::default::Default for wechat_protocol::NativeOptions | impl | -
 impl core::default::Default for wechat_protocol::calls::signaling::CloudRequest | impl | -
 impl core::default::Default for wechat_protocol::calls::signaling::CommonRequest | impl | -
 impl core::default::Default for wechat_protocol::calls::signaling::CommonResponse | impl | -
+impl core::default::Default for wechat_protocol::media::ChannelsDownloadFacts | impl | -
 impl core::error::Error for wechat_protocol::AccountInterrupted | impl | -
 impl core::error::Error for wechat_protocol::AccountPersistenceFailed | impl | -
 impl core::error::Error for wechat_protocol::NativeRequestNotSubmitted | impl | -
@@ -1372,6 +1411,7 @@ impl core::error::Error for wechat_protocol::OpenImServiceError | impl | -
 impl core::error::Error for wechat_protocol::ServiceRejected | impl | -
 impl core::error::Error for wechat_protocol::calls::host_transport::CallHostRpcError | impl | -
 impl core::error::Error for wechat_protocol::calls::host_transport::CallLiveSyncInterrupted | impl | -
+impl core::error::Error for wechat_protocol::media::ChannelsDownloadFailure | impl | -
 impl core::error::Error for wechat_protocol::media::LargeFileDownloadError | impl | -
 impl core::error::Error for wechat_protocol::media::VideoRepresentationMismatch | impl | -
 impl core::error::Error for wechat_protocol::openim::OpenImServiceError | impl | -
@@ -1382,6 +1422,10 @@ impl core::fmt::Debug for wechat_protocol::AccountPersistenceFailed | impl | -
 impl core::fmt::Debug for wechat_protocol::AccountState | impl | -
 impl core::fmt::Debug for wechat_protocol::AccountStatus | impl | -
 impl core::fmt::Debug for wechat_protocol::AuthSnapshot | impl | -
+impl core::fmt::Debug for wechat_protocol::ChannelsMedia | impl | -
+impl core::fmt::Debug for wechat_protocol::ChannelsPage | impl | -
+impl core::fmt::Debug for wechat_protocol::ChannelsPost | impl | -
+impl core::fmt::Debug for wechat_protocol::ChannelsTicket | impl | -
 impl core::fmt::Debug for wechat_protocol::DeviceProfile | impl | -
 impl core::fmt::Debug for wechat_protocol::Heartbeat | impl | -
 impl core::fmt::Debug for wechat_protocol::LoginAttempt | impl | -
@@ -1417,6 +1461,9 @@ impl core::fmt::Debug for wechat_protocol::calls::relay::RelayProgress | impl | 
 impl core::fmt::Debug for wechat_protocol::calls::signaling::CallOperation | impl | -
 impl core::fmt::Debug for wechat_protocol::file_upload::FileUploadReservation | impl | -
 impl core::fmt::Debug for wechat_protocol::media::CdnConfig | impl | -
+impl core::fmt::Debug for wechat_protocol::media::ChannelsDownloadFacts | impl | -
+impl core::fmt::Debug for wechat_protocol::media::ChannelsDownloadFailure | impl | -
+impl core::fmt::Debug for wechat_protocol::media::ChannelsVideo | impl | -
 impl core::fmt::Debug for wechat_protocol::media::LargeCdnRoute | impl | -
 impl core::fmt::Debug for wechat_protocol::media::LargeFileDownloadControl | impl | -
 impl core::fmt::Debug for wechat_protocol::media::LargeFileDownloadError | impl | -
@@ -1444,6 +1491,7 @@ impl core::fmt::Display for wechat_protocol::StickerId | impl | -
 impl core::fmt::Display for wechat_protocol::StickerPackId | impl | -
 impl core::fmt::Display for wechat_protocol::calls::host_transport::CallHostRpcError | impl | -
 impl core::fmt::Display for wechat_protocol::calls::host_transport::CallLiveSyncInterrupted | impl | -
+impl core::fmt::Display for wechat_protocol::media::ChannelsDownloadFailure | impl | -
 impl core::fmt::Display for wechat_protocol::media::LargeFileDownloadError | impl | -
 impl core::fmt::Display for wechat_protocol::media::VideoRepresentationMismatch | impl | -
 impl core::fmt::Display for wechat_protocol::openim::OpenImServiceError | impl | -
@@ -1485,6 +1533,7 @@ impl core::marker::StructuralPartialEq for wechat_protocol::AccountIdentity | im
 impl core::marker::StructuralPartialEq for wechat_protocol::AccountInterrupted | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::AccountLifecycle | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::AccountStatus | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::ChannelsPost | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::GroupMemberResult | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::GroupMutation | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::LoginStatus | impl | -
@@ -1514,6 +1563,7 @@ impl core::marker::StructuralPartialEq for wechat_protocol::calls::personal::Voi
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::relay::RelayEpoch | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::relay::RelayProgress | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::signaling::CallOperation | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::media::ChannelsDownloadFacts | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::media::LargeCdnRoute | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::media::LargeFileDownloadControl | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::media::LargeFileDownloadError | impl | -
@@ -1531,6 +1581,7 @@ impl core::ops::deref::Deref for wechat_protocol::StickerId | impl | -
 impl core::ops::deref::Deref for wechat_protocol::StickerPackId | impl | -
 impl core::ops::drop::Drop for wechat_protocol::AccountState | impl | -
 impl core::ops::drop::Drop for wechat_protocol::AuthSnapshot | impl | -
+impl core::ops::drop::Drop for wechat_protocol::ChannelsMedia | impl | -
 impl core::ops::drop::Drop for wechat_protocol::LoginAttempt | impl | -
 impl core::ops::drop::Drop for wechat_protocol::business::AuthenticatedPacket | impl | -
 impl core::ops::drop::Drop for wechat_protocol::business::Prelogin | impl | -
@@ -1725,6 +1776,10 @@ struct wechat_protocol::AccountStatus | struct { public fields } | Non-secret ac
 struct wechat_protocol::AddMessage | struct { public fields } | MISSING DOC
 struct wechat_protocol::AuthSnapshot | struct { public fields } | Raw accepted auth sections, retained only inside the encrypted account state. The update mask describes native application gates; presence alone does not mean an optional section changed active account credentials.
 struct wechat_protocol::AvatarBytes | struct { public fields } | MISSING DOC
+struct wechat_protocol::ChannelsMedia | struct { private fields } | Fresh playback material for a post's single video, kept together as returned.
+struct wechat_protocol::ChannelsPage | struct (_) | The authenticated page address for one post. Credential material, not a share link.
+struct wechat_protocol::ChannelsPost | struct { public fields } | A post this client may resolve: its object ID and the card's full nonce.
+struct wechat_protocol::ChannelsTicket | struct { private fields } | A current H5 ticket for the transfer proxy.
 struct wechat_protocol::ContactLookup | struct { public fields } | MISSING DOC
 struct wechat_protocol::ContactRecord | struct { public fields } | MISSING DOC
 struct wechat_protocol::DeviceProfile | struct { public fields } | MISSING DOC
@@ -1807,6 +1862,9 @@ struct wechat_protocol::file_upload::FileUploadReservation | struct { public fie
 struct wechat_protocol::media::CdnClient | struct { private fields } | MISSING DOC
 struct wechat_protocol::media::CdnConfig | struct { public fields } | MISSING DOC
 struct wechat_protocol::media::CdnLocation | struct { public fields } | MISSING DOC
+struct wechat_protocol::media::ChannelsDownloadFacts | struct { public fields } | What the CDN delivered, kept for checks and failure diagnostics. Holds no address, token or key.
+struct wechat_protocol::media::ChannelsDownloadFailure | struct { public fields } | A downloaded video failed a check. Its message is the stable code `channels_integrity_failed`; `check` names which check and `facts` say what arrived.
+struct wechat_protocol::media::ChannelsVideo | struct { public fields } | A downloaded Channels video: the decoded bytes and what the CDN delivered.
 struct wechat_protocol::media::DownloadedMedia | struct { public fields } | MISSING DOC
 struct wechat_protocol::media::MediaDescriptor | struct { public fields } | MISSING DOC
 struct wechat_protocol::media::PreparedImageUpload | struct { public fields } | MISSING DOC
@@ -1887,6 +1945,10 @@ variant wechat_protocol::Service::Avatar | - | Avatar lookup.
 variant wechat_protocol::Service::CdnBootstrap | - | CDN credential bootstrap.
 variant wechat_protocol::Service::CdnDownload | - | CDN download.
 variant wechat_protocol::Service::CdnUpload | - | CDN upload.
+variant wechat_protocol::Service::Channels | - | The H5 transfer proxy that carries Channels requests.
+variant wechat_protocol::Service::ChannelsAuthorization | - | H5 ticket request for Channels post lookups.
+variant wechat_protocol::Service::ChannelsDetail | - | The Channels post detail request carried by the proxy.
+variant wechat_protocol::Service::ChannelsPage | - | Authenticated page address for a Channels post.
 variant wechat_protocol::Service::Contact | - | Contact lookup.
 variant wechat_protocol::Service::ContactBootstrap | - | Initial contact catalog.
 variant wechat_protocol::Service::ContactSync | - | Contact catalog sync.
