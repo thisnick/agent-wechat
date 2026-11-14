@@ -111,9 +111,10 @@ export class NativeConsumerState {
     // different occupant now retained under the same source-local ID.
     replaced = !!message && !nativeRecallInfo(message) && !!existing && (existing.message.threadId !== message.threadId || existing.message.serverId !== message.serverId);
     if (message && (!existing || replaced)) {
+      // Work held after an uncertain dispatch, reply or phone read is never
+      // retried, so it is pruned like finished work instead of piling up.
       const completed = Object.entries(this.value.items).filter(([, item]) => !item.readPending && !item.groupContext
-        && item.phoneReadState !== "needs_review" && item.phoneReadState !== "rejected"
-        && ["completed", "ignored"].includes(item.state));
+        && ["completed", "ignored", "needs_review"].includes(item.state));
       for (const [key] of completed.slice(0, Math.max(0, completed.length - 1000))) delete this.value.items[key];
       if (!existing && Object.keys(this.value.items).length >= 5000) throw new Error("Native custody queue is full; operator review required");
       if (replaced) {

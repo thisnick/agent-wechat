@@ -7,7 +7,7 @@ export interface StatusIssue {
 }
 
 export function collectWeChatStatusIssues(
-  accounts: Array<{ accountId: string; connected?: boolean; linked?: boolean; lastError?: string | null; authStatus?: string; backend?: string; handoffUnconfirmed?: boolean; needsReview?: number }>,
+  accounts: Array<{ accountId: string; connected?: boolean; linked?: boolean; lastError?: string | null; authStatus?: string; backend?: string; handoffUnconfirmed?: boolean }>,
 ): StatusIssue[] {
   const issues: StatusIssue[] = [];
 
@@ -16,11 +16,6 @@ export function collectWeChatStatusIssues(
       issues.push({ channel: "agent-wechat", accountId: snapshot.accountId, kind: "runtime",
         message: "Prepared model handoff was not confirmed by this OpenClaw host; automatic read state remains unchanged.",
         fix: "Select native.readPolicy=on_inbound to mark successfully handled conversations read without model hooks, or use a compatible prepared-run SDK hook." });
-    }
-    if ((snapshot.needsReview ?? 0) > 0) {
-      issues.push({ channel: "agent-wechat", accountId: snapshot.accountId, kind: "runtime",
-        message: "Native consumer work needs review after an uncertain model dispatch or reply.",
-        fix: "Inspect the retained consumer receipts before retrying; do not automatically resend uncertain work." });
     }
     if (snapshot.connected === false) {
       issues.push({
