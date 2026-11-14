@@ -262,7 +262,8 @@ fn page_request(state: &AccountState, post: &ChannelsPost) -> Result<Vec<u8>> {
     p::message(&[
         p::bytes(1, &wire::base_request(&state.device, state.uin, 0)?),
         p::uint(2, 2),
-        p::bytes(7, url.as_bytes()),
+        // The initial address is a nested string message, not raw bytes.
+        p::bytes(7, &p::message(&[p::bytes(1, url.as_bytes())])?),
         p::uint(10, 7),
         p::uint(14, 0),
         p::uint(16, 0),
@@ -658,8 +659,13 @@ mod tests {
         assert_eq!(p::scalar(&fields, 2).unwrap(), 2);
         assert_eq!(p::scalar(&fields, 10).unwrap(), 7);
         assert_eq!(p::scalar(&fields, 20).unwrap(), 123_456);
+        // Field 7 wraps the initial address as {1: URL}; it is not the URL bytes themselves.
+        let wrapped = p::data(&fields, 7).unwrap();
+        assert_ne!(wrapped, post().page_url().unwrap().as_bytes());
+        let inner = p::decode(wrapped).unwrap();
+        assert_eq!(inner.len(), 1);
         assert_eq!(
-            p::data(&fields, 7).unwrap(),
+            p::data(&inner, 1).unwrap(),
             post().page_url().unwrap().as_bytes()
         );
         assert_eq!(p::data(&fields, 39).unwrap(), b"en_US");
