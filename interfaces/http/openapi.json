@@ -943,6 +943,15 @@
               "null"
             ]
           },
+          "durationSeconds": {
+            "description": "Length of a Channels video in seconds. Omitted for other cards and when the card does not\nsay.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "sourceName": {
             "description": "Name of the site or account that published the card, such as a Channels account. Null when\nthere is none.",
             "type": [

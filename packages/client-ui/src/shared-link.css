@@ -11,8 +11,29 @@
   text-decoration: none;
   white-space: normal;
 }
-a.shared-link-card:hover {
+a.shared-link-card:hover,
+button.shared-link-card:hover {
   border-color: var(--muted);
+}
+button.channels-video-card {
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.shared-link-play {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: rgb(0 0 0 / 55%);
+  color: #fff;
+}
+.shared-link-art .shared-link-play svg {
+  width: 16px;
+  height: 16px;
+  margin-left: 2px;
 }
 .compact-link-card {
   display: grid;

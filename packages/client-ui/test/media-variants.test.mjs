@@ -85,6 +85,9 @@ test("downloads prefer the advertised original and never substitute standard byt
       [
         { id: "photo", accountId: "a", threadId: "t", type: 3 },
         { id: "video", accountId: "a", threadId: "t", type: 43 },
+        { id: "channels", accountId: "a", threadId: "t", type: 49, appMessageType: 51, link: { title: null } },
+        { id: "channels-without-card", accountId: "a", threadId: "t", type: 49, appMessageType: 51 },
+        { id: "article", accountId: "a", threadId: "t", type: 49, appMessageType: 5, link: { title: "A" } },
         { id: "pdf", accountId: "a", threadId: "t", type: 49 },
         { id: "sticker", accountId: "a", threadId: "t", type: 47 },
         { id: "recalled", accountId: "a", threadId: "t", type: 3, recall: {} },
@@ -94,8 +97,24 @@ test("downloads prefer the advertised original and never substitute standard byt
       "a",
       "t",
     ).map((m) => m.id),
-    ["photo", "video"],
+    ["photo", "video", "channels"],
   );
+});
+
+test("a received Channels card plays like a video message, other cards do not", async () => {
+  const { isChannelsCard, isVideoMessage } = await import("../src/media-variants.ts");
+  const channels = { type: 49, appMessageType: 51, link: { title: null } };
+  assert.equal(isChannelsCard(channels), true);
+  assert.equal(isVideoMessage(channels), true);
+  assert.equal(isVideoMessage({ type: 43 }), true);
+  for (const other of [
+    { type: 49, appMessageType: 51 },
+    { type: 49, appMessageType: 5, link: { title: "A" } },
+    { type: 3 },
+  ]) {
+    assert.equal(isChannelsCard(other), false);
+    assert.equal(isVideoMessage(other), false);
+  }
 });
 
 test("video browsing uses thumbnails while the viewer prefers cached originals or normal playback", async () => {

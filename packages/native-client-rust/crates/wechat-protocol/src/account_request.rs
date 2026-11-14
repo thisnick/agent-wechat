@@ -12,7 +12,8 @@ pub struct AccountRequest<'a> {
 }
 
 macro_rules! operation {
-    ($name:ident($($arg:ident: $ty:ty),*) -> $result:ty => $raw:ident) => {
+    ($(#[$meta:meta])* $name:ident($($arg:ident: $ty:ty),*) -> $result:ty => $raw:ident) => {
+        $(#[$meta])*
         pub fn $name(&mut self, $($arg: $ty),*) -> Result<$result> {
             self.admit()?;
             self.transport.$raw(self.state, $($arg),*)
@@ -181,9 +182,16 @@ impl AccountRequest<'_> {
     operation!(download_avatars(ids: &[String]) -> Vec<crate::AvatarBytes> => download_avatars_snapshot);
     operation!(download_voice_chunk(server_id: u64, length: u32, offset: u32) -> crate::VoiceChunk => download_voice_chunk_snapshot);
     operation!(cdn_config() -> crate::media::CdnConfig => cdn_config_snapshot);
-    operation!(channels_ticket() -> crate::ChannelsTicket => channels_ticket_snapshot);
-    operation!(channels_page(post: &crate::ChannelsPost) -> crate::ChannelsPage => channels_page_snapshot);
-    operation!(channels_media(post: &crate::ChannelsPost, ticket: &crate::ChannelsTicket, page: &crate::ChannelsPage) -> crate::ChannelsMedia => channels_media_snapshot);
+    operation!(
+        /// Request a new H5 ticket for Channels post lookups. Submitted once, without renewal or retry.
+        channels_ticket() -> crate::ChannelsTicket => channels_ticket_snapshot);
+    operation!(
+        /// Request the authenticated page address for a Channels post. Submitted once.
+        channels_page(post: &crate::ChannelsPost) -> crate::ChannelsPage => channels_page_snapshot);
+    operation!(
+        /// Request a Channels post's detail and return its single video's fresh playback material.
+        /// Submitted once.
+        channels_media(post: &crate::ChannelsPost, ticket: &crate::ChannelsTicket, page: &crate::ChannelsPage) -> crate::ChannelsMedia => channels_media_snapshot);
     operation!(large_cdn_config(route: crate::media::LargeCdnRoute) -> crate::media::CdnConfig => large_cdn_config_snapshot);
     operation!(group_inventory(cursor: &[u8]) -> crate::GroupMetadataPage => group_inventory_snapshot);
     operation!(lookup_contacts_raw(ids: &[String]) -> Vec<u8> => lookup_contacts_raw_snapshot);

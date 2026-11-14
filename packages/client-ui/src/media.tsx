@@ -24,6 +24,7 @@ import {
   canRetrieve,
   downloadAsset,
   cachedOriginal,
+  isVideoMessage,
   videoAsset,
 } from "./media-variants.ts";
 import { useVisible } from "./visible.tsx";
@@ -212,7 +213,7 @@ export function MediaCard({
   const state = useSyncExternalStore(model.subscribe, model.snapshot);
   const gallery = useMediaViewer();
   const image = message.type === 3;
-  const video = message.type === 43;
+  const video = isVideoMessage(message);
   const sticker =
     message.type === 47 ||
     (message.type === 49 && message.appMessageType === 8);

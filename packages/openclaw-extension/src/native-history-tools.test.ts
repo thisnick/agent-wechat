@@ -271,6 +271,33 @@ test("cached files, voice and videos return verified paths without automatically
     assert.equal(result.content.some((item: any) => item.type === "image"), false); assert.equal(value.calls.some(call => call[0] === "transferMedia"), false);
   }
 });
+test("Channels cards are video entries and the media tools retrieve the post's video", async t => {
+  for (const archive of [false, true]) {
+    const value = await mediaFixture(t, 43, {}, archive), prefix = archive ? "wechat_archive_" : "wechat_";
+    const link = { title: null, description: "Synthetic post", url: null, sourceName: "Publisher", durationSeconds: 96 };
+    value.setMessages([{ id: "media-message", accountId: "a", threadId: "room@chatroom", senderId: "u1", direction: "incoming", type: 49, appMessageType: 51,
+      body: "[Channels video] Publisher: Synthetic post (1:36)", link }]);
+    const found: any = await value.run(`${prefix}message`, { messageId: "media-message" });
+    assert.equal(found.details.body, "[Channels video] Publisher: Synthetic post (1:36)");
+    assert.deepEqual(found.details.link, link);
+    assert.deepEqual(found.details.attachment, { kind: "channels_video", retrievalTool: `${prefix}media`, messageId: "media-message" });
+    const fetched: any = await value.run(`${prefix}media`, { messageId: "media-message" });
+    assert.equal(fetched.details.status, "ready"); assert.equal(fetched.details.attachment.kind, "video");
+    assert.deepEqual(await readFile(fetched.details.attachment.path), value.bytes);
+  }
+});
+test("a sandboxed agent is told a fetched file is not reachable from its shell instead of getting a gateway path", async t => {
+  for (const type of [43, 49]) {
+    const value = await mediaFixture(t, type, { sandboxed: true });
+    const result: any = await value.run("wechat_media", { messageId: "media-message" });
+    assert.equal(result.details.status, "ready");
+    assert.equal(result.details.attachment.path, undefined);
+    assert.equal(result.details.attachment.reachableFromSandbox, false);
+  }
+  const image = await mediaFixture(t, 3, { sandboxed: true });
+  const result: any = await image.run("wechat_media", { messageId: "media-message" });
+  assert.ok(result.content.some((item: any) => item.type === "image"));
+});
 test("missing media requests the authorized message's durable transfer and returns the downloaded bytes", async t => {
   const value = await mediaFixture(t); value.setAssets([{ ...value.asset, state: "pending" }]);
   value.client.transferMedia = async (...args: any[]) => { value.calls.push(["transferMedia", ...args]); value.setAssets([value.asset]); return { id: "download-job", state: "available", retryable: false }; };

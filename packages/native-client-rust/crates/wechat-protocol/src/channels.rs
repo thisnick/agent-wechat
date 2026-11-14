@@ -30,7 +30,9 @@ const MAX_DETAIL_JSON: usize = 4 * 1024 * 1024;
 /// A post this client may resolve: its object ID and the card's full nonce.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ChannelsPost {
+    /// Post object ID from the card.
     pub object_id: u64,
+    /// The card's full `objectNonceId`; requests use its numeric prefix.
     pub nonce: String,
 }
 

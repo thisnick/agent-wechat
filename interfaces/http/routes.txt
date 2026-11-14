@@ -576,6 +576,7 @@ response NativeMessage.direction | string, required, nullable | `outgoing` when 
 response NativeMessage.id | string, required | Message ID. Pass it back unchanged to routes that take a message ID.
 response NativeMessage.link | object, required, nullable | Link card details when the message is a shared link, article, music or video card, or a Channels post. Null otherwise.
 response NativeMessage.link.description | string, required, nullable | Card description or summary. Null when there is none.
+response NativeMessage.link.durationSeconds | integer, nullable, min 0, format uint32 | Length of a Channels video in seconds. Omitted for other cards and when the card does not say.
 response NativeMessage.link.sourceName | string, required, nullable | Name of the site or account that published the card, such as a Channels account. Null when there is none.
 response NativeMessage.link.title | string, required, nullable | Card title. Null when there is none.
 response NativeMessage.link.url | string, required, nullable | Address the card opens. Null when the card has none or it is not a valid http or https address.
@@ -601,6 +602,7 @@ response NativeMessage.quote.direction | string, required, nullable | `outgoing`
 response NativeMessage.quote.embeddedImage | boolean, required, nullable | True when the reply carries the quoted image, so it can be downloaded through the reply's media routes.
 response NativeMessage.quote.embeddedLink | object, nullable | Link card of the quoted message when it was a shared link, with the same fields as `link` on a message.
 response NativeMessage.quote.embeddedLink.description | string, required, nullable | Card description or summary. Null when there is none.
+response NativeMessage.quote.embeddedLink.durationSeconds | integer, nullable, min 0, format uint32 | Length of a Channels video in seconds. Omitted for other cards and when the card does not say.
 response NativeMessage.quote.embeddedLink.sourceName | string, required, nullable | Name of the site or account that published the card, such as a Channels account. Null when there is none.
 response NativeMessage.quote.embeddedLink.title | string, required, nullable | Card title. Null when there is none.
 response NativeMessage.quote.embeddedLink.url | string, required, nullable | Address the card opens. Null when the card has none or it is not a valid http or https address.
@@ -634,6 +636,7 @@ response NativeMessagePage.items[]<NativeMessage>.direction | string, required, 
 response NativeMessagePage.items[]<NativeMessage>.id | string, required | Message ID. Pass it back unchanged to routes that take a message ID.
 response NativeMessagePage.items[]<NativeMessage>.link | object, required, nullable | Link card details when the message is a shared link, article, music or video card, or a Channels post. Null otherwise.
 response NativeMessagePage.items[]<NativeMessage>.link.description | string, required, nullable | Card description or summary. Null when there is none.
+response NativeMessagePage.items[]<NativeMessage>.link.durationSeconds | integer, nullable, min 0, format uint32 | Length of a Channels video in seconds. Omitted for other cards and when the card does not say.
 response NativeMessagePage.items[]<NativeMessage>.link.sourceName | string, required, nullable | Name of the site or account that published the card, such as a Channels account. Null when there is none.
 response NativeMessagePage.items[]<NativeMessage>.link.title | string, required, nullable | Card title. Null when there is none.
 response NativeMessagePage.items[]<NativeMessage>.link.url | string, required, nullable | Address the card opens. Null when the card has none or it is not a valid http or https address.
@@ -659,6 +662,7 @@ response NativeMessagePage.items[]<NativeMessage>.quote.direction | string, requ
 response NativeMessagePage.items[]<NativeMessage>.quote.embeddedImage | boolean, required, nullable | True when the reply carries the quoted image, so it can be downloaded through the reply's media routes.
 response NativeMessagePage.items[]<NativeMessage>.quote.embeddedLink | object, nullable | Link card of the quoted message when it was a shared link, with the same fields as `link` on a message.
 response NativeMessagePage.items[]<NativeMessage>.quote.embeddedLink.description | string, required, nullable | Card description or summary. Null when there is none.
+response NativeMessagePage.items[]<NativeMessage>.quote.embeddedLink.durationSeconds | integer, nullable, min 0, format uint32 | Length of a Channels video in seconds. Omitted for other cards and when the card does not say.
 response NativeMessagePage.items[]<NativeMessage>.quote.embeddedLink.sourceName | string, required, nullable | Name of the site or account that published the card, such as a Channels account. Null when there is none.
 response NativeMessagePage.items[]<NativeMessage>.quote.embeddedLink.title | string, required, nullable | Card title. Null when there is none.
 response NativeMessagePage.items[]<NativeMessage>.quote.embeddedLink.url | string, required, nullable | Address the card opens. Null when the card has none or it is not a valid http or https address.

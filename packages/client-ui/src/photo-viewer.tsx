@@ -19,7 +19,7 @@ import {
 import type { NativeMessage } from "@agent-wechat/shared";
 import type { Connection } from "./connection.ts";
 import { formatLocale, t } from "./i18n.ts";
-import { conversationMedia, videoAsset } from "./media-variants.ts";
+import { conversationMedia, isVideoMessage, videoAsset } from "./media-variants.ts";
 import { mergeMessage } from "./session.ts";
 import { MediaCard, MediaDownload } from "./media.tsx";
 import { downloadAsset, standardImage } from "./media-variants.ts";
@@ -270,7 +270,7 @@ export function PhotoViewer({
                           (contact) => contact.id === current.senderId,
                         )?.displayName ||
                         current.senderId ||
-                        (current.type === 43
+                        (isVideoMessage(current)
                           ? t("photoViewer.video")
                           : t("photoViewer.photo"))}
                   </strong>
@@ -353,7 +353,7 @@ export function PhotoViewer({
                     key={photo.id}
                     className="photo-thumbnail"
                     aria-label={`${
-                      photo.type === 43
+                      isVideoMessage(photo)
                         ? t("photoViewer.video")
                         : t("photoViewer.photo")
                     } ${position + 1}`}
@@ -585,7 +585,7 @@ function PhotoDownload({
       connection={connection}
       asset={downloadAsset(
         state.assets,
-        message.type === 43
+        isVideoMessage(message)
           ? videoAsset(state.assets, true)
           : standardImage(state.assets),
       )}
