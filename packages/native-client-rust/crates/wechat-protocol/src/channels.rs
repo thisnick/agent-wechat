@@ -71,7 +71,7 @@ impl ChannelsPost {
 
 /// A current H5 ticket for the transfer proxy.
 pub struct ChannelsTicket {
-    ticket: Zeroizing<String>,
+    ticket: Zeroizing<Vec<u8>>,
     /// Seconds the ticket stays valid, when the reply says.
     pub lifetime_seconds: Option<u64>,
 }
@@ -88,14 +88,14 @@ impl fmt::Debug for ChannelsTicket {
 impl Clone for ChannelsTicket {
     fn clone(&self) -> Self {
         Self {
-            ticket: Zeroizing::new(self.ticket.as_str().to_owned()),
+            ticket: Zeroizing::new(self.ticket.to_vec()),
             lifetime_seconds: self.lifetime_seconds,
         }
     }
 }
 
 /// The authenticated page address for one post. Credential material, not a share link.
-pub struct ChannelsPage(Zeroizing<String>);
+pub struct ChannelsPage(Zeroizing<Vec<u8>>);
 
 impl fmt::Debug for ChannelsPage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -161,13 +161,16 @@ impl ChannelsMedia {
     }
 }
 
-fn text(value: &[u8], max: usize) -> Result<Zeroizing<String>> {
-    let value = std::str::from_utf8(value).map_err(|_| anyhow::anyhow!("channels_rejected"))?;
-    ensure!(
-        !value.is_empty() && value.len() <= max && !value.chars().any(char::is_control),
-        "channels_rejected"
-    );
-    Ok(Zeroizing::new(value.to_owned()))
+/// An opaque credential value echoed back to WeChat unchanged. It is bounded but not parsed:
+/// a ticket can contain line breaks, and neither value is ever opened as an address here.
+fn opaque(
+    value: Option<&[u8]>,
+    max: usize,
+    unreadable: &'static str,
+) -> Result<Zeroizing<Vec<u8>>> {
+    let value = value.ok_or_else(|| anyhow::anyhow!(unreadable))?;
+    ensure!(!value.is_empty() && value.len() <= max, unreadable);
+    Ok(Zeroizing::new(value.to_vec()))
 }
 
 /// The first bytes value of a field number, ignoring values of other wire types.
@@ -214,14 +217,17 @@ fn h5_auth_request(state: &AccountState) -> Result<Vec<u8>> {
 fn h5_auth_response(bytes: &[u8]) -> Result<ChannelsTicket> {
     let fields = p::decode(bytes)?;
     ServiceRejected::check(Service::ChannelsAuthorization, p::base_code(&fields)?)?;
-    let ticket = text(
-        p::optional_data(&fields, 2)?.ok_or_else(|| anyhow::anyhow!("channels_rejected"))?,
+    let ticket = opaque(
+        bytes_field(&fields, 2),
         MAX_CREDENTIAL_TEXT,
+        "channels_ticket_unreadable",
     )?;
-    let lifetime_seconds = match p::optional(&fields, 3)? {
-        Some(p::Value::Varint(value)) => Some(*value),
-        _ => None,
-    };
+    let lifetime_seconds = fields
+        .iter()
+        .find_map(|field| match (field.number, &field.value) {
+            (3, p::Value::Varint(value)) => Some(*value),
+            _ => None,
+        });
     // Field 5 is the transfer-route configuration: a count and repeated per-scope entries. Only
     // the fixed route this client uses is accepted; a server-supplied path is never used as a
     // destination. Entries are found directly in field 5 or one level inside it.
@@ -272,15 +278,11 @@ fn page_request(state: &AccountState, post: &ChannelsPost) -> Result<Vec<u8>> {
 fn page_response(bytes: &[u8]) -> Result<ChannelsPage> {
     let fields = p::decode(bytes)?;
     ServiceRejected::check(Service::ChannelsPage, p::base_code(&fields)?)?;
-    let url = text(
-        p::optional_data(&fields, 2)?.ok_or_else(|| anyhow::anyhow!("channels_rejected"))?,
+    Ok(ChannelsPage(opaque(
+        bytes_field(&fields, 2),
         MAX_CREDENTIAL_TEXT,
-    )?;
-    ensure!(
-        url.starts_with("https://channels.weixin.qq.com/"),
-        "channels_rejected"
-    );
-    Ok(ChannelsPage(url))
+        "channels_page_unreadable",
+    )?))
 }
 
 fn detail_json(post: &ChannelsPost) -> Result<String> {
@@ -321,8 +323,8 @@ fn transfer_request(
     Ok(Zeroizing::new(p::message(&[
         p::bytes(1, &wire::base_request(&state.device, state.uin, 0)?),
         p::bytes(2, &inner),
-        p::bytes(3, ticket.ticket.as_bytes()),
-        p::bytes(5, page.0.as_bytes()),
+        p::bytes(3, &ticket.ticket),
+        p::bytes(5, &page.0),
         p::uint(6, TRANSFER_CONTROL),
         p::bytes(7, TRANSFER_SCOPE.as_bytes()),
         p::uint(10, 0),
@@ -332,17 +334,20 @@ fn transfer_request(
 fn transfer_response(bytes: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
     let fields = p::decode(bytes)?;
     ServiceRejected::check(Service::Channels, p::base_code(&fields)?)?;
-    let inner = p::decode(p::data(&fields, 2)?)?;
-    let status = p::optional(&inner, 1)?
-        .map(|value| match value {
-            p::Value::Varint(raw) => Ok(*raw as u32 as i32),
-            _ => Err(anyhow::anyhow!("channels_rejected")),
+    let inner = bytes_field(&fields, 2)
+        .and_then(|inner| p::decode(inner).ok())
+        .ok_or_else(|| anyhow::anyhow!("channels_detail_unreadable"))?;
+    let status = inner
+        .iter()
+        .find_map(|field| match (field.number, &field.value) {
+            (1, p::Value::Varint(raw)) => Some(*raw as u32 as i32),
+            _ => None,
         })
-        .transpose()?
         .unwrap_or(0);
     ServiceRejected::check(Service::Channels, status)?;
-    let json = p::optional_data(&inner, 3)?.ok_or_else(|| anyhow::anyhow!("channels_rejected"))?;
-    ensure!(json.len() <= MAX_DETAIL_JSON, "channels_rejected");
+    let json =
+        bytes_field(&inner, 3).ok_or_else(|| anyhow::anyhow!("channels_detail_unreadable"))?;
+    ensure!(json.len() <= MAX_DETAIL_JSON, "channels_detail_unreadable");
     Ok(Zeroizing::new(json.to_vec()))
 }
 
@@ -365,7 +370,7 @@ fn json_u32(value: Option<&serde_json::Value>) -> Option<u32> {
 /// usable playback material.
 fn parse_detail(json: &[u8], post: &ChannelsPost) -> Result<ChannelsMedia> {
     let reply: serde_json::Value =
-        serde_json::from_slice(json).map_err(|_| anyhow::anyhow!("channels_rejected"))?;
+        serde_json::from_slice(json).map_err(|_| anyhow::anyhow!("channels_detail_unreadable"))?;
     let ret = reply
         .pointer("/BaseResponse/Ret")
         .or_else(|| reply.pointer("/base_response/ret"))
@@ -557,7 +562,7 @@ mod tests {
         ])
         .unwrap();
         let ticket = h5_auth_response(&good).unwrap();
-        assert_eq!(ticket.ticket.as_str(), "dGlja2V0");
+        assert_eq!(ticket.ticket.as_slice(), b"dGlja2V0");
         // The route configuration may also be one container with a count and nested entries.
         let entry = |scope: &str, path: &str| {
             p::bytes(
@@ -601,6 +606,17 @@ mod tests {
             "channels_route_unsupported"
         );
         assert_eq!(ticket.lifetime_seconds, Some(7200));
+        // A wrapped Base64 ticket keeps its line breaks and is echoed back unchanged.
+        let wrapped = p::message(&[
+            base_response(0),
+            p::bytes(2, b"dGlj\na2V0\n"),
+            route("finderLive", 6673, TRANSFER_PATH),
+        ])
+        .unwrap();
+        assert_eq!(
+            h5_auth_response(&wrapped).unwrap().ticket.as_slice(),
+            b"dGlj\na2V0\n"
+        );
         assert!(!format!("{ticket:?}").contains("dGlja2V0"));
 
         for routes in [
@@ -652,27 +668,29 @@ mod tests {
         .unwrap();
         let page = page_response(&reply).unwrap();
         assert!(!format!("{page:?}").contains("secret"));
-        let elsewhere =
-            p::message(&[base_response(0), p::bytes(2, b"https://example.invalid/")]).unwrap();
-        assert!(page_response(&elsewhere).is_err());
+        let missing = p::message(&[base_response(0)]).unwrap();
+        assert_eq!(
+            page_response(&missing).unwrap_err().to_string(),
+            "channels_page_unreadable"
+        );
     }
 
     #[test]
     fn detail_request_rides_the_transfer_proxy_with_the_ticket_and_page() {
         let state = state();
         let ticket = ChannelsTicket {
-            ticket: Zeroizing::new("ticket".into()),
+            ticket: Zeroizing::new(b"ticket".to_vec()),
             lifetime_seconds: None,
         };
         let page = ChannelsPage(Zeroizing::new(
-            "https://channels.weixin.qq.com/web/pages/feed?x".into(),
+            b"https://channels.weixin.qq.com/web/pages/feed?x".to_vec(),
         ));
         let json = detail_json(&post()).unwrap();
         let fields = p::decode(&transfer_request(&state, &ticket, &page, &json).unwrap()).unwrap();
         let numbers: Vec<u32> = fields.iter().map(|f| f.number).collect();
         assert_eq!(numbers, [1, 2, 3, 5, 6, 7, 10]);
         assert_eq!(p::data(&fields, 3).unwrap(), b"ticket");
-        assert_eq!(p::data(&fields, 5).unwrap(), page.0.as_bytes());
+        assert_eq!(p::data(&fields, 5).unwrap(), page.0.as_slice());
         assert_eq!(p::scalar(&fields, 6).unwrap(), 400);
         assert_eq!(p::data(&fields, 7).unwrap(), b"finderLive");
         assert_eq!(p::scalar(&fields, 10).unwrap(), 0);
@@ -770,6 +788,9 @@ mod tests {
         let error = transfer_response(&transfer_reply(-2, &serde_json::json!({}))).unwrap_err();
         let failure = ServiceRejected::find(&error).unwrap();
         assert_eq!((failure.service, failure.code), (Service::Channels, -2));
-        assert!(parse_detail(b"not json", &post()).is_err());
+        assert_eq!(
+            parse_detail(b"not json", &post()).unwrap_err().to_string(),
+            "channels_detail_unreadable"
+        );
     }
 }
