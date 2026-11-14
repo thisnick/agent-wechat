@@ -272,6 +272,16 @@ fn mirror<T>(
     }
 }
 
+/// Name the Channels lookup step for a failure that has no more specific media code, so a
+/// failed job says where it stopped. The code is static; error details stay out of it.
+fn channels_stage(error: anyhow::Error, stage: &'static str) -> anyhow::Error {
+    if crate::media::classify_error(&error) == "media_processing_failed" {
+        error.context(stage)
+    } else {
+        error
+    }
+}
+
 macro_rules! forward {
     ($name:ident($($arg:ident: $ty:ty),*) -> $result:ty => $method:ident) => {
         fn $name(&self, state: &mut AccountState, $($arg: $ty),*) -> Result<$result> {
@@ -412,7 +422,7 @@ impl crate::upstream::Upstream for BoundUpstream {
                     *state = self.renew_session(state, "agent-wechat media")?;
                     renewed = true;
                 }
-                Err(error) => return Err(error),
+                Err(error) => return Err(channels_stage(error, "channels_ticket_failed")),
             }
         };
         checkpoint()?;
@@ -423,13 +433,14 @@ impl crate::upstream::Upstream for BoundUpstream {
                     *state = self.renew_session(state, "agent-wechat media")?;
                     renewed = true;
                 }
-                Err(error) => return Err(error),
+                Err(error) => return Err(channels_stage(error, "channels_page_failed")),
             }
         };
         checkpoint()?;
         let media = mirror(&self.client, state, |request| {
             request.channels_media(post, &ticket, &page)
-        })?;
+        })
+        .map_err(|error| channels_stage(error, "channels_detail_failed"))?;
         drop((ticket, page));
         checkpoint()?;
         wechat_protocol::media::fetch_channels_video(&media, max_bytes, progress)

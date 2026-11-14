@@ -170,6 +170,39 @@ fn text(value: &[u8], max: usize) -> Result<Zeroizing<String>> {
     Ok(Zeroizing::new(value.to_owned()))
 }
 
+/// The first bytes value of a field number, ignoring values of other wire types.
+fn bytes_field(fields: &[p::Field], number: u32) -> Option<&[u8]> {
+    fields
+        .iter()
+        .find_map(|field| match (field.number == number, &field.value) {
+            (true, p::Value::Bytes(value)) => Some(value.as_slice()),
+            _ => None,
+        })
+}
+
+/// Candidate route entries in the H5 ticket reply's field 5: the field itself and each embedded
+/// message inside it. Values that do not decode as messages are skipped.
+fn route_entries(fields: &[p::Field]) -> Vec<Vec<p::Field>> {
+    let mut entries = vec![];
+    for field in fields.iter().filter(|field| field.number == 5) {
+        let p::Value::Bytes(bytes) = &field.value else {
+            continue;
+        };
+        let Ok(container) = p::decode(bytes) else {
+            continue;
+        };
+        for child in &container {
+            if let p::Value::Bytes(nested) = &child.value {
+                if let Ok(entry) = p::decode(nested) {
+                    entries.push(entry);
+                }
+            }
+        }
+        entries.push(container);
+    }
+    entries
+}
+
 fn h5_auth_request(state: &AccountState) -> Result<Vec<u8>> {
     state.validate()?;
     p::message(&[
@@ -189,22 +222,23 @@ fn h5_auth_response(bytes: &[u8]) -> Result<ChannelsTicket> {
         Some(p::Value::Varint(value)) => Some(*value),
         _ => None,
     };
-    // Field 5 repeats one transfer route per API scope. Only the fixed route this client uses
-    // is accepted; a server-supplied path is never used as a destination.
+    // Field 5 is the transfer-route configuration: a count and repeated per-scope entries. Only
+    // the fixed route this client uses is accepted; a server-supplied path is never used as a
+    // destination. Entries are found directly in field 5 or one level inside it.
     let mut routed = false;
-    for field in fields.iter().filter(|field| field.number == 5) {
-        let p::Value::Bytes(entry) = &field.value else {
-            bail!("channels_rejected");
-        };
-        let entry = p::decode(entry)?;
-        let scope = p::optional_data(&entry, 1)?;
-        if scope != Some(TRANSFER_SCOPE.as_bytes()) {
+    for entry in route_entries(&fields) {
+        if bytes_field(&entry, 1) != Some(TRANSFER_SCOPE.as_bytes()) {
             continue;
         }
-        let cgi = p::scalar(&entry, 2)?;
-        let path = p::optional_data(&entry, 3)?;
+        let cgi = entry
+            .iter()
+            .find_map(|field| match (field.number, &field.value) {
+                (2, p::Value::Varint(value)) => Some(*value),
+                _ => None,
+            });
         ensure!(
-            cgi == u64::from(TRANSFER_CGI) && path == Some(TRANSFER_PATH.as_bytes()),
+            cgi == Some(u64::from(TRANSFER_CGI))
+                && bytes_field(&entry, 3) == Some(TRANSFER_PATH.as_bytes()),
             "channels_route_unsupported"
         );
         routed = true;
@@ -524,6 +558,48 @@ mod tests {
         .unwrap();
         let ticket = h5_auth_response(&good).unwrap();
         assert_eq!(ticket.ticket.as_str(), "dGlja2V0");
+        // The route configuration may also be one container with a count and nested entries.
+        let entry = |scope: &str, path: &str| {
+            p::bytes(
+                2,
+                &p::message(&[
+                    p::bytes(1, scope.as_bytes()),
+                    p::uint(2, 6673),
+                    p::bytes(3, path.as_bytes()),
+                    p::bytes(4, b"/cgi-bin/micromsg-bin/transfer/"),
+                    p::bytes(5, b"h5exttransfer"),
+                ])
+                .unwrap(),
+            )
+        };
+        let nested = p::message(&[
+            base_response(0),
+            p::bytes(2, b"dGlja2V0"),
+            p::bytes(
+                5,
+                &p::message(&[
+                    p::uint(1, 2),
+                    entry("finderInteraction", TRANSFER_PATH),
+                    entry("finderLive", TRANSFER_PATH),
+                ])
+                .unwrap(),
+            ),
+        ])
+        .unwrap();
+        assert!(h5_auth_response(&nested).is_ok());
+        let elsewhere = p::message(&[
+            base_response(0),
+            p::bytes(2, b"dGlja2V0"),
+            p::bytes(
+                5,
+                &p::message(&[p::uint(1, 1), entry("finderLive", "/cgi-bin/elsewhere")]).unwrap(),
+            ),
+        ])
+        .unwrap();
+        assert_eq!(
+            h5_auth_response(&elsewhere).unwrap_err().to_string(),
+            "channels_route_unsupported"
+        );
         assert_eq!(ticket.lifetime_seconds, Some(7200));
         assert!(!format!("{ticket:?}").contains("dGlja2V0"));
 

@@ -2380,7 +2380,7 @@ pub(crate) fn is_media_auth_rejected(error: &anyhow::Error) -> bool {
         ))
     )
 }
-fn classify_error(error: &anyhow::Error) -> String {
+pub(crate) fn classify_error(error: &anyhow::Error) -> String {
     if let Some((stage, code)) = service_diagnostic(error) {
         if is_media_auth_rejected(error) {
             return "auth_required".into();
@@ -2406,6 +2406,9 @@ fn classify_error(error: &anyhow::Error) -> String {
             "channels_media_too_large",
             "channels_download_failed",
             "channels_integrity_failed",
+            "channels_ticket_failed",
+            "channels_page_failed",
+            "channels_detail_failed",
             "sticker_pack_not_eligible",
             "sticker_pack_membership_rejected",
             "sticker_pack_readback_mismatch",
