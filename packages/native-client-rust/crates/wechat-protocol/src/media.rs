@@ -768,6 +768,8 @@ impl CdnClient {
         let bytes = decrypt_cdn(&encrypted, &descriptor.aes_key)?;
         ensure!(bytes.len() <= plaintext_limit, "Decoded CDN body too large");
         let size_matches = descriptor.expected_bytes.map(|n| n == bytes.len() as u64);
+        // Normal-video plans are no longer strict so that a selected copy can be accepted, but
+        // a video reply the CDN did not mark as selected must still match the advertised size.
         let size_rejected = video_selected_response != Some(true)
             && (strict_transfer
                 || descriptor.strict_size
