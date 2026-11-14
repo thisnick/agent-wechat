@@ -12,6 +12,15 @@ function text(value: unknown, label: string): string {
   if (typeof value !== "string" || !value || value.length > 4096 || /[\u0000-\u001f\u007f]/.test(value)) throw Error(`Invalid ${label}`);
   return value;
 }
+/** The one original sticker attachment of a received message; the daemon only adds that copy. */
+async function receivedStickerOriginal(client: { mediaAssets(accountId: string, messageId: string, signal?: AbortSignal): Promise<{ items: MediaAsset[] }> },
+  accountId: string, messageId: string, signal?: AbortSignal): Promise<string> {
+  const { items } = await client.mediaAssets(accountId, messageId, signal);
+  const originals = (Array.isArray(items) ? items : []).filter(item => item.accountId === accountId && item.messageId === messageId
+    && item.kind === "sticker" && item.variant === "original");
+  if (originals.length !== 1) throw Error(originals.length ? "The message has more than one original sticker" : "The message has no received sticker to add");
+  return text(originals[0].id, "asset identity");
+}
 /** Owner-only custom sticker management and preparation. Files belong to the active execution
  * workspace; tool arguments cannot select a different account, node or SSH host. */
 export function createNativeStickerTools(context: OpenClawPluginToolContext,
@@ -62,9 +71,16 @@ export function createNativeStickerTools(context: OpenClawPluginToolContext,
         guard(); context.assertInputCommitAllowed?.();
         let job;
         if(args.action === "add") {
-          if ((args.preparationId != null) === (args.messageId != null || args.assetId != null)) throw Error("Provide a preparation or one message/asset pair");
-          const source=args.preparationId != null ? {kind:"prepared" as const,preparationId:text(args.preparationId,"preparation identity")}
-            : {kind:"message" as const,messageId:text(args.messageId,"message identity"),assetId:text(args.assetId,"asset identity")};
+          if ((args.preparationId != null) === (args.messageId != null || args.assetId != null)) throw Error("Provide a preparation or a received sticker message");
+          let source;
+          if (args.preparationId != null) source={kind:"prepared" as const,preparationId:text(args.preparationId,"preparation identity")};
+          else {
+            const messageId=text(args.messageId,"message identity");
+            // Received messages do not show asset identities to the model, so find the message's original sticker.
+            const assetId=args.assetId != null ? text(args.assetId,"asset identity") : await receivedStickerOriginal(client,accountId,messageId,signal);
+            guard(); context.assertInputCommitAllowed?.();
+            source={kind:"message" as const,messageId,assetId};
+          }
           job=await client.addCustomSticker(accountId,{source},key,signal);
         } else {
           const stickerId=text(args.stickerId,"sticker identity"),revision=text(args.revision,"collection revision");

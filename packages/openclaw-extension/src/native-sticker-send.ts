@@ -18,9 +18,11 @@ export async function handleNativeStickerAction(ctx: ChannelMessageActionContext
   const account=resolveWeChatAccount(ctx.cfg,ctx.accountId ?? undefined);
   if (!account?.enabled || !account.native) throw Error("No native WeChat account configured");
   const binding=nativeConfigurationKey(account.native);
+  // The host's message tool passes assertDirectAdapterHandoff on every turn but
+  // onPlatformSendDispatch only on scheduled turns, as for ordinary sends.
   const guard=async()=> {
-    if (ctx.senderIsOwner!==true || !ctx.onPlatformSendDispatch || !ctx.assertDirectAdapterHandoff) throw Error("WeChat sticker send requires live host handoff authority");
-    await ctx.onPlatformSendDispatch();ctx.assertDirectAdapterHandoff();
+    if (ctx.senderIsOwner!==true || !ctx.assertDirectAdapterHandoff) throw Error("WeChat sticker send requires live host handoff authority");
+    await ctx.onPlatformSendDispatch?.();ctx.assertDirectAdapterHandoff();
     const current=resolveWeChatAccount(ctx.cfg,ctx.accountId ?? undefined);
     if (!current?.enabled || !current.native || current.accountId!==account.accountId || nativeConfigurationKey(current.native)!==binding) throw Error("WeChat account configuration changed");
   };
