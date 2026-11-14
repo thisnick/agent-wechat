@@ -1715,10 +1715,16 @@ impl Core {
         };
         let mut official_writeback = None;
         let (bytes, mime, actual, frames) = match plan {
-            DownloadPlan::Cdn { descriptor }
+            DownloadPlan::Cdn { mut descriptor }
             | DownloadPlan::LinkThumbnail {
-                source: crate::links::LinkThumbnail::Cdn(descriptor),
+                source: crate::links::LinkThumbnail::Cdn(mut descriptor),
             } => {
+                // Persisted plans from older releases also marked normal videos
+                // strict. The transport still verifies a selected representation
+                // against the CDN response digest before returning any bytes.
+                if asset.kind == MediaKind::Video && asset.variant == MediaVariant::Normal {
+                    descriptor.strict_size = false;
+                }
                 let mut state = self.account_state(account)?;
                 let route = if descriptor.quality == MediaQuality::LargeFile {
                     Some(LargeCdnRoute::Download)

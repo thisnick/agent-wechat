@@ -647,9 +647,9 @@ impl CdnClient {
                 && !descriptor.strict_size
                 && matches!(integer(&reply, "istrans").ok(), Some(13 | 999))
                 && integer(&reply, "videoformat").ok() == Some(1)
-                && integer(&reply, "ver").ok() == Some(0)
-                && response_digest.is_some();
+                && integer(&reply, "ver").ok() == Some(0);
             if server_selected {
+                ensure!(response_digest.is_some(), "media_integrity_failed");
                 validate_large_video_reply_fields(&reply)?;
                 if reply.contains_key("rawfilesize") {
                     let size = u64::try_from(integer(&reply, "rawfilesize")?)?;
@@ -769,7 +769,9 @@ impl CdnClient {
         ensure!(bytes.len() <= plaintext_limit, "Decoded CDN body too large");
         let size_matches = descriptor.expected_bytes.map(|n| n == bytes.len() as u64);
         let size_rejected = video_selected_response != Some(true)
-            && (strict_transfer || descriptor.strict_size)
+            && (strict_transfer
+                || descriptor.strict_size
+                || descriptor.quality == MediaQuality::Video)
             && size_matches == Some(false);
         let digest = hex::encode(md5(&bytes));
         let digest_matches = descriptor.expected_md5.as_ref().map(|expected| {
@@ -3221,7 +3223,7 @@ mod tests {
 
     #[test]
     fn server_selected_video_representation_is_accepted_with_validated_response_digest() {
-        for istrans in [13, 999] {
+        for (istrans, filetype) in [(13, 4), (13, 9), (999, 4), (999, 9)] {
             let (mut d, raw, encrypted) = download_fixture(103, MediaQuality::Video);
             // The advertised representation differs from the delivered bytes.
             d.expected_bytes = Some(90);
@@ -3237,7 +3239,7 @@ mod tests {
                         put(&mut r, "videoformat", 1);
                         put(&mut r, "ver", 0);
                         put(&mut r, "backsrcnum", 2);
-                        put(&mut r, "substituteftype", 4);
+                        put(&mut r, "substituteftype", filetype);
                         r.insert("rawfilemd5".into(), hex::encode(md5(&raw)).into_bytes());
                         Ok(r)
                     },
@@ -3250,24 +3252,73 @@ mod tests {
     }
 
     #[test]
-    fn server_selected_video_without_matching_response_digest_is_rejected() {
+    fn nonselected_video_without_advertised_digest_still_requires_advertised_size() {
         let (mut d, _raw, encrypted) = download_fixture(103, MediaQuality::Video);
         d.expected_bytes = Some(90);
+        d.expected_md5 = None;
         d.strict_size = false;
-        d.expected_md5 = Some("0".repeat(32));
         assert!(client()
             .download_with_transport(
                 &d,
                 |_, _| Ok(()),
-                |_, fields| {
-                    let mut r = download_reply(fields, &d, &encrypted);
-                    put(&mut r, "istrans", 999);
-                    put(&mut r, "videoformat", 1);
-                    put(&mut r, "ver", 0);
-                    r.insert("rawfilemd5".into(), "0".repeat(32).into_bytes());
-                    Ok(r)
-                },
+                |_, fields| Ok(download_reply(fields, &d, &encrypted)),
             )
             .is_err());
+    }
+
+    #[test]
+    fn server_selected_video_matching_advertised_size_still_requires_response_digest() {
+        for response_md5 in [None, Some("not-a-digest".to_string()), Some("0".repeat(32))] {
+            let (mut d, raw, encrypted) = download_fixture(103, MediaQuality::Video);
+            d.expected_bytes = Some(raw.len() as u64);
+            d.expected_md5 = None;
+            d.strict_size = false;
+            assert!(client()
+                .download_with_transport(
+                    &d,
+                    |_, _| Ok(()),
+                    |_, fields| {
+                        let mut r = download_reply(fields, &d, &encrypted);
+                        put(&mut r, "istrans", 13);
+                        put(&mut r, "videoformat", 1);
+                        put(&mut r, "ver", 0);
+                        put(&mut r, "substituteftype", 9);
+                        if let Some(md5) = &response_md5 {
+                            r.insert("rawfilemd5".into(), md5.as_bytes().to_vec());
+                        }
+                        Ok(r)
+                    },
+                )
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn server_selected_video_without_matching_response_digest_is_rejected() {
+        for advertised_md5 in [None, Some("0".repeat(32))] {
+            for response_md5 in [None, Some("not-a-digest".to_string()), Some("0".repeat(32))] {
+                let (mut d, _raw, encrypted) = download_fixture(103, MediaQuality::Video);
+                d.expected_bytes = Some(90);
+                d.strict_size = false;
+                d.expected_md5 = advertised_md5.clone();
+                assert!(client()
+                    .download_with_transport(
+                        &d,
+                        |_, _| Ok(()),
+                        |_, fields| {
+                            let mut r = download_reply(fields, &d, &encrypted);
+                            put(&mut r, "istrans", 13);
+                            put(&mut r, "videoformat", 1);
+                            put(&mut r, "ver", 0);
+                            put(&mut r, "substituteftype", 9);
+                            if let Some(md5) = &response_md5 {
+                                r.insert("rawfilemd5".into(), md5.as_bytes().to_vec());
+                            }
+                            Ok(r)
+                        },
+                    )
+                    .is_err());
+            }
+        }
     }
 }
