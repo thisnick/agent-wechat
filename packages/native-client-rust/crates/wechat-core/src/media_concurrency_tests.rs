@@ -576,7 +576,7 @@ async fn channels_video_is_requested_once_cached_as_a_sidecar_file_and_renewed_a
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn channels_failures_publish_nothing_and_only_retryable_ones_allow_a_new_request() {
+async fn channels_failures_publish_nothing_and_a_new_request_resolves_again() {
     let (tmp, core, upstream, _received) = fixture();
     let message = insert_channels_card(&tmp);
     let video = core.media_assets("one", &message).unwrap()[1].clone();
@@ -632,8 +632,21 @@ async fn channels_failures_publish_nothing_and_only_retryable_ones_allow_a_new_r
     let row = core.store.media_job("one", &gone.id).unwrap();
     assert_eq!(row.error_code.as_deref(), Some("channels_post_unavailable"));
     assert!(!row.retryable);
-    // A removed post is not looked up again by repeating the request.
-    let repeat = core.start_media_transfer("one", request()).unwrap();
-    assert_eq!(repeat.id, gone.id);
+    // The failed job never retries by itself; asking again starts exactly one new lookup.
     assert_eq!(upstream.channels_count.load(Ordering::SeqCst), 3);
+    let bytes = channels_mp4(3);
+    upstream
+        .channels_replies
+        .lock()
+        .unwrap()
+        .push(Ok(bytes.clone()));
+    let again = core.start_media_transfer("one", request()).unwrap();
+    assert_ne!(again.id, gone.id);
+    assert_eq!(
+        core.start_media_transfer("one", request()).unwrap().id,
+        again.id
+    );
+    assert_eq!(wait_for_job(&core, &again.id).await, "available");
+    assert_eq!(upstream.channels_count.load(Ordering::SeqCst), 4);
+    assert_eq!(core.media_content("one", &video.id).unwrap().bytes, bytes);
 }

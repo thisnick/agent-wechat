@@ -1242,7 +1242,8 @@ impl Core {
         let mut key = format!("download:{}", asset.id);
         if self.channels_asset(account, &asset.id)? {
             // A Channels video is renewable: when its cached file is gone, or its last transfer
-            // failed in a retryable way, a new request resolves fresh material in one new job.
+            // failed, an explicit new request resolves fresh material in one new job. Nothing
+            // retries automatically; each new job comes from a separate request.
             if asset.state == "available" && !self.store.media_asset_cached(account, &asset.id)? {
                 asset.state = "pending".into();
                 asset.actual_variant = None;
@@ -1262,8 +1263,7 @@ impl Core {
             while let Ok(previous) = self.store.media_job_by_key(account, &key) {
                 let renewable = match previous.state.as_str() {
                     "available" => asset.state != "available",
-                    "failed" => previous.retryable,
-                    "cancelled" | "expired" => true,
+                    "failed" | "cancelled" | "expired" => true,
                     _ => false,
                 };
                 if !renewable {
