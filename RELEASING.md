@@ -112,7 +112,7 @@ For each release affecting the public libraries:
   A public library may not depend on an unpublished workspace crate. Required support crates remain published
   even when users normally depend only on protocol/profile/calls.
 - Run the pinned formatter, warning-denying Clippy, relevant library tests and
-  public examples. `node scripts/native-crates.mjs package` builds the actual
+  public examples. `node scripts/release/crates.mjs package` builds the actual
   five source archives, including their packaged native sources and licenses;
   a workspace build alone is insufficient. Keep the reference page and crate
   documentation aligned with the shipped API and supported profile layouts.

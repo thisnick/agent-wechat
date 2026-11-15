@@ -128,7 +128,7 @@ cargo +1.93.1 fmt --all --manifest-path packages/native-client-rust/Cargo.toml
 cargo +1.93.1 fmt --all --check --manifest-path packages/native-client-rust/Cargo.toml
 cargo +1.93.1 clippy --workspace --all-targets --locked --manifest-path packages/native-client-rust/Cargo.toml -- -D warnings
 cargo +1.93.1 test --workspace --locked --manifest-path packages/native-client-rust/Cargo.toml
-bash scripts/native-generate-types.sh --check
+bash scripts/generate-types.sh --check
 pnpm interfaces --check
 ```
 

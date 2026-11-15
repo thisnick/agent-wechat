@@ -28,10 +28,10 @@ verified fragments from an exact committed version on main.
 Record OS version, CPU, `wx --json version` output and source commit. Use an empty
 scratch directory, never an existing official profile or deployed daemon.
 
-1. Run `node scripts/native-platform-smoke.mjs /absolute/path/to/wx` (use `wx.exe`
+1. Run `node scripts/smoke/platform.mjs /absolute/path/to/wx` (use `wx.exe`
    on Windows). It checks authenticated lifecycle, stale generation rejection,
    duplicate start, graceful stop and restart identity without contacting WeChat.
-2. Run `node scripts/native-package-smoke.mjs /absolute/path/to/artifact-directory`
+2. Run `node scripts/smoke/package.mjs /absolute/path/to/artifact-directory`
    after installing repository dependencies. This stages an npm tarball, verifies
    offline installation and runs actual managed/external OpenClaw hosting.
 3. Confirm installation and invocation from paths containing spaces. On Windows,

@@ -45,7 +45,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: Identify native build dependencies
         id: cache-key
-        run: python scripts/native-ci-cache-key.py rust --github-output
+        run: python scripts/ci/cache-key.py rust --github-output
       - uses: dtolnay/rust-toolchain@stable
         id: rust
         with:
@@ -55,7 +55,7 @@ jobs:
       - name: Select native Windows compiler
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./scripts/native-ci-msvc.ps1
+        run: ./scripts/ci/msvc.ps1
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: packages/native-client-rust -> target
@@ -95,7 +95,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: Identify installed and native build dependencies
         id: cache-key
-        run: python scripts/native-ci-cache-key.py all --github-output
+        run: python scripts/ci/cache-key.py all --github-output
       - uses: dtolnay/rust-toolchain@stable
         id: rust
         with:
@@ -104,7 +104,7 @@ jobs:
       - name: Select native Windows compiler
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./scripts/native-ci-msvc.ps1
+        run: ./scripts/ci/msvc.ps1
       - name: Select Windows Perl for vendored OpenSSL
         if: runner.os == 'Windows'
         run: |
@@ -117,7 +117,7 @@ jobs:
         with:
           path: packages/native-client-rust/target/${{ matrix.target }}/release/wx.exe
           # No fallback keys: all native inputs and the build driver must match.
-          key: native-executable-v2-${{ matrix.target }}-${{ steps.rust.outputs.cachekey }}-${{ env.VCToolsVersion }}-${{ env.WindowsSDKVersion }}-${{ env.RUSTFLAGS }}-${{ hashFiles('packages/native-client-rust/**', '!packages/native-client-rust/**/target/**', 'rust-toolchain.toml', '.cargo/config*', '.gitattributes', 'scripts/native-ci-build.py', 'scripts/native-ci-msvc.ps1', '.github/workflows/native-portable.yml') }}
+          key: native-executable-v2-${{ matrix.target }}-${{ steps.rust.outputs.cachekey }}-${{ env.VCToolsVersion }}-${{ env.WindowsSDKVersion }}-${{ env.RUSTFLAGS }}-${{ hashFiles('packages/native-client-rust/**', '!packages/native-client-rust/**/target/**', 'rust-toolchain.toml', '.cargo/config*', '.gitattributes', 'scripts/ci/build.py', 'scripts/ci/msvc.ps1', '.github/workflows/native-portable.yml') }}
       - uses: Swatinem/rust-cache@v2
         if: runner.os != 'Windows' || steps.native-executable.outputs.cache-hit != 'true' || (inputs.simulator_checks && inputs.windows_simulator)
         with:
@@ -131,11 +131,11 @@ jobs:
           cache-on-failure: true
       - name: Start Unix release compiler
         if: runner.os != 'Windows'
-        run: python scripts/native-ci-build.py start ${{ matrix.target }}
+        run: python scripts/ci/build.py start ${{ matrix.target }}
       - name: Start Windows release compiler
         if: runner.os == 'Windows' && steps.native-executable.outputs.cache-hit != 'true'
         shell: pwsh
-        run: python scripts/native-ci-build.py start ${{ matrix.target }}
+        run: python scripts/ci/build.py start ${{ matrix.target }}
       # Dependency setup is independent of Cargo and can overlap compilation.
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
@@ -158,7 +158,7 @@ jobs:
       - run: pnpm --filter @agent-wechat/agent-wechat... build
       - name: Require a successful release build
         if: steps.native-executable.outputs.cache-hit != 'true'
-        run: python scripts/native-ci-build.py wait
+        run: python scripts/ci/build.py wait
       - name: Check Windows standalone runtime dependencies
         if: runner.os == 'Windows'
         shell: pwsh
@@ -169,15 +169,15 @@ jobs:
           if ($dependencies -match '(?i)(VCRUNTIME|MSVCP|libcrypto-|libssl-|libgcc|libstdc\+\+)') {
             throw 'Release executable must not require compiler or separately installed crypto DLLs'
           }
-      - run: node scripts/native-portable-build.mjs
-      - run: node scripts/native-ci-artifact.mjs record artifacts/native
+      - run: node scripts/release/portable-build.mjs
+      - run: node scripts/ci/artifact.mjs record artifacts/native
       - name: Validate actual executable and npm installation
         run: |
           BINARY=$(node --input-type=module -e "import {assetName} from './packages/cli/scripts/native-runtime.mjs'; import fs from 'node:fs'; console.log('artifacts/native/'+assetName(JSON.parse(fs.readFileSync('packages/cli/package.json')).version))")
           # Both checks read the artifact and create independent temporary data.
-          node scripts/native-platform-smoke.mjs "$BINARY" &
+          node scripts/smoke/platform.mjs "$BINARY" &
           platform_smoke=$!
-          node scripts/native-package-smoke.mjs artifacts/native &
+          node scripts/smoke/package.mjs artifacts/native &
           package_smoke=$!
           smoke_status=0
           wait "$platform_smoke" || smoke_status=1
@@ -200,13 +200,13 @@ jobs:
           cargo build --profile test --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-simulator --bin wx-dev --target ${{ matrix.target }}
       - name: Install verified media helpers for simulator sends
         if: inputs.simulator_checks && (runner.os != 'Windows' || inputs.windows_simulator)
-        run: node scripts/native-ci-media-runtime.mjs "$RUNNER_TEMP/native-simulator-media"
+        run: node scripts/ci/media-runtime.mjs "$RUNNER_TEMP/native-simulator-media"
       - name: Verify the simulator and real hub on this native platform
         if: inputs.simulator_checks && (runner.os != 'Windows' || inputs.windows_simulator)
         env:
           WX_DEV_BINARY: packages/native-client-rust/target/${{ matrix.target }}/debug/${{ runner.os == 'Windows' && 'wx-dev.exe' || 'wx-dev' }}
           WX_BINARY: packages/native-client-rust/target/${{ matrix.target }}/release/${{ runner.os == 'Windows' && 'wx.exe' || 'wx' }}
-        run: node scripts/native-simulator-smoke.mjs
+        run: node scripts/smoke/simulator.mjs
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ inputs.artifact_prefix || 'native-validation' }}-${{ matrix.target }}

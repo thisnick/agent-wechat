@@ -17,7 +17,7 @@ These files list every public interface of agent-wechat, one item per line, gene
 | `ui/scenes.txt` | The screens captured for visual review, each with its route and viewports | `pnpm --filter @agent-wechat/client-ui scenes:list` |
 | `storage/registry.txt` | The SQL schema of the daemon's `registry.sqlite`, plus a hash of every migration file | `packages/native-client-rust/crates/wechat-store/src/schema_interface_tests.rs` |
 
-Official WeChat profile databases belong to WeChat, not to this project, so they aren't listed. The event stream's per-kind payloads aren't listed yet. Screenshots aren't committed: CI captures every scene in `scenes.txt` and uploads it to [Argos](https://app.argos-ci.com/thisnick/agent-wechat), which compares it with the latest `main` build and adds a check to the PR. Approving the changes in Argos is the visual sign-off; the merged `main` build becomes the next baseline. Their request and response types are checked separately by `scripts/native-generate-types.sh --check`.
+Official WeChat profile databases belong to WeChat, not to this project, so they aren't listed. The event stream's per-kind payloads aren't listed yet. Screenshots aren't committed: CI captures every scene in `scenes.txt` and uploads it to [Argos](https://app.argos-ci.com/thisnick/agent-wechat), which compares it with the latest `main` build and adds a check to the PR. Approving the changes in Argos is the visual sign-off; the merged `main` build becomes the next baseline. Their request and response types are checked separately by `scripts/generate-types.sh --check`.
 
 ## Update the listings
 
