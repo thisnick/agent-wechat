@@ -1,7 +1,7 @@
 ---
 title: 管理“我的表情”
 description: 通过 OpenClaw 准备工作区媒体、预览表情并管理“我的表情”。
-sourceHash: 23af0e5347c6
+sourceHash: f80b7ebc9a8e
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -35,7 +35,7 @@ import { Aside } from '@astrojs/starlight/components';
 4. 准备由远程执行生成的文件。
 
    ```json
-   {"action":"prepare","file":"stickers/clip.mp4","startMs":1000,"durationMs":2000,"fit":true,"idempotencyKey":"clip-prepare-1"}
+   {"action":"prepare","file":"stickers/clip.mp4","startMs":1000,"durationMs":2000,"maxEdge":360,"fps":12,"idempotencyKey":"clip-prepare-1"}
    ```
 
    使用返回的 `preparationId` 进行 `preview`，然后保存：
