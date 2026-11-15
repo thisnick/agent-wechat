@@ -301,6 +301,10 @@ export class NativeWeChatClient {
     const response = await this.response(`v1/accounts/${id(accountId)}/uploads`, { method: "POST", body: form, signal }, false, this.mediaTimeoutMs);
     return JSON.parse(new TextDecoder().decode(await this.readBounded(response))) as OwnedMediaSource;
   }
+  /** Delete an upload you have finished with, such as the source of an added sticker. Uploads a pending send or preparation needs are kept (`upload_in_use`). */
+  releaseUpload(accountId: string, sourceId: string, signal?: AbortSignal): Promise<{ released: boolean }> {
+    return this.request(`v1/accounts/${id(accountId)}/uploads/${id(sourceId)}`, { method: "DELETE", signal });
+  }
   /** Derive Saved and all added official pack tabs from the account profile. */
   stickerCollections(accountId: string, signal?: AbortSignal): Promise<import("./native.generated.js").StickerCollections> {
     return this.request(`v1/accounts/${id(accountId)}/sticker-collections`, { signal });

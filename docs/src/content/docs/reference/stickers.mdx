@@ -32,7 +32,8 @@ a missing canonical GIF; it preserves an existing alternate-format Saved cache.
 ## Prepare, review and save
 
 1. Upload bytes through `/uploads`. Preparation receives the returned
-   `sourceId`, never a path on the caller's machine.
+   `sourceId`, never a path on the caller's machine. Sources can be up to
+   64 MiB for images and GIFs and 512 MiB for videos.
 
    ```json
    {"sourceId":"SOURCE_ID","maxEdge":360,"fps":12,"trim":{"startMs":1000,"durationMs":2000}}
@@ -55,6 +56,10 @@ a missing canonical GIF; it preserves an existing alternate-format Saved cache.
    `{"source":{"kind":"message","messageId":"MESSAGE_ID","assetId":"ASSET_ID"}}`.
    Its original must already be downloaded and verified. Alternate WXGF files
    cannot be saved as a new item directly; use a verified canonical original.
+4. Once the sticker is saved, or you decide not to save it, DELETE
+   `/uploads/{sourceId}` to free the source's disk space. It returns
+   `{"released":true}`, or `false` if the upload was already gone. While a
+   preparation or send still needs the upload, it returns 409 `upload_in_use`.
 
 ## Placement and operation recovery
 

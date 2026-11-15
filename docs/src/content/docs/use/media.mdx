@@ -120,6 +120,7 @@ When someone sends a Channels card, the agent gets the post's publisher, descrip
 <Aside title="Good to know">
 - File detection uses the browser's media type first, then the extension when the type is missing or generic. A supported video container can still contain an unsupported codec; export it as MP4 if preparation fails. Some videos cannot be previewed by the browser before sending.
 - Sending a large file or an original-quality video holds about twice the source size in the daemon's memory while it uploads.
+- Staged uploads are written to disk as they arrive, so staging does not hold the file in memory. The daemon deletes an upload a day after every send that used it has finished. To delete one sooner, call `DELETE /uploads/{id}`; it returns 409 `upload_in_use` while a send or sticker preparation still needs it.
 - The daemon downloads and checks uploaded bytes before submitting the attachment message. `accepted` confirms WeChat accepted the message; it does not confirm recipient opening.
 - Server-side duplicate-file shortcuts are not supported. Uncertain reservations and sends require review; another send is never started automatically.
 - After a job stops during verification, `wx jobs retry JOB_ID --reuse-completed-upload` can reuse its saved object. This requires proof that submission never started; API clients use `POST /jobs/{id}/retry-completed-upload` with `reuseCompletedUpload: true`; the SDK accepts this option on `retryJob`.

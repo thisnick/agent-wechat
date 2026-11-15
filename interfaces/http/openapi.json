@@ -10627,6 +10627,59 @@
         ]
       }
     },
+    "/v1/accounts/{a}/uploads/{id}": {
+      "delete": {
+        "operationId": "releaseUpload",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Upload source ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {},
+                "x-agent-wechat-untyped": true
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "send"
+            ]
+          }
+        ],
+        "summary": "Delete an upload you have finished with, such as the source of an added sticker. Returns `released: false` when it is already gone; an upload a pending send or preparation needs is kept (409 `upload_in_use`).",
+        "tags": [
+          "media"
+        ]
+      }
+    },
     "/v1/daemon/shutdown": {
       "post": {
         "operationId": "shutdownDaemon",

@@ -7,7 +7,7 @@ import { readableError } from "./session.ts";
 import { t } from "./i18n.ts";
 import { Button, Icon } from "./ui.tsx";
 import { StickerJobError, waitStickerJob } from "./sticker-jobs.ts";
-import { FPS_STOPS, MAX_STICKER_EDGE, PHONE_STICKER_EDGE, defaultOptions, exceedsStickerEdge, maxLength, readStickerSource, requestKey, sizeStops, stickerRequest, stopPosition, trimRange, withLength, withStart, type StickerOptions, type StickerRequestOptions, type StickerSource } from "./sticker-options.ts";
+import { FPS_STOPS, MAX_STICKER_EDGE, PHONE_STICKER_EDGE, defaultOptions, sourceKind, exceedsStickerEdge, maxLength, readStickerSource, requestKey, sizeStops, stickerRequest, stopPosition, trimRange, withLength, withStart, type StickerOptions, type StickerRequestOptions, type StickerSource } from "./sticker-options.ts";
 import "./stickers.css";
 export { waitStickerJob } from "./sticker-jobs.ts";
 
@@ -113,6 +113,10 @@ type PreparedEntry = { key: string; addKey: string; prepared?: PreparedSticker; 
  * prepared. `shown` is the last result that matched the options, kept on screen while
  * the next one is prepared.
  */
+/** Largest image or GIF the hub prepares a sticker from. */
+const MAX_IMAGE_SOURCE_BYTES = 64 * 1024 * 1024;
+/** Largest video the hub prepares a sticker from, the same as an attachment. */
+const MAX_VIDEO_SOURCE_BYTES = 512 * 1024 * 1024;
 type ImportItem = { id: string; file: File; selected: boolean; sourceId?: string; source?: StickerSource; options?: StickerOptions; want?: string; results: Record<string, PreparedEntry>; shown?: PreparedSticker; error?: string; added?: boolean };
 const liveKey = (item: ImportItem) => item.source && item.options ? requestKey(stickerRequest(item.source, item.options)) : undefined;
 function liveEntry(item: ImportItem): PreparedEntry | undefined { const key = liveKey(item); return key ? item.results[key] : undefined; }
@@ -345,7 +349,10 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
       setImports(old => old?.map(current => current.id === item.id ? { ...current, ...more(current), results: { ...current.results, [want]: { ...entry, ...update } } } : current) ?? null);
     const active = importSignal();
     try {
-      if (item.file.size === 0 || item.file.size > 64 * 1024 * 1024) { store({ error: t("stickers.sourceSize") }); return; }
+      if (item.file.size === 0) { store({ error: t("stickers.sourceEmpty") }); return; }
+      // Videos are converted from a file on the hub; images and GIFs are decoded in memory.
+      const limit = sourceKind(item.file) === "video" ? MAX_VIDEO_SOURCE_BYTES : MAX_IMAGE_SOURCE_BYTES;
+      if (item.file.size > limit) { store({ error: t("stickers.sourceSize", { size: Math.ceil(item.file.size / 1048576), limit: limit / 1048576 }) }); return; }
       store({}); // An entry in progress keeps the row from being picked again.
       const sourceId = item.sourceId ?? (await client.upload(account, item.file, item.file.name, item.file.type || "application/octet-stream", active)).id;
       active.throwIfAborted(); updateImport(item.id, { sourceId });
@@ -365,6 +372,15 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
     const next = imports.find(item => item.selected && !item.added && item.want !== undefined && !item.results[item.want]);
     if (next?.want !== undefined) void prepare(next, next.want);
   }, [imports, queue]);
+  /** Ask the hub to delete an upload; one a preparation still needs is kept until it finishes. */
+  function releaseUpload(sourceId?: string) {
+    if (sourceId) void client.releaseUpload(account, sourceId).catch(() => undefined);
+  }
+  /** Close Add to Saved and free the uploads of files that were not added. */
+  function closeImports() {
+    for (const item of imports ?? []) if (!item.added) releaseUpload(item.sourceId);
+    setImports(null);
+  }
   async function addBatch() {
     await act(async () => {
       const selected = (imports ?? []).filter(item => item.selected);
@@ -377,11 +393,13 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
         try {
           await waitStickerJob(client, account, await client.addCustomSticker(account, { source: { kind: "prepared", preparationId: entry.prepared.id } }, entry.addKey, signal()), signal());
           guard(); updateImport(item.id, { added: true, error: undefined });
+          // The saved sticker no longer needs its upload; free the hub's copy now.
+          releaseUpload(item.sourceId);
         } catch (error) { allAdded = false; if (!signal().aborted) updateImport(item.id, { error: readableError(error) }); }
       }
       await refresh();
       guard();
-      if (allAdded) { setTab("saved"); setImports(null); }
+      if (allAdded) { setTab("saved"); closeImports(); }
     });
   }
   const visible = tab === "saved" ? saved.items.slice(0,savedLimit) : packItems.id === tab ? packItems.items : [];
@@ -436,8 +454,8 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
       </> : <><nav className="sticker-browser-tabs"><button aria-pressed={browser === "browse"} onClick={() => void browse("browse")}>{t("stickers.browse")}</button><button aria-pressed={browser === "added"} onClick={() => void browse("added")}>{t("stickers.added")}</button></nav><div className="sticker-pack-cards">{(browser === "added" ? added : catalog).map(pack => <button key={pack.id} onClick={() => void inspect(pack)} className="sticker-pack-card" disabled={busy}><StickerImage client={client} account={account} asset={pack.icon} label={pack.name} acquire /><span><strong>{pack.name}</strong><small>{pack.membership === "added" ? t("stickers.added") : t("stickers.previewPack")}</small></span><Icon name="chevron" /></button>)}</div>{browser === "browse" && cursor && <button disabled={busy} onClick={() => void browse("browse", cursor)}>{t("stickers.morePacks")}</button>}</>}
       {busy && <p role="status">{t("stickers.working")}</p>}{error && <p role="alert" className="sticker-error">{error}</p>}
     </StickerModal>}
-    {imports && <StickerModal className="sticker-import-modal" label={t("stickers.addToSaved")} close={() => { if (!busy) setImports(null); }} onDrop={drop}>
-      <header><div><h2>{t("stickers.addToSaved")}</h2><p>{t("stickers.importHint")}</p></div><Button icon="close" label={t("stickers.close")} disabled={busy} onClick={() => setImports(null)} /></header>
+    {imports && <StickerModal className="sticker-import-modal" label={t("stickers.addToSaved")} close={() => { if (!busy) closeImports(); }} onDrop={drop}>
+      <header><div><h2>{t("stickers.addToSaved")}</h2><p>{t("stickers.importHint")}</p></div><Button icon="close" label={t("stickers.close")} disabled={busy} onClick={() => closeImports()} /></header>
       <div className="sticker-import-list">{imports.map(item => <StickerImportRow key={item.id} client={client} account={account} item={item} disabled={busy}
         select={selected => updateImport(item.id, { selected })} adjust={change => adjust(item.id, change)} retry={() => retry(item.id)} />)}</div>
       <footer><button disabled={busy} onClick={() => fileInput.current?.click()}>{t("stickers.chooseFiles")}</button><button className="sticker-add-submit" disabled={busy || !ready || pending} onClick={() => void addBatch()}>{busy ? t("stickers.saving") : t("stickers.addCount", { count: ready })}</button></footer>{error && <p role="alert">{error}</p>}

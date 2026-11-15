@@ -9,6 +9,11 @@ use std::io::Cursor;
 
 /// Maximum accepted prepared GIF size under this application's sticker policy.
 pub const MAX_STICKER_BYTES: usize = 1024 * 1024;
+/// Largest image or GIF a sticker can be prepared from; it is decoded in memory.
+pub const MAX_STICKER_IMAGE_SOURCE_BYTES: usize = 64 * 1024 * 1024;
+/// Largest MOV/MP4 a sticker can be prepared from, the same as a video attachment.
+/// Only the converted segment of at most ten seconds is decoded.
+pub const MAX_STICKER_VIDEO_SOURCE_BYTES: usize = crate::MAX_FILE_BYTES;
 /// Largest accepted edge length. The official client refuses to save larger
 /// stickers; inputs within it keep their original encoding unless resized.
 pub const MAX_STICKER_EDGE: u32 = 1024;

@@ -879,8 +879,9 @@
     "savedReceived": "Saved to stickers",
     "saving": "Saving…",
     "moreSaved": "More Saved stickers",
-    "sourceSize": "Choose a nonempty file up to 64 MiB.",
+    "sourceSize": "This file is {{size}} MB; the limit for this kind of file is {{limit}} MB (64 MB for images and GIFs, 512 MB for videos).",
     "previewItem": "Preview {name}",
-    "previewHint": "Choose a sticker to preview its animation."
+    "previewHint": "Choose a sticker to preview its animation.",
+    "sourceEmpty": "This file is empty. If you dragged it from a web page or app, save it first and add the saved file."
   }
 }

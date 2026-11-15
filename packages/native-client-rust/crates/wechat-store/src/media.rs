@@ -245,6 +245,90 @@ impl Store {
             })
         })
     }
+    /// Create an upload whose encrypted payload `write` streams into a new
+    /// private file, returning the plaintext length and SHA-256. The file is
+    /// written before the account database is locked, so a slow upload does not
+    /// hold up other work; the row is added only once the payload is complete.
+    pub fn create_media_source_streamed(
+        &self,
+        account: &str,
+        id: &str,
+        name: &str,
+        media_type: &str,
+        write: impl FnOnce(&mut std::fs::File) -> Result<(u64, String)>,
+    ) -> Result<OwnedMediaSource> {
+        let files = self.media_directory(account)?;
+        let mut written = None;
+        let file = media_files::write_with(&files, |payload| {
+            written = Some(write(payload)?);
+            Ok(())
+        })?;
+        let (byte_length, sha256) = written.context("media payload missing")?;
+        let created = self.control(account, |db| {
+            if id.is_empty()
+                || id.len() > 100
+                || name.is_empty()
+                || name.len() > 255
+                || media_type.len() > 128
+                || byte_length == 0
+                || byte_length > wechat_media::MAX_FILE_BYTES as u64
+                || sha256.len() != 64
+            {
+                bail!("invalid media source");
+            }
+            let now = chrono::Utc::now().to_rfc3339();
+            db.execute(
+                "INSERT INTO media_sources(id,name,media_type,byte_length,sha256,payload,created_at,payload_file) VALUES(?1,?2,?3,?4,?5,x'',?6,?7)",
+                params![id, name, media_type, byte_length, sha256, now, file],
+            )?;
+            Ok(OwnedMediaSource {
+                id: id.into(),
+                name: name.into(),
+                media_type: media_type.into(),
+                byte_length,
+                sha256: sha256.clone(),
+                created_at: now,
+            })
+        });
+        if created.is_err() {
+            media_files::remove(&files, &file);
+        }
+        created
+    }
+    /// The upload's metadata and a reader of its encrypted bytes, for
+    /// streaming. A deleted file is an error.
+    pub fn media_source_reader(
+        &self,
+        account: &str,
+        id: &str,
+    ) -> Result<(OwnedMediaSource, Box<dyn std::io::Read + Send>)> {
+        let files = self.media_directory(account)?;
+        let (source, file) = self.control(account, |db| {
+            Ok(db.query_row(
+                "SELECT name,media_type,byte_length,sha256,created_at,payload_file FROM media_sources WHERE id=?1",
+                [id],
+                |r| {
+                    Ok((
+                        OwnedMediaSource {
+                            id: id.into(),
+                            name: r.get(0)?,
+                            media_type: r.get(1)?,
+                            byte_length: r.get(2)?,
+                            sha256: r.get(3)?,
+                            created_at: r.get(4)?,
+                        },
+                        r.get::<_, Option<String>>(5)?,
+                    ))
+                },
+            )?)
+        })?;
+        let reader: Box<dyn std::io::Read + Send> = match file {
+            Some(file) => Box::new(std::io::BufReader::new(media_files::open(&files, &file)?)),
+            // Earlier versions kept small payloads inside the database.
+            None => Box::new(std::io::Cursor::new(self.media_source(account, id)?.1)),
+        };
+        Ok((source, reader))
+    }
     /// The upload's metadata and encrypted bytes. A deleted file is an error.
     pub fn media_source(&self, account: &str, id: &str) -> Result<(OwnedMediaSource, Vec<u8>)> {
         let files = self.media_directory(account)?;

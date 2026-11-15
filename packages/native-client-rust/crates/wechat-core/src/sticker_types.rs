@@ -2,8 +2,12 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-/// Maximum source bytes for local image/GIF/video sticker preparation.
-pub const MAX_STICKER_SOURCE_BYTES: usize = 64 * 1024 * 1024;
+/// Largest source accepted for sticker preparation: a MOV/MP4 video, the same
+/// limit as a video attachment. Image and GIF sources are limited to
+/// [`MAX_STICKER_IMAGE_SOURCE_BYTES`], checked once the type is known.
+pub const MAX_STICKER_SOURCE_BYTES: usize = wechat_media::MAX_STICKER_VIDEO_SOURCE_BYTES;
+/// Largest image or GIF source accepted for sticker preparation.
+pub const MAX_STICKER_IMAGE_SOURCE_BYTES: usize = wechat_media::MAX_STICKER_IMAGE_SOURCE_BYTES;
 
 /// Explicit preparation of owned image/GIF/video bytes; never saves or sends a sticker.
 #[derive(Clone, Debug, Serialize, Deserialize, TS, schemars::JsonSchema)]

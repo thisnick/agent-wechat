@@ -275,6 +275,7 @@ fn param_doc(path: &str, name: &str) -> String {
                 "sticker-packs" => "Official product identity.",
                 "custom-stickers" => "Stable Saved sticker identity.",
                 "sticker-preparations" => "Preparation job ID.",
+                "uploads" => "Upload source ID.",
                 other => panic!("describe the {{id}} parameter after /{other}/"),
             }
         }

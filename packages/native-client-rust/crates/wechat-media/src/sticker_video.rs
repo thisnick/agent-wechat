@@ -1,7 +1,8 @@
 //! Bounded MOV/MP4 sticker conversion through the installed FFmpeg tools.
 use crate::{
     prepare_sticker_image, PreparedStickerImage, StickerImageOptions, DEFAULT_VIDEO_STICKER_EDGE,
-    DEFAULT_VIDEO_STICKER_FPS, MAX_STICKER_EDGE, MAX_VIDEO_STICKER_FPS, MIN_STICKER_EDGE,
+    DEFAULT_VIDEO_STICKER_FPS, MAX_STICKER_EDGE, MAX_STICKER_IMAGE_SOURCE_BYTES,
+    MAX_STICKER_VIDEO_SOURCE_BYTES, MAX_VIDEO_STICKER_FPS, MIN_STICKER_EDGE,
 };
 use anyhow::{ensure, Result};
 use std::{
@@ -10,7 +11,6 @@ use std::{
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
-const MAX_SOURCE: usize = 64 * 1024 * 1024;
 struct OwnedChild(Child);
 impl Drop for OwnedChild {
     fn drop(&mut self) {
@@ -65,18 +65,20 @@ pub fn prepare_sticker(
 ) -> Result<PreparedStickerImage> {
     cancelled()?;
     if crate::inspect_video_container(input).is_err() {
+        ensure!(
+            !input.is_empty() && input.len() <= MAX_STICKER_IMAGE_SOURCE_BYTES,
+            "sticker_source_size_limit"
+        );
         let result = prepare_sticker_image(input, options)?;
         cancelled()?;
         return Ok(result);
     }
     ensure!(
-        !input.is_empty() && input.len() <= MAX_SOURCE,
+        !input.is_empty() && input.len() <= MAX_STICKER_VIDEO_SOURCE_BYTES,
         "sticker_source_size_limit"
     );
     let dir = wechat_platform::private_tempdir("wechat-sticker-")?;
     let source = dir.path().join("source.mp4");
-    let report = dir.path().join("probe.json");
-    let output = dir.path().join("output.gif");
     let mut file = wechat_platform::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -84,6 +86,55 @@ pub fn prepare_sticker(
         .open(&source)?;
     file.write_all(input)?;
     drop(file);
+    convert_video(dir.path(), &source, options, cancelled)
+}
+
+/// The same as [`prepare_sticker`] for a source already in a private file, such
+/// as a decrypted upload. A video (at most [`MAX_STICKER_VIDEO_SOURCE_BYTES`]) is
+/// converted from the file itself and never read into memory; an image or GIF
+/// (at most [`MAX_STICKER_IMAGE_SOURCE_BYTES`]) is read and prepared as usual.
+pub fn prepare_sticker_file(
+    path: &Path,
+    options: &StickerImageOptions,
+    mut cancelled: impl FnMut() -> Result<()>,
+) -> Result<PreparedStickerImage> {
+    use std::io::{Read, Seek, SeekFrom};
+    cancelled()?;
+    let mut file = std::fs::File::open(path)?;
+    let length = file.metadata()?.len();
+    ensure!(length > 0, "sticker_source_size_limit");
+    if crate::inspect_video_reader(&mut file, length).is_err() {
+        ensure!(
+            length <= MAX_STICKER_IMAGE_SOURCE_BYTES as u64,
+            "sticker_source_size_limit"
+        );
+        file.seek(SeekFrom::Start(0))?;
+        let mut bytes = Vec::with_capacity(length as usize);
+        file.take(MAX_STICKER_IMAGE_SOURCE_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        ensure!(bytes.len() as u64 == length, "sticker_source_changed");
+        let result = prepare_sticker_image(&bytes, options)?;
+        cancelled()?;
+        return Ok(result);
+    }
+    ensure!(
+        length <= MAX_STICKER_VIDEO_SOURCE_BYTES as u64,
+        "sticker_source_size_limit"
+    );
+    let dir = wechat_platform::private_tempdir("wechat-sticker-")?;
+    convert_video(dir.path(), path, options, cancelled)
+}
+
+/// Probe `source` and convert its selected segment into a GIF sticker, using
+/// `dir` (private, owned by the caller) for the probe report and output.
+fn convert_video(
+    dir: &Path,
+    source: &Path,
+    options: &StickerImageOptions,
+    mut cancelled: impl FnMut() -> Result<()>,
+) -> Result<PreparedStickerImage> {
+    let report = dir.join("probe.json");
+    let output = dir.join("output.gif");
     let mut probe = Command::new("ffprobe");
     probe
         .args([
@@ -110,7 +161,7 @@ pub fn prepare_sticker(
             "-o",
         ])
         .arg(&report)
-        .arg(&source);
+        .arg(source);
     execute(probe, &report, 65536, &mut cancelled)?;
     let shape: serde_json::Value = serde_json::from_slice(&owned_bytes(&report, 65536)?)?;
     let stream = &shape["streams"][0];
@@ -184,7 +235,7 @@ pub fn prepare_sticker(
             "1",
             "-i",
         ])
-        .arg(&source)
+        .arg(source)
         .args([
             "-ss",
             &start.to_string(),

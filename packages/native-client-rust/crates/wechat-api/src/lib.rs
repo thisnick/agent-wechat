@@ -145,6 +145,8 @@ impl From<anyhow::Error> for ApiError {
             ("invalid_sticker_source", StatusCode::BAD_REQUEST),
             ("sticker_preparation_expired", StatusCode::GONE),
             ("sticker_source_size_limit", StatusCode::PAYLOAD_TOO_LARGE),
+            ("source_size_limit", StatusCode::PAYLOAD_TOO_LARGE),
+            ("upload_in_use", StatusCode::CONFLICT),
             ("sticker_trim_invalid", StatusCode::BAD_REQUEST),
             ("invalid_sticker_download", StatusCode::BAD_REQUEST),
             ("sticker_pack_not_added", StatusCode::CONFLICT),

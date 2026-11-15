@@ -106,16 +106,23 @@ impl Core {
             .vault
             .open_record(account, &format!("media-job:{id}"), &row.payload)?;
         let request: StickerPreparationRequest = serde_json::from_slice(&plain)?;
-        let (_, bytes) = self.source_bytes(account, &request.source_id)?;
+        let source = self
+            .store
+            .media_source_metadata(account, &request.source_id)?;
         ensure!(
-            bytes.len() <= crate::MAX_STICKER_SOURCE_BYTES,
+            source.byte_length <= crate::MAX_STICKER_SOURCE_BYTES as u64,
             "sticker_source_size_limit"
         );
         row.phase = "preparing".into();
         self.store.save_media_job(account, &row)?;
         let output = permit.transfer(self, account, || {
-            wechat_media::prepare_sticker(
-                &bytes,
+            // The upload is decrypted into a private file, never into memory;
+            // a video is converted from that file directly.
+            let directory = wechat_platform::private_tempdir("wechat-sticker-source-")?;
+            let path = directory.path().join("source");
+            self.source_to_file(account, &request.source_id, &path)?;
+            wechat_media::prepare_sticker_file(
+                &path,
                 &wechat_media::StickerImageOptions {
                     fit: request.fit,
                     max_edge: request.max_edge,
@@ -190,7 +197,7 @@ impl Core {
         row.phase = "completed".into();
         row.retryable = false;
         row.error_code = None;
-        row.data["completedBytes"] = bytes.len().into();
+        row.data["completedBytes"] = source.byte_length.into();
         row.data["result"] = serde_json::to_value(prepared)?;
         self.store.save_media_job(account, &row)?;
         Ok(())

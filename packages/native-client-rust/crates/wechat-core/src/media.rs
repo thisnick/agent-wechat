@@ -482,11 +482,19 @@ impl Core {
         mime: &str,
         bytes: &[u8],
     ) -> Result<OwnedMediaSource> {
+        self.upload_source_stream(account, name, mime, &mut &bytes[..])
+    }
+    /// Store an upload read from `input`, encrypting it as it arrives so the
+    /// whole file is never held in memory. An empty input or one longer than the
+    /// upload limit fails with `source_size_limit` and stores nothing.
+    pub fn upload_source_stream(
+        &self,
+        account: &str,
+        name: &str,
+        mime: &str,
+        input: &mut dyn std::io::Read,
+    ) -> Result<OwnedMediaSource> {
         self.store.account(account)?;
-        ensure!(
-            !bytes.is_empty() && bytes.len() <= MAX_SOURCE_BYTES,
-            "source_size_limit"
-        );
         ensure!(
             !name.is_empty()
                 && name.len() <= 255
@@ -501,18 +509,93 @@ impl Core {
             "invalid_content_type"
         );
         let id = format!("upload_{}", uuid::Uuid::new_v4());
-        let sealed = self
-            .vault
-            .seal_media(account, &format!("source:{id}"), bytes)?;
-        self.store.create_media_source(
-            account,
-            &id,
-            name,
-            mime,
-            bytes.len() as u64,
-            &digest(bytes),
-            &sealed,
-        )
+        self.store
+            .create_media_source_streamed(account, &id, name, mime, |file| {
+                let (length, sha256) = self
+                    .vault
+                    .seal_media_stream(
+                        account,
+                        &format!("source:{id}"),
+                        input,
+                        file,
+                        MAX_SOURCE_BYTES as u64,
+                    )
+                    .map_err(|error| {
+                        if error.to_string() == "protected record exceeds limit" {
+                            anyhow::anyhow!("source_size_limit")
+                        } else {
+                            error
+                        }
+                    })?;
+                ensure!(length > 0, "source_size_limit");
+                Ok((length, sha256))
+            })
+            .map_err(|error| {
+                match error
+                    .chain()
+                    .find(|cause| cause.to_string() == "source_size_limit")
+                {
+                    Some(_) => anyhow::anyhow!("source_size_limit"),
+                    None => error,
+                }
+            })
+    }
+    /// Decrypt an upload into a new private file at `path`, checking its length
+    /// and SHA-256 before returning. Memory stays bounded for any upload size.
+    /// On any failure the file is removed, so nothing unverified remains.
+    pub(crate) fn source_to_file(
+        &self,
+        account: &str,
+        id: &str,
+        path: &std::path::Path,
+    ) -> Result<OwnedMediaSource> {
+        use sha2::{Digest, Sha256};
+        struct Hashing<W> {
+            inner: W,
+            hash: Sha256,
+            length: u64,
+        }
+        impl<W: std::io::Write> std::io::Write for Hashing<W> {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                let written = self.inner.write(data)?;
+                self.hash.update(&data[..written]);
+                self.length += written as u64;
+                Ok(written)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.inner.flush()
+            }
+        }
+        let result = (|| -> Result<OwnedMediaSource> {
+            let (meta, mut reader) = self.store.media_source_reader(account, id)?;
+            let file = wechat_platform::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)?;
+            let mut output = Hashing {
+                inner: std::io::BufWriter::new(file),
+                hash: Sha256::new(),
+                length: 0,
+            };
+            self.vault.open_media_stream(
+                account,
+                &format!("source:{id}"),
+                &mut reader,
+                &mut output,
+            )?;
+            std::io::Write::flush(&mut output)?;
+            ensure!(
+                output.length == meta.byte_length
+                    && format!("{:x}", output.hash.finalize()) == meta.sha256,
+                "source_integrity_failed"
+            );
+            Ok(meta)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(path);
+        }
+        result
     }
     fn source_bytes(&self, account: &str, id: &str) -> Result<(OwnedMediaSource, Vec<u8>)> {
         let (meta, sealed) = self.store.media_source(account, id)?;
