@@ -30,13 +30,20 @@ The equivalent CLI workflow uses paths on the CLI's machine:
 
 ```sh
 wx stickers list
-wx stickers prepare clip.mp4 --start 1 --duration 2 --fit
+wx stickers prepare clip.mp4 --start 1 --duration 2 --max-edge 360 --fps 12
 wx stickers preview --prepared PREPARATION_ID --output preview.png
 wx stickers add --prepared PREPARATION_ID
 wx stickers move STICKER_ID --last
 wx stickers download STICKER_ID --output original.gif
 wx stickers remove STICKER_ID
 ```
+
+Images and GIFs keep their size and encoding up to 1024 pixels, the largest
+sticker WeChat saves. A larger file needs `--fit`, which shrinks it to 1024, or
+`--max-edge N` for a smaller longest side. Videos are always converted to a GIF:
+240 pixels and 10 frames per second unless you set `--max-edge` and `--fps` (up
+to 30). Every sticker must stay within 1 MiB, 200 frames and 10 seconds; use
+`--start` and `--duration` to keep part of a longer clip.
 
 Preparation returns a job. Its completed result includes an original, preview,
 sampled-frame sheet, dimensions, transformations and expiry. Keep the operation's

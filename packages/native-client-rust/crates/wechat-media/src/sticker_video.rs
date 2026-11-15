@@ -1,5 +1,8 @@
 //! Bounded MOV/MP4 sticker conversion through the installed FFmpeg tools.
-use crate::{prepare_sticker_image, PreparedStickerImage, StickerImageOptions, MAX_STICKER_EDGE};
+use crate::{
+    prepare_sticker_image, PreparedStickerImage, StickerImageOptions, DEFAULT_VIDEO_STICKER_EDGE,
+    DEFAULT_VIDEO_STICKER_FPS, MAX_STICKER_EDGE, MAX_VIDEO_STICKER_FPS, MIN_STICKER_EDGE,
+};
 use anyhow::{ensure, Result};
 use std::{
     io::{Read, Write},
@@ -52,8 +55,9 @@ fn owned_bytes(path: &Path, max: usize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 /// Prepare a supported still image/GIF or a bounded MOV/MP4 video. Video timing
-/// and shape are probed first; shortening and resizing require caller choices.
-/// The resulting animation contains no audio and uses a 10 fps conversion policy.
+/// and shape are probed first, and a clip longer than ten seconds needs a trim.
+/// Video is always re-encoded: without audio, at `fps` (default 10) and shrunk
+/// to `max_edge` (default 240 pixels); it is never enlarged.
 pub fn prepare_sticker(
     input: &[u8],
     options: &StickerImageOptions,
@@ -139,14 +143,70 @@ pub fn prepare_sticker(
         seconds > 0.0 && seconds <= 10.0 && start + seconds <= duration + 0.001,
         "sticker_adjustment_required"
     );
-    let resize = width > u64::from(MAX_STICKER_EDGE) || height > u64::from(MAX_STICKER_EDGE);
-    ensure!(!resize || options.fit, "sticker_adjustment_required");
+    let edge = options.max_edge.unwrap_or(DEFAULT_VIDEO_STICKER_EDGE);
+    ensure!(
+        (MIN_STICKER_EDGE..=MAX_STICKER_EDGE).contains(&edge),
+        "sticker_option_invalid"
+    );
+    let resize = width.max(height) > u64::from(edge);
+    let fps = options.fps.unwrap_or(DEFAULT_VIDEO_STICKER_FPS);
+    ensure!(
+        (1..=MAX_VIDEO_STICKER_FPS).contains(&fps),
+        "sticker_option_invalid"
+    );
+    // The sticker frame limit applies to the converted animation.
+    let frames = (f64::from(fps) * seconds).ceil() as u64;
+    ensure!(frames <= 200, "sticker_adjustment_required");
+    let filter = format!(
+        "fps={fps},scale=w='min({edge},iw)':h='min({edge},ih)':force_original_aspect_ratio=decrease:flags=lanczos"
+    );
     let mut command = Command::new("ffmpeg");
-    command.args(["-v","error","-nostdin","-y","-xerror","-max_alloc","67108864","-protocol_whitelist","file",
-        "-format_whitelist","mov","-enable_drefs","0","-use_absolute_path","0","-threads","1","-filter_threads","1","-i"])
-        .arg(&source).args(["-ss",&start.to_string(),"-t",&seconds.to_string(),"-map","0:v:0","-an","-sn","-dn",
-            "-map_metadata","-1","-vf","fps=10,scale=w='min(240,iw)':h='min(240,ih)':force_original_aspect_ratio=decrease:flags=lanczos",
-            "-frames:v","100","-fs","1048577","-loop","0"]).arg(&output);
+    command
+        .args([
+            "-v",
+            "error",
+            "-nostdin",
+            "-y",
+            "-xerror",
+            "-max_alloc",
+            "67108864",
+            "-protocol_whitelist",
+            "file",
+            "-format_whitelist",
+            "mov",
+            "-enable_drefs",
+            "0",
+            "-use_absolute_path",
+            "0",
+            "-threads",
+            "1",
+            "-filter_threads",
+            "1",
+            "-i",
+        ])
+        .arg(&source)
+        .args([
+            "-ss",
+            &start.to_string(),
+            "-t",
+            &seconds.to_string(),
+            "-map",
+            "0:v:0",
+            "-an",
+            "-sn",
+            "-dn",
+            "-map_metadata",
+            "-1",
+            "-vf",
+            &filter,
+            "-frames:v",
+            "200",
+            "-fs",
+            "1048577",
+            "-loop",
+            "0",
+        ])
+        .arg(&output);
     execute(command, &output, 1024 * 1024 + 1, &mut cancelled)?;
     let mut result =
         prepare_sticker_image(&owned_bytes(&output, 1024 * 1024)?, &Default::default())?;
@@ -157,7 +217,7 @@ pub fn prepare_sticker(
     );
     result
         .transformations
-        .push("video_to_gif_10fps_without_audio".into());
+        .push(format!("video_to_gif_{fps}fps_without_audio"));
     if resize {
         result.transformations.push("resize_contain".into());
     }
@@ -165,4 +225,70 @@ pub fn prepare_sticker(
         result.transformations.push("trim".into());
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn clip(size: &str, seconds: u32) -> Vec<u8> {
+        let dir = wechat_platform::private_tempdir("wechat-sticker-video-test-").unwrap();
+        let path = dir.path().join("clip.mp4");
+        let status = Command::new("ffmpeg")
+            .args(["-v", "error", "-nostdin", "-f", "lavfi", "-i"])
+            .arg(format!("testsrc2=size={size}:rate=25:duration={seconds}"))
+            .args(["-c:v", "mpeg4", "-threads", "1", "-f", "mp4"])
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        std::fs::read(path).unwrap()
+    }
+
+    #[test]
+    fn video_defaults_to_240_pixels_at_10_fps_and_follows_a_requested_size_and_rate() {
+        let source = clip("640x480", 2);
+        let shape = |options: &StickerImageOptions| {
+            let result = prepare_sticker(&source, options, || Ok(())).unwrap();
+            (
+                result.inspection.width,
+                result.inspection.height,
+                result.inspection.frames,
+                result
+                    .transformations
+                    .iter()
+                    .find(|step| step.starts_with("video_to_gif"))
+                    .cloned()
+                    .unwrap(),
+            )
+        };
+        assert_eq!(
+            shape(&Default::default()),
+            (240, 180, 20, "video_to_gif_10fps_without_audio".into())
+        );
+        let requested = StickerImageOptions {
+            max_edge: Some(320),
+            fps: Some(5),
+            ..Default::default()
+        };
+        assert_eq!(
+            shape(&requested),
+            (320, 240, 10, "video_to_gif_5fps_without_audio".into())
+        );
+        for options in [
+            StickerImageOptions {
+                fps: Some(31),
+                ..Default::default()
+            },
+            StickerImageOptions {
+                max_edge: Some(4096),
+                ..Default::default()
+            },
+        ] {
+            let error = prepare_sticker(&source, &options, || Ok(()))
+                .err()
+                .expect("refused");
+            assert_eq!(error.to_string(), "sticker_option_invalid");
+        }
+    }
 }

@@ -106,6 +106,8 @@ impl Core {
                 &bytes,
                 &wechat_media::StickerImageOptions {
                     fit: request.fit,
+                    max_edge: request.max_edge,
+                    fps: request.fps,
                     trim: request.trim.map(|trim| wechat_media::StickerTrim {
                         start_ms: trim.start_ms,
                         duration_ms: trim.duration_ms,
@@ -298,6 +300,8 @@ mod tests {
         let request = StickerPreparationRequest {
             source_id: source.id,
             fit: false,
+            max_edge: None,
+            fps: None,
             trim: None,
         };
         let guard = core.lock_account("one").await.unwrap();
@@ -314,6 +318,8 @@ mod tests {
                 "same",
                 StickerPreparationRequest {
                     fit: true,
+                    max_edge: None,
+                    fps: None,
                     ..request
                 }
             )
@@ -344,6 +350,8 @@ mod tests {
                 StickerPreparationRequest {
                     source_id: source.id,
                     fit: false,
+                    max_edge: None,
+                    fps: None,
                     trim: None,
                 },
             )
@@ -377,6 +385,8 @@ mod lifecycle_tests {
                 StickerPreparationRequest {
                     source_id: source.id,
                     fit: false,
+                    max_edge: None,
+                    fps: None,
                     trim: None,
                 },
             )

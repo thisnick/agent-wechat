@@ -297,7 +297,7 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
       if (item.file.size===0 || item.file.size>64*1024*1024) throw Error(t("stickers.sourceSize"));
       const sourceId = item.sourceId ?? (await client.upload(account, item.file, item.file.name, item.file.type || "application/octet-stream", signal())).id;
       guard();updateImport(item.id,{sourceId});
-      const job = await waitStickerJob(client, account, await client.prepareSticker(account, { sourceId, fit: false, trim: null }, item.prepareKey, signal()), signal());
+      const job = await waitStickerJob(client, account, await client.prepareSticker(account, { sourceId, fit: false, maxEdge: null, fps: null, trim: null }, item.prepareKey, signal()), signal());
       guard(); updateImport(item.id, { prepared: job.result as unknown as PreparedSticker, busy: false });
     } catch (error) { if (!signal().aborted) updateImport(item.id, { error: readableError(error), busy: false }); }
     finally {preparing.current=false;}

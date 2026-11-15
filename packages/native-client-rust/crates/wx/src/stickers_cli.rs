@@ -44,9 +44,15 @@ pub enum StickerCommand {
         /// Verified original sticker asset belonging to --message.
         #[arg(long, requires = "message")]
         asset: Option<String>,
-        /// Permit proportional resizing for a local source.
+        /// Shrink a local source larger than 1024 pixels to fit; smaller sources keep their size.
         #[arg(long, requires = "file")]
         fit: bool,
+        /// Shrink a local source so its longest edge is at most this many pixels (16-1024).
+        #[arg(long, requires = "file", value_parser = clap::value_parser!(u32).range(16..=1024))]
+        max_edge: Option<u32>,
+        /// Frame rate for a sticker made from a local video (1-30, default 10).
+        #[arg(long, requires = "file", value_parser = clap::value_parser!(u32).range(1..=30))]
+        fps: Option<u32>,
         #[command(flatten)]
         job: StickerJobOptions,
     },
@@ -98,9 +104,16 @@ pub enum StickerCommand {
     Prepare {
         /// Local input file; the CLI uploads its bytes rather than a daemon path.
         file: PathBuf,
-        /// Permit proportional resizing to the sticker edge limit.
+        /// Shrink a source larger than 1024 pixels to fit; smaller sources keep their size.
         #[arg(long)]
         fit: bool,
+        /// Shrink so the longest edge is at most this many pixels (16-1024); never enlarges.
+        /// Video defaults to 240.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(16..=1024))]
+        max_edge: Option<u32>,
+        /// Frame rate for a sticker made from video (1-30, default 10).
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=30))]
+        fps: Option<u32>,
         /// Start of an explicit segment in seconds; requires --duration.
         #[arg(long, requires = "duration")]
         start: Option<f64>,
@@ -539,6 +552,8 @@ pub async fn run(remote: &Remote, command: StickerCommand) -> Result<Value> {
             message,
             asset,
             fit,
+            max_edge,
+            fps,
             job,
         } => {
             let key = job.key();
@@ -549,6 +564,8 @@ pub async fn run(remote: &Remote, command: StickerCommand) -> Result<Value> {
                     StickerCommand::Prepare {
                         file,
                         fit,
+                        max_edge,
+                        fps,
                         start: None,
                         duration: None,
                         idempotency_key: Some(format!(
@@ -726,6 +743,8 @@ pub async fn run(remote: &Remote, command: StickerCommand) -> Result<Value> {
         StickerCommand::Prepare {
             file,
             fit,
+            max_edge,
+            fps,
             start,
             duration,
             idempotency_key,
@@ -772,7 +791,7 @@ pub async fn run(remote: &Remote, command: StickerCommand) -> Result<Value> {
             let source = remote.upload(bytes, name).await?;
             let key = idempotency_key.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             let result = remote.request(reqwest::Method::POST, &remote.path("sticker-preparations")?,
-                Some(json!({"sourceId":source["id"],"fit":fit,"trim":trim})), Some(&key)).await
+                Some(json!({"sourceId":source["id"],"fit":fit,"maxEdge":max_edge,"fps":fps,"trim":trim})), Some(&key)).await
                 .with_context(|| format!("Preparation response unavailable; retain idempotency key {key} and reuse it with the same input"))?;
             let mut result = client_actions::wait_resource(
                 remote,

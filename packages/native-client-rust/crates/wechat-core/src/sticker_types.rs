@@ -11,9 +11,19 @@ pub const MAX_STICKER_SOURCE_BYTES: usize = 64 * 1024 * 1024;
 pub struct StickerPreparationRequest {
     /// ID returned by the existing upload endpoint.
     pub source_id: String,
-    /// Permit proportional resizing to the current sticker edge limit.
+    /// Shrink proportionally to fit within the 1024-pixel sticker edge limit when
+    /// the source is larger. Without it, a larger image or GIF is refused;
+    /// smaller sources keep their size and encoding.
     #[serde(default)]
     pub fit: bool,
+    /// Shrink proportionally so the longest edge is at most this many pixels
+    /// (16 to 1024). Never enlarges. For video it replaces the 240-pixel default.
+    #[serde(default)]
+    pub max_edge: Option<u32>,
+    /// Frame rate for a sticker made from video (1 to 30, default 10). Image and
+    /// GIF sources keep their own timing and refuse this option.
+    #[serde(default)]
+    pub fps: Option<u32>,
     /// Optional explicit segment, in milliseconds. Omission preserves the source duration.
     pub trim: Option<StickerPreparationTrim>,
 }

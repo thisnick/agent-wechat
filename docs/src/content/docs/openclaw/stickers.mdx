@@ -42,7 +42,7 @@ execution workspace can live on a different machine from the Gateway and daemon.
 4. Prepare a file made by remote execution.
 
    ```json
-   {"action":"prepare","file":"stickers/clip.mp4","startMs":1000,"durationMs":2000,"fit":true,"idempotencyKey":"clip-prepare-1"}
+   {"action":"prepare","file":"stickers/clip.mp4","startMs":1000,"durationMs":2000,"maxEdge":360,"fps":12,"idempotencyKey":"clip-prepare-1"}
    ```
 
    Use `preview` with the returned `preparationId`, then save it:
