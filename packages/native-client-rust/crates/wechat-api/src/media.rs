@@ -191,10 +191,10 @@ async fn release_upload(
     State(app): State<App>,
     Extension(c): Extension<Claims>,
     Path((a, id)): Path<(String, String)>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<crate::contracts::NativeUploadRelease>> {
     c.require(Some(&a), "send")?;
     let released = work(move || app.core.release_upload(&a, &id)).await?;
-    Ok(Json(json!({ "released": released })))
+    Ok(Json(crate::contracts::NativeUploadRelease { released }))
 }
 async fn assets(
     State(app): State<App>,

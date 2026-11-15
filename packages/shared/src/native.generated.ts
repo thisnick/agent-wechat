@@ -1728,6 +1728,11 @@ removed: boolean,
  * True when the account's local files were kept. They are always kept.
  */
 filesRetained: boolean, };
+export type NativeUploadRelease = {
+/**
+ * True when this request deleted the upload; false when it was already gone.
+ */
+released: boolean, };
 export type QuoteSendReference = {
 /**
  * ID of the saved message to quote, copied from `id` on the message.

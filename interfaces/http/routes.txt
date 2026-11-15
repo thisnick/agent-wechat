@@ -812,6 +812,8 @@ response NativeThreadPage.items[]<NativeTombstone>.id | string, required | ID of
 response NativeThreadPage.items[]<NativeTombstone>.version | string, required | Fingerprint of the saved profile data in which the resource is missing, the same value as `sourceGeneration` on the page.
 response NativeThreadPage.nextCursor | string, required, nullable | Pass it as `cursor` with the same query to get the next page. Null on the last page.
 response NativeThreadPage.sourceGeneration | string, required | Fingerprint of the saved profile data the page was read from. It changes when the profile files change.
+response NativeUploadRelease | object | Result of deleting an upload.
+response NativeUploadRelease.released | boolean, required | True when this request deleted the upload; false when it was already gone.
 response OfficialProfileSelection | object | The account an official profile is attached to.
 response OfficialProfileSelection.accountId | string, required | ID of the account that uses the profile.
 response OfficialProfileSelection.profilePath | string, required | Path of the attached profile on the daemon's host.
@@ -1098,7 +1100,7 @@ route DELETE /v1/accounts/{a}/groups/{room}/members | scope admin, idempotency k
 route DELETE /v1/accounts/{a}/login-attempts/{id} | scope varies, response NativeOperation, sdk response NativeOperation | Cancel a login attempt. Scope: Needs read, login, media or send to look the operation up, then its kind decides: login, logout and forget_credentials need login; media-writeback needs media; message_recall needs send; sync and metadata need read; every other kind needs admin.
 route DELETE /v1/accounts/{a}/operations/{id} | scope varies, response NativeOperation, sdk response NativeOperation | Ask a background operation to stop. Scope: Needs read, login, media or send to look the operation up, then its kind decides: login, logout and forget_credentials need login; media-writeback needs media; message_recall needs send; sync and metadata need read; every other kind needs admin.
 route DELETE /v1/accounts/{a}/sticker-packs/{id}/membership | scope send, idempotency key required, response MediaJob, status 202, sdk response MediaJob | Remove account membership and reconcile canonical pack storage asynchronously.
-route DELETE /v1/accounts/{a}/uploads/{id} | scope send, response untyped | Delete an upload you have finished with, such as the source of an added sticker. Returns `released: false` when it is already gone; an upload a pending send or preparation needs is kept (409 `upload_in_use`).
+route DELETE /v1/accounts/{a}/uploads/{id} | scope send, response NativeUploadRelease, sdk response NativeUploadRelease | Delete an upload you have finished with, such as the source of an added sticker. Returns `released: false` when it is already gone; an upload a pending send or preparation needs is kept (409 `upload_in_use`).
 route DELETE /v1/tokens/{id} | scope owner token, response untyped | Revoke an API token so it stops working.
 route GET /health | scope none, response untyped | Report that the daemon is running. This is the only route that needs no token.
 route GET /v1/access-tokens | scope owner token, response untyped | List the API tokens that have been issued, without their secret values.

@@ -282,7 +282,9 @@ fn convert_video(
 mod tests {
     use super::*;
 
-    fn clip(size: &str, seconds: u32) -> Vec<u8> {
+    /// A synthetic MP4, or `None` where FFmpeg is not installed (the portable
+    /// macOS and Windows test runners).
+    fn clip(size: &str, seconds: u32) -> Option<Vec<u8>> {
         let dir = wechat_platform::private_tempdir("wechat-sticker-video-test-").unwrap();
         let path = dir.path().join("clip.mp4");
         let status = Command::new("ffmpeg")
@@ -291,14 +293,16 @@ mod tests {
             .args(["-c:v", "mpeg4", "-threads", "1", "-f", "mp4"])
             .arg(&path)
             .status()
-            .unwrap();
+            .ok()?;
         assert!(status.success());
-        std::fs::read(path).unwrap()
+        Some(std::fs::read(path).unwrap())
     }
 
     #[test]
     fn video_defaults_to_240_pixels_at_10_fps_and_follows_a_requested_size_and_rate() {
-        let source = clip("640x480", 2);
+        let Some(source) = clip("640x480", 2) else {
+            return;
+        };
         let shape = |options: &StickerImageOptions| {
             let result = prepare_sticker(&source, options, || Ok(())).unwrap();
             (
@@ -325,6 +329,19 @@ mod tests {
         assert_eq!(
             shape(&requested),
             (320, 240, 10, "video_to_gif_5fps_without_audio".into())
+        );
+        // A video already in a file converts from that file to the same result.
+        let dir = wechat_platform::private_tempdir("wechat-sticker-video-file-").unwrap();
+        let path = dir.path().join("source");
+        std::fs::write(&path, &source).unwrap();
+        let from_file = prepare_sticker_file(&path, &requested, || Ok(())).unwrap();
+        assert_eq!(
+            (
+                from_file.inspection.width,
+                from_file.inspection.height,
+                from_file.inspection.frames
+            ),
+            (320, 240, 10)
         );
         for options in [
             StickerImageOptions {

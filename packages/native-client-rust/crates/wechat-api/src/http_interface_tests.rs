@@ -85,6 +85,7 @@ payloads! {
     "NativeStatus" => crate::contracts::NativeStatus,
     "NativeAccountRemovalRequest" => crate::contracts::NativeAccountRemovalRequest,
     "NativeAccountRemoval" => crate::contracts::NativeAccountRemoval,
+    "NativeUploadRelease" => crate::contracts::NativeUploadRelease,
     "NativeOperation" => crate::contracts::NativeOperation,
     "NativeReadRequest" => crate::contracts::NativeReadRequest,
     "NativeMediaBatchRequest" => crate::contracts::NativeMediaBatchRequest,

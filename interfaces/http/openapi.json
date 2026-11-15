@@ -3254,6 +3254,19 @@
         ],
         "type": "object"
       },
+      "NativeUploadRelease": {
+        "description": "Result of deleting an upload.",
+        "properties": {
+          "released": {
+            "description": "True when this request deleted the upload; false when it was already gone.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "released"
+        ],
+        "type": "object"
+      },
       "OfficialProfileRequest": {
         "additionalProperties": false,
         "description": "Where to find the stopped official WeChat profile to attach as an account.",
@@ -10654,8 +10667,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {},
-                "x-agent-wechat-untyped": true
+                "schema": {
+                  "$ref": "#/components/schemas/NativeUploadRelease"
+                }
               }
             },
             "description": "Success."
@@ -10677,6 +10691,11 @@
         "summary": "Delete an upload you have finished with, such as the source of an added sticker. Returns `released: false` when it is already gone; an upload a pending send or preparation needs is kept (409 `upload_in_use`).",
         "tags": [
           "media"
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/NativeUploadRelease"
+          }
         ]
       }
     },

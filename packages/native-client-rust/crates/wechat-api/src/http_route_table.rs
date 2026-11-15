@@ -753,9 +753,9 @@ pub(crate) const ROUTES: &[Route] = &[
         idempotency: Idempotency::No,
         request: Body::None,
         query: Body::None,
-        response: Body::Untyped,
+        response: Body::Type("NativeUploadRelease"),
         status: 200,
-        sdk: &[],
+        sdk: &[("response", "NativeUploadRelease")],
         summary: "Delete an upload you have finished with, such as the source of an added sticker. Returns `released: false` when it is already gone; an upload a pending send or preparation needs is kept (409 `upload_in_use`).",
     },
     Route {
