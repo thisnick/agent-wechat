@@ -64,8 +64,10 @@ tool wechat_stickers.afterId | string|null | Required for move: place after this
 tool wechat_stickers.assetId | string | Verified original sticker asset belonging to messageId for add.
 tool wechat_stickers.durationMs | integer, min 1, max 10000 | Explicit retained duration in milliseconds; omitted means preserve duration.
 tool wechat_stickers.file | string | Workspace-relative source file for prepare; resolved on the session execution host.
-tool wechat_stickers.fit | boolean | Permit proportional resizing to the sticker output limit.
+tool wechat_stickers.fit | boolean | Shrink a source larger than 1024 pixels to fit. Smaller sources keep their size and encoding.
+tool wechat_stickers.fps | integer, min 1, max 30 | Frame rate for a sticker made from video; default 10. Not accepted for images or GIFs.
 tool wechat_stickers.idempotencyKey | string, min length 1, max length 200 | Required stable key for prepare/add/move/remove and downloads that need acquisition. Reuse the key and identical intent after uncertain responses.
+tool wechat_stickers.maxEdge | integer, min 16, max 1024 | Shrink so the longest edge is at most this many pixels; never enlarges. Video defaults to 240.
 tool wechat_stickers.messageId | string | Received message identity when adding a received original instead of a preparation.
 tool wechat_stickers.output | string | New workspace-relative output for download, using the original format extension; existing files are never replaced.
 tool wechat_stickers.preparationId | string | Preparation job identity for preview/download; returned by prepare.

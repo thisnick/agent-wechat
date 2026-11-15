@@ -37,11 +37,23 @@ impl Core {
             source.byte_length <= crate::MAX_STICKER_SOURCE_BYTES as u64,
             "sticker_source_size_limit"
         );
-        let hash = digest(&serde_json::to_vec(&(
-            &source.sha256,
-            request.fit,
-            &request.trim,
-        ))?);
+        // Requests without the size options keep their original hash, so a
+        // retry of a preparation made by an older daemon still matches.
+        let hash = if request.max_edge.is_none() && request.fps.is_none() {
+            digest(&serde_json::to_vec(&(
+                &source.sha256,
+                request.fit,
+                &request.trim,
+            ))?)
+        } else {
+            digest(&serde_json::to_vec(&(
+                &source.sha256,
+                request.fit,
+                &request.trim,
+                request.max_edge,
+                request.fps,
+            ))?)
+        };
         let id = format!("job_{}", uuid::Uuid::new_v4());
         let payload = self.vault.seal(
             account,
@@ -320,10 +332,25 @@ mod tests {
                     fit: true,
                     max_edge: None,
                     fps: None,
-                    ..request
+                    ..request.clone()
                 }
             )
             .is_err());
+        // The size options are part of the intent a key stands for.
+        for (max_edge, fps) in [(Some(120), None), (None, Some(5))] {
+            let error = core
+                .prepare_sticker(
+                    "one",
+                    "same",
+                    StickerPreparationRequest {
+                        max_edge,
+                        fps,
+                        ..request.clone()
+                    },
+                )
+                .expect_err("a changed intent conflicts");
+            assert_eq!(error.to_string(), "idempotency_conflict");
+        }
         drop(guard);
         let job = finished(&core, &first.id).await;
         assert_eq!(job.state, "available", "{:?}", job.reason);

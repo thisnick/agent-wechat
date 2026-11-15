@@ -5,12 +5,15 @@ const ended = new Set(["available", "accepted", "failed", "cancelled", "needs_re
 
 /** A known job result, distinct from failure to reach the hub. */
 export class StickerJobError extends Error {
+  /** The job's result code when it is a safe identifier, otherwise empty. */
+  readonly reason: string;
   constructor(job: Pick<MediaJob, "id" | "state" | "reason">, stillRunning = false) {
     const id = /^[a-zA-Z0-9_-]{1,100}$/.test(job.id) ? job.id : "";
     const state = /^[a-z_]{1,40}$/.test(job.state) ? job.state : "unknown";
     const reason = job.reason && /^[a-z0-9_]{1,80}$/.test(job.reason) ? job.reason : "";
     super(t(stillRunning ? "stickers.jobStillRunning" : "stickers.jobFailed", { id, state, reason }));
     this.name = "StickerJobError";
+    this.reason = stillRunning ? "" : reason;
   }
 }
 

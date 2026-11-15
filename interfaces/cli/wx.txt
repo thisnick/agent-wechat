@@ -477,8 +477,10 @@ wx stickers | - | Read Saved stickers and prepare local sticker media
 wx stickers add | - | Save a local source, a prepared result, or one received sticker
 wx stickers add --asset | takes <ASSET> | Verified original sticker asset belonging to --message
 wx stickers add --detach | switch | Return the queued job without waiting
-wx stickers add --fit | switch | Permit proportional resizing for a local source
+wx stickers add --fit | switch | Shrink a local source larger than 1024 pixels to fit; smaller sources keep their size
+wx stickers add --fps | takes <FPS> | Frame rate for a sticker made from a local video (1-30, default 10)
 wx stickers add --idempotency-key | takes <IDEMPOTENCY_KEY> | Stable submission key; reuse the key after an uncertain response
+wx stickers add --max-edge | takes <MAX_EDGE> | Shrink a local source so its longest edge is at most this many pixels (16-1024)
 wx stickers add --message | takes <MESSAGE> | Received message containing the original sticker attachment
 wx stickers add --prepared | takes <PREPARED> | Completed preparation to save, without preparing it again
 wx stickers add --wait | takes <WAIT>, default 30 | Seconds to wait; work continues after the client stops waiting
@@ -528,8 +530,10 @@ wx stickers packs show <ID> | position 1, required | Official product identity
 wx stickers prepare | - | Prepare a local image, GIF, or MOV/MP4 video without saving or sending it
 wx stickers prepare --detach | switch | Return immediately after the preparation is queued
 wx stickers prepare --duration | takes <DURATION> | Retained segment length in seconds, at most ten
-wx stickers prepare --fit | switch | Permit proportional resizing to the sticker edge limit
+wx stickers prepare --fit | switch | Shrink a source larger than 1024 pixels to fit; smaller sources keep their size
+wx stickers prepare --fps | takes <FPS> | Frame rate for a sticker made from video (1-30, default 10)
 wx stickers prepare --idempotency-key | takes <IDEMPOTENCY_KEY> | Stable key for this preparation; reuse it after an uncertain response
+wx stickers prepare --max-edge | takes <MAX_EDGE> | Shrink so the longest edge is at most this many pixels (16-1024); never enlarges. Video defaults to 240
 wx stickers prepare --start | takes <START> | Start of an explicit segment in seconds; requires --duration
 wx stickers prepare --wait | takes <WAIT>, default 30 | Seconds to wait; work continues after the client stops waiting
 wx stickers prepare <FILE> | position 1, required | Local input file; the CLI uploads its bytes rather than a daemon path

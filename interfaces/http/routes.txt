@@ -127,7 +127,9 @@ request StickerPackQuery | object, rejects unknown fields | Filters for account-
 request StickerPackQuery.cursor | string, nullable | Opaque available-feed continuation returned by the preceding page.
 request StickerPackQuery.membership | string, nullable, values added | Select `added` for the complete canonical account list; omission browses the feed.
 request StickerPreparationRequest | object, rejects unknown fields | Explicit preparation of owned image/GIF/video bytes; never saves or sends a sticker.
-request StickerPreparationRequest.fit | boolean, default false | Permit proportional resizing to the current sticker edge limit.
+request StickerPreparationRequest.fit | boolean, default false | Shrink proportionally to fit within the 1024-pixel sticker edge limit when the source is larger. Without it, a larger image or GIF is refused; smaller sources keep their size and encoding.
+request StickerPreparationRequest.fps | integer, nullable, min 0, format uint32, default null | Frame rate for a sticker made from video (1 to 30, default 10). Image and GIF sources keep their own timing and refuse this option.
+request StickerPreparationRequest.maxEdge | integer, nullable, min 0, format uint32, default null | Shrink proportionally so the longest edge is at most this many pixels (16 to 1024). Never enlarges. For video it replaces the 240-pixel default.
 request StickerPreparationRequest.sourceId | string, required | ID returned by the existing upload endpoint.
 request StickerPreparationRequest.trim | object, nullable, rejects unknown fields | Optional explicit segment, in milliseconds. Omission preserves the source duration.
 request StickerPreparationRequest.trim.durationMs | integer, required, min 0, format uint32 | Duration of the retained segment in milliseconds, greater than zero.
