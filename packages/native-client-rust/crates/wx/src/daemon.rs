@@ -58,15 +58,15 @@ fn load(path: &Path) -> Result<Option<OwnedProcess>> {
         Err(error) => Err(error),
     }
 }
-fn remote(config: &wechat_config::ServerConfig) -> Result<Remote> {
-    Remote::new(wechat_config::ClientConfig {
+fn remote(config: &crate::config::ServerConfig) -> Result<Remote> {
+    Remote::new(crate::config::ClientConfig {
         schema_version: 1,
         endpoint: format!("http://{}", config.listen),
         token_file: config.token_file.clone(),
         account: None,
     })
 }
-async fn identity(config: &wechat_config::ServerConfig, owned: &OwnedProcess) -> Result<Value> {
+async fn identity(config: &crate::config::ServerConfig, owned: &OwnedProcess) -> Result<Value> {
     if !process_matches(owned)
         || owned.data_dir != std::fs::canonicalize(&config.data_dir)?
         || owned.endpoint != format!("http://{}", config.listen)
@@ -87,7 +87,7 @@ async fn identity(config: &wechat_config::ServerConfig, owned: &OwnedProcess) ->
     Ok(value)
 }
 pub async fn run(
-    config: wechat_config::ServerConfig,
+    config: crate::config::ServerConfig,
     command: DaemonCommand,
     output: Output,
 ) -> Result<()> {

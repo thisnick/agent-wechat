@@ -43,7 +43,7 @@ The app includes the chat interface, native hub, and `wx` CLI. See the
 [desktop guide](https://thisnick.github.io/agent-wechat/setup/desktop/) for
 installers, system requirements, connection keys, and networking. Desktop
 packaging and installed-app acceptance vary by platform; check the
-[platform status](PLATFORM-ACCEPTANCE.md) and release notes for the build you use.
+[platform status](RELEASING.md#platform-release-candidate-acceptance) and release notes for the build you use.
 
 ### Terminal and API
 
@@ -217,9 +217,9 @@ for prerequisites and scenario controls. To build and test changes, start with
 [AGENTS.md](AGENTS.md) and the
 [build guide](https://thisnick.github.io/agent-wechat/reference/build/).
 
-The [demo assets and gallery source](scripts/demo-gallery/README.md) include the
+The [demo assets and gallery source](docs/demo/gallery/README.md) include the
 finished video, screenshots, synthetic visual fixtures, and image-generation
-scripts. [Video edit sources](scripts/demo-video/README.md) preserve the motion
+scripts. [Video edit sources](docs/demo/video/README.md) preserve the motion
 titles, timing, and original instrumental; private raw recordings stay outside Git.
 
 ## License
@@ -227,4 +227,4 @@ titles, timing, and original instrumental; private raw recordings stay outside G
 Agent WeChat's original project code is licensed under the [MIT License](LICENSE).
 Third-party components retain their existing licenses and notices; see the
 [bundled notices](packages/cli/THIRD_PARTY_NOTICES.txt), component-specific notices,
-and the [Inter font license](scripts/demo-video/fonts/OFL.txt).
+and the [Inter font license](docs/demo/video/fonts/OFL.txt).

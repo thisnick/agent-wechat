@@ -5,7 +5,7 @@ from pathlib import Path
 import subprocess
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parents[1]
+ROOT = HERE.parents[2]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--output-dir', type=Path, default=ROOT / 'work/demo-gallery/media')
 args = parser.parse_args()

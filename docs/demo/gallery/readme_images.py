@@ -4,13 +4,13 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parents[1]
+ROOT = HERE.parents[2]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--output-dir', type=Path, default=ROOT / 'docs/public/demo')
 args = parser.parse_args()
 output = args.output_dir.resolve()
 output.mkdir(parents=True, exist_ok=True)
-font_path = HERE.parent / 'demo-video/fonts/Inter.ttf'
+font_path = HERE.parent / 'video/fonts/Inter.ttf'
 
 
 def font(size):

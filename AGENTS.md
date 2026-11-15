@@ -48,7 +48,7 @@ Native routes/contracts live in `packages/native-client-rust/crates/wechat-api/`
 - Write plain sentences for a reader who hasn't seen the code. Avoid "explicit", "bounded", "durable", "custody", "projection" and similar internal terms unless the page defines them.
 - Prefer a table, diagram (a `mermaid` code block, rendered at build time) or example over a paragraph.
 - Keep task pages short, roughly 600 words; split a page that grows past that.
-- Internal test evidence, CI scripts and release mechanics belong in `RELEASING.md`, `PLATFORM-ACCEPTANCE.md` or `deploy/native/README.md`, not in the `docs/` site.
+- Internal test evidence, CI scripts and release mechanics belong in `RELEASING.md` or `deploy/native/README.md`, not in the `docs/` site.
 - Moving or renaming a page needs an entry in `moved` in `docs/astro.config.mjs` so old links keep working.
 
 ## Runtime boundaries

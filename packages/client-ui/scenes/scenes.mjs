@@ -585,7 +585,7 @@ async function stickerFixtures(page, cold = false) {
 // a `file` are real fixtures the UI measures itself; the PNGs are drawn in the page.
 const stickerGif = '../../native-client-rust/crates/wechat-simulator/fixtures/sticker.gif';
 const importSources = {
-  'afternoon-walk.mp4': { kind: 'video', type: 'video/mp4', width: 1280, height: 858, durationMs: 4000, file: '../../../scripts/demo-gallery/fixtures/media/afternoon-walk.mp4' },
+  'afternoon-walk.mp4': { kind: 'video', type: 'video/mp4', width: 1280, height: 858, durationMs: 4000, file: '../../../docs/demo/gallery/fixtures/media/afternoon-walk.mp4' },
   'photo.png': { kind: 'image', type: 'image/png', width: 800, height: 600 },
   'poster.png': { kind: 'image', type: 'image/png', width: 1600, height: 1200 },
   'wave-1.gif': { kind: 'gif', type: 'image/gif', width: 96, height: 96, durationMs: 1000, file: stickerGif },

@@ -34,7 +34,7 @@ fn read(location: &ProfileLocation, keys: &KeyFile) -> ProfileReader {
 fn message_original_is_independent_of_saved_membership_and_pack_cache_removal() {
     let (_dir, location, keys, options) = fixture();
     let archive = wechat_media::decode_sticker_archive(
-        include_bytes!("../../wechat-media/fixtures/sticker-pack.zip"),
+        include_bytes!("../../wechat-media/tests/fixtures/sticker-pack.zip"),
         "pack.fixture",
         &[
             "2c5f182a5005cfdeec4bd4071fad0e39".into(),

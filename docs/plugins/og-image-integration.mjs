@@ -3,7 +3,7 @@ import sharp from 'sharp';
 import { readFileSync, readdirSync, statSync, mkdirSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { resolve, dirname } from 'path';
-import { translatedLocales } from './locales.mjs';
+import { translatedLocales } from '../locales.mjs';
 
 export const OG_WIDTH = 1200;
 export const OG_HEIGHT = 630;

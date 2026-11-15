@@ -2884,17 +2884,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wechat-config"
-version = "2.5.0"
-dependencies = [
- "anyhow",
- "serde",
- "tempfile",
- "toml",
- "wechat-platform",
-]
-
-[[package]]
 name = "wechat-core"
 version = "2.5.0"
 dependencies = [
@@ -3331,7 +3320,6 @@ dependencies = [
  "wechat-api",
  "wechat-audio",
  "wechat-calls",
- "wechat-config",
  "wechat-core",
  "wechat-media",
  "wechat-platform",

@@ -13,6 +13,7 @@ use wechat_core::Core;
 mod calls_cli;
 mod cli_help;
 mod client_actions;
+mod config;
 mod daemon;
 mod events;
 mod login;
@@ -1199,10 +1200,10 @@ struct Remote {
     account: Option<String>,
 }
 impl Remote {
-    fn new(config: wechat_config::ClientConfig) -> Result<Self> {
+    fn new(config: crate::config::ClientConfig) -> Result<Self> {
         Self::with_token(config, None)
     }
-    fn with_token(config: wechat_config::ClientConfig, token: Option<String>) -> Result<Self> {
+    fn with_token(config: crate::config::ClientConfig, token: Option<String>) -> Result<Self> {
         let base = reqwest::Url::parse(&format!("{}/", config.endpoint.trim_end_matches('/')))?;
         if !base.username().is_empty()
             || base.password().is_some()
@@ -1457,7 +1458,7 @@ async fn run(cli: Cli) -> Result<()> {
     {
         bail!("--token-stdin is supported by serve and HTTP client commands");
     }
-    let env = wechat_config::Environment::capture();
+    let env = crate::config::Environment::capture();
     let cwd = std::env::current_dir()?;
     if matches!(
         &cli.command,
@@ -1468,8 +1469,8 @@ async fn run(cli: Cli) -> Result<()> {
                 command: ConfigCommand::Show
             }
     ) {
-        let config = wechat_config::resolve(
-            &wechat_config::Overrides {
+        let config = crate::config::resolve(
+            &crate::config::Overrides {
                 server_config: cli.server_config.clone(),
                 data_dir: cli.data_dir.clone(),
                 token_file: cli.token_file.clone(),
@@ -1600,8 +1601,8 @@ async fn run(cli: Cli) -> Result<()> {
             output,
         );
     }
-    let config = wechat_config::resolve(
-        &wechat_config::Overrides {
+    let config = crate::config::resolve(
+        &crate::config::Overrides {
             server_config: cli.server_config.clone(),
             data_dir: cli.data_dir.clone(),
             token_file: cli.token_file.clone(),
@@ -2274,7 +2275,7 @@ async fn stdin_token() -> Result<String> {
     }
     Ok(token.into())
 }
-async fn serve(config: wechat_config::ServerConfig, token_stdin: bool, json: bool) -> Result<()> {
+async fn serve(config: crate::config::ServerConfig, token_stdin: bool, json: bool) -> Result<()> {
     let supplied = if token_stdin {
         if config.token_explicit {
             bail!("--token-stdin cannot be combined with a configured tokenFile");
@@ -2397,7 +2398,7 @@ async fn wait_operation_checked(
 }
 
 fn offline(
-    config: wechat_config::ServerConfig,
+    config: crate::config::ServerConfig,
     account: String,
     command: StoreCommand,
     output: Output,

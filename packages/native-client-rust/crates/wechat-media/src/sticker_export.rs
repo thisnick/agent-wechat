@@ -216,7 +216,7 @@ mod tests {
     use super::*;
     fn items() -> Vec<StickerExportItem> {
         let archive = crate::decode_sticker_archive(
-            include_bytes!("../fixtures/sticker-pack.zip"),
+            include_bytes!("../tests/fixtures/sticker-pack.zip"),
             "pack.fixture",
             &[
                 "2c5f182a5005cfdeec4bd4071fad0e39".into(),

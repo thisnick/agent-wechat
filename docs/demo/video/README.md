@@ -7,11 +7,11 @@ Windows client; it is not a compatibility statement for current releases.
 
 The final cut is **1920 × 1080, 30 fps, 2,776 frames (92.533 seconds)**.
 The approved final export is included at
-[`docs/public/demo/agent-wechat-demo.mp4`](../../docs/public/demo/agent-wechat-demo.mp4).
+[`docs/public/demo/agent-wechat-demo.mp4`](../../public/demo/agent-wechat-demo.mp4).
 Private raw recordings, standalone voice notes, credentials, and intermediate
 renders are not stored in Git. Keep the original recordings separately to rebuild
 the full video. The title preview and instrumental can be generated without them.
-README and gallery images have their own [rebuild guide](../demo-gallery/README.md).
+README and gallery images have their own [rebuild guide](../gallery/README.md).
 
 ## Run
 
@@ -21,16 +21,16 @@ below. Run from the repository root:
 ```sh
 python3 -m venv work/demo-video/venv
 . work/demo-video/venv/bin/activate
-python -m pip install -r scripts/demo-video/requirements.txt
+python -m pip install -r docs/demo/video/requirements.txt
 
 # Independent previews; no recordings required.
-python scripts/demo-video/titles.py --frames
-python scripts/demo-video/titles.py
-python scripts/demo-video/music.py
+python docs/demo/video/titles.py --frames
+python docs/demo/video/titles.py
+python docs/demo/video/music.py
 
 # Full edit, with the local inputs listed below.
-python scripts/demo-video/render.py
-python scripts/demo-video/finish.py
+python docs/demo/video/render.py
+python docs/demo/video/finish.py
 ```
 
 Outputs go to `work/demo-video/render/`. The final file is

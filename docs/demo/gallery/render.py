@@ -3,14 +3,14 @@ from pathlib import Path
 from PIL import Image,ImageDraw,ImageFont
 import argparse,json
 HERE=Path(__file__).resolve().parent
-ROOT=HERE.parents[1]
+ROOT=HERE.parents[2]
 parser=argparse.ArgumentParser(description='Render the approved Product Hunt gallery from archived capture inputs.')
 parser.add_argument('--output-dir',type=Path,default=ROOT/'docs/public/demo/gallery')
 parser.add_argument('--captures-dir',type=Path,default=HERE/'captures')
 args=parser.parse_args()
 OUT=args.output_dir.resolve();OUT.mkdir(parents=True,exist_ok=True)
 CAP=args.captures_dir.resolve()
-FONT=HERE.parent/'demo-video/fonts/Inter.ttf'
+FONT=HERE.parent/'video/fonts/Inter.ttf'
 BG=(23,24,25);WHITE=(255,255,255);ORANGE=(189,87,33)
 W,H=1270,760
 

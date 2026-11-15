@@ -1,10 +1,10 @@
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
-import { remarkBasePath } from './remark-base-path.mjs';
-import { remarkHeadingIds } from './remark-heading-ids.mjs';
+import { remarkBasePath } from './plugins/remark-base-path.mjs';
+import { remarkHeadingIds } from './plugins/remark-heading-ids.mjs';
 import { locales, translatedLocales } from './locales.mjs';
-import { remarkMermaid } from './remark-mermaid.mjs';
-import { ogImage } from './og-image-integration.mjs';
+import { remarkMermaid } from './plugins/remark-mermaid.mjs';
+import { ogImage } from './plugins/og-image-integration.mjs';
 
 const base = '/agent-wechat';
 const site = 'https://thisnick.github.io';
