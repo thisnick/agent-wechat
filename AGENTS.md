@@ -11,6 +11,7 @@ This repository provides a standalone native WeChat daemon, Rust CLI and OpenCla
 | `packages/cli/` | npm `wx` launcher and verified executable installer |
 | `packages/openclaw-extension/` | OpenClaw native hosting, event custody, model handoff and media |
 | `deploy/native/` | Native-only image, Compose and optional user-service examples |
+| `scripts/` | Repository tooling: CI helpers, release scripts, cross-package smoke tests, translation and interface tooling. See `scripts/AGENTS.md` |
 | `docs/` | Public documentation site |
 
 Native routes/contracts live in `packages/native-client-rust/crates/wechat-api/`; run `pnpm generate-types` after exported Rust contract changes. The README is a concise user guide, not an exhaustive API specification. The former UI server, image, container CLI and Wechaty integrations are retired; Git history retains their implementation.
