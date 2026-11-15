@@ -175,22 +175,47 @@ impl Core {
                 cdn.download_with_progress(plan.locator.as_ref().unwrap(), |n, t| {
                     self.progress_media(account, id, n, t)
                 })
-            })?;
-            self.resume_media_state(account, id, &plan.fence)?;
-            ensure!(
-                downloaded.substituted_filetype.is_none_or(|t| t == 5),
-                "unsupported_media_variant"
-            );
+            });
+            let bytes = match downloaded {
+                Ok(downloaded) => {
+                    self.resume_media_state(account, id, &plan.fence)?;
+                    ensure!(
+                        downloaded.substituted_filetype.is_none_or(|t| t == 5),
+                        "unsupported_media_variant"
+                    );
+                    downloaded.bytes
+                }
+                // The CDN refuses some pack archives outright (official packs
+                // answer HTTP 400). The detail still advertises every item's
+                // own source, and each original is verified against its MD5
+                // identity, so assemble the same archive layout from those.
+                // Keeping the archive form lets repair and later membership
+                // promotion reuse the one verified decode and writeback path.
+                Err(error) if crate::media::is_cdn_download_refused(&error) => {
+                    let detail = plan
+                        .detail
+                        .as_ref()
+                        .context("sticker_metadata_incomplete")?;
+                    let content = permit.transfer(self, account, || {
+                        wechat_protocol::sticker_packs::fetch_sticker_pack_items(detail, |n, t| {
+                            self.progress_media(account, id, n, t)
+                        })
+                    })?;
+                    self.resume_media_state(account, id, &plan.fence)?;
+                    wechat_media::encode_sticker_archive(&plan.pack, &content)?
+                }
+                Err(error) => return Err(error),
+            };
             self.store_pack_bytes(
                 account,
                 id,
                 &archive_id,
                 "pack.zip",
-                &downloaded.bytes,
+                &bytes,
                 "application/zip",
                 0,
             )?;
-            downloaded.bytes
+            bytes
         };
         let ids = plan
             .detail
