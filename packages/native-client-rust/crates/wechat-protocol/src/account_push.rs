@@ -17,8 +17,8 @@ impl NativeClient {
     /// Open an authenticated notification transport on the caller's blocking
     /// worker. Creating the transport does not start a hidden executor or loop.
     pub fn open_push_connection_blocking(&self) -> Result<AccountPushConnection> {
-        let (exchange, state) = self
-            .owned_account()?
+        let owner = self.owned_account()?;
+        let (exchange, state) = owner
             .begin()
             .map_err(|error| error.context(NativeRequestNotSubmitted))?;
         let credential_generation = exchange.credential_generation;
@@ -27,6 +27,7 @@ impl NativeClient {
             options.clone(),
             exchange,
             state,
+            owner.short_link.clone(),
             Arc::new(AtomicBool::new(false)),
             |_, state, check| {
                 check()?;
@@ -59,6 +60,7 @@ impl AccountPushConnection {
             self.client.options.clone(),
             exchange,
             state,
+            self.client.owned_account()?.short_link.clone(),
             Arc::new(AtomicBool::new(false)),
             |_, state, check| operation(&mut self.connection, state, check),
         )
