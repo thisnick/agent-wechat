@@ -70,6 +70,19 @@ impl AccountPushConnection {
         self.request(|connection, state, check| connection.heartbeat_guarded(state, cursor, check))
     }
 
+    /// Submit one journaled sticker probe or byte continuation on this long
+    /// link. Same contract as `AccountRequest::send_sticker_chunk_raw`: return
+    /// raw bytes for durable retention before validating the acknowledgement.
+    /// A transport error after submission leaves the outcome uncertain.
+    pub fn send_sticker_chunk_raw(
+        &mut self,
+        chunk: &crate::sticker_send::StickerSendChunk<'_>,
+    ) -> Result<Vec<u8>> {
+        self.request(|connection, state, check| {
+            connection.sticker_chunk_guarded(state, chunk, check)
+        })
+    }
+
     pub fn sync(&mut self, cursor: &[u8], scene: u32) -> Result<wire::SyncBatch> {
         self.request(|connection, state, check| {
             connection.sync_guarded(state, cursor, scene, check)

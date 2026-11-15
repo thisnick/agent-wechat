@@ -29,6 +29,7 @@ mod quote_send;
 mod quotes;
 mod read_view;
 pub use read_view::ReadTimings;
+mod long_link;
 mod sticker_control;
 mod sticker_handle;
 mod sticker_metadata_cache;

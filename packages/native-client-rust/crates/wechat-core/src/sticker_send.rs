@@ -235,6 +235,7 @@ impl Core {
             self.save_sticker_send_plan(account, id, &plan)?;
         }
         self.write_sticker_message_cache(account, id, &plan)?;
+        let shared: Arc<[u8]> = Arc::from(bytes.as_slice());
         while plan.server_id.is_none() {
             self.phase_media(account, id, "submitting")?;
             plan.submitted = true;
@@ -249,9 +250,7 @@ impl Core {
             };
             let mut state = self.resume_media_state(account, id, &plan.fence)?;
             let raw = permit.transfer(self, account, || {
-                self.native_request(account, &mut state, |ctx| {
-                    ctx.send_sticker_chunk_raw(&chunk)
-                })
+                self.submit_sticker_chunk(account, &mut state, &chunk, &shared)
             })?;
             ensure!(
                 raw.len() <= 65536 && plan.replies.len() < 2050,
@@ -279,6 +278,38 @@ impl Core {
         }
         self.phase_media(account, id, "projecting")?;
         self.finish_sticker_send(account, id, &plan)
+    }
+    /// Submit one journaled piece: on the connected push session's long link,
+    /// as the official client does, otherwise on the short link. The short link
+    /// is used only when the session never started the piece; a started piece's
+    /// failure stays uncertain and is never resubmitted on another transport.
+    fn submit_sticker_chunk(
+        &self,
+        account: &str,
+        state: &mut wechat_protocol::AccountState,
+        chunk: &wire::StickerSendChunk<'_>,
+        source: &Arc<[u8]>,
+    ) -> Result<Vec<u8>> {
+        if let Some(mailbox) = self.long_link(account) {
+            let piece = crate::long_link::LongLinkStickerChunk {
+                id: chunk.id.to_owned(),
+                recipient: chunk.recipient.to_owned(),
+                client_id: chunk.client_id.to_owned(),
+                source: source.clone(),
+                offset: chunk.offset,
+                probe: chunk.probe,
+            };
+            if let crate::long_link::LongLinkOutcome::Sent(result) = mailbox.submit(piece) {
+                // Mirror the owner's state, including any adopted cookie.
+                if let Ok(client) = self.native_account(account, Default::default()) {
+                    if let Ok(accepted) = client.export_account_state() {
+                        *state = accepted;
+                    }
+                }
+                return result;
+            }
+        }
+        self.native_request(account, state, |ctx| ctx.send_sticker_chunk_raw(chunk))
     }
     fn finish_sticker_send(&self, account: &str, id: &str, plan: &StickerSendPlan) -> Result<()> {
         self.write_sticker_message_cache(account, id, plan)?;
