@@ -119,6 +119,8 @@ pub struct CoreShared {
     account_calls: Mutex<AccountCalls>,
     pub(crate) sticker_metadata: crate::sticker_metadata_cache::StickerMetadataCache,
     native_accounts: Mutex<BTreeMap<String, Option<wechat_protocol::NativeClient>>>,
+    /// Mailboxes of connected native push sessions, for long-link sticker pieces.
+    pub(crate) long_links: Mutex<BTreeMap<String, Arc<crate::long_link::LongLinkMailbox>>>,
 
     pub(crate) call_epochs: Mutex<BTreeMap<String, crate::calls::authority::Entry>>,
     pub(crate) upstream: Arc<dyn crate::upstream::Upstream>,
@@ -358,6 +360,7 @@ impl Core {
                 account_calls: Mutex::new(AccountCalls::default()),
                 sticker_metadata: Default::default(),
                 native_accounts: Mutex::new(BTreeMap::new()),
+                long_links: Mutex::new(BTreeMap::new()),
 
                 call_epochs: Mutex::new(BTreeMap::new()),
                 upstream,

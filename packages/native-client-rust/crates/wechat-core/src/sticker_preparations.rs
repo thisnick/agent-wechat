@@ -37,11 +37,23 @@ impl Core {
             source.byte_length <= crate::MAX_STICKER_SOURCE_BYTES as u64,
             "sticker_source_size_limit"
         );
-        let hash = digest(&serde_json::to_vec(&(
-            &source.sha256,
-            request.fit,
-            &request.trim,
-        ))?);
+        // Requests without the size options keep their original hash, so a
+        // retry of a preparation made by an older daemon still matches.
+        let hash = if request.max_edge.is_none() && request.fps.is_none() {
+            digest(&serde_json::to_vec(&(
+                &source.sha256,
+                request.fit,
+                &request.trim,
+            ))?)
+        } else {
+            digest(&serde_json::to_vec(&(
+                &source.sha256,
+                request.fit,
+                &request.trim,
+                request.max_edge,
+                request.fps,
+            ))?)
+        };
         let id = format!("job_{}", uuid::Uuid::new_v4());
         let payload = self.vault.seal(
             account,
@@ -94,18 +106,27 @@ impl Core {
             .vault
             .open_record(account, &format!("media-job:{id}"), &row.payload)?;
         let request: StickerPreparationRequest = serde_json::from_slice(&plain)?;
-        let (_, bytes) = self.source_bytes(account, &request.source_id)?;
+        let source = self
+            .store
+            .media_source_metadata(account, &request.source_id)?;
         ensure!(
-            bytes.len() <= crate::MAX_STICKER_SOURCE_BYTES,
+            source.byte_length <= crate::MAX_STICKER_SOURCE_BYTES as u64,
             "sticker_source_size_limit"
         );
         row.phase = "preparing".into();
         self.store.save_media_job(account, &row)?;
         let output = permit.transfer(self, account, || {
-            wechat_media::prepare_sticker(
-                &bytes,
+            // The upload is decrypted into a private file, never into memory;
+            // a video is converted from that file directly.
+            let directory = wechat_platform::private_tempdir("wechat-sticker-source-")?;
+            let path = directory.path().join("source");
+            self.source_to_file(account, &request.source_id, &path)?;
+            wechat_media::prepare_sticker_file(
+                &path,
                 &wechat_media::StickerImageOptions {
                     fit: request.fit,
+                    max_edge: request.max_edge,
+                    fps: request.fps,
                     trim: request.trim.map(|trim| wechat_media::StickerTrim {
                         start_ms: trim.start_ms,
                         duration_ms: trim.duration_ms,
@@ -176,7 +197,7 @@ impl Core {
         row.phase = "completed".into();
         row.retryable = false;
         row.error_code = None;
-        row.data["completedBytes"] = bytes.len().into();
+        row.data["completedBytes"] = source.byte_length.into();
         row.data["result"] = serde_json::to_value(prepared)?;
         self.store.save_media_job(account, &row)?;
         Ok(())
@@ -298,6 +319,8 @@ mod tests {
         let request = StickerPreparationRequest {
             source_id: source.id,
             fit: false,
+            max_edge: None,
+            fps: None,
             trim: None,
         };
         let guard = core.lock_account("one").await.unwrap();
@@ -314,10 +337,27 @@ mod tests {
                 "same",
                 StickerPreparationRequest {
                     fit: true,
-                    ..request
+                    max_edge: None,
+                    fps: None,
+                    ..request.clone()
                 }
             )
             .is_err());
+        // The size options are part of the intent a key stands for.
+        for (max_edge, fps) in [(Some(120), None), (None, Some(5))] {
+            let error = core
+                .prepare_sticker(
+                    "one",
+                    "same",
+                    StickerPreparationRequest {
+                        max_edge,
+                        fps,
+                        ..request.clone()
+                    },
+                )
+                .expect_err("a changed intent conflicts");
+            assert_eq!(error.to_string(), "idempotency_conflict");
+        }
         drop(guard);
         let job = finished(&core, &first.id).await;
         assert_eq!(job.state, "available", "{:?}", job.reason);
@@ -344,6 +384,8 @@ mod tests {
                 StickerPreparationRequest {
                     source_id: source.id,
                     fit: false,
+                    max_edge: None,
+                    fps: None,
                     trim: None,
                 },
             )
@@ -377,6 +419,8 @@ mod lifecycle_tests {
                 StickerPreparationRequest {
                     source_id: source.id,
                     fit: false,
+                    max_edge: None,
+                    fps: None,
                     trim: None,
                 },
             )

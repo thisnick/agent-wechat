@@ -12,8 +12,36 @@ fn validate_upload_chunk(current: usize, next: usize) -> ApiResult<()> {
     }
     Ok(())
 }
-fn upload_capacity(current: usize, needed: usize) -> usize {
-    current.saturating_mul(2).max(needed).min(MAX_SOURCE_BYTES)
+/// One message from the request task: a body chunk, the end of the body
+/// (`Ok(None)`), or why it stopped.
+type UploadPiece = std::io::Result<Option<axum::body::Bytes>>;
+/// Blocking reader over upload chunks sent from the request task, so the
+/// encrypting writer consumes the body as it arrives. Only an explicit end
+/// marker ends the body: a request dropped mid-upload closes the channel
+/// without one and fails the upload instead of storing a truncated file.
+struct ChunkReader {
+    chunks: tokio::sync::mpsc::Receiver<UploadPiece>,
+    current: axum::body::Bytes,
+    ended: bool,
+}
+impl std::io::Read for ChunkReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        while self.current.is_empty() {
+            if self.ended {
+                return Ok(0);
+            }
+            match self.chunks.blocking_recv() {
+                Some(Ok(Some(chunk))) => self.current = chunk,
+                Some(Ok(None)) => self.ended = true,
+                Some(Err(error)) => return Err(error),
+                None => return Err(std::io::Error::other("upload_interrupted")),
+            }
+        }
+        let count = buffer.len().min(self.current.len());
+        buffer[..count].copy_from_slice(&self.current[..count]);
+        self.current = self.current.slice(count..);
+        Ok(count)
+    }
 }
 
 pub(super) fn routes() -> Router<App> {
@@ -21,6 +49,10 @@ pub(super) fn routes() -> Router<App> {
         .api_route(
             "/v1/accounts/{a}/uploads",
             post(upload).layer(DefaultBodyLimit::max(MAX_SOURCE_BYTES + 64 * 1024)),
+        )
+        .api_route(
+            "/v1/accounts/{a}/uploads/{id}",
+            axum::routing::delete(release_upload),
         )
         .api_route("/v1/accounts/{a}/messages/{id}/media", get(assets))
         .api_route(
@@ -72,13 +104,19 @@ async fn upload(
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     c.require(Some(&a), "send")?;
     app.core.store.account(&a)?;
-    let mut file = None;
+    let mut file: Option<wechat_store::OwnedMediaSource> = None;
     while let Some(mut field) = form
         .next_field()
         .await
         .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_upload"))?
     {
         if file.is_some() || field.name() != Some("file") {
+            if let Some(stored) = file.take() {
+                let core = app.core.clone();
+                let account = a.clone();
+                let id: String = stored.id;
+                let _ = work(move || core.store.delete_media_source(&account, &id)).await;
+            }
             return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_upload"));
         }
         let name = field.file_name().unwrap_or("attachment").to_owned();
@@ -86,35 +124,77 @@ async fn upload(
             .content_type()
             .unwrap_or("application/octet-stream")
             .to_owned();
-        let mut bytes = Vec::new();
-        while let Some(chunk) = field
-            .chunk()
-            .await
-            .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_upload"))?
-        {
-            validate_upload_chunk(bytes.len(), chunk.len())?;
-            let needed = bytes.len() + chunk.len();
-            if needed > bytes.capacity() {
-                let capacity = upload_capacity(bytes.capacity(), needed);
-                bytes
-                    .try_reserve_exact(capacity - bytes.len())
-                    .map_err(|_| {
-                        ApiError(
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "upload_capacity_unavailable",
-                        )
-                    })?;
+        // The body is encrypted to disk as it arrives; it is never buffered whole.
+        let (sender, chunks) = tokio::sync::mpsc::channel(4);
+        let core = app.core.clone();
+        let account = a.clone();
+        let store = work(move || {
+            let mut reader = ChunkReader {
+                chunks,
+                current: axum::body::Bytes::new(),
+                ended: false,
+            };
+            core.upload_source_stream(&account, &name, &mime, &mut reader)
+        });
+        let pump = async move {
+            let mut total = 0usize;
+            loop {
+                match field.chunk().await {
+                    Ok(Some(chunk)) => {
+                        if let Err(error) = validate_upload_chunk(total, chunk.len()) {
+                            let _ = sender
+                                .send(Err(std::io::Error::other("upload_too_large")))
+                                .await;
+                            return Err(error);
+                        }
+                        total += chunk.len();
+                        // A closed channel means the writer stopped; its error is reported.
+                        if sender.send(Ok(Some(chunk))).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                    Ok(None) => {
+                        let _ = sender.send(Ok(None)).await;
+                        return Ok(());
+                    }
+                    Err(_) => {
+                        let _ = sender
+                            .send(Err(std::io::Error::other("upload_interrupted")))
+                            .await;
+                        return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_upload"));
+                    }
+                }
             }
-            bytes.extend_from_slice(&chunk);
+        };
+        let (pumped, stored) = tokio::join!(pump, store);
+        if let Err(error) = pumped {
+            // The writer saw the failure too; never keep a stored body anyway.
+            if let Ok(source) = stored {
+                let core = app.core.clone();
+                let account = a.clone();
+                let _ = work(move || core.store.delete_media_source(&account, &source.id)).await;
+            }
+            return Err(error);
         }
-        file = Some((name, mime, bytes));
+        file = Some(stored?);
     }
-    let (name, mime, bytes) = file.ok_or(ApiError(StatusCode::BAD_REQUEST, "file_required"))?;
-    let source = work(move || app.core.upload_source(&a, &name, &mime, &bytes)).await?;
+    let source = file.ok_or(ApiError(StatusCode::BAD_REQUEST, "file_required"))?;
     Ok((
         StatusCode::CREATED,
         Json(serde_json::to_value(source).map_err(anyhow::Error::from)?),
     ))
+}
+/// Delete an upload the caller has finished with, such as the source of a
+/// sticker that has been added. Uploads a pending send or preparation still
+/// needs are kept (409 `upload_in_use`).
+async fn release_upload(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path((a, id)): Path<(String, String)>,
+) -> ApiResult<Json<crate::contracts::NativeUploadRelease>> {
+    c.require(Some(&a), "send")?;
+    let released = work(move || app.core.release_upload(&a, &id)).await?;
+    Ok(Json(crate::contracts::NativeUploadRelease { released }))
 }
 async fn assets(
     State(app): State<App>,
@@ -515,6 +595,35 @@ mod tests {
     use super::*;
     use http_body_util::BodyExt;
     #[test]
+    fn upload_body_ends_only_at_the_end_marker() {
+        use std::io::Read;
+        let reader = |pieces: Vec<UploadPiece>| {
+            let (sender, chunks) = tokio::sync::mpsc::channel(pieces.len().max(1));
+            for piece in pieces {
+                sender.try_send(piece).unwrap();
+            }
+            ChunkReader {
+                chunks,
+                current: axum::body::Bytes::new(),
+                ended: false,
+            }
+        };
+        let mut body = Vec::new();
+        reader(vec![
+            Ok(Some(axum::body::Bytes::from_static(b"GIF"))),
+            Ok(Some(axum::body::Bytes::from_static(b"89a"))),
+            Ok(None),
+        ])
+        .read_to_end(&mut body)
+        .unwrap();
+        assert_eq!(body, b"GIF89a");
+        // A request dropped mid-body closes the channel without the marker.
+        let error = reader(vec![Ok(Some(axum::body::Bytes::from_static(b"GIF")))])
+            .read_to_end(&mut Vec::new())
+            .expect_err("a truncated body must not read as complete");
+        assert_eq!(error.to_string(), "upload_interrupted");
+    }
+    #[test]
     fn completed_upload_reuse_requires_the_named_boolean_opt_in() {
         use contracts::NativeMediaJobRetryRequest;
         let default: NativeMediaJobRetryRequest = serde_json::from_value(json!({})).unwrap();
@@ -563,13 +672,6 @@ mod tests {
                 StatusCode::PAYLOAD_TOO_LARGE
             );
         }
-        // Multipart chunk boundaries need not align with powers of two.
-        assert_eq!(
-            upload_capacity(MAX_SOURCE_BYTES - 37, MAX_SOURCE_BYTES),
-            MAX_SOURCE_BYTES
-        );
-        assert_eq!(upload_capacity(100, 110), 200);
-        assert_eq!(upload_capacity(0, 37), 37);
     }
     #[tokio::test]
     async fn preview_response_binds_source_hash_and_ranges_to_preview_bytes() {

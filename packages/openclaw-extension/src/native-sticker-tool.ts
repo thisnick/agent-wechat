@@ -45,7 +45,9 @@ export function createNativeStickerTools(context: OpenClawPluginToolContext,
       file:{type:"string",description:"Workspace-relative source file for prepare; resolved on the session execution host."},
       sourceId:{type:"string",description:"Existing daemon-owned upload instead of a workspace file."},
       output:{type:"string",description:"New workspace-relative output for download, using the original format extension; existing files are never replaced."},
-      fit:{type:"boolean",description:"Permit proportional resizing to the sticker output limit."},
+      fit:{type:"boolean",description:"Shrink a source larger than 1024 pixels to fit. Smaller sources keep their size and encoding."},
+      maxEdge:{type:"integer",minimum:16,maximum:1024,description:"Shrink so the longest edge is at most this many pixels; never enlarges. Video defaults to 240."},
+      fps:{type:"integer",minimum:1,maximum:30,description:"Frame rate for a sticker made from video; default 10. Not accepted for images or GIFs."},
       startMs:{type:"integer",minimum:0,maximum:4294967295,description:"Explicit segment start in milliseconds; requires durationMs."},
       durationMs:{type:"integer",minimum:1,maximum:10000,description:"Explicit retained duration in milliseconds; omitted means preserve duration."},
       idempotencyKey:{type:"string",minLength:1,maxLength:200,description:"Required stable key for prepare/add/move/remove and downloads that need acquisition. Reuse the key and identical intent after uncertain responses."},
@@ -53,7 +55,7 @@ export function createNativeStickerTools(context: OpenClawPluginToolContext,
     execute: async (_id,input:unknown,signal?:AbortSignal) => {
       if (!input || typeof input !== "object" || Array.isArray(input)) throw Error("Invalid sticker arguments");
       const args = input as Record<string,unknown>;
-      const fields = ["action","stickerId","preparationId","file","sourceId","output","fit","startMs","durationMs","idempotencyKey","revision","afterId","messageId","assetId"];
+      const fields = ["action","stickerId","preparationId","file","sourceId","output","fit","maxEdge","fps","startMs","durationMs","idempotencyKey","revision","afterId","messageId","assetId"];
       if (Object.keys(args).some(key=>!fields.includes(key))) throw Error("Unknown sticker argument");
       const guard = () => {
         signal?.throwIfAborted(); context.assertInvocationCurrent!();
@@ -96,6 +98,8 @@ export function createNativeStickerTools(context: OpenClawPluginToolContext,
       if (args.action === "prepare") {
         const key=text(args.idempotencyKey,"idempotency key");
         if (key.length > 200 || args.fit != null && typeof args.fit !== "boolean") throw Error("Invalid sticker preparation options");
+        const whole = (value:unknown, min:number, max:number) => value == null || Number.isInteger(value) && (value as number) >= min && (value as number) <= max;
+        if (!whole(args.maxEdge,16,1024) || !whole(args.fps,1,30)) throw Error("Invalid sticker preparation options");
         if (args.startMs != null && typeof args.startMs !== "number" || args.durationMs != null && typeof args.durationMs !== "number") throw Error("Invalid sticker segment");
         const trim = args.durationMs == null ? null : {startMs:Number(args.startMs ?? 0),durationMs:Number(args.durationMs)};
         if (args.startMs != null && !trim || trim && (!Number.isInteger(trim.startMs) || trim.startMs<0 || trim.startMs>4294967295
@@ -110,7 +114,7 @@ export function createNativeStickerTools(context: OpenClawPluginToolContext,
           },signal);
         } else sourceId=text(args.sourceId,"source identity");
         guard(); context.assertInputCommitAllowed?.();
-        const job=await client.prepareSticker(accountId,{sourceId,fit:args.fit===true,trim},key,signal); guard();
+        const job=await client.prepareSticker(accountId,{sourceId,fit:args.fit===true,maxEdge:args.maxEdge==null?null:Number(args.maxEdge),fps:args.fps==null?null:Number(args.fps),trim},key,signal); guard();
         return result({...job,idempotencyKey:key});
       }
       if (args.action !== "preview" && args.action !== "download") throw Error("Unknown sticker action");

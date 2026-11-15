@@ -580,11 +580,78 @@ async function stickerFixtures(page, cold = false) {
   await page.route(/\/media\/sticker_preview_[^/]+$/, route => route.fulfill({json:{...asset('preview'),id:new URL(route.request().url()).pathname.split('/').pop()}}));
   await page.route(/\/media\/sticker(?:-|_preview_)[^/]+\/content(?:\?.*)?$/, route => route.fulfill({ body: gif, contentType: 'image/gif' }));
 }
-for (const mode of ['picker', 'edit', 'dragging', 'packs', 'pack-detail', 'import', 'import-saved', 'import-retry', 'lazy-loading', 'loading']) {
+
+// Files the import scenes drop, and what the mocked hub knows about each. Files with
+// a `file` are real fixtures the UI measures itself; the PNGs are drawn in the page.
+const stickerGif = '../../native-client-rust/crates/wechat-simulator/fixtures/sticker.gif';
+const importSources = {
+  'afternoon-walk.mp4': { kind: 'video', type: 'video/mp4', width: 1280, height: 858, durationMs: 4000, file: '../../../scripts/demo-gallery/fixtures/media/afternoon-walk.mp4' },
+  'photo.png': { kind: 'image', type: 'image/png', width: 800, height: 600 },
+  'poster.png': { kind: 'image', type: 'image/png', width: 1600, height: 1200 },
+  'wave-1.gif': { kind: 'gif', type: 'image/gif', width: 96, height: 96, durationMs: 1000, file: stickerGif },
+  'wave-2.gif': { kind: 'gif', type: 'image/gif', width: 96, height: 96, durationMs: 1000, file: stickerGif },
+};
+
+/**
+ * Uploads and preparations that follow the hub's rules closely enough to show real
+ * sizes: images keep their size unless shrunk, video defaults to 240 px and 10 fps, and
+ * results over 1 MiB, 200 frames or 10 s fail with the hub's codes. Returns the requests.
+ */
+async function stickerPreparations(page) {
+  const gif = await readFile(new URL(stickerGif, import.meta.url));
+  const requests = [];
+  await page.route(/\/uploads$/, route => {
+    const name = /filename="([^"]+)"/.exec(route.request().postDataBuffer()?.toString('latin1') ?? '')?.[1] ?? 'unknown';
+    return route.fulfill({ json: { id: `source-${name}`, name, mediaType: importSources[name]?.type ?? 'application/octet-stream', byteLength: 1, sha256: 'd'.repeat(64), createdAt: '2026-01-01T00:00:00Z' } });
+  });
+  await page.route(/\/sticker-preparations$/, route => {
+    const input = route.request().postDataJSON();
+    requests.push(input);
+    const id = requests.length === 1 ? 'prep-scene' : `prep-scene-${requests.length}`;
+    const fail = reason => route.fulfill({ json: { id, kind: 'sticker_prepare', state: 'failed', phase: 'preparing', reason, retryable: false } });
+    const source = importSources[input.sourceId.replace(/^source-/, '')];
+    const video = source.kind === 'video', longest = Math.max(source.width, source.height);
+    if (!video && input.fps !== null) return fail('sticker_option_unsupported');
+    if (!video && input.maxEdge === null && longest > 1024) return fail('sticker_adjustment_required');
+    const scale = Math.min(1, (input.maxEdge ?? (video ? 240 : longest)) / longest);
+    const width = Math.round(source.width * scale), height = Math.round(source.height * scale);
+    const durationMs = input.trim?.durationMs ?? source.durationMs ?? 0;
+    const frames = video ? Math.ceil((input.fps ?? 10) * durationMs / 1000) : source.kind === 'gif' ? 2 : 1;
+    if (frames > 200 || durationMs > 10_000) return fail('sticker_adjustment_required');
+    const byteLength = source.kind === 'gif' && scale === 1 && !input.trim ? gif.length : Math.round(width * height * frames * (video ? 0.12 : 0.6));
+    if (byteLength > 1024 * 1024) return fail('sticker_output_size_limit');
+    const asset = { id: `sticker-prepared-${id}`, state: 'available', contentType: 'image/gif', sha256: 'a'.repeat(64), byteLength };
+    return route.fulfill({ json: { id, kind: 'sticker_prepare', state: 'available', result: { id, sourceId: input.sourceId, original: asset, preview: asset, contactSheet: asset, width, height, durationMs, transformations: [], warnings: [], expiresAt: 9999999999 } } });
+  });
+  return requests;
+}
+
+async function dropStickerFiles(page, names) {
+  const files = await Promise.all(names.map(async name => {
+    const source = importSources[name];
+    return { name, type: source.type, width: source.width, height: source.height, encoded: source.file ? (await readFile(new URL(source.file, import.meta.url))).toString('base64') : null };
+  }));
+  await page.locator('.sticker-tray').evaluate(async (tray, files) => {
+    const transfer = new DataTransfer();
+    for (const file of files) {
+      let blob;
+      if (file.encoded) blob = new Blob([Uint8Array.from(atob(file.encoded), c => c.charCodeAt(0))]);
+      else {
+        const canvas = new OffscreenCanvas(file.width, file.height), context = canvas.getContext('2d');
+        context.fillStyle = '#9fd3b8'; context.fillRect(0, 0, file.width, file.height);
+        blob = await canvas.convertToBlob({ type: 'image/png' });
+      }
+      transfer.items.add(new File([blob], file.name, { type: file.type }));
+    }
+    tray.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer }));
+  }, files);
+}
+
+for (const mode of ['picker', 'edit', 'dragging', 'packs', 'pack-detail', 'import', 'import-adjust', 'import-saved', 'import-retry', 'lazy-loading', 'loading']) {
   scenes.push({
     name: `stickers-${mode}`,
     route: 'chat',
-    description: { loading: 'Added pack contents show loading until the response arrives, with empty state only after an empty response.', 'lazy-loading': 'Missing Saved originals and pack thumbnails load on visibility, including after scrolling.', picker: 'Composer-anchored Saved picker with labeled added-pack tabs.', edit: 'Saved edit mode stays inside the composer tray with removal, visible drag feedback, Escape cancellation and keyboard placement.', dragging: 'Holding a Saved sticker shows its existing image under the pointer, dims the source and marks its drop position without staging a send.', packs: 'Official pack browser shows added and available packs in one dialog.', 'pack-detail': 'Official pack detail has complete contents, captions, membership and a copyable ID.', import: 'Add to Saved offers previews, file selection and one primary Add action without fit or trim controls.', 'import-saved': 'A completed asynchronous import closes the dialog and selects Saved without reopening the picker or resubmitting the item.', 'import-retry': 'A partial import keeps its per-file results open; retry submits only the remaining item before returning to Saved.' }[mode],
+    description: { loading: 'Added pack contents show loading until the response arrives, with empty state only after an empty response.', 'lazy-loading': 'Missing Saved originals and pack thumbnails load on visibility, including after scrolling.', picker: 'Composer-anchored Saved picker with labeled added-pack tabs.', edit: 'Saved edit mode stays inside the composer tray with removal, visible drag feedback, Escape cancellation and keyboard placement.', dragging: 'Holding a Saved sticker shows its existing image under the pointer, dims the source and marks its drop position without staging a send.', packs: 'Official pack browser shows added and available packs in one dialog.', 'pack-detail': 'Official pack detail has complete contents, captions, membership and a copyable ID.', import: 'Add to Saved shows each prepared file with its size, bytes and length, a size slider with a phone-size mark, a note when an image is shrunk to 1024 px, and smoothness, start and length for video, with one primary Add action.', 'import-adjust': 'Moving a slider prepares again after a pause, returns to an earlier setting without preparing it again, keeps Add off until the row matches its controls, and explains a result too large to send.','import-saved': 'A completed asynchronous import closes the dialog and selects Saved without reopening the picker or resubmitting the item.', 'import-retry': 'A partial import keeps its per-file results open; retry submits only the remaining item before returning to Saved.' }[mode],
     viewports: ['desktop', 'narrow', 'compact'],
     preservePointer: mode === 'dragging',
     setup: standardWorld,
@@ -689,18 +756,67 @@ for (const mode of ['picker', 'edit', 'dragging', 'packs', 'pack-detail', 'impor
           expect(detailReads).toBe(initialReads);
           await page.locator('.sticker-pack-item').first().click(); await expect(page.locator('.sticker-draft')).toHaveCount(0); await expect(page.locator('.sticker-detail-cover img')).toBeVisible(); }
       }
-      if (mode === 'import' || mode === 'import-saved' || mode === 'import-retry') {
+      if (mode.startsWith('import')) {
         if (mode === 'import-saved') await page.getByRole('tab', { name: 'Cozy cats' }).click();
-        await page.route(/\/media-sources$/, route => route.fulfill({ json: { id: 'source-scene', name: 'wave.gif' } }));
-        const asset = { id: 'sticker-prepared', state: 'available', contentType: 'image/gif', sha256: 'a'.repeat(64), byteLength: 100 };
-        let preparedCount = 0;
-        await page.route(/\/sticker-preparations$/, route => { const id = ++preparedCount === 1 ? 'prep-scene' : `prep-scene-${preparedCount}`; return route.fulfill({ json: { id, state: 'available', result: { id, sourceId: 'source-scene', original: asset, preview: asset, contactSheet: asset, width: 96, height: 96, durationMs: 1200, transformations: [], expiresAt: 9999999999 } } }); });
-        const fixture=(await readFile(new URL('../../native-client-rust/crates/wechat-simulator/fixtures/sticker.gif', import.meta.url))).toString('base64');
-        await page.locator('.sticker-tray').evaluate((tray,{encoded,count})=>{ const transfer=new DataTransfer(); for(let i=0;i<count;i++) transfer.items.add(new File([Uint8Array.from(atob(encoded),c=>c.charCodeAt(0))],`wave-${i+1}.gif`,{type:'image/gif'}));tray.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:transfer}));},{encoded:fixture,count:mode==='import-retry'?2:1});
+        const prepared = await stickerPreparations(page);
+        const files = { import: ['afternoon-walk.mp4', 'photo.png', 'poster.png', 'wave-1.gif'], 'import-adjust': ['afternoon-walk.mp4'], 'import-retry': ['wave-1.gif', 'wave-2.gif'] }[mode] ?? ['wave-1.gif'];
+        await dropStickerFiles(page, files);
         await expect(page.locator('.composer-attachments')).toHaveCount(0);
         const dialog = page.getByRole('dialog', { name: 'Add to Saved' });
         await expect(dialog.getByRole('button', { name: 'Done', exact: true })).toHaveCount(0);
-        await expect(dialog.getByRole('button', { name: mode === 'import-retry' ? 'Add 2' : 'Add 1', exact: true })).toBeEnabled();
+        await expect(dialog.getByRole('button', { name: `Add ${files.length}`, exact: true })).toBeEnabled();
+        const options = name => dialog.getByRole('group', { name: `Options for ${name}` });
+        const requestFor = name => prepared.find(request => request.sourceId === `source-${name}`);
+        if (mode === 'import') {
+          const video = options('afternoon-walk.mp4');
+          await expect(video.getByRole('slider', { name: 'Size' })).toHaveAttribute('aria-valuetext', '240 pixels');
+          await expect(video.getByRole('slider', { name: 'Smoothness' })).toHaveAttribute('aria-valuetext', '10 frames per second');
+          await expect(video.getByRole('slider', { name: 'Start' })).toHaveAttribute('aria-valuetext', '0.0 seconds');
+          await expect(video.getByRole('slider', { name: 'Length' })).toHaveAttribute('aria-valuetext', '4.0 seconds');
+          await expect(options('photo.png').getByRole('slider', { name: 'Size' })).toHaveAttribute('aria-valuetext', 'Original size, 800 pixels');
+          await expect(options('poster.png').getByRole('slider', { name: 'Size' })).toHaveAttribute('aria-valuetext', '1024 pixels');
+          await expect(options('poster.png').getByText("Shrunk to WeChat's 1024 px limit.")).toBeVisible();
+          await expect(options('wave-1.gif').getByRole('slider')).toHaveCount(0);
+          for (const text of ['240 × 161 · 181 KB · 4.0s', '800 × 600 · 281 KB', '1024 × 768 · 461 KB', '96 × 96 · 5 KB · 1.0s']) await expect(dialog.getByText(text, { exact: true })).toBeVisible();
+          expect(prepared).toHaveLength(4);
+          expect(requestFor('afternoon-walk.mp4')).toMatchObject({ fit: false, maxEdge: 240, fps: 10, trim: null });
+          expect(requestFor('photo.png')).toMatchObject({ fit: false, maxEdge: null, fps: null, trim: null });
+          expect(requestFor('poster.png')).toMatchObject({ fit: false, maxEdge: 1024, fps: null, trim: null });
+          expect(requestFor('wave-1.gif')).toMatchObject({ fit: false, maxEdge: null, fps: null, trim: null });
+          await dialog.locator('.sticker-import-list').evaluate(list => { list.scrollTop = 0; });
+        }
+        if (mode === 'import-adjust') {
+          const size = dialog.getByRole('slider', { name: 'Size' }), add = dialog.locator('.sticker-add-submit');
+          await expect(dialog.getByText('240 × 161 · 181 KB · 4.0s', { exact: true })).toBeVisible();
+          await size.focus();
+          for (let step = 0; step < 4; step++) await page.keyboard.press('ArrowRight');
+          await expect(size).toHaveAttribute('aria-valuetext', '640 pixels');
+          await expect(add).toBeDisabled();
+          await expect(dialog.getByRole('alert')).toHaveText(/^Too large to send/);
+          // Only the size the slider rested on was prepared, not the stops passed on the way.
+          expect(prepared).toHaveLength(2);
+          expect(prepared[1]).toMatchObject({ maxEdge: 640, fps: 10, trim: null });
+          for (let step = 0; step < 4; step++) await page.keyboard.press('ArrowLeft');
+          await expect(add).toHaveText('Add 1');
+          await expect(add).toBeEnabled();
+          await expect(dialog.getByRole('alert')).toHaveCount(0);
+          await dialog.getByRole('slider', { name: 'Smoothness' }).focus();
+          await page.keyboard.press('ArrowRight');
+          await expect(dialog.getByText('240 × 161 · 217 KB · 4.0s', { exact: true })).toBeVisible();
+          await dialog.getByRole('slider', { name: 'Length' }).focus();
+          for (let step = 0; step < 10; step++) await page.keyboard.press('ArrowLeft');
+          await expect(dialog.getByText('240 × 161 · 163 KB · 3.0s', { exact: true })).toBeVisible();
+          // Returning to 240 px reused its result, so only the two new settings were prepared.
+          expect(prepared).toHaveLength(4);
+          expect(prepared[2]).toMatchObject({ maxEdge: 240, fps: 12, trim: null });
+          expect(prepared[3]).toMatchObject({ maxEdge: 240, fps: 12, trim: { startMs: 0, durationMs: 3000 } });
+          await size.focus();
+          await page.keyboard.press('End');
+          await expect(size).toHaveAttribute('aria-valuetext', '1024 pixels');
+          await expect(dialog.getByRole('alert')).toHaveText(/^Too large to send/);
+          await expect(add).toBeDisabled();
+          await size.blur();
+        }
         if (mode === 'import-saved') {
           let finish;
           await page.route(/\/jobs\/scene-add$/, async route => { await new Promise(resolve => { finish = resolve; }); await route.fallback(); });

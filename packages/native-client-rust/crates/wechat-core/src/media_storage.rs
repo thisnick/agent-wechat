@@ -277,13 +277,16 @@ impl Core {
             .open_media_record(account, &format!("asset:{id}"), &sealed)?;
         self.release_to_profile(account, &asset, &bytes)
     }
-    /// Delete uploads whose every send job finished at least a day ago with
-    /// nothing left to retry, review or write to the profile. An upload that no
-    /// job has used yet is kept.
-    fn release_finished_uploads(&self, account: &str) -> Result<usize> {
-        let jobs = self
-            .store
-            .send_jobs_for_source_release(account, UPLOAD_GRACE_SECONDS)?;
+    /// Uploads named by send jobs and sticker preparations at least `grace`
+    /// seconds old, split into those an unfinished job still needs and those
+    /// only finished jobs used. `None` means a job's needs cannot be read, so
+    /// nothing may be released.
+    fn upload_use(
+        &self,
+        account: &str,
+        grace: i64,
+    ) -> Result<Option<(BTreeSet<String>, BTreeSet<String>)>> {
+        let jobs = self.store.send_jobs_for_source_release(account, grace)?;
         let mut needed = BTreeSet::new();
         let mut finished = BTreeSet::new();
         for (id, done) in jobs {
@@ -299,7 +302,7 @@ impl Core {
                 if done {
                     continue;
                 }
-                return Ok(0);
+                return Ok(None);
             };
             let ids = [
                 Some(plan.request.source_id.clone()),
@@ -314,7 +317,7 @@ impl Core {
         }
         for (source, done) in self
             .store
-            .sticker_preparation_sources_for_release(account, UPLOAD_GRACE_SECONDS)?
+            .sticker_preparation_sources_for_release(account, grace)?
         {
             if done {
                 finished.insert(source);
@@ -322,6 +325,25 @@ impl Core {
                 needed.insert(source);
             }
         }
+        Ok(Some((needed, finished)))
+    }
+    /// Delete one upload now, for a caller that has finished with it, such as
+    /// after adding the sticker it was prepared into. An upload that an
+    /// unfinished send or preparation still needs is kept: `upload_in_use`.
+    /// Returns false when the upload no longer exists.
+    pub fn release_upload(&self, account: &str, id: &str) -> Result<bool> {
+        self.store.account(account)?;
+        let (needed, _) = self.upload_use(account, 0)?.context("upload_in_use")?;
+        ensure!(!needed.contains(id), "upload_in_use");
+        self.store.delete_media_source(account, id)
+    }
+    /// Delete uploads whose every send job finished at least a day ago with
+    /// nothing left to retry, review or write to the profile. An upload that no
+    /// job has used yet is kept.
+    fn release_finished_uploads(&self, account: &str) -> Result<usize> {
+        let Some((needed, finished)) = self.upload_use(account, UPLOAD_GRACE_SECONDS)? else {
+            return Ok(0);
+        };
         let mut removed = 0;
         for id in finished.difference(&needed) {
             if self.store.delete_media_source(account, id)? {
@@ -355,6 +377,31 @@ impl Core {
                 let _ = core
                     .guarded_storage_step(&id, |core, id| core.finish_media_storage(id))
                     .await;
+            }
+            // Release finished uploads and expired preparations every hour, so
+            // large uploads do not wait for the next restart.
+            let mut hourly = tokio::time::interval(std::time::Duration::from_secs(3600));
+            hourly.tick().await;
+            loop {
+                hourly.tick().await;
+                if core.stopping.load(Ordering::Acquire) {
+                    break;
+                }
+                let Ok(accounts) = core.store.accounts() else {
+                    continue;
+                };
+                for account in accounts {
+                    let _ = core
+                        .guarded_storage_step(&account.id, |core, id| {
+                            core.store.expire_sticker_preparation_assets(
+                                id,
+                                chrono::Utc::now().timestamp(),
+                                1000,
+                            )?;
+                            core.release_finished_uploads(id)
+                        })
+                        .await;
+                }
             }
         });
         Ok(())

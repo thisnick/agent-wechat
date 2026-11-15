@@ -1,7 +1,7 @@
 ---
 title: 使用与管理表情
 description: 导入自定义媒体，整理“我的表情”，浏览或导出官方表情包。
-sourceHash: 87b27f0aabc2
+sourceHash: bd2d4aceacd6
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -10,9 +10,10 @@ import { Aside } from '@astrojs/starlight/components';
 
 ## 添加并整理“我的表情” \{#add-and-arrange-saved}
 
-1. 选择**添加表情**，或将文件拖放到已打开的面板中。图片、GIF 以及 MOV/MP4 视频会出现在**添加到我的表情**中，供预览和检查。
-2. 检查预览并排除不需要的文件，然后选择**添加 N**。在所选项目保存完成前，按钮会显示**正在保存…**；随后对话框关闭，**我的表情**显示刷新后的列表。若某个项目失败，对话框会保持打开；重试时会跳过已成功的项目。
-3. 选择**编辑**，或长按“我的表情”中的表情。拖动即可调整顺序；箭头控件支持用键盘调整位置。被拖动的表情会跟随指针移动，标记会显示它将落下的位置。按 **Escape** 可取消拖动。移除控件会删除单个“我的表情”项目。选择**完成**即可退出编辑。编辑操作不会生成待发送的草稿。
+1. 选择**添加表情**，或将文件拖放到已打开的面板中。图片和 GIF 最大 64 MiB、MOV/MP4 视频最大 512 MiB，会出现在**添加到我的表情**中，供预览和检查。
+2. 每个文件会显示其准备后的尺寸、文件大小和时长。**尺寸**用于缩小表情：图片从原始尺寸开始（若更大则从 1024 像素开始），视频从 240 像素开始。384 像素附近的标记大约是手机能显示的最大尺寸；更大的表情主要是多占字节。视频还有**流畅度**（每秒帧数）、**开始**和**时长**。停止拖动控件后，预览会很快更新。
+3. 排除不需要的文件，然后选择**添加 N**。在所选项目保存完成前，按钮会显示**正在保存…**；随后对话框关闭，**我的表情**显示刷新后的列表。若某个项目失败，对话框会保持打开；重试时会跳过已成功的项目。
+4. 选择**编辑**，或长按“我的表情”中的表情。拖动即可调整顺序；箭头控件支持用键盘调整位置。被拖动的表情会跟随指针移动，标记会显示它将落下的位置。按 **Escape** 可取消拖动。移除控件会删除单个“我的表情”项目。选择**完成**即可退出编辑。编辑操作不会生成待发送的草稿。
 
 收到的表情消息菜单中也提供**添加到表情**。
 
@@ -20,13 +21,15 @@ import { Aside } from '@astrojs/starlight/components';
 
 ```sh
 wx stickers list
-wx stickers prepare clip.mp4 --start 1 --duration 2 --fit
+wx stickers prepare clip.mp4 --start 1 --duration 2 --max-edge 360 --fps 12
 wx stickers preview --prepared PREPARATION_ID --output preview.png
 wx stickers add --prepared PREPARATION_ID
 wx stickers move STICKER_ID --last
 wx stickers download STICKER_ID --output original.gif
 wx stickers remove STICKER_ID
 ```
+
+图片和 GIF 在 1024 像素以内保持其尺寸和编码，这是微信可保存的最大表情尺寸。较大的文件需要使用 `--fit` 缩小至 1024，或使用 `--max-edge N` 设定更小的最长边。视频始终会转换为 GIF：除非设定了 `--max-edge` 和 `--fps`（最高 30），否则为 240 像素、每秒 10 帧。每个表情都必须在 1 MiB、200 帧和 10 秒以内；如需只保留较长视频中的一段，请使用 `--start` 和 `--duration`。
 
 准备操作会返回一个任务。完成后的结果包括原图、预览、抽样帧图、尺寸、转换记录和过期时间。若操作的响应不确定，请保留其幂等键。使用 `--detach` 可立即返回任务，使用 `--wait SECONDS` 可等待指定秒数。`--json` 会保持结果为机器可读格式。
 

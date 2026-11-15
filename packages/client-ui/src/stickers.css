@@ -49,16 +49,43 @@
 .pack-detail-grid { grid-template-columns: repeat(4, minmax(0,1fr)); max-height: 420px; border-radius: 12px; background: var(--canvas, #f7f9f6); }
 .sticker-pack-item { font-size: 11px; gap: 5px; }.sticker-pack-item img { max-height: 95px; }.sticker-pack-item span { overflow: hidden; text-overflow: ellipsis; max-width: 100%; white-space: nowrap; }
 .sticker-pack-id { margin-top: 12px; font-size: 11px; color: var(--muted, #6b7b70); }.sticker-pack-id code { display: inline-block; overflow-wrap: anywhere; padding: 12px 0; }
-.sticker-import-list { display: grid; gap: 10px; min-height: 130px; margin: 16px 0; }
-.sticker-import-item { display: flex; align-items: flex-start; gap: 12px; padding: 12px; border: 1px solid var(--line, #dbe4df); border-radius: 12px; }
-.sticker-import-item > img, .sticker-import-item > .sticker-unloaded { width: 72px; height: 72px; flex: 0 0 72px; object-fit: contain; }.sticker-import-item > div { min-width: 0; flex: 1; }.sticker-import-item strong { display: block; overflow-wrap: anywhere; font-size: 13px; }.sticker-import-item p { font-size: 12px; }
+.sticker-import-list { display: grid; align-content: start; gap: 10px; min-height: 130px; margin: 16px 0; }
+/* The list scrolls inside the dialog so Add stays in view with many rows. */
+.sticker-import-modal .sticker-modal-body { display: flex; flex-direction: column; box-sizing: border-box; max-height: calc(min(720px, 100dvh - 40px) - 2px); }
+.sticker-import-modal .sticker-import-list { overflow: auto; overscroll-behavior: contain; }
+.sticker-import-item { display: grid; grid-template-columns: auto 72px minmax(0, 1fr); align-items: start; column-gap: 12px; row-gap: 8px; padding: 12px; border: 1px solid var(--line, #dbe4df); border-radius: 12px; }
+.sticker-import-item > input, .sticker-import-item > img, .sticker-import-item > .sticker-unloaded { grid-row: 1 / span 2; }
+.sticker-import-item > img, .sticker-import-item > .sticker-unloaded { width: 72px; height: 72px; object-fit: contain; }
+.sticker-import-info { min-width: 0; }.sticker-import-item strong { display: block; overflow-wrap: anywhere; font-size: 13px; }
+.sticker-import-item p { font-size: 12px; margin: 4px 0 0; }
+.sticker-import-status { display: flex; flex-wrap: wrap; gap: 4px 10px; color: var(--muted, #6b7b70); font-variant-numeric: tabular-nums; }
+.sticker-import-item .sticker-error { padding: 0; }
+/* A result from an earlier setting stays visible, dimmed, until the current one is ready. */
+.sticker-import-status .is-stale { opacity: .55; }
+.sticker-modal .sticker-import-retry { font: inherit; margin-top: 4px; padding: 4px 0; border: 0; background: transparent; color: var(--accent, #19734e); font-size: 12px; cursor: pointer; }
+.sticker-import-controls { grid-column: 3; display: grid; grid-template-columns: minmax(6em, max-content) minmax(0, 1fr) auto; align-items: start; gap: 6px 10px; font-size: 12px; }
+.sticker-control { display: contents; }
+.sticker-control > label, .sticker-control > span:first-child { line-height: 18px; }
+.sticker-control-value { min-width: 4.5em; line-height: 18px; text-align: right; font-variant-numeric: tabular-nums; color: var(--muted, #6b7b70); white-space: nowrap; }
+.sticker-range { min-width: 0; }
+.sticker-range input { display: block; width: 100%; height: 18px; margin: 0; accent-color: var(--accent, #19734e); cursor: pointer; }
+.sticker-range input:disabled { cursor: default; }
+.sticker-range-scale { position: relative; display: flex; justify-content: space-between; gap: 8px; padding-top: 3px; font-size: 10px; line-height: 12px; color: var(--muted, #6b7b70); }
+/* --at is the mark's place along the track; the 16px is the range thumb's width. */
+.sticker-range-mark { position: absolute; top: -3px; left: calc(var(--at) * (100% - 16px) + 8px); width: 9px; height: 7px; margin-left: -4.5px; background: linear-gradient(currentColor, currentColor) center / 2px 100% no-repeat; cursor: help; }
+.sticker-import-controls .sticker-import-note { grid-column: 1 / -1; margin: -2px 0 0; font-size: 11px; color: var(--muted, #6b7b70); }
 @media (max-width: 720px) { .sticker-tray { width: calc(100vw - 100px); }.sticker-grid { grid-template-columns: repeat(4,minmax(0,1fr)); }.pack-detail-grid { grid-template-columns: repeat(3,minmax(0,1fr)); } }
 .dark .sticker-tray, .dark .sticker-modal { color: var(--ink); border-color: var(--line); }
 .dark .sticker-unloaded { background: #343638; color: #8c9690; }
 .dark .sticker-tile:hover, .dark .sticker-pack-item:hover { background: #304039; }
 .dark .sticker-tabs [aria-selected=true], .dark .sticker-browser-tabs [aria-pressed=true] { background: #2b4538; color: #a5dabb; }
 .dark .sticker-tray footer button:last-child { color: #a5dabb; }
-@media (max-width: 520px) { .sticker-pack-cards { grid-template-columns: 1fr; }.sticker-modal-body { padding: 15px; }.sticker-grid { gap: 6px; padding: 10px; }.sticker-tabs button { padding: 8px; font-size: 11px; }.pack-detail-grid { grid-template-columns: repeat(3,minmax(0,1fr)); } }
+@media (max-width: 520px) { .sticker-pack-cards { grid-template-columns: 1fr; }.sticker-modal-body { padding: 15px; }.sticker-grid { gap: 6px; padding: 10px; }.sticker-tabs button { padding: 8px; font-size: 11px; }.pack-detail-grid { grid-template-columns: repeat(3,minmax(0,1fr)); }
+  .sticker-import-item { grid-template-columns: auto 56px minmax(0, 1fr); padding: 10px; column-gap: 10px; }
+  .sticker-import-item > input, .sticker-import-item > img, .sticker-import-item > .sticker-unloaded { grid-row: 1; }
+  .sticker-import-item > img, .sticker-import-item > .sticker-unloaded { width: 56px; height: 56px; }
+  .sticker-import-controls { grid-column: 1 / -1; column-gap: 8px; }
+  .sticker-control-value { min-width: 3.5em; } }
 
 .sticker-detail-cover { display:flex; justify-content:center; margin:8px 0; height:112px; }
 .sticker-detail-cover img { max-height:112px; max-width:100%; object-fit:contain; }

@@ -1,7 +1,7 @@
 ---
 title: 表情 API
 description: 我的表情、准备内容、官方表情包、媒体获取与发送。
-sourceHash: 5092be66b1c6
+sourceHash: 519d643649aa
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -13,7 +13,7 @@ import { Aside } from '@astrojs/starlight/components';
 | `/sticker-collections` | GET 返回“我的表情”以及每个已添加表情包的选择器描述 |
 | `/custom-stickers` | GET 返回有序的“我的表情”及 revision；POST 保存已准备或已接收的媒体 |
 | `/custom-stickers/{id}` | GET 获取元数据/媒体；PATCH 调整位置；DELETE 移出“我的表情” |
-| `/sticker-preparations` | POST 提交已上传的源文件，并可选裁剪/适配 |
+| `/sticker-preparations` | POST 提交已上传的源文件，并可选指定 trim、fit、maxEdge 和 fps |
 | `/sticker-preparations/{id}` | GET 获取任务、输出、预览、转换记录与过期时间 |
 | `/sticker-packs` | GET 获取可用列表页；`?membership=added` 读取账号已添加的完整列表 |
 | `/sticker-packs/{id}` | GET 获取名称、成员关系以及单独的内容就绪状态 |
@@ -27,11 +27,13 @@ import { Aside } from '@astrojs/starlight/components';
 
 ## 准备、预览与保存 \{#prepare-review-and-save}
 
-1. 通过 `/media-sources` 上传字节。准备接口接收返回的 `sourceId`，绝不接收调用方机器上的路径。
+1. 通过 `/uploads` 上传字节。准备接口接收返回的 `sourceId`，绝不接收调用方机器上的路径。图片和 GIF 源文件最大 64 MiB，视频最大 512 MiB。
 
    ```json
-   {"sourceId":"SOURCE_ID","fit":true,"trim":{"startMs":1000,"durationMs":2000}}
+   {"sourceId":"SOURCE_ID","maxEdge":360,"fps":12,"trim":{"startMs":1000,"durationMs":2000}}
    ```
+
+   不超过 1024 像素的图片和 GIF 保留其尺寸和编码。`fit` 会将更大的图片缩小至 1024；`maxEdge`（16–1024）会进一步缩小最长边，且绝不会放大。除非指定了 `maxEdge` 和 `fps`（1–30），否则视频会以 240 像素、10 fps 转换为 GIF；图片不支持 `fps`。
 
 2. 携带 `Idempotency-Key`，将该请求体 POST 到 `/sticker-preparations`。准备完成后，会链接到经过身份验证的原图、预览和抽样帧媒体。
 3. 使用 POST `/custom-stickers` 保存已检查的输出：
@@ -41,6 +43,7 @@ import { Aside } from '@astrojs/starlight/components';
    ```
 
    接收到的媒体源则使用 `{"source":{"kind":"message","messageId":"MESSAGE_ID","assetId":"ASSET_ID"}}`。其原图必须已下载并通过校验。其他格式的 WXGF 文件不能直接保存为新项目；请改用已校验的标准原图。
+4. 表情保存完成，或你决定不保存后，DELETE `/uploads/{sourceId}` 以释放源文件占用的磁盘空间。返回 `{"released":true}`；若上传内容已不存在，则返回 `false`。若准备或发送仍需要该上传，则返回 409 `upload_in_use`。
 
 ## 位置调整与操作恢复 \{#placement-and-operation-recovery}
 

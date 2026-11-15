@@ -8,9 +8,21 @@ export type StickerPreparationRequest = {
  */
 sourceId: string,
 /**
- * Permit proportional resizing to the current sticker edge limit.
+ * Shrink proportionally to fit within the 1024-pixel sticker edge limit when
+ * the source is larger. Without it, a larger image or GIF is refused;
+ * smaller sources keep their size and encoding.
  */
 fit: boolean,
+/**
+ * Shrink proportionally so the longest edge is at most this many pixels
+ * (16 to 1024). Never enlarges. For video it replaces the 240-pixel default.
+ */
+maxEdge: number | null,
+/**
+ * Frame rate for a sticker made from video (1 to 30, default 10). Image and
+ * GIF sources keep their own timing and refuse this option.
+ */
+fps: number | null,
 /**
  * Optional explicit segment, in milliseconds. Omission preserves the source duration.
  */
@@ -1716,6 +1728,11 @@ removed: boolean,
  * True when the account's local files were kept. They are always kept.
  */
 filesRetained: boolean, };
+export type NativeUploadRelease = {
+/**
+ * True when this request deleted the upload; false when it was already gone.
+ */
+released: boolean, };
 export type QuoteSendReference = {
 /**
  * ID of the saved message to quote, copied from `id` on the message.

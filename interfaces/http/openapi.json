@@ -3254,6 +3254,19 @@
         ],
         "type": "object"
       },
+      "NativeUploadRelease": {
+        "description": "Result of deleting an upload.",
+        "properties": {
+          "released": {
+            "description": "True when this request deleted the upload; false when it was already gone.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "released"
+        ],
+        "type": "object"
+      },
       "OfficialProfileRequest": {
         "additionalProperties": false,
         "description": "Where to find the stopped official WeChat profile to attach as an account.",
@@ -4109,8 +4122,28 @@
         "properties": {
           "fit": {
             "default": false,
-            "description": "Permit proportional resizing to the current sticker edge limit.",
+            "description": "Shrink proportionally to fit within the 1024-pixel sticker edge limit when\nthe source is larger. Without it, a larger image or GIF is refused;\nsmaller sources keep their size and encoding.",
             "type": "boolean"
+          },
+          "fps": {
+            "default": null,
+            "description": "Frame rate for a sticker made from video (1 to 30, default 10). Image and\nGIF sources keep their own timing and refuse this option.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "maxEdge": {
+            "default": null,
+            "description": "Shrink proportionally so the longest edge is at most this many pixels\n(16 to 1024). Never enlarges. For video it replaces the 240-pixel default.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "sourceId": {
             "description": "ID returned by the existing upload endpoint.",
@@ -10603,6 +10636,65 @@
         "x-agent-wechat-sdk-response": [
           {
             "$ref": "#/components/schemas/OwnedMediaSource"
+          }
+        ]
+      }
+    },
+    "/v1/accounts/{a}/uploads/{id}": {
+      "delete": {
+        "operationId": "releaseUpload",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Upload source ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeUploadRelease"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "send"
+            ]
+          }
+        ],
+        "summary": "Delete an upload you have finished with, such as the source of an added sticker. Returns `released: false` when it is already gone; an upload a pending send or preparation needs is kept (409 `upload_in_use`).",
+        "tags": [
+          "media"
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/NativeUploadRelease"
           }
         ]
       }

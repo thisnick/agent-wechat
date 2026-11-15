@@ -127,7 +127,9 @@ request StickerPackQuery | object, rejects unknown fields | Filters for account-
 request StickerPackQuery.cursor | string, nullable | Opaque available-feed continuation returned by the preceding page.
 request StickerPackQuery.membership | string, nullable, values added | Select `added` for the complete canonical account list; omission browses the feed.
 request StickerPreparationRequest | object, rejects unknown fields | Explicit preparation of owned image/GIF/video bytes; never saves or sends a sticker.
-request StickerPreparationRequest.fit | boolean, default false | Permit proportional resizing to the current sticker edge limit.
+request StickerPreparationRequest.fit | boolean, default false | Shrink proportionally to fit within the 1024-pixel sticker edge limit when the source is larger. Without it, a larger image or GIF is refused; smaller sources keep their size and encoding.
+request StickerPreparationRequest.fps | integer, nullable, min 0, format uint32, default null | Frame rate for a sticker made from video (1 to 30, default 10). Image and GIF sources keep their own timing and refuse this option.
+request StickerPreparationRequest.maxEdge | integer, nullable, min 0, format uint32, default null | Shrink proportionally so the longest edge is at most this many pixels (16 to 1024). Never enlarges. For video it replaces the 240-pixel default.
 request StickerPreparationRequest.sourceId | string, required | ID returned by the existing upload endpoint.
 request StickerPreparationRequest.trim | object, nullable, rejects unknown fields | Optional explicit segment, in milliseconds. Omission preserves the source duration.
 request StickerPreparationRequest.trim.durationMs | integer, required, min 0, format uint32 | Duration of the retained segment in milliseconds, greater than zero.
@@ -810,6 +812,8 @@ response NativeThreadPage.items[]<NativeTombstone>.id | string, required | ID of
 response NativeThreadPage.items[]<NativeTombstone>.version | string, required | Fingerprint of the saved profile data in which the resource is missing, the same value as `sourceGeneration` on the page.
 response NativeThreadPage.nextCursor | string, required, nullable | Pass it as `cursor` with the same query to get the next page. Null on the last page.
 response NativeThreadPage.sourceGeneration | string, required | Fingerprint of the saved profile data the page was read from. It changes when the profile files change.
+response NativeUploadRelease | object | Result of deleting an upload.
+response NativeUploadRelease.released | boolean, required | True when this request deleted the upload; false when it was already gone.
 response OfficialProfileSelection | object | The account an official profile is attached to.
 response OfficialProfileSelection.accountId | string, required | ID of the account that uses the profile.
 response OfficialProfileSelection.profilePath | string, required | Path of the attached profile on the daemon's host.
@@ -1096,6 +1100,7 @@ route DELETE /v1/accounts/{a}/groups/{room}/members | scope admin, idempotency k
 route DELETE /v1/accounts/{a}/login-attempts/{id} | scope varies, response NativeOperation, sdk response NativeOperation | Cancel a login attempt. Scope: Needs read, login, media or send to look the operation up, then its kind decides: login, logout and forget_credentials need login; media-writeback needs media; message_recall needs send; sync and metadata need read; every other kind needs admin.
 route DELETE /v1/accounts/{a}/operations/{id} | scope varies, response NativeOperation, sdk response NativeOperation | Ask a background operation to stop. Scope: Needs read, login, media or send to look the operation up, then its kind decides: login, logout and forget_credentials need login; media-writeback needs media; message_recall needs send; sync and metadata need read; every other kind needs admin.
 route DELETE /v1/accounts/{a}/sticker-packs/{id}/membership | scope send, idempotency key required, response MediaJob, status 202, sdk response MediaJob | Remove account membership and reconcile canonical pack storage asynchronously.
+route DELETE /v1/accounts/{a}/uploads/{id} | scope send, response NativeUploadRelease, sdk response NativeUploadRelease | Delete an upload you have finished with, such as the source of an added sticker. Returns `released: false` when it is already gone; an upload a pending send or preparation needs is kept (409 `upload_in_use`).
 route DELETE /v1/tokens/{id} | scope owner token, response untyped | Revoke an API token so it stops working.
 route GET /health | scope none, response untyped | Report that the daemon is running. This is the only route that needs no token.
 route GET /v1/access-tokens | scope owner token, response untyped | List the API tokens that have been issued, without their secret values.

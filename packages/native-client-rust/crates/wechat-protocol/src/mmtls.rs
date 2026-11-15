@@ -161,6 +161,52 @@ impl Drop for ShortSession {
         self.ticket.nonce.zeroize();
     }
 }
+
+/// Longest reuse of one short-link ticket, even when its lifetime is longer.
+const SHORT_LINK_MAX_REUSE: Duration = Duration::from_secs(3600);
+/// Stop reusing a ticket this long before its advertised lifetime ends.
+const SHORT_LINK_EXPIRY_MARGIN: Duration = Duration::from_secs(60);
+
+/// The short-link resumption ticket an account's owner reuses between
+/// requests. The long-link handshake issues an access PSK and ticket with a
+/// lifetime; short-link requests present it, so a new long-link handshake is
+/// only needed when no ticket is cached for the host, the cached one is near
+/// the end of its lifetime, or a short exchange that used it failed. Held only
+/// in memory and zeroized with the session when replaced.
+#[derive(Default)]
+pub(crate) struct ShortLinkCache {
+    entry: std::sync::Mutex<Option<(String, ShortSession, Instant)>>,
+}
+impl ShortLinkCache {
+    /// A clone of the cached ticket for `host` while it is still reusable.
+    pub(crate) fn get(&self, host: &str) -> Option<ShortSession> {
+        self.get_at(host, Instant::now())
+    }
+    fn get_at(&self, host: &str, now: Instant) -> Option<ShortSession> {
+        let entry = self.entry.lock().ok()?;
+        let (cached_host, session, issued) = entry.as_ref()?;
+        let lifetime = Duration::from_secs(u64::from(session.ticket.lifetime))
+            .saturating_sub(SHORT_LINK_EXPIRY_MARGIN)
+            .min(SHORT_LINK_MAX_REUSE);
+        (cached_host == host && now.saturating_duration_since(*issued) < lifetime)
+            .then(|| session.clone())
+    }
+    /// Remember the ticket a long-link handshake to `host` just issued.
+    pub(crate) fn put(&self, host: &str, session: ShortSession) {
+        self.put_at(host, session, Instant::now());
+    }
+    fn put_at(&self, host: &str, session: ShortSession, issued: Instant) {
+        if let Ok(mut entry) = self.entry.lock() {
+            *entry = Some((host.to_string(), session, issued));
+        }
+    }
+    /// Forget the cached ticket so the next request performs a handshake.
+    pub(crate) fn invalidate(&self) {
+        if let Ok(mut entry) = self.entry.lock() {
+            *entry = None;
+        }
+    }
+}
 pub struct Session {
     socket: TcpStream,
     deadline: Instant,
@@ -965,6 +1011,45 @@ fn decode_short_reply(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn short_link_tickets_are_reused_per_host_within_their_lifetime() {
+        use super::*;
+        let session = |lifetime: u32| ShortSession {
+            access_psk: vec![0x42; 32],
+            ticket: Ticket {
+                kind: 1,
+                lifetime,
+                reserved: 0,
+                nonce: vec![0; 12],
+                opaque: vec![1],
+            },
+        };
+        let start = Instant::now();
+        let cache = ShortLinkCache::default();
+        assert!(cache.get_at("long.example", start).is_none());
+        cache.put_at("long.example", session(600), start);
+        let reused = cache
+            .get_at("long.example", start + Duration::from_secs(539))
+            .expect("reused inside the lifetime margin");
+        assert_eq!(reused.access_psk, vec![0x42; 32]);
+        // Another host, the expiry margin and invalidation all force a handshake.
+        assert!(cache.get_at("other.example", start).is_none());
+        assert!(cache
+            .get_at("long.example", start + Duration::from_secs(540))
+            .is_none());
+        cache.invalidate();
+        assert!(cache.get_at("long.example", start).is_none());
+        // Reuse is capped at an hour, and a ticket without lifetime is not reused.
+        cache.put_at("long.example", session(86_400), start);
+        assert!(cache
+            .get_at("long.example", start + Duration::from_secs(3599))
+            .is_some());
+        assert!(cache
+            .get_at("long.example", start + Duration::from_secs(3600))
+            .is_none());
+        cache.put_at("long.example", session(0), start);
+        assert!(cache.get_at("long.example", start).is_none());
+    }
     #[test]
     fn short_requests_split_large_uploads_and_authenticate_the_close_sequence() {
         let session = ShortSession {

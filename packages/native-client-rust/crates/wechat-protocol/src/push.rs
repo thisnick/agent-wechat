@@ -188,6 +188,19 @@ impl Connection {
         wire::decode_heartbeat(&self.rpc(state, 518, 238, &request, before_submit)?)
     }
 
+    /// One sticker piece (CGI 175) on the long link, which the official client
+    /// prefers over the short link while connected. Notifications that arrive
+    /// before the reply stay queued for [`Self::poll`].
+    pub(crate) fn sticker_chunk_guarded(
+        &mut self,
+        state: &mut AccountState,
+        chunk: &crate::sticker_send::StickerSendChunk<'_>,
+        before_submit: impl FnOnce() -> Result<()>,
+    ) -> Result<Vec<u8>> {
+        let request = crate::sticker_send::sticker_send_request(state, chunk)?;
+        self.rpc(state, 175, 68, &request, before_submit)
+    }
+
     pub(crate) fn sync_guarded(
         &mut self,
         state: &mut AccountState,

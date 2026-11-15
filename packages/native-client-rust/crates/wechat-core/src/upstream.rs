@@ -45,6 +45,17 @@ pub trait PushConnection: Send {
     fn heartbeat(&mut self, state: &mut AccountState, cursor: &[u8]) -> Result<Heartbeat>;
     fn sync(&mut self, state: &mut AccountState, cursor: &[u8], scene: u32) -> Result<SyncBatch>;
     fn poll(&mut self, timeout: Duration) -> Result<Option<Notification>>;
+    /// Whether this connection can carry sticker pieces on its long link.
+    fn sends_sticker_chunks(&self) -> bool {
+        false
+    }
+    /// Submit one journaled sticker piece on this connection.
+    fn send_sticker_chunk(
+        &mut self,
+        _chunk: &wechat_protocol::sticker_send::StickerSendChunk<'_>,
+    ) -> Result<Vec<u8>> {
+        bail!("unsupported_simulator_operation")
+    }
 }
 
 /// Simulation implements decoded operations explicitly. All remaining native

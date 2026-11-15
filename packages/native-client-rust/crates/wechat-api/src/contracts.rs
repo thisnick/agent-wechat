@@ -686,6 +686,14 @@ pub struct NativeAccountRemoval {
     pub files_retained: bool,
 }
 
+/// Result of deleting an upload.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeUploadRelease {
+    /// True when this request deleted the upload; false when it was already gone.
+    pub released: bool,
+}
+
 pub fn typescript() -> String {
     let declarations = [
         wechat_core::StickerPreparationRequest::decl(),
@@ -779,6 +787,7 @@ pub fn typescript() -> String {
         wechat_store::AccountSettings::decl(),
         NativeAccountRemovalRequest::decl(),
         NativeAccountRemoval::decl(),
+        NativeUploadRelease::decl(),
         wechat_core::QuoteSendReference::decl(),
         wechat_core::TextMentionPosition::decl(),
         wechat_core::TextMentions::decl(),

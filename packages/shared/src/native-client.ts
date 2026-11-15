@@ -6,7 +6,7 @@ export * from "./native-calls.ts";
 import type { TextMentions } from "./native.generated.js";
 export type NativeTextSendOptions = { quote?: QuoteSendReference; mentions?: TextMentions };
 export type NativeTextMentionOptions = NativeTextSendOptions & { mentions: TextMentions };
-import type { AccountSettings, NativeAccountRemoval, OfficialProfileRequest, OfficialProfileSelection, LoginRequest, QrRefresh, NativeTombstone, NativeMessage, QuoteSendReference, NativeThread, NativeContact, NativeGroup, NativeGroupMember, NativePage, NativeOperation, NativeSendIntent, ShareSendRequest, NativeEvent, NativeIdentity, NativeStatus, MediaAsset, MediaJob, NativeMediaJobRetryRequest, MediaTransferRequest, MediaSendRequest, OwnedMediaSource } from "./native.generated.js";
+import type { AccountSettings, NativeAccountRemoval, NativeUploadRelease, OfficialProfileRequest, OfficialProfileSelection, LoginRequest, QrRefresh, NativeTombstone, NativeMessage, QuoteSendReference, NativeThread, NativeContact, NativeGroup, NativeGroupMember, NativePage, NativeOperation, NativeSendIntent, ShareSendRequest, NativeEvent, NativeIdentity, NativeStatus, MediaAsset, MediaJob, NativeMediaJobRetryRequest, MediaTransferRequest, MediaSendRequest, OwnedMediaSource } from "./native.generated.js";
 export type * from "./native.generated.js";
 export { NATIVE_MAX_SOURCE_BYTES, NATIVE_MAX_ORDINARY_SOURCE_BYTES, NATIVE_MAX_VIDEO_SOURCE_BYTES } from "./native.generated.ts";
 import { NATIVE_MAX_SOURCE_BYTES } from "./native.generated.ts";
@@ -300,6 +300,10 @@ export class NativeWeChatClient {
     const form = new FormData(); form.set("file", part, name);
     const response = await this.response(`v1/accounts/${id(accountId)}/uploads`, { method: "POST", body: form, signal }, false, this.mediaTimeoutMs);
     return JSON.parse(new TextDecoder().decode(await this.readBounded(response))) as OwnedMediaSource;
+  }
+  /** Delete an upload you have finished with, such as the source of an added sticker. Uploads a pending send or preparation needs are kept (`upload_in_use`). */
+  releaseUpload(accountId: string, sourceId: string, signal?: AbortSignal): Promise<NativeUploadRelease> {
+    return this.request(`v1/accounts/${id(accountId)}/uploads/${id(sourceId)}`, { method: "DELETE", signal });
   }
   /** Derive Saved and all added official pack tabs from the account profile. */
   stickerCollections(accountId: string, signal?: AbortSignal): Promise<import("./native.generated.js").StickerCollections> {

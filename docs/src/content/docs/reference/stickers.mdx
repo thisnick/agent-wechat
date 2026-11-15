@@ -14,7 +14,7 @@ they do not start acquisition or change account membership.
 | `/sticker-collections` | GET Saved plus every added-pack picker descriptor |
 | `/custom-stickers` | GET ordered Saved/revision; POST save prepared or received media |
 | `/custom-stickers/{id}` | GET metadata/media; PATCH placement; DELETE Saved membership |
-| `/sticker-preparations` | POST uploaded source plus optional trim/fit |
+| `/sticker-preparations` | POST uploaded source plus optional trim, fit, maxEdge and fps |
 | `/sticker-preparations/{id}` | GET job, outputs, previews, transformations and expiry |
 | `/sticker-packs` | GET available-feed page; `?membership=added` reads the complete account-added list |
 | `/sticker-packs/{id}` | GET name, membership and separate content readiness |
@@ -31,12 +31,18 @@ a missing canonical GIF; it preserves an existing alternate-format Saved cache.
 
 ## Prepare, review and save
 
-1. Upload bytes through `/media-sources`. Preparation receives the returned
-   `sourceId`, never a path on the caller's machine.
+1. Upload bytes through `/uploads`. Preparation receives the returned
+   `sourceId`, never a path on the caller's machine. Sources can be up to
+   64 MiB for images and GIFs and 512 MiB for videos.
 
    ```json
-   {"sourceId":"SOURCE_ID","fit":true,"trim":{"startMs":1000,"durationMs":2000}}
+   {"sourceId":"SOURCE_ID","maxEdge":360,"fps":12,"trim":{"startMs":1000,"durationMs":2000}}
    ```
+
+   Images and GIFs up to 1024 pixels keep their size and encoding. `fit` shrinks a
+   larger one to 1024; `maxEdge` (16–1024) shrinks the longest side further and
+   never enlarges. Video becomes a GIF at 240 pixels and 10 fps unless `maxEdge`
+   and `fps` (1–30) say otherwise; `fps` is refused for images.
 
 2. POST that body to `/sticker-preparations` with `Idempotency-Key`. A completed
    preparation links to authenticated original, preview and sampled-frame media.
@@ -50,6 +56,10 @@ a missing canonical GIF; it preserves an existing alternate-format Saved cache.
    `{"source":{"kind":"message","messageId":"MESSAGE_ID","assetId":"ASSET_ID"}}`.
    Its original must already be downloaded and verified. Alternate WXGF files
    cannot be saved as a new item directly; use a verified canonical original.
+4. Once the sticker is saved, or you decide not to save it, DELETE
+   `/uploads/{sourceId}` to free the source's disk space. It returns
+   `{"released":true}`, or `false` if the upload was already gone. While a
+   preparation or send still needs the upload, it returns 409 `upload_in_use`.
 
 ## Placement and operation recovery
 

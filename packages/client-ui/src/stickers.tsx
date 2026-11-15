@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type DragEvent } from "react";
+import { useEffect, useId, useRef, useState, type CSSProperties, type DragEvent } from "react";
 import { createPortal } from "react-dom";
 import type { CustomSticker, CustomStickerList, MediaAsset, NativeWeChatClient, PreparedSticker, StickerPack, StickerPackSticker, StickerSendSource } from "@agent-wechat/shared";
 import { NativeApiError } from "@agent-wechat/shared";
@@ -6,7 +6,8 @@ import type { Connection } from "./connection.ts";
 import { readableError } from "./session.ts";
 import { t } from "./i18n.ts";
 import { Button, Icon } from "./ui.tsx";
-import { waitStickerJob } from "./sticker-jobs.ts";
+import { StickerJobError, waitStickerJob } from "./sticker-jobs.ts";
+import { FPS_STOPS, MAX_STICKER_EDGE, PHONE_STICKER_EDGE, defaultOptions, sourceKind, exceedsStickerEdge, maxLength, readStickerSource, requestKey, sizeStops, stickerRequest, stopPosition, trimRange, withLength, withStart, type StickerOptions, type StickerRequestOptions, type StickerSource } from "./sticker-options.ts";
 import "./stickers.css";
 export { waitStickerJob } from "./sticker-jobs.ts";
 
@@ -105,7 +106,21 @@ export function StickerDraftPreview({ connection, account, draft, remove }: { co
   </section>;
 }
 
-type ImportItem = { id: string; file: File; key: string; prepareKey: string; sourceId?: string; selected: boolean; prepared?: PreparedSticker; error?: string; busy?: boolean; added?: boolean };
+/** One preparation per distinct option set, each with its own idempotency keys. */
+type PreparedEntry = { key: string; addKey: string; prepared?: PreparedSticker; error?: string; retry?: boolean };
+/**
+ * `options` follow the sliders; `want` follows them after a pause and is what gets
+ * prepared. `shown` is the last result that matched the options, kept on screen while
+ * the next one is prepared.
+ */
+/** Largest image or GIF the hub prepares a sticker from. */
+const MAX_IMAGE_SOURCE_BYTES = 64 * 1024 * 1024;
+/** Largest video the hub prepares a sticker from, the same as an attachment. */
+const MAX_VIDEO_SOURCE_BYTES = 512 * 1024 * 1024;
+type ImportItem = { id: string; file: File; selected: boolean; sourceId?: string; source?: StickerSource; options?: StickerOptions; want?: string; results: Record<string, PreparedEntry>; shown?: PreparedSticker; error?: string; added?: boolean };
+const liveKey = (item: ImportItem) => item.source && item.options ? requestKey(stickerRequest(item.source, item.options)) : undefined;
+function liveEntry(item: ImportItem): PreparedEntry | undefined { const key = liveKey(item); return key ? item.results[key] : undefined; }
+function isPreparing(item: ImportItem) { const entry = liveEntry(item); return item.selected && !item.added && !entry?.prepared && !entry?.error; }
 type DragPreview = { id: string; x: number; y: number; width: number; height: number; src?: string; dropId?: string; side?: "before" | "after" };
 type Props = { connection: Connection; account: string; enabled: boolean; stage: (draft: StickerDraft) => void };
 export function StickerPicker({ connection, account, enabled, stage }: Props) {
@@ -122,7 +137,8 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
   const [savedLimit,setSavedLimit]=useState(25);
   const root = useRef<HTMLDivElement>(null), fileInput = useRef<HTMLInputElement>(null), hold = useRef<ReturnType<typeof setTimeout> | undefined>(undefined), held = useRef(false);
   const scope = useRef(new AbortController()), keys = useRef(new Map<string, string>()), id = useId();
-  const preparing = useRef(false);
+  const preparing = useRef(false), [queue, setQueue] = useState(0);
+  const adjustTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>()), importScope = useRef(new AbortController());
   const catalogLoaded = useRef(0);
   const packViews = useRef(new Map<string, { at: number; detail: StickerPack; items: StickerPackSticker[] }>());
   const viewEpoch = useRef(0);
@@ -285,47 +301,111 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
     if (busy) return;
     setEdit(false);
     const count=(imports?.length ?? 0)+files.length;
-    setImports(old => [...(old ?? []),...files.slice(0,Math.max(0,20-(old?.length ?? 0))).map(file => ({ id: crypto.randomUUID(), file, key: crypto.randomUUID(), prepareKey: crypto.randomUUID(), selected: true }))]);
+    const fresh: ImportItem[] = files.slice(0, 20).map(file => ({ id: crypto.randomUUID(), file, selected: true, results: {} }));
+    setImports(old => [...(old ?? []),...fresh.slice(0,Math.max(0,20-(old?.length ?? 0)))]);
     if (count > 20) setError(t("stickers.batchLimit"));
+    // Sizes and lengths are read locally so the first preparation already uses the defaults.
+    for (const item of fresh) void readStickerSource(item.file).then(source => {
+      const options = defaultOptions(source);
+      updateImport(item.id, { source, options, want: requestKey(stickerRequest(source, options)) });
+    });
   }
   function updateImport(id: string, update: Partial<ImportItem>) { setImports(old => old?.map(item => item.id === id ? { ...item, ...update } : item) ?? null); }
-  async function prepare(item: ImportItem) {
-    if (preparing.current) return;
-    preparing.current=true;
-    updateImport(item.id, { busy: true, error: undefined });
-    try {
-      if (item.file.size===0 || item.file.size>64*1024*1024) throw Error(t("stickers.sourceSize"));
-      const sourceId = item.sourceId ?? (await client.upload(account, item.file, item.file.name, item.file.type || "application/octet-stream", signal())).id;
-      guard();updateImport(item.id,{sourceId});
-      const job = await waitStickerJob(client, account, await client.prepareSticker(account, { sourceId, fit: false, trim: null }, item.prepareKey, signal()), signal());
-      guard(); updateImport(item.id, { prepared: job.result as unknown as PreparedSticker, busy: false });
-    } catch (error) { if (!signal().aborted) updateImport(item.id, { error: readableError(error), busy: false }); }
-    finally {preparing.current=false;}
+  const importOpen = imports !== null;
+  useEffect(() => {
+    if (!importOpen) return;
+    const abort = new AbortController(); importScope.current = abort;
+    const timers = adjustTimers.current;
+    return () => { abort.abort(); for (const timer of timers.values()) clearTimeout(timer); timers.clear(); };
+  }, [importOpen, account, connection]);
+  const importSignal = () => AbortSignal.any([signal(), importScope.current.signal]);
+  /** Follows a slider at once; prepares only after the slider has rested for a moment. */
+  function adjust(id: string, change: (source: StickerSource, options: StickerOptions) => StickerOptions) {
+    setImports(old => old?.map(item => {
+      if (item.id !== id || !item.source || !item.options) return item;
+      const options = change(item.source, item.options);
+      const cached = item.results[requestKey(stickerRequest(item.source, options))]?.prepared;
+      return { ...item, options, error: undefined, ...(cached ? { shown: cached } : {}) };
+    }) ?? null);
+    clearTimeout(adjustTimers.current.get(id));
+    adjustTimers.current.set(id, setTimeout(() => {
+      adjustTimers.current.delete(id);
+      setImports(old => old?.map(item => item.id === id ? { ...item, want: liveKey(item) } : item) ?? null);
+    }, 400));
   }
-  useEffect(()=> {
-    const next=imports?.find(item=>item.selected && !item.prepared && !item.error && !item.busy && !item.added);
-    if (next && !preparing.current) void prepare(next);
-  },[imports]);
+  /** A failed preparation is submitted again under a new key; the old job keeps its result. */
+  function retry(id: string) {
+    setImports(old => old?.map(item => {
+      const key = liveKey(item);
+      if (item.id !== id || !key) return item;
+      const { [key]: _failed, ...results } = item.results;
+      return { ...item, results, want: key, error: undefined };
+    }) ?? null);
+  }
+  async function prepare(item: ImportItem, want: string) {
+    preparing.current = true;
+    const entry: PreparedEntry = { key: crypto.randomUUID(), addKey: crypto.randomUUID() };
+    const store = (update: Partial<PreparedEntry>, more: (current: ImportItem) => Partial<ImportItem> = () => ({})) =>
+      setImports(old => old?.map(current => current.id === item.id ? { ...current, ...more(current), results: { ...current.results, [want]: { ...entry, ...update } } } : current) ?? null);
+    const active = importSignal();
+    try {
+      if (item.file.size === 0) { store({ error: t("stickers.sourceEmpty") }); return; }
+      // Videos are converted from a file on the hub; images and GIFs are decoded in memory.
+      const limit = sourceKind(item.file) === "video" ? MAX_VIDEO_SOURCE_BYTES : MAX_IMAGE_SOURCE_BYTES;
+      if (item.file.size > limit) { store({ error: t("stickers.sourceSize", { size: Math.ceil(item.file.size / 1048576), limit: limit / 1048576 }) }); return; }
+      store({}); // An entry in progress keeps the row from being picked again.
+      const sourceId = item.sourceId ?? (await client.upload(account, item.file, item.file.name, item.file.type || "application/octet-stream", active)).id;
+      active.throwIfAborted(); updateImport(item.id, { sourceId });
+      const request = { sourceId, ...(JSON.parse(want) as StickerRequestOptions) };
+      const job = await waitStickerJob(client, account, await client.prepareSticker(account, request, entry.key, active), active);
+      active.throwIfAborted();
+      const prepared = job.result as unknown as PreparedSticker;
+      // A result for options the row has since left is kept for later, not shown.
+      store({ prepared }, current => liveKey(current) === want ? { shown: prepared } : {});
+    } catch (error) {
+      if (!active.aborted) { const failure = preparationError(error, item.source); store({ error: failure.text, retry: failure.retry }); }
+    } finally { preparing.current = false; setQueue(value => value + 1); }
+  }
+  // One preparation at a time, for the first selected row whose settled options have none.
+  useEffect(() => {
+    if (preparing.current || !imports) return;
+    const next = imports.find(item => item.selected && !item.added && item.want !== undefined && !item.results[item.want]);
+    if (next?.want !== undefined) void prepare(next, next.want);
+  }, [imports, queue]);
+  /** Ask the hub to delete an upload; one a preparation still needs is kept until it finishes. */
+  function releaseUpload(sourceId?: string) {
+    if (sourceId) void client.releaseUpload(account, sourceId).catch(() => undefined);
+  }
+  /** Close Add to Saved and free the uploads of files that were not added. */
+  function closeImports() {
+    for (const item of imports ?? []) if (!item.added) releaseUpload(item.sourceId);
+    setImports(null);
+  }
   async function addBatch() {
     await act(async () => {
       const selected = (imports ?? []).filter(item => item.selected);
       let allAdded = selected.length > 0;
       for (const item of selected) {
         if (item.added) continue;
-        if (!item.prepared) { allAdded = false; continue; }
+        // Only the result prepared for the row's current options is added.
+        const entry = liveEntry(item);
+        if (!entry?.prepared) { allAdded = false; continue; }
         try {
-          await waitStickerJob(client, account, await client.addCustomSticker(account, { source: { kind: "prepared", preparationId: item.prepared.id } }, item.key, signal()), signal());
+          await waitStickerJob(client, account, await client.addCustomSticker(account, { source: { kind: "prepared", preparationId: entry.prepared.id } }, entry.addKey, signal()), signal());
           guard(); updateImport(item.id, { added: true, error: undefined });
+          // The saved sticker no longer needs its upload; free the hub's copy now.
+          releaseUpload(item.sourceId);
         } catch (error) { allAdded = false; if (!signal().aborted) updateImport(item.id, { error: readableError(error) }); }
       }
       await refresh();
       guard();
-      if (allAdded) { setTab("saved"); setImports(null); }
+      if (allAdded) { setTab("saved"); closeImports(); }
     });
   }
   const visible = tab === "saved" ? saved.items.slice(0,savedLimit) : packItems.id === tab ? packItems.items : [];
   const loading = tab === "saved" ? !savedLoaded || busy : packItems.id !== tab || packItems.loading;
-  const ready = imports?.filter(item => item.selected && item.prepared && !item.added).length ?? 0;
+  const ready = imports?.filter(item => item.selected && !item.added && liveEntry(item)?.prepared).length ?? 0;
+  const pending = imports?.some(isPreparing) ?? false;
   return <div className="sticker-picker" ref={root} onKeyDown={event => { if (event.key === "Escape" && pointerDrag.current) { clearDrag(); event.preventDefault(); event.stopPropagation(); } else if (event.key === "Escape" && !browser && !imports) { setOpen(false); event.stopPropagation(); } }}>
     <button type="button" className="icon-btn" aria-label={t("stickers.open")} title={t("stickers.open")} aria-expanded={open} aria-controls={id} disabled={!enabled} onClick={() => setOpen(value => !value)}><Icon name="smile" /></button>
     {open && !browser && !imports && <section id={id} className="sticker-tray" data-composer-file-drop aria-label={t("stickers.picker")} onDragOver={event => { event.preventDefault(); event.stopPropagation(); }} onDrop={drop}>
@@ -374,18 +454,94 @@ export function StickerPicker({ connection, account, enabled, stage }: Props) {
       </> : <><nav className="sticker-browser-tabs"><button aria-pressed={browser === "browse"} onClick={() => void browse("browse")}>{t("stickers.browse")}</button><button aria-pressed={browser === "added"} onClick={() => void browse("added")}>{t("stickers.added")}</button></nav><div className="sticker-pack-cards">{(browser === "added" ? added : catalog).map(pack => <button key={pack.id} onClick={() => void inspect(pack)} className="sticker-pack-card" disabled={busy}><StickerImage client={client} account={account} asset={pack.icon} label={pack.name} acquire /><span><strong>{pack.name}</strong><small>{pack.membership === "added" ? t("stickers.added") : t("stickers.previewPack")}</small></span><Icon name="chevron" /></button>)}</div>{browser === "browse" && cursor && <button disabled={busy} onClick={() => void browse("browse", cursor)}>{t("stickers.morePacks")}</button>}</>}
       {busy && <p role="status">{t("stickers.working")}</p>}{error && <p role="alert" className="sticker-error">{error}</p>}
     </StickerModal>}
-    {imports && <StickerModal label={t("stickers.addToSaved")} close={() => { if (!busy) setImports(null); }} onDrop={drop}>
-      <header><div><h2>{t("stickers.addToSaved")}</h2><p>{t("stickers.importHint")}</p></div><Button icon="close" label={t("stickers.close")} disabled={busy} onClick={() => setImports(null)} /></header>
-      <div className="sticker-import-list">{imports.map(item => <article key={item.id} className="sticker-import-item"><input type="checkbox" aria-label={t("stickers.includeFile", { name: item.file.name })} checked={item.selected} disabled={busy || item.added} onChange={event => updateImport(item.id, { selected: event.target.checked })} /><StickerImage client={client} account={account} asset={item.prepared?.original} label={item.file.name} /><div><strong>{item.file.name}</strong>{item.added ? <p>{t("stickers.added")}</p> : item.prepared ? <p>{t("stickers.preparedDimensions", { width: item.prepared.width, height: item.prepared.height, seconds: item.prepared.durationMs / 1000 })}</p> : <button disabled={item.busy || busy} onClick={() => void prepare(item)}>{item.busy ? t("stickers.preparing") : t("stickers.prepare")}</button>}
-        {item.error && <p role="alert" className="sticker-error">{item.error}</p>}
-      </div></article>)}</div>
-      <footer><button disabled={busy} onClick={() => fileInput.current?.click()}>{t("stickers.chooseFiles")}</button><button className="sticker-add-submit" disabled={busy || !ready} onClick={() => void addBatch()}>{busy ? t("stickers.saving") : t("stickers.addCount", { count: ready })}</button></footer>{error && <p role="alert">{error}</p>}
+    {imports && <StickerModal className="sticker-import-modal" label={t("stickers.addToSaved")} close={() => { if (!busy) closeImports(); }} onDrop={drop}>
+      <header><div><h2>{t("stickers.addToSaved")}</h2><p>{t("stickers.importHint")}</p></div><Button icon="close" label={t("stickers.close")} disabled={busy} onClick={() => closeImports()} /></header>
+      <div className="sticker-import-list">{imports.map(item => <StickerImportRow key={item.id} client={client} account={account} item={item} disabled={busy}
+        select={selected => updateImport(item.id, { selected })} adjust={change => adjust(item.id, change)} retry={() => retry(item.id)} />)}</div>
+      <footer><button disabled={busy} onClick={() => fileInput.current?.click()}>{t("stickers.chooseFiles")}</button><button className="sticker-add-submit" disabled={busy || !ready || pending} onClick={() => void addBatch()}>{busy ? t("stickers.saving") : t("stickers.addCount", { count: ready })}</button></footer>{error && <p role="alert">{error}</p>}
     </StickerModal>}
   </div>;
 }
 
-function StickerModal({ label, close, children, onDrop }: { label: string; close: () => void; children: React.ReactNode; onDrop?: (event: DragEvent) => void }) {
+/** Plain-language results for the limits a person can fix with the controls. */
+function preparationError(error: unknown, source?: StickerSource): { text: string; retry: boolean } {
+  const reason = error instanceof StickerJobError ? error.reason : error instanceof NativeApiError ? error.code : "";
+  const video = source?.kind === "video";
+  if (reason === "sticker_output_size_limit") return { text: t(video ? "stickers.tooLargeVideo" : "stickers.tooLargeImage"), retry: false };
+  if (reason === "sticker_adjustment_required") return { text: t(video ? "stickers.tooLongVideo" : "stickers.tooLongGif"), retry: false };
+  if (reason === "sticker_input_unsupported") return { text: t("stickers.inputUnsupported"), retry: false };
+  return { text: readableError(error), retry: true };
+}
+
+function preparedSummary(prepared: PreparedSticker) {
+  const bytes = prepared.original.byteLength;
+  const values = { width: prepared.width, height: prepared.height, size: bytes ? Math.max(1, Math.round(bytes / 1024)) : "–" };
+  return prepared.durationMs > 0 ? t("stickers.preparedDimensions", { ...values, seconds: (prepared.durationMs / 1000).toFixed(1) }) : t("stickers.preparedStill", values);
+}
+
+const seconds = (ms: number) => (ms / 1000).toFixed(1);
+
+type ImportRowProps = { client: NativeWeChatClient; account: string; item: ImportItem; disabled: boolean; select: (selected: boolean) => void; adjust: (change: (source: StickerSource, options: StickerOptions) => StickerOptions) => void; retry: () => void };
+function StickerImportRow({ client, account, item, disabled, select, adjust, retry }: ImportRowProps) {
+  const entry = liveEntry(item), prepared = entry?.prepared ?? item.shown, preparing = isPreparing(item);
+  return <article className="sticker-import-item">
+    <input type="checkbox" aria-label={t("stickers.includeFile", { name: item.file.name })} checked={item.selected} disabled={disabled || item.added} onChange={event => select(event.target.checked)} />
+    <StickerImage client={client} account={account} asset={prepared?.original} label={item.file.name} />
+    <div className="sticker-import-info">
+      <strong>{item.file.name}</strong>
+      <p className="sticker-import-status">{item.added ? t("stickers.added") : prepared && <span className={entry?.prepared ? undefined : "is-stale"}>{preparedSummary(prepared)}</span>}<span role="status">{preparing ? t("stickers.preparing") : ""}</span></p>
+      {(entry?.error || item.error) && <p role="alert" className="sticker-error">{entry?.error || item.error}</p>}
+      {entry?.retry && !item.added && <button className="sticker-import-retry" disabled={disabled} onClick={retry}>{t("stickers.prepare")}</button>}
+    </div>
+    {!item.added && item.source && item.options && <StickerImportControls name={item.file.name} id={item.id} source={item.source} options={item.options} disabled={disabled} adjust={adjust} />}
+  </article>;
+}
+
+function StickerImportControls({ name, id, source, options, disabled, adjust }: { name: string; id: string; source: StickerSource; options: StickerOptions; disabled: boolean; adjust: ImportRowProps["adjust"] }) {
+  const stops = sizeStops(source), stop = stops[Math.min(options.size, stops.length - 1)], range = trimRange(source);
+  const video = source.kind === "video", fps = FPS_STOPS[options.fps];
+  return <div className="sticker-import-controls" role="group" aria-label={t("stickers.optionsFor", { name })}>
+    <StickerSlider id={`${id}-size`} label={t("stickers.size")} min={0} max={stops.length - 1} value={Math.min(options.size, stops.length - 1)} disabled={disabled}
+      text={t("stickers.sizeValue", { px: stop.px })} valueText={t(stop.original ? "stickers.sizeOriginalLong" : "stickers.sizeValueLong", { px: stop.px })}
+      ends={[t("stickers.smaller"), !video && stops[stops.length - 1].original ? t("stickers.original") : t("stickers.larger")]}
+      mark={stopPosition(stops, PHONE_STICKER_EDGE)} markLabel={t("stickers.phoneSize", { px: PHONE_STICKER_EDGE })}
+      onChange={size => adjust((_, current) => ({ ...current, size }))} />
+    {!video && exceedsStickerEdge(source) && stop.px === MAX_STICKER_EDGE && <p className="sticker-import-note">{t("stickers.shrunkToLimit")}</p>}
+    {video && <StickerSlider id={`${id}-fps`} label={t("stickers.smoothness")} min={0} max={FPS_STOPS.length - 1} value={options.fps} disabled={disabled}
+      text={t("stickers.fpsValue", { fps })} valueText={t("stickers.fpsValueLong", { fps })} ends={[t("stickers.smallerFile"), t("stickers.smoother")]}
+      onChange={value => adjust((_, current) => ({ ...current, fps: value }))} />}
+    {range && <>
+      <StickerSlider id={`${id}-start`} label={t("stickers.start")} min={0} max={range.totalMs - 100} step={100} value={options.startMs} disabled={disabled}
+        text={t("stickers.secondsValue", { seconds: seconds(options.startMs) })} valueText={t("stickers.secondsValueLong", { seconds: seconds(options.startMs) })}
+        onChange={value => adjust((current, previous) => withStart(current, previous, value))} />
+      <StickerSlider id={`${id}-length`} label={t("stickers.length")} min={100} max={maxLength(range, options.startMs)} step={100} value={options.lengthMs} disabled={disabled}
+        text={t("stickers.secondsValue", { seconds: seconds(options.lengthMs) })} valueText={t("stickers.secondsValueLong", { seconds: seconds(options.lengthMs) })}
+        onChange={value => adjust((current, previous) => withLength(current, previous, value))} />
+    </>}
+  </div>;
+}
+
+type SliderProps = { id: string; label: string; min: number; max: number; step?: number; value: number; text: string; valueText: string; disabled: boolean; ends?: [string, string]; mark?: number; markLabel?: string; onChange: (value: number) => void };
+/** A labelled range with its current value; a single choice shows only the value. */
+function StickerSlider({ id, label, min, max, step = 1, value, text, valueText, disabled, ends, mark, markLabel, onChange }: SliderProps) {
+  if (max <= min) return <div className="sticker-control"><span>{label}</span><span /><span className="sticker-control-value">{text}</span></div>;
+  const note = mark !== undefined ? `${id}-mark` : undefined;
+  return <div className="sticker-control">
+    <label htmlFor={id}>{label}</label>
+    <div className="sticker-range">
+      <input id={id} type="range" min={min} max={max} step={step} value={value} disabled={disabled} aria-valuetext={valueText} aria-describedby={note} onChange={event => onChange(Number(event.currentTarget.value))} />
+      {(ends || note) && <div className="sticker-range-scale" aria-hidden="true">
+        {ends && <><span>{ends[0]}</span><span>{ends[1]}</span></>}
+        {note && <span className="sticker-range-mark" style={{ "--at": mark } as CSSProperties} title={markLabel} />}
+      </div>}
+      {note && <span id={note} className="sr-only">{markLabel}</span>}
+    </div>
+    <span className="sticker-control-value">{text}</span>
+  </div>;
+}
+
+function StickerModal({ label, close, children, onDrop, className }: { label: string; close: () => void; children: React.ReactNode; onDrop?: (event: DragEvent) => void; className?: string }) {
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => { ref.current?.showModal(); return () => ref.current?.close(); }, []);
-  return createPortal(<dialog ref={ref} className="sticker-modal" aria-label={label} onCancel={event => { event.preventDefault(); close(); }} onClick={event => { if (event.target === event.currentTarget) close(); }} onDragOver={event => { if (onDrop) { event.preventDefault(); event.stopPropagation(); } }} onDrop={onDrop}><div className="sticker-modal-body">{children}</div></dialog>, document.body);
+  return createPortal(<dialog ref={ref} className={`sticker-modal${className ? ` ${className}` : ""}`} aria-label={label} onCancel={event => { event.preventDefault(); close(); }} onClick={event => { if (event.target === event.currentTarget) close(); }} onDragOver={event => { if (onDrop) { event.preventDefault(); event.stopPropagation(); } }} onDrop={onDrop}><div className="sticker-modal-body">{children}</div></dialog>, document.body);
 }

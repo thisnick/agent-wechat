@@ -16,9 +16,9 @@ mod wxgf;
 pub use image::ImageInspection;
 pub use sticker_archive::*;
 pub use sticker_export::*;
-pub use sticker_video::prepare_sticker;
+pub use sticker_video::{prepare_sticker, prepare_sticker_file};
 pub use stickers::*;
-pub use video::inspect_video_container;
+pub use video::{inspect_video_container, inspect_video_reader};
 pub use wxgf::wxgf_preview;
 
 pub const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;

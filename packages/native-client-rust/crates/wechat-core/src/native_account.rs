@@ -531,6 +531,22 @@ impl crate::upstream::PushConnection for BoundPush {
     fn poll(&mut self, timeout: Duration) -> Result<Option<wechat_protocol::push::Notification>> {
         self.connection.poll(timeout)
     }
+    fn sends_sticker_chunks(&self) -> bool {
+        true
+    }
+    fn send_sticker_chunk(
+        &mut self,
+        chunk: &wechat_protocol::sticker_send::StickerSendChunk<'_>,
+    ) -> Result<Vec<u8>> {
+        let reply = self.connection.send_sticker_chunk_raw(chunk);
+        if reply
+            .as_ref()
+            .is_err_and(|error| error.is::<wechat_protocol::AccountPersistenceFailed>())
+        {
+            self.client.stop()?;
+        }
+        reply
+    }
 }
 
 #[cfg(test)]

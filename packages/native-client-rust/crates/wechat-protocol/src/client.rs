@@ -487,6 +487,8 @@ pub struct NativeClient {
     account: Option<std::sync::Arc<account::OwnedAccount>>,
     submission_guard: Option<std::sync::Arc<dyn Fn() -> Result<()> + Send + Sync>>,
     call_reply_observer: Option<std::sync::Arc<CallReplyObserver>>,
+    /// The account owner's reusable short-link ticket, set on request transports.
+    short_link: Option<std::sync::Arc<mmtls::ShortLinkCache>>,
 }
 type CallReplyObserver = dyn Fn(&[u8]) -> Result<()> + Send + Sync;
 /// Polling an issued login challenge is repeatable. This does not authorize
@@ -540,11 +542,26 @@ impl NativeClient {
             account: None,
             submission_guard: None,
             call_reply_observer: None,
+            short_link: None,
         })
     }
     fn session(&self, host: &str) -> Result<Session> {
         self.check_snapshot_transport()?;
         Session::connect(host, self.options.timeout, self.options.receive_budget)
+    }
+    /// A short-link ticket for `host`: the account owner's cached ticket while
+    /// it is reusable, otherwise one from a new long-link handshake, which is
+    /// then cached for later requests.
+    fn short_session(&self, host: &str) -> Result<mmtls::ShortSession> {
+        if let Some(short) = self.short_link.as_ref().and_then(|cache| cache.get(host)) {
+            self.check_snapshot_transport()?;
+            return Ok(short);
+        }
+        let short = self.session(host)?.short.clone();
+        if let Some(cache) = &self.short_link {
+            cache.put(host, short.clone());
+        }
+        Ok(short)
     }
     #[allow(clippy::too_many_arguments)]
     fn prelogin_rpc(
@@ -1071,17 +1088,24 @@ impl NativeClient {
         request: &[u8],
         before_submit: impl FnOnce() -> Result<()>,
     ) -> Result<Vec<u8>> {
-        let session = self.session(&state.long_host)?;
+        let short = self.short_session(&state.long_host)?;
         let packet = AuthenticatedPacket::prepare(state, cgi, request)?;
         self.check_submission()?;
         before_submit()?;
         let reply = mmtls::short_exchange(
-            &session.short,
+            &short,
             &state.short_host,
             path,
             &packet.packet,
             self.options.timeout,
-        )?;
+        )
+        .inspect_err(|_| {
+            // Never retried here: the request may have reached the server.
+            // The next request performs a new handshake instead.
+            if let Some(cache) = &self.short_link {
+                cache.invalidate();
+            }
+        })?;
         let (plain, cookie) = packet.decode_verified_transport_reply(&reply)?;
         if !cookie.is_empty() {
             state.cookie = cookie;
