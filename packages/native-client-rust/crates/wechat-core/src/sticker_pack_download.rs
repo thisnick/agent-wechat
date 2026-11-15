@@ -171,51 +171,31 @@ impl Core {
                 self.native_request(account, &mut state, |ctx| ctx.cdn_config())
             })?;
             let cdn = CdnClient::new(config, Duration::from_secs(25))?;
+            // The official client downloads pack archives as storage objects.
+            // Its task ID is the archive task kind (2), an underscore and the
+            // product ID; some archives are only served on this route.
             let downloaded = permit.transfer(self, account, || {
-                cdn.download_with_progress(plan.locator.as_ref().unwrap(), |n, t| {
-                    self.progress_media(account, id, n, t)
-                })
-            });
-            let bytes = match downloaded {
-                Ok(downloaded) => {
-                    self.resume_media_state(account, id, &plan.fence)?;
-                    ensure!(
-                        downloaded.substituted_filetype.is_none_or(|t| t == 5),
-                        "unsupported_media_variant"
-                    );
-                    downloaded.bytes
-                }
-                // The CDN refuses some pack archives outright (official packs
-                // answer HTTP 400). The detail still advertises every item's
-                // own source, and each original is verified against its MD5
-                // identity, so assemble the same archive layout from those.
-                // Keeping the archive form lets repair and later membership
-                // promotion reuse the one verified decode and writeback path.
-                Err(error) if crate::media::is_cdn_download_refused(&error) => {
-                    let detail = plan
-                        .detail
-                        .as_ref()
-                        .context("sticker_metadata_incomplete")?;
-                    let content = permit.transfer(self, account, || {
-                        wechat_protocol::sticker_packs::fetch_sticker_pack_items(detail, |n, t| {
-                            self.progress_media(account, id, n, t)
-                        })
-                    })?;
-                    self.resume_media_state(account, id, &plan.fence)?;
-                    wechat_media::encode_sticker_archive(&plan.pack, &content)?
-                }
-                Err(error) => return Err(error),
-            };
+                cdn.download_storage_with_progress(
+                    plan.locator.as_ref().unwrap(),
+                    &format!("2_{}", plan.pack),
+                    |n, t| self.progress_media(account, id, n, t),
+                )
+            })?;
+            self.resume_media_state(account, id, &plan.fence)?;
+            ensure!(
+                downloaded.substituted_filetype.is_none_or(|t| t == 5),
+                "unsupported_media_variant"
+            );
             self.store_pack_bytes(
                 account,
                 id,
                 &archive_id,
                 "pack.zip",
-                &bytes,
+                &downloaded.bytes,
                 "application/zip",
                 0,
             )?;
-            bytes
+            downloaded.bytes
         };
         let ids = plan
             .detail

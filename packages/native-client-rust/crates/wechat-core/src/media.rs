@@ -2400,14 +2400,6 @@ fn service_diagnostic(error: &anyhow::Error) -> Option<(&'static str, i32)> {
     }
     None
 }
-/// The CDN refused the requested object itself: an HTTP 4xx or a download
-/// service code. Transport failures and 5xx responses are not refusals.
-pub(crate) fn is_cdn_download_refused(error: &anyhow::Error) -> bool {
-    matches!(
-        service_diagnostic(error),
-        Some(("http", 400..=499) | ("download", _))
-    )
-}
 pub(crate) fn is_media_auth_rejected(error: &anyhow::Error) -> bool {
     matches!(
         service_diagnostic(error),
@@ -6764,18 +6756,6 @@ mod tests {
         let nested = anyhow::anyhow!("connection closed before message completed")
             .context("opaque request wrapper");
         assert_eq!(classify_error(&nested), "transport_unavailable");
-        // Only an object refusal selects a pack's per-item sources.
-        assert!(is_cdn_download_refused(&anyhow::anyhow!(
-            "CDN HTTP status 400"
-        )));
-        assert!(is_cdn_download_refused(
-            &ServiceRejected::new(Service::CdnDownload, -5103059).into()
-        ));
-        assert!(!is_cdn_download_refused(&anyhow::anyhow!(
-            "CDN HTTP status 503"
-        )));
-        assert!(!is_cdn_download_refused(&nested));
-        assert!(!is_cdn_download_refused(&expired_auth));
     }
     #[test]
     fn image_validation_errors_expose_only_exact_fixed_codes() {
