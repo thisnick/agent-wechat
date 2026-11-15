@@ -172,6 +172,64 @@ fn hex_digest(bytes: &[u8]) -> String {
     format!("{:x}", Md5::digest(bytes))
 }
 
+/// Encode verified pack content in the supported archive layout: the product
+/// root holds `icon.png`, `large/<ordinal>.<ext>` originals and
+/// `thumb/<ordinal>.<ext>` thumbnails. Members are stored uncompressed with a
+/// fixed timestamp, so the same content always encodes to the same bytes.
+/// Content assembled from per-item sources is kept in this layout so it is
+/// stored and re-verified by [`decode_sticker_archive`] like a downloaded pack.
+pub fn encode_sticker_archive(product: &str, archive: &StickerArchive) -> Result<Vec<u8>> {
+    use std::io::Write;
+    ensure!(
+        !product.is_empty()
+            && !product.contains(['/', '\\', '\0'])
+            && !archive.items.is_empty()
+            && archive.items.len() <= 500,
+        "unsupported_sticker_archive"
+    );
+    let extension = |bytes: &[u8]| -> Result<&'static str> {
+        Ok(match crate::inspect_image(bytes)?.content_type.as_str() {
+            "image/gif" => "gif",
+            "image/png" => "png",
+            "image/jpeg" => "jpg",
+            _ => anyhow::bail!("unsupported_sticker_archive"),
+        })
+    };
+    ensure!(
+        extension(&archive.icon)? == "png",
+        "unsupported_sticker_archive"
+    );
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .last_modified_time(zip::DateTime::default())
+        .unix_permissions(0o644);
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    zip.start_file(format!("{product}/icon.png"), options)?;
+    zip.write_all(&archive.icon)?;
+    for item in &archive.items {
+        ensure!(item.ordinal > 0, "unsupported_sticker_archive");
+        zip.start_file(
+            format!(
+                "{product}/large/{}.{}",
+                item.ordinal,
+                extension(&item.original)?
+            ),
+            options,
+        )?;
+        zip.write_all(&item.original)?;
+        zip.start_file(
+            format!(
+                "{product}/thumb/{}.{}",
+                item.ordinal,
+                extension(&item.thumbnail)?
+            ),
+            options,
+        )?;
+        zip.write_all(&item.thumbnail)?;
+    }
+    Ok(zip.finish()?.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,5 +252,32 @@ mod tests {
         reversed.reverse();
         assert!(decode_sticker_archive(zip, "pack.fixture", &reversed).is_err());
         assert!(decode_sticker_archive(&zip[..zip.len() - 8], "pack.fixture", &ids).is_err());
+    }
+
+    #[test]
+    fn encoded_content_decodes_to_the_same_verified_items_deterministically() {
+        let zip = include_bytes!("../fixtures/sticker-pack.zip");
+        let ids: Vec<String> = vec![
+            "2c5f182a5005cfdeec4bd4071fad0e39".into(),
+            "3cba29f7d86c1245ca196c29923a28eb".into(),
+        ];
+        let decoded = decode_sticker_archive(zip, "pack.fixture", &ids).unwrap();
+        let encoded = encode_sticker_archive("pack.fixture", &decoded).unwrap();
+        assert_eq!(
+            encoded,
+            encode_sticker_archive("pack.fixture", &decoded).unwrap()
+        );
+        let again = decode_sticker_archive(&encoded, "pack.fixture", &ids).unwrap();
+        assert_eq!(again.icon, decoded.icon);
+        assert_eq!(again.items.len(), decoded.items.len());
+        for (a, b) in again.items.iter().zip(&decoded.items) {
+            assert_eq!(
+                (&a.id, a.ordinal, &a.original, &a.thumbnail, a.file_type),
+                (&b.id, b.ordinal, &b.original, &b.thumbnail, b.file_type)
+            );
+        }
+        // The encoder keeps the product root, so another product still fails.
+        assert!(decode_sticker_archive(&encoded, "another.pack", &ids).is_err());
+        assert!(encode_sticker_archive("bad/product", &decoded).is_err());
     }
 }
