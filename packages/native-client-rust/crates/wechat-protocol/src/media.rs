@@ -506,7 +506,7 @@ impl CdnClient {
         let sequence = u32::try_from(integer(fields, "seq")?)?;
         ensure!(sequence != 0, "Invalid CDN sequence");
         ensure!(
-            ["/download", "/downloadbig", "/uploadv3"].contains(&path)
+            ["/download", "/downloadbig", "/downloadstorage", "/uploadv3"].contains(&path)
                 || large_file_path(path, self.config.uin, sequence),
             "Invalid CDN path"
         );
@@ -547,12 +547,47 @@ impl CdnClient {
     ) -> Result<DownloadedMedia> {
         self.download_with_transport(descriptor, progress, |path, fields| self.post(path, fields))
     }
+    /// Download a storage object, as the official client does for sticker pack
+    /// archives: `POST /downloadstorage` with the storage request fields
+    /// (`apptype` 10, `isstorevideo` 0, `nocheckaeskey` 1, `enablehit` 1,
+    /// `existancecheck` 0 and `filekey`). `file_key` is the caller's task ID
+    /// for the object; it correlates requests and is not a credential. Only
+    /// whole-file descriptors are accepted; the downloaded bytes get the same
+    /// size and integrity checks as an ordinary file download.
+    pub fn download_storage_with_progress(
+        &self,
+        descriptor: &MediaDescriptor,
+        file_key: &str,
+        progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+    ) -> Result<DownloadedMedia> {
+        self.download_on_route(descriptor, Some(file_key), progress, |path, fields| {
+            self.post(path, fields)
+        })
+    }
     fn download_with_transport(
         &self,
         descriptor: &MediaDescriptor,
+        progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+        post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
+    ) -> Result<DownloadedMedia> {
+        self.download_on_route(descriptor, None, progress, post)
+    }
+    fn download_on_route(
+        &self,
+        descriptor: &MediaDescriptor,
+        storage_key: Option<&str>,
         mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
         mut post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
     ) -> Result<DownloadedMedia> {
+        if let Some(key) = storage_key {
+            ensure!(
+                descriptor.quality == MediaQuality::File
+                    && !key.is_empty()
+                    && key.len() <= 1024
+                    && !key.chars().any(char::is_control),
+                "Invalid storage download"
+            );
+        }
         ensure!(
             !descriptor.file_id.is_empty()
                 && descriptor.file_id.len() <= 8192
@@ -638,7 +673,28 @@ impl CdnClient {
             }
             fields.insert("wxmsgflag".into(), vec![]);
             fields.insert("fileid".into(), descriptor.file_id.as_bytes().to_vec());
-            let reply = post(if large { "/downloadbig" } else { "/download" }, &fields)?;
+            if let Some(key) = storage_key {
+                // The descriptor always carries its AES key, so the official
+                // client's conditional `nocheckaeskey` is always 1 here.
+                for (k, v) in [
+                    ("apptype", 10),
+                    ("isstorevideo", 0),
+                    ("nocheckaeskey", 1),
+                    ("enablehit", 1),
+                    ("existancecheck", 0),
+                ] {
+                    put(&mut fields, k, v);
+                }
+                fields.insert("filekey".into(), key.as_bytes().to_vec());
+            }
+            let path = if storage_key.is_some() {
+                "/downloadstorage"
+            } else if large {
+                "/downloadbig"
+            } else {
+                "/download"
+            };
+            let reply = post(path, &fields)?;
             let code = integer(&reply, "retcode")?;
             ServiceRejected::check_wide(Service::CdnDownload, code)?;
             let response_digest = reply
@@ -2265,6 +2321,56 @@ mod tests {
             )
             .is_err());
         assert_eq!(requests, 2);
+    }
+    #[test]
+    fn storage_download_uses_the_storage_route_and_fields() {
+        let (descriptor, raw, ciphertext) = download_fixture(100_000, MediaQuality::File);
+        let mut paths = vec![];
+        let result = client()
+            .download_on_route(
+                &descriptor,
+                Some("2_pack.fixture"),
+                |_, _| Ok(()),
+                |path, fields| {
+                    paths.push(path.to_string());
+                    assert_eq!(integer(fields, "filetype")?, 5);
+                    for (key, value) in [
+                        ("apptype", 10),
+                        ("isstorevideo", 0),
+                        ("nocheckaeskey", 1),
+                        ("enablehit", 1),
+                        ("existancecheck", 0),
+                    ] {
+                        assert_eq!(integer(fields, key)?, value, "{key}");
+                    }
+                    assert_eq!(fields["filekey"], b"2_pack.fixture");
+                    Ok(download_reply(fields, &descriptor, &ciphertext))
+                },
+            )
+            .unwrap();
+        assert_eq!(result.bytes, raw);
+        assert_eq!(paths, ["/downloadstorage", "/downloadstorage"]);
+        // Ordinary downloads keep their route and send no storage fields.
+        client()
+            .download_with_transport(
+                &descriptor,
+                |_, _| Ok(()),
+                |path, fields| {
+                    assert_eq!(path, "/download");
+                    assert!(!fields.contains_key("filekey") && !fields.contains_key("apptype"));
+                    Ok(download_reply(fields, &descriptor, &ciphertext))
+                },
+            )
+            .unwrap();
+        // Storage keys must be usable and only whole-file descriptors qualify.
+        let unused = |_: &str, _: &CdnFields| -> Result<CdnFields> { unreachable!() };
+        assert!(client()
+            .download_on_route(&descriptor, Some(""), |_, _| Ok(()), unused)
+            .is_err());
+        let (video, _, _) = download_fixture(1000, MediaQuality::Video);
+        assert!(client()
+            .download_on_route(&video, Some("2_pack.fixture"), |_, _| Ok(()), unused)
+            .is_err());
     }
     #[test]
     fn download_refuses_truncated_overlong_and_changing_source_bytes() {
