@@ -1,5 +1,15 @@
 # @agent-wechat/desktop
 
+## 2.5.0
+
+### Minor Changes
+
+- [#525](https://github.com/thisnick/agent-wechat/pull/525) [`4859bba`](https://github.com/thisnick/agent-wechat/commit/4859bba2f047391142ddde69bf59fe33d834f45c) Thanks [@thisnick](https://github.com/thisnick)! - **Add to Saved** now lets you choose each sticker's size before adding it. Every file shows its prepared dimensions, file size and length, and a **Size** slider shrinks it: images start at their original size (anything over WeChat's 1024-pixel limit starts at 1024), videos at 240 pixels. A mark on the slider shows about 384 pixels, the largest size phones display stickers at. Videos also get **Smoothness** (frames per second), **Start** and **Length**. The preview is prepared again shortly after you stop moving a control, earlier settings come back instantly, and a result too large or too long to send is explained in plain words. **Add** waits until every selected file matches its controls.
+
+- [#525](https://github.com/thisnick/agent-wechat/pull/525) [`aca8954`](https://github.com/thisnick/agent-wechat/commit/aca8954edb2129f44142acea9b1e1990b5d7e4eb) Thanks [@thisnick](https://github.com/thisnick)! - Stickers are no longer limited to 240 pixels. Images and GIFs up to 1024 pixels, the largest sticker WeChat saves, keep their size and encoding, so larger stickers stay sharp on high-resolution screens. A larger file is refused unless you ask to shrink it: `fit` now shrinks to 1024 pixels, and the new `maxEdge` option (`--max-edge` in the CLI) shrinks the longest side to any size from 16 to 1024 pixels. Stickers made from video can set their size with `maxEdge` and their frame rate with the new `fps` option (`--fps`, 1–30); they default to 240 pixels at 10 fps as before. A trim now applies before the 200-frame and 10-second checks, so part of a longer GIF can be kept. Preparing a large animation no longer needs memory for every frame at once.
+
+- [#525](https://github.com/thisnick/agent-wechat/pull/525) [`25442d7`](https://github.com/thisnick/agent-wechat/commit/25442d7bff89c8695abbbb2b346c76e14f0c16d3) Thanks [@thisnick](https://github.com/thisnick)! - Stickers can now be made from videos up to 512 MB; images and GIFs stay limited to 64 MB. Uploads are written to disk as they arrive, and sticker preparation reads the video from a temporary file, so a large source no longer needs its whole size in the daemon's memory. **Add to Saved** deletes each upload once its sticker is added, or when the dialog closes, and says separately whether a file is empty or too large. API clients can do the same with the new `DELETE /uploads/{id}`, which returns 409 `upload_in_use` while a send or preparation still needs the upload. The daemon now also deletes finished uploads every hour instead of only at startup. The OpenClaw sticker tool keeps its 64 MB limit, because OpenClaw's workspace bridge reads a whole file into memory.
+
 ## 2.4.2
 
 ### Patch Changes
