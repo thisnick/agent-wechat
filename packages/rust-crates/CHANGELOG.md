@@ -1,5 +1,19 @@
 # @agent-wechat/rust-crates
 
+## 2.5.0
+
+### Minor Changes
+
+- [#525](https://github.com/thisnick/agent-wechat/pull/525) [`aca8954`](https://github.com/thisnick/agent-wechat/commit/aca8954edb2129f44142acea9b1e1990b5d7e4eb) Thanks [@thisnick](https://github.com/thisnick)! - Stickers are no longer limited to 240 pixels. Images and GIFs up to 1024 pixels, the largest sticker WeChat saves, keep their size and encoding, so larger stickers stay sharp on high-resolution screens. A larger file is refused unless you ask to shrink it: `fit` now shrinks to 1024 pixels, and the new `maxEdge` option (`--max-edge` in the CLI) shrinks the longest side to any size from 16 to 1024 pixels. Stickers made from video can set their size with `maxEdge` and their frame rate with the new `fps` option (`--fps`, 1–30); they default to 240 pixels at 10 fps as before. A trim now applies before the 200-frame and 10-second checks, so part of a longer GIF can be kept. Preparing a large animation no longer needs memory for every frame at once.
+
+- [#525](https://github.com/thisnick/agent-wechat/pull/525) [`25442d7`](https://github.com/thisnick/agent-wechat/commit/25442d7bff89c8695abbbb2b346c76e14f0c16d3) Thanks [@thisnick](https://github.com/thisnick)! - Stickers can now be made from videos up to 512 MB; images and GIFs stay limited to 64 MB. Uploads are written to disk as they arrive, and sticker preparation reads the video from a temporary file, so a large source no longer needs its whole size in the daemon's memory. **Add to Saved** deletes each upload once its sticker is added, or when the dialog closes, and says separately whether a file is empty or too large. API clients can do the same with the new `DELETE /uploads/{id}`, which returns 409 `upload_in_use` while a send or preparation still needs the upload. The daemon now also deletes finished uploads every hour instead of only at startup. The OpenClaw sticker tool keeps its 64 MB limit, because OpenClaw's workspace bridge reads a whole file into memory.
+
+### Patch Changes
+
+- [#522](https://github.com/thisnick/agent-wechat/pull/522) [`4f43734`](https://github.com/thisnick/agent-wechat/commit/4f43734df53a0b1f9238ece77fffad15fb6f0069) Thanks [@thisnick](https://github.com/thisnick)! - Official sticker packs such as WeChat Bubble Pup now download. Pack archives are now requested from WeChat's CDN as storage downloads, the way the official client requests them. Before, they were requested as ordinary file downloads, and the CDN refused some packs' archives with HTTP 400, so a pack or sticker download failed with `media_service_rejected`.
+
+- [#525](https://github.com/thisnick/agent-wechat/pull/525) [`945ccf6`](https://github.com/thisnick/agent-wechat/commit/945ccf63ee49315d03bc9fe57911682a95b3966e) Thanks [@thisnick](https://github.com/thisnick)! - Sticker sends are about four times faster. A sticker is sent in 8 KB pieces, and every piece used to start a new secure connection to WeChat; a 370 KB sticker took about 70 seconds. Pieces now go over the account's existing long-lived connection when it is connected, as the official client sends them, and otherwise reuse the account's current short-link ticket until it nears expiry. The same sticker now takes about 15 seconds. Other requests to WeChat also skip the per-request connection setup and are faster.
+
 ## 2.4.2
 
 ### Patch Changes
