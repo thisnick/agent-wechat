@@ -35,6 +35,16 @@ impl Store {
             Ok(())
         })
     }
+    /// Queued exact contact lookups for versioned personal remarks, oldest first.
+    pub fn contact_remark_refreshes(&self, account: &str) -> Result<Vec<(String, Vec<u8>)>> {
+        self.control(account, |db| {
+            let mut q = db.prepare(
+                "SELECT key,value FROM runtime WHERE key GLOB 'contact-remark-refresh:*' ORDER BY rowid LIMIT 8",
+            )?;
+            let rows = q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
     pub fn pending_metadata(&self, account: &str) -> Result<Vec<(String, Vec<u8>)>> {
         self.control(account,|db|{let mut q=db.prepare("SELECT substr(p.key,18),r.value FROM runtime p JOIN runtime r ON r.key='metadata-receipt:'||substr(p.key,18) WHERE p.key LIKE 'metadata-pending:%' ORDER BY p.key LIMIT 1000")?;let rows=q.query_map([],|r|Ok((r.get(0)?,r.get(1)?)))?;Ok(rows.collect::<rusqlite::Result<_>>()?)})
     }
