@@ -408,13 +408,15 @@ pub fn apply_initialize_emoticon(
     if rc != rusqlite::ffi::SQLITE_OK {
         return Err(ProfileError::Database);
     }
-    db.execute_batch("PRAGMA cipher_compatibility=4;PRAGMA cipher_page_size=4096;PRAGMA kdf_iter=256000;PRAGMA synchronous=FULL;PRAGMA journal_mode=DELETE;")?;
+    db.execute_batch("PRAGMA cipher_compatibility=4;PRAGMA cipher_page_size=4096;PRAGMA kdf_iter=256000;PRAGMA synchronous=FULL;")?;
+    crate::initialize::enable_wal(&db)?;
     db.execute_batch(include_str!("layout/emoticon.db.sql"))?;
     let integrity: String = db.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
     if integrity != "ok" {
         return Err(ProfileError::Database);
     }
-    drop(db);
+    // Same WAL layout as initialize_profile; the staged file is renamed alone.
+    crate::initialize::finish_wal_database(db, staged.path())?;
     staged.as_file().sync_all()?;
     let mut page = [0u8; 4096];
     std::fs::File::open(staged.path())?.read_exact(&mut page)?;

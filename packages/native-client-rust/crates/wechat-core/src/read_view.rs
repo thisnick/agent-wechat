@@ -206,6 +206,12 @@ pub(crate) mod tests {
     use std::time::Duration;
 
     pub(crate) fn fixture() -> (tempfile::TempDir, Arc<Core>) {
+        fixture_with(true)
+    }
+
+    /// `force_wal` false leaves the journal mode exactly as `initialize_profile`
+    /// created it, so a test can prove new profiles are already in WAL.
+    fn fixture_with(force_wal: bool) -> (tempfile::TempDir, Arc<Core>) {
         let tmp = tempfile::tempdir().unwrap();
         #[cfg(unix)]
         {
@@ -215,7 +221,7 @@ pub(crate) mod tests {
         let profile = tmp.path().join("account");
         let password = [42u8; 32];
         let (_, keys, _) = wechat_profile::initialize_profile(&profile, &password).unwrap();
-        for relative in keys.databases.keys() {
+        for relative in keys.databases.keys().filter(|_| force_wal) {
             let db = rusqlite::Connection::open(profile.join("db_storage").join(relative)).unwrap();
             assert_eq!(
                 unsafe { rusqlite::ffi::sqlite3_key(db.handle(), password.as_ptr().cast(), 32) },
@@ -434,5 +440,36 @@ pub(crate) mod tests {
                 "delete"
             );
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn newly_initialized_profiles_read_in_parallel_mode() {
+        let (_tmp, core) = fixture_with(false);
+        let (location, keys) = core.profile_location_keys("one").unwrap();
+        for relative in keys.databases.keys() {
+            let db = rusqlite::Connection::open(location.root().join("db_storage").join(relative))
+                .unwrap();
+            assert_eq!(
+                unsafe { rusqlite::ffi::sqlite3_key(db.handle(), [42u8; 32].as_ptr().cast(), 32) },
+                0
+            );
+            db.execute_batch("PRAGMA cipher_compatibility=4;PRAGMA cipher_page_size=4096;PRAGMA kdf_iter=256000;").unwrap();
+            assert_eq!(
+                db.query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0))
+                    .unwrap(),
+                "wal",
+                "{relative}"
+            );
+        }
+        let (_, timing) = core
+            .read_timed("one", |view| {
+                view.catalog_page("one", "threads", None, &Default::default())
+            })
+            .await
+            .unwrap();
+        assert!(timing.parallel);
+        assert!(timing
+            .server_timing()
+            .contains("read_mode;desc=\"parallel\""));
     }
 }
