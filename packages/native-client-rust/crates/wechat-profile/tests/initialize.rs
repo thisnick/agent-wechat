@@ -149,3 +149,141 @@ fn new_full_home_contains_selected_account_and_readable_identity() {
     );
     assert!(initialize_official_home(&home, &input, &[8; 32], &[7; 16]).is_err());
 }
+
+fn open_keyed(path: &std::path::Path, password: &[u8; 32]) -> rusqlite::Connection {
+    let db = rusqlite::Connection::open(path).unwrap();
+    assert_eq!(
+        unsafe { rusqlite::ffi::sqlite3_key(db.handle(), password.as_ptr().cast(), 32) },
+        0
+    );
+    db.execute_batch(
+        "PRAGMA cipher_compatibility=4;PRAGMA cipher_page_size=4096;PRAGMA kdf_iter=256000;",
+    )
+    .unwrap();
+    db
+}
+fn journal_mode(path: &std::path::Path, password: &[u8; 32]) -> String {
+    open_keyed(path, password)
+        .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        .unwrap()
+}
+/// Recreate the layout older daemon builds wrote (rollback journal).
+fn downgrade_to_rollback(location: &ProfileLocation, keys: &KeyFile, password: &[u8; 32]) {
+    for relative in keys.databases.keys() {
+        let db = open_keyed(&location.root().join("db_storage").join(relative), password);
+        let mode: String = db
+            .query_row("PRAGMA journal_mode=DELETE", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+    }
+}
+fn write_options() -> WriteOptions {
+    WriteOptions {
+        exclusive_ownership_confirmed: true,
+        allow_plaintext: false,
+        durable_intent_id: "synthetic-wal".into(),
+    }
+}
+
+#[test]
+fn new_profiles_use_wal_with_every_page_in_the_main_file() {
+    let d = tempfile::tempdir().unwrap();
+    let (location, keys, _) = initialize_profile(d.path().join("account"), &[42; 32]).unwrap();
+    for relative in keys.databases.keys() {
+        let file = location.root().join("db_storage").join(relative);
+        assert_eq!(journal_mode(&file, &[42; 32]), "wal", "{relative}");
+        for suffix in ["-wal", "-shm"] {
+            let mut sidecar = file.as_os_str().to_owned();
+            sidecar.push(suffix);
+            // The profile is published as a directory move, so nothing may be
+            // left behind in a sidecar.
+            assert!(
+                !std::path::Path::new(&sidecar).exists()
+                    || std::fs::metadata(&sidecar).unwrap().len() == 0,
+                "{relative}{suffix}"
+            );
+        }
+    }
+    assert_eq!(
+        verify_profile_password(&location, &keys, &[42; 32]).unwrap(),
+        8
+    );
+}
+
+#[test]
+fn rollback_profiles_convert_once_and_keep_their_data() {
+    let d = tempfile::tempdir().unwrap();
+    let (location, keys, _) = initialize_profile(d.path().join("account"), &[42; 32]).unwrap();
+    downgrade_to_rollback(&location, &keys, &[42; 32]);
+    let contact = location
+        .root()
+        .join("db_storage")
+        .join("contact/contact.db");
+    open_keyed(&contact, &[42; 32])
+        .execute_batch("CREATE TABLE synthetic(value TEXT);INSERT INTO synthetic VALUES('kept')")
+        .unwrap();
+    let first = convert_profile_to_wal(&location, &keys, &write_options()).unwrap();
+    assert_eq!(first.converted.len(), keys.databases.len());
+    assert!(first.already_wal.is_empty() && first.skipped.is_empty());
+    for relative in keys.databases.keys() {
+        let file = location.root().join("db_storage").join(relative);
+        assert_eq!(journal_mode(&file, &[42; 32]), "wal");
+    }
+    let kept: String = open_keyed(&contact, &[42; 32])
+        .query_row("SELECT value FROM synthetic", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(kept, "kept");
+    let second = convert_profile_to_wal(&location, &keys, &write_options()).unwrap();
+    assert!(second.converted.is_empty() && second.skipped.is_empty());
+    assert_eq!(second.already_wal.len(), keys.databases.len());
+    let mut denied = write_options();
+    denied.exclusive_ownership_confirmed = false;
+    assert!(convert_profile_to_wal(&location, &keys, &denied).is_err());
+}
+
+#[test]
+fn conversion_skips_missing_busy_and_wrongly_keyed_databases() {
+    let d = tempfile::tempdir().unwrap();
+    let (location, keys, _) = initialize_profile(d.path().join("account"), &[42; 32]).unwrap();
+    downgrade_to_rollback(&location, &keys, &[42; 32]);
+    let storage = location.root().join("db_storage");
+    std::fs::remove_file(storage.join("session/session.db")).unwrap();
+    let mut wrong = keys.clone();
+    wrong.databases.insert(
+        "contact/contact.db".into(),
+        DatabaseKey::new(
+            "contact/contact.db".into(),
+            keys.databases["contact/contact.db"].salt,
+            [9; 32],
+        )
+        .unwrap(),
+    );
+    // Another connection mid-read keeps a shared lock on the rollback database.
+    let held_path = storage.join("hardlink/hardlink.db");
+    let held = open_keyed(&held_path, &[42; 32]);
+    held.execute_batch("BEGIN").unwrap();
+    held.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+        r.get::<_, i64>(0)
+    })
+    .unwrap();
+    let report = convert_profile_to_wal(&location, &wrong, &write_options()).unwrap();
+    let skipped: std::collections::BTreeMap<_, _> = report.skipped.iter().cloned().collect();
+    assert_eq!(skipped["session/session.db"], "missing");
+    assert_eq!(skipped["contact/contact.db"], "key_mismatch");
+    assert_eq!(skipped["hardlink/hardlink.db"], "busy");
+    assert_eq!(report.converted.len(), keys.databases.len() - 3);
+    held.execute_batch("COMMIT").unwrap();
+    assert_eq!(journal_mode(&held_path, &[42; 32]), "delete");
+    let integrity: String = held
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(integrity, "ok");
+    assert!(!storage.join("session/session.db").exists());
+    drop(held);
+    // The next pass finishes whatever was skipped and is still readable.
+    let mut repaired = keys.clone();
+    repaired.databases.remove("session/session.db");
+    let next = convert_profile_to_wal(&location, &repaired, &write_options()).unwrap();
+    assert_eq!(next.converted.len(), 2);
+    assert_eq!(journal_mode(&held_path, &[42; 32]), "wal");
+}

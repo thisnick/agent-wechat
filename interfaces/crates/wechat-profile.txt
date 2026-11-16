@@ -359,6 +359,9 @@ field wechat_profile::ThreadReadProjection::session_present | bool | MISSING DOC
 field wechat_profile::ThreadReadProjection::unread_count_after | i64 | MISSING DOC
 field wechat_profile::ThreadReadProjection::unread_count_before | i64 | MISSING DOC
 field wechat_profile::ThreadReadProjection::whole_thread | bool | MISSING DOC
+field wechat_profile::WalConversionReport::already_wal | alloc::vec::Vec<alloc::string::String> | Databases that were already in WAL mode and were not modified.
+field wechat_profile::WalConversionReport::converted | alloc::vec::Vec<alloc::string::String> | Databases switched from a rollback journal to WAL in this pass.
+field wechat_profile::WalConversionReport::skipped | alloc::vec::Vec<(alloc::string::String, alloc::string::String)> | Databases left unchanged, with a short reason (missing, unreadable, busy, unsupported journal mode). A later pass retries them.
 field wechat_profile::WriteOptions::allow_plaintext | bool | MISSING DOC
 field wechat_profile::WriteOptions::durable_intent_id | alloc::string::String | Reference to the caller's already durable apply intent, never a SyncKey.
 field wechat_profile::WriteOptions::exclusive_ownership_confirmed | bool | MISSING DOC
@@ -461,6 +464,7 @@ fn wechat_profile::cache_video_projection | fn(location: &wechat_profile::snapsh
 fn wechat_profile::cache_voice_projection | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, source: &wechat_profile::model::SourceMessageId, chat: &str, encoded: &[u8], options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<wechat_profile::media::AppliedVoiceCache> | Preserve the original encoded voice, independently of any WAV derivative. The supported media shard is selected only when no other media ordinal exists. The message row must already exist and be type 34 in its own table namespace.
 fn wechat_profile::choose_message_sort_sequence | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, peer: &str, server_id: &str, time: i64, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<i64> | Choose the first unused millisecond slot in this message's second, or retain the already stored slot for a replay. This is an independent collision policy within the observed native 1000-slots/second representation, not a recovered native rollover algorithm. Caller holds the lease through insertion.
 fn wechat_profile::compressed_profile_field | fn(bytes: &[u8]) -> wechat_profile::Result<wechat_profile::model::SqlValue> | WCDB compression state 4 observed on the supported fields. Compression is independent of media type; raw protocol bytes stay in the durable sidecar.
+fn wechat_profile::convert_profile_to_wal | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<wechat_profile::wal_conversion::WalConversionReport> | Convert every keyed database of a daemon-created profile to WAL.
 fn wechat_profile::create_mmkv_v4 | fn(key: &[u8], iv: [u8; 16], capacity: usize) -> wechat_profile::Result<wechat_profile::mmkv::StagedMmkv> | New nonexpiring v4 pair with explicit caller-generated key and IV. Fixed capacity is the total page-aligned data-file size, including its 4-byte reserved header. The metadata occupies one 4096-byte page, matching the inspected native files. Maximum data capacity is 4 MiB.
 fn wechat_profile::decode_dat_v2 | fn(data: &[u8], key: &wechat_profile::keys::ImageDatKey) -> wechat_profile::Result<(alloc::vec::Vec<u8>, wechat_profile::dat::DatLayout)> | Independent V2 framing decode. ECB/XOR is not authenticated encryption; callers must separately validate image format/dimensions before rendering.
 fn wechat_profile::decode_mmkv_records | fn(data: &[u8], metadata: &[u8], key: &[u8]) -> wechat_profile::Result<wechat_profile::mmkv::MmkvRecords> | MISSING DOC
@@ -583,6 +587,7 @@ impl core::clone::Clone for wechat_profile::ThreadExitReadProjection | impl | -
 impl core::clone::Clone for wechat_profile::ThreadReadProjection | impl | -
 impl core::clone::Clone for wechat_profile::VerifiedImageQuality | impl | -
 impl core::clone::Clone for wechat_profile::VideoQuality | impl | -
+impl core::clone::Clone for wechat_profile::WalConversionReport | impl | -
 impl core::clone::Clone for wechat_profile::WriteOptions | impl | -
 impl core::cmp::Eq for wechat_profile::ColumnSchema | impl | -
 impl core::cmp::Eq for wechat_profile::DatLayout | impl | -
@@ -597,6 +602,7 @@ impl core::cmp::Eq for wechat_profile::SourceMessageId | impl | -
 impl core::cmp::Eq for wechat_profile::ThreadExitReadOutcome | impl | -
 impl core::cmp::Eq for wechat_profile::VerifiedImageQuality | impl | -
 impl core::cmp::Eq for wechat_profile::VideoQuality | impl | -
+impl core::cmp::Eq for wechat_profile::WalConversionReport | impl | -
 impl core::cmp::Ord for wechat_profile::SourceMessageId | impl | -
 impl core::cmp::PartialEq for wechat_profile::ColumnSchema | impl | -
 impl core::cmp::PartialEq for wechat_profile::DatLayout | impl | -
@@ -612,9 +618,11 @@ impl core::cmp::PartialEq for wechat_profile::SqlValue | impl | -
 impl core::cmp::PartialEq for wechat_profile::ThreadExitReadOutcome | impl | -
 impl core::cmp::PartialEq for wechat_profile::VerifiedImageQuality | impl | -
 impl core::cmp::PartialEq for wechat_profile::VideoQuality | impl | -
+impl core::cmp::PartialEq for wechat_profile::WalConversionReport | impl | -
 impl core::cmp::PartialOrd for wechat_profile::SourceMessageId | impl | -
 impl core::convert::From<rusqlite::error::Error> for wechat_profile::ProfileError | impl | -
 impl core::convert::From<std::io::error::Error> for wechat_profile::ProfileError | impl | -
+impl core::convert::From<wechat_profile::wal_conversion::WalConversionReport> for wechat_profile::WalConversionReport | impl | -
 impl core::default::Default for wechat_profile::BusinessContactProjection | impl | -
 impl core::default::Default for wechat_profile::ListQuery | impl | -
 impl core::default::Default for wechat_profile::MessageQuery | impl | -
@@ -622,6 +630,7 @@ impl core::default::Default for wechat_profile::OwnedReaderCache | impl | -
 impl core::default::Default for wechat_profile::ReadOptions | impl | -
 impl core::default::Default for wechat_profile::SavedStickerRecord | impl | -
 impl core::default::Default for wechat_profile::StickerPackRecord | impl | -
+impl core::default::Default for wechat_profile::WalConversionReport | impl | -
 impl core::error::Error for wechat_profile::ProfileError | impl | -
 impl core::fmt::Debug for wechat_profile::AppliedContact | impl | -
 impl core::fmt::Debug for wechat_profile::AppliedContactPin | impl | -
@@ -697,6 +706,7 @@ impl core::fmt::Debug for wechat_profile::ThreadExitReadProjection | impl | -
 impl core::fmt::Debug for wechat_profile::ThreadReadProjection | impl | -
 impl core::fmt::Debug for wechat_profile::VerifiedImageQuality | impl | -
 impl core::fmt::Debug for wechat_profile::VideoQuality | impl | -
+impl core::fmt::Debug for wechat_profile::WalConversionReport | impl | -
 impl core::fmt::Debug for wechat_profile::WriteOptions | impl | -
 impl core::fmt::Display for wechat_profile::ProfileError | impl | -
 impl core::marker::Copy for wechat_profile::DatLayout | impl | -
@@ -722,6 +732,7 @@ impl core::marker::StructuralPartialEq for wechat_profile::SqlValue | impl | -
 impl core::marker::StructuralPartialEq for wechat_profile::ThreadExitReadOutcome | impl | -
 impl core::marker::StructuralPartialEq for wechat_profile::VerifiedImageQuality | impl | -
 impl core::marker::StructuralPartialEq for wechat_profile::VideoQuality | impl | -
+impl core::marker::StructuralPartialEq for wechat_profile::WalConversionReport | impl | -
 impl serde_core::de::Deserialize<'de> for wechat_profile::BusinessContactProjection | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_profile::ContactProjection | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_profile::DatLayout | impl<'de> | -
@@ -815,6 +826,7 @@ impl serde_core::ser::Serialize for wechat_profile::ThreadExitReadProjection | i
 impl serde_core::ser::Serialize for wechat_profile::ThreadReadProjection | impl | -
 impl serde_core::ser::Serialize for wechat_profile::VerifiedImageQuality | impl | -
 impl serde_core::ser::Serialize for wechat_profile::VideoQuality | impl | -
+impl serde_core::ser::Serialize for wechat_profile::WalConversionReport | impl | -
 mod wechat_profile | - | Readers and narrow opt-in writers for selected official Linux profiles.
 struct wechat_profile::AppliedContact | struct { public fields } | MISSING DOC
 struct wechat_profile::AppliedContactPin | struct { public fields } | MISSING DOC
@@ -893,6 +905,7 @@ struct wechat_profile::TableSchema | struct { public fields } | MISSING DOC
 struct wechat_profile::Thread | struct { public fields } | MISSING DOC
 struct wechat_profile::ThreadExitReadProjection | struct { public fields } | MISSING DOC
 struct wechat_profile::ThreadReadProjection | struct { public fields } | MISSING DOC
+struct wechat_profile::WalConversionReport | struct { public fields } | Outcome of one conversion pass; every database lands in exactly one list.
 struct wechat_profile::WriteOptions | struct { public fields } | MISSING DOC
 type wechat_profile::RawFields | type = alloc::collections::btree::map::BTreeMap<alloc::string::String, wechat_profile::model::SqlValue> | MISSING DOC
 type wechat_profile::Result | type<T> = core::result::Result<T, wechat_profile::ProfileError> | MISSING DOC
