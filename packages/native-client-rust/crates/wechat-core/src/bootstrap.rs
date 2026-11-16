@@ -85,18 +85,28 @@ impl Core {
                 let changed = report["converted"].as_u64().unwrap_or(0) > 0
                     || report["skipped"].as_array().is_some_and(|s| !s.is_empty());
                 if changed {
-                    let _ = self
-                        .store
-                        .append_event(account, "profile.wal-conversion", &report);
+                    // A database that stays skipped (for example, missing) would
+                    // otherwise repeat the same event on every start.
+                    let digest = serde_json::to_vec(&report)
+                        .map(|bytes| format!("{:x}", Sha256::digest(bytes)))
+                        .unwrap_or_default();
+                    let _ = self.store.append_event_once(
+                        account,
+                        &format!("profile-wal-conversion:{digest}"),
+                        "profile.wal-conversion",
+                        &report,
+                    );
                 }
             }
             Err(error) => {
-                // Events are the daemon's only account log; a no-op pass stays silent.
+                // Events are the daemon's only account log; a no-op pass stays
+                // silent, and each distinct failure reason is recorded once.
+                let reason = error.to_string();
                 let _ = self.store.append_event_once(
                     account,
-                    "profile-wal-conversion-skipped",
+                    &format!("profile-wal-conversion-skipped:{reason}"),
                     "profile.wal-conversion-skipped",
-                    &json!({"reason":error.to_string()}),
+                    &json!({"reason":reason}),
                 );
             }
         }
