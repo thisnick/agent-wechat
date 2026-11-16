@@ -357,69 +357,6 @@ pub fn process_identity(pid: u32) -> Option<(String, std::path::PathBuf)> {
         executable,
     ))
 }
-/// A handle to the parent process, or `None` when it had already exited.
-pub struct ParentWatch(Option<Handle>);
-impl ParentWatch {
-    pub fn new() -> io::Result<Self> {
-        let parent = parent_process_id()?;
-        let handle = Handle(unsafe {
-            OpenProcess(
-                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
-                0,
-                parent,
-            )
-        });
-        if handle.0.is_null() {
-            return Ok(Self(None));
-        }
-        // A process created after this one only reuses the exited parent's ID.
-        if creation_time(handle.0)? > creation_time(unsafe { GetCurrentProcess() })? {
-            return Ok(Self(None));
-        }
-        Ok(Self(Some(handle)))
-    }
-    pub fn exited(&self) -> bool {
-        self.0
-            .as_ref()
-            .is_none_or(|handle| unsafe { WaitForSingleObject(handle.0, 0) } == WAIT_OBJECT_0)
-    }
-}
-fn parent_process_id() -> io::Result<u32> {
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
-        TH32CS_SNAPPROCESS,
-    };
-    let snapshot = Handle(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) });
-    if snapshot.0 == INVALID_HANDLE_VALUE {
-        return Err(error());
-    }
-    let current = unsafe { GetCurrentProcessId() };
-    let mut entry = PROCESSENTRY32W {
-        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
-        ..Default::default()
-    };
-    let mut found = unsafe { Process32FirstW(snapshot.0, &mut entry) } != 0;
-    while found {
-        if entry.th32ProcessID == current {
-            return Ok(entry.th32ParentProcessID);
-        }
-        found = unsafe { Process32NextW(snapshot.0, &mut entry) } != 0;
-    }
-    Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        "this process is missing from the process list",
-    ))
-}
-fn creation_time(process: HANDLE) -> io::Result<u64> {
-    let mut created: FILETIME = unsafe { std::mem::zeroed() };
-    let mut exited = created;
-    let mut kernel = created;
-    let mut user = created;
-    if unsafe { GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user) } == 0 {
-        return Err(error());
-    }
-    Ok((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
-}
 pub fn publish_directory(source: &Path, destination: &Path) -> io::Result<()> {
     if unsafe {
         MoveFileExW(
