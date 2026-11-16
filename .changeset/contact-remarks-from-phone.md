@@ -1,4 +1,5 @@
 ---
+"@agent-wechat/rust-crates": patch
 "@agent-wechat/agent-wechat": patch
 ---
 
