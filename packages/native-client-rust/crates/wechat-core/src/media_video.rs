@@ -98,7 +98,10 @@ pub(super) fn prepare_normal(
         "-sn",
         "-dn",
         "-vf",
-        "scale=w='min(720,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1,fps=30",
+        // Full-range sources (yuvj420p or color_range=pc) keep their range
+        // through the encoder on FFmpeg 7 and later unless it is converted
+        // here, and the result would fail the yuv420p check below.
+        "scale=w='min(720,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2:out_range=tv,setsar=1,fps=30",
         "-c:v",
         "libx264",
         "-preset",
@@ -718,5 +721,57 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
+    }
+
+    #[test]
+    fn normal_video_converts_full_range_sources_to_limited_range() {
+        let dir = wechat_platform::private_tempdir("wechat-video-range-test-").unwrap();
+        let source = dir.path().join("source.mp4");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-nostdin",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x240:rate=10:duration=1",
+                "-c:v",
+                "libx264",
+                "-threads",
+                "1",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
+                "-color_range",
+                "pc",
+            ])
+            .arg(&source)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let input = std::fs::read(&source).unwrap();
+        let encoded = prepare_normal(&input, 1, || Ok(())).unwrap();
+        let output = dir.path().join("normal.mp4");
+        std::fs::write(&output, encoded).unwrap();
+        let report = Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=pix_fmt,color_range",
+                "-of",
+                "json",
+            ])
+            .arg(&output)
+            .output()
+            .unwrap();
+        assert!(report.status.success());
+        let report: serde_json::Value = serde_json::from_slice(&report.stdout).unwrap();
+        assert_eq!(report["streams"][0]["pix_fmt"], "yuv420p");
+        assert_ne!(report["streams"][0]["color_range"], "pc");
     }
 }
