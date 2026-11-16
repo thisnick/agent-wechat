@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { crateNames } from '../native-crates.mjs';
+import { crateNames } from '../release/crates.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '../..');
 const manifest = join(root, 'packages/native-client-rust/Cargo.toml');

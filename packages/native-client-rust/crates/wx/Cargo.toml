@@ -25,7 +25,6 @@ axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
-wechat-config = { path = "../wechat-config" }
 wechat-store = { path = "../wechat-store" }
 wechat-api = { path = "../wechat-api" }
 

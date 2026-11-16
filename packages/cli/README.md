@@ -95,11 +95,11 @@ pnpm --filter @agent-wechat/cli test
 pnpm native:build
 pnpm native:test
 pnpm native:release:build
-node scripts/native-package-smoke.mjs artifacts/native
+node scripts/smoke/package.mjs artifacts/native
 # Substitute the exact artifact version emitted by the build:
-python3 scripts/native-cli-smoke.py artifacts/native/wx-vVERSION-linux-x64-gnu
-python3 scripts/native-cli-fixture-test.py artifacts/native/wx-vVERSION-linux-x64-gnu
-python3 scripts/native-export-smoke.py artifacts/native/wx-vVERSION-linux-x64-gnu
+python3 packages/native-client-rust/scripts/cli-smoke.py artifacts/native/wx-vVERSION-linux-x64-gnu
+python3 packages/native-client-rust/scripts/cli-fixture-test.py artifacts/native/wx-vVERSION-linux-x64-gnu
+python3 packages/native-client-rust/scripts/export-smoke.py artifacts/native/wx-vVERSION-linux-x64-gnu
 ```
 
 Source-workspace postinstall defers release installation; run the Rust binary from its target directory or use an explicit trusted executable override. The local release builder tests the Rust workspace, verifies executable identity and creates versioned assets; it does not publish, deploy or log an account in. The package smoke test packs/unpacks an actual npm tarball and installs from local artifacts into a temporary directory.
@@ -112,4 +112,4 @@ Deployment examples and the deliberate release preparation sequence are in [depl
 
 `native-check-package.mjs` is the prepack/prepublish gate. It checks version/source/target/checksum metadata; before publication it additionally requires both architecture assets to exist and match the package's manifest. A local pack smoke can use one architecture fragment; publication requires the complete matrix. These helpers belong to the existing CLI package, not additional npm packages.
 
-Candidate platform validation and remaining profile boundaries are tracked in [the acceptance checklist](../../PLATFORM-ACCEPTANCE.md). Windows executables are named `wx.exe`; the npm launcher chooses the OS/CPU-specific asset. A native ARM64 Node installation selects the native Windows ARM64 executable.
+Candidate platform validation and remaining profile boundaries are tracked in [the acceptance checklist](../../RELEASING.md#platform-release-candidate-acceptance). Windows executables are named `wx.exe`; the npm launcher chooses the OS/CPU-specific asset. A native ARM64 Node installation selects the native Windows ARM64 executable.

@@ -12,7 +12,7 @@
   --sl-color-accent-high: #7a3510;
 }
 
-/* Mermaid diagrams rendered at build time by remark-mermaid.mjs. */
+/* Mermaid diagrams rendered at build time by plugins/remark-mermaid.mjs. */
 .diagram {
   margin-block: 1.5rem;
   overflow-x: auto;

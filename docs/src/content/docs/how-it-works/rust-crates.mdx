@@ -16,7 +16,6 @@ Arrows below mean “depends on.” `wechat-protocol` does **not** depend on
 flowchart TD
   WX["wx-native: daemon and CLI"] --> API["wechat-api: HTTP and WebSockets"]
   WX --> AUDIO["wechat-audio: local devices"]
-  WX --> CFG["wechat-config: configuration"]
   WX --> CORE["wechat-core: account runtime"]
   API --> CORE
   CORE --> CALLS["wechat-calls: call admission, sessions and media"]
@@ -27,7 +26,6 @@ flowchart TD
   PROFILE --> MEDIA["wechat-media: message media"]
   PROTOCOL --> MEDIA
   MEDIA --> PLATFORM["wechat-platform: OS primitives"]
-  CFG --> PLATFORM
   STORE --> PLATFORM
   DEV["wechat-simulator: development fixtures"] --> API
   DEV --> CORE
@@ -50,9 +48,8 @@ with base64 PCM, while the daemon assembles and paces audio frames.
 | `wechat-core` | Daemon permissions, profile integration, operation journals and call orchestration | No |
 | `wechat-api` | HTTP routes, authenticated control/media sockets and contracts | No |
 | `wechat-store` | Pending operations and recovery receipts | No |
-| `wechat-config` | CLI/daemon configuration files | No |
 | `wechat-simulator` | Synthetic backend and development fixtures | No |
-| `wx-native` | `wx` executable, daemon startup and CLI participation | No |
+| `wx-native` | `wx` executable, daemon startup, CLI participation and configuration files | No |
 
 `NativeClient` owns account state and the authenticated request lifecycle.
 Cloning a client shares that account rather than creating another mutable copy.

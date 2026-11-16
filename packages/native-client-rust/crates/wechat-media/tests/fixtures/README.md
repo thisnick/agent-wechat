@@ -3,3 +3,5 @@
 `progressive.jpg` is a synthetic image-regression fixture moved from wechat-protocol. `two-frame.webp` is a synthetic two-frame animation fixture.
 
 `channels-prefix-vectors.json` holds synthetic WeChat Channels prefix keystream vectors: for seeds 0, 1, 42, 2^53+1 and 2^64-1, the first 64 bytes, bytes 2040 to 2063 (across the first 2048-byte batch) and the SHA-256 of the full 131,072-byte stream. The seeds are synthetic; no account or media data is involved.
+
+`sticker-pack.zip` is a synthetic sticker-pack archive for the `pack.fixture` product: an icon, two numbered 1x1 GIF stickers under `large/` and their PNG thumbnails under `thumb/` (43-69 bytes each). It contains no account or downloaded pack data.

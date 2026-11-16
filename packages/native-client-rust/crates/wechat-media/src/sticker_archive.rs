@@ -177,7 +177,7 @@ mod tests {
     use super::*;
     #[test]
     fn independent_zip_orders_numeric_members_and_rejects_wrong_product_or_identity() {
-        let zip = include_bytes!("../fixtures/sticker-pack.zip");
+        let zip = include_bytes!("../tests/fixtures/sticker-pack.zip");
         let ids = vec![
             "2c5f182a5005cfdeec4bd4071fad0e39".into(),
             "3cba29f7d86c1245ca196c29923a28eb".into(),

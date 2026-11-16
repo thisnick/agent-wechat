@@ -65,7 +65,7 @@ jobs:
       - name: Select native Windows compiler
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./scripts/native-ci-msvc.ps1
+        run: ./scripts/ci/msvc.ps1
       - name: Select Windows Perl
         if: runner.os == 'Windows'
         shell: pwsh
@@ -97,7 +97,7 @@ jobs:
           path: ${{ runner.temp }}/native-cli-artifact
       - name: Require matching CLI source, compiler, target, flags and checksum
         if: inputs.native_artifact_prefix != ''
-        run: node scripts/native-ci-artifact.mjs restore "$RUNNER_TEMP/native-cli-artifact"
+        run: node scripts/ci/artifact.mjs restore "$RUNNER_TEMP/native-cli-artifact"
       - name: Build native CLI
         if: inputs.native_artifact_prefix == '' && runner.os != 'Windows'
         run: cargo build --release --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }} -p wx-native

@@ -338,13 +338,13 @@ Inspect structured state/reasons; an exit number never permits resending.
 Run the actual binary lifecycle and synthetic transport tests without credentials:
 
 ```bash
-python3 scripts/native-cli-smoke.py /absolute/path/to/wx
-python3 scripts/native-cli-fixture-test.py /absolute/path/to/wx
-python3 scripts/native-export-smoke.py /absolute/path/to/wx
-bash scripts/native-generate-types.sh --check
+python3 packages/native-client-rust/scripts/cli-smoke.py /absolute/path/to/wx
+python3 packages/native-client-rust/scripts/cli-fixture-test.py /absolute/path/to/wx
+python3 packages/native-client-rust/scripts/export-smoke.py /absolute/path/to/wx
+bash scripts/generate-types.sh --check
 ```
 
 The shared TypeScript wire types come from Rust contracts, including actual
-media serde types. Regenerate with `scripts/native-generate-types.sh`; CI rejects
+media serde types. Regenerate with `scripts/generate-types.sh`; CI rejects
 stale generated output. These checks do not establish compatibility with an
 arbitrary official client build or prove recipient playback.

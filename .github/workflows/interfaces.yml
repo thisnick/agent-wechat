@@ -31,7 +31,7 @@ jobs:
             relevant:
               - 'interfaces/**'
               - 'scripts/interfaces/**'
-              - 'scripts/native-crates.mjs'
+              - 'scripts/release/crates.mjs'
               - 'packages/native-client-rust/**'
               - 'packages/openclaw-extension/**'
               - 'packages/client-ui/**'

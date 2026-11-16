@@ -33,7 +33,7 @@ https://github.com/user-attachments/assets/764bc53f-cea2-4b3e-99a1-34fdcb43ec09
 2. 选择 **使用此设备** 以运行本地 Hub，或选择 **连接到其他 Hub**。
 3. 添加微信 Profile，并按照手机上的提示完成登录。
 
-应用内置聊天界面、原生 Hub 以及 `wx` CLI。安装包、系统要求、连接密钥和网络配置，请参阅[桌面端指南](https://thisnick.github.io/agent-wechat/zh-cn/setup/desktop/)。各平台的桌面端打包与安装后的验收情况有所不同；请根据你所用的版本，查看[平台验收状态](PLATFORM-ACCEPTANCE.md)和发布说明。
+应用内置聊天界面、原生 Hub 以及 `wx` CLI。安装包、系统要求、连接密钥和网络配置，请参阅[桌面端指南](https://thisnick.github.io/agent-wechat/zh-cn/setup/desktop/)。各平台的桌面端打包与安装后的验收情况有所不同；请根据你所用的版本，查看[平台验收状态](RELEASING.md#platform-release-candidate-acceptance)和发布说明。
 
 ### 终端与 API
 
@@ -167,8 +167,8 @@ pnpm client:dev
 
 前置条件与场景控制，请参阅[客户端预览指南](packages/client-ui/README.md)和[模拟器指南](packages/native-client-rust/crates/wechat-simulator/README.md)。如需构建并测试改动，请先阅读 [AGENTS.md](AGENTS.md) 和[构建指南](https://thisnick.github.io/agent-wechat/zh-cn/reference/build/)。
 
-[演示素材与画廊源码](scripts/demo-gallery/README.md)包含成片视频、截图、合成的视觉测试素材和图片生成脚本。[视频剪辑源码](scripts/demo-video/README.md)保留了动态标题、时间轴和原创配乐；私有的原始录屏不纳入 Git 仓库。
+[演示素材与画廊源码](docs/demo/gallery/README.md)包含成片视频、截图、合成的视觉测试素材和图片生成脚本。[视频剪辑源码](docs/demo/video/README.md)保留了动态标题、时间轴和原创配乐；私有的原始录屏不纳入 Git 仓库。
 
 ## 许可证
 
-Agent WeChat 的原创项目代码采用 [MIT 许可证](LICENSE)。第三方组件保留其原有的许可证和声明；请查阅[随附声明](packages/cli/THIRD_PARTY_NOTICES.txt)、各组件的独立声明，以及 [Inter 字体许可证](scripts/demo-video/fonts/OFL.txt)。
+Agent WeChat 的原创项目代码采用 [MIT 许可证](LICENSE)。第三方组件保留其原有的许可证和声明；请查阅[随附声明](packages/cli/THIRD_PARTY_NOTICES.txt)、各组件的独立声明，以及 [Inter 字体许可证](docs/demo/video/fonts/OFL.txt)。

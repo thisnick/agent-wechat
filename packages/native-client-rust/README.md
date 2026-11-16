@@ -33,15 +33,15 @@ cargo test --manifest-path packages/native-client-rust/Cargo.toml --workspace --
 cargo fmt --manifest-path packages/native-client-rust/Cargo.toml --all --check
 cargo clippy --manifest-path packages/native-client-rust/Cargo.toml --workspace --all-targets --locked -- -D warnings
 python3 packages/native-client-rust/scripts/smoke.py packages/native-client-rust/target/debug/wx
-node scripts/native-openclaw-smoke.mjs /absolute/path/to/wx
-python3 scripts/native-cli-smoke.py /absolute/path/to/wx
-python3 scripts/native-cli-fixture-test.py /absolute/path/to/wx
-python3 scripts/native-export-smoke.py /absolute/path/to/wx
-bash scripts/native-generate-types.sh --check
+node packages/openclaw-extension/test/smoke/host.mjs /absolute/path/to/wx
+python3 packages/native-client-rust/scripts/cli-smoke.py /absolute/path/to/wx
+python3 packages/native-client-rust/scripts/cli-fixture-test.py /absolute/path/to/wx
+python3 packages/native-client-rust/scripts/export-smoke.py /absolute/path/to/wx
+bash scripts/generate-types.sh --check
 # Build the extension and its shared dependency before these pinned-host tests:
-node scripts/native-gateway-smoke.mjs
-node scripts/native-model-smoke.mjs
-node scripts/native-media-model-smoke.mjs
+node packages/openclaw-extension/test/smoke/gateway.mjs
+node packages/openclaw-extension/test/smoke/model.mjs
+node packages/openclaw-extension/test/smoke/media-model.mjs
 ```
 
 The public smoke tests use synthetic data, loopback HTTP and owned child processes. They make no WeChat requests; model-boundary tests use a local stub provider and a deterministic local transcription fixture. Unit tests cover authenticated crypto vectors, malformed/cross-account data, unsigned 64-bit IDs, real SQLCipher databases, schema drift, copy preservation, projection retries, whole-thread reads, token scope/revocation, event custody and uncertain-send recovery. Native packaging and deployment preparation are described in [deploy/native](../../deploy/native/README.md). No test command deploys production services.
@@ -239,13 +239,12 @@ Use `tokens create NAME --accounts ACCOUNT --scopes read` to issue a restricted 
 
 ## Library boundaries
 
-- `wechat-config`: versioned server/client paths and settings.
 - `wechat-store`: private root/registry, profile copies/leases, encrypted record vault, outbox, events and apply intents.
 - `wechat-profile`: official SQLCipher/schema/message/media readers and narrow checked writers.
 - `wechat-protocol`: native cryptography, transport, auth/sync/contact/media wire codecs.
 - `wechat-core`: serialized account workers and durable operation/projection coordination.
 - `wechat-api`: account/scoped HTTP and SSE router.
-- `wx-native`: CLI/server composition.
+- `wx-native`: CLI/server composition and versioned server/client configuration.
 
 The supported existing-profile workflow has explicit compatibility limits. It is not ready to replace arbitrary production official profiles. No deployment, release publication or production profile handoff is part of the validation performed here.
 

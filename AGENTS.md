@@ -11,6 +11,7 @@ This repository provides a standalone native WeChat daemon, Rust CLI and OpenCla
 | `packages/cli/` | npm `wx` launcher and verified executable installer |
 | `packages/openclaw-extension/` | OpenClaw native hosting, event custody, model handoff and media |
 | `deploy/native/` | Native-only image, Compose and optional user-service examples |
+| `scripts/` | Repository tooling: CI helpers, release scripts, cross-package smoke tests, translation and interface tooling. See `scripts/AGENTS.md` |
 | `docs/` | Public documentation site |
 
 Native routes/contracts live in `packages/native-client-rust/crates/wechat-api/`; run `pnpm generate-types` after exported Rust contract changes. The README is a concise user guide, not an exhaustive API specification. The former UI server, image, container CLI and Wechaty integrations are retired; Git history retains their implementation.
@@ -47,7 +48,7 @@ Native routes/contracts live in `packages/native-client-rust/crates/wechat-api/`
 - Write plain sentences for a reader who hasn't seen the code. Avoid "explicit", "bounded", "durable", "custody", "projection" and similar internal terms unless the page defines them.
 - Prefer a table, diagram (a `mermaid` code block, rendered at build time) or example over a paragraph.
 - Keep task pages short, roughly 600 words; split a page that grows past that.
-- Internal test evidence, CI scripts and release mechanics belong in `RELEASING.md`, `PLATFORM-ACCEPTANCE.md` or `deploy/native/README.md`, not in the `docs/` site.
+- Internal test evidence, CI scripts and release mechanics belong in `RELEASING.md` or `deploy/native/README.md`, not in the `docs/` site.
 - Moving or renaming a page needs an entry in `moved` in `docs/astro.config.mjs` so old links keep working.
 
 ## Runtime boundaries
@@ -128,7 +129,7 @@ cargo +1.93.1 fmt --all --manifest-path packages/native-client-rust/Cargo.toml
 cargo +1.93.1 fmt --all --check --manifest-path packages/native-client-rust/Cargo.toml
 cargo +1.93.1 clippy --workspace --all-targets --locked --manifest-path packages/native-client-rust/Cargo.toml -- -D warnings
 cargo +1.93.1 test --workspace --locked --manifest-path packages/native-client-rust/Cargo.toml
-bash scripts/native-generate-types.sh --check
+bash scripts/generate-types.sh --check
 pnpm interfaces --check
 ```
 

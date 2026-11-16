@@ -52,7 +52,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           release_dir="$RUNNER_TEMP/native-image-release"
-          node scripts/native-image-release.mjs "$RELEASE_VERSION" "$release_dir"
+          node scripts/release/image.mjs "$RELEASE_VERSION" "$release_dir"
           for path in "$release_dir/manifest.json" "$release_dir/wx"; do
             gh attestation verify "$path" --repo "$GITHUB_REPOSITORY" \
               --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/native-release.yml" \
@@ -78,7 +78,7 @@ jobs:
       - name: Test on the native architecture before publishing
         run: |
           docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges native-candidate --json version
-          python3 scripts/native-container-smoke.py native-candidate
+          python3 scripts/smoke/container.py native-candidate
       - uses: docker/login-action@v4.6.0
         with:
           registry: ghcr.io
