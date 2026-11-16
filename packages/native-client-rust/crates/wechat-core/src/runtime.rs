@@ -1,5 +1,7 @@
 #[path = "checkpoint.rs"]
 mod checkpoint;
+#[path = "contact_remarks.rs"]
+mod contact_remarks;
 #[path = "contact_sync.rs"]
 mod contact_sync;
 #[path = "groups.rs"]
@@ -2250,6 +2252,7 @@ impl Core {
                 if core.refresh_incoming_groups(&owned, true)? > 0 {
                     core.project_pending(&owned)?;
                 }
+                core.refresh_contact_remarks(&owned, true)?;
                 if core.store.pending_sync_count(&owned)? == 0 {
                     core.publish_profile_checkpoint(&owned)?;
                 }
@@ -2272,6 +2275,7 @@ impl Core {
                 if core.refresh_incoming_groups(&account, true)? > 0 {
                     core.project_pending(&account)?;
                 }
+                core.refresh_contact_remarks(&account, true)?;
                 if core.store.pending_sync_count(&account)? == 0 {
                     let _ = core.publish_profile_checkpoint(&account);
                 }

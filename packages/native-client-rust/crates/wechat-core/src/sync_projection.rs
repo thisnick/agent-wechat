@@ -664,7 +664,15 @@ impl Core {
                 _ => false,
             };
             let unresolved_mask = partial_mask && !known_partial_mask;
-            if pending || !controlled.is_empty() || unresolved_mask {
+            if !pending
+                && !unresolved_mask
+                && super::contact_remarks::remark_only_controls(&controlled)
+            {
+                // Its other fields are saved above. The controlled remark copy is
+                // not applied (its version ordering is unmapped); an exact lookup
+                // supplies the current remark instead of holding this batch.
+                self.queue_remark_refresh(account, &contact.username, receipt)?;
+            } else if pending || !controlled.is_empty() || unresolved_mask {
                 let mut blocked = command_blocker(command);
                 blocked.classification = "contact_update";
                 blocked.reason = if pending {
