@@ -10,6 +10,8 @@ import {
   PinOff,
   Pin,
   AtSign,
+  Info,
+  CircleAlert,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { languages, t, useLanguage, type LanguagePreference } from "./i18n.ts";
@@ -58,6 +60,8 @@ export function Icon({ name }: { name: string }) {
       unpin: PinOff,
       pin: Pin,
       mention: AtSign,
+      info: Info,
+      alert: CircleAlert,
     } as Record<string, typeof MessageSquareX>
   )[name];
   if (component) {
@@ -73,6 +77,39 @@ export function Icon({ name }: { name: string }) {
       <path d={icons[name] ?? icons.chat} />
     </svg>
   );
+}
+/**
+ * A notice that can carry the action that resolves it. Its parts follow
+ * shadcn/ui's Alert: `NoticeTitle`, `NoticeDescription` and `NoticeAction`, in
+ * any combination. The action sits to the right when the notice is wide enough
+ * and moves under the text when it is not. `tone="error"` is for problems; the
+ * default tone is neutral. Errors are announced as alerts, the rest as status.
+ */
+export function Notice({
+  tone = "neutral",
+  children,
+}: {
+  tone?: "neutral" | "error";
+  children: ReactNode;
+}) {
+  return (
+    <div
+      className={`notice notice-${tone}`}
+      role={tone === "error" ? "alert" : "status"}
+    >
+      <Icon name={tone === "error" ? "alert" : "info"} />
+      {children}
+    </div>
+  );
+}
+export function NoticeTitle({ children }: { children: ReactNode }) {
+  return <p className="notice-title">{children}</p>;
+}
+export function NoticeDescription({ children }: { children: ReactNode }) {
+  return <div className="notice-description">{children}</div>;
+}
+export function NoticeAction({ children }: { children: ReactNode }) {
+  return <div className="notice-action">{children}</div>;
 }
 export function Logo() {
   return (

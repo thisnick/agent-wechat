@@ -175,7 +175,7 @@
     "leftoverHubStopped": "Stopped the leftover hub",
     "listeningNewMessages": "Listening for new messages",
     "local": "Local",
-    "localHubNotRunning": "This device’s hub isn’t running: {{error}}",
+    "localHubNotRunning": "This device’s hub isn’t running",
     "messageNotifications": "Message notifications",
     "mostHubsNeedNoExtra": "Most hubs need no extra certificate. For a hub using a private certificate, paste the PEM certificate supplied by its owner.",
     "network": "Network",

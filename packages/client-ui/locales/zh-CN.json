@@ -174,7 +174,7 @@
     "leftoverHubStopped": "已停止遗留的 Hub",
     "listeningNewMessages": "正在监听新消息",
     "local": "本地",
-    "localHubNotRunning": "此设备的 Hub 未运行：{{error}}",
+    "localHubNotRunning": "此设备的 Hub 未运行",
     "messageNotifications": "消息通知",
     "mostHubsNeedNoExtra": "大多数 Hub 无需额外证书。若 Hub 使用私有证书，请粘贴其管理员提供的 PEM 证书。",
     "network": "局域网",

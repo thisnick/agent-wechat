@@ -151,7 +151,7 @@
   "desktopUi.leftoverHubStopped": {"source":"6a8dddd843f5","machine":"5209626c64eb"},
   "desktopUi.listeningNewMessages": {"source":"773eec9cb882"},
   "desktopUi.local": {"source":"8c31e6e72230"},
-  "desktopUi.localHubNotRunning": {"source":"9874c2ee786c","machine":"d430c701cde1"},
+  "desktopUi.localHubNotRunning": {"source":"fcd2e859d57d","machine":"b5ba032628cb"},
   "desktopUi.messageNotifications": {"source":"37bc56162adc"},
   "desktopUi.mostHubsNeedNoExtra": {"source":"a2c11cc792d6"},
   "desktopUi.network": {"source":"1744b96470b5"},

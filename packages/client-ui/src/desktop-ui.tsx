@@ -8,25 +8,49 @@ import {
 } from "./desktop.ts";
 import type { Connection } from "./connection.ts";
 import { richText, t } from "./i18n.ts";
-import { Welcome } from "./ui.tsx";
+import {
+  Icon,
+  Notice,
+  NoticeAction,
+  NoticeDescription,
+  NoticeTitle,
+  Welcome,
+} from "./ui.tsx";
 const message = (error: unknown) =>
   typeof error === "string"
     ? error
     : error instanceof Error
     ? error.message
     : t("desktopUi.operationCouldNotCompleted");
-/** Stops a hub that an earlier run of the app left on the local port. */
-function LeftoverHub({
+/**
+ * Says why this device's hub isn't running. When a hub that an earlier run of
+ * the app left behind holds the local port, the notice offers to stop it.
+ */
+function LocalHubNotice({
+  error,
+  leftover,
   busy,
   onStop,
 }: {
+  error: string;
+  leftover: boolean;
   busy: boolean;
   onStop: () => void;
 }) {
   return (
-    <button className="secondary" disabled={busy} onClick={onStop}>
-      {busy ? t("desktopUi.stoppingLeftoverHub") : t("desktopUi.stopLeftoverHub")}
-    </button>
+    <Notice tone="error">
+      <NoticeTitle>{t("desktopUi.localHubNotRunning")}</NoticeTitle>
+      <NoticeDescription>{error}</NoticeDescription>
+      {leftover && (
+        <NoticeAction>
+          <button type="button" disabled={busy} onClick={onStop}>
+            {busy
+              ? t("desktopUi.stoppingLeftoverHub")
+              : t("desktopUi.stopLeftoverHub")}
+          </button>
+        </NoticeAction>
+      )}
+    </Notice>
   );
 }
 function translateNotificationStatus(status?: string): string {
@@ -61,6 +85,7 @@ export function DesktopWelcome({
     [key, setKey] = useState("");
   const [certificate, setCertificate] = useState("");
   const https = endpoint.trim().toLowerCase().startsWith("https://");
+  const leftover = mode === "choose" && !!settings?.leftoverHub;
   useEffect(() => {
     if (mode !== "choose") return;
     let cancelled = false;
@@ -115,13 +140,13 @@ export function DesktopWelcome({
   if (mode === "settings")
     return (
       <Welcome simulator={false}>
+        <button className="step-back" type="button" onClick={() => setMode("choose")}>
+          <Icon name="back" /> {t("desktopUi.back")}
+        </button>
         <div className="welcome-heading">
           <h1>{t("desktopUi.desktopSettings")}</h1>
         </div>
         <DesktopPreferences onConnection={onConnect} manageLocal />
-        <button className="secondary" onClick={() => setMode("choose")}>
-          {t("desktopUi.back")}
-        </button>
       </Welcome>
     );
   return (
@@ -238,13 +263,19 @@ export function DesktopWelcome({
           </button>
         </form>
       )}
-      {error && (
+      {/* The notice below already says why the selected local hub failed. */}
+      {error && !(leftover && error === settings?.localHubError) && (
         <p role="alert" className="connection-error">
           {error}
         </p>
       )}
-      {mode === "choose" && settings?.leftoverHub && (
-        <LeftoverHub busy={busy} onStop={() => void stopLeftover()} />
+      {leftover && settings?.localHubError && (
+        <LocalHubNotice
+          error={settings.localHubError}
+          leftover
+          busy={busy}
+          onStop={() => void stopLeftover()}
+        />
       )}
     </Welcome>
   );
@@ -404,12 +435,12 @@ export function DesktopPreferences({
         </div>
       )}
       {settings?.localHubError && (
-        <p role="alert" className="connection-error">
-          {t("desktopUi.localHubNotRunning", { error: settings.localHubError })}
-        </p>
-      )}
-      {settings?.leftoverHub && (
-        <LeftoverHub busy={busy} onStop={() => void stopLeftover()} />
+        <LocalHubNotice
+          error={settings.localHubError}
+          leftover={settings.leftoverHub}
+          busy={busy}
+          onStop={() => void stopLeftover()}
+        />
       )}
       {localSettings && (
         <form className="desktop-form" onSubmit={save}>

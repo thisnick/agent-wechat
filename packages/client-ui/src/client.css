@@ -1945,6 +1945,8 @@ input:focus-visible {
 .desktop-port-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
 .desktop-preferences > .desktop-form, .desktop-preferences > .desktop-connection-details { padding: 20px 0; border-bottom: 1px solid var(--line); }
 .desktop-access-key { flex-wrap: wrap; }
+.desktop-preferences > .notice { margin-top: 16px; }
+.onboarding-center > .notice { margin: 16px 0; }
 .desktop-access-key input { width: 100%; font-family: monospace; }
 .desktop-connection-details code, .desktop-preferences small { overflow-wrap: anywhere; }
 
