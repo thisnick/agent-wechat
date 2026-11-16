@@ -88,7 +88,8 @@ pub(super) fn prepare_normal(
     ]);
     command.arg(&source).args([
         "-map",
-        "0:v:0",
+        // `V` skips attached pictures (cover art), which FFmpeg lists as video.
+        "0:V:0",
         "-map",
         "0:a:0?",
         "-map_metadata",
@@ -186,15 +187,22 @@ fn parse_probe_inner(bytes: &[u8], normal: bool, require_frames: bool) -> Result
     let result: serde_json::Value = serde_json::from_slice(bytes).context("media_probe_failed")?;
     let streams = result["streams"].as_array().context("media_probe_failed")?;
     ensure!(streams.len() <= 8, "video_stream_limit");
+    // Cover art is a one-frame video stream marked as an attached picture; it is
+    // not encoded, so it does not count as the source's video.
     let videos: Vec<_> = streams
         .iter()
-        .filter(|s| s["codec_type"] == "video")
+        .filter(|s| s["codec_type"] == "video" && s["disposition"]["attached_pic"] != 1)
         .collect();
     let audios: Vec<_> = streams
         .iter()
         .filter(|s| s["codec_type"] == "audio")
         .collect();
-    ensure!(videos.len() == 1 && audios.len() <= 1, "video_stream_limit");
+    // A source may have several audio tracks; only the first is encoded, so
+    // the playback copy still has at most one.
+    ensure!(
+        videos.len() == 1 && (!normal || audios.len() <= 1),
+        "video_stream_limit"
+    );
     let video = videos[0];
     let width = video["width"].as_u64().context("media_probe_failed")?;
     let height = video["height"].as_u64().context("media_probe_failed")?;
@@ -296,7 +304,7 @@ fn probe(
             "-threads",
             "1",
             "-show_entries",
-            "stream=codec_name,codec_type,pix_fmt,width,height,duration,avg_frame_rate,nb_read_frames,sample_rate,channels:format=duration",
+            "stream=codec_name,codec_type,pix_fmt,width,height,duration,avg_frame_rate,nb_read_frames,sample_rate,channels:stream_disposition=attached_pic:format=duration",
             "-of",
             "json",
         ]);
@@ -721,6 +729,113 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
+    }
+
+    #[test]
+    fn source_probe_ignores_cover_art_and_extra_audio_tracks() {
+        let video = report()["streams"][0].clone();
+        let audio =
+            json!({"codec_type":"audio","codec_name":"aac","sample_rate":"48000","channels":2});
+        let cover = json!({"codec_type":"video","codec_name":"mjpeg","width":320,"height":320,"nb_read_frames":"1","disposition":{"attached_pic":1}});
+        let mut value = report();
+        value["streams"] = json!([video, audio, audio, cover]);
+        let bytes = serde_json::to_vec(&value).unwrap();
+        assert!(parse_probe(&bytes, false).unwrap().audio);
+        // The playback copy itself must still have one video and at most one
+        // audio stream.
+        assert!(parse_probe(&bytes, true)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("video_stream_limit"));
+        value["streams"] = json!([cover, audio]);
+        assert!(parse_probe(&serde_json::to_vec(&value).unwrap(), false)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("video_stream_limit"));
+    }
+
+    #[test]
+    fn normal_video_accepts_sources_with_cover_art_and_two_audio_tracks() {
+        let dir = wechat_platform::private_tempdir("wechat-video-streams-test-").unwrap();
+        let cover = dir.path().join("cover.jpg");
+        let plain = dir.path().join("plain.mp4");
+        let source = dir.path().join("source.mp4");
+        let ffmpeg = |args: &[&str], output: &Path| {
+            assert!(Command::new("ffmpeg")
+                .args(["-v", "error", "-nostdin"])
+                .args(args)
+                .arg(output)
+                .status()
+                .unwrap()
+                .success());
+        };
+        ffmpeg(
+            &["-f", "lavfi", "-i", "color=c=red:s=64x64", "-frames:v", "1"],
+            &cover,
+        );
+        ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x240:rate=10:duration=1",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000:duration=1",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=880:sample_rate=48000:duration=1",
+                "-map",
+                "0",
+                "-map",
+                "1",
+                "-map",
+                "2",
+                "-c:v",
+                "libx264",
+                "-threads",
+                "1",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+            ],
+            &plain,
+        );
+        let plain = plain.to_str().unwrap();
+        let cover = cover.to_str().unwrap();
+        ffmpeg(
+            &[
+                "-i",
+                plain,
+                "-i",
+                cover,
+                "-map",
+                "0",
+                "-map",
+                "1",
+                "-c",
+                "copy",
+                "-disposition:v:1",
+                "attached_pic",
+            ],
+            &source,
+        );
+        let input = std::fs::read(&source).unwrap();
+        let encoded = prepare_normal(&input, 1, || Ok(())).unwrap();
+        let output = dir.path().join("normal.mp4");
+        std::fs::write(&output, encoded).unwrap();
+        let probe = probe(&output, true, Instant::now() + PREPARE_TIMEOUT, &mut || {
+            Ok(())
+        })
+        .unwrap();
+        assert!(probe.audio);
     }
 
     #[test]
