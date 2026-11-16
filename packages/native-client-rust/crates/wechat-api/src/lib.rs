@@ -67,6 +67,8 @@ pub fn version() -> Version {
         api_version: API_VERSION,
         capabilities: vec![
             "serve",
+            // `wx serve --exit-with-parent`, for hosts that start an owned daemon.
+            "serve-exit-with-parent",
             "profile-attach",
             "profile-copy",
             "profile-read",
