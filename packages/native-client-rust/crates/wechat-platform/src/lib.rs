@@ -368,6 +368,48 @@ pub fn process_identity(pid: u32) -> Option<(String, std::path::PathBuf)> {
     }
 }
 
+/// Reports when the process that started this one has exited.
+///
+/// Create it at startup, while that process is still running. On Unix it
+/// notices that this process now has a different parent, which happens when
+/// the original parent exits. On Windows it holds a handle to the original
+/// parent, opened while that parent was alive, so a reused process ID cannot
+/// be mistaken for it.
+pub struct ParentWatch {
+    #[cfg(unix)]
+    parent: libc::pid_t,
+    #[cfg(windows)]
+    inner: windows::ParentWatch,
+}
+impl ParentWatch {
+    /// Starts watching the current parent process.
+    pub fn new() -> io::Result<Self> {
+        #[cfg(unix)]
+        {
+            Ok(Self {
+                parent: unsafe { libc::getppid() },
+            })
+        }
+        #[cfg(windows)]
+        {
+            Ok(Self {
+                inner: windows::ParentWatch::new()?,
+            })
+        }
+    }
+    /// Whether the original parent has exited. This never blocks.
+    pub fn exited(&self) -> bool {
+        #[cfg(unix)]
+        {
+            unsafe { libc::getppid() != self.parent }
+        }
+        #[cfg(windows)]
+        {
+            self.inner.exited()
+        }
+    }
+}
+
 /// Atomically publish a new directory, refusing any existing destination.
 pub fn publish_directory(source: &Path, destination: &Path) -> io::Result<()> {
     #[cfg(unix)]

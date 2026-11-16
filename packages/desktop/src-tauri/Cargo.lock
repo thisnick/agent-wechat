@@ -28,6 +28,7 @@ dependencies = [
  "block2",
  "chrono",
  "keyring",
+ "libc",
  "mac-notification-sys",
  "notify-rust",
  "objc2",

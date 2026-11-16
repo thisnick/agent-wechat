@@ -11,6 +11,8 @@ fn wechat_platform::OpenOptions::open | fn(&mut self, path: impl core::convert::
 fn wechat_platform::OpenOptions::read | fn(&mut self, value: bool) -> &mut Self | MISSING DOC
 fn wechat_platform::OpenOptions::truncate | fn(&mut self, value: bool) -> &mut Self | MISSING DOC
 fn wechat_platform::OpenOptions::write | fn(&mut self, value: bool) -> &mut Self | MISSING DOC
+fn wechat_platform::ParentWatch::exited | fn(&self) -> bool | Whether the original parent has exited. This never blocks.
+fn wechat_platform::ParentWatch::new | fn() -> std::io::error::Result<Self> | Starts watching the current parent process.
 fn wechat_platform::PrivateTempDir::keep | fn(self) -> std::path::PathBuf | MISSING DOC
 fn wechat_platform::PrivateTempDir::path | fn(&self) -> &std::path::Path | MISSING DOC
 fn wechat_platform::detach | fn(command: &mut std::process::Command) | MISSING DOC
@@ -37,4 +39,5 @@ impl core::default::Default for wechat_platform::OpenOptions | impl | -
 impl core::ops::drop::Drop for wechat_platform::PrivateTempDir | impl | -
 mod wechat_platform | - | OS boundaries shared by the native CLI, daemon and profile storage.
 struct wechat_platform::OpenOptions | struct { private fields } | Files never follow a final symlink/reparse point. Private creation is atomic.
+struct wechat_platform::ParentWatch | struct { private fields } | Reports when the process that started this one has exited.
 struct wechat_platform::PrivateTempDir | struct { private fields } | A randomly named scratch directory, owned by this user from creation. Windows' default temporary-directory owner can be Administrators when elevated.

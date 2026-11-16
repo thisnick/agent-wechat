@@ -44,6 +44,11 @@ pub struct Config {
     /// UI language for tray and notification text; `None` until the UI reports one.
     #[serde(default)]
     pub language: Option<String>,
+    /// Keep this device's hub running while the app uses another hub, so the
+    /// command-line tool and other apps can reach it. When off, it runs only
+    /// while "This device" is selected. Either way it stops when the app quits.
+    #[serde(default)]
+    pub keep_local_hub_running: bool,
 }
 fn enabled() -> bool {
     true
@@ -64,6 +69,7 @@ impl Default for Config {
             automatic_updates: true,
             update_prereleases: None,
             language: None,
+            keep_local_hub_running: false,
         }
     }
 }
@@ -280,6 +286,18 @@ mod tests {
         config.notification_sound_enabled = false;
         config.save(&path).unwrap();
         assert!(!Config::load(&path).unwrap().notification_sound_enabled);
+    }
+    #[test]
+    fn local_hub_runs_only_when_selected_unless_kept_and_the_choice_survives_reload() {
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+        value.as_object_mut().unwrap().remove("keepLocalHubRunning");
+        let mut config: Config = serde_json::from_value(value).unwrap();
+        assert!(!config.keep_local_hub_running);
+        let directory = wechat_platform::private_tempdir("desktop-keep-hub-").unwrap();
+        let path = directory.path().join("desktop.json");
+        config.keep_local_hub_running = true;
+        config.save(&path).unwrap();
+        assert!(Config::load(&path).unwrap().keep_local_hub_running);
     }
     #[test]
     fn account_notification_overrides_are_local_scoped_and_survive_reload() {

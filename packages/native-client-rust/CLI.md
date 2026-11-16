@@ -33,7 +33,9 @@ signals only that verified process, releases locks and keeps login trust/history
 It does not submit native logout. `serve --token-stdin` accepts a bounded API
 token through a private pipe without creating a token file; it cannot be
 combined with `--token-file` or a configured `tokenFile`. OpenClaw managed mode
-uses this foreground-only startup option. Use either this manager, systemd, Compose or
+uses this foreground-only startup option. `serve --exit-with-parent` stops the
+daemon gracefully once the process that started it exits; the desktop app uses
+it so a crash or forced quit does not leave its hub running. Use either this manager, systemd, Compose or
 OpenClaw ownership for one process; do not nest owners.
 
 ```bash

@@ -10,6 +10,7 @@
 // scene is also captured in every translation as `<scene>@<viewport>@<language>`
 // (see capture.spec.mjs); `ready` and `actions` stay in English.
 import { ACCOUNT, SPARE } from "./accounts.mjs";
+import { desktopBridge, LEFTOVER_HUB_SETTINGS } from "./desktop.mjs";
 import { readFile } from "node:fs/promises";
 
 /** Desktop, phone and compact phone sizes for visual review. */
@@ -525,6 +526,45 @@ export const scenes = [
       await expect(page.getByRole("heading", { name: "Connect to an agent-wechat hub" })).toBeVisible();
     },
     mask: hubAddress,
+  },
+  {
+    name: "desktop-leftover-hub",
+    route: "servers",
+    description: "The desktop app's first screen when a hub left running by an earlier session holds the local port.",
+    viewports: ["desktop", "narrow"],
+    setup: async () => ({}),
+    prepare: ({ page }) =>
+      desktopBridge(page, {
+        bootstrapError: LEFTOVER_HUB_SETTINGS.localHubError,
+        settings: LEFTOVER_HUB_SETTINGS,
+      }),
+    target: () => ({}),
+    ready: async ({ page, expect }) => {
+      await expect(page.getByRole("heading", { name: "Welcome to AgentWechat" })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Stop leftover hub" })).toBeVisible();
+    },
+  },
+  {
+    name: "desktop-settings",
+    route: "servers",
+    description: "Desktop settings, including whether this device's hub keeps running while another hub is used.",
+    viewports: ["desktop", "narrow"],
+    setup: async () => ({}),
+    prepare: ({ page }) =>
+      desktopBridge(page, {
+        bootstrapError: LEFTOVER_HUB_SETTINGS.localHubError,
+        settings: LEFTOVER_HUB_SETTINGS,
+      }),
+    target: () => ({}),
+    ready: async ({ page, expect }) => {
+      await expect(page.getByRole("heading", { name: "Welcome to AgentWechat" })).toBeVisible();
+    },
+    actions: async ({ page, expect }) => {
+      await page.getByRole("button", { name: "Desktop settings" }).click();
+      await expect(page.getByRole("heading", { name: "Desktop settings" })).toBeVisible();
+      await expect(page.getByRole("checkbox", { name: "Keep this device’s hub running" })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Stop leftover hub" })).toBeVisible();
+    },
   },
 ];
 
