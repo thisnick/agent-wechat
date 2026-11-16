@@ -374,9 +374,11 @@ export async function interfaceAcceptance({
       const layout =
         await script(`const panel = document.querySelector('.onboarding-main');
         panel.scrollTop = panel.scrollHeight;
-        const back = [...panel.querySelectorAll('button')].find(b => b.textContent === 'Back');
-        const rect = back.getBoundingClientRect();
-        return { scrollable: panel.scrollHeight > panel.clientHeight, top: rect.top, bottom: rect.bottom, height: innerHeight, graphic: document.querySelector('.app-illustration').getBoundingClientRect().height };`);
+        const scrollable = panel.scrollHeight > panel.clientHeight && panel.scrollTop > 0;
+        // Back sits above the heading, so returning to the top must bring it into view.
+        panel.scrollTop = 0;
+        const rect = panel.querySelector('.step-back').getBoundingClientRect();
+        return { scrollable, top: rect.top, bottom: rect.bottom, height: innerHeight, graphic: document.querySelector('.app-illustration').getBoundingClientRect().height };`);
       assert.ok(
         layout.scrollable,
         "long settings must scroll inside their panel",

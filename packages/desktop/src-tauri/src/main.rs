@@ -19,7 +19,7 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{
-        atomic::{AtomicU8, Ordering},
+        atomic::{AtomicU32, AtomicU8, Ordering},
         Arc,
     },
 };
@@ -38,6 +38,14 @@ pub struct Inner {
     config: Config,
     hub: Option<hub::OwnedHub>,
     active: Option<Arc<Active>>,
+    /// Why this device's hub last failed to start, until it starts.
+    local_error: Option<LocalHubError>,
+}
+#[derive(Clone)]
+struct LocalHubError {
+    message: String,
+    /// A hub from an earlier run of this app holds the local port.
+    leftover: bool,
 }
 pub struct Desktop {
     inner: Mutex<Inner>,
@@ -47,8 +55,20 @@ pub struct Desktop {
     uploads: Mutex<HashMap<String, transport::Upload>>,
     requests: Arc<Mutex<HashMap<String, transport::Control>>>,
     quit: AtomicU8,
+    /// Process ID of this device's hub while it runs or starts, else 0. It is
+    /// read without the `inner` lock when the app ends.
+    hub_pid: AtomicU32,
     notifications: notifications::Notifications,
     updates: updates::Updates,
+}
+/// How long an ending app waits for its hub to stop.
+#[cfg(unix)]
+const EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Whether this device's hub should run: while "This device" is selected, or
+/// while another hub is selected if the user chose to keep it running.
+fn local_wanted(config: &Config) -> bool {
+    config.connections.iter().any(|connection| connection.local)
+        && (config.active.as_deref() == Some("local") || config.keep_local_hub_running)
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -82,6 +102,9 @@ struct Settings {
     notifications_enabled: bool,
     notification_sound_enabled: bool,
     notification_status: String,
+    keep_local_hub_running: bool,
+    local_hub_error: Option<String>,
+    leftover_hub: bool,
 }
 impl Desktop {
     async fn start_local(&self, inner: &mut Inner, key: Zeroizing<String>) -> Result<()> {
@@ -96,25 +119,127 @@ impl Desktop {
             .is_some_and(|owned| owned.child.try_wait().ok().flatten().is_some())
         {
             inner.hub = None;
+            self.hub_pid.store(0, Ordering::Release);
         }
         if inner.hub.is_none() {
-            inner.hub = Some(hub::start(&inner.config, &self.data, &self.binaries, key).await?);
+            let started = hub::start(
+                &inner.config,
+                &self.data,
+                &self.binaries,
+                Zeroizing::new(key.to_string()),
+                &self.hub_pid,
+            )
+            .await;
+            match started {
+                Ok(owned) => {
+                    inner.hub = Some(owned);
+                    inner.local_error = None;
+                }
+                Err(error) => {
+                    self.hub_pid.store(0, Ordering::Release);
+                    let leftover = hub::leftover(&inner.config, &self.data, &key)
+                        .await
+                        .is_some();
+                    // The port error alone suggests choosing another port, but
+                    // the fix here is to stop the hub an earlier run left behind.
+                    let error = if leftover {
+                        anyhow::anyhow!(
+                            "An earlier AgentWechat session left its hub running on port {}",
+                            inner.config.local_port
+                        )
+                    } else {
+                        error
+                    };
+                    inner.local_error = Some(LocalHubError {
+                        message: error.to_string(),
+                        leftover,
+                    });
+                    return Err(error);
+                }
+            }
         }
         Ok(())
     }
+    /// Starts this device's hub if the user keeps it running while another hub
+    /// is selected. Selecting "This device" starts it through `activate`.
     async fn resume_local(&self) -> Result<()> {
         let mut inner = self.inner.lock().await;
-        if !inner
-            .config
-            .connections
-            .iter()
-            .any(|connection| connection.local)
-        {
+        if !local_wanted(&inner.config) {
             return Ok(());
         }
         let key = credentials::read(&inner.config.installation_id, "local")?
             .context("The local hub access key is missing; restore it before starting this hub")?;
         self.start_local(&mut inner, key).await
+    }
+    /// Stops this device's hub if it runs. Callers cancel open requests first.
+    async fn stop_local(&self, inner: &mut Inner) -> Result<()> {
+        if let Some(owned) = inner.hub.as_mut() {
+            hub::stop(owned).await?;
+        }
+        inner.hub = None;
+        self.hub_pid.store(0, Ordering::Release);
+        Ok(())
+    }
+    /// Stops this device's hub once nothing needs it, such as after switching
+    /// to another hub. A hub that refuses to stop stays owned and stops at Quit.
+    async fn stop_unused_local(&self) {
+        {
+            let inner = self.inner.lock().await;
+            if inner.hub.is_none() || local_wanted(&inner.config) {
+                return;
+            }
+        }
+        for control in self.requests.lock().await.values() {
+            control.cancel.cancel();
+        }
+        let mut inner = self.inner.lock().await;
+        if inner.hub.is_some() && !local_wanted(&inner.config) {
+            let _ = self.stop_local(&mut inner).await;
+        }
+    }
+    /// Signals this device's hub to stop and waits briefly, for an app the
+    /// system is ending without asking first (on macOS: Quit from the Dock,
+    /// logging out or shutting down). The hub also stops by itself once the app
+    /// is gone; this only starts that sooner, so a quick relaunch finds the
+    /// local port free. It never blocks longer than [`EXIT_WAIT`].
+    fn stop_hub_now(&self) {
+        let pid = self.hub_pid.swap(0, Ordering::AcqRel);
+        if pid == 0 {
+            return;
+        }
+        #[cfg(unix)]
+        {
+            // The process is this app's unreaped child, so its ID is not reused.
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+            tauri::async_runtime::block_on(async {
+                let _ = tokio::time::timeout(EXIT_WAIT, async {
+                    if let Some(owned) = self.inner.lock().await.hub.as_mut() {
+                        let _ = owned.child.wait().await;
+                    }
+                })
+                .await;
+            });
+        }
+    }
+    async fn bootstrap(&self) -> Result<Option<Session>> {
+        let id = self.inner.lock().await.config.active.clone();
+        if id.as_deref() != Some("local") {
+            // A kept-running local hub must not stop the selected hub from
+            // opening. Its error stays in settings, with a fix when there is one.
+            if let Err(error) = self.resume_local().await {
+                let mut inner = self.inner.lock().await;
+                if inner.local_error.is_none() {
+                    inner.local_error = Some(LocalHubError {
+                        message: error.to_string(),
+                        leftover: false,
+                    });
+                }
+            }
+        }
+        match id {
+            Some(id) => self.activate(&id).await.map(Some),
+            None => Ok(None),
+        }
     }
     async fn activate(&self, id: &str) -> Result<Session> {
         let mut inner = self.inner.lock().await;
@@ -152,11 +277,16 @@ impl Desktop {
         });
         let mut session = Session::from(&connection);
         session.status = Some(identity);
+        let local = connection.local;
         inner.config.connections.retain(|value| value.id != id);
         inner.config.connections.push(connection);
         inner.config.active = Some(id.into());
         inner.config.save(&self.config_file)?;
         inner.active = Some(active);
+        drop(inner);
+        if !local {
+            self.stop_unused_local().await;
+        }
         Ok(session)
     }
     async fn stop_hub(&self) -> Result<()> {
@@ -164,11 +294,7 @@ impl Desktop {
             control.cancel.cancel();
         }
         let mut inner = self.inner.lock().await;
-        if let Some(owned) = inner.hub.as_mut() {
-            hub::stop(owned).await?;
-        }
-        inner.hub = None;
-        Ok(())
+        self.stop_local(&mut inner).await
     }
     async fn stop(&self) -> Result<()> {
         self.stop_hub().await?;
@@ -179,22 +305,7 @@ impl Desktop {
 }
 #[tauri::command]
 async fn desktop_bootstrap(state: State<'_, Desktop>) -> Result<Option<Session>, String> {
-    let id = state.inner.lock().await.config.active.clone();
-    // A configured local hub also serves other clients while this UI uses a remote hub.
-    if id.as_deref() != Some("local") {
-        state
-            .resume_local()
-            .await
-            .map_err(|error| error.to_string())?;
-    }
-    match id {
-        Some(id) => state
-            .activate(&id)
-            .await
-            .map(Some)
-            .map_err(|error| error.to_string()),
-        None => Ok(None),
-    }
+    state.bootstrap().await.map_err(|error| error.to_string())
 }
 #[tauri::command]
 async fn desktop_local(state: State<'_, Desktop>) -> Result<Session, String> {
@@ -294,7 +405,58 @@ async fn desktop_settings(state: State<'_, Desktop>) -> Result<Settings, String>
         notifications_enabled: config.notifications_enabled,
         notification_sound_enabled: config.notification_sound_enabled,
         notification_status: notifications::status(&state).await,
+        keep_local_hub_running: config.keep_local_hub_running,
+        local_hub_error: inner
+            .local_error
+            .as_ref()
+            .map(|error| error.message.clone()),
+        leftover_hub: inner
+            .local_error
+            .as_ref()
+            .is_some_and(|error| error.leftover),
     })
+}
+/// Keeps this device's hub running while another hub is selected, or lets it
+/// stop then. The hub stops when the app quits either way.
+#[tauri::command]
+async fn desktop_keep_local_hub(state: State<'_, Desktop>, enabled: bool) -> Result<(), String> {
+    let result = async {
+        {
+            let mut inner = state.inner.lock().await;
+            let mut next = inner.config.clone();
+            next.keep_local_hub_running = enabled;
+            next.save(&state.config_file)?;
+            inner.config = next;
+        }
+        if enabled {
+            state.resume_local().await
+        } else {
+            state.stop_unused_local().await;
+            Ok(())
+        }
+    }
+    .await;
+    result.map_err(|error: anyhow::Error| error.to_string())
+}
+/// Stops a hub that an earlier run of this app left on the local port, after
+/// checking it uses this app's data folder and key, then starts this device's
+/// hub if it should run. Returns the session when "This device" is selected.
+#[tauri::command]
+async fn desktop_stop_leftover_hub(state: State<'_, Desktop>) -> Result<Option<Session>, String> {
+    let result = async {
+        let config = state.inner.lock().await.config.clone();
+        let key = credentials::read(&config.installation_id, "local")?
+            .context("The local hub access key is missing; restore it before starting this hub")?;
+        hub::stop_leftover(&config, &state.data, &key).await?;
+        state.inner.lock().await.local_error = None;
+        if config.active.as_deref() == Some("local") {
+            return state.activate("local").await.map(Some);
+        }
+        state.resume_local().await?;
+        Ok(None)
+    }
+    .await;
+    result.map_err(|error: anyhow::Error| error.to_string())
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -324,10 +486,7 @@ async fn desktop_save_local(
         if next.network_enabled {
             hub::tls_files(&state.data)?;
         }
-        if let Some(owned) = inner.hub.as_mut() {
-            hub::stop(owned).await?;
-        }
-        inner.hub = None;
+        state.stop_local(&mut inner).await?;
         inner.active = None;
         inner.config = next;
         drop(inner);
@@ -475,10 +634,54 @@ fn install_cli(binaries: &std::path::Path) -> Result<String> {
 fn desktop_quit(app: tauri::AppHandle) {
     request_quit(app);
 }
-/// Tray items whose labels follow the UI language.
+/// Tray and app menu items whose labels follow the UI language.
 struct TrayMenu {
     show: tauri::menu::MenuItem<tauri::Wry>,
     quit: tauri::menu::MenuItem<tauri::Wry>,
+    #[cfg(target_os = "macos")]
+    app_quit: tauri::menu::MenuItem<tauri::Wry>,
+}
+/// Menu item IDs. Every Quit item stops the hub before the app exits.
+const MENU_SHOW: &str = "show";
+const MENU_QUIT: &str = "quit";
+#[cfg(target_os = "macos")]
+const MENU_APP_QUIT: &str = "app-quit";
+fn menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
+    match event.id.as_ref() {
+        MENU_SHOW => show_main_window(app),
+        MENU_QUIT => request_quit(app.clone()),
+        #[cfg(target_os = "macos")]
+        MENU_APP_QUIT => request_quit(app.clone()),
+        _ => {}
+    }
+}
+/// Tauri's default macOS menu, with its Quit item replaced. The standard
+/// item ends the app at once, without the chance to stop the hub that
+/// `request_quit` needs; this one runs `request_quit` for the same ⌘Q.
+#[cfg(target_os = "macos")]
+fn app_menu(
+    app: &tauri::AppHandle,
+    quit: &tauri::menu::MenuItem<tauri::Wry>,
+) -> Result<tauri::menu::Menu<tauri::Wry>> {
+    let menu = tauri::menu::Menu::default(app)?;
+    let application = menu
+        .items()?
+        .into_iter()
+        .next()
+        .and_then(|item| item.as_submenu().cloned())
+        .context("Missing application menu")?;
+    let last = application
+        .items()?
+        .len()
+        .checked_sub(1)
+        .context("Missing application menu")?;
+    // The default application menu ends with the standard Quit item.
+    match application.remove_at(last)? {
+        Some(tauri::menu::MenuItemKind::Predefined(_)) => {}
+        _ => bail!("Unexpected application menu"),
+    }
+    application.append(quit)?;
+    Ok(menu)
 }
 /// Records the language the UI shows, for tray and notification text.
 #[tauri::command]
@@ -501,6 +704,8 @@ async fn desktop_language(
     if let Some(tray) = app.try_state::<TrayMenu>() {
         let _ = tray.show.set_text(i18n::text("trayOpen"));
         let _ = tray.quit.set_text(i18n::text("trayQuit"));
+        #[cfg(target_os = "macos")]
+        let _ = tray.app_quit.set_text(i18n::text("trayQuit"));
     }
     Ok(())
 }
@@ -569,6 +774,7 @@ fn main() {
                     config,
                     hub: None,
                     active: None,
+                    local_error: None,
                 }),
                 config_file,
                 data,
@@ -576,6 +782,7 @@ fn main() {
                 requests: Arc::new(Mutex::new(HashMap::new())),
                 uploads: Mutex::new(HashMap::new()),
                 quit: AtomicU8::new(0),
+                hub_pid: AtomicU32::new(0),
                 notifications: notifications::Notifications::default(),
                 updates: updates::Updates::default(),
             });
@@ -583,23 +790,39 @@ fn main() {
             updates::start(app.handle().clone());
             let show = tauri::menu::MenuItem::with_id(
                 app,
-                "show",
+                MENU_SHOW,
                 i18n::text("trayOpen"),
                 true,
                 None::<&str>,
             )?;
             let quit = tauri::menu::MenuItem::with_id(
                 app,
-                "quit",
+                MENU_QUIT,
                 i18n::text("trayQuit"),
                 true,
                 None::<&str>,
             )?;
             let menu = tauri::menu::Menu::with_items(app, &[&show, &quit])?;
+            #[cfg(target_os = "macos")]
+            let app_quit = {
+                let item = tauri::menu::MenuItem::with_id(
+                    app,
+                    MENU_APP_QUIT,
+                    i18n::text("trayQuit"),
+                    true,
+                    Some("CmdOrCtrl+Q"),
+                )?;
+                app.set_menu(app_menu(app.handle(), &item)?)?;
+                item
+            };
             app.manage(TrayMenu {
                 show: show.clone(),
                 quit: quit.clone(),
+                #[cfg(target_os = "macos")]
+                app_quit,
             });
+            // Menu events from the tray and the app menu share one handler.
+            app.on_menu_event(menu_event);
             tauri::tray::TrayIconBuilder::new()
                 .icon(
                     app.default_window_icon()
@@ -607,11 +830,6 @@ fn main() {
                         .clone(),
                 )
                 .menu(&menu)
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "show" => show_main_window(app),
-                    "quit" => request_quit(app.clone()),
-                    _ => {}
-                })
                 .build(app)?;
             Ok(())
         })
@@ -629,6 +847,8 @@ fn main() {
             desktop_settings,
             desktop_language,
             desktop_save_local,
+            desktop_keep_local_hub,
+            desktop_stop_leftover_hub,
             desktop_reveal,
             desktop_copy_key,
             desktop_forget,
@@ -662,6 +882,9 @@ fn main() {
                     request_quit(app.clone());
                 }
             }
+            // Reached without ExitRequested when the system ends the app, as
+            // macOS does for Quit from the Dock, logging out or shutting down.
+            tauri::RunEvent::Exit => app.state::<Desktop>().stop_hub_now(),
             _ => {}
         });
 }
@@ -669,6 +892,97 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture(directory: &std::path::Path, config: Config) -> Desktop {
+        Desktop {
+            inner: Mutex::new(Inner {
+                config,
+                hub: None,
+                active: None,
+                local_error: None,
+            }),
+            config_file: directory.join("desktop.json"),
+            data: directory.join("hub"),
+            binaries: directory.to_owned(),
+            uploads: Mutex::new(HashMap::new()),
+            requests: Arc::new(Mutex::new(HashMap::new())),
+            quit: AtomicU8::new(0),
+            hub_pid: AtomicU32::new(0),
+            notifications: notifications::Notifications::default(),
+            updates: updates::Updates::default(),
+        }
+    }
+
+    fn remote_selected_with_local_saved() -> Config {
+        let mut config = Config {
+            active: Some("remote".into()),
+            ..Config::default()
+        };
+        config.connections.push(hub::local_connection(&config));
+        config.connections.push(Connection {
+            id: "remote".into(),
+            name: "Fixture remote".into(),
+            endpoint: "https://hub.example".into(),
+            local: false,
+            server_id: None,
+            certificate: None,
+        });
+        config
+    }
+
+    #[test]
+    fn local_hub_is_wanted_only_while_selected_or_kept_running() {
+        let mut config = remote_selected_with_local_saved();
+        assert!(!local_wanted(&config));
+        config.keep_local_hub_running = true;
+        assert!(local_wanted(&config));
+        config.keep_local_hub_running = false;
+        config.active = Some("local".into());
+        assert!(local_wanted(&config));
+        // Without a saved local connection there is no local hub to run.
+        config.connections.retain(|connection| !connection.local);
+        config.keep_local_hub_running = true;
+        assert!(!local_wanted(&config));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_hub_does_not_start_while_another_hub_is_selected() {
+        use std::os::unix::fs::PermissionsExt;
+        let temporary = tempfile::tempdir().unwrap();
+        let marker = temporary.path().join("hub-launched");
+        let executable = temporary.path().join("wx");
+        std::fs::write(
+            &executable,
+            format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let desktop = fixture(temporary.path(), remote_selected_with_local_saved());
+        desktop.resume_local().await.unwrap();
+        assert!(!marker.exists(), "the local hub started while unused");
+        assert!(desktop.inner.lock().await.local_error.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_ending_app_signals_its_hub_even_while_it_starts() {
+        use std::os::unix::process::ExitStatusExt;
+        let temporary = tempfile::tempdir().unwrap();
+        let desktop = fixture(temporary.path(), Config::default());
+        // Stands in for a hub that has been spawned but is not ready yet.
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        desktop.hub_pid.store(child.id(), Ordering::Release);
+        let started = std::time::Instant::now();
+        desktop.stop_hub_now();
+        assert!(started.elapsed() < EXIT_WAIT);
+        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGTERM));
+        assert_eq!(desktop.hub_pid.load(Ordering::Acquire), 0);
+        desktop.stop_hub_now();
+    }
 
     #[cfg(unix)]
     #[tokio::test]
@@ -693,6 +1007,7 @@ mod tests {
                     },
                     hub: None,
                     active: None,
+                    local_error: None,
                 }),
                 config_file: temporary.path().join("desktop.json"),
                 data: temporary.path().join("hub"),
@@ -700,6 +1015,7 @@ mod tests {
                 uploads: Mutex::new(HashMap::new()),
                 requests: Arc::new(Mutex::new(HashMap::new())),
                 quit: AtomicU8::new(quit),
+                hub_pid: AtomicU32::new(0),
                 notifications: notifications::Notifications::default(),
                 updates: updates::Updates::default(),
             };
@@ -751,6 +1067,7 @@ mod tests {
                 config,
                 hub: None,
                 active: None,
+                local_error: None,
             }),
             config_file,
             data: temporary.path().join("hub"),
@@ -758,10 +1075,16 @@ mod tests {
             uploads: Mutex::new(HashMap::new()),
             requests: Arc::new(Mutex::new(HashMap::new())),
             quit: AtomicU8::new(0),
+            hub_pid: AtomicU32::new(0),
             notifications: notifications::Notifications::default(),
             updates: updates::Updates::default(),
         };
+        // Off by default: the local hub runs only while it is selected.
         desktop.resume_local().await.unwrap();
+        assert!(desktop.inner.lock().await.hub.is_none());
+        desktop.inner.lock().await.config.keep_local_hub_running = true;
+        desktop.resume_local().await.unwrap();
+        assert_ne!(desktop.hub_pid.load(Ordering::Acquire), 0);
         {
             let inner = desktop.inner.lock().await;
             assert_eq!(inner.config.active.as_deref(), Some("remote"));

@@ -8,6 +8,8 @@ scene chat-filters | route /{server}/{account}/chats, viewports desktop+compact 
 scene chat-info | route /{server}/{account}/chats/{thread}/info, viewports desktop+narrow | Details of a group conversation with its pin, mute and group settings.
 scene chat-list | route /{server}/{account}/chats, viewports desktop+narrow | The full inbox with category and conversation unread counts and the newest conversation open beside it.
 scene contacts | route /{server}/{account}/contacts, viewports desktop | The contact list of an account.
+scene desktop-leftover-hub | route /servers, viewports desktop+narrow | The desktop app's first screen when a hub left running by an earlier session holds the local port.
+scene desktop-settings | route /servers, viewports desktop+narrow | Desktop settings, including whether this device's hub keeps running while another hub is used.
 scene direct-chat | route /{server}/{account}/chats/{thread}, viewports desktop+narrow | A direct conversation with text from both sides and a photo.
 scene group-chat | route /{server}/{account}/chats/{thread}, viewports desktop | A group conversation where each message names its sender, ending in a photo.
 scene hub-picker | route /servers, viewports desktop+narrow | The screen for choosing which hub to connect to.

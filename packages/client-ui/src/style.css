@@ -929,6 +929,80 @@ h1 {
   text-decoration: underline;
   margin-left: 8px;
 }
+/* Notice: icon, title, description and an optional action (see ui.tsx). */
+.notice {
+  container-type: inline-size;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  column-gap: 10px;
+  row-gap: 2px;
+  align-items: start;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.notice > .icon {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+}
+.notice-title {
+  grid-column: 2;
+  margin: 0;
+  font-weight: 600;
+}
+.notice-description {
+  grid-column: 2;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.notice-action {
+  grid-column: 3;
+  grid-row: 1 / span 2;
+  align-self: center;
+  display: flex;
+  gap: 8px;
+}
+.notice-action > button {
+  white-space: nowrap;
+  padding: 7px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  color: inherit;
+  font-size: 12px;
+  font-weight: 550;
+}
+.notice-action > button:disabled {
+  opacity: 0.6;
+}
+/* In a narrow notice the action moves under the text, aligned with it. */
+@container (max-width: 420px) {
+  .notice-action {
+    grid-column: 2;
+    grid-row: auto;
+    justify-self: start;
+    margin-top: 8px;
+  }
+}
+.notice-error {
+  color: #a54436;
+  background: #faeee9;
+  border-color: #ecd1c5;
+}
+.notice-error .notice-description {
+  color: #8f4a3e;
+}
+.notice-error .notice-action > button {
+  border-color: #e3bfb1;
+  background: #fff8f5;
+}
 .empty {
   display: grid;
   place-content: center;
@@ -1250,6 +1324,18 @@ h1 {
   --surface: #292929;
   --canvas: #212122;
   --bubble: #474649;
+}
+.dark .notice-error {
+  background: #472f29;
+  border-color: #684335;
+  color: #f1baaa;
+}
+.dark .notice-error .notice-description {
+  color: #dda594;
+}
+.dark .notice-error .notice-action > button {
+  border-color: #7a4f40;
+  background: #3a2622;
 }
 .dark .sidebar,
 .dark .detail-panel {

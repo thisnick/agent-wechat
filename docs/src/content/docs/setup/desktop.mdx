@@ -21,6 +21,19 @@ The desktop app includes the chat interface, a local agent-wechat hub and the `w
 
 The app runs under your user account. It uses your system credential store and native file dialogs; network access and opening at login are optional settings. Enabling access from other devices may require allowing the hub through your system firewall.
 
+## When the local hub runs
+
+The local hub runs only while the app is open and needs it:
+
+| Situation | Local hub |
+| --- | --- |
+| **This device** is selected | Runs, including while the window is closed to the tray or menu bar |
+| Another hub is selected | Stopped, unless **Settings → Keep this device’s hub running** is on |
+| You quit AgentWechat: menu, ⌘Q, Dock, logging out | Stops |
+| The app crashes or is forced to quit | Stops by itself a moment later |
+
+Turn on **Keep this device’s hub running** if the `wx` command or another app should reach this device's hub while the window shows another hub. If an earlier session left its hub running, the app says so and offers **Stop leftover hub**. It stops only a hub that uses this app's data and access key.
+
 ## Connect the CLI
 
 Desktop access keys are saved in your system keyring. Independent CLI installations use protected token files:
@@ -70,5 +83,5 @@ Clicking a message notification opens its chat at that message. On macOS:
 If no notifications appear, allow AgentWechat in **System Settings → Notifications**.
 
 <Aside title="Good to know">
-Once configured, the local hub starts whenever you open the app, even when the interface uses a remote hub. Closing the window keeps it running in the tray or menu bar. Choose **Quit AgentWechat** to stop it. Quitting does not sign out of WeChat or delete profiles. Linux desktops need an unlocked Secret Service keyring. A separately installed CLI does not read the desktop keyring; export a key for it or create a separate [API token](/reference/tokens/).
+Quitting does not sign out of WeChat or delete profiles. Linux desktops need an unlocked Secret Service keyring. A separately installed CLI does not read the desktop keyring; export a key for it or create a separate [API token](/reference/tokens/).
 </Aside>

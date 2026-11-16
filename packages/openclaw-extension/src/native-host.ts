@@ -44,7 +44,20 @@ export function nativeExecutableFormat(bytes: Buffer, platform = process.platfor
   }
   return false;
 }
-export async function resolveNativeExecutable(explicit?: string, path = process.env.PATH ?? "", environment = nativeChildEnvironment("")): Promise<string> {
+/** A verified native executable and the capabilities its `--json version` reports. */
+export type NativeExecutable = { path: string; capabilities: readonly string[] };
+/**
+ * Arguments for the owned `wx serve`. A `wx` that can stop with the process that
+ * started it gets `--exit-with-parent`, so a Gateway that crashes or is killed does
+ * not leave its daemon holding the port. An older `wx` starts as before.
+ */
+export function managedServeArgs(dataDir: string, listen: string, serverConfig: string | undefined, capabilities: readonly string[]): string[] {
+  const args = ["serve", "--data-dir", dataDir, "--token-stdin", "--listen", listen];
+  if (capabilities.includes("serve-exit-with-parent")) args.push("--exit-with-parent");
+  if (serverConfig) args.push("--server-config", serverConfig);
+  return args;
+}
+export async function resolveNativeExecutable(explicit?: string, path = process.env.PATH ?? "", environment = nativeChildEnvironment("")): Promise<NativeExecutable> {
   const target = nativeHostTarget();
   let candidate = explicit;
   if (candidate && !isAbsolute(candidate)) throw new Error("native.executable must be absolute");
@@ -80,7 +93,7 @@ export async function resolveNativeExecutable(explicit?: string, path = process.
   const version = JSON.parse(stdout);
   requireNativeIdentity(version);
   if (version.target !== target.rustTarget) throw new Error("native_binary_incompatible: executable architecture differs from this host");
-  return candidate;
+  return { path: candidate, capabilities: version.capabilities };
 }
 async function portOccupied(url: URL): Promise<boolean> {
   return new Promise((resolve, reject) => {
@@ -116,9 +129,8 @@ export async function startNativeHost(config: WeChatNativeConfig): Promise<Nativ
   if (await portOccupied(url)) throw new Error("native_owner_conflict: configured port is already owned; use external mode for an independently operated daemon");
   const executable = await resolveNativeExecutable(config.executable, undefined, nativeChildEnvironment(token));
   const client = new NativeWeChatClient({ baseUrl: url.href, token, timeoutMs: 1000 });
-  const args = ["serve", "--data-dir", config.dataDir, "--token-stdin", "--listen", url.host];
-  if (config.serverConfig) args.push("--server-config", config.serverConfig);
-  const child = spawn(executable, args, { env: nativeChildEnvironment(token), stdio: ["pipe", "ignore", "pipe"], shell: false });
+  const args = managedServeArgs(config.dataDir, url.host, config.serverConfig, executable.capabilities);
+  const child = spawn(executable.path, args, { env: nativeChildEnvironment(token), stdio: ["pipe", "ignore", "pipe"], shell: false });
   // Drain stderr without copying account/device/transport details into Gateway logs.
   child.stderr?.on("data", () => {});
   let exited = false;

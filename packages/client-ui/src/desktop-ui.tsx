@@ -8,13 +8,51 @@ import {
 } from "./desktop.ts";
 import type { Connection } from "./connection.ts";
 import { richText, t } from "./i18n.ts";
-import { Welcome } from "./ui.tsx";
+import {
+  Icon,
+  Notice,
+  NoticeAction,
+  NoticeDescription,
+  NoticeTitle,
+  Welcome,
+} from "./ui.tsx";
 const message = (error: unknown) =>
   typeof error === "string"
     ? error
     : error instanceof Error
     ? error.message
     : t("desktopUi.operationCouldNotCompleted");
+/**
+ * Says why this device's hub isn't running. When a hub that an earlier run of
+ * the app left behind holds the local port, the notice offers to stop it.
+ */
+function LocalHubNotice({
+  error,
+  leftover,
+  busy,
+  onStop,
+}: {
+  error: string;
+  leftover: boolean;
+  busy: boolean;
+  onStop: () => void;
+}) {
+  return (
+    <Notice tone="error">
+      <NoticeTitle>{t("desktopUi.localHubNotRunning")}</NoticeTitle>
+      <NoticeDescription>{error}</NoticeDescription>
+      {leftover && (
+        <NoticeAction>
+          <button type="button" disabled={busy} onClick={onStop}>
+            {busy
+              ? t("desktopUi.stoppingLeftoverHub")
+              : t("desktopUi.stopLeftoverHub")}
+          </button>
+        </NoticeAction>
+      )}
+    </Notice>
+  );
+}
 function translateNotificationStatus(status?: string): string {
   switch (status) {
     case "Listening for new messages":
@@ -47,6 +85,7 @@ export function DesktopWelcome({
     [key, setKey] = useState("");
   const [certificate, setCertificate] = useState("");
   const https = endpoint.trim().toLowerCase().startsWith("https://");
+  const leftover = mode === "choose" && !!settings?.leftoverHub;
   useEffect(() => {
     if (mode !== "choose") return;
     let cancelled = false;
@@ -74,6 +113,21 @@ export function DesktopWelcome({
       setBusy(false);
     }
   }
+  async function stopLeftover() {
+    setBusy(true);
+    setError("");
+    try {
+      const session = await desktopInvoke<DesktopSession | null>(
+        "desktop_stop_leftover_hub",
+      );
+      if (session) onConnect(await desktopConnect(session));
+      else setSettings(await desktopInvoke<DesktopSettings>("desktop_settings"));
+    } catch (error) {
+      setError(message(error));
+    } finally {
+      setBusy(false);
+    }
+  }
   async function remote(event: FormEvent) {
     event.preventDefault();
     await open("desktop_remote", {
@@ -86,13 +140,13 @@ export function DesktopWelcome({
   if (mode === "settings")
     return (
       <Welcome simulator={false}>
+        <button className="step-back" type="button" onClick={() => setMode("choose")}>
+          <Icon name="back" /> {t("desktopUi.back")}
+        </button>
         <div className="welcome-heading">
           <h1>{t("desktopUi.desktopSettings")}</h1>
         </div>
         <DesktopPreferences onConnection={onConnect} manageLocal />
-        <button className="secondary" onClick={() => setMode("choose")}>
-          {t("desktopUi.back")}
-        </button>
       </Welcome>
     );
   return (
@@ -209,10 +263,19 @@ export function DesktopWelcome({
           </button>
         </form>
       )}
-      {error && (
+      {/* The notice below already says why the selected local hub failed. */}
+      {error && !(leftover && error === settings?.localHubError) && (
         <p role="alert" className="connection-error">
           {error}
         </p>
+      )}
+      {leftover && settings?.localHubError && (
+        <LocalHubNotice
+          error={settings.localHubError}
+          leftover
+          busy={busy}
+          onStop={() => void stopLeftover()}
+        />
       )}
     </Welcome>
   );
@@ -273,6 +336,17 @@ export function DesktopPreferences({
       if (session && onConnection) onConnection(await desktopConnect(session));
     });
   }
+  async function stopLeftover() {
+    await action(async () => {
+      const session = await desktopInvoke<DesktopSession | null>(
+        "desktop_stop_leftover_hub",
+      );
+      await refresh();
+      setNotice(t("desktopUi.leftoverHubStopped"));
+      if (session && onConnection) onConnection(await desktopConnect(session));
+    });
+  }
+  const hasLocal = settings?.connections.some((connection) => connection.local);
   const localSettings =
     manageLocal || !settings?.active || settings.active === "local";
   const credentialId = manageLocal
@@ -336,6 +410,38 @@ export function DesktopPreferences({
           }}
         />
       </div>
+      {hasLocal && (
+        <div className="setting">
+          <span>
+            {t("desktopUi.keepLocalHubRunning")}
+            <small>{t("desktopUi.keepLocalHubRunningHelp")}</small>
+          </span>
+          <input
+            type="checkbox"
+            aria-label={t("desktopUi.keepLocalHubRunning")}
+            checked={settings?.keepLocalHubRunning ?? false}
+            disabled={busy || !settings}
+            onChange={(event) => {
+              const enabled = event.target.checked;
+              void action(async () => {
+                try {
+                  await desktopInvoke("desktop_keep_local_hub", { enabled });
+                } finally {
+                  await refresh();
+                }
+              });
+            }}
+          />
+        </div>
+      )}
+      {settings?.localHubError && (
+        <LocalHubNotice
+          error={settings.localHubError}
+          leftover={settings.leftoverHub}
+          busy={busy}
+          onStop={() => void stopLeftover()}
+        />
+      )}
       {localSettings && (
         <form className="desktop-form" onSubmit={save}>
           <div className="setting">

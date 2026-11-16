@@ -19,6 +19,7 @@ mod events;
 mod login;
 mod outcome;
 mod output;
+mod parent_watch;
 mod profile_cli;
 mod profile_export;
 mod settings;
@@ -104,7 +105,11 @@ enum Command {
         command: ConfigCommand,
     },
     /// Run the daemon in the foreground. Use the supplied service unit for background ownership.
-    Serve {},
+    Serve {
+        /// Stop gracefully when the process that started this daemon exits, for an app that owns it.
+        #[arg(long)]
+        exit_with_parent: bool,
+    },
     /// Start, inspect or stop the local background daemon.
     Daemon {
         #[command(subcommand)]
@@ -1176,20 +1181,30 @@ async fn main() {
     }
     std::process::exit(outcome::exit());
 }
-async fn shutdown(core: Arc<Core>) {
+async fn shutdown(core: Arc<Core>, parent: Option<parent_watch::ParentWatch>) {
     async fn requested(core: &Core) {
         while !core.stopping.load(std::sync::atomic::Ordering::SeqCst) {
             tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    // A parent that exits during startup is noticed once the daemon is ready,
+    // because the watch keeps reporting the exit.
+    async fn orphaned(parent: Option<parent_watch::ParentWatch>) {
+        let Some(parent) = parent else {
+            return std::future::pending().await;
+        };
+        while !parent.exited() {
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
     }
     #[cfg(unix)]
     {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("signal registration");
-        tokio::select! { _=tokio::signal::ctrl_c()=>{}, _=term.recv()=>{}, _=requested(&core)=>{} }
+        tokio::select! { _=tokio::signal::ctrl_c()=>{}, _=term.recv()=>{}, _=requested(&core)=>{}, _=orphaned(parent)=>{} }
     }
     #[cfg(windows)]
-    tokio::select! { _=tokio::signal::ctrl_c()=>{}, _=requested(&core)=>{} }
+    tokio::select! { _=tokio::signal::ctrl_c()=>{}, _=requested(&core)=>{}, _=orphaned(parent)=>{} }
     core.shutdown_gracefully().await;
 }
 
@@ -1402,6 +1417,13 @@ fn query(path: String, values: &[(&str, Option<String>)]) -> String {
     )
 }
 async fn run(cli: Cli) -> Result<()> {
+    // Record the parent first, while the process that started serve is still running.
+    let parent = match &cli.command {
+        Command::Serve {
+            exit_with_parent: true,
+        } => Some(parent_watch::ParentWatch::new().context("cannot watch the parent process")?),
+        _ => None,
+    };
     let output = Output::new(cli.json);
     if matches!(
         &cli.command,
@@ -1483,7 +1505,7 @@ async fn run(cli: Cli) -> Result<()> {
             &cwd,
         )?;
         return match cli.command {
-            Command::Serve {} => serve(config, cli.token_stdin, cli.json).await,
+            Command::Serve { .. } => serve(config, cli.token_stdin, cli.json, parent).await,
             Command::Daemon { command } => daemon::run(config, command, output).await,
             Command::Store { command } => {
                 offline(config, cli.account.unwrap_or_default(), command, output)
@@ -2275,7 +2297,12 @@ async fn stdin_token() -> Result<String> {
     }
     Ok(token.into())
 }
-async fn serve(config: crate::config::ServerConfig, token_stdin: bool, json: bool) -> Result<()> {
+async fn serve(
+    config: crate::config::ServerConfig,
+    token_stdin: bool,
+    json: bool,
+    parent: Option<parent_watch::ParentWatch>,
+) -> Result<()> {
     let supplied = if token_stdin {
         if config.token_explicit {
             bail!("--token-stdin cannot be combined with a configured tokenFile");
@@ -2315,8 +2342,8 @@ async fn serve(config: crate::config::ServerConfig, token_stdin: bool, json: boo
         eprintln!("Daemon ready on {listen} (server ID {}).", store.server_id);
     }
     let router = wechat_api::router(core.clone(), &token);
-    let local =
-        axum::serve(listener, router.clone()).with_graceful_shutdown(shutdown(core.clone()));
+    let local = axum::serve(listener, router.clone())
+        .with_graceful_shutdown(shutdown(core.clone(), parent));
     if let Some((socket, tls)) = network {
         let handle = axum_server::Handle::new();
         let stop_handle = handle.clone();
