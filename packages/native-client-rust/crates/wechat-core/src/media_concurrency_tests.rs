@@ -10,6 +10,19 @@ pub(super) struct PausedDownloads {
     video_reply: Mutex<Option<Vec<u8>>>,
     channels_count: AtomicUsize,
     channels_replies: Mutex<Vec<std::result::Result<Vec<u8>, String>>>,
+    /// Open unless a test holds Channels fetches to observe an in-flight job.
+    channels_open: (Mutex<bool>, Condvar),
+}
+impl PausedDownloads {
+    /// Keep the next Channels fetch running until `release_channels`, so a
+    /// repeated request is checked while the first job is still in flight.
+    fn hold_channels(&self) {
+        *self.channels_open.0.lock().unwrap() = false;
+    }
+    fn release_channels(&self) {
+        *self.channels_open.0.lock().unwrap() = true;
+        self.channels_open.1.notify_all();
+    }
 }
 struct PausedCdn(Arc<PausedDownloads>);
 impl Upstream for Arc<PausedDownloads> {
@@ -36,6 +49,13 @@ impl Upstream for Arc<PausedDownloads> {
         assert_eq!(post.nonce, "12345678901234567890_0_38_12_4_context");
         assert_eq!(max_bytes, wechat_protocol::media::MAX_CHANNELS_VIDEO_BYTES);
         checkpoint()?;
+        // Bounded so a failed assertion while held cannot hang the test run.
+        let (open, released) = &self.channels_open;
+        drop(
+            released
+                .wait_timeout_while(open.lock().unwrap(), Duration::from_secs(10), |open| !*open)
+                .unwrap(),
+        );
         let reply = self
             .channels_replies
             .lock()
@@ -137,6 +157,7 @@ pub(super) fn fixture() -> (
         video_reply: Mutex::new(None),
         channels_count: AtomicUsize::new(0),
         channels_replies: Mutex::new(Vec::new()),
+        channels_open: (Mutex::new(true), Condvar::new()),
     });
     Arc::get_mut(&mut Arc::get_mut(&mut core).unwrap().shared)
         .unwrap()
@@ -545,9 +566,11 @@ async fn channels_video_is_requested_once_cached_as_a_sidecar_file_and_renewed_a
         asset_id: Some(video.id.clone()),
         quality: MediaVariant::Normal,
     };
+    upstream.hold_channels();
     let first = core.start_media_transfer("one", request()).unwrap();
     let again = core.start_media_transfer("one", request()).unwrap();
     assert_eq!(first.id, again.id);
+    upstream.release_channels();
     assert_eq!(wait_for_job(&core, &first.id).await, "available");
     assert_eq!(upstream.channels_count.load(Ordering::SeqCst), 1);
     let cached = core.media_asset("one", &video.id).unwrap();
@@ -585,10 +608,12 @@ async fn channels_video_is_requested_once_cached_as_a_sidecar_file_and_renewed_a
         .lock()
         .unwrap()
         .push(Ok(second_bytes.clone()));
+    upstream.hold_channels();
     let renewed = core.start_media_transfer("one", request()).unwrap();
     assert_ne!(renewed.id, first.id);
     let duplicate = core.start_media_transfer("one", request()).unwrap();
     assert_eq!(duplicate.id, renewed.id);
+    upstream.release_channels();
     assert_eq!(wait_for_job(&core, &renewed.id).await, "available");
     assert_eq!(upstream.channels_count.load(Ordering::SeqCst), 2);
     assert_eq!(
@@ -666,12 +691,14 @@ async fn channels_failures_publish_nothing_and_a_new_request_resolves_again() {
         .lock()
         .unwrap()
         .push(Ok(bytes.clone()));
+    upstream.hold_channels();
     let again = core.start_media_transfer("one", request()).unwrap();
     assert_ne!(again.id, gone.id);
     assert_eq!(
         core.start_media_transfer("one", request()).unwrap().id,
         again.id
     );
+    upstream.release_channels();
     assert_eq!(wait_for_job(&core, &again.id).await, "available");
     assert_eq!(upstream.channels_count.load(Ordering::SeqCst), 4);
     assert_eq!(core.media_content("one", &video.id).unwrap().bytes, bytes);
