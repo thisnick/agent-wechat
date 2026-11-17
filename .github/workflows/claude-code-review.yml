@@ -1,51 +1,151 @@
 name: Claude Code Review
 
-# Reviews a pull request when it opens, becomes ready for review, or receives
-# new commits, and posts findings as inline comments. Pushes to main never
-# trigger it: only pull request events do. Draft PRs are skipped until they
-# are marked ready. Fork PRs are skipped because GitHub withholds secrets from
-# them on a public repository, and bot PRs are skipped to save runs.
+# An independent Claude reviewer reads a pull request against its base branch,
+# posts inline comments where it has findings, and keeps one summary comment up
+# to date. What it checks is in .github/claude-review/instructions.md.
+#
+# When it runs:
+# - Automatically when a pull request from a branch of this repository is
+#   opened ready for review, marked ready for review, or reopened. Drafts and
+#   pull requests opened by bots wait.
+# - On request, for any pull request, including forks and drafts: add the
+#   `claude-review` label. The label is removed when the review ends, so add it
+#   again to review later commits.
+#
+# Safety: pull_request_target runs the base branch's copy of this workflow and
+# of the instructions, with this repository's secrets. The pull request's files
+# are checked out outside the workspace, as data for Claude to read; nothing
+# from the pull request is built, installed or run. Only people with triage
+# access can add labels, and the action stops unless whoever triggered the run
+# has write access. Skim a fork's pull request before labelling it: Claude
+# treats its text as material to review, but it is still outside text.
+#
+# Transcripts: each run uploads Claude's full transcript as an artifact,
+# encrypted to .github/claude-review/transcripts.pem, because anyone signed in
+# to GitHub can download a public repository's artifacts. The private key is
+# kept by the maintainer. To read one:
+#   gh run download RUN_ID -n claude-review-transcript-ATTEMPT -D DIR
+#   openssl cms -decrypt -binary -inform DER -inkey KEY -in DIR/transcript.json.cms
 on:
-  pull_request:
-    types: [opened, reopened, ready_for_review, synchronize]
+  pull_request_target:
+    types: [opened, reopened, ready_for_review, labeled]
 
 jobs:
   review:
     if: >-
+      (github.event.action == 'labeled' && github.event.label.name == 'claude-review') ||
+      (github.event.action != 'labeled' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       !github.event.pull_request.draft &&
-      github.event.pull_request.user.type != 'Bot'
+      github.event.pull_request.user.type != 'Bot')
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    # A newer push supersedes a review still in progress.
+    timeout-minutes: 60
+    # A newer request supersedes a review in progress. Other labels get a group
+    # of their own, so adding one can't cancel a review.
     concurrency:
-      group: claude-code-review-${{ github.event.pull_request.number }}
+      group: claude-code-review-${{ github.event.pull_request.number }}${{ github.event.action == 'labeled' && github.event.label.name != 'claude-review' && format('-{0}', github.run_id) || '' }}
       cancel-in-progress: true
     permissions:
       contents: read
-      pull-requests: read
       issues: read
-      id-token: write
+      pull-requests: write # the last step posts the summary and removes the label
+      id-token: write # the action exchanges it for the Claude GitHub App's token
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
-          fetch-depth: 1
-      - uses: anthropics/claude-code-action@v1
+          # The base branch with its history; git downloads older file contents
+          # only when a command needs them.
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+
+      - name: Check out the pull request as data
+        env:
+          EVENT_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git fetch --no-tags --filter=blob:none origin "+refs/pull/$PR_NUMBER/head:refs/remotes/review/head"
+          git update-ref refs/remotes/review/base HEAD
+          head=$(git rev-parse refs/remotes/review/head)
+          if [ "$head" != "$EVENT_HEAD" ]; then
+            echo "::notice::The pull request moved to $head after this run was requested; reviewing $head."
+          fi
+          # Symbolic links become plain files holding their target, so a link in
+          # the pull request can't point Claude at a file outside the checkout.
+          git -c core.symlinks=false worktree add --detach "$RUNNER_TEMP/pr" "$head"
+          { echo "PR_DIR=$RUNNER_TEMP/pr"; echo "HEAD_SHA=$head"; } >> "$GITHUB_ENV"
+
+      - name: Review
+        id: review
+        # A step timeout fails the step instead of cancelling the job, so the
+        # summary step still reports that the review didn't finish.
+        timeout-minutes: 45
+        uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          plugin_marketplaces: "https://github.com/anthropics/claude-plugins-official.git"
-          plugins: "code-review@claude-plugins-official"
-          # The plugin stops once Claude has commented on a pull request, so
-          # each push overrides that check and skips findings already posted.
-          prompt: >-
-            /code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}
-            This review runs on every push. In step 1, ignore the condition that Claude has already commented, and review the current head commit.
-            Before posting, list the existing inline comments with `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments --paginate`, and do not post an issue that an earlier Claude comment already reports for the same lines.
-            Post the no-issues summary comment only if Claude has not commented on this pull request before; otherwise, when there is nothing new to report, post nothing.
-          # The inline-comment MCP server only starts when --allowedTools names it.
+          prompt: |
+            Review pull request #${{ env.PR_NUMBER }} in ${{ github.repository }} by following .github/claude-review/instructions.md.
+            Head commit: ${{ env.HEAD_SHA }}
+            PR checkout: ${{ env.PR_DIR }}
+          # The inline-comment MCP server starts only when --allowedTools names it.
+          # dontAsk denies every tool call the lists below don't allow, instead of
+          # the action's default auto mode. The reviewer reads and comments: it
+          # can't edit files, use the web, write files through git's --output or
+          # read outside the checkouts through --no-index, or post through gh api
+          # other than the inline-comment tool.
           claude_args: |
             --model claude-opus-5-5
-            --allowedTools "mcp__github_inline_comment__create_inline_comment" "Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments:*)"
-          # The plugin asks for Haiku/Sonnet on some subagents; force Opus throughout.
-          settings: |
-            {"env": {"CLAUDE_CODE_SUBAGENT_MODEL": "claude-opus-5-5", "CLAUDE_CODE_SUBAGENT_MODEL_FORCE": "1"}}
+            --permission-mode dontAsk
+            --add-dir ${{ env.PR_DIR }}
+            --json-schema '{"type":"object","properties":{"summary":{"type":"string","description":"The review summary in Markdown, in the layout the instructions give"},"confidence":{"type":"integer","minimum":1,"maximum":10,"description":"Confidence in the pull request, from 1 to 10, as the instructions define it"},"important":{"type":"integer","minimum":0,"description":"Number of Important findings"},"nits":{"type":"integer","minimum":0,"description":"Number of Nit findings"},"preexisting":{"type":"integer","minimum":0,"description":"Number of Pre-existing findings"}},"required":["summary","confidence","important","nits","preexisting"],"additionalProperties":false}'
+            --allowedTools "Read" "Grep" "Glob" "mcp__github_inline_comment__create_inline_comment" "Agent" "Bash(gh pr view:*)" "Bash(gh pr diff:*)" "Bash(gh issue view:*)" "Bash(gh api repos/${{ github.repository }}/issues/${{ env.PR_NUMBER }}/comments:*)" "Bash(gh api repos/${{ github.repository }}/pulls/${{ env.PR_NUMBER }}/comments:*)" "Bash(git log:*)" "Bash(git show:*)" "Bash(git diff:*)" "Bash(git blame:*)" "Bash(git -C ${{ env.PR_DIR }} log:*)" "Bash(git -C ${{ env.PR_DIR }} show:*)" "Bash(git -C ${{ env.PR_DIR }} diff:*)" "Bash(git -C ${{ env.PR_DIR }} blame:*)"
+            --disallowedTools "Edit" "Write" "NotebookEdit" "WebFetch" "WebSearch" "Read(//proc/**)" "Read(//sys/**)" "Bash(*--output*)" "Bash(*--no-index*)" "Bash(gh api * -f *)" "Bash(gh api * -F *)" "Bash(gh api *--field*)" "Bash(gh api *--raw-field*)" "Bash(gh api * -X *)" "Bash(gh api *--method*)" "Bash(gh api *--input*)"
+
+      # The steps below trust two files from the workspace. Stop if anything
+      # during the review changed them.
+      - name: Check the workspace files the next steps use
+        id: trusted
+        if: always()
+        run: git diff --quiet HEAD -- scripts/ci/claude-review-comment.mjs .github/claude-review/transcripts.pem
+
+      - name: Encrypt the transcript
+        id: transcript
+        if: always() && steps.trusted.outcome == 'success'
+        run: |
+          transcript="$RUNNER_TEMP/claude-execution-output.json"
+          if [ ! -s "$transcript" ]; then echo "No transcript was written."; exit 0; fi
+          mkdir -p "$RUNNER_TEMP/transcript"
+          openssl cms -encrypt -binary -aes256 -outform DER -in "$transcript" \
+            -out "$RUNNER_TEMP/transcript/transcript.json.cms" .github/claude-review/transcripts.pem
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: claude-review-transcript-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/transcript/transcript.json.cms
+          if-no-files-found: ignore
+          retention-days: 14
+
+      # Skipped when a newer request cancelled this run; that run posts instead.
+      - name: Post the summary
+        if: ${{ !cancelled() && steps.trusted.outcome == 'success' }}
+        uses: actions/github-script@v8
+        env:
+          STRUCTURED_OUTPUT: ${{ steps.review.outputs.structured_output }}
+          REVIEW_OUTCOME: ${{ steps.review.outcome }}
+        with:
+          script: |
+            const { publish } = await import(`${process.env.GITHUB_WORKSPACE}/scripts/ci/claude-review-comment.mjs`);
+            await publish({
+              github, context, core,
+              structuredOutput: process.env.STRUCTURED_OUTPUT,
+              outcome: process.env.REVIEW_OUTCOME,
+              headSha: process.env.HEAD_SHA || context.payload.pull_request.head.sha,
+              runUrl: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            });
+            if (context.payload.action === 'labeled') {
+              await github.rest.issues.removeLabel({
+                ...context.repo, issue_number: context.payload.pull_request.number, name: 'claude-review',
+              }).catch(error => core.info(`The label was already gone: ${error.message}`));
+            }

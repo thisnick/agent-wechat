@@ -40,6 +40,16 @@ Native routes/contracts live in `packages/native-client-rust/crates/wechat-api/`
 - UI changes are reviewed visually: CI uploads every scene to Argos, and the owner approves the changes there. Add or update a scene in `packages/client-ui/scenes/` when you add or change a screen. Never approve Argos changes yourself.
 - A PR that changes `interfaces/` needs the owner's `interfaces-approved` label. Never add that label yourself, and never merge while the Interface approval check is pending or failing.
 
+## Pull request review
+
+An independent Claude reviewer posts inline comments and one summary comment, with a confidence score, on pull requests (`.github/workflows/claude-code-review.yml`; what it checks is in `.github/claude-review/instructions.md`). It runs when a pull request from a branch of this repository is opened ready for review, marked ready or reopened, and whenever the `claude-review` label is added. Pushes alone don't start it.
+
+- Before opening a PR, have a fresh agent review the diff, one with none of your session's context: in Claude Code, run `/code-review` on the branch; with other agents, start a new session or subagent given only the diff and this guide. Fix what it finds, or say in the PR why not.
+- Answer every finding from the Claude review: fix it or reply with the reason, then resolve the thread. Fix a Pre-existing finding if it's small; otherwise open an issue for it.
+- After pushing fixes, add the `claude-review` label once to have the new commits reviewed, not after every push. On a fork's PR, it takes someone with write access to the repository.
+- Fill in the template's "Risk and rollback" section. Say plainly when installing the previous version would not undo the change, for example after a new migration or a changed stored format.
+- When a bug gets past review and turns up later, in a lab test, from a user or in production, add what the reviewer would have needed to know to this guide or to the review instructions.
+
 ## Documentation site
 
 `docs/` is for people setting it up, people using it from the CLI, OpenClaw or their own code, and people who want to know how it works. When a change affects users, update the one page that owns the topic; don't append a paragraph to whichever page is nearest.

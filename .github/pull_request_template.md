@@ -43,6 +43,15 @@ client, or you couldn't check what the official client does. Say how you know
 (which client, platform and version). Delete otherwise.
 -->
 
+## Risk and rollback
+
+<!--
+What could break, for whom, and how someone would notice. Can installing the
+previous version undo this change? Say so plainly if not: a new migration, a
+changed stored format or a write to the official profile can make going back
+impossible.
+-->
+
 ## Evidence
 
 ### Tests
