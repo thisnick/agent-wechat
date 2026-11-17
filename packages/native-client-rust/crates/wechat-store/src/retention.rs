@@ -1615,6 +1615,16 @@ mod tests {
                 20 - n,
             );
         }
+        // Older than the newest five, but its profile write failed: local
+        // repair still reads its plan.
+        sticker_job(
+            &store,
+            "acquired-blocked",
+            "sticker_acquire",
+            acquired("blocked"),
+            "available",
+            25,
+        );
         sticker_job(
             &store,
             "other-pack",
@@ -1761,6 +1771,7 @@ mod tests {
             "acquired-6",
             "other-pack",
             "promoting",
+            "acquired-blocked",
             "failed-accepted",
             "pack-pending",
             "running",
