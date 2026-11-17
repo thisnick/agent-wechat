@@ -5,32 +5,17 @@ body:
   - type: markdown
     attributes:
       value: |
-        Use this form when something finishes but takes too long or uses too much. If it fails, gives the wrong result, or never finishes, use **Bug report** instead.
+        Use this when something finishes but takes too long or uses too much. If it fails or never finishes, use **Bug report** instead. We need numbers we can reproduce.
 
-        We need numbers we can reproduce: what you measured, how, how often, and at what size.
-
-        - One problem per issue.
-        - Remove private data before posting: tokens, keys, wxids, phone numbers, names, message text, file IDs, URLs and MD5s.
-
-        You can write in English or Chinese. 中文也可以。
-
-  - type: textarea
-    id: what
-    attributes:
-      label: What is slow?
-      description: The operation, how long it takes or how much it uses, and what you expected.
-      placeholder: Reading a chat takes 3–5 s while the daemon catches up after a reconnect; it normally takes under 10 ms.
-    validations:
-      required: true
+        Before posting, remove tokens, keys, wxids, phone numbers, names, message text, file IDs and URLs. 中文也可以。
 
   - type: textarea
     id: steps
     attributes:
       label: Steps to reproduce
-      description: |
-        The exact commands, starting from a known state. Give the sizes involved: how many messages were waiting, how large a file, how many chats, contacts or groups.
+      description: The exact commands, with the sizes involved, such as how many messages were waiting, how large a file, or how many chats and contacts.
       placeholder: |
-        1. Disconnect the account and send 30 messages to it from another phone.
+        1. Disconnect the account and send it 30 messages from another phone.
         2. wx accounts connect
         3. While it catches up, run wx messages list filehelper --limit 1 every 200 ms and time each call.
     validations:
@@ -39,10 +24,20 @@ body:
   - type: textarea
     id: measurements
     attributes:
-      label: Measurements
-      description: |
-        Timings or resource use, and how you measured them (for example `time`, `ps`, `top`, and the sampling interval).
-        Give a range over several runs, not a single observation. Compare with a baseline if you can: an earlier version, a smaller input, or the official WeChat app.
+      label: How slow is it?
+      description: Timings or resource use over several runs, how you measured them, and what you expected. A baseline helps, such as an earlier version, a smaller input, or the official WeChat app.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      value: |
+        - agent-wechat version (`wx version`):
+        - Installed with (npm, release binary, Docker, desktop app, OpenClaw managed mode, source):
+        - OS and architecture:
+        - Hardware and storage (CPU, RAM, disk, VM, WSL or container):
     validations:
       required: true
 
@@ -50,93 +45,4 @@ body:
     id: breakdown
     attributes:
       label: Where the time goes (optional)
-      description: If you profiled or instrumented it, per-step timings, profiler or debugger samples, or timestamps from the daemon log.
-
-  - type: dropdown
-    id: frequency
-    attributes:
-      label: How often does it happen?
-      options:
-        - Every time
-        - Sometimes
-        - Once so far
-    validations:
-      required: true
-
-  - type: input
-    id: version
-    attributes:
-      label: Version
-      description: Output of `wx --json version`. If you built from source, the commit.
-    validations:
-      required: true
-
-  - type: dropdown
-    id: install
-    attributes:
-      label: How do you run agent-wechat?
-      options:
-        - npm (wx launcher)
-        - Release binary
-        - Docker image
-        - Desktop app
-        - OpenClaw managed mode
-        - Built from source
-    validations:
-      required: true
-
-  - type: input
-    id: platform
-    attributes:
-      label: OS and architecture
-      placeholder: e.g. Debian 13 arm64, macOS 15 Apple Silicon, Windows 11 x64
-    validations:
-      required: true
-
-  - type: input
-    id: hardware
-    attributes:
-      label: Hardware and storage
-      description: CPU, RAM, the kind of disk the data folder is on, and whether it runs in a VM, WSL or container.
-      placeholder: e.g. 4-core VM, 8 GB RAM, SSD, Docker on Ubuntu 24.04
-
-  - type: dropdown
-    id: surface
-    attributes:
-      label: Where do you see it?
-      multiple: true
-      options:
-        - wx CLI
-        - HTTP API
-        - OpenClaw channel
-        - Desktop app or web UI
-        - Rust crates
-    validations:
-      required: true
-
-  - type: dropdown
-    id: profile
-    attributes:
-      label: How did you log in?
-      options:
-        - New profile created by agent-wechat (wx auth login)
-        - Existing official WeChat profile (wx auth login --official)
-        - Not sure
-
-  - type: textarea
-    id: context
-    attributes:
-      label: Setup details
-      description: |
-        Anything else that might matter: roughly how many chats, contacts and groups the account has, other WeChat clients signed in at the same time (desktop, tablet, web), the OpenClaw version, and whether it started after an upgrade.
-
-  - type: checkboxes
-    id: checklist
-    attributes:
-      label: Before you submit
-      options:
-        - label: I searched existing issues and didn't find this one.
-          required: true
-        - label: I removed tokens, keys, IDs, phone numbers, names and message text.
-          required: true
-        - label: It still happens on the latest release.
+      description: Per-step timings, profiler samples, or timestamps from the daemon log.
