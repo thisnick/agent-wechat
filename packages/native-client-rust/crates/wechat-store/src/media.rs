@@ -141,7 +141,17 @@ fn job_changed(old: &MediaJobRecord, new: &MediaJobRecord) -> bool {
         || old.error_code != new.error_code
         || old.data != new.data
 }
-fn job_event(tx: &Connection, account: &str, row: &MediaJobRecord) -> Result<()> {
+/// Copy a WAL sidecar's log back into the database and truncate it, so a
+/// rewrite does not leave a log as large as the database. An open read
+/// snapshot can keep the log in use; the next pass tries again.
+fn checkpoint(db: &Connection) -> Result<()> {
+    let mode: String = db.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
+    if mode.eq_ignore_ascii_case("wal") {
+        db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+    }
+    Ok(())
+}
+pub(crate) fn job_event(tx: &Connection, account: &str, row: &MediaJobRecord) -> Result<()> {
     if let Some(id) = row.data["assetId"].as_str() {
         let metadata: Option<String> = tx
             .query_row(
@@ -437,6 +447,10 @@ impl Store {
                 if old!=hash { bail!("idempotency_conflict"); }
                 return Ok((read_job(&tx,&id)?,false));
             }
+            crate::retention::ensure_key_live(&tx, crate::retention::MEDIA_KEY, key)?;
+            if let Some(send) = key.strip_prefix("send:") {
+                crate::retention::ensure_key_live(&tx, crate::retention::SEND_KEY, send)?;
+            }
             let queued:u32=tx.query_row("SELECT count(*) FROM media_jobs WHERE state IN ('queued','running')",[],|r|r.get(0))?;
             if queued>=100 { bail!("media_queue_full"); }
             let now=chrono::Utc::now().to_rfc3339();
@@ -458,15 +472,28 @@ impl Store {
         })
     }
     pub fn media_job(&self, account: &str, id: &str) -> Result<MediaJobRecord> {
-        self.control(account, |db| read_job(db, id))
+        self.control(account, |db| {
+            crate::retention::expired_if_missing(
+                db,
+                crate::retention::MEDIA_ID,
+                id,
+                read_job(db, id),
+            )
+        })
     }
     pub fn media_job_by_key(&self, account: &str, key: &str) -> Result<MediaJobRecord> {
         self.control(account, |db| {
-            let id: String = db.query_row(
-                "SELECT id FROM media_jobs WHERE idempotency_key=?1",
-                [key],
-                |r| r.get(0),
-            )?;
+            let id: Option<String> = db
+                .query_row(
+                    "SELECT id FROM media_jobs WHERE idempotency_key=?1",
+                    [key],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(id) = id else {
+                crate::retention::ensure_key_live(db, crate::retention::MEDIA_KEY, key)?;
+                return Err(rusqlite::Error::QueryReturnedNoRows.into());
+            };
             read_job(db, &id)
         })
     }
@@ -486,6 +513,9 @@ impl Store {
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .optional()?;
+            if existing.is_none() {
+                crate::retention::ensure_key_live(db, crate::retention::MEDIA_KEY, key)?;
+            }
             existing
                 .map(|(id, old)| {
                     if old != hash {
@@ -498,7 +528,7 @@ impl Store {
     }
     pub fn pending_media_projections(&self, account: &str) -> Result<Vec<String>> {
         self.control(account,|db|{
-            let mut query=db.prepare("SELECT id FROM media_jobs WHERE kind='send' AND state IN ('accepted','failed','cancelled','needs_review') AND coalesce(json_extract(data_json,'$.result.profileProjection'),'') NOT IN ('complete','not_applicable','unknown') ORDER BY created_at,id LIMIT 100")?;
+            let mut query=db.prepare("SELECT id FROM media_jobs WHERE kind='send' AND state IN ('accepted','failed','cancelled','needs_review') AND length(payload)>0 AND coalesce(json_extract(data_json,'$.result.profileProjection'),'') NOT IN ('complete','not_applicable','unknown') ORDER BY created_at,id LIMIT 100")?;
             let rows=query.query_map([],|r|r.get(0))?;Ok(rows.collect::<rusqlite::Result<_>>()?)
         })
     }
@@ -508,7 +538,7 @@ impl Store {
     pub fn incomplete_media_writeback(&self, account: &str) -> Result<bool> {
         self.control(account, |db| {
             Ok(db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM media_assets WHERE json_extract(metadata_json,'$.state')='available' AND coalesce(json_extract(metadata_json,'$.officialWriteback'),'') NOT IN ('complete','not_applicable')) OR EXISTS(SELECT 1 FROM media_jobs j WHERE j.kind='send' AND (j.state='accepted' OR json_extract(j.data_json,'$.serverMessageId') IS NOT NULL OR EXISTS(SELECT 1 FROM json_each(j.data_json,'$.result.chunks') c WHERE json_extract(c.value,'$.state')='accepted')) AND coalesce(json_extract(j.data_json,'$.result.officialMediaWriteback'),'') NOT IN ('complete','not_applicable')) OR EXISTS(SELECT 1 FROM media_jobs WHERE kind IN ('sticker_saved','sticker_pack','sticker_send','sticker_acquire') AND (state IN ('queued','running','needs_review') OR (json_extract(data_json,'$.serverAcceptance')='accepted' AND coalesce(json_extract(data_json,'$.profileWriteback'),'')!='complete')))",
+                "SELECT EXISTS(SELECT 1 FROM media_assets WHERE json_extract(metadata_json,'$.state')='available' AND coalesce(json_extract(metadata_json,'$.officialWriteback'),'') NOT IN ('complete','not_applicable')) OR EXISTS(SELECT 1 FROM media_jobs j WHERE j.kind='send' AND (j.state='accepted' OR json_extract(j.data_json,'$.serverMessageId') IS NOT NULL OR EXISTS(SELECT 1 FROM json_each(j.data_json,'$.result.chunks') c WHERE json_extract(c.value,'$.state')='accepted')) AND coalesce(json_extract(j.data_json,'$.result.officialMediaWriteback'),'') NOT IN ('complete','not_applicable')) OR EXISTS(SELECT 1 FROM media_jobs WHERE kind IN ('sticker_saved','sticker_pack','sticker_send','sticker_acquire') AND (state IN ('queued','running') OR (state='needs_review' AND coalesce(error_code,'')!='review_expired') OR (length(payload)>0 AND json_extract(data_json,'$.serverAcceptance')='accepted' AND coalesce(json_extract(data_json,'$.profileWriteback'),'')!='complete')))",
                 [],
                 |row| row.get(0),
             )?)
@@ -994,21 +1024,52 @@ impl Store {
             media_files::sweep(&files, &referenced)
         })
     }
-    /// Return the space freed by moved or deleted payloads to the file system
-    /// once at least 16 MiB and a quarter of the database is unused. Returns
-    /// whether the database was rewritten.
+    /// Return space freed by moved or deleted payloads to the file system.
+    ///
+    /// A database not yet in incremental mode is rewritten once at least
+    /// 16 MiB and a quarter of it is unused; that rewrite also switches it to
+    /// incremental mode. Afterwards each call releases up to 64 MiB of unused
+    /// pages once 4 MiB are free, without rewriting the file. A rewrite needs
+    /// free disk space for a full copy and its journal; without it the
+    /// database is left as it is and `control_compaction_needs_space` is
+    /// returned. Returns whether space was given back.
     pub fn compact_control(&self, account: &str) -> Result<bool> {
+        const MIB: i64 = 1024 * 1024;
         if self.is_read_snapshot() {
             return Ok(false);
         }
+        let directory = self.account_dir(account)?.join("agent");
         self.control(account, |db| {
             let pages: i64 = db.pragma_query_value(None, "page_count", |r| r.get(0))?;
             let free: i64 = db.pragma_query_value(None, "freelist_count", |r| r.get(0))?;
             let size: i64 = db.pragma_query_value(None, "page_size", |r| r.get(0))?;
-            if free.saturating_mul(size) < 16 * 1024 * 1024 || free < pages / 4 {
+            let incremental: i64 = db.pragma_query_value(None, "auto_vacuum", |r| r.get(0))?;
+            if incremental == 2 {
+                if free.saturating_mul(size) < 4 * MIB {
+                    return Ok(false);
+                }
+                // Each step of this statement frees one page.
+                let mut release = db.prepare(&format!(
+                    "PRAGMA incremental_vacuum({})",
+                    64 * MIB / size.max(512)
+                ))?;
+                let mut rows = release.query([])?;
+                while rows.next()?.is_some() {}
+                drop(rows);
+                drop(release);
+                checkpoint(db)?;
+                return Ok(true);
+            }
+            if free.saturating_mul(size) < 16 * MIB || free < pages / 4 {
                 return Ok(false);
             }
-            db.execute_batch("VACUUM")?;
+            let needed =
+                u64::try_from(pages.saturating_mul(size).saturating_mul(2)).unwrap_or(u64::MAX);
+            if fs2::available_space(&directory)? < needed {
+                bail!("control_compaction_needs_space");
+            }
+            db.execute_batch("PRAGMA auto_vacuum=INCREMENTAL;VACUUM;")?;
+            checkpoint(db)?;
             Ok(true)
         })
     }
@@ -1025,7 +1086,7 @@ impl Store {
         let before = (chrono::Utc::now() - chrono::Duration::seconds(settled_seconds)).to_rfc3339();
         self.control(account, |db| {
             let mut q = db.prepare(
-                "SELECT id,finished FROM (SELECT j.id AS id,(j.retryable=0 AND j.updated_at<=?1 AND (j.state IN ('failed','cancelled') OR (j.state='accepted' AND coalesce(json_extract(j.data_json,'$.result.profileProjection'),'') IN ('complete','not_applicable') AND coalesce(json_extract(j.data_json,'$.result.officialMediaWriteback'),'') IN ('complete','not_applicable')))) AS finished,json_extract(j.data_json,'$.sourceId') AS source FROM media_jobs j WHERE j.kind='send') WHERE finished=0 OR EXISTS(SELECT 1 FROM media_sources s WHERE s.id=source) ORDER BY id",
+                "SELECT id,finished FROM (SELECT j.id AS id,(j.retryable=0 AND j.updated_at<=?1 AND (j.state IN ('failed','cancelled') OR (j.state='needs_review' AND coalesce(j.error_code,'')='review_expired') OR (j.state='accepted' AND coalesce(json_extract(j.data_json,'$.result.profileProjection'),'') IN ('complete','not_applicable') AND coalesce(json_extract(j.data_json,'$.result.officialMediaWriteback'),'') IN ('complete','not_applicable')))) AS finished,json_extract(j.data_json,'$.sourceId') AS source FROM media_jobs j WHERE j.kind='send') WHERE finished=0 OR EXISTS(SELECT 1 FROM media_sources s WHERE s.id=source) ORDER BY id",
             )?;
             let rows = q.query_map([before], |r| Ok((r.get(0)?, r.get(1)?)))?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1042,7 +1103,7 @@ impl Store {
         anyhow::ensure!(settled_seconds >= 0, "invalid_limit");
         let before = (chrono::Utc::now() - chrono::Duration::seconds(settled_seconds)).to_rfc3339();
         self.control(account, |db| {
-            let mut query = db.prepare("SELECT json_extract(data_json,'$.sourceId'), (retryable=0 AND updated_at<=?1 AND (state IN ('failed','cancelled','unsupported','expired') OR (state='available' AND (kind='sticker_prepare' OR json_extract(data_json,'$.profileWriteback')='complete'))) AND (coalesce(json_extract(data_json,'$.serverAcceptance'),'')!='accepted' OR coalesce(json_extract(data_json,'$.profileWriteback'),'')='complete')) FROM media_jobs WHERE kind IN ('sticker_prepare','sticker_send') AND json_type(data_json,'$.sourceId')='text'")?;
+            let mut query = db.prepare("SELECT json_extract(data_json,'$.sourceId'), (retryable=0 AND updated_at<=?1 AND (((state IN ('failed','cancelled','unsupported','expired') OR (state='available' AND (kind='sticker_prepare' OR json_extract(data_json,'$.profileWriteback')='complete'))) AND (coalesce(json_extract(data_json,'$.serverAcceptance'),'')!='accepted' OR coalesce(json_extract(data_json,'$.profileWriteback'),'')='complete')) OR (state='needs_review' AND coalesce(error_code,'')='review_expired'))) FROM media_jobs WHERE kind IN ('sticker_prepare','sticker_send') AND json_type(data_json,'$.sourceId')='text'")?;
             let rows = query.query_map([before], |r| Ok((r.get(0)?,r.get(1)?)))?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
@@ -1061,7 +1122,7 @@ impl Store {
         self.control(account, |db| {
             let tx = db.transaction()?;
             let expired = {
-                let mut query = tx.prepare("SELECT a.id,a.payload_file,a.metadata_json FROM media_assets a WHERE json_extract(a.metadata_json,'$.preparationExpiresAt')<=?1 AND json_extract(a.metadata_json,'$.state')='available' AND NOT EXISTS(SELECT 1 FROM media_jobs j WHERE json_extract(j.data_json,'$.preparationId')=json_extract(a.metadata_json,'$.jobId') AND (j.state IN ('queued','running','needs_review') OR j.retryable=1 OR (j.kind IN ('sticker_saved','sticker_acquire') AND json_extract(j.data_json,'$.serverAcceptance')='accepted' AND coalesce(json_extract(j.data_json,'$.profileWriteback'),'')!='complete'))) LIMIT ?2")?;
+                let mut query = tx.prepare("SELECT a.id,a.payload_file,a.metadata_json FROM media_assets a WHERE json_extract(a.metadata_json,'$.preparationExpiresAt')<=?1 AND json_extract(a.metadata_json,'$.state')='available' AND NOT EXISTS(SELECT 1 FROM media_jobs j WHERE json_extract(j.data_json,'$.preparationId')=json_extract(a.metadata_json,'$.jobId') AND (j.state IN ('queued','running') OR (j.state='needs_review' AND coalesce(j.error_code,'')!='review_expired') OR j.retryable=1 OR (j.kind IN ('sticker_saved','sticker_acquire') AND json_extract(j.data_json,'$.serverAcceptance')='accepted' AND coalesce(json_extract(j.data_json,'$.profileWriteback'),'')!='complete'))) LIMIT ?2")?;
                 let rows = query.query_map(params![now,limit], |r| Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,String>(2)?)))?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()?
             };
@@ -1075,14 +1136,11 @@ impl Store {
             Ok(expired.len())
         })
     }
+    /// Retained message batches for the voice fallback: the same bounded window
+    /// as recall evidence. Older batches have already written their inline
+    /// voice to the profile, and retention drops their payloads.
     pub fn media_sync_receipts(&self, account: &str) -> Result<Vec<(String, Vec<u8>)>> {
-        self.control(account, |db| {
-            let mut q = db.prepare(
-                "SELECT id,payload FROM apply_intents WHERE stream='message' ORDER BY created_at DESC,id DESC LIMIT 10000",
-            )?;
-            let rows = q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
-            Ok(rows.collect::<rusqlite::Result<_>>()?)
-        })
+        self.recent_message_batches(account)
     }
 }
 

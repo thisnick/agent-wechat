@@ -63,7 +63,7 @@ pub(crate) fn confirm_recall_in_transaction(
     server: &str,
 ) -> Result<()> {
     let ids = {
-        let mut q=tx.prepare("SELECT r.operation_id FROM outgoing_recalls r JOIN operations o ON o.id=r.operation_id WHERE r.phase='needs_review' AND json_extract(o.result_json,'$.threadId')=?1 AND json_extract(o.result_json,'$.serverId')=?2")?;
+        let mut q=tx.prepare("SELECT r.operation_id FROM outgoing_recalls r JOIN operations o ON o.id=r.operation_id WHERE r.phase='needs_review' AND length(r.encrypted_request)>0 AND json_extract(o.result_json,'$.threadId')=?1 AND json_extract(o.result_json,'$.serverId')=?2")?;
         let rows = q.query_map(params![thread, server], |r| r.get::<_, String>(0))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
@@ -133,6 +133,7 @@ impl Store {
                 )
                 .optional()?;
             let Some((id, hash)) = row else {
+                crate::retention::ensure_key_live(db, crate::retention::RECALL_KEY, &digest(key))?;
                 return Ok(None);
             };
             if hash != request_hash {
@@ -166,6 +167,7 @@ impl Store {
             let tx=db.transaction()?;
             let prior_key:Option<(String,String)>=tx.query_row("SELECT operation_id,request_hash FROM recall_keys WHERE key_hash=?1",[digest(key)],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
             if let Some((id,hash))=prior_key {if hash!=request_hash {bail!("idempotency_conflict");}return Ok((read(&tx,&op.account_id,&id)?,false));}
+            crate::retention::ensure_key_live(&tx, crate::retention::RECALL_KEY, &digest(key))?;
             let prior:Option<String>=tx.query_row("SELECT operation_id FROM outgoing_recalls WHERE target_key=?1 OR source_key=?2",params![target_key,source_key],|r|r.get(0)).optional()?;
             let (id,created)=if let Some(id)=prior {(id,false)} else {
                 let phase=if op.state=="queued" {"queued"}else{op.state.as_str()};
@@ -205,6 +207,7 @@ impl Store {
                 }
                 return Ok(Some(read(&tx, account, &id)?));
             }
+            crate::retention::ensure_key_live(&tx, crate::retention::RECALL_KEY, &digest(key))?;
             let id: Option<String> = tx
                 .query_row(
                     "SELECT operation_id FROM outgoing_recalls WHERE source_key=?1",
@@ -308,7 +311,7 @@ impl Store {
         })
     }
     pub fn pending_message_recalls(&self, account: &str) -> Result<usize> {
-        self.control(account,|db|Ok(db.query_row("SELECT count(*) FROM outgoing_recalls WHERE phase IN ('queued','submitting','accepted','needs_review')",[],|r|r.get(0))?))
+        self.control(account,|db|Ok(db.query_row("SELECT count(*) FROM outgoing_recalls WHERE phase IN ('queued','submitting','accepted','needs_review') AND length(encrypted_request)>0",[],|r|r.get(0))?))
     }
     pub fn accepted_message_recalls(&self, account: &str) -> Result<Vec<StoredMessageRecall>> {
         self.control(account,|db|{
@@ -583,7 +586,7 @@ mod tests {
         store
             .control("a", |db| {
                 db.execute_batch(
-                    "ALTER TABLE media_assets DROP COLUMN payload_file;ALTER TABLE media_assets DROP COLUMN profile_key;ALTER TABLE media_sources DROP COLUMN payload_file;DROP TABLE call_actions;DROP TABLE call_sessions;DROP INDEX apply_intents_stream;ALTER TABLE apply_intents DROP COLUMN stream;DROP TABLE group_mutations;DROP TABLE recall_keys;DROP TABLE outgoing_recalls;DROP TABLE contact_mutations;PRAGMA user_version=5;",
+                    "ALTER TABLE media_assets DROP COLUMN payload_file;ALTER TABLE media_assets DROP COLUMN profile_key;ALTER TABLE media_sources DROP COLUMN payload_file;DROP TABLE call_actions;DROP TABLE call_sessions;DROP INDEX apply_intents_stream;ALTER TABLE apply_intents DROP COLUMN stream;DROP TABLE group_mutations;DROP TABLE recall_keys;DROP TABLE outgoing_recalls;DROP TABLE contact_mutations;DROP TABLE retired_keys;PRAGMA user_version=5;",
                 )?;
                 Ok(())
             })

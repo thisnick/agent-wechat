@@ -79,7 +79,7 @@ impl Store {
     ) -> Result<Vec<StoredContactMutation>> {
         self.control(account, |db| {
             let ids = {
-                let mut query = db.prepare("SELECT operation_id FROM contact_mutations WHERE phase IN ('queued','submitting','received','projecting','needs_review') AND (?1 IS NULL OR operation_id!=?1) LIMIT 2000")?;
+                let mut query = db.prepare("SELECT operation_id FROM contact_mutations WHERE phase IN ('queued','submitting','received','projecting','needs_review') AND length(encrypted_request)>0 AND (?1 IS NULL OR operation_id!=?1) LIMIT 2000")?;
                 let rows = query.query_map([own_operation], |row| row.get::<_, String>(0))?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()?
             };
@@ -97,7 +97,7 @@ impl Store {
     ) -> Result<bool> {
         self.control(account, |db| {
             Ok(db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM contact_mutations c JOIN operations o ON o.id=c.operation_id WHERE (?1 IS NULL OR c.operation_id!=?1) AND (c.phase IN ('queued','submitting','received','projecting','needs_review') OR ((c.phase='succeeded' OR (c.phase='failed' AND json_extract(o.result_json,'$.partial')=1)) AND json_extract(o.result_json,'$.profileProjection')='awaiting_contact_sync')) LIMIT 1 OFFSET 2000)",
+                "SELECT EXISTS(SELECT 1 FROM contact_mutations c JOIN operations o ON o.id=c.operation_id WHERE (?1 IS NULL OR c.operation_id!=?1) AND ((c.phase IN ('queued','submitting','received','projecting','needs_review') AND length(c.encrypted_request)>0) OR ((c.phase='succeeded' OR (c.phase='failed' AND json_extract(o.result_json,'$.partial')=1)) AND json_extract(o.result_json,'$.profileProjection')='awaiting_contact_sync')) LIMIT 1 OFFSET 2000)",
                 [own_operation],
                 |row| row.get(0),
             )?)
@@ -125,11 +125,12 @@ impl Store {
             let row: Option<(String, String)> = db
                 .query_row(
                     "SELECT operation_id,request_hash FROM contact_mutations WHERE key_hash=?1",
-                    [key],
+                    [&key],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .optional()?;
             let Some((id, saved)) = row else {
+                crate::retention::ensure_key_live(db, crate::retention::CONTACT_KEY, &key)?;
                 return Ok(None);
             };
             if hash.is_some_and(|hash| hash != saved) {
@@ -171,6 +172,7 @@ impl Store {
                 }
                 return Ok((read(&tx, &op.account_id, &id)?.operation, false));
             }
+            crate::retention::ensure_key_live(&tx, crate::retention::CONTACT_KEY, &key)?;
             tx.execute(
                 "INSERT INTO operations VALUES(?1,?2,?3,?4,?5,?6)",
                 params![
@@ -328,7 +330,7 @@ impl Store {
         self.control(account, |db| {
             let ids = {
                 let mut q = db
-                .prepare("SELECT operation_id FROM contact_mutations WHERE phase='needs_review' OR (phase IN ('projecting','cancelled','failed','succeeded') AND json_extract((SELECT result_json FROM operations WHERE id=operation_id),'$.profileProjection')='pending')")?;
+                .prepare("SELECT operation_id FROM contact_mutations WHERE (phase='needs_review' AND length(encrypted_request)>0) OR (phase IN ('projecting','cancelled','failed','succeeded') AND json_extract((SELECT result_json FROM operations WHERE id=operation_id),'$.profileProjection')='pending')")?;
                 let rows = q.query_map([], |r| r.get::<_, String>(0))?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()?
             };

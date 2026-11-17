@@ -259,8 +259,26 @@ impl Core {
             }
             return Ok(prior.response());
         }
-        let mut state = self.account_state(account)?;
         let key = notification_key(account, &notification)?;
+        if self
+            .store
+            .is_retired_key(account, wechat_store::READ_NOTIFICATION, &key)?
+        {
+            // Retention removed this boundary's receipt after its window. The
+            // notification is never sent twice; its old outcome is unknown.
+            let expired = ReadNotificationReceipt {
+                notification,
+                through_message_id: through,
+                logout_epoch: epoch,
+                local_result: local,
+                state: "expired".into(),
+                service_code: None,
+                authorization_saved: false,
+                updated_at: now(),
+            };
+            return Ok(expired.response());
+        }
+        let mut state = self.account_state(account)?;
         let mut receipt = ReadNotificationReceipt {
             notification,
             through_message_id: through,

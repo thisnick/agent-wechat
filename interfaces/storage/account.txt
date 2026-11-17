@@ -19,7 +19,8 @@ migration account/V011__call_non_submission.sql | sha256 6b7fb82dbc0894e0 | -
 migration account/V012__call_local_closure.sql | sha256 0f638990f3baa99e | -
 migration account/V013__media_files.sql | sha256 c70edfdce0f3e860 | -
 migration account/V014__contact_mutations.sql | sha256 41d06bbf1a02261f | -
-schema version | 14 | -
+migration account/V015__retired_keys.sql | sha256 5bf7d1b04f3c4308 | -
+schema version | 15 | -
 table apply_intents | CREATE TABLE apply_intents(id TEXT PRIMARY KEY,payload BLOB NOT NULL,state TEXT NOT NULL,created_at TEXT NOT NULL, stream TEXT NOT NULL DEFAULT 'message') | -
 table apply_intents.created_at | TEXT, not null | -
 table apply_intents.id | TEXT, primary key 1 | -
@@ -157,6 +158,10 @@ table recall_keys.key_hash | TEXT, primary key 1 | -
 table recall_keys.operation_id | TEXT, not null | -
 table recall_keys.operation_id foreign key #0 | references outgoing_recalls(operation_id), on delete NO ACTION | -
 table recall_keys.request_hash | TEXT, not null | -
+table retired_keys | CREATE TABLE retired_keys( family TEXT NOT NULL, digest BLOB NOT NULL CHECK(length(digest)=16), retired_at INTEGER NOT NULL, PRIMARY KEY(family,digest) ) WITHOUT ROWID | -
+table retired_keys.digest | BLOB, not null, primary key 2 | -
+table retired_keys.family | TEXT, not null, primary key 1 | -
+table retired_keys.retired_at | INTEGER, not null | -
 table runtime | CREATE TABLE runtime(key TEXT PRIMARY KEY,value BLOB NOT NULL) | -
 table runtime.key | TEXT, primary key 1 | -
 table runtime.value | BLOB, not null | -

@@ -444,7 +444,7 @@ mod tests {
                 let store = Store::open(&root).unwrap();
                 store.create_account("a").unwrap();
                 store.control("a", |db| {
-                    db.execute_batch("ALTER TABLE media_assets DROP COLUMN payload_file;ALTER TABLE media_assets DROP COLUMN profile_key;ALTER TABLE media_sources DROP COLUMN payload_file;DROP TABLE call_actions; DROP TABLE call_sessions; DROP TABLE contact_mutations;")?;
+                    db.execute_batch("ALTER TABLE media_assets DROP COLUMN payload_file;ALTER TABLE media_assets DROP COLUMN profile_key;ALTER TABLE media_sources DROP COLUMN payload_file;DROP TABLE call_actions; DROP TABLE call_sessions; DROP TABLE contact_mutations; DROP TABLE retired_keys;")?;
                     db.execute_batch(include_str!("../migrations/account/V009__call_actions.sql"))?;
                     if version == 10 {
                         db.execute_batch(include_str!("../migrations/account/V010__call_request_context.sql"))?;
