@@ -79,6 +79,7 @@ through their unit tests.
 | `release/sync-version.mjs` | Rewrites package manifests, the desktop Tauri config and Cargo lockfiles. `pnpm version-packages` runs it. |
 | `ci/install-npm.sh`, `release/trigger.mjs`, `release/crates-release.mjs trigger` | Need GitHub Actions files such as `GITHUB_PATH`, `GITHUB_ENV`, `GITHUB_OUTPUT` or `GITHUB_EVENT_PATH`, and fail without them |
 | `ci/media-runtime.mjs DIR` | Downloads the desktop's pinned media helpers listed in `packages/desktop/media-assets.json` |
+| `ci/claude-review-comment.mjs` | Creates or replaces the Claude review summary comment on a pull request. Only `claude-code-review.yml` calls it, through `actions/github-script`. |
 
 ## Smoke tests
 
