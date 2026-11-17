@@ -11,7 +11,8 @@
 //! | --- | --- | --- | --- |
 //! | Sync batches (`apply_intents`) | pending or blocked; a message batch among the newest 256, which recall evidence and the voice fallback read | batch ID, for duplicate detection | 30 days after arrival |
 //! | Text sends (`outbox`) | unfinished; accepted but not yet written to the profile; for a day | state, server ID and key | 90 days; key retired |
-//! | Media sends and downloads | unfinished or awaiting profile writeback; for a day | public job record | 90 days; key retired |
+//! | Media sends | unfinished or awaiting profile writeback; for a day, and until their upload is released | public job record | 90 days; key retired |
+//! | Downloads | always; they hold no payload | - | kept: the key comes from the attachment, so retiring it would block downloading it again |
 //! | Sticker jobs | always: finished plans are reopened when a pack is added again | - | kept |
 //! | Group and contact changes, recalls | unfinished, awaiting a profile write or contact sync; for a day | operation record and key | 365 days; key retired |
 //! | Sync, metadata and media writeback operations | unfinished | - | 30 days after finishing; ID retired |
@@ -340,7 +341,6 @@ fn compact(tx: &Transaction, now: i64, budget: &mut i64) -> Result<usize> {
         tx.execute(
             "UPDATE media_jobs SET payload=x'' WHERE id IN (SELECT id FROM media_jobs WHERE length(payload)>0 AND retryable=0 AND updated_at<=?1 AND (
                 (kind='send' AND (state IN ('failed','cancelled') OR (state='needs_review' AND coalesce(error_code,'')='review_expired') OR (state='accepted' AND coalesce(json_extract(data_json,'$.result.profileProjection'),'') IN ('complete','not_applicable') AND coalesce(json_extract(data_json,'$.result.officialMediaWriteback'),'') IN ('complete','not_applicable'))) AND NOT EXISTS(SELECT 1 FROM media_sources s WHERE s.id=json_extract(media_jobs.data_json,'$.sourceId')))
-                OR (kind='download' AND state IN ('available','failed','cancelled','expired','unsupported'))
             ) LIMIT ?2)",
             params![before, (*budget).max(0)],
         )?,
@@ -416,7 +416,7 @@ fn retire_receipts(tx: &Transaction, now: i64, budget: &mut i64) -> Result<usize
     }
     let jobs = {
         let mut query = tx.prepare(
-            "SELECT id,idempotency_key FROM media_jobs WHERE length(payload)=0 AND updated_at<=?1 LIMIT ?2",
+            "SELECT id,idempotency_key FROM media_jobs WHERE kind='send' AND length(payload)=0 AND retryable=0 AND state IN ('accepted','failed','cancelled','needs_review') AND updated_at<=?1 LIMIT ?2",
         )?;
         let rows = query.query_map(
             params![cutoff(now, SEND_RECEIPT_DAYS), (*budget).max(0)],
@@ -1418,6 +1418,58 @@ mod tests {
             error(store.create_send("a", "done", "peer", "hash", b"text", "client")),
             "idempotency_key_expired"
         );
+    }
+
+    #[test]
+    fn download_jobs_are_kept_so_an_attachment_can_be_fetched_again() {
+        let (_temp, store) = fixture();
+        let hash = "0".repeat(64);
+        // Downloads hold no payload and their key comes from the attachment.
+        for (id, key, state) in [
+            ("finished", "download:asset-1", "available"),
+            ("waiting", "download:asset-2", "queued"),
+        ] {
+            store
+                .create_media_job(
+                    "a",
+                    id,
+                    key,
+                    &hash,
+                    "download",
+                    &json!({"assetId":"asset"}),
+                    b"",
+                )
+                .unwrap();
+            sql(&store, |db| {
+                db.execute(
+                    "UPDATE media_jobs SET state=?2,updated_at='2026-01-01T00:00:00+00:00' WHERE id=?1",
+                    params![id, state],
+                )?;
+                Ok(())
+            });
+        }
+        let step = settle(&store, unix_seconds() + 91 * DAY);
+        assert_eq!(step.retired, 0);
+        assert_eq!(store.media_job("a", "waiting").unwrap().state, "queued");
+        // The renewal chain still finds the finished job and starts a new one.
+        let previous = store.media_job_by_key("a", "download:asset-1").unwrap();
+        assert_eq!(previous.id, "finished");
+        let (again, created) = store
+            .create_media_job(
+                "a",
+                "again",
+                "download:asset-1:after:finished",
+                &hash,
+                "download",
+                &json!({"assetId":"asset"}),
+                b"",
+            )
+            .unwrap();
+        assert!(created);
+        assert_eq!(again.state, "queued");
+        assert!(!store
+            .is_retired_key("a", MEDIA_KEY, "download:asset-1")
+            .unwrap());
     }
 
     #[test]
