@@ -74,7 +74,9 @@ Steps a reviewer can follow on their own test account: what to run on `main`
 to see the problem, what to run on this branch, and the output to expect.
 
 To run a branch without touching your normal daemon or profiles, give it its
-own data folder and port:
+own data folder and port. Use a folder that doesn't exist yet: the daemon
+creates it with private permissions, and refuses an existing folder that
+other users can read.
 
   cargo build --manifest-path packages/native-client-rust/Cargo.toml -p wx-native
   WX="$PWD/packages/native-client-rust/target/debug/wx"
