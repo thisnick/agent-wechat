@@ -3,7 +3,7 @@
 use anyhow::{bail, ensure, Context, Result};
 use std::{
     fs::File,
-    io::{Read, Write},
+    io::Read,
     path::Path,
     process::{Child, Command, Stdio},
     sync::{
@@ -13,7 +13,6 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use wechat_media::inspect_video_container;
 
 const OUTPUT_LIMIT: usize = wechat_protocol::media::MAX_NATIVE_UPLOAD_BYTES;
 const REPORT_LIMIT: usize = 65_536;
@@ -21,25 +20,19 @@ const STDERR_LIMIT: usize = 16_384;
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(300);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Produce one MP4 with H.264 Main/yuv420p, longest edge at most 720, at most 30
-/// frames/second, and stereo 48kHz AAC when the source has audio. The bitrate
-/// budget reserves 20% of the upload cap for muxing/encoder variation. Inputs
-/// that cannot fit even 32kbps video plus 64kbps audio are refused. A file-size
-/// stop is only a safety guard: independently decoded frame counts and video
-/// durations must still match before any bytes are returned.
+/// [`prepare_normal_file`] for a source held in memory.
+#[cfg(test)]
 pub(super) fn prepare_normal(
     input: &[u8],
     seconds: u32,
     mut cancelled: impl FnMut() -> Result<()>,
 ) -> Result<Vec<u8>> {
+    use std::io::Write;
     cancelled()?;
     validate_input_length(input.len())?;
-    inspect_video_container(input)?;
-    ensure!((1..=3600).contains(&seconds), "video_duration_limit");
-    let deadline = Instant::now() + PREPARE_TIMEOUT;
+    wechat_media::inspect_video_container(input)?;
     let dir = wechat_platform::private_tempdir("wechat-video-")?;
     let source = dir.path().join("source.mp4");
-    let output = dir.path().join("normal.mp4");
     let mut file = wechat_platform::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -50,6 +43,31 @@ pub(super) fn prepare_normal(
         file.write_all(chunk)?;
     }
     drop(file);
+    prepare_normal_file(&source, seconds, cancelled)
+}
+
+/// Produce one MP4 with H.264 Main/yuv420p, longest edge at most 720, at most 30
+/// frames/second, and stereo 48kHz AAC when the source has audio. The bitrate
+/// budget reserves 20% of the upload cap for muxing/encoder variation. Inputs
+/// that cannot fit even 32kbps video plus 64kbps audio are refused. A file-size
+/// stop is only a safety guard: independently decoded frame counts and video
+/// durations must still match before any bytes are returned.
+///
+/// The source is a private file that FFprobe and FFmpeg read directly; it is
+/// never loaded into memory.
+pub(super) fn prepare_normal_file(
+    source: &Path,
+    seconds: u32,
+    mut cancelled: impl FnMut() -> Result<()>,
+) -> Result<Vec<u8>> {
+    cancelled()?;
+    let length = std::fs::metadata(source)?.len();
+    validate_input_length(usize::try_from(length)?)?;
+    wechat_media::inspect_video_reader(&mut File::open(source)?, length)?;
+    ensure!((1..=3600).contains(&seconds), "video_duration_limit");
+    let deadline = Instant::now() + PREPARE_TIMEOUT;
+    let dir = wechat_platform::private_tempdir("wechat-video-")?;
+    let output = dir.path().join("normal.mp4");
     drop(
         wechat_platform::OpenOptions::new()
             .write(true)
@@ -57,7 +75,7 @@ pub(super) fn prepare_normal(
             .mode(0o600)
             .open(&output)?,
     );
-    let original = probe(&source, false, deadline, &mut cancelled)?;
+    let original = probe(source, false, deadline, &mut cancelled)?;
     ensure!(
         original.container_duration.ceil() as u32 == seconds,
         "video_duration_changed"
@@ -86,7 +104,7 @@ pub(super) fn prepare_normal(
         "1",
         "-i",
     ]);
-    command.arg(&source).args([
+    command.arg(source).args([
         "-map",
         // `V` skips attached pictures (cover art), which FFmpeg lists as video.
         "0:V:0",
@@ -425,6 +443,7 @@ fn execute(
 mod tests {
     use super::*;
     use serde_json::json;
+    use wechat_media::inspect_video_container;
 
     fn synthetic_video(muxer: &str, codec: &str, brand: Option<&str>) -> Vec<u8> {
         let dir = wechat_platform::private_tempdir("wechat-video-source-test-").unwrap();

@@ -248,9 +248,263 @@ impl Vault {
     }
 }
 
+/// Plaintext of one media record, decrypted as it is read, in the same format
+/// [`Vault::open_media_stream`] reads. The tag is checked when the end of the
+/// record is reached: a failed check is the error of that final `read`, so
+/// everything read before `read` returns 0 is unverified.
+pub struct MediaRecordReader<R> {
+    input: R,
+    crypter: Crypter,
+    sealed: Vec<u8>,
+    plain: Zeroizing<Vec<u8>>,
+    start: usize,
+    end: usize,
+    total: u64,
+    finished: bool,
+}
+impl<R: Read> Read for MediaRecordReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            if self.start < self.end {
+                let count = buffer.len().min(self.end - self.start);
+                buffer[..count].copy_from_slice(&self.plain[self.start..self.start + count]);
+                self.start += count;
+                return Ok(count);
+            }
+            if self.finished {
+                return Ok(0);
+            }
+            let read = self.input.read(&mut self.sealed)?;
+            let count = if read == 0 {
+                self.finished = true;
+                self.crypter.finalize(&mut self.plain).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "storage unlock/integrity failed; existing data preserved",
+                    )
+                })?
+            } else {
+                self.total += read as u64;
+                if self.total > wechat_media::MAX_FILE_BYTES as u64 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "invalid protected record",
+                    ));
+                }
+                self.crypter
+                    .update(&self.sealed[..read], &mut self.plain)
+                    .map_err(std::io::Error::other)?
+            };
+            self.start = 0;
+            self.end = count;
+        }
+    }
+}
+
+/// Plaintext bytes `offset..offset + length` of one media record, decrypted
+/// without reading the rest of it. The record is AES-256-GCM, whose keystream
+/// for plaintext block `i` is AES-CTR at counter `2 + i`; the range is
+/// decrypted with that counter. The tag covers the whole record, so it is NOT
+/// checked here: use this only for a record whose whole content was verified
+/// and that has not changed since.
+pub struct MediaRangeReader<R> {
+    input: R,
+    crypter: Crypter,
+    sealed: Vec<u8>,
+    plain: Zeroizing<Vec<u8>>,
+    start: usize,
+    end: usize,
+    /// Leading plaintext bytes of the first block that precede `offset`.
+    skip: usize,
+    /// Ciphertext bytes still to read.
+    unread: u64,
+}
+impl<R: Read> Read for MediaRangeReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            if self.start < self.end {
+                let count = buffer.len().min(self.end - self.start);
+                buffer[..count].copy_from_slice(&self.plain[self.start..self.start + count]);
+                self.start += count;
+                return Ok(count);
+            }
+            if self.unread == 0 {
+                return Ok(0);
+            }
+            let step = self.sealed.len().min(self.unread as usize);
+            self.input.read_exact(&mut self.sealed[..step])?;
+            self.unread -= step as u64;
+            let count = self
+                .crypter
+                .update(&self.sealed[..step], &mut self.plain)
+                .map_err(std::io::Error::other)?;
+            self.start = self.skip.min(count);
+            self.skip -= self.start;
+            self.end = count;
+        }
+    }
+}
+
+impl Vault {
+    /// A reader of one media record's plaintext; see [`MediaRecordReader`].
+    pub fn media_record_reader<R: Read>(
+        &self,
+        account: &str,
+        purpose: &str,
+        mut input: R,
+    ) -> Result<MediaRecordReader<R>> {
+        if !media_purpose(purpose) {
+            bail!("invalid protected media purpose");
+        }
+        let mut header = [0u8; RECORD_OVERHEAD];
+        input
+            .read_exact(&mut header)
+            .map_err(|_| anyhow::anyhow!("invalid protected record"))?;
+        if header[0] != 1 {
+            bail!("invalid protected record");
+        }
+        let aad = format!("agent-wechat:1:{account}:{purpose}");
+        let cipher = Cipher::aes_256_gcm();
+        let mut crypter = Crypter::new(cipher, Mode::Decrypt, &self.key, Some(&header[1..13]))?;
+        crypter.aad_update(aad.as_bytes())?;
+        crypter.set_tag(&header[13..RECORD_OVERHEAD])?;
+        Ok(MediaRecordReader {
+            input,
+            crypter,
+            sealed: vec![0u8; STREAM_CHUNK],
+            plain: Zeroizing::new(vec![0u8; STREAM_CHUNK + cipher.block_size()]),
+            start: 0,
+            end: 0,
+            total: 0,
+            finished: false,
+        })
+    }
+    /// A reader of `length` plaintext bytes at `offset` of a verified media
+    /// record holding `plaintext_length` bytes; see [`MediaRangeReader`].
+    pub fn media_range_reader<R: Read + Seek>(
+        &self,
+        purpose: &str,
+        mut input: R,
+        plaintext_length: u64,
+        offset: u64,
+        length: u64,
+    ) -> Result<MediaRangeReader<R>> {
+        if !media_purpose(purpose) {
+            bail!("invalid protected media purpose");
+        }
+        let end = offset.checked_add(length).context("invalid media range")?;
+        if length == 0
+            || end > plaintext_length
+            || plaintext_length > wechat_media::MAX_FILE_BYTES as u64
+        {
+            bail!("invalid media range");
+        }
+        let mut header = [0u8; RECORD_OVERHEAD];
+        input.seek(SeekFrom::Start(0))?;
+        input
+            .read_exact(&mut header)
+            .map_err(|_| anyhow::anyhow!("invalid protected record"))?;
+        if header[0] != 1
+            || input.seek(SeekFrom::End(0))? != RECORD_OVERHEAD as u64 + plaintext_length
+        {
+            bail!("invalid protected record");
+        }
+        let first = offset / 16;
+        let last = (end - 1) / 16;
+        let mut counter = [0u8; 16];
+        counter[..12].copy_from_slice(&header[1..13]);
+        // GCM increments only the low 32 bits; a record this size never wraps them.
+        counter[12..].copy_from_slice(&u32::try_from(2 + first)?.to_be_bytes());
+        u32::try_from(2 + last)?;
+        let crypter = Crypter::new(
+            Cipher::aes_256_ctr(),
+            Mode::Decrypt,
+            &self.key,
+            Some(&counter),
+        )?;
+        input.seek(SeekFrom::Start(RECORD_OVERHEAD as u64 + first * 16))?;
+        Ok(MediaRangeReader {
+            input,
+            crypter,
+            sealed: vec![0u8; STREAM_CHUNK],
+            plain: Zeroizing::new(vec![0u8; STREAM_CHUNK + 16]),
+            start: 0,
+            end: 0,
+            skip: (offset % 16) as usize,
+            unread: end - first * 16,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn media_readers_return_whole_records_and_exact_ranges() {
+        let t = tempfile::tempdir().unwrap();
+        let vault = Vault::open(&t.path().join("private/key"), true).unwrap();
+        let plain: Vec<u8> = (0..STREAM_CHUNK * 2 + 4321)
+            .map(|i| (i * 13 % 251) as u8)
+            .collect();
+        let sealed = vault.seal_media("one", "asset:a", &plain).unwrap();
+        let mut whole = vec![];
+        vault
+            .media_record_reader("one", "asset:a", std::io::Cursor::new(&sealed))
+            .unwrap()
+            .read_to_end(&mut whole)
+            .unwrap();
+        assert_eq!(whole, plain);
+        let length = plain.len() as u64;
+        for (offset, count) in [
+            (0, 1),
+            (0, length),
+            (15, 2),
+            (16, 16),
+            (17, 100_000),
+            (STREAM_CHUNK as u64 - 3, 7),
+            (length - 1, 1),
+            (length - 5000, 5000),
+        ] {
+            let mut range = vec![];
+            vault
+                .media_range_reader(
+                    "asset:a",
+                    std::io::Cursor::new(&sealed),
+                    length,
+                    offset,
+                    count,
+                )
+                .unwrap()
+                .read_to_end(&mut range)
+                .unwrap();
+            assert_eq!(
+                range,
+                plain[offset as usize..(offset + count) as usize],
+                "{offset}+{count}"
+            );
+        }
+        // Out-of-bounds ranges and a record of another length are refused.
+        assert!(vault
+            .media_range_reader("asset:a", std::io::Cursor::new(&sealed), length, length, 1)
+            .is_err());
+        assert!(vault
+            .media_range_reader("asset:a", std::io::Cursor::new(&sealed), length + 1, 0, 1)
+            .is_err());
+        // A changed record fails its tag at the end of a whole read.
+        let mut changed = sealed.clone();
+        let last = changed.len() - 1;
+        changed[last] ^= 1;
+        let mut reader = vault
+            .media_record_reader("one", "asset:a", std::io::Cursor::new(&changed))
+            .unwrap();
+        assert!(reader.read_to_end(&mut vec![]).is_err());
+        // So does a record read under another binding.
+        assert!(vault
+            .media_record_reader("two", "asset:a", std::io::Cursor::new(&sealed))
+            .unwrap()
+            .read_to_end(&mut vec![])
+            .is_err());
+    }
     #[test]
     fn streamed_media_records_match_whole_records_and_keep_their_bindings() {
         let t = tempfile::tempdir().unwrap();

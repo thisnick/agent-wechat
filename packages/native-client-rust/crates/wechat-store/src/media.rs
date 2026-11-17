@@ -54,6 +54,13 @@ pub struct MediaAssetRecord {
     /// Present on writes and `media_asset_with_payload`; metadata reads omit it.
     pub payload: Option<Vec<u8>>,
 }
+/// An asset's own sealed copy, opened for streaming reads.
+pub enum MediaAssetPayload {
+    /// A private payload file; `name` is the file name its row records.
+    File { file: std::fs::File, name: String },
+    /// A sealed payload an earlier version stored inside the database.
+    Embedded(Vec<u8>),
+}
 pub struct CompletedUploadRetry<'a> {
     pub expected: &'a MediaJobRecord,
     pub source: &'a OwnedMediaSource,
@@ -720,6 +727,32 @@ impl Store {
             Ok(row)
         })
     }
+    /// The asset's own sealed copy opened for streaming, without reading it:
+    /// the payload file, or a payload an earlier version kept inside the
+    /// database. `None` when this store keeps no copy, which includes an
+    /// attachment read from the official profile. A deleted file is an error.
+    pub fn media_asset_payload(
+        &self,
+        account: &str,
+        id: &str,
+    ) -> Result<Option<MediaAssetPayload>> {
+        let files = self.media_directory(account)?;
+        self.control(account, |db| {
+            let (file, embedded): (Option<String>, Option<Vec<u8>>) = db.query_row(
+                "SELECT payload_file, CASE WHEN payload_file IS NULL THEN payload END FROM media_assets WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            Ok(match (file, embedded) {
+                (Some(name), _) => Some(MediaAssetPayload::File {
+                    file: media_files::open(&files, &name)?,
+                    name,
+                }),
+                (None, Some(sealed)) => Some(MediaAssetPayload::Embedded(sealed)),
+                (None, None) => None,
+            })
+        })
+    }
     /// Whether this store still holds the asset's own copy: an embedded payload or a payload
     /// file that has not been deleted. Reads no payload bytes.
     pub fn media_asset_cached(&self, account: &str, id: &str) -> Result<bool> {
@@ -811,11 +844,45 @@ impl Store {
         metadata: &Value,
         payload: Option<&[u8]>,
     ) -> Result<MediaAssetRecord> {
+        match payload {
+            Some(sealed) => self.save_media_asset_streamed(account, id, metadata, |file| {
+                Ok(std::io::Write::write_all(file, sealed)?)
+            }),
+            None => self.save_media_asset_row(account, id, metadata, None),
+        }
+    }
+    /// [`Self::save_media_asset`] with a sealed payload that `fill` streams into
+    /// a new private file. The file is complete before the account database
+    /// is locked, so a large attachment does not hold up other work.
+    pub fn save_media_asset_streamed(
+        &self,
+        account: &str,
+        id: &str,
+        metadata: &Value,
+        fill: impl FnOnce(&mut std::fs::File) -> Result<()>,
+    ) -> Result<MediaAssetRecord> {
+        let files = self.media_directory(account)?;
+        let file = media_files::write_with(&files, fill)?;
+        let saved = self.save_media_asset_row(account, id, metadata, Some(&file));
+        if saved.is_err() {
+            media_files::remove(&files, &file);
+        }
+        saved
+    }
+    /// Save an asset row. `written` names a payload file already published for
+    /// it; the caller removes that file if this fails.
+    fn save_media_asset_row(
+        &self,
+        account: &str,
+        id: &str,
+        metadata: &Value,
+        written: Option<&str>,
+    ) -> Result<MediaAssetRecord> {
         let files = self.media_directory(account)?;
         self.control(account, |db| {
             let tx = db.transaction()?;
             let old = read_asset(&tx, id)?;
-            if metadata["state"] == "available" && payload.is_none() {
+            if metadata["state"] == "available" && written.is_none() {
                 let cached: bool = tx.query_row(
                     "SELECT payload IS NOT NULL OR payload_file IS NOT NULL OR profile_key IS NOT NULL FROM media_assets WHERE id=?1",
                     [id],
@@ -827,16 +894,13 @@ impl Store {
             }
             let now = chrono::Utc::now().to_rfc3339();
             let mut replaced = None;
-            let mut written = None;
             let saved = (|| -> Result<MediaAssetRecord> {
-                if let Some(sealed) = payload {
+                if let Some(file) = written {
                     replaced = tx.query_row(
                         "SELECT payload_file FROM media_assets WHERE id=?1",
                         [id],
                         |r| r.get::<_, Option<String>>(0),
                     )?;
-                    let file = media_files::write(&files, sealed)?;
-                    written = Some(file.clone());
                     tx.execute(
                         "UPDATE media_assets SET metadata_json=?2,payload=NULL,payload_file=?3,profile_key=NULL,updated_at=?4 WHERE id=?1",
                         params![id, serde_json::to_string(metadata)?, file, now],
@@ -861,20 +925,12 @@ impl Store {
                 tx.commit()?;
                 Ok(row)
             });
-            match committed {
-                Ok(row) => {
-                    if let Some(file) = replaced {
-                        media_files::remove(&files, &file);
-                    }
-                    Ok(row)
-                }
-                Err(error) => {
-                    if let Some(file) = written {
-                        media_files::remove(&files, &file);
-                    }
-                    Err(error)
+            if committed.is_ok() {
+                if let Some(file) = replaced.filter(|old| Some(old.as_str()) != written) {
+                    media_files::remove(&files, &file);
                 }
             }
+            committed
         })
     }
     /// Rows that still carry a payload BLOB written by an earlier version, as

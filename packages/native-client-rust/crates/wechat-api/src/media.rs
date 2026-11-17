@@ -400,15 +400,137 @@ async fn content(
     headers: HeaderMap,
 ) -> ApiResult<Response> {
     c.require(Some(&a), "media")?;
+    if matches!(query.representation, ContentRepresentation::Preview) {
+        // A still preview is decoded when asked for and is small.
+        let (media, timing) = app
+            .core
+            .read_timed(&a.clone(), move |core| core.media_preview_content(&a, &id))
+            .await
+            .map_err(ApiError::from)?;
+        return Ok(timed_response(content_response(media, &headers)?, timing));
+    }
+    let wanted = ContentRequest::new(&headers);
     let (media, timing) = app
         .core
-        .read_timed(&a.clone(), move |core| match query.representation {
-            ContentRepresentation::Original => core.media_content(&a, &id),
-            ContentRepresentation::Preview => core.media_preview_content(&a, &id),
+        .read_timed(&a.clone(), move |core| {
+            core.media_content_stream(&a, &id, |total, sha256| wanted.range(total, sha256))
         })
         .await
         .map_err(ApiError::from)?;
-    Ok(timed_response(content_response(media, &headers)?, timing))
+    Ok(timed_response(stream_response(media, &headers)?, timing))
+}
+/// The conditional and range headers of a content request, kept so the range
+/// can be chosen once the attachment's length and digest are known.
+struct ContentRequest {
+    range: Option<String>,
+    if_range: Option<String>,
+    if_none_match: Option<String>,
+}
+impl ContentRequest {
+    fn new(headers: &HeaderMap) -> Self {
+        let text = |name: &str| {
+            headers
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+        };
+        Self {
+            range: text("range"),
+            if_range: text("if-range"),
+            if_none_match: text("if-none-match"),
+        }
+    }
+    /// The inclusive byte range to read, or `None` for the whole attachment.
+    /// Nothing is read for a request answered with 304 or 416.
+    fn range(&self, total: u64, sha256: &str) -> Option<(u64, u64)> {
+        let etag = format!("\"{sha256}\"");
+        if self.if_none_match.as_deref() == Some(etag.as_str()) {
+            return None;
+        }
+        if self.if_range.as_deref().is_some_and(|value| value != etag) {
+            return None;
+        }
+        let (start, end) = byte_range(self.range.as_deref()?, usize::try_from(total).ok()?)?;
+        Some((start as u64, end as u64))
+    }
+}
+/// A content response whose body is read from `media` as it is sent. Headers
+/// and status codes are the same as for a response built from bytes.
+fn stream_response(
+    media: wechat_core::media_types::MediaContentStream,
+    headers: &HeaderMap,
+) -> ApiResult<Response> {
+    let total = media.byte_length;
+    let etag = format!("\"{}\"", media.sha256);
+    let response = Response::builder()
+        .header("cache-control", "private, no-store")
+        .header("accept-ranges", "bytes")
+        .header("etag", &etag);
+    if headers
+        .get("if-none-match")
+        .is_some_and(|v| v.as_bytes() == etag.as_bytes())
+    {
+        return Ok(response
+            .status(StatusCode::NOT_MODIFIED)
+            .body(axum::body::Body::empty())
+            .expect("valid media response"));
+    }
+    let requested = headers.get("range").is_some()
+        && headers
+            .get("if-range")
+            .is_none_or(|v| v.as_bytes() == etag.as_bytes());
+    let (status, length, response) = match media.range {
+        Some((start, end)) => (
+            StatusCode::PARTIAL_CONTENT,
+            end - start + 1,
+            response.header("content-range", format!("bytes {start}-{end}/{total}")),
+        ),
+        None if requested => {
+            return Ok(response
+                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                .header("content-range", format!("bytes */{total}"))
+                .body(axum::body::Body::empty())
+                .expect("valid range response"));
+        }
+        None => (StatusCode::OK, total, response),
+    };
+    // MIME is validated when bytes are cached, and never taken from a URL.
+    response
+        .header("content-type", media.content_type)
+        .header("content-length", length)
+        .status(status)
+        .body(streaming_body(media.body))
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "invalid_media_response"))
+}
+/// A response body read from `body` on a blocking thread, at most a few steps
+/// ahead of the client. A read error ends the body with an error, which cuts
+/// the connection, so a client never gets a complete response with bytes that
+/// failed a check.
+fn streaming_body(mut body: Box<dyn std::io::Read + Send>) -> axum::body::Body {
+    const STEP: usize = 256 * 1024;
+    let (sender, mut receiver) =
+        tokio::sync::mpsc::channel::<std::io::Result<axum::body::Bytes>>(4);
+    tokio::task::spawn_blocking(move || {
+        let mut buffer = vec![0u8; STEP];
+        loop {
+            let piece = match body.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => Ok(axum::body::Bytes::copy_from_slice(&buffer[..read])),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => Err(error),
+            };
+            let failed = piece.is_err();
+            // A closed channel means the client went away.
+            if sender.blocking_send(piece).is_err() || failed {
+                break;
+            }
+        }
+    });
+    axum::body::Body::from_stream(async_stream::stream! {
+        while let Some(piece) = receiver.recv().await {
+            yield piece;
+        }
+    })
 }
 fn content_response(
     media: wechat_core::media_types::MediaContent,

@@ -751,6 +751,57 @@ fn file_resources_bind_original_and_local_names_and_replay_without_duplication()
     );
 }
 #[test]
+fn a_file_payload_projects_like_bytes_and_is_verified_without_loading_it() {
+    let d = fixture();
+    let location = ProfileLocation::new(d.path().join("account")).unwrap();
+    let keys = KeyFile::empty("account");
+    let o = options();
+    // Several read steps long and not a multiple of one.
+    let bytes: Vec<u8> = (0..700_001).map(|i| (i * 31 % 251) as u8).collect();
+    let source = apply_message_projection(
+        &location,
+        &keys,
+        &attachment_row("large.bin", "bin", &bytes),
+        &o,
+    )
+    .unwrap()
+    .source_id;
+    let staged = d.path().join("staged-source");
+    fs::write(&staged, &bytes).unwrap();
+    let payload = MediaPayload::File {
+        path: &staged,
+        length: bytes.len() as u64,
+    };
+    let first =
+        cache_file_projection_payload(&location, &keys, &source, "peer", payload, &o).unwrap();
+    assert!(first.changed);
+    assert_eq!(first.plaintext_bytes, bytes.len());
+    // The same bytes from memory are already there.
+    assert!(
+        !cache_file_projection(&location, &keys, &source, "peer", &bytes, &o)
+            .unwrap()
+            .changed
+    );
+    let md5 = format!("{:x}", Md5::digest(&bytes));
+    let verified = reader(location.clone(), keys.clone())
+        .verified_hardlink_file(HardlinkKind::File, &md5)
+        .unwrap();
+    assert_eq!(verified.byte_length, bytes.len() as u64);
+    assert_eq!(verified.md5, md5);
+    assert_eq!(verified.sha256, hex::encode(Sha256::digest(&bytes)));
+    assert_eq!(fs::read(&verified.path).unwrap(), bytes);
+    // A staged file that no longer matches the message is refused before any write.
+    fs::write(&staged, b"changed").unwrap();
+    assert!(cache_file_projection_payload(&location, &keys, &source, "peer", payload, &o).is_err());
+    // A changed profile file is not reported as verified.
+    let mut changed = bytes.clone();
+    changed[0] ^= 1;
+    fs::write(&verified.path, &changed).unwrap();
+    assert!(reader(location, keys)
+        .verified_hardlink_file(HardlinkKind::File, &md5)
+        .is_err());
+}
+#[test]
 fn pending_file_resource_adds_only_local_name_and_preserves_access_time() {
     let d = fixture();
     let location = ProfileLocation::new(d.path().join("account")).unwrap();
