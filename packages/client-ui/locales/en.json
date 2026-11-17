@@ -949,6 +949,8 @@
     "savePrivacy": "Save privacy",
     "privacySaved": "Privacy settings saved",
     "requestHistory": "Request history",
-    "deleteExplanation": "Delete this request history from your device. This does not decline the request on WeChat."
+    "deleteExplanation": "Delete this request history from your device. This does not decline the request on WeChat.",
+    "privacyWaiting": "Waiting for saved privacy settings…",
+    "privacyReadbackUnavailable": "Privacy change accepted. Refresh to load the saved settings."
   }
 }

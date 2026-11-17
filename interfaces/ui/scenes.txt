@@ -16,6 +16,7 @@ scene contact-details-search | route /{server}/{account}/contacts, viewports des
 scene contact-details-sidebar | route /{server}/{account}/chats/{thread}/info, viewports desktop | A direct-conversation sidebar opens the same contact card and its checked privacy/removal actions.
 scene contact-privacy-retry | route /{server}/{account}/contacts, viewports desktop | An uncertain privacy save locks edits and retries only the same inspected intent.
 scene contact-privacy-saved | route /{server}/{account}/contacts, viewports desktop+compact | Moments selections survive Chats Only and save with the original privacy version.
+scene contact-privacy-syncing | route /{server}/{account}/contacts, viewports desktop+compact | One accepted PATCH waits through pending canonical GETs before showing saved settings, without another mutation.
 scene contact-privacy-unavailable | route /{server}/{account}/contacts, viewports desktop+compact | Missing administrator permission disables privacy edits and submission.
 scene contact-request-retry | route /{server}/{account}/contacts, viewports desktop | A lost submission response keeps the original key and greeting until an inspected retry completes.
 scene contact-search-without-reference | route /{server}/{account}/contacts, viewports desktop+compact | A server match without request material offers View and cannot send a friend request.

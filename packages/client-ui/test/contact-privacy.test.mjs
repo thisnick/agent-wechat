@@ -1,9 +1,11 @@
+import { NativeApiError } from "@agent-wechat/shared";
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
   contactDetailActions,
   restoreContactChange,
   sameContactPrivacy,
+  readContactPrivacyWithPendingRetry,
 } from "../src/contact-privacy.ts";
 
 const privacy = { chatsOnly: true, hideMyPosts: true, hideTheirPosts: false };
@@ -114,4 +116,115 @@ test("hidden Moments choices still count as privacy changes while Chats Only is 
     sameContactPrivacy(privacy, { ...privacy, hideTheirPosts: true }),
     false,
   );
+});
+
+test("canonical privacy readback retries only pending GETs before returning the fresh version", async () => {
+  let reads = 0,
+    pending = 0;
+  const pauses = [];
+  const fresh = { privacy, version: "canonical-v2" };
+  const value = await readContactPrivacyWithPendingRetry(
+    async (signal) => {
+      assert.equal(signal.aborted, false);
+      if (++reads < 3) throw new NativeApiError(409, "contact_privacy_pending");
+      return fresh;
+    },
+    new AbortController().signal,
+    {
+      pending: () => pending++,
+      wait: async (milliseconds) => {
+        pauses.push(milliseconds);
+      },
+    },
+  );
+  assert.equal(value, fresh);
+  assert.equal(reads, 3);
+  assert.equal(pending, 2);
+  assert.deepEqual(pauses, [250, 500]);
+});
+
+test("privacy readback stops on forbidden, unresolved and other errors", async () => {
+  for (const error of [
+    new NativeApiError(403, "forbidden"),
+    new NativeApiError(409, "contact_privacy_unresolved"),
+    new NativeApiError(404, "not_found"),
+    new NativeApiError(500, "internal", true),
+    new TypeError("fetch failed"),
+  ]) {
+    let reads = 0;
+    await assert.rejects(
+      readContactPrivacyWithPendingRetry(
+        async () => {
+          reads++;
+          throw error;
+        },
+        new AbortController().signal,
+        {
+          wait: async () => {
+            assert.fail("Unrelated errors must not schedule a retry");
+          },
+        },
+      ),
+      (value) => value === error,
+    );
+    assert.equal(reads, 1);
+  }
+});
+
+test("account-scope cancellation stops pending privacy reads and discards late results", async () => {
+  const scope = new AbortController();
+  let reads = 0;
+  await assert.rejects(
+    readContactPrivacyWithPendingRetry(
+      async () => {
+        reads++;
+        throw new NativeApiError(409, "contact_privacy_pending");
+      },
+      scope.signal,
+      {
+        wait: async () => {
+          scope.abort();
+        },
+      },
+    ),
+    { name: "AbortError" },
+  );
+  assert.equal(reads, 1);
+  const late = new AbortController();
+  await assert.rejects(
+    readContactPrivacyWithPendingRetry(async () => {
+      late.abort();
+      return { privacy, version: "old-account" };
+    }, late.signal),
+    { name: "AbortError" },
+  );
+});
+
+test("pending privacy readback has both a deadline and a finite GET budget", async () => {
+  let reads = 0;
+  await assert.rejects(
+    readContactPrivacyWithPendingRetry(
+      async () => {
+        reads++;
+        throw new NativeApiError(409, "contact_privacy_pending");
+      },
+      new AbortController().signal,
+      { timeoutMs: 20 },
+    ),
+    (error) => error.code === "contact_privacy_pending",
+  );
+  assert.equal(reads, 1);
+  reads = 0;
+  await assert.rejects(
+    readContactPrivacyWithPendingRetry(
+      async () => {
+        reads++;
+        throw new NativeApiError(409, "contact_privacy_pending");
+      },
+      new AbortController().signal,
+      { wait: async () => {} },
+    ),
+    (error) => error.code === "contact_privacy_pending",
+  );
+  assert.equal(reads, 8);
 });

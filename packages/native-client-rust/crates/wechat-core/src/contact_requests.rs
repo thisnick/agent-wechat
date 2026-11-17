@@ -275,6 +275,34 @@ impl Core {
         Ok(())
     }
 
+    fn ensure_contact_privacy_guard_capacity(
+        &self,
+        account: &str,
+        action: &ContactMutation,
+        own_operation: Option<&str>,
+    ) -> Result<()> {
+        if matches!(
+            action,
+            ContactMutation::UpdatePrivacy { .. }
+                | ContactMutation::SendRequest {
+                    privacy: Some(_),
+                    ..
+                }
+                | ContactMutation::AcceptRequest {
+                    privacy: Some(_),
+                    ..
+                }
+        ) {
+            ensure!(
+                !self
+                    .store
+                    .contact_privacy_guard_overflow(account, own_operation)?,
+                "contact_privacy_pending"
+            );
+        }
+        Ok(())
+    }
+
     fn ensure_no_active_contact_privacy(
         &self,
         account: &str,
@@ -286,8 +314,9 @@ impl Core {
             .contact_for_request(username)?
             .map(|contact| contact.username)
             .unwrap_or_else(|| username.into());
-        let active = self.store.active_contact_mutations(account)?;
-        ensure!(active.len() < 2000, "contact_privacy_pending");
+        let active = self
+            .store
+            .active_contact_mutations(account, own_operation)?;
         for record in active {
             if own_operation == Some(record.operation.id.as_str()) {
                 continue;
@@ -570,6 +599,7 @@ impl Core {
         {
             return Ok((old.operation, false));
         }
+        self.ensure_contact_privacy_guard_capacity(account, &action, None)?;
         let state = self.account_state(account)?;
         let mut target = None;
         let rpc = match &action {
@@ -785,6 +815,7 @@ impl Core {
             return Ok(());
         }
         let (attempt, mut receipts) = self.load_contact_attempt(&record)?;
+        self.ensure_contact_privacy_guard_capacity(account, &attempt.action, Some(id))?;
         if matches!(attempt.action, ContactMutation::SendRequest { .. }) {
             self.ensure_request_database(account, id)?;
         }

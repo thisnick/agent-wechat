@@ -72,14 +72,35 @@ impl Store {
 
     /// Unsettled intents, including unknown outcomes, used to guard a new mutation.
     /// Callers inspect the sealed action and exclude their own operation before submission.
-    pub fn active_contact_mutations(&self, account: &str) -> Result<Vec<StoredContactMutation>> {
+    pub fn active_contact_mutations(
+        &self,
+        account: &str,
+        own_operation: Option<&str>,
+    ) -> Result<Vec<StoredContactMutation>> {
         self.control(account, |db| {
             let ids = {
-                let mut query = db.prepare("SELECT operation_id FROM contact_mutations WHERE phase IN ('queued','submitting','received','projecting','needs_review') LIMIT 2000")?;
-                let rows = query.query_map([], |row| row.get::<_, String>(0))?;
+                let mut query = db.prepare("SELECT operation_id FROM contact_mutations WHERE phase IN ('queued','submitting','received','projecting','needs_review') AND (?1 IS NULL OR operation_id!=?1) LIMIT 2000")?;
+                let rows = query.query_map([own_operation], |row| row.get::<_, String>(0))?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()?
             };
             ids.iter().map(|id| read(db, account, id)).collect()
+        })
+    }
+
+    /// Detect whether bounded privacy guards could omit an unsettled contact intent.
+    /// Includes all candidate actions because optional privacy is in the sealed request.
+    /// This admission check does not restrict settlement's existing batch enumeration.
+    pub fn contact_privacy_guard_overflow(
+        &self,
+        account: &str,
+        own_operation: Option<&str>,
+    ) -> Result<bool> {
+        self.control(account, |db| {
+            Ok(db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM contact_mutations c JOIN operations o ON o.id=c.operation_id WHERE (?1 IS NULL OR c.operation_id!=?1) AND (c.phase IN ('queued','submitting','received','projecting','needs_review') OR ((c.phase='succeeded' OR (c.phase='failed' AND json_extract(o.result_json,'$.partial')=1)) AND json_extract(o.result_json,'$.profileProjection')='awaiting_contact_sync')) LIMIT 1 OFFSET 2000)",
+                [own_operation],
+                |row| row.get(0),
+            )?)
         })
     }
 
@@ -406,7 +427,7 @@ mod privacy_pending_tests {
             }
         }
         let active = store
-            .active_contact_mutations("one")
+            .active_contact_mutations("one", None)
             .unwrap()
             .into_iter()
             .map(|row| row.operation.id)
@@ -417,10 +438,59 @@ mod privacy_pending_tests {
             .unwrap()
             .is_empty());
         assert!(store
-            .active_contact_mutations("one")
+            .active_contact_mutations("one", None)
             .unwrap()
             .iter()
             .any(|row| row.operation.id == "unknown" && row.phase == "needs_review"));
+    }
+
+    #[test]
+    fn privacy_capacity_uses_combined_candidates_excludes_self_and_leaves_settlement_batched() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Store::open(&temporary.path().join("data")).unwrap();
+        store.create_account("one").unwrap();
+        let seed = |start: usize, end: usize, phase: &str| {
+            store.control("one", |db| {
+                let tx = db.transaction()?;
+                for index in start..end {
+                    let id = format!("capacity-{index:04}");
+                    let result = serde_json::json!({"action":"update_privacy","profileProjection":"awaiting_contact_sync"}).to_string();
+                    tx.execute("INSERT INTO operations VALUES(?1,'contact_mutation',?2,?3,'now','now')", params![id, phase, result])?;
+                    tx.execute("INSERT INTO contact_mutations VALUES(?1,?2,?3,?4,0,?5,?6)", params![id, format!("key-{index}"), "a".repeat(64), phase, &[1u8][..], &[2u8][..]])?;
+                }
+                tx.commit()?;
+                Ok(())
+            }).unwrap();
+        };
+        seed(0, 1000, "queued");
+        seed(1000, 2000, "succeeded");
+        assert!(!store.contact_privacy_guard_overflow("one", None).unwrap());
+        seed(2000, 2001, "queued");
+        assert!(store.contact_privacy_guard_overflow("one", None).unwrap());
+        assert!(!store
+            .contact_privacy_guard_overflow("one", Some("capacity-2000"))
+            .unwrap());
+        assert!(!store
+            .active_contact_mutations("one", Some("capacity-2000"))
+            .unwrap()
+            .iter()
+            .any(|record| record.operation.id == "capacity-2000"));
+        seed(2001, 3002, "succeeded");
+        assert!(store
+            .contact_privacy_guard_overflow("one", Some("capacity-2000"))
+            .unwrap());
+        let first = store.pending_contact_relationships("one").unwrap();
+        assert_eq!(first.len(), 2000);
+        store.control("one", |db| {
+            let tx = db.transaction()?;
+            for record in first {
+                tx.execute("UPDATE operations SET result_json=json_set(result_json,'$.profileProjection','complete') WHERE id=?1", [record.operation.id])?;
+            }
+            tx.commit()?;
+            Ok(())
+        }).unwrap();
+        assert_eq!(store.pending_contact_relationships("one").unwrap().len(), 1);
+        assert!(!store.contact_privacy_guard_overflow("one", None).unwrap());
     }
 
     #[test]
@@ -460,7 +530,10 @@ mod privacy_pending_tests {
                 .advance_contact_mutation(&operation, &operation.state, 0)
                 .unwrap();
         }
-        assert!(store.active_contact_mutations("one").unwrap().is_empty());
+        assert!(store
+            .active_contact_mutations("one", None)
+            .unwrap()
+            .is_empty());
         let ids = |store: &Store| {
             store
                 .pending_contact_relationships("one")

@@ -1,7 +1,8 @@
-import type {
-  NativeOperation,
-  NativeContactPrivacy,
-  NativeContactPrivacySettings,
+import {
+  NativeApiError,
+  type NativeOperation,
+  type NativeContactPrivacy,
+  type NativeContactPrivacySettings,
 } from "@agent-wechat/shared";
 import type { Connection } from "./connection.ts";
 
@@ -109,4 +110,65 @@ export function contactDetailActions(
       }
     },
   };
+}
+
+/** Read-only reconciliation for a canonical snapshot still waiting on contact sync. */
+export async function readContactPrivacyWithPendingRetry(
+  read: (signal: AbortSignal) => Promise<ContactPrivacySnapshot>,
+  signal: AbortSignal,
+  options: {
+    timeoutMs?: number;
+    pending?: () => void;
+    wait?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
+  } = {},
+): Promise<ContactPrivacySnapshot> {
+  const deadline = new AbortController();
+  const active = AbortSignal.any([signal, deadline.signal]);
+  const timer = setTimeout(() => deadline.abort(), options.timeoutMs ?? 10_000);
+  const delays = [250, 500, 1000, 1500, 2000, 2000, 2500];
+  const wait =
+    options.wait ??
+    ((milliseconds: number, waiting: AbortSignal) =>
+      new Promise<void>((resolve) => {
+        if (waiting.aborted) {
+          resolve();
+          return;
+        }
+        const done = () => {
+          clearTimeout(pause);
+          waiting.removeEventListener("abort", done);
+          resolve();
+        };
+        const pause = setTimeout(done, milliseconds);
+        waiting.addEventListener("abort", done, { once: true });
+      }));
+  let lastPending: NativeApiError | undefined;
+  try {
+    for (let attempt = 0; ; attempt++) {
+      active.throwIfAborted();
+      try {
+        const value = await read(active);
+        active.throwIfAborted();
+        return value;
+      } catch (error) {
+        active.throwIfAborted();
+        if (
+          !(error instanceof NativeApiError) ||
+          error.status !== 409 ||
+          error.code !== "contact_privacy_pending"
+        )
+          throw error;
+        lastPending = error;
+        options.pending?.();
+        if (attempt === delays.length) throw error;
+        await wait(delays[attempt], active);
+      }
+    }
+  } catch (error) {
+    if (signal.aborted) signal.throwIfAborted();
+    if (deadline.signal.aborted && lastPending) throw lastPending;
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }

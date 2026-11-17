@@ -615,25 +615,31 @@ export const scenes = [
       await expect(page.getByRole("dialog", { name: "Contact details" })).toBeVisible();
     },
   },
-  ...["contact-details", "contact-details-search", "contact-privacy-saved", "contact-privacy-unavailable", "contact-privacy-retry"].map(name => ({
+  ...["contact-details", "contact-details-search", "contact-privacy-saved", "contact-privacy-unavailable", "contact-privacy-retry", "contact-privacy-syncing"].map(name => ({
     name, route: "contacts",
-    description: ({ "contact-details": "A saved contact card reached from the contact list by its keyboard-accessible Details action.", "contact-details-search": "Saved-contact search offers separate Message and Details actions; Details opens the shared card.", "contact-privacy-saved": "Moments selections survive Chats Only and save with the original privacy version.", "contact-privacy-unavailable": "Missing administrator permission disables privacy edits and submission.", "contact-privacy-retry": "An uncertain privacy save locks edits and retries only the same inspected intent." })[name],
+    description: ({ "contact-details": "A saved contact card reached from the contact list by its keyboard-accessible Details action.", "contact-details-search": "Saved-contact search offers separate Message and Details actions; Details opens the shared card.", "contact-privacy-saved": "Moments selections survive Chats Only and save with the original privacy version.", "contact-privacy-unavailable": "Missing administrator permission disables privacy edits and submission.", "contact-privacy-retry": "An uncertain privacy save locks edits and retries only the same inspected intent.", "contact-privacy-syncing": "One accepted PATCH waits through pending canonical GETs before showing saved settings, without another mutation." })[name],
     viewports: name === "contact-privacy-retry" ? ["desktop"] : ["desktop", "compact"],
     setup: standardWorld, target: () => ({ account: ACCOUNT.id }),
     prepare: async ({ page }) => {
       await prepareContactScenes({ page });
       let privacy = { chatsOnly: false, hideMyPosts: false, hideTheirPosts: true };
       const attempts = [];
-      await page.route("**/v1/accounts/*/contacts/sim_mei/privacy", route => {
+      let readbackReads = 0;
+      await page.route("**/v1/accounts/*/contacts/sim_mei/privacy", async route => {
         if (route.request().method() !== "GET") throw Error("Privacy reads must use GET");
         if (name === "contact-privacy-unavailable") return route.fulfill({ status: 403, json: { error: { code: "forbidden" } } });
-        return route.fulfill({ json: { privacy, version: "scene-privacy-v1" } });
+        if (name === "contact-privacy-syncing" && attempts.length) {
+          if (++readbackReads === 1) return route.fulfill({ status: 409, json: { error: { code: "contact_privacy_pending" } } });
+          await new Promise(resolve => setTimeout(resolve, 600));
+        }
+        return route.fulfill({ json: { privacy, version: attempts.length ? "scene-privacy-v2" : "scene-privacy-v1" } });
       });
       await page.route("**/v1/accounts/*/contacts/sim_mei", async route => {
         if (route.request().method() !== "PATCH") throw Error("Contact changes must use PATCH");
         if (name === "contact-privacy-unavailable") throw Error("Unavailable privacy must not submit a contact change");
         const body = route.request().postDataJSON();
-        if (body.expectedVersion !== "scene-privacy-v1" || body.privacy.chatsOnly !== false || body.privacy.hideMyPosts !== true || body.privacy.hideTheirPosts !== true) throw Error("Privacy submission lost the selected settings or source version");
+        const expectedHide = name !== "contact-privacy-syncing";
+        if (body.expectedVersion !== "scene-privacy-v1" || body.privacy.chatsOnly !== false || body.privacy.hideMyPosts !== expectedHide || body.privacy.hideTheirPosts !== expectedHide) throw Error("Privacy submission lost the selected settings or source version");
         attempts.push({ key: route.request().headers()["idempotency-key"], body: route.request().postData() });
         if (name === "contact-privacy-retry" && attempts.length === 1) return route.abort("failed");
         if (attempts.length > 1 && JSON.stringify(attempts[0]) !== JSON.stringify(attempts[1])) throw Error("Privacy retry changed its original intent");
@@ -670,13 +676,23 @@ export const scenes = [
       const hideMine = dialog.getByRole("switch", { name: "Hide My Posts", exact: true });
       await expect(dialog.getByRole("switch", { name: "Hide Their Posts", exact: true })).toBeChecked();
       await expect(dialog.getByRole("button", { name: "Save privacy", exact: true })).toBeDisabled();
-      if (name === "contact-privacy-saved" || name === "contact-privacy-retry") {
-        await hideMine.check();
+      if (name === "contact-privacy-saved" || name === "contact-privacy-retry" || name === "contact-privacy-syncing") {
+        let patchCount = 0;
+        page.on("request", request => { if (request.method() === "PATCH" && new URL(request.url()).pathname.endsWith("/contacts/sim_mei")) patchCount++; });
+        if (name === "contact-privacy-syncing") await dialog.getByRole("switch", { name: "Hide Their Posts", exact: true }).uncheck();
+        else await hideMine.check();
         await dialog.getByRole("radio", { name: "Chats Only", exact: true }).check();
         await expect(hideMine).toHaveCount(0);
         await dialog.getByRole("radio", { name: "Full access", exact: true }).check();
-        await expect(hideMine).toBeChecked();
+        if (name === "contact-privacy-syncing") await expect(hideMine).not.toBeChecked();
+        else await expect(hideMine).toBeChecked();
         await dialog.getByRole("button", { name: "Save privacy", exact: true }).click();
+        if (name === "contact-privacy-syncing") {
+          await expect(dialog.locator(".contact-change-status")).toContainText("Waiting for saved privacy settings");
+          await expect(hideMine).toBeDisabled();
+          await expect(dialog.getByRole("button", { name: "Save privacy", exact: true })).toBeDisabled();
+          await expect(dialog.getByRole("alert")).toHaveCount(0);
+        }
         if (name === "contact-privacy-retry") {
           await expect(dialog.getByRole("alert")).toBeVisible();
           await expect(hideMine).toBeDisabled();
@@ -685,7 +701,13 @@ export const scenes = [
           await dialog.getByRole("button", { name: "Retry original request", exact: true }).click();
         }
         await expect(dialog.locator(".contact-change-status")).toContainText("Privacy settings saved");
-        await expect(hideMine).toBeChecked();
+        if (name === "contact-privacy-syncing") {
+          await expect(hideMine).not.toBeChecked();
+          await expect(dialog.getByRole("switch", { name: "Hide Their Posts", exact: true })).not.toBeChecked();
+          await expect(hideMine).toBeEnabled();
+          await expect(dialog.getByRole("alert")).toHaveCount(0);
+          expect(patchCount).toBe(1);
+        } else await expect(hideMine).toBeChecked();
       }
     },
   })),

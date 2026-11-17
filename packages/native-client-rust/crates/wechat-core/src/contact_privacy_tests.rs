@@ -756,3 +756,142 @@ fn partial_privacy_reply_reconciles_actual_snapshot_without_retry_or_forcing_des
         SqlValue::Integer("8388609".into())
     );
 }
+
+#[tokio::test]
+async fn contact_privacy_overflow_holds_admission_and_submission_but_replays_the_original_key() {
+    let (_temp, core) = super::super::groups::tests::fixture();
+    let desired = ContactPrivacySettings {
+        chats_only: true,
+        ..Default::default()
+    };
+    set_fields(
+        &core,
+        "capacity-peer",
+        &[("local_type", "1"), ("flag", "1"), ("delete_flag", "0")],
+    );
+    let fresh_action = ContactMutation::UpdatePrivacy {
+        username: "capacity-peer".into(),
+        privacy: desired,
+        expected_version: core.contact_privacy("one", "capacity-peer").unwrap()["version"]
+            .as_str()
+            .unwrap()
+            .into(),
+    };
+    let action = update(&core, desired);
+    let (first, _) = core
+        .admit_contact("one", action.clone(), "privacy-capacity-original")
+        .unwrap();
+    let original = core.store.contact_mutation("one", &first.id).unwrap();
+    let (mut attempt, _) = core.load_contact_attempt(&original).unwrap();
+    let other_before = ContactPrivacySettings::default();
+    attempt.action = ContactMutation::UpdatePrivacy {
+        username: "other".into(),
+        privacy: desired,
+        expected_version: core.contact_privacy("one", "other").unwrap()["version"]
+            .as_str()
+            .unwrap()
+            .into(),
+    };
+    attempt.rpc = Some(
+        wechat_protocol::contact_privacy_request(
+            &core.account_state("one").unwrap(),
+            "other",
+            &other_before,
+            &desired,
+        )
+        .unwrap(),
+    );
+    let request = serde_json::to_vec(&attempt).unwrap();
+    let receipts = serde_json::to_vec(&Receipts {
+        reply: Some(successful_reply(attempt.rpc.as_ref().unwrap())),
+        ..Default::default()
+    })
+    .unwrap();
+    // Neither individual batch is full, but their combined guard candidates exceed 2000.
+    for index in 0..2001 {
+        let id = format!("privacy-capacity-{index:04}");
+        let mut operation = Operation {
+            id: id.clone(),
+            account_id: "one".into(),
+            kind: "contact_mutation".into(),
+            state: "queued".into(),
+            result: json!({"action":"update_privacy","profileProjection":"awaiting_contact_sync"}),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        };
+        core.store
+            .create_contact_mutation(
+                &operation,
+                &id,
+                &digest(&request),
+                &core
+                    .vault
+                    .seal("one", &purpose(&id, "request"), &request)
+                    .unwrap(),
+                &core
+                    .vault
+                    .seal("one", &purpose(&id, "receipts"), &receipts)
+                    .unwrap(),
+            )
+            .unwrap();
+        if index < 1001 {
+            for (phase, state) in [
+                ("needs_review", "needs_review"),
+                ("projecting", "running"),
+                ("succeeded", "succeeded"),
+            ] {
+                operation.state = state.into();
+                core.store
+                    .advance_contact_mutation(&operation, phase, 0)
+                    .unwrap();
+            }
+        }
+    }
+    assert_eq!(
+        core.store
+            .active_contact_mutations("one", Some(&first.id))
+            .unwrap()
+            .len(),
+        1000
+    );
+    assert_eq!(
+        core.store
+            .pending_contact_relationships("one")
+            .unwrap()
+            .len(),
+        1001
+    );
+    assert_eq!(
+        core.admit_contact("one", fresh_action, "privacy-capacity-new-key")
+            .unwrap_err()
+            .to_string(),
+        "contact_privacy_pending"
+    );
+    let (replayed, created) = core
+        .admit_contact("one", action, "privacy-capacity-original")
+        .unwrap();
+    assert!(!created);
+    assert_eq!(replayed.id, first.id);
+    let guard = core.lock_account("one").await.unwrap();
+    let mut permit = crate::account_network::AccountNetworkPermit {
+        guard: Some(guard),
+        runtime: tokio::runtime::Handle::current(),
+    };
+    assert_eq!(
+        core.execute_contact("one", &first.id, &mut permit)
+            .unwrap_err()
+            .to_string(),
+        "contact_privacy_pending"
+    );
+    let held = core.store.contact_mutation("one", &first.id).unwrap();
+    assert_eq!(held.phase, "queued");
+    assert!(core.load_contact_attempt(&held).unwrap().1.reply.is_none());
+    assert_eq!(
+        core.profile_reader_owned("one")
+            .unwrap()
+            .contact("peer")
+            .unwrap()
+            .raw_fields["flag"],
+        SqlValue::Integer("1".into())
+    );
+}

@@ -15,6 +15,7 @@ import { Icon } from "./ui.tsx";
 
 import {
   contactDetailActions,
+  readContactPrivacyWithPendingRetry,
   contactChangeActions,
   restoreContactChange,
   defaultContactPrivacy,
@@ -622,6 +623,7 @@ export function ContactDetailDialog({
   const [privacyLoading, setPrivacyLoading] = useState(false),
     [privacyError, setPrivacyError] = useState("");
   const [privacyRevision, setPrivacyRevision] = useState(0);
+  const [privacyWaiting, setPrivacyWaiting] = useState(false);
   const [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
     [retryOriginal, setRetryOriginal] = useState(false);
@@ -647,11 +649,33 @@ export function ContactDetailDialog({
   useEffect(() => {
     setSavedPrivacy(null);
     setPrivacyError("");
+    setPrivacyWaiting(false);
     if (!friendId) return;
     const abort = new AbortController();
     setPrivacyLoading(true);
-    void actions
-      .readPrivacy(friendId, abort.signal)
+    const current = () => {
+      const state = connection.session.snapshot();
+      return (
+        state.account === account &&
+        state.signInRequired !== account &&
+        !state.accounts.some(
+          (item) => item.id === account && item.authenticated === false,
+        )
+      );
+    };
+    const unsubscribe = connection.session.subscribe(() => {
+      if (!current()) abort.abort();
+    });
+    if (!current()) abort.abort();
+    void readContactPrivacyWithPendingRetry(
+      (signal) => actions.readPrivacy(friendId, signal),
+      abort.signal,
+      {
+        pending: () => {
+          if (!abort.signal.aborted) setPrivacyWaiting(true);
+        },
+      },
+    )
       .then((value) => {
         if (!abort.signal.aborted) {
           setSavedPrivacy(value);
@@ -668,10 +692,16 @@ export function ContactDetailDialog({
           );
       })
       .finally(() => {
-        if (!abort.signal.aborted) setPrivacyLoading(false);
+        if (!abort.signal.aborted) {
+          setPrivacyLoading(false);
+          setPrivacyWaiting(false);
+        }
       });
-    return () => abort.abort();
-  }, [actions, friendId, privacyRevision]);
+    return () => {
+      unsubscribe();
+      abort.abort();
+    };
+  }, [actions, friendId, privacyRevision, connection, account]);
   const save = (value: ContactChange) => {
     connection.cache.writeState(account, receiptId, value);
     setReceipt(value);
@@ -816,17 +846,25 @@ export function ContactDetailDialog({
     !receipt?.operation || receipt.operation.state === "needs_review"
       ? t("contactsUi.checkBeforeRetry")
       : receipt.operation.state === "succeeded"
-        ? t(
-            (
-              {
-                send: "contactsUi.sent",
-                accept: "contactsUi.accepted",
-                delete: "contactsUi.historyDeleted",
-                remove: "contactsUi.contactRemoved",
-                privacy: "contactsUi.privacySaved",
-              } as const
-            )[receipt.action],
-          )
+        ? receipt.action === "privacy"
+          ? t(
+              privacyLoading
+                ? "contactsUi.privacyWaiting"
+                : savedPrivacy && !privacyError
+                  ? "contactsUi.privacySaved"
+                  : "contactsUi.privacyReadbackUnavailable",
+            )
+          : t(
+              (
+                {
+                  send: "contactsUi.sent",
+                  accept: "contactsUi.accepted",
+                  delete: "contactsUi.historyDeleted",
+                  remove: "contactsUi.contactRemoved",
+                  privacy: "contactsUi.privacySaved",
+                } as const
+              )[receipt.action],
+            )
         : receipt.operation.state === "failed"
           ? t("contactsUi.failed")
           : receipt.operation.state === "cancelled"
@@ -916,8 +954,14 @@ export function ContactDetailDialog({
                 : "contactsUi.privacyBeforeRequest",
             )}
           </p>
-          {privacyLoading && (
-            <p role="status">{t("contactsUi.privacyLoading")}</p>
+          {privacyLoading && !privacySucceeded && (
+            <p role="status">
+              {t(
+                privacyWaiting
+                  ? "contactsUi.privacyWaiting"
+                  : "contactsUi.privacyLoading",
+              )}
+            </p>
           )}
           {privacyError && (
             <div role="alert">
