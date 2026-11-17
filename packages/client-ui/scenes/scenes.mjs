@@ -520,7 +520,7 @@ export const scenes = [
       });
       await page.locator(".search-trigger").click();
       const search = page.getByRole("dialog", { name: "Search everything" });
-      await expect(search.getByRole("button", { name: "Contacts", exact: true })).toHaveAttribute("aria-pressed", "true");
+      await expect(search.getByRole("button", { name: "Friends", exact: true })).toHaveAttribute("aria-pressed", "true");
       await search.getByRole("button", { name: "All", exact: true }).click();
       await search.getByRole("combobox").fill("Mei");
       try {
@@ -556,9 +556,11 @@ export const scenes = [
           await search.getByRole("combobox").fill("station");
           const match = search.locator("[cmdk-item]").filter({ hasText: "I booked the place near the station" });
           await expect(match).toContainText("Mei Chen");
+          await expect(match.locator("time")).toBeVisible();
+          await expect(match.locator("time")).toHaveAttribute("datetime", /2023-11-14T/);
         }
         if (name === "add-contact") {
-          await search.getByRole("button", { name: "Contacts", exact: true }).click();
+          await search.getByRole("button", { name: "Other people", exact: true }).click();
           await search.getByRole("combobox").fill("avery.example");
           await search.locator("[cmdk-item]").filter({ hasText: "Add contact" }).click();
           const add = page.getByRole("dialog", { name: "Contact details" });
@@ -582,6 +584,7 @@ export const scenes = [
     ready: async ({ page, expect }) => { await expect(row(page, "Mei Chen")).toBeVisible(); },
     actions: async ({ page, expect }) => {
       await page.locator(".search-trigger").focus();
+      await page.getByRole("dialog", { name: "Search everything" }).getByRole("button", { name: "Other people", exact: true }).click();
       await page.getByRole("combobox").fill("mei.example");
       const match = page.locator("[cmdk-item]").filter({ hasText: "mei.example" });
       await expect(match).toContainText(known ? "Message" : "View");
@@ -621,6 +624,7 @@ export const scenes = [
     ready: async ({ page, expect }) => { await expect(row(page, "Mei Chen")).toBeVisible(); },
     actions: async ({ page, expect }) => {
       await page.locator(".search-trigger").focus();
+      await page.getByRole("dialog", { name: "Search everything" }).getByRole("button", { name: "Other people", exact: true }).click();
       await page.getByRole("combobox").fill("avery.example");
       await page.locator("[cmdk-item]").filter({ hasText: "Add contact" }).click();
       const dialog = page.getByRole("dialog", { name: "Contact details" });
@@ -641,21 +645,198 @@ export const scenes = [
       await expect(page.getByRole("dialog", { name: "Contact details" })).toBeVisible();
     },
   },
-  ...["unknown-contact", "unknown-contact-add"].map(name => ({
+  ...["omni-section-pagination", "omni-pagination-query-change"].map(name => ({
     name, route: "contacts",
-    description: "An unknown relationship offers Add contact without friend-only controls; lookup opens request review without submitting.",
-    viewports: ["desktop", "compact"], setup: standardWorld,
-    target: () => ({ account: ACCOUNT.id }),
+    description: "Each search section loads its own cursor, keeps earlier results on retry, deduplicates pages and shows message timestamps; query changes discard late pages.",
+    viewports: ["desktop", "compact"], setup: standardWorld, target: () => ({ account: ACCOUNT.id }),
+    prepare: prepareContactScenes,
+    ready: async ({ page, expect }) => { await expect(row(page, "Mei Chen")).toBeVisible(); },
+    actions: async ({ page, expect }) => {
+      const reads = [];
+      let releaseMessages, releaseStale;
+      const messageGate = new Promise(resolve => { releaseMessages = resolve; });
+      const staleGate = new Promise(resolve => { releaseStale = resolve; });
+      let groupRetries = 0, messagePages = 0, stalePages = 0;
+      const person = (id, relation, displayName) => ({ id, username: id, displayName, relation });
+      const message = (id, body, createdAt) => ({ id, accountId: ACCOUNT.id, threadId: "sim_mei", body, createdAt, serverId: "123" });
+      await page.route(/\/v1\/accounts\/[^/]+\/(contacts|groups|messages)\?.*/, async route => {
+        const url = new URL(route.request().url()), query = url.searchParams.get("query"), cursor = url.searchParams.get("cursor");
+        if (query !== "needle" && query !== "fresh") return route.continue();
+        const resource = url.pathname.split("/").at(-1), relation = url.searchParams.get("relation");
+        reads.push({ resource, relation, cursor, query });
+        let items = [], nextCursor = null;
+        if (query === "fresh") {
+          if (resource === "messages") items = [message("fresh", "Fresh query result", null)];
+        } else if (resource === "contacts" && relation === "friend") {
+          items = [person("friend-one", "friend", "Needle Friend One")];
+          if (cursor) { expect(cursor).toBe("friends-next"); items.push(person("friend-two", "friend", "Needle Friend Two")); }
+          else nextCursor = "friends-next";
+        } else if (resource === "contacts" && relation === "non_contact") {
+          items = [person("other-one", "non_contact", "Needle Person One")];
+        } else if (resource === "contacts" && relation === "unknown") {
+          if (cursor) { expect(cursor).toBe("unknown-next"); items = [person("other-three", "unknown", "Needle Person Three")]; }
+          else { items = [person("other-two", "unknown", "Needle Person Two")]; nextCursor = "unknown-next"; }
+        } else if (resource === "groups") {
+          items = [{ id: "needle-one@chatroom", displayName: "Needle Group One" }];
+          if (cursor) {
+            expect(cursor).toBe("groups-next");
+            if (++groupRetries === 1) return route.fulfill({ status: 503, json: { error: { code: "unavailable" } } });
+            items = [{ id: "needle-two@chatroom", displayName: "Needle Group Two" }];
+          } else nextCursor = "groups-next";
+        } else if (resource === "messages") {
+          if (cursor === "messages-next") {
+            messagePages++;
+            await messageGate;
+            items = [message("message-one", "First message match", "2023-11-14T20:03:00Z"), message("message-two", "Second message match", "1700000000"), message("message-no-time", "Message with no timestamp", null)];
+            nextCursor = "messages-third";
+          } else if (cursor === "messages-third") {
+            stalePages++;
+            await staleGate;
+            items = [message("stale", "Stale page must disappear", null)];
+          } else {
+            expect(cursor).toBeNull();
+            items = [message("message-one", "First message match", "2023-11-14T20:03:00Z")]; nextCursor = "messages-next";
+          }
+        }
+        await route.fulfill({ json: { items, nextCursor } });
+      });
+      try {
+        await page.locator(".search-trigger").click();
+        const search = page.getByRole("dialog", { name: "Search everything" });
+        await expect(search.getByRole("button", { name: "Friends", exact: true })).toHaveAttribute("aria-pressed", "true");
+        await search.getByRole("button", { name: "All", exact: true }).click();
+        await search.getByRole("combobox").fill("needle");
+        const section = label => search.getByRole("group", { name: label, exact: true });
+        const friends = section("Friends"), groups = section("Groups"), messages = section("Messages"), others = section("Other people");
+        await expect(friends.locator("[cmdk-item]")).toHaveCount(1);
+        await expect(groups.locator("[cmdk-item]")).toHaveCount(1);
+        await expect(others.locator("[cmdk-item]")).toHaveCount(2);
+        await expect(messages.locator("time")).toHaveAttribute("datetime", "2023-11-14T20:03:00.000Z");
+        await expect(messages.locator("time")).toHaveText(/Nov 14, 2023.*8:03 PM/);
+        const otherReads = reads.filter(read => read.resource !== "contacts").length;
+        await friends.getByRole("button", { name: "Load more Friends", exact: true }).click();
+        await expect(friends.locator("[cmdk-item]")).toHaveCount(2);
+        await expect(friends.getByRole("button", { name: "Load more Friends", exact: true })).toHaveCount(0);
+        expect(reads.filter(read => read.resource !== "contacts").length).toBe(otherReads);
+        await others.getByRole("button", { name: "Load more Other people", exact: true }).click();
+        await expect(others.locator("[cmdk-item]")).toHaveCount(3);
+        await groups.getByRole("button", { name: "Load more Groups", exact: true }).click();
+        await expect(groups.getByRole("alert")).toBeVisible();
+        await expect(groups.locator("[cmdk-item]")).toHaveCount(1);
+        await expect(friends.locator("[cmdk-item]")).toHaveCount(2);
+        await groups.getByRole("button", { name: "Load more Groups", exact: true }).click();
+        await expect(groups.locator("[cmdk-item]")).toHaveCount(2);
+        await expect(groups.getByRole("alert")).toHaveCount(0);
+        await messages.getByRole("button", { name: "Load more Messages", exact: true }).click();
+        await expect.poll(() => messagePages).toBe(1);
+        await expect(messages.getByRole("button", { name: "Load more Messages", exact: true })).toBeDisabled();
+        await expect(friends.locator("[cmdk-item]")).toHaveCount(2);
+        releaseMessages();
+        await expect(messages.locator("[cmdk-item]")).toHaveCount(3);
+        await expect(messages.locator("[cmdk-item]").filter({ hasText: "Second message match" }).locator("time")).toHaveAttribute("datetime", "2023-11-14T22:13:20.000Z");
+        await expect(messages.locator("[cmdk-item]").filter({ hasText: "Message with no timestamp" }).locator("time")).toHaveCount(0);
+        expect(messagePages).toBe(1);
+        if (name === "omni-pagination-query-change") {
+          await messages.getByRole("button", { name: "Load more Messages", exact: true }).click();
+          await expect.poll(() => stalePages).toBe(1);
+          await search.getByRole("combobox").fill("fresh");
+          await expect(messages).toContainText("Fresh query result");
+          releaseStale();
+          await expect(search.locator("[cmdk-item]").filter({ hasText: "Stale page must disappear" })).toHaveCount(0);
+          await expect(search.locator("[cmdk-item]").filter({ hasText: "First message match" })).toHaveCount(0);
+          expect(reads.filter(read => read.query === "fresh").every(read => read.cursor === null)).toBe(true);
+        }
+      } finally { releaseMessages(); releaseStale(); }
+    },
+  })),
+  ...["contact-search-saved-only", "contact-search-other-people"].map(name => ({
+    name, route: "contacts",
+    description: "Empty search shows saved contacts; typing adds a separate Other people section with clear source/membership labels and a separate WeChat discovery result.",
+    viewports: ["desktop", "compact"], setup: standardWorld, target: () => ({ account: ACCOUNT.id }),
     prepare: async ({ page }) => {
       await prepareContactScenes({ page });
       await page.route(/\/v1\/accounts\/[^/]+\/contacts(?:\?.*)?$/, async route => {
         const response = await route.fetch();
         const body = await response.json();
-        body.items = body.items.map(row => row.id === "sim_mei" ? { ...row, relation: "unknown" } : row);
+        const url = new URL(route.request().url());
+        const unknown = { id: "sim_mei", username: "sim_mei", displayName: "Mei Chen", relation: "unknown" };
+        const nonContact = { id: "sim_outsider", username: "sim_outsider", displayName: "Mei Rivera", relation: "non_contact" };
+        const relation = url.searchParams.get("relation");
+        const query = url.searchParams.get("query") || "";
+        if (relation === "unknown") body.items = query === "Mei" ? [unknown] : [];
+        else if (relation === "non_contact") body.items = query === "Mei" ? [nonContact] : [];
+        else {
+          body.items = body.items.map(row => row.id === "sim_mei" ? unknown : row);
+          body.items.push(nonContact);
+        }
         await route.fulfill({ response, json: body });
       });
     },
     ready: async ({ page, expect }) => { await expect(row(page, "Daniel Park")).toBeVisible(); },
+    actions: async ({ page, expect }) => {
+      const reads = [];
+      page.on("request", request => {
+        const url = new URL(request.url());
+        if (/\/contacts$/.test(url.pathname)) reads.push(url);
+      });
+      await page.locator(".search-trigger").click();
+      const search = page.getByRole("dialog", { name: "Search everything" });
+      for (const scope of ["Friends", "All"]) {
+        await search.getByRole("button", { name: scope, exact: true }).click();
+        await expect(search.locator("[cmdk-item]").filter({ hasText: "Daniel Park" })).toContainText("Contact");
+        await expect(search.locator("[cmdk-item]").filter({ hasText: "Mei Chen" })).toHaveCount(0);
+        await expect(search.locator("[cmdk-item]").filter({ hasText: "Mei Rivera" })).toHaveCount(0);
+      }
+      expect(reads.length).toBeGreaterThan(0);
+      expect(reads.every(url => url.searchParams.get("relation") === "friend")).toBe(true);
+      await search.getByRole("combobox").fill("Mei");
+      const otherPeople = search.getByRole("group", { name: "Other people", exact: true });
+      const unknown = otherPeople.locator("[cmdk-item]").filter({ hasText: "Mei Chen" });
+      const nonContact = otherPeople.locator("[cmdk-item]").filter({ hasText: "Mei Rivera" });
+      await expect(unknown).toContainText("From local history");
+      await expect(nonContact).toContainText("Not friends yet");
+      await expect(unknown.getByRole("button", { name: "Message", exact: true })).toBeVisible();
+      expect(new Set(reads.map(url => url.searchParams.get("relation")))).toEqual(new Set(["friend", "non_contact", "unknown"]));
+      await unknown.getByRole("button", { name: "Details for Mei Chen", exact: true }).click();
+      const cachedCard = page.getByRole("dialog", { name: "Contact details" });
+      await expect(cachedCard.getByRole("button", { name: "Add contact", exact: true })).toBeVisible();
+      await expect(cachedCard.getByRole("radio")).toHaveCount(0);
+      await cachedCard.getByRole("button", { name: "Close", exact: true }).click();
+      await expect(otherPeople).toBeVisible();
+      await search.getByRole("button", { name: "Friends", exact: true }).click();
+      await expect(otherPeople).toHaveCount(0);
+      await expect(search.getByRole("group", { name: "Add someone on WeChat", exact: true })).toHaveCount(0);
+      await search.getByRole("button", { name: "Other people", exact: true }).click();
+      await expect(otherPeople).toBeVisible();
+      await expect(search.getByRole("group", { name: "Friends", exact: true })).toHaveCount(0);
+      if (name === "contact-search-other-people") return;
+      await search.getByRole("combobox").fill("avery.example");
+      const discovery = search.getByRole("group", { name: "Add someone on WeChat", exact: true });
+      await expect(discovery.locator("[cmdk-item]")).toContainText("avery.example");
+      await expect(discovery.locator("[cmdk-item]")).toContainText("Add contact");
+      await expect(search).not.toContainText("On WeChat");
+      await expect(search).not.toContainText("Saved contact");
+      await discovery.locator("[cmdk-item]").click();
+      const card = page.getByRole("dialog", { name: "Contact details" });
+      await expect(card.getByRole("textbox", { name: "Friend request message" })).toBeVisible();
+      await expect(card.locator(".contact-detail-identity p")).toHaveCount(0);
+    },
+  })),
+  ...["unknown-contact", "unknown-contact-add", "non-contact"].map(name => ({
+    name, route: "info",
+    description: "A cached person opens from conversation details; confirmed non-contacts say Not friends yet, unknown membership has no label, and Add contact opens request review without submitting.",
+    viewports: ["desktop", "compact"], setup: standardWorld,
+    target: () => ({ account: ACCOUNT.id, thread: "sim_mei" }),
+    prepare: async ({ page }) => {
+      await prepareContactScenes({ page });
+      await page.route(/\/v1\/accounts\/[^/]+\/contacts(?:\?.*)?$/, async route => {
+        const response = await route.fetch();
+        const body = await response.json();
+        body.items = body.items.map(row => row.id === "sim_mei" ? { ...row, relation: name === "non-contact" ? "non_contact" : "unknown" } : row);
+        await route.fulfill({ response, json: body });
+      });
+    },
+    ready: async ({ page, expect }) => { await expect(page.getByRole("complementary", { name: "Conversation details" })).toBeVisible(); },
     actions: async ({ page, expect }) => {
       let submits = 0, lookups = 0, privacyReads = 0;
       page.on("request", request => {
@@ -664,13 +845,12 @@ export const scenes = [
         if (path.endsWith("/search/contacts")) lookups++;
         if (path.endsWith("/privacy")) privacyReads++;
       });
-      await expect(row(page, "Mei Chen")).toHaveCount(0);
-      await page.locator(".search-trigger").click();
-      const match = page.locator("[cmdk-item]").filter({ hasText: "Mei Chen" });
-      await expect(match).not.toContainText("Saved contact");
-      await match.getByRole("button", { name: "Details for Mei Chen", exact: true }).click();
+      await page.getByRole("complementary", { name: "Conversation details" }).getByRole("button", { name: "Details", exact: true }).click();
       const card = page.getByRole("dialog", { name: "Contact details" });
-      await expect(card.getByText("Saved contact", { exact: true })).toHaveCount(0);
+      await expect(card.getByText("Contact", { exact: true })).toHaveCount(0);
+      await expect(card.getByText("On WeChat", { exact: true })).toHaveCount(0);
+      await expect(card.locator(".contact-detail-identity p")).toHaveCount(name === "non-contact" ? 1 : 0);
+      if (name === "non-contact") await expect(card.locator(".contact-detail-identity p")).toHaveText("Not friends yet");
       await expect(card.getByRole("radio")).toHaveCount(0);
       await expect(card.getByRole("button", { name: "Remove contact", exact: true })).toHaveCount(0);
       await expect(card.getByRole("button", { name: "Message", exact: true })).toBeVisible();

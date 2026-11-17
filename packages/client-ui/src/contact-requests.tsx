@@ -11,7 +11,7 @@ import {
   type NativeOperation,
 } from "@agent-wechat/shared";
 import type { Connection } from "./connection.ts";
-import { t } from "./i18n.ts";
+import { t, formatLocale } from "./i18n.ts";
 import { readableError } from "./session.ts";
 import { HubAvatar } from "./avatars.tsx";
 import { Icon } from "./ui.tsx";
@@ -195,15 +195,30 @@ export function FriendRequests({
 const scopeLabel = (scope: string) =>
   ({
     all: t("contactsUi.all"),
-    contacts: t("contactsUi.contacts"),
+    contacts: t("contactsUi.friends"),
     groups: t("contactsUi.groups"),
     messages: t("contactsUi.messages"),
+    discovery: t("contactsUi.addSomeoneOnWechat"),
+    otherPeople: t("contactsUi.otherPeople"),
   })[scope];
+type SearchSource = "contacts" | "groups" | "messages" | "non_contact" | "unknown";
+const sectionSources: Record<string, SearchSource[]> = {
+  contacts: ["contacts"], groups: ["groups"], messages: ["messages"],
+  otherPeople: ["non_contact", "unknown"], discovery: [],
+};
+type SearchPage = { nextCursor: string | null; loading: boolean; error: string };
+function messageSearchDate(value: string | null): string | undefined {
+  if (!value) return undefined;
+  const date = new Date(/^\d+$/.test(value) ? Number(value) * 1000 : value);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
+}
 type Hit = {
   id: string;
   name: string;
   subtitle?: string;
-  kind: "contacts" | "groups" | "messages";
+  kind: "contacts" | "groups" | "messages" | "discovery" | "otherPeople";
+  source?: SearchSource;
+  createdAt?: string;
   thread?: string;
   request?: NativeContactRequest;
   discovery?: NativeContactSearch;
@@ -231,48 +246,86 @@ export function OmniSearch({
     [scope, setScope] = useState(initialScope),
     [hits, setHits] = useState<Hit[]>([]),
     [remote, setRemote] = useState<NativeContactSearch | null>(null),
-    [error, setError] = useState(""),
+    [pages, setPages] = useState<Partial<Record<SearchSource, SearchPage>>>({}),
+    [requestLimits, setRequestLimits] = useState({ contacts: 15, otherPeople: 15 }),
     [remoteError, setRemoteError] = useState(""),
     [loading, setLoading] = useState(false);
+  const readMore = useRef<(source: SearchSource) => void>(() => {});
   useEffect(() => {
     const abort = new AbortController();
-    setRemote(null);
-    setRemoteError("");
-    setError("");
     setHits([]);
+    setPages({});
+    setRequestLimits({ contacts: 15, otherPeople: 15 });
     const search = query.trim();
     const client = connection.session.client;
-    const publish = (kind: Hit["kind"], rows: Hit[]) => {
-      if (!abort.signal.aborted)
-        setHits((current) => [...current.filter((hit) => hit.kind !== kind), ...rows]);
-    };
-    const failed = (e: unknown) => {
-      if (!abort.signal.aborted) setError(readableError(e));
-    };
-    if (scope === "all" || scope === "contacts")
-      void client.contacts(account, { query: search, limit: 30, relation: "all" }, abort.signal)
-        .then((page) => publish("contacts", page.items.filter((c): c is NativeContact => !isNativeTombstone(c)).map((c) => ({
-          id: c.id, name: c.displayName ?? c.id, subtitle: t(c.relation === "friend" ? "contactsUi.saved" : "contactsUi.onWechat"), kind: "contacts",
-        })))).catch(failed);
-    if (scope === "all" || scope === "groups")
-      void client.groups(account, { query: search, limit: 20 }, abort.signal)
-        .then((page) => publish("groups", page.items.filter((g): g is NativeGroup => !isNativeTombstone(g)).map((g) => ({
-          id: g.id, name: g.displayName ?? g.id, subtitle: t("contactsUi.group"), kind: "groups",
-        })))).catch(failed);
-    if (search && (scope === "all" || scope === "messages"))
-      void client.searchMessages(account, { query: search, limit: 20 }, abort.signal)
-        .then((page) => publish("messages", page.items.filter((m): m is NativeMessage => !isNativeTombstone(m)).map((m) => {
-          const snapshot = connection.session.snapshot();
-          return { id: m.id, thread: m.threadId, kind: "messages",
-            name: snapshot.account === account
-              ? (snapshot.threads.find((thread) => thread.id === m.threadId)?.displayName
-                ?? snapshot.contacts.find((contact) => contact.id === m.threadId)?.displayName ?? m.threadId)
-              : m.threadId,
-            subtitle: m.body ?? "",
-          };
-        }))).catch(failed);
+    const pending = new Set<SearchSource>();
+    const cursors = new Map<SearchSource, string | null>();
+    async function read(source: SearchSource, cursor?: string) {
+      if (pending.has(source) || abort.signal.aborted) return;
+      pending.add(source);
+      setPages(current => ({ ...current, [source]: { nextCursor: cursors.get(source) ?? null, loading: true, error: "" } }));
+      try {
+        let rows: Hit[], nextCursor: string | null;
+        if (source === "groups") {
+          const page = await client.groups(account, { query: search, limit: 20, cursor }, abort.signal);
+          rows = page.items.filter((g): g is NativeGroup => !isNativeTombstone(g)).map(g => ({
+            id: g.id, name: g.displayName ?? g.id, subtitle: t("contactsUi.group"), kind: "groups", source,
+          }));
+          nextCursor = page.nextCursor;
+        } else if (source === "messages") {
+          const page = await client.searchMessages(account, { query: search, limit: 20, cursor }, abort.signal);
+          rows = page.items.filter((m): m is NativeMessage => !isNativeTombstone(m)).map(m => {
+            const snapshot = connection.session.snapshot();
+            return { id: m.id, thread: m.threadId, kind: "messages", source,
+              name: snapshot.account === account
+                ? (snapshot.threads.find(thread => thread.id === m.threadId)?.displayName
+                  ?? snapshot.contacts.find(contact => contact.id === m.threadId)?.displayName ?? m.threadId)
+                : m.threadId,
+              subtitle: m.body ?? "", createdAt: messageSearchDate(m.createdAt),
+            };
+          });
+          nextCursor = page.nextCursor;
+        } else {
+          const relation = source === "contacts" ? "friend" : source;
+          const page = await client.contacts(account, { query: search, limit: source === "contacts" ? 30 : 15, relation, cursor }, abort.signal);
+          rows = page.items.filter((c): c is NativeContact => !isNativeTombstone(c) && c.relation === relation).map(c => ({
+            id: c.id, name: c.displayName ?? c.id, source,
+            kind: source === "contacts" ? "contacts" : "otherPeople",
+            subtitle: t(source === "contacts" ? "contactsUi.saved" : source === "non_contact" ? "contactsUi.notFriendsYet" : "contactsUi.fromLocalHistory"),
+          }));
+          nextCursor = page.nextCursor;
+        }
+        if (abort.signal.aborted) return;
+        cursors.set(source, nextCursor);
+        setHits(current => {
+          const retained = cursor ? current : current.filter(hit => hit.source !== source);
+          const seen = new Set(retained.filter(hit => hit.source === source).map(hit => hit.id));
+          return [...retained, ...rows.filter(hit => { if (seen.has(hit.id)) return false; seen.add(hit.id); return true; })];
+        });
+        setPages(current => ({ ...current, [source]: { nextCursor, loading: false, error: "" } }));
+      } catch (error) {
+        if (!abort.signal.aborted)
+          setPages(current => ({ ...current, [source]: { nextCursor: cursors.get(source) ?? null, loading: false, error: readableError(error) } }));
+      } finally { pending.delete(source); }
+    }
+    readMore.current = source => { void read(source, cursors.get(source) ?? undefined); };
+    if (scope === "all" || scope === "contacts") void read("contacts");
+    if (search && (scope === "all" || scope === "otherPeople")) {
+      void read("non_contact");
+      void read("unknown");
+    }
+    if (scope === "all" || scope === "groups") void read("groups");
+    if (search && (scope === "all" || scope === "messages")) void read("messages");
+    return () => abort.abort();
+  }, [connection, account, query, scope]);
+  useEffect(() => {
+    const abort = new AbortController();
+    const search = query.trim();
+    setRemote(null);
+    setRemoteError("");
+    setLoading(false);
     const timer = setTimeout(() => {
-      if (!search || !["all", "contacts"].includes(scope)) return;
+      if (!search || !["all", "otherPeople"].includes(scope)) return;
       setLoading(true);
       void connection.session.client
         .searchContacts(account, search, abort.signal)
@@ -292,25 +345,22 @@ export function OmniSearch({
       setLoading(false);
     };
   }, [connection, account, query, scope, requests]);
-  const filteredRequests = ["all", "contacts"].includes(scope)
-    ? requests.filter(
-        (r) =>
-          !query.trim() ||
-          `${r.displayName} ${r.peerId} ${r.history.map((h) => h.message).join(" ")}`
-            .toLowerCase()
-            .includes(query.toLowerCase()),
-      )
-    : [];
+  const filteredRequests = requests.filter(r =>
+    (scope === "all" || (scope === "contacts" && r.isContact) || (scope === "otherPeople" && !r.isContact)) &&
+    (!query.trim() || `${r.displayName} ${r.peerId} ${r.history.map(h => h.message).join(" ")}`.toLowerCase().includes(query.trim().toLowerCase())),
+  );
+  const requestKind = (r: NativeContactRequest) => r.isContact ? "contacts" : "otherPeople";
+  const visibleRequests = (["contacts", "otherPeople"] as const).flatMap(kind => filteredRequests.filter(r => requestKind(r) === kind).slice(0, requestLimits[kind]));
   const merged = hits.filter(
     (h) =>
-      h.kind !== "contacts" || !filteredRequests.some((r) => r.peerId === h.id),
+      !["contacts", "otherPeople"].includes(h.kind) || !visibleRequests.some((r) => r.peerId === h.id),
   );
-  for (const r of filteredRequests)
+  for (const r of visibleRequests)
     merged.push({
       id: r.peerId,
       name: r.displayName,
       subtitle: requestLabel(r),
-      kind: "contacts",
+      kind: requestKind(r),
       request: r,
     });
   if (remote?.request) {
@@ -320,7 +370,7 @@ export function OmniSearch({
         id: r.peerId,
         name: r.displayName,
         subtitle: requestLabel(r),
-        kind: "contacts",
+        kind: requestKind(r),
         request: r,
       });
   } else if (remote?.contactId) {
@@ -335,10 +385,20 @@ export function OmniSearch({
     merged.push({
       id: "discovery",
       name: remote.displayName,
-      subtitle: t("contactsUi.onWechat"),
-      kind: "contacts",
+      kind: "discovery",
       discovery: remote,
     });
+  function sectionHasMore(kind: string) {
+    return sectionSources[kind].some(source => pages[source]?.nextCursor || pages[source]?.error) ||
+      ((kind === "contacts" || kind === "otherPeople") && filteredRequests.filter(r => requestKind(r) === kind).length > requestLimits[kind]);
+  }
+  function sectionLoading(kind: string) { return sectionSources[kind].some(source => pages[source]?.loading); }
+  function more(kind: string) {
+    for (const source of sectionSources[kind])
+      if (pages[source]?.nextCursor || pages[source]?.error) readMore.current(source);
+    if (kind === "contacts" || kind === "otherPeople")
+      setRequestLimits(current => ({ ...current, [kind]: current[kind] + 15 }));
+  }
   const details = (h: Hit) => {
     if (h.discovery) review({ discovery: h.discovery });
     else if (h.request) review({ request: h.request });
@@ -376,7 +436,7 @@ export function OmniSearch({
         </button>
       </div>
       <div className="omni-scopes">
-        {(["all", "contacts", "groups", "messages"] as const).map((s) => (
+        {(["all", "contacts", "otherPeople", "groups", "messages"] as const).map((s) => (
           <button
             key={s}
             aria-pressed={scope === s}
@@ -387,13 +447,13 @@ export function OmniSearch({
         ))}
       </div>
       <Command.List>
-        {error && <p role="alert">{error}</p>}
-        {(["contacts", "groups", "messages"] as const)
-          .filter((kind) => merged.some((hit) => hit.kind === kind))
+        {(["contacts", "groups", "messages", "otherPeople", "discovery"] as const)
+          .filter((kind) => merged.some((hit) => hit.kind === kind) || sectionLoading(kind) || sectionHasMore(kind))
           .map((kind) => (
             <Command.Group key={kind} heading={scopeLabel(kind)}>
               {merged
                 .filter((h) => h.kind === kind)
+                .sort((a, b) => kind === "otherPeople" ? a.name.localeCompare(b.name) || a.id.localeCompare(b.id) : 0)
                 .map((h) => (
                   <Command.Item
                     key={`${kind}:${h.id}`}
@@ -402,9 +462,10 @@ export function OmniSearch({
                   >
                     <span className="omni-result-copy">
                       <strong>{h.name}</strong>
-                      <span>{h.subtitle}</span>
+                      {h.subtitle && <span>{h.subtitle}</span>}
+                      {h.createdAt && <time dateTime={h.createdAt}>{new Date(h.createdAt).toLocaleString(formatLocale(), { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</time>}
                     </span>
-                    {h.kind === "contacts" &&
+                    {(h.kind === "contacts" || h.kind === "otherPeople") &&
                     !h.discovery &&
                     (!h.request || h.request.isContact) ? (
                       <span className="omni-result-actions">
@@ -457,9 +518,17 @@ export function OmniSearch({
                     )}
                   </Command.Item>
                 ))}
+              {sectionSources[kind].map(source => pages[source]?.error && <p key={source} role="alert">{pages[source]!.error}</p>)}
+              {(sectionHasMore(kind) || sectionLoading(kind)) && <button className="omni-load-more"
+                aria-label={t("contactsUi.loadMoreSection", { section: scopeLabel(kind) })}
+                disabled={sectionLoading(kind)}
+                onKeyDown={e => { if (e.key === "Enter" || e.key === " ") e.stopPropagation(); }}
+                onClick={() => more(kind)}>
+                {t(sectionLoading(kind) ? "contactsUi.loadingResults" : "contactsUi.loadMore")}
+              </button>}
             </Command.Group>
           ))}
-        {!merged.length && <Command.Empty>{t("main.noMatches")}</Command.Empty>}
+        {!merged.length && !Object.values(pages).some(page => page?.loading || page?.error) && !loading && <Command.Empty>{t("main.noMatches")}</Command.Empty>}
       </Command.List>
       <div className="omni-foot" aria-live="polite">
         {loading
@@ -554,6 +623,11 @@ export function ContactDetailDialog({
   const removal = "removeContact" in selection ? selection.removeContact : null;
   const savedContact = contact && connection.session.snapshot().contacts.find((row) => row.id === contact.id);
   const friendId = (savedContact?.relation === "friend" ? contact?.id : null) ?? (request?.isContact ? request.peerId : null);
+  const relationshipLabel = friendId || removal
+    ? t("contactsUi.saved")
+    : request ? requestLabel(request)
+    : savedContact?.relation === "non_contact" ? t("contactsUi.notFriendsYet")
+    : null;
   const name =
     contact?.displayName ??
     removal?.displayName ??
@@ -906,13 +980,7 @@ export function ContactDetailDialog({
         />
         <div>
           <h3>{name}</h3>
-          <p>
-            {friendId || removal
-              ? t("contactsUi.saved")
-              : request
-                ? requestLabel(request)
-                : t("contactsUi.onWechat")}
-          </p>
+          {relationshipLabel && <p>{relationshipLabel}</p>}
         </div>
       </div>
       {removal && <p>{t("contactsUi.removeExplanation")}</p>}

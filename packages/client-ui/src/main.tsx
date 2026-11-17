@@ -1318,7 +1318,7 @@ function Chats({
             <Button
               icon="plus"
               label={section === "contacts" ? t("main.findPerson") : t("main.newConversation")}
-              onClick={() => section === "contacts" ? setOmniScope("contacts") : router.push({ name: "new-chat", ...here })}
+              onClick={() => section === "contacts" ? setOmniScope("otherPeople") : router.push({ name: "new-chat", ...here })}
             />
           </div>
           <button title={section === "contacts" ? t("main.searchContacts") : t("main.searchConversations")} className="search search-trigger" onFocus={()=>setOmniScope(section === "contacts" ? "contacts" : "all")} onClick={()=>setOmniScope(section === "contacts" ? "contacts" : "all")} aria-label={t("contactsUi.searchEverything")}><Icon name="search"/><span>{t("contactsUi.searchEverything")}</span></button>

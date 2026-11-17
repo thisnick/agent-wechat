@@ -498,3 +498,7 @@
 .contact-moments-options input::before { content: ''; position: absolute; width: 14px; height: 14px; left: 3px; top: 3px; border-radius: 50%; background: var(--surface); }
 .contact-moments-options input:checked { background: var(--accent-ink); }
 .contact-moments-options input:checked::before { left: 17px; }
+
+.omni-result-copy time { color: var(--muted); font-size: 11px; }
+.omni-load-more { display: block; margin: 6px 10px 12px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--muted); cursor: pointer; }
+.omni-load-more:disabled { cursor: wait; opacity: .65; }

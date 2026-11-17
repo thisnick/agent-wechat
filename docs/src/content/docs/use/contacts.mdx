@@ -67,7 +67,9 @@ Deleting local history does not withdraw a sent request or notify the other pers
 
 ## In the app
 
-Focus the sidebar search field or press Command/Ctrl+K to search contacts, groups and messages. Contacts includes saved people, request history and debounced WeChat discovery. Choose Add, Review or Details to open the same contact card. The card keeps request actions, relationship privacy and contact removal together. Both the Contacts search field and Contacts + open search with Contacts selected. Local contacts, groups and messages appear as their individual searches finish; WeChat discovery runs separately after a short typing pause.
+Focus sidebar search or press Command/Ctrl+K. Tabs separate **All**, **Friends**, **Other people**, **Groups** and **Messages**. Contacts search opens Friends; Contacts + opens Other people for adding someone. In All, typing also searches cached people under Other people. Server discovery appears under **Add someone on WeChat**. Friends say Contact; confirmed non-contacts say Not friends yet; unknown membership uses a local-history source label in search.
+
+Each section loads independently and has its own **Load more** control. Message results show their original date and time in your local timezone when available. Choose Message to open the conversation or Details to open the shared contact card.
 
 Friend requests appears in the Contacts sidebar. The Contacts icon also shows the number of incoming requests needing review while Chats is open. A saved contact or group opens its conversation with Message. Contact rows also expose Details on hover or keyboard focus. See [Privacy](#privacy) for privacy updates.
 
@@ -90,7 +92,7 @@ All paths below are relative to `/v1/accounts/ACCOUNT_ID/`:
 | `DELETE contacts/ID` | Remove the saved contact |
 | `GET contact-mutations/by-idempotency-key?key=KEY` | Recover the original operation |
 
-Keep `relation` and the search text unchanged when following `nextCursor`; filtering occurs before pagination. Omni-search explicitly requests all cached people.
+Keep `relation` and the search text unchanged when following `nextCursor`; filtering occurs before pagination. The Friends tab uses the saved-friend default; Other people searches the other local relationship categories.
 
 Reads require `read`; mutations and operation-by-key recovery require `admin`. Every mutation requires `Idempotency-Key`. Follow the returned ID through `GET operations/ID`. An uncertain operation stops at `needs_review`; recovery never resends automatically.
 
