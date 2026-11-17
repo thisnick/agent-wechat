@@ -46,9 +46,10 @@ the directory holding the pull request's files (the PR checkout).
 - Read the discussion: `gh api repos/<repo>/issues/<number>/comments --paginate`
   and `gh api repos/<repo>/pulls/<number>/comments --paginate`.
 - Find the previous Claude review summary, a comment whose body starts with
-  `<!-- claude-review -->`. Its "Earlier reviews" list and its heading tell you
-  which commits were reviewed before. Count this review's round: 1 if there is
-  no previous summary, otherwise one more than the number of earlier reviews.
+  `<!-- claude-review -->`. Its heading names the last reviewed commit, and its
+  "Earlier reviews" list names the ones before that. Count this review's round:
+  1 if there is no previous summary; otherwise 2 plus the number of entries in
+  that list.
   Note which inline comments Claude already posted (from the `claude` bot) and
   how the author answered each.
 
