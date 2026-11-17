@@ -539,7 +539,7 @@ mod tests {
                 )
                 .unwrap();
                 assert_eq!(
-                    decrypt_cdn(&original.encrypted_bytes().unwrap(), &original.aes_key).unwrap(),
+                    decrypt_cdn(&original.encrypted, &original.aes_key).unwrap(),
                     source
                 );
                 assert_eq!(openssl::sha::sha256(&source), source_hash);

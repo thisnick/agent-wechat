@@ -31,12 +31,10 @@ impl SimulatorMedia {
         variant: Option<&PreparedVariant>,
         dimensions: Option<(u32, u32)>,
     ) -> Result<UploadedMedia> {
-        // The simulator takes one object per request, so the whole
-        // ciphertext is built here.
         let (encrypted, size, md5, sha256) = match variant {
-            Some(v) => (v.encrypted.clone(), v.plaintext_bytes, &v.md5, &v.sha256),
+            Some(v) => (&v.encrypted, v.plaintext_bytes, &v.md5, &v.sha256),
             None => (
-                prepared.encrypted_bytes()?.to_vec(),
+                &prepared.encrypted,
                 prepared.plaintext_bytes,
                 &prepared.md5,
                 &prepared.sha256,
@@ -101,10 +99,12 @@ impl MediaTransport for SimulatorMedia {
         })
     }
     fn upload(&self, prepared: &PreparedUpload, progress: Progress<'_>) -> Result<UploadedMedia> {
-        let total = prepared.encrypted_len() as u64;
-        progress(0, Some(total))?;
+        progress(0, Some(prepared.encrypted.len() as u64))?;
         let result = self.upload_object(prepared, prepared.kind, None, None)?;
-        progress(total, Some(total))?;
+        progress(
+            prepared.encrypted.len() as u64,
+            Some(prepared.encrypted.len() as u64),
+        )?;
         Ok(result)
     }
     fn upload_image(
@@ -112,7 +112,7 @@ impl MediaTransport for SimulatorMedia {
         p: &PreparedImageUpload,
         progress: Progress<'_>,
     ) -> Result<UploadedImage> {
-        progress(0, Some(p.original.encrypted_len() as u64))?;
+        progress(0, Some(p.original.encrypted.len() as u64))?;
         Ok(UploadedImage {
             original: Some(self.upload_object(
                 &p.original,

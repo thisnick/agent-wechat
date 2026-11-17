@@ -1,11 +1,12 @@
-//! Upload plaintext that is encrypted one chunk at a time.
+//! Uploads whose plaintext stays in a file and is encrypted one chunk at a time.
 //!
 //! CDN objects use AES-128-ECB with PKCS#7 padding, so each 16-byte ciphertext
 //! block depends only on the plaintext block at the same offset. A chunk that
 //! starts on a block boundary is encrypted on its own from that plaintext
 //! range, and the result is byte-for-byte the slice of the whole-object
-//! ciphertext. Large files are therefore read from disk as they are sent
-//! instead of being encrypted into memory first.
+//! ciphertext. A [`PreparedFileUpload`] is therefore read from disk as it is
+//! sent instead of being encrypted into memory first, and every request is the
+//! same as for the equivalent in-memory [`PreparedUpload`].
 use super::*;
 use std::{
     io::{Seek, SeekFrom},
@@ -13,51 +14,48 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-/// Where an upload's plaintext comes from.
-#[derive(Clone)]
-pub(super) enum UploadSource {
-    Memory(Arc<Zeroizing<Vec<u8>>>),
-    /// A private file the caller has already checked. Its length, MD5 and
-    /// SHA-256 are checked again while the object is sent.
-    File(Arc<Mutex<std::fs::File>>),
-}
-impl UploadSource {
-    /// Fill `buffer` with the plaintext at `offset`. A short source is an error.
-    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<()> {
-        match self {
-            Self::Memory(bytes) => {
-                let start = usize::try_from(offset)?;
-                let end = start
-                    .checked_add(buffer.len())
-                    .filter(|end| *end <= bytes.len())
-                    .ok_or_else(|| anyhow::anyhow!("Upload source changed"))?;
-                buffer.copy_from_slice(&bytes[start..end]);
-            }
-            Self::File(file) => {
-                let mut file = file
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("Upload source unavailable"))?;
-                file.seek(SeekFrom::Start(offset))?;
-                file.read_exact(buffer)
-                    .map_err(|_| anyhow::anyhow!("Upload source changed"))?;
-            }
-        }
-        Ok(())
-    }
-}
-
 fn ciphertext_len(plaintext: usize) -> usize {
     (plaintext / 16 + 1) * 16
 }
 
-impl PreparedUpload {
-    /// Prepare an upload whose plaintext stays in `file`. `length`, `md5` and
-    /// `sha256` describe the file; the caller computed them while writing it.
-    /// They are checked again as the object is sent: the chunk that ends the
-    /// object is only produced once every byte read matched, so a changed or
-    /// truncated file fails before the final request.
+/// One object ready to upload from a private file. The file is read in steps
+/// while the object is sent; its length, MD5 and SHA-256 are checked again on
+/// the way, and the request that ends the object is only made once every byte
+/// read matched. Persist the key and file key before the first request, as
+/// for [`PreparedUpload`].
+#[derive(Clone)]
+pub struct PreparedFileUpload {
+    pub kind: MediaQuality,
+    pub aes_key: Vec<u8>,
+    pub file_key: String,
+    pub plaintext_bytes: u32,
+    pub md5: String,
+    pub sha256: String,
+    pub file_name: String,
+    pub destination: String,
+    file: Arc<Mutex<std::fs::File>>,
+}
+impl Drop for PreparedFileUpload {
+    fn drop(&mut self) {
+        self.aes_key.zeroize();
+        self.file_key.zeroize();
+    }
+}
+impl fmt::Debug for PreparedFileUpload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PreparedFileUpload")
+            .field("kind", &self.kind)
+            .field("plaintext_bytes", &self.plaintext_bytes)
+            .field("material", &"[redacted]")
+            .finish()
+    }
+}
+impl PreparedFileUpload {
+    /// Prepare an upload of `file`. `length`, `md5` and `sha256` describe the
+    /// file; the caller computed them while writing it. A file of another
+    /// length is refused now, and changed bytes before the final request.
     #[allow(clippy::too_many_arguments)]
-    pub fn from_file(
+    pub fn new(
         file: std::fs::File,
         length: u64,
         md5: &str,
@@ -82,59 +80,45 @@ impl PreparedUpload {
             kind,
             aes_key: key.to_vec(),
             file_key: file_key.to_string(),
-            source: UploadSource::File(Arc::new(Mutex::new(file))),
             plaintext_bytes: u32::try_from(plaintext_bytes)?,
             md5: md5.to_ascii_lowercase(),
             sha256: sha256.to_ascii_lowercase(),
             file_name: file_name.into(),
             destination: destination.into(),
+            file: Arc::new(Mutex::new(file)),
         })
-    }
-    pub(super) fn memory_source(raw: &[u8]) -> UploadSource {
-        UploadSource::Memory(Arc::new(Zeroizing::new(raw.to_vec())))
-    }
-    /// The whole plaintext, when it is held in memory.
-    pub(super) fn memory_plaintext(&self) -> Option<&[u8]> {
-        match &self.source {
-            UploadSource::Memory(bytes) => Some(bytes.as_slice()),
-            UploadSource::File(_) => None,
-        }
     }
     /// Length of the encrypted object, including its padding block.
     pub fn encrypted_len(&self) -> usize {
         ciphertext_len(self.plaintext_bytes as usize)
     }
-    /// The whole encrypted object. Only for transports that send one object
-    /// per request, such as the simulator; it holds the object in memory.
-    pub fn encrypted_bytes(&self) -> Result<Zeroizing<Vec<u8>>> {
-        let mut chunks = self.ciphertext_chunks();
-        chunks.next(self.encrypted_len())
+    /// The same upload held in memory, for transports that send one object per
+    /// request. The file is read whole and checked against its digests.
+    pub fn to_memory(&self) -> Result<PreparedUpload> {
+        let mut raw = Zeroizing::new(vec![0u8; self.plaintext_bytes as usize]);
+        self.read_at(0, &mut raw)?;
+        let prepared = PreparedUpload::with_material(
+            &raw,
+            self.kind,
+            &self.file_name,
+            &self.destination,
+            &self.aes_key,
+            &self.file_key,
+        )?;
+        ensure!(
+            prepared.md5 == self.md5 && prepared.sha256 == self.sha256,
+            "Prepared upload digest mismatch"
+        );
+        Ok(prepared)
     }
-    /// The encrypted object in order, one chunk at a time.
-    pub(super) fn ciphertext_chunks(&self) -> CiphertextChunks<'_> {
-        CiphertextChunks {
-            prepared: self,
-            position: 0,
-            md5: None,
-            sha256: None,
-        }
-    }
-    /// Check an in-memory source completely. A file source is checked while
-    /// it is sent instead, so it is not read twice.
-    pub(super) fn check_memory_source(&self) -> Result<()> {
-        if let Some(raw) = self.memory_plaintext() {
-            ensure!(
-                raw.len() == self.plaintext_bytes as usize
-                    && hex::encode(md5(raw)) == self.md5
-                    && hex::encode(sha256(raw)) == self.sha256,
-                "Prepared upload digest mismatch"
-            );
-        }
-        Ok(())
-    }
-    #[cfg(test)]
-    pub(super) fn replace_memory_source(&mut self, raw: &[u8]) {
-        self.source = Self::memory_source(raw);
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<()> {
+        let mut file = self
+            .file
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Upload source unavailable"))?;
+        file.seek(SeekFrom::Start(offset))?;
+        file.read_exact(buffer)
+            .map_err(|_| anyhow::anyhow!("Upload source changed"))
     }
 }
 
@@ -176,11 +160,126 @@ pub(super) fn check_upload_profile(
     Ok(())
 }
 
-/// Produces an upload's ciphertext from the start, in order. The plaintext is
-/// hashed as it is read; the chunk holding the end of the object is returned
-/// only when the length and both digests match the prepared values.
+/// Either kind of prepared upload, for the shared request builders.
+#[derive(Clone, Copy)]
+pub(super) enum UploadRef<'a> {
+    Memory(&'a PreparedUpload),
+    File(&'a PreparedFileUpload),
+}
+impl<'a> UploadRef<'a> {
+    pub(super) fn kind(self) -> MediaQuality {
+        match self {
+            Self::Memory(p) => p.kind,
+            Self::File(p) => p.kind,
+        }
+    }
+    pub(super) fn aes_key(self) -> &'a [u8] {
+        match self {
+            Self::Memory(p) => &p.aes_key,
+            Self::File(p) => &p.aes_key,
+        }
+    }
+    pub(super) fn file_key(self) -> &'a str {
+        match self {
+            Self::Memory(p) => &p.file_key,
+            Self::File(p) => &p.file_key,
+        }
+    }
+    pub(super) fn plaintext_bytes(self) -> u32 {
+        match self {
+            Self::Memory(p) => p.plaintext_bytes,
+            Self::File(p) => p.plaintext_bytes,
+        }
+    }
+    pub(super) fn md5(self) -> &'a str {
+        match self {
+            Self::Memory(p) => &p.md5,
+            Self::File(p) => &p.md5,
+        }
+    }
+    pub(super) fn sha256(self) -> &'a str {
+        match self {
+            Self::Memory(p) => &p.sha256,
+            Self::File(p) => &p.sha256,
+        }
+    }
+    pub(super) fn file_name(self) -> &'a str {
+        match self {
+            Self::Memory(p) => &p.file_name,
+            Self::File(p) => &p.file_name,
+        }
+    }
+    pub(super) fn destination(self) -> &'a str {
+        match self {
+            Self::Memory(p) => &p.destination,
+            Self::File(p) => &p.destination,
+        }
+    }
+    pub(super) fn encrypted_len(self) -> usize {
+        match self {
+            Self::Memory(p) => p.encrypted.len(),
+            Self::File(p) => p.encrypted_len(),
+        }
+    }
+    /// Checks made before any request. An in-memory upload's ciphertext is
+    /// fully checked; a file is checked while it is sent instead.
+    pub(super) fn validate(self) -> Result<()> {
+        match self {
+            Self::Memory(p) => p.validate(),
+            Self::File(p) => {
+                ensure!(
+                    p.aes_key.len() == 16
+                        && p.file_key.len() == 32
+                        && p.file_key.bytes().all(|b| b.is_ascii_hexdigit())
+                        && p.plaintext_bytes > 0
+                        && p.plaintext_bytes as usize <= upload_plaintext_limit(p.kind),
+                    "Invalid prepared upload"
+                );
+                Ok(())
+            }
+        }
+    }
+    /// The encrypted object in order, one chunk at a time.
+    pub(super) fn chunks(self) -> CiphertextChunks<'a> {
+        CiphertextChunks {
+            upload: self,
+            position: 0,
+            md5: None,
+            sha256: None,
+        }
+    }
+    /// The uploaded object's receipt for this upload.
+    pub(super) fn uploaded(
+        self,
+        file_id: String,
+        width: Option<u32>,
+        height: Option<u32>,
+    ) -> UploadedMedia {
+        UploadedMedia {
+            descriptor: MediaDescriptor {
+                file_id,
+                aes_key: self.aes_key().to_vec(),
+                quality: self.kind(),
+                expected_bytes: Some(self.plaintext_bytes() as u64),
+                expected_md5: Some(self.md5().into()),
+                strict_size: true,
+                expires_at: None,
+            },
+            plaintext_bytes: self.plaintext_bytes(),
+            md5: self.md5().into(),
+            sha256: self.sha256().into(),
+            file_name: self.file_name().into(),
+            width,
+            height,
+        }
+    }
+}
+
+/// Produces an upload's ciphertext from the start, in order. For a file, the
+/// plaintext is hashed as it is read, and the chunk holding the end of the
+/// object is returned only when the length and both digests match.
 pub(super) struct CiphertextChunks<'a> {
-    prepared: &'a PreparedUpload,
+    upload: UploadRef<'a>,
     position: usize,
     md5: Option<Hasher>,
     sha256: Option<Hasher>,
@@ -193,18 +292,24 @@ impl CiphertextChunks<'_> {
     /// The next `size` ciphertext bytes, or fewer at the end of the object.
     /// `size` must be a multiple of the 16-byte block size.
     pub(super) fn next(&mut self, size: usize) -> Result<Zeroizing<Vec<u8>>> {
-        let total = self.prepared.encrypted_len();
+        let total = self.upload.encrypted_len();
         ensure!(
             size > 0 && size.is_multiple_of(16) && self.position < total,
             "Invalid upload range"
         );
-        let plaintext = self.prepared.plaintext_bytes as usize;
         let end = (self.position + size).min(total);
+        let prepared = match self.upload {
+            UploadRef::Memory(prepared) => {
+                let chunk = Zeroizing::new(prepared.encrypted[self.position..end].to_vec());
+                self.position = end;
+                return Ok(chunk);
+            }
+            UploadRef::File(prepared) => prepared,
+        };
+        let plaintext = prepared.plaintext_bytes as usize;
         let read = end.min(plaintext).saturating_sub(self.position);
         let mut block = Zeroizing::new(vec![0u8; end - self.position]);
-        self.prepared
-            .source
-            .read_at(self.position as u64, &mut block[..read])?;
+        prepared.read_at(self.position as u64, &mut block[..read])?;
         let md5 = match &mut self.md5 {
             Some(hasher) => hasher,
             None => self.md5.insert(Hasher::new(MessageDigest::md5())?),
@@ -222,14 +327,14 @@ impl CiphertextChunks<'_> {
             let md5 = hex::encode(self.md5.take().unwrap().finish()?);
             let sha256 = hex::encode(self.sha256.take().unwrap().finish()?);
             ensure!(
-                md5 == self.prepared.md5 && sha256 == self.prepared.sha256,
+                md5 == prepared.md5 && sha256 == prepared.sha256,
                 "Prepared upload digest mismatch"
             );
         }
         let mut crypter = Crypter::new(
             Cipher::aes_128_ecb(),
             Mode::Encrypt,
-            &self.prepared.aes_key,
+            &prepared.aes_key,
             None,
         )?;
         crypter.pad(false);
@@ -244,55 +349,65 @@ impl CiphertextChunks<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::io::Write;
 
     fn material() -> ([u8; 16], String) {
         ([9; 16], "a".repeat(32))
     }
-    fn whole(prepared: &PreparedUpload, chunk: usize) -> Vec<u8> {
-        let mut chunks = prepared.ciphertext_chunks();
+    fn whole(upload: UploadRef<'_>, chunk: usize) -> Vec<u8> {
+        let mut chunks = upload.chunks();
         let mut out = vec![];
-        while chunks.position() < prepared.encrypted_len() {
+        while chunks.position() < upload.encrypted_len() {
             out.extend_from_slice(&chunks.next(chunk).unwrap());
         }
         out
     }
-    struct FileSource {
+    pub(in super::super) struct FileSource {
         _directory: wechat_platform::PrivateTempDir,
-        path: std::path::PathBuf,
+        pub(in super::super) path: std::path::PathBuf,
     }
-    fn prepare_file(raw: &[u8], file: &FileSource) -> Result<PreparedUpload> {
-        let (key, file_key) = material();
-        PreparedUpload::from_file(
-            std::fs::File::open(&file.path)?,
-            raw.len() as u64,
-            &hex::encode(md5(raw)),
-            &hex::encode(sha256(raw)),
-            MediaQuality::File,
-            "a.bin",
-            "wxid_peer",
-            &key,
-            &file_key,
-        )
-    }
-    fn file_upload(raw: &[u8]) -> (FileSource, PreparedUpload) {
+    /// A file upload of `raw` with `kind`, using the given material.
+    pub(in super::super) fn file_upload_with(
+        raw: &[u8],
+        kind: MediaQuality,
+        key: &[u8],
+        file_key: &str,
+    ) -> (FileSource, PreparedFileUpload) {
         let directory = wechat_platform::private_tempdir("wechat-upload-source-test-").unwrap();
         let path = directory.path().join("source");
         std::fs::File::create(&path)
             .unwrap()
             .write_all(raw)
             .unwrap();
-        let file = FileSource {
-            _directory: directory,
-            path,
-        };
-        let prepared = prepare_file(raw, &file).unwrap();
-        (file, prepared)
+        let prepared = PreparedFileUpload::new(
+            std::fs::File::open(&path).unwrap(),
+            raw.len() as u64,
+            &hex::encode(md5(raw)),
+            &hex::encode(sha256(raw)),
+            kind,
+            "a.bin",
+            "wxid_peer",
+            key,
+            file_key,
+        )
+        .unwrap();
+        (
+            FileSource {
+                _directory: directory,
+                path,
+            },
+            prepared,
+        )
     }
+    fn file_upload(raw: &[u8]) -> (FileSource, PreparedFileUpload) {
+        let (key, file_key) = material();
+        file_upload_with(raw, MediaQuality::File, &key, &file_key)
+    }
+
     #[test]
-    fn chunked_ciphertext_matches_whole_object_encryption_at_every_boundary() {
+    fn file_chunks_match_the_in_memory_upload_at_every_boundary() {
         let (key, file_key) = material();
         for length in [
             1,
@@ -309,7 +424,6 @@ mod tests {
             131072,
         ] {
             let raw: Vec<u8> = (0..length).map(|i| (i * 7 % 251) as u8).collect();
-            let expected = ecb_encrypt(&raw, &key).unwrap();
             let memory = PreparedUpload::with_material(
                 &raw,
                 MediaQuality::File,
@@ -320,16 +434,24 @@ mod tests {
             )
             .unwrap();
             let (_file, from_file) = file_upload(&raw);
-            assert_eq!(memory.encrypted_len(), expected.len(), "length {length}");
-            for chunk in [16, 4096, UPLOAD_CHUNK] {
-                assert_eq!(whole(&memory, chunk), expected, "memory {length}/{chunk}");
-                assert_eq!(whole(&from_file, chunk), expected, "file {length}/{chunk}");
-            }
-            assert_eq!(*memory.encrypted_bytes().unwrap(), expected);
             assert_eq!(
-                decrypt_cdn(&whole(&from_file, 4096), &key).unwrap(),
-                raw,
-                "roundtrip {length}"
+                from_file.encrypted_len(),
+                memory.encrypted.len(),
+                "length {length}"
+            );
+            for chunk in [16, 4096, UPLOAD_CHUNK] {
+                assert_eq!(whole(UploadRef::Memory(&memory), chunk), memory.encrypted);
+                assert_eq!(
+                    whole(UploadRef::File(&from_file), chunk),
+                    memory.encrypted,
+                    "file {length}/{chunk}"
+                );
+            }
+            let copied = from_file.to_memory().unwrap();
+            assert_eq!(copied.encrypted, memory.encrypted);
+            assert_eq!(
+                (copied.md5.clone(), copied.sha256.clone()),
+                (memory.md5.clone(), memory.sha256.clone())
             );
         }
     }
@@ -342,18 +464,32 @@ mod tests {
         let mut changed = raw.clone();
         changed[69_999] ^= 1;
         std::fs::write(&file.path, &changed).unwrap();
-        let mut chunks = prepared.ciphertext_chunks();
+        let mut chunks = UploadRef::File(&prepared).chunks();
         chunks.next(UPLOAD_CHUNK).unwrap();
         let error = chunks.next(UPLOAD_CHUNK).unwrap_err();
         assert_eq!(error.to_string(), "Prepared upload digest mismatch");
+        assert!(prepared.to_memory().is_err());
         // Truncated: the read itself fails.
         std::fs::write(&file.path, &raw[..66_000]).unwrap();
-        let mut chunks = prepared.ciphertext_chunks();
+        let mut chunks = UploadRef::File(&prepared).chunks();
         chunks.next(UPLOAD_CHUNK).unwrap();
         let error = chunks.next(UPLOAD_CHUNK).unwrap_err();
         assert_eq!(error.to_string(), "Upload source changed");
         // A file whose length differs is refused when prepared.
-        let error = prepare_file(&raw, &file).err().unwrap();
+        let (key, file_key) = material();
+        let error = PreparedFileUpload::new(
+            std::fs::File::open(&file.path).unwrap(),
+            raw.len() as u64,
+            &hex::encode(md5(&raw)),
+            &hex::encode(sha256(&raw)),
+            MediaQuality::File,
+            "a.bin",
+            "wxid_peer",
+            &key,
+            &file_key,
+        )
+        .err()
+        .unwrap();
         assert_eq!(error.to_string(), "Upload source changed");
     }
 }

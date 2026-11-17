@@ -1,7 +1,7 @@
 use super::*;
 use crate::upstream::{media::MediaTransport, Upstream, UpstreamKind};
 use std::sync::{atomic::AtomicUsize, Condvar, Mutex};
-use wechat_protocol::media::DownloadedMedia;
+use wechat_protocol::media::{DownloadedMedia, PreparedUpload};
 
 pub(super) struct PausedDownloads {
     starts: std::sync::mpsc::Sender<String>,
