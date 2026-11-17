@@ -1,5 +1,11 @@
 # @agent-wechat/client-ui
 
+## 0.4.3
+
+### Patch Changes
+
+- [#553](https://github.com/thisnick/agent-wechat/pull/553) [`d0e0e7d`](https://github.com/thisnick/agent-wechat/commit/d0e0e7d483b1d7d78d1f0f152a17f05de2e3d963) Thanks [@thisnick](https://github.com/thisnick)! - The message box's **Original media quality** choice now also covers images. When it is checked, each staged image is sent with a full-resolution original as well as the compressed copy, as each staged video already includes its unchanged file. The choice appears whenever an image or video is staged, and its help explains what it adds for each. Standard image sends are unchanged.
+
 ## 0.4.2
 
 ### Patch Changes
