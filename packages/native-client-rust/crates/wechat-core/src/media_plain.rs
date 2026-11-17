@@ -12,10 +12,11 @@ use std::io::{Read, Write};
 /// Write step for files created here.
 const STEP: usize = 256 * 1024;
 
-/// Plaintext in a private temporary file. Its length and digests were computed
-/// while it was written. The file and its directory are removed on drop.
+/// Plaintext in a file whose length and digests are known. A file this created
+/// is private and temporary: it and its directory are removed on drop. An
+/// [`PlainFile::existing`] file, such as a checked profile copy, is only read.
 pub(crate) struct PlainFile {
-    _directory: wechat_platform::PrivateTempDir,
+    _directory: Option<wechat_platform::PrivateTempDir>,
     pub(crate) path: std::path::PathBuf,
     pub(crate) byte_length: u64,
     pub(crate) md5: String,
@@ -81,12 +82,28 @@ impl PlainFile {
         let (buffered, byte_length, md5, sha256) = output.finish();
         drop(buffered.into_inner().map_err(|error| error.into_error())?);
         Ok(Self {
-            _directory: directory,
+            _directory: Some(directory),
             path,
             byte_length,
             md5,
             sha256,
         })
+    }
+    /// A file someone else owns whose length and digests were already checked,
+    /// read where it is. It is never removed.
+    pub(crate) fn existing(
+        path: std::path::PathBuf,
+        byte_length: u64,
+        md5: String,
+        sha256: String,
+    ) -> Self {
+        Self {
+            _directory: None,
+            path,
+            byte_length,
+            md5,
+            sha256,
+        }
     }
     /// Open the file, refusing one whose length changed.
     pub(crate) fn open(&self) -> Result<std::fs::File> {
@@ -200,6 +217,42 @@ impl Core {
         );
         Ok((source, file))
     }
+    /// This store's own copy of `asset`, decrypted into a private file in steps
+    /// and checked against the asset's recorded size and SHA-256. `None` when
+    /// this store keeps no copy, as for an attachment read from the profile.
+    pub(crate) fn asset_file(
+        &self,
+        account: &str,
+        asset: &MediaAsset,
+    ) -> Result<Option<PlainFile>> {
+        let Some(payload) = self.store.media_asset_payload(account, &asset.id)? else {
+            return Ok(None);
+        };
+        let purpose = format!("asset:{}", asset.id);
+        let file = PlainFile::write_with("wechat-media-asset-", |output| {
+            match payload {
+                wechat_store::MediaAssetPayload::File { file, .. } => {
+                    self.vault.open_media_stream(
+                        account,
+                        &purpose,
+                        &mut std::io::BufReader::with_capacity(STEP, file),
+                        output,
+                    )?;
+                }
+                // Written by an earlier version; small enough to open whole.
+                wechat_store::MediaAssetPayload::Embedded(sealed) => {
+                    output.write_all(&self.vault.open_media_record(account, &purpose, &sealed)?)?;
+                }
+            }
+            Ok(())
+        })?;
+        ensure!(
+            asset.byte_length == Some(file.byte_length)
+                && asset.sha256.as_deref() == Some(file.sha256.as_str()),
+            "media_integrity_failed"
+        );
+        Ok(Some(file))
+    }
     /// Seal `file` into this store's own copy of asset `id` without reading it
     /// into memory, then save `metadata` for it.
     pub(crate) fn save_asset_file(
@@ -261,6 +314,22 @@ mod tests {
         let path = file.path.clone();
         drop(file);
         assert!(!path.exists());
+        // A file described as existing is read in place and never removed.
+        let directory = wechat_platform::private_tempdir("wechat-plain-test-").unwrap();
+        let kept = directory.path().join("kept");
+        std::fs::write(&kept, &bytes).unwrap();
+        let existing = PlainFile::existing(
+            kept.clone(),
+            bytes.len() as u64,
+            digest(&bytes),
+            digest(&bytes),
+        );
+        assert_eq!(
+            existing.open().unwrap().metadata().unwrap().len(),
+            bytes.len() as u64
+        );
+        drop(existing);
+        assert!(kept.exists());
         // A failed write leaves nothing behind.
         let mut left = None;
         assert!(PlainFile::write_with("wechat-plain-test-", |output| {

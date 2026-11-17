@@ -1211,14 +1211,37 @@ impl Core {
                         } else {
                             wechat_profile::HardlinkKind::Video
                         };
-                        if let Ok(cached) = reader.cached_hardlink_file(cache_kind, md5) {
-                            if let Ok((mime, frames)) =
-                                validate_asset_bytes(kind, variant, &cached.bytes)
-                            {
-                                asset = self.cache_asset(
+                        if variant == MediaVariant::Thumbnail {
+                            // A video thumbnail is a small JPEG, checked in memory.
+                            if let Ok(cached) = reader.cached_hardlink_file(cache_kind, md5) {
+                                if let Ok((mime, frames)) =
+                                    validate_asset_bytes(kind, variant, &cached.bytes)
+                                {
+                                    asset = self.cache_asset(
+                                        account,
+                                        &id,
+                                        &cached.bytes,
+                                        &mime,
+                                        Some(variant),
+                                        frames,
+                                    )?;
+                                }
+                            }
+                        } else if let Ok(cached) = reader.verified_hardlink_file(cache_kind, md5) {
+                            // The profile already holds these bytes, for example after
+                            // the same file was sent or received before. They are
+                            // checked and sealed from the profile file in steps.
+                            let file = PlainFile::existing(
+                                cached.path,
+                                cached.byte_length,
+                                cached.md5,
+                                cached.sha256,
+                            );
+                            if let Ok((mime, frames)) = validate_asset_file(kind, &file) {
+                                asset = self.cache_asset_payload(
                                     account,
                                     &id,
-                                    &cached.bytes,
+                                    Payload::File(&file),
                                     &mime,
                                     Some(variant),
                                     frames,
@@ -2252,6 +2275,29 @@ impl Core {
             return Ok(asset);
         }
         if asset.actual_variant != Some(asset.variant) {
+            return Ok(asset);
+        }
+        if matches!(asset.kind, MediaKind::File | MediaKind::Video) {
+            // A file or movie can be 512 MiB: decrypt this store's copy into a
+            // private file in steps and write the profile from it.
+            let Some(file) = self.asset_file(account, &asset)? else {
+                return Ok(asset);
+            };
+            let receipt = format!("media-cache-repair:{}", asset.id);
+            let status = self.project_received_hardlink_payload(
+                account,
+                &receipt,
+                &asset,
+                Payload::File(&file),
+            );
+            asset.official_writeback = status.into();
+            self.store.save_media_asset(
+                account,
+                &asset.id,
+                &serde_json::to_value(&asset)?,
+                None,
+            )?;
+            let _ = self.release_to_profile_payload(account, &asset, Payload::File(&file));
             return Ok(asset);
         }
         let record = self.store.media_asset_with_payload(account, &asset.id)?;
