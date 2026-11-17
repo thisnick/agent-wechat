@@ -13,11 +13,14 @@ const STEP: usize = 256 * 1024;
 /// Plaintext for a profile cache write.
 #[derive(Clone, Copy, Debug)]
 pub enum MediaPayload<'a> {
+    /// Bytes held in memory.
     Bytes(&'a [u8]),
     /// A private file the caller owns and has already checked. `length` is the
     /// file's expected size; any other size is refused.
     File {
+        /// The file to read.
         path: &'a Path,
+        /// The file's expected size in bytes.
         length: u64,
     },
 }
@@ -29,12 +32,14 @@ pub(crate) struct PayloadDigests {
     pub sha256: String,
 }
 impl MediaPayload<'_> {
+    /// Size of the payload in bytes.
     pub fn len(&self) -> u64 {
         match self {
             Self::Bytes(bytes) => bytes.len() as u64,
             Self::File { length, .. } => *length,
         }
     }
+    /// Whether the payload has no bytes.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -164,8 +169,11 @@ fn read_full(input: &mut dyn Read, buffer: &mut [u8]) -> Result<usize> {
 pub struct VerifiedHardlink {
     /// Absolute path of the checked file.
     pub path: std::path::PathBuf,
+    /// Size of the file in bytes.
     pub byte_length: u64,
+    /// Lowercase hex MD5 of the file's content.
     pub md5: String,
+    /// Lowercase hex SHA-256 of the file's content.
     pub sha256: String,
     /// The file's modification time when checked, used to notice a later change.
     pub modified: std::time::SystemTime,

@@ -347,11 +347,17 @@ pub struct DownloadedMedia {
 pub struct DownloadReceipt {
     /// Plaintext bytes written.
     pub byte_length: u64,
+    /// Quality the download asked for.
     pub requested_quality: MediaQuality,
+    /// File type the CDN substituted for the requested one, when it said so.
     pub substituted_filetype: Option<u32>,
+    /// Picture format the CDN reported, when it said so.
     pub picture_format: Option<u32>,
+    /// Lowercase hex MD5 of the plaintext.
     pub md5: String,
+    /// Lowercase hex SHA-256 of the plaintext.
     pub sha256: String,
+    /// Whether the plaintext length matched the advertised size, when one was advertised.
     pub advertised_size_matches: Option<bool>,
 }
 impl DownloadedMedia {

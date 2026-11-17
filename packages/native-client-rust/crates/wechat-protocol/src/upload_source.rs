@@ -25,13 +25,21 @@ fn ciphertext_len(plaintext: usize) -> usize {
 /// for [`PreparedUpload`].
 #[derive(Clone)]
 pub struct PreparedFileUpload {
+    /// CDN object type to upload as.
     pub kind: MediaQuality,
+    /// AES-128 key the object is encrypted with.
     pub aes_key: Vec<u8>,
+    /// Client file key that correlates the upload's requests.
     pub file_key: String,
+    /// Size of the plaintext in bytes.
     pub plaintext_bytes: u32,
+    /// Lowercase hex MD5 of the plaintext.
     pub md5: String,
+    /// Lowercase hex SHA-256 of the plaintext.
     pub sha256: String,
+    /// File name sent with the upload.
     pub file_name: String,
+    /// Chat the upload is for.
     pub destination: String,
     file: Arc<Mutex<std::fs::File>>,
 }
