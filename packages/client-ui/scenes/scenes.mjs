@@ -66,6 +66,19 @@ async function standardWorld(sim) {
   };
 }
 
+/** Real media from the docs gallery, staged through the composer's own file input. */
+const composerFiles = {
+  "afternoon-walk.jpg": "image/jpeg",
+  "afternoon-walk.mp4": "video/mp4",
+};
+async function stageComposerFiles(page, names) {
+  await page.locator("input.attachment-input").setInputFiles(await Promise.all(names.map(async (name) => ({
+    name,
+    mimeType: composerFiles[name],
+    buffer: await readFile(new URL(`../../../docs/demo/gallery/fixtures/media/${name}`, import.meta.url)),
+  }))));
+}
+
 /** A row of the chat or contact list, found by the conversation's name rather than its preview text. */
 const row = (page, name) => page.locator(".chat-row").filter({ has: page.getByText(name, { exact: true }) });
 /**
@@ -241,6 +254,37 @@ export const scenes = [
       await expect(page.locator("img.media-preview")).toHaveCount(1);
     },
   },
+  ...["composer-attachments", "composer-attachments-original"].map((name) => ({
+    name,
+    route: "chat",
+    description: name === "composer-attachments"
+      ? "A photo and a video staged in the message box with previews, sizes, remove buttons and the unchecked Original choice."
+      : "Original checked for a staged photo and video, with help that explains what it adds for each.",
+    viewports: ["desktop", "narrow", "compact"],
+    setup: standardWorld,
+    target: (world) => ({ account: ACCOUNT.id, thread: world.mei }),
+    ready: async ({ page, expect }) => {
+      await expect(page.getByText("I booked the place near the station")).toBeVisible();
+    },
+    actions: async ({ page, expect }) => {
+      // Attachments open once the hub's capabilities and the conversation are loaded.
+      await expect(page.getByRole("button", { name: "Attach file" })).toBeEnabled();
+      await stageComposerFiles(page, ["afternoon-walk.jpg", "afternoon-walk.mp4"]);
+      const tray = page.getByRole("region", { name: "Staged attachments" });
+      await expect(tray.getByText("2 attachments")).toBeVisible();
+      await expect(tray.getByRole("img", { name: "Staged image" })).toBeVisible();
+      // Settling waits for images, not videos: wait for the first frame to show.
+      await expect.poll(() => tray.locator("video").evaluate((video) => video.readyState)).toBeGreaterThanOrEqual(2);
+      const original = tray.getByRole("checkbox", { name: "Original media quality" });
+      await expect(original).not.toBeChecked();
+      if (name === "composer-attachments") return;
+      await original.check();
+      // Focus, not hover: the screenshot moves the pointer away, which closes a hovered tip.
+      await tray.getByRole("button", { name: "About original media quality" }).focus();
+      await expect(page.getByRole("tooltip")).toContainText("full resolution");
+      await expect(page.getByRole("tooltip")).toContainText("unchanged video file");
+    },
+  })),
   {
     name: "group-chat",
     route: "chat",

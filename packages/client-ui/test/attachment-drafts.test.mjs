@@ -88,7 +88,7 @@ test("one send claims the draft, a rejected text admission preserves it, and sig
   drafts.remove("a", "mei", first.files[0].id);
   assert.equal(drafts.get("a", "mei").files.length, 1);
   assert.equal(drafts.finish(first, false), true);
-  assert.equal(drafts.get("a", "mei").videoQuality, "original");
+  assert.equal(drafts.get("a", "mei").quality, "original");
   const second = drafts.claim("a", "mei");
   drafts.clear("a");
   assert.equal(drafts.finish(second, false), false);
@@ -146,8 +146,18 @@ test("Send creates individual outbox operations with distinct keys and captured 
     ],
   );
   assert.equal(new Set(submissions.map((item) => item.key)).size, 3);
-  assert.equal(submissions[1].request.videoQuality, "original");
-  assert.equal(submissions[0].request.videoQuality, undefined);
+  assert.deepEqual(
+    submissions.map((item) => [
+      item.request.imageQuality,
+      item.request.videoQuality,
+    ]),
+    [
+      ["original", undefined],
+      [undefined, "original"],
+      [undefined, undefined],
+    ],
+    "one Original choice covers the batch's images and videos, never files",
+  );
   assert.equal(drafts.get("a", "mei").files.length, 0);
   assert.equal(drafts.get("b", "dan").files.length, 1);
 });
