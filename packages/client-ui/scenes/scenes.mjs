@@ -827,6 +827,7 @@ export const scenes = [
       const dialog = page.getByRole("dialog", { name: "Contact details" });
       await expect(dialog.getByRole("switch", { name: "Hide Their Posts", exact: true })).toBeChecked();
       await expect(dialog.getByRole("button", { name: "Message", exact: true })).toBeVisible();
+      await dialog.locator(".contact-more summary").click();
       await expect(dialog.getByRole("button", { name: "Remove contact", exact: true })).toBeVisible();
     },
   },
