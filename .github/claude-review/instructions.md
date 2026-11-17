@@ -14,8 +14,20 @@ well-supported finding beats a long one with guesses.
 
 ## What you have
 
-The prompt names the repository, the pull request number, the head commit and
-the directory holding the pull request's files (the PR checkout).
+The prompt names the repository, the pull request number, the head commit,
+the directory holding the pull request's files (the PR checkout) and a
+directory of context files saved before the review started:
+
+| File | Contents |
+| --- | --- |
+| `pr.json` | `gh pr view` output: title, description, author, base branch, files, commits, labels |
+| `diffstat.txt` | `git diff --stat review/base...review/head` |
+| `diff.patch` | The full diff of the pull request against its base |
+| `comments.jsonl` | The pull request's conversation comments, one JSON object per line |
+| `review-comments.jsonl` | Its inline review comments, one JSON object per line |
+| `reviews.jsonl` | Its submitted reviews (approve, comment or request changes) with their text, one JSON object per line |
+
+Read these with the Read tool. `diff.patch` can be long; read it in parts.
 
 - The working directory is the base branch. Compare it with the PR checkout to
   see how the code works today. In git, `review/base` is the base commit and
@@ -35,16 +47,26 @@ the directory holding the pull request's files (the PR checkout).
 - Don't build, test, install or run anything; CI does that. Every tool works;
   don't make exploratory or test calls. Don't @-mention anyone in anything you
   post.
+- Use Read, Grep and Glob for files. Bash runs only these commands, one per
+  call: `gh issue view`, `gh pr view`, `gh pr diff`, GET requests with
+  `gh api repos/<repo>/issues/<number>/comments` or
+  `gh api repos/<repo>/pulls/<number>/comments`, and `git log`, `git show`,
+  `git diff` and `git blame`, either in the working directory or as
+  `git -C <PR checkout> ...`. A call that adds anything else is refused whole:
+  `cd`, `cat`, pipes, `;`, `&&`, redirects or other programs. If a call is
+  refused, rewrite it as one of the allowed commands; a refusal doesn't mean
+  Bash is unavailable.
 - The private protocol documentation is not available here. If the pull request
   changes protobuf fields or wire formats, say in "Not checked" that the
   maintainer should cross-check them.
 
 ## 1. Understand the intent and the history
 
-- `gh pr view <number> --json title,body,author,baseRefName,headRefOid,isDraft,additions,deletions,changedFiles,files,commits,labels`
-- Read every issue the description links with `gh issue view`.
-- Read the discussion: `gh api repos/<repo>/issues/<number>/comments --paginate`
-  and `gh api repos/<repo>/pulls/<number>/comments --paginate`.
+- Read `pr.json` for the title, description and commits.
+- Read every issue the description links with `gh issue view <number>`.
+- Read the discussion in `comments.jsonl`, `reviews.jsonl` and
+  `review-comments.jsonl`. Requests from earlier human reviews count: check
+  whether the latest commits address them.
 - Find the previous Claude review summary, a comment whose body starts with
   `<!-- claude-review -->`. Its heading names the last reviewed commit, and its
   "Earlier reviews" list names the ones before that. Count this review's round:
@@ -56,8 +78,8 @@ the directory holding the pull request's files (the PR checkout).
 
 ## 2. Map the change and choose the depth
 
-List the changed files with `git diff --stat review/base...review/head` and sort
-them:
+Read `diffstat.txt` for the changed files, then `diff.patch`, and sort the
+files:
 
 - **Source:** what you review line by line.
 - **Tests:** read them to see what the change claims to handle.
