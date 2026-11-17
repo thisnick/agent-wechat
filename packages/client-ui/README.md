@@ -125,7 +125,7 @@ introduced. Token and daemon-management routes remain blocked by the proxy.
 
 The launcher accepts `CLIENT_UI_PORT` and HTTPS `CLIENT_UI_ORIGIN`. Keep the printed
 fragment link private. Closing the launcher leaves the external daemon running.
-`node scripts/client-ui-connect-smoke.mjs` checks the proxy with a local HTTP fixture.
+`node packages/client-ui/scripts/smoke/connect.mjs` checks the proxy with a local HTTP fixture.
 
 For several hubs, use `--connections-file /absolute/private/connections.json`
 instead of `--server` and `--token-file`. Keep this JSON file owner-only:

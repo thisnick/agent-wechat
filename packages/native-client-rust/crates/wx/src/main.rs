@@ -13,14 +13,17 @@ use wechat_core::Core;
 mod calls_cli;
 mod cli_help;
 mod client_actions;
+mod config;
 mod daemon;
 mod events;
 mod login;
 mod outcome;
 mod output;
+mod parent_watch;
 mod profile_cli;
 mod profile_export;
 mod settings;
+mod stickers_cli;
 use outcome::{failure, set_exit};
 use output::Output;
 
@@ -87,6 +90,11 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Read Saved stickers and prepare local sticker media.
+    Stickers {
+        #[command(subcommand)]
+        command: stickers_cli::StickerCommand,
+    },
     /// Show the CLI version, build target and API capabilities.
     Version,
     /// Show bundled third-party license notices.
@@ -97,7 +105,11 @@ enum Command {
         command: ConfigCommand,
     },
     /// Run the daemon in the foreground. Use the supplied service unit for background ownership.
-    Serve {},
+    Serve {
+        /// Stop gracefully when the process that started this daemon exits, for an app that owns it.
+        #[arg(long)]
+        exit_with_parent: bool,
+    },
     /// Start, inspect or stop the local background daemon.
     Daemon {
         #[command(subcommand)]
@@ -119,8 +131,8 @@ enum Command {
     /// Look up known contact IDs on the selected account.
     #[command(hide = true)]
     LookupContacts {
-        /// Contact IDs to look up on WeChat; give one or more.
-        #[arg(required = true)]
+        /// One or two distinct contact IDs to look up live on WeChat.
+        #[arg(required = true, num_args = 1..=2)]
         ids: Vec<String>,
     },
     /// Look up a known group ID on the selected account.
@@ -370,10 +382,10 @@ enum ResourceAction {
 enum ContactCommand {
     #[command(flatten)]
     Catalog(CatalogCommand),
-    /// Look up one or more known contact IDs on WeChat.
+    /// Look up one or two known contact IDs live on WeChat without saving the result.
     Lookup {
-        /// Contact IDs to look up on WeChat; give one or more.
-        #[arg(required = true)]
+        /// One or two distinct contact IDs to look up live on WeChat.
+        #[arg(required = true, num_args = 1..=2)]
         ids: Vec<String>,
     },
 }
@@ -529,7 +541,7 @@ struct MutationOptions {
 enum GroupCommand {
     #[command(flatten)]
     Catalog(CatalogCommand),
-    /// Fetch the member roster for a known group ID from WeChat.
+    /// Fetch the member roster for a known group ID live from WeChat without saving it.
     Lookup {
         /// Group ID, ending in @chatroom, to fetch the member roster for.
         room: String,
@@ -587,6 +599,9 @@ enum MemberCommand {
     List {
         /// Group ID from wx groups list.
         id: String,
+        /// Only list members whose ID, WeChat ID, nickname, remark or name in this group contains this text; repeat it with --cursor.
+        #[arg(long)]
+        search: Option<String>,
         /// Return at most this many items.
         #[arg(long)]
         limit: Option<usize>,
@@ -1166,20 +1181,30 @@ async fn main() {
     }
     std::process::exit(outcome::exit());
 }
-async fn shutdown(core: Arc<Core>) {
+async fn shutdown(core: Arc<Core>, parent: Option<parent_watch::ParentWatch>) {
     async fn requested(core: &Core) {
         while !core.stopping.load(std::sync::atomic::Ordering::SeqCst) {
             tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    // A parent that exits during startup is noticed once the daemon is ready,
+    // because the watch keeps reporting the exit.
+    async fn orphaned(parent: Option<parent_watch::ParentWatch>) {
+        let Some(parent) = parent else {
+            return std::future::pending().await;
+        };
+        while !parent.exited() {
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
     }
     #[cfg(unix)]
     {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("signal registration");
-        tokio::select! { _=tokio::signal::ctrl_c()=>{}, _=term.recv()=>{}, _=requested(&core)=>{} }
+        tokio::select! { _=tokio::signal::ctrl_c()=>{}, _=term.recv()=>{}, _=requested(&core)=>{}, _=orphaned(parent)=>{} }
     }
     #[cfg(windows)]
-    tokio::select! { _=tokio::signal::ctrl_c()=>{}, _=requested(&core)=>{} }
+    tokio::select! { _=tokio::signal::ctrl_c()=>{}, _=requested(&core)=>{}, _=orphaned(parent)=>{} }
     core.shutdown_gracefully().await;
 }
 
@@ -1190,10 +1215,10 @@ struct Remote {
     account: Option<String>,
 }
 impl Remote {
-    fn new(config: wechat_config::ClientConfig) -> Result<Self> {
+    fn new(config: crate::config::ClientConfig) -> Result<Self> {
         Self::with_token(config, None)
     }
-    fn with_token(config: wechat_config::ClientConfig, token: Option<String>) -> Result<Self> {
+    fn with_token(config: crate::config::ClientConfig, token: Option<String>) -> Result<Self> {
         let base = reqwest::Url::parse(&format!("{}/", config.endpoint.trim_end_matches('/')))?;
         if !base.username().is_empty()
             || base.password().is_some()
@@ -1271,6 +1296,18 @@ impl Remote {
         key: Option<&str>,
         timeout: Duration,
     ) -> Result<reqwest::Response> {
+        self.response_with_revision(method, path, body, key, timeout, None)
+            .await
+    }
+    async fn response_with_revision(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+        key: Option<&str>,
+        timeout: Duration,
+        revision: Option<&str>,
+    ) -> Result<reqwest::Response> {
         let mut request = self
             .http
             .request(method, self.base.join(path)?)
@@ -1281,6 +1318,9 @@ impl Remote {
         }
         if let Some(key) = key {
             request = request.header("idempotency-key", key);
+        }
+        if let Some(revision) = revision {
+            request = request.header("if-match", format!("\"{revision}\""));
         }
         let response = request.send().await?;
         if !response.status().is_success() {
@@ -1377,6 +1417,13 @@ fn query(path: String, values: &[(&str, Option<String>)]) -> String {
     )
 }
 async fn run(cli: Cli) -> Result<()> {
+    // Record the parent first, while the process that started serve is still running.
+    let parent = match &cli.command {
+        Command::Serve {
+            exit_with_parent: true,
+        } => Some(parent_watch::ParentWatch::new().context("cannot watch the parent process")?),
+        _ => None,
+    };
     let output = Output::new(cli.json);
     if matches!(
         &cli.command,
@@ -1433,7 +1480,7 @@ async fn run(cli: Cli) -> Result<()> {
     {
         bail!("--token-stdin is supported by serve and HTTP client commands");
     }
-    let env = wechat_config::Environment::capture();
+    let env = crate::config::Environment::capture();
     let cwd = std::env::current_dir()?;
     if matches!(
         &cli.command,
@@ -1444,8 +1491,8 @@ async fn run(cli: Cli) -> Result<()> {
                 command: ConfigCommand::Show
             }
     ) {
-        let config = wechat_config::resolve(
-            &wechat_config::Overrides {
+        let config = crate::config::resolve(
+            &crate::config::Overrides {
                 server_config: cli.server_config.clone(),
                 data_dir: cli.data_dir.clone(),
                 token_file: cli.token_file.clone(),
@@ -1458,7 +1505,7 @@ async fn run(cli: Cli) -> Result<()> {
             &cwd,
         )?;
         return match cli.command {
-            Command::Serve {} => serve(config, cli.token_stdin, cli.json).await,
+            Command::Serve { .. } => serve(config, cli.token_stdin, cli.json, parent).await,
             Command::Daemon { command } => daemon::run(config, command, output).await,
             Command::Store { command } => {
                 offline(config, cli.account.unwrap_or_default(), command, output)
@@ -1576,8 +1623,8 @@ async fn run(cli: Cli) -> Result<()> {
             output,
         );
     }
-    let config = wechat_config::resolve(
-        &wechat_config::Overrides {
+    let config = crate::config::resolve(
+        &crate::config::Overrides {
             server_config: cli.server_config.clone(),
             data_dir: cli.data_dir.clone(),
             token_file: cli.token_file.clone(),
@@ -1714,6 +1761,7 @@ async fn run(cli: Cli) -> Result<()> {
     use reqwest::Method;
     let result = match cli.command {
         Command::Status => r.get("v1/status").await?,
+        Command::Stickers { command } => stickers_cli::run(&r, command).await?,
         Command::Calls { command } => {
             return calls_cli::run(&r, command.context("choose a calls command")?, cli.json).await;
         }
@@ -2249,7 +2297,12 @@ async fn stdin_token() -> Result<String> {
     }
     Ok(token.into())
 }
-async fn serve(config: wechat_config::ServerConfig, token_stdin: bool, json: bool) -> Result<()> {
+async fn serve(
+    config: crate::config::ServerConfig,
+    token_stdin: bool,
+    json: bool,
+    parent: Option<parent_watch::ParentWatch>,
+) -> Result<()> {
     let supplied = if token_stdin {
         if config.token_explicit {
             bail!("--token-stdin cannot be combined with a configured tokenFile");
@@ -2289,8 +2342,8 @@ async fn serve(config: wechat_config::ServerConfig, token_stdin: bool, json: boo
         eprintln!("Daemon ready on {listen} (server ID {}).", store.server_id);
     }
     let router = wechat_api::router(core.clone(), &token);
-    let local =
-        axum::serve(listener, router.clone()).with_graceful_shutdown(shutdown(core.clone()));
+    let local = axum::serve(listener, router.clone())
+        .with_graceful_shutdown(shutdown(core.clone(), parent));
     if let Some((socket, tls)) = network {
         let handle = axum_server::Handle::new();
         let stop_handle = handle.clone();
@@ -2372,7 +2425,7 @@ async fn wait_operation_checked(
 }
 
 fn offline(
-    config: wechat_config::ServerConfig,
+    config: crate::config::ServerConfig,
     account: String,
     command: StoreCommand,
     output: Output,

@@ -33,7 +33,10 @@ signals only that verified process, releases locks and keeps login trust/history
 It does not submit native logout. `serve --token-stdin` accepts a bounded API
 token through a private pipe without creating a token file; it cannot be
 combined with `--token-file` or a configured `tokenFile`. OpenClaw managed mode
-uses this foreground-only startup option. Use either this manager, systemd, Compose or
+uses this foreground-only startup option. `serve --exit-with-parent` stops the
+daemon gracefully once the process that started it exits; the desktop app and
+OpenClaw managed mode use it so a crash or forced quit does not leave their
+daemon running. `wx --json version` lists it as `serve-exit-with-parent`. Use either this manager, systemd, Compose or
 OpenClaw ownership for one process; do not nest owners.
 
 ```bash
@@ -338,13 +341,13 @@ Inspect structured state/reasons; an exit number never permits resending.
 Run the actual binary lifecycle and synthetic transport tests without credentials:
 
 ```bash
-python3 scripts/native-cli-smoke.py /absolute/path/to/wx
-python3 scripts/native-cli-fixture-test.py /absolute/path/to/wx
-python3 scripts/native-export-smoke.py /absolute/path/to/wx
-bash scripts/native-generate-types.sh --check
+python3 packages/native-client-rust/scripts/cli-smoke.py /absolute/path/to/wx
+python3 packages/native-client-rust/scripts/cli-fixture-test.py /absolute/path/to/wx
+python3 packages/native-client-rust/scripts/export-smoke.py /absolute/path/to/wx
+bash scripts/generate-types.sh --check
 ```
 
 The shared TypeScript wire types come from Rust contracts, including actual
-media serde types. Regenerate with `scripts/native-generate-types.sh`; CI rejects
+media serde types. Regenerate with `scripts/generate-types.sh`; CI rejects
 stale generated output. These checks do not establish compatibility with an
 arbitrary official client build or prove recipient playback.

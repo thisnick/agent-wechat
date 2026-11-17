@@ -156,6 +156,10 @@ export function bindComposerAttachments(
 ): () => void {
   let depth = 0;
   const capture = { capture: true };
+  const delegatedDrop = (event: Event) => {
+    const target=event.target as Element | null;
+    return typeof target?.closest === "function" && !!target.closest("[data-composer-file-drop]");
+  };
   const reset = () => {
     depth = 0;
     hover(false);
@@ -167,12 +171,14 @@ export function bindComposerAttachments(
     receive(transferredFiles(event.clipboardData!));
   };
   const enter = (event: DragEvent) => {
+    if (delegatedDrop(event)) {reset();return;}
     if (!hasTransferredFiles(event.dataTransfer)) return;
     event.preventDefault();
     depth++;
     hover(true);
   };
   const over = (event: DragEvent) => {
+    if (delegatedDrop(event)) return;
     if (!hasTransferredFiles(event.dataTransfer)) return;
     event.preventDefault();
     event.dataTransfer!.dropEffect = "copy";
@@ -182,6 +188,7 @@ export function bindComposerAttachments(
   };
   const drop = (event: DragEvent) => {
     reset();
+    if (delegatedDrop(event)) return;
     if (!hasTransferredFiles(event.dataTransfer)) return;
     event.preventDefault();
     event.stopPropagation();

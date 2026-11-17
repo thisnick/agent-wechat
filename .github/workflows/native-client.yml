@@ -13,16 +13,14 @@ on:
       - 'rust-toolchain.toml'
       - '.cargo/config*'
       - 'packages/shared/src/native*'
-      - 'scripts/native-generate-types.sh'
-      - 'scripts/native-simulator-smoke.mjs'
-      - 'scripts/native-calls-api-smoke.mjs'
-      - 'scripts/native-cli-conference-smoke.*'
+      - 'scripts/generate-types.sh'
+      - 'scripts/smoke/simulator.mjs'
+      - 'scripts/smoke/calls-api.mjs'
       - 'packages/openclaw-extension/src/calls*'
-      - 'scripts/client-ui*-smoke.mjs'
       - 'packages/client-ui/**'
       - '.node-version'
       - 'pnpm-lock.yaml'
-      - 'scripts/native-ci-cache-key*.py'
+      - 'scripts/ci/cache-key*.py'
       - '.github/workflows/native-client.yml'
 
 permissions:
@@ -63,7 +61,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: Identify native build dependencies
         id: cache-key
-        run: python ../../scripts/native-ci-cache-key.py rust --github-output
+        run: python ../../scripts/ci/cache-key.py rust --github-output
       - uses: dtolnay/rust-toolchain@stable
         id: rust
         with:
@@ -152,9 +150,9 @@ jobs:
           node-version-file: .node-version
       - name: Exercise the real hub through the local upstream simulator
         if: matrix.suite == 'test' && (github.event_name == 'pull_request' || inputs.simulator_checks)
-        run: node ../../scripts/native-simulator-smoke.mjs
+        run: node ../../scripts/smoke/simulator.mjs
       - if: matrix.suite == 'test' && runner.arch == 'X64'
-        run: bash ../../scripts/native-generate-types.sh --check
+        run: bash ../../scripts/generate-types.sh --check
       - if: matrix.suite == 'test'
         run: python3 scripts/smoke.py target/debug/wx
       - if: matrix.suite == 'test' && (github.event_name == 'pull_request' || inputs.simulator_checks) && (runner.arch == 'X64' || github.event_name != 'pull_request')
@@ -173,8 +171,8 @@ jobs:
       - name: Exercise calling through the real API, SDK, CLI and fake voice provider
         if: matrix.suite == 'test' && (github.event_name == 'pull_request' || inputs.simulator_checks) && (runner.arch == 'X64' || github.event_name != 'pull_request')
         working-directory: .
-        run: node --experimental-strip-types scripts/native-calls-api-smoke.mjs
+        run: node --experimental-strip-types scripts/smoke/calls-api.mjs
 
       - name: Exercise interactive conference CLI with isolated generated audio
         if: matrix.suite == 'test' && runner.arch == 'X64' && (github.event_name == 'pull_request' || inputs.simulator_checks)
-        run: bash ../../scripts/native-cli-conference-smoke.sh target/debug/wx target/debug/wx-calls-fixture
+        run: bash scripts/cli-conference-smoke.sh target/debug/wx target/debug/wx-calls-fixture

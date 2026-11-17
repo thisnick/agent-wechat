@@ -209,6 +209,8 @@ pub(super) struct OwnedAccount {
     changed_blocking: Condvar,
     authority: Arc<Authority>,
     components: components::AccountComponents,
+    /// Short-link ticket shared by this owner's request transports.
+    short_link: Arc<crate::mmtls::ShortLinkCache>,
 }
 
 struct AccountData {
@@ -537,6 +539,7 @@ impl NativeClient {
                 credential_generation: AtomicU64::new(0),
             }),
             components: components::AccountComponents::default(),
+            short_link: Arc::default(),
         }));
         Ok(client)
     }
@@ -656,15 +659,23 @@ impl NativeClient {
             + Send
             + 'static,
     {
-        let (exchange, state) = self
-            .owned_account()?
+        let owner = self.owned_account()?;
+        let (exchange, state) = owner
             .begin()
             .map_err(|error| error.context(NativeRequestNotSubmitted))?;
+        let short_link = owner.short_link.clone();
         let options = self.options.clone();
         let cancellation = Arc::new(AtomicBool::new(false));
         let _cancel_on_drop = CancelOnDrop(cancellation.clone());
         tokio::task::spawn_blocking(move || {
-            Self::execute_account_request(options, exchange, state, cancellation, operation)
+            Self::execute_account_request(
+                options,
+                exchange,
+                state,
+                short_link,
+                cancellation,
+                operation,
+            )
         })
         .await
         .context("Account request worker failed")?
@@ -674,14 +685,15 @@ impl NativeClient {
     where
         F: FnOnce(&NativeClient, &mut AccountState, &dyn Fn() -> Result<()>) -> Result<T>,
     {
-        let (exchange, state) = self
-            .owned_account()?
+        let owner = self.owned_account()?;
+        let (exchange, state) = owner
             .begin()
             .map_err(|error| error.context(NativeRequestNotSubmitted))?;
         Self::execute_account_request(
             self.options.clone(),
             exchange,
             state,
+            owner.short_link.clone(),
             Arc::new(AtomicBool::new(false)),
             operation,
         )
@@ -691,6 +703,7 @@ impl NativeClient {
         options: NativeOptions,
         exchange: Exchange,
         mut state: AccountState,
+        short_link: Arc<crate::mmtls::ShortLinkCache>,
         cancellation: Arc<AtomicBool>,
         operation: F,
     ) -> Result<T>
@@ -700,6 +713,7 @@ impl NativeClient {
         let exchange = Arc::new(exchange);
         // This transport gets a temporary request snapshot, not another owner.
         let mut transport = NativeClient::new(options)?;
+        transport.short_link = Some(short_link);
         let submission_exchange = exchange.clone();
         let prior_admission = AtomicBool::new(false);
         transport.submission_guard = Some(Arc::new(move || {

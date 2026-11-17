@@ -357,6 +357,14 @@ pub struct NativeGroupMember {
     pub display_name: Option<String>,
     /// The member's own display name in this group. Null when none is saved.
     pub room_display_name: Option<String>,
+    /// The name the member chose for themselves. Null when none is saved.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub nickname: Option<String>,
+    /// The custom WeChat ID the member chose, which they can change. Null when none is saved.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub alias: Option<String>,
     /// Name used for this member in mention text. It comes from their name in the group or their
     /// nickname, never from your private remark, and falls back to the username.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -678,8 +686,37 @@ pub struct NativeAccountRemoval {
     pub files_retained: bool,
 }
 
+/// Result of deleting an upload.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeUploadRelease {
+    /// True when this request deleted the upload; false when it was already gone.
+    pub released: bool,
+}
+
 pub fn typescript() -> String {
     let declarations = [
+        wechat_core::StickerPreparationRequest::decl(),
+        wechat_core::StickerPreparationTrim::decl(),
+        wechat_core::PreparedSticker::decl(),
+        wechat_core::CustomSticker::decl(),
+        wechat_core::CustomStickerList::decl(),
+        wechat_core::StickerCollection::decl(),
+        wechat_core::StickerCollections::decl(),
+        wechat_core::StickerPack::decl(),
+        wechat_core::StickerPackList::decl(),
+        wechat_core::StickerPackSticker::decl(),
+        wechat_core::StickerPackStickers::decl(),
+        wechat_core::CustomStickerSource::decl(),
+        wechat_core::AddCustomStickerRequest::decl(),
+        wechat_core::CustomStickerPosition::decl(),
+        wechat_core::MoveCustomStickerRequest::decl(),
+        wechat_core::StickerDownloadRequest::decl(),
+        wechat_core::StickerSendKind::decl(),
+        wechat_core::StickerSendSource::decl(),
+        wechat_core::StickerSendRequest::decl(),
+        wechat_core::StickerSyncRequest::decl(),
+        wechat_core::StickerSyncScope::decl(),
         wechat_core::call_types::CallClientHello::decl(),
         wechat_core::call_types::CallParticipant::decl(),
         wechat_core::call_types::CallMembership::decl(),
@@ -750,6 +787,7 @@ pub fn typescript() -> String {
         wechat_store::AccountSettings::decl(),
         NativeAccountRemovalRequest::decl(),
         NativeAccountRemoval::decl(),
+        NativeUploadRelease::decl(),
         wechat_core::QuoteSendReference::decl(),
         wechat_core::TextMentionPosition::decl(),
         wechat_core::TextMentions::decl(),
@@ -787,6 +825,11 @@ pub fn typescript() -> String {
         output.push('\n');
     }
     output
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
 }
 
 #[cfg(test)]

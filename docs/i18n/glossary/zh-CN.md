@@ -15,11 +15,13 @@ WeChat client's Simplified Chinese so the app reads like WeChat.
 | Official Account | 公众号 | |
 | service account | 服务号 | Never use 服务 alone for the hub |
 | Moments | 朋友圈 | |
+| WeChat Channels, Channels | 微信视频号, 视频号 | 视频号 in compounds: "Channels card" 视频号卡片, "Channels video" 视频号视频. Not 频道 |
 | mute notifications (a chat) | 消息免打扰 | 静音 only for a microphone |
 | pin a chat | 置顶聊天 | |
 | recall a message | 撤回 | |
 | mention, @ | @ 提醒 | "mention everyone": @所有人 |
 | sticker | 表情 | |
+| Saved (the account's own stickers) | 我的表情 | "Add to Saved": 添加到我的表情. Not 收藏 (WeChat Favorites) or 已保存 |
 | voice message | 语音消息 | |
 | File Transfer | 文件传输助手 | |
 | group announcement | 群公告 | |

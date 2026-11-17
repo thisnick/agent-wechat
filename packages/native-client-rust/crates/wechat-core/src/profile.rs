@@ -220,7 +220,7 @@ impl Core {
     pub fn group_members(&self, account: &str, room: &str, q: &ListQuery) -> Result<Value> {
         let reader = self.profile_reader_owned(account)?;
         let page = reader.group_members(room, q)?;
-        let mut items:Vec<_>=page.items.into_iter().map(|m|json!({"id":m.username,"username":m.username,"displayName":m.label,"roomDisplayName":m.room_display_name,"mentionName":crate::mention_send::mention_name(&m)})).collect();
+        let mut items:Vec<_>=page.items.into_iter().map(|m|json!({"id":m.username,"username":m.username,"displayName":m.label,"roomDisplayName":m.room_display_name,"nickname":m.contact.nickname,"alias":m.contact.alias,"mentionName":crate::mention_send::mention_name(&m)})).collect();
         self.classify_peers(&mut items, &reader)?;
         Ok(
             json!({"items":items,"nextCursor":page.next_cursor,"sourceGeneration":page.source_generation,"coverage":page.coverage}),
@@ -348,9 +348,10 @@ pub(crate) fn normalized_message(
         .as_ref()
         .filter(|a| a.subtype == 57)
         .and_then(|a| crate::quotes::embedded_quote(a, own));
-    let link = app.as_ref().and_then(|a| a.link.as_ref()).map(|l| &l.card);
-    if let Some(link) = link {
-        text = Some(link.body());
+    let parsed_link = app.as_ref().and_then(|a| a.link.as_ref());
+    let link = parsed_link.map(|l| &l.card);
+    if let Some(parsed) = parsed_link {
+        text = Some(parsed.body());
     }
     if let Some(body) = app.as_ref().and_then(|a| a.text.as_ref()) {
         text = Some(body.clone());

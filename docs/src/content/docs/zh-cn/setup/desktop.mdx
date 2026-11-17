@@ -1,7 +1,7 @@
 ---
 title: 桌面应用
 description: 使用本地 agent-wechat Hub 或将桌面端连接到其他 Hub 节点。
-sourceHash: bd11e33f63f2
+sourceHash: fa9febf339f5
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -21,6 +21,19 @@ import { Aside } from '@astrojs/starlight/components';
 4. 打开 **设置 (Settings)** 配置网络访问权限、安装全局 `wx` 命令，或导出访问密钥供其他客户端使用。
 
 该应用在当前用户权限下运行，使用系统原生凭据管理和文件对话框；网络访问权限和开机自启均为可选配置。如果需要允许外部局域网设备连接，可能需要在系统防火墙中放行相应端口。
+
+## 本地 Hub 何时运行 \{#when-the-local-hub-runs}
+
+本地 Hub 仅在应用打开且需要它时运行：
+
+| 情况 | 本地 Hub |
+| --- | --- |
+| 选择了 **使用此设备** | 运行，包括窗口关闭到托盘或状态栏时 |
+| 选择了其他 Hub | 停止，除非开启了 **设置 → 保持此设备的 Hub 运行** |
+| 退出 AgentWechat：菜单、⌘Q、程序坞、注销 | 停止 |
+| 应用崩溃或被强制退出 | 片刻后自行停止 |
+
+如果希望在窗口显示其他 Hub 时，`wx` 命令或其他应用仍能连接此设备的 Hub，请开启 **保持此设备的 Hub 运行**。如果之前的会话留下了仍在运行的 Hub，应用会提示并提供 **停止遗留的 Hub**。它只会停止使用此应用数据和访问密钥的 Hub。
 
 ## 连接命令行工具 (CLI) \{#connect-the-cli}
 
@@ -71,5 +84,5 @@ Web 客户端为每个视图提供了独立的 URL 路径，因此刷新、后�
 若未弹出通知，请前往 **系统设置 → 通知** 中允许 AgentWechat 发送通知。
 
 <Aside title="使用提示">
-配置完成后，每当打开应用时本地 Hub 会自动启动（即使当前图形界面连接的是远程节点）。关闭窗口后应用仍将在托盘或状态栏中后台运行。如需彻底停止服务，请选择 **退出 AgentWechat**。退出程序不会导致微信退出登录或删除 Profile。Linux 桌面端需要运行未锁定的 Secret Service 密钥环。单独安装的 CLI 无法直接读取桌面密钥环，需导出密钥文件或创建独立的 [API 令牌](/reference/tokens/)。
+退出程序不会导致微信退出登录或删除 Profile。Linux 桌面端需要运行未锁定的 Secret Service 密钥环。单独安装的 CLI 无法直接读取桌面密钥环，需导出密钥文件或创建独立的 [API 令牌](/reference/tokens/)。
 </Aside>

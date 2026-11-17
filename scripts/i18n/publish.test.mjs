@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MACHINE_NOTICE, allowedPath, changedKeys, count, planWork, prBody, readAsCurrent, withNotice } from './publish.mjs';
+import { allowedPath, changedKeys, count, planWork, prBody, readAsCurrent } from './publish.mjs';
 import { checkUi } from './index.mjs';
-import { frontmatter, hash } from './docs.mjs';
+import { hash } from './docs.mjs';
 
 test('the bot may change only translation files of the languages it is translating', () => {
   const scope = { tags: ['zh-CN'], folders: ['zh-cn'] };
@@ -36,14 +36,6 @@ test('the work list carries the English and current text for missing and stale i
   assert.equal(work['zh-CN'].docs[0].translation, 'docs/src/content/docs/zh-cn/setup/run.mdx');
 });
 
-test('machine-translated pages get a banner once; a reviewed page without one keeps none', () => {
-  const page = '---\ntitle: 运行\n---\n\n正文';
-  const marked = withNotice(page, '本页由机器翻译。');
-  assert.match(marked, /^---\ntitle: 运行\nbanner:\n {2}content: "本页由机器翻译。"\n---\n/);
-  assert.equal(withNotice(marked, 'again'), marked);
-  assert.equal(frontmatter(marked).fields.title, '运行');
-});
-
 test('the pull request body lists counts, dropped items and the back-translation', () => {
   const work = { 'zh-CN': { ui: [{}, {}], docs: [{}] } };
   const body = prBody({ work, report: { dropped: ['zh-CN: app.hello'], restored: ['README.md'] }, source: '12', backTranslation: '### zh-CN\n- `app.hello`: Hello' });
@@ -52,7 +44,6 @@ test('the pull request body lists counts, dropped items and the back-translation
   assert.match(body, /- zh-CN: app.hello/);
   assert.match(body, /- `README.md`/);
   assert.match(body, /<summary>Back-translation/);
-  assert.ok(MACHINE_NOTICE.length > 0);
 });
 
 test('a re-translated stale string is checked as current, so a broken one is caught', () => {

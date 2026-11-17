@@ -15,9 +15,6 @@ import { fileURLToPath } from 'node:url';
 import { baseKey, checkUi, flatten, loadUi, root, stampLanguage, status, ui } from './index.mjs';
 import { compareDocs, docs, hash, stamp } from './docs.mjs';
 
-/** Shown on machine-translated docs pages until a person reviews them. */
-export const MACHINE_NOTICE = 'This page was translated by machine and not yet reviewed by a person.';
-
 /**
  * Which files the bot may change: a translation catalog (never en.json or its meta
  * file is written by finish, not Claude) or a page in a translated docs folder.
@@ -103,13 +100,6 @@ export function readAsCurrent(read, work, en) {
   };
 }
 
-/** Adds the machine-translation notice to a docs page's frontmatter (Starlight's `banner`). */
-export function withNotice(text, notice) {
-  const match = text.match(/^---\n([\s\S]*?)\n---\n?/);
-  if (!match || /^banner:/m.test(match[1])) return text;
-  return `---\n${match[1]}\nbanner:\n  content: ${JSON.stringify(notice)}\n---\n${text.slice(match[0].length)}`;
-}
-
 async function finish(file) {
   const work = JSON.parse(readFileSync(file, 'utf8'));
   const tags = Object.keys(work);
@@ -152,12 +142,10 @@ async function finish(file) {
     report.dropped.push(`${path}: ${message}`);
   }
   // 3. Record what is left as machine-translated from the current English.
-  const notices = existsSync(join(process.env.RUNNER_TEMP ?? '/tmp', 'notices.json')) ? JSON.parse(readFileSync(join(process.env.RUNNER_TEMP ?? '/tmp', 'notices.json'), 'utf8')) : {};
   for (const [tag, entry] of Object.entries(work)) {
     const catalog = existsSync(join(root, `${ui.locales}/${tag}.json`)) ? flatten(JSON.parse(read(`${ui.locales}/${tag}.json`))) : {};
     const keys = changedKeys(catalog, entry);
     const written = entry.docs.filter(item => existsSync(join(root, item.translation)) && git('status', '--porcelain', item.translation));
-    for (const item of written) writeFileSync(join(root, item.translation), withNotice(read(item.translation), notices[tag] || MACHINE_NOTICE));
     const items = [...keys, ...written.map(item => item.page)];
     if (items.length) await stampLanguage(tag, { machine: true, items });
   }
@@ -170,7 +158,7 @@ export function prBody({ work, report, source, backTranslation }) {
   const lines = [
     source ? `Translations for the English changes in #${source}. Merge this into that branch before merging it.` : 'Translations for English changes on main.',
     '',
-    'Written by Claude (Haiku) and checked by `pnpm i18n check`; nothing here has been reviewed by a person yet. Docs pages carry a "translated by machine" banner until someone reviews and removes it.',
+    'Written by Claude (Haiku) and checked by `pnpm i18n check`; nothing here has been reviewed by a person yet.',
     '',
     '| Language | UI strings | Docs pages |',
     '| --- | --- | --- |',

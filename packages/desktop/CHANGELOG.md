@@ -1,5 +1,71 @@
 # @agent-wechat/desktop
 
+## 2.6.0
+
+### Minor Changes
+
+- [#541](https://github.com/thisnick/agent-wechat/pull/541) [`49d3614`](https://github.com/thisnick/agent-wechat/commit/49d36143a1b7dd5e4f11330b6ef12e86eea40ca1) Thanks [@thisnick](https://github.com/thisnick)! - The desktop app's local hub now runs only while the app needs it. It runs while **This device** is selected and stops when you switch to another hub, unless the new **Settings → Keep this device’s hub running** option is on; turn that on if the `wx` command or another app used this device's hub while the window showed a remote hub. Quitting with ⌘Q, from the Dock or by logging out now stops the hub too; before, only **Quit AgentWechat** in the tray or menu bar did, and the other ways left the hub running and holding its port. If an earlier session left its hub running, the app says so instead of failing to open the selected hub, and offers **Stop leftover hub**, which checks that the hub uses this app's data and key before stopping it.
+
+  `wx serve --exit-with-parent` stops the daemon gracefully once the process that started it exits, and `wx --json version` lists it as the `serve-exit-with-parent` capability. The desktop app starts its hub with it, so a crash or forced quit no longer leaves the hub behind. OpenClaw managed mode passes it too when the `wx` it finds reports that capability, so a Gateway that crashes or is killed no longer leaves its daemon holding the port; an older `wx` starts as before.
+
+### Patch Changes
+
+- [#553](https://github.com/thisnick/agent-wechat/pull/553) [`d0e0e7d`](https://github.com/thisnick/agent-wechat/commit/d0e0e7d483b1d7d78d1f0f152a17f05de2e3d963) Thanks [@thisnick](https://github.com/thisnick)! - The message box's **Original media quality** choice now also covers images. When it is checked, each staged image is sent with a full-resolution original as well as the compressed copy, as each staged video already includes its unchanged file. The choice appears whenever an image or video is staged, and its help explains what it adds for each. Standard image sends are unchanged.
+
+- Updated dependencies [[`d0e0e7d`](https://github.com/thisnick/agent-wechat/commit/d0e0e7d483b1d7d78d1f0f152a17f05de2e3d963)]:
+  - @agent-wechat/client-ui@0.4.3
+
+## 2.5.0
+
+### Minor Changes
+
+- [#525](https://github.com/thisnick/agent-wechat/pull/525) [`4859bba`](https://github.com/thisnick/agent-wechat/commit/4859bba2f047391142ddde69bf59fe33d834f45c) Thanks [@thisnick](https://github.com/thisnick)! - **Add to Saved** now lets you choose each sticker's size before adding it. Every file shows its prepared dimensions, file size and length, and a **Size** slider shrinks it: images start at their original size (anything over WeChat's 1024-pixel limit starts at 1024), videos at 240 pixels. A mark on the slider shows about 384 pixels, the largest size phones display stickers at. Videos also get **Smoothness** (frames per second), **Start** and **Length**. The preview is prepared again shortly after you stop moving a control, earlier settings come back instantly, and a result too large or too long to send is explained in plain words. **Add** waits until every selected file matches its controls.
+
+- [#525](https://github.com/thisnick/agent-wechat/pull/525) [`aca8954`](https://github.com/thisnick/agent-wechat/commit/aca8954edb2129f44142acea9b1e1990b5d7e4eb) Thanks [@thisnick](https://github.com/thisnick)! - Stickers are no longer limited to 240 pixels. Images and GIFs up to 1024 pixels, the largest sticker WeChat saves, keep their size and encoding, so larger stickers stay sharp on high-resolution screens. A larger file is refused unless you ask to shrink it: `fit` now shrinks to 1024 pixels, and the new `maxEdge` option (`--max-edge` in the CLI) shrinks the longest side to any size from 16 to 1024 pixels. Stickers made from video can set their size with `maxEdge` and their frame rate with the new `fps` option (`--fps`, 1–30); they default to 240 pixels at 10 fps as before. A trim now applies before the 200-frame and 10-second checks, so part of a longer GIF can be kept. Preparing a large animation no longer needs memory for every frame at once.
+
+- [#525](https://github.com/thisnick/agent-wechat/pull/525) [`25442d7`](https://github.com/thisnick/agent-wechat/commit/25442d7bff89c8695abbbb2b346c76e14f0c16d3) Thanks [@thisnick](https://github.com/thisnick)! - Stickers can now be made from videos up to 512 MB; images and GIFs stay limited to 64 MB. Uploads are written to disk as they arrive, and sticker preparation reads the video from a temporary file, so a large source no longer needs its whole size in the daemon's memory. **Add to Saved** deletes each upload once its sticker is added, or when the dialog closes, and says separately whether a file is empty or too large. API clients can do the same with the new `DELETE /uploads/{id}`, which returns 409 `upload_in_use` while a send or preparation still needs the upload. The daemon now also deletes finished uploads every hour instead of only at startup. The OpenClaw sticker tool keeps its 64 MB limit, because OpenClaw's workspace bridge reads a whole file into memory.
+
+## 2.4.2
+
+### Patch Changes
+
+- [#515](https://github.com/thisnick/agent-wechat/pull/515) [`f9ce53a`](https://github.com/thisnick/agent-wechat/commit/f9ce53a3cfee711d7cfe51008b385bf56b116e7f) Thanks [@thisnick](https://github.com/thisnick)! - Received WeChat Channels cards now show the post's cover, publisher, description and length instead of WeChat's "please upgrade" notice, and the message body no longer contains that notice or its link. The post's video is listed as a `video` asset that downloads only on request: open it in the desktop app, run `wx messages media CHAT MESSAGE_ID --quality normal`, or have an OpenClaw agent call `wechat_media`. Each request fetches a fresh copy from WeChat, and the downloaded video is kept in the daemon's media files. OpenClaw agents get the post text and cover by default. Media tools in a sandboxed OpenClaw agent now say a downloaded file isn't reachable from the agent's shell instead of returning a path it can't open.
+
+- [#509](https://github.com/thisnick/agent-wechat/pull/509) [`1cb9d4a`](https://github.com/thisnick/agent-wechat/commit/1cb9d4a274ef1877071760ae4324f8ab7b7b3e14) Thanks [@thisnick](https://github.com/thisnick)! - Add `wx groups members list --search` to find members of one group by ID, WeChat ID, nickname, remark or name in the group. Member search now also matches a member's nickname, WeChat ID and name in the group when you have given them a remark, so mention suggestions find them too. Group member rows now include `nickname` and `alias`. Correct the help text for `wx contacts lookup` and `wx groups lookup`: both ask WeChat directly and don't save the result, and contact lookup accepts one or two IDs.
+
+- [#518](https://github.com/thisnick/agent-wechat/pull/518) [`ae198c0`](https://github.com/thisnick/agent-wechat/commit/ae198c04c4a5642d8d69ab168aa3b6b699c51bca) Thanks [@thisnick](https://github.com/thisnick)! - Keep a conversation scrolled to the newest message when a photo near the bottom finishes loading. The photo used to replace its placeholder before its size was known, which could leave the conversation scrolled up with the photo out of view.
+
+## 2.4.1
+
+### Patch Changes
+
+- [#495](https://github.com/thisnick/agent-wechat/pull/495) [`7bcef20`](https://github.com/thisnick/agent-wechat/commit/7bcef20d8c3c0e8fa7b57e438b32f7c929b9469a) Thanks [@thisnick](https://github.com/thisnick)! - Fix adding larger custom stickers by splitting encrypted upload requests across transport records. Preserve collection revision headers in the desktop app so moving and removing Saved stickers reaches the daemon with the required precondition.
+
+  Make Add to Saved use one primary Add button, show saving progress, and return to Saved after successful imports. Keep partial failures open for retry without resubmitting completed items.
+
+  Simplify import review to previews and file selection by removing fit, start and duration controls.
+
+  Accept verified complete-upload acknowledgements when adding previously uploaded stickers again. Show sticker job failures separately from connection errors, and show the dragged sticker and its drop position while reordering Saved. Keep edit controls still instead of jiggling.
+
+- Updated dependencies [[`7bcef20`](https://github.com/thisnick/agent-wechat/commit/7bcef20d8c3c0e8fa7b57e438b32f7c929b9469a)]:
+  - @agent-wechat/client-ui@0.4.2
+
+## 2.4.0
+
+### Minor Changes
+
+- [#481](https://github.com/thisnick/agent-wechat/pull/481) [`e9f2b12`](https://github.com/thisnick/agent-wechat/commit/e9f2b126cbf61869f8fe21214847742c4f276fa2) Thanks [@thisnick](https://github.com/thisnick)! - Add Saved sticker import, placement, removal, preparation and sends, plus official pack browsing, details, membership, media acquisition and one-pack GIF export. The composer gains a sticker tray, in-tray editing, import review and pack browsing. REST resources, generated contracts and account-bound Rust operations share durable jobs and official profile storage. OpenClaw manages Saved, sends existing references through the standard message action, delivers visual previews and transfers files through the host's execution-workspace bridge. Outbound media honors the host's remote file reader.
+
+### Patch Changes
+
+- [#481](https://github.com/thisnick/agent-wechat/pull/481) [`6098ebf`](https://github.com/thisnick/agent-wechat/commit/6098ebfa592b4695617f09b52f39297ed796e904) Thanks [@thisnick](https://github.com/thisnick)! - Share recent sticker catalog metadata across clients and release the account writer during sticker operations, contact and room lookups, group mutations and recalls. Preserve operation ordering, accepted receipts and session fences. Read added packs and already indexed message media on consistent snapshots. Show confirmed pack membership before refreshing previews.
+
+- [#481](https://github.com/thisnick/agent-wechat/pull/481) [`27e73c4`](https://github.com/thisnick/agent-wechat/commit/27e73c48ab189d17e5d48bbd86b5c7af1e4c53d7) Thanks [@thisnick](https://github.com/thisnick)! - Speed up sticker pack browsing by loading only visible previews, pausing the obscured tray, and removing duplicate collection and post-membership detail reads. Reuse recent catalog and pack views for up to one minute, invalidating them on collection changes, reconnection, event gaps and mutations.
+
+- [#481](https://github.com/thisnick/agent-wechat/pull/481) [`9e97480`](https://github.com/thisnick/agent-wechat/commit/9e9748097724c7530c42ab9a650858d13d3aef2f) Thanks [@thisnick](https://github.com/thisnick)! - Show a loading message while sticker collections are being fetched. Only show the empty message after an empty response, and keep an already selected pack visible when its tab is clicked again.
+
+- [#481](https://github.com/thisnick/agent-wechat/pull/481) [`e9bc9f1`](https://github.com/thisnick/agent-wechat/commit/e9bc9f1dc0c47a42e0ccd6e2b967f4a1c4e13b85) Thanks [@thisnick](https://github.com/thisnick)! - Load missing Saved sticker media and official pack thumbnails when tiles enter the composer tray viewport. Limit concurrent transfers, skip off-screen metadata reads, and discard obsolete pack responses when switching tabs.
+
 ## 2.3.2
 
 ### Patch Changes

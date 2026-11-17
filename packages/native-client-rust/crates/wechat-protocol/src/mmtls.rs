@@ -11,6 +11,7 @@ use std::{
 use zeroize::Zeroize;
 
 pub const VERSION: u16 = 0xf104;
+const MAX_RECORD_PLAINTEXT: usize = u16::MAX as usize - 16;
 pub struct Cursor<'a> {
     bytes: &'a [u8],
     offset: usize,
@@ -72,7 +73,10 @@ pub fn nonce(iv: &[u8], sequence: u64) -> Result<[u8; 12]> {
     Ok(b)
 }
 pub fn seal(kind: u8, plain: &[u8], key: &[u8], iv: &[u8], sequence: u64) -> Result<Vec<u8>> {
-    ensure!(plain.len() <= 65519, "MMTLS plaintext too large");
+    ensure!(
+        plain.len() <= MAX_RECORD_PLAINTEXT,
+        "MMTLS plaintext too large"
+    );
     let header = frame(kind, &vec![0; plain.len() + 16])?[..5].to_vec();
     let aad = [sequence.to_be_bytes().as_slice(), &header].concat();
     let (cipher, tag) = gcm_seal(key, &nonce(iv, sequence)?, &aad, plain)?;
@@ -155,6 +159,52 @@ impl Drop for ShortSession {
         self.access_psk.zeroize();
         self.ticket.opaque.zeroize();
         self.ticket.nonce.zeroize();
+    }
+}
+
+/// Longest reuse of one short-link ticket, even when its lifetime is longer.
+const SHORT_LINK_MAX_REUSE: Duration = Duration::from_secs(3600);
+/// Stop reusing a ticket this long before its advertised lifetime ends.
+const SHORT_LINK_EXPIRY_MARGIN: Duration = Duration::from_secs(60);
+
+/// The short-link resumption ticket an account's owner reuses between
+/// requests. The long-link handshake issues an access PSK and ticket with a
+/// lifetime; short-link requests present it, so a new long-link handshake is
+/// only needed when no ticket is cached for the host, the cached one is near
+/// the end of its lifetime, or a short exchange that used it failed. Held only
+/// in memory and zeroized with the session when replaced.
+#[derive(Default)]
+pub(crate) struct ShortLinkCache {
+    entry: std::sync::Mutex<Option<(String, ShortSession, Instant)>>,
+}
+impl ShortLinkCache {
+    /// A clone of the cached ticket for `host` while it is still reusable.
+    pub(crate) fn get(&self, host: &str) -> Option<ShortSession> {
+        self.get_at(host, Instant::now())
+    }
+    fn get_at(&self, host: &str, now: Instant) -> Option<ShortSession> {
+        let entry = self.entry.lock().ok()?;
+        let (cached_host, session, issued) = entry.as_ref()?;
+        let lifetime = Duration::from_secs(u64::from(session.ticket.lifetime))
+            .saturating_sub(SHORT_LINK_EXPIRY_MARGIN)
+            .min(SHORT_LINK_MAX_REUSE);
+        (cached_host == host && now.saturating_duration_since(*issued) < lifetime)
+            .then(|| session.clone())
+    }
+    /// Remember the ticket a long-link handshake to `host` just issued.
+    pub(crate) fn put(&self, host: &str, session: ShortSession) {
+        self.put_at(host, session, Instant::now());
+    }
+    fn put_at(&self, host: &str, session: ShortSession, issued: Instant) {
+        if let Ok(mut entry) = self.entry.lock() {
+            *entry = Some((host.to_string(), session, issued));
+        }
+    }
+    /// Forget the cached ticket so the next request performs a handshake.
+    pub(crate) fn invalidate(&self) {
+        if let Ok(mut entry) = self.entry.lock() {
+            *entry = None;
+        }
     }
 }
 pub struct Session {
@@ -773,13 +823,25 @@ fn prepare_short_exchange(
         ]
         .concat(),
     );
-    let wire = [
+    let mut wire = [
         frame(0x19, &hello)?,
         seal(0x19, &extensions, &keys[..16], &keys[16..], 1)?,
-        seal(0x17, &route, &keys[..16], &keys[16..], 2)?,
-        seal(0x15, &section(&[0, 1, 1]), &keys[..16], &keys[16..], 3)?,
     ]
     .concat();
+    // The route is one application message, but large encrypted upload chunks
+    // span records. Every data record and the close use consecutive nonces.
+    let mut sequence = 2;
+    for chunk in route.chunks(MAX_RECORD_PLAINTEXT) {
+        wire.extend(seal(0x17, chunk, &keys[..16], &keys[16..], sequence)?);
+        sequence += 1;
+    }
+    wire.extend(seal(
+        0x15,
+        &section(&[0, 1, 1]),
+        &keys[..16],
+        &keys[16..],
+        sequence,
+    )?);
     Ok((hello, extensions, wire))
 }
 
@@ -949,6 +1011,117 @@ fn decode_short_reply(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn short_link_tickets_are_reused_per_host_within_their_lifetime() {
+        use super::*;
+        let session = |lifetime: u32| ShortSession {
+            access_psk: vec![0x42; 32],
+            ticket: Ticket {
+                kind: 1,
+                lifetime,
+                reserved: 0,
+                nonce: vec![0; 12],
+                opaque: vec![1],
+            },
+        };
+        let start = Instant::now();
+        let cache = ShortLinkCache::default();
+        assert!(cache.get_at("long.example", start).is_none());
+        cache.put_at("long.example", session(600), start);
+        let reused = cache
+            .get_at("long.example", start + Duration::from_secs(539))
+            .expect("reused inside the lifetime margin");
+        assert_eq!(reused.access_psk, vec![0x42; 32]);
+        // Another host, the expiry margin and invalidation all force a handshake.
+        assert!(cache.get_at("other.example", start).is_none());
+        assert!(cache
+            .get_at("long.example", start + Duration::from_secs(540))
+            .is_none());
+        cache.invalidate();
+        assert!(cache.get_at("long.example", start).is_none());
+        // Reuse is capped at an hour, and a ticket without lifetime is not reused.
+        cache.put_at("long.example", session(86_400), start);
+        assert!(cache
+            .get_at("long.example", start + Duration::from_secs(3599))
+            .is_some());
+        assert!(cache
+            .get_at("long.example", start + Duration::from_secs(3600))
+            .is_none());
+        cache.put_at("long.example", session(0), start);
+        assert!(cache.get_at("long.example", start).is_none());
+    }
+    #[test]
+    fn short_requests_split_large_uploads_and_authenticate_the_close_sequence() {
+        let session = ShortSession {
+            access_psk: vec![0x42; 32],
+            ticket: Ticket {
+                kind: 1,
+                lifetime: 3600,
+                reserved: 0,
+                nonce: vec![0x24; 12],
+                opaque: vec![0x17; 32],
+            },
+        };
+        for size in [0, 60_000, 98_400, 200_000] {
+            let payload = vec![0xa5; size];
+            let (hello, extensions, wire) = prepare_short_exchange(
+                &session,
+                "short.weixin.qq.com",
+                "/cgi-bin/micromsg-bin/mmemojiupload",
+                &payload,
+            )
+            .unwrap();
+            let keys = expand(
+                &session.access_psk,
+                &[b"early data key expansion".as_slice(), &sha256(&hello)].concat(),
+                28,
+            )
+            .unwrap();
+            let mut cursor = Cursor::new(&wire);
+            let mut records = Vec::new();
+            while cursor.offset < wire.len() {
+                let header: [u8; 5] = cursor.take(5).unwrap().try_into().unwrap();
+                let length = u16::from_be_bytes([header[3], header[4]]) as usize;
+                records.push(Record {
+                    header,
+                    body: cursor.take(length).unwrap().to_vec(),
+                });
+            }
+            assert_eq!(records[0].header[0], 0x19);
+            assert_eq!(records[0].body, hello);
+            assert_eq!(
+                open(&records[1], &keys[..16], &keys[16..], 1).unwrap(),
+                extensions
+            );
+            let mut route = Vec::new();
+            for (sequence, record) in records[2..records.len() - 1].iter().enumerate() {
+                assert_eq!(record.header[0], 0x17);
+                route.extend(open(record, &keys[..16], &keys[16..], sequence as u64 + 2).unwrap());
+            }
+            let expected = section(
+                &[
+                    sized(b"/cgi-bin/micromsg-bin/mmemojiupload").unwrap(),
+                    sized(b"short.weixin.qq.com").unwrap(),
+                    section(&payload),
+                ]
+                .concat(),
+            );
+            assert_eq!(route, expected);
+            let close = records.last().unwrap();
+            assert_eq!(close.header[0], 0x15);
+            assert_eq!(
+                open(close, &keys[..16], &keys[16..], records.len() as u64 - 1).unwrap(),
+                section(&[0, 1, 1])
+            );
+            assert!(open(close, &keys[..16], &keys[16..], records.len() as u64).is_err());
+            if size <= 60_000 {
+                assert_eq!(records.len(), 4);
+            } else {
+                assert!(records.len() > 4);
+            }
+        }
+    }
+
     #[test]
     fn fresh_handshake_secret_requires_the_selected_p256_width() {
         for wrong in [0, 28, 31, 33] {

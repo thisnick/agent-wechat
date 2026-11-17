@@ -116,10 +116,10 @@ export function seeder(stack) {
       const done = await until(
         "the group to be created",
         () => client.operation(ACCOUNT.id, operation.id),
-        (current) => ["succeeded", "failed", "rejected", "cancelled"].includes(current.state),
+        (current) => ["succeeded", "failed", "rejected", "cancelled", "needs_review"].includes(current.state),
       );
       if (done.state !== "succeeded" || typeof done.result?.groupId !== "string")
-        throw new Error(`Group creation ${done.state}`);
+        throw new Error(`Group creation ${done.state}: ${done.result?.code ?? "group result unavailable"}`);
       return done.result.groupId;
     },
     /** Waits until the hub lists the conversation with a message, since the hub learns of new messages by sync. */

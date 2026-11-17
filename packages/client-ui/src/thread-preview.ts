@@ -49,6 +49,10 @@ export function messageSummary(
       ? message.body?.trim() || t("threadPreview.forwardedMessages")
       : ["text", "reply"].includes(kind)
       ? message.body || t("threadPreview.message")
+      : kind === "link" && message.type === 49 && message.appMessageType === 51
+      ? [t("threadPreview.channelsVideo"), message.link?.description?.trim()]
+          .filter(Boolean)
+          .join(": ")
       : kind === "link"
       ? message.link?.title || t("threadPreview.link")
       : message.type === 48 && message.location

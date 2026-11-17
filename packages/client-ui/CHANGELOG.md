@@ -1,5 +1,23 @@
 # @agent-wechat/client-ui
 
+## 0.4.3
+
+### Patch Changes
+
+- [#553](https://github.com/thisnick/agent-wechat/pull/553) [`d0e0e7d`](https://github.com/thisnick/agent-wechat/commit/d0e0e7d483b1d7d78d1f0f152a17f05de2e3d963) Thanks [@thisnick](https://github.com/thisnick)! - The message box's **Original media quality** choice now also covers images. When it is checked, each staged image is sent with a full-resolution original as well as the compressed copy, as each staged video already includes its unchanged file. The choice appears whenever an image or video is staged, and its help explains what it adds for each. Standard image sends are unchanged.
+
+## 0.4.2
+
+### Patch Changes
+
+- [#495](https://github.com/thisnick/agent-wechat/pull/495) [`7bcef20`](https://github.com/thisnick/agent-wechat/commit/7bcef20d8c3c0e8fa7b57e438b32f7c929b9469a) Thanks [@thisnick](https://github.com/thisnick)! - Fix adding larger custom stickers by splitting encrypted upload requests across transport records. Preserve collection revision headers in the desktop app so moving and removing Saved stickers reaches the daemon with the required precondition.
+
+  Make Add to Saved use one primary Add button, show saving progress, and return to Saved after successful imports. Keep partial failures open for retry without resubmitting completed items.
+
+  Simplify import review to previews and file selection by removing fit, start and duration controls.
+
+  Accept verified complete-upload acknowledgements when adding previously uploaded stickers again. Show sticker job failures separately from connection errors, and show the dragged sticker and its drop position while reordering Saved. Keep edit controls still instead of jiggling.
+
 ## 0.4.1
 
 ### Patch Changes

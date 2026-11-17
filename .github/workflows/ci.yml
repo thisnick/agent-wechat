@@ -18,23 +18,12 @@ on:
       - '.github/workflows/native-image.yml'
       - '.github/workflows/native-distribution.yml'
       - '.github/workflows/desktop.yml'
-      - 'scripts/client-ui-smoke.mjs'
       - 'scripts/i18n/**'
-      - 'scripts/native-release-notes*.mjs'
-      - 'scripts/native-release-policy*.mjs'
-      - 'scripts/native-release-orchestration*.mjs'
-      - 'scripts/native-release-trigger*.mjs'
-      - 'scripts/native-crates*'
-      - 'scripts/native-sync-version*'
+      - 'scripts/ci/**'
+      - 'scripts/release/**'
+      - 'scripts/smoke/media-assertions*.mjs'
       - '.github/workflows/rust-crates.yml'
-      - 'scripts/native-ci-*'
-      - 'scripts/native-build-release.test.py'
-      - 'scripts/native-release-preflight*.mjs'
-      - 'scripts/native-merge-release*.mjs'
-      - 'scripts/native-image-release*.mjs'
       - '.changeset/**'
-      - 'scripts/install-ci-npm.sh'
-      - 'scripts/verify-ci-publisher*.mjs'
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -59,17 +48,18 @@ jobs:
           filters: |
             helpers:
               - 'packages/skills/**'
-              - 'scripts/native-ci-*'
-              - 'scripts/native-build-release*'
-              - 'scripts/native-release-preflight*'
-              - 'scripts/native-merge-release*'
-              - 'scripts/native-image-release*'
+              - 'scripts/ci/**'
+              - 'scripts/smoke/media-assertions*.mjs'
+              - 'scripts/release/build*'
+              - 'scripts/release/preflight*'
+              - 'scripts/release/merge*'
+              - 'scripts/release/image*'
               - '.github/workflows/ci.yml'
               - '.github/workflows/native-*.yml'
               - '.github/workflows/desktop.yml'
             release:
-              - 'scripts/native-crates*'
-              - 'scripts/native-sync-version*'
+              - 'scripts/release/crates*'
+              - 'scripts/release/sync-version*'
               - 'packages/rust-crates/**'
               - 'packages/native-client-rust/**/Cargo.toml'
               - '.github/workflows/rust-crates.yml'
@@ -77,19 +67,18 @@ jobs:
               - '.github/workflows/release.yml'
               - '.github/workflows/native-release.yml'
               - '.github/workflows/native-image.yml'
-              - 'scripts/native-release-notes*.mjs'
-              - 'scripts/native-release-policy*.mjs'
-              - 'scripts/native-release-orchestration*.mjs'
-              - 'scripts/native-release-trigger*.mjs'
+              - 'scripts/release/notes*.mjs'
+              - 'scripts/release/policy*.mjs'
+              - 'scripts/release/orchestration*.mjs'
+              - 'scripts/release/trigger*.mjs'
               - '.changeset/**'
-              - 'scripts/install-ci-npm.sh'
-              - 'scripts/verify-ci-publisher*.mjs'
+              - 'scripts/ci/install-npm.sh'
+              - 'scripts/release/verify-publisher*.mjs'
             ts:
               - 'packages/desktop/**'
               - 'packages/cli/**'
               - 'packages/shared/**'
               - 'packages/client-ui/**'
-              - 'scripts/client-ui-smoke.mjs'
               - 'scripts/i18n/**'
               - 'packages/openclaw-extension/**'
               - '.node-version'
@@ -119,18 +108,18 @@ jobs:
         with:
           node-version-file: .node-version
       - run: pnpm install --filter agent-wechat --frozen-lockfile --ignore-scripts
-      - run: bash -n scripts/install-ci-npm.sh
-      - run: bash scripts/install-ci-npm.sh
+      - run: bash -n scripts/ci/install-npm.sh
+      - run: bash scripts/ci/install-npm.sh
       - run: |
           test "$(npm --version)" = "11.12.1"
-          node --test scripts/verify-ci-publisher.test.mjs
-          node --test scripts/native-release-notes.test.mjs
-          node --test scripts/native-release-policy.test.mjs
-          node --test scripts/native-release-orchestration.test.mjs
-          node --test scripts/native-release-trigger.test.mjs
-          node --test scripts/native-crates*.test.mjs scripts/native-sync-version.test.mjs
-          node scripts/native-release-notes.mjs --output "$RUNNER_TEMP/native-release-notes.md"
-          node scripts/verify-ci-publisher.mjs
+          node --test scripts/release/verify-publisher.test.mjs
+          node --test scripts/release/notes.test.mjs
+          node --test scripts/release/policy.test.mjs
+          node --test scripts/release/orchestration.test.mjs
+          node --test scripts/release/trigger.test.mjs
+          node --test scripts/release/crates*.test.mjs scripts/release/sync-version.test.mjs
+          node scripts/release/notes.mjs --output "$RUNNER_TEMP/native-release-notes.md"
+          node scripts/release/verify-publisher.mjs
 
   ts:
     needs: changes
@@ -181,11 +170,11 @@ jobs:
           node-version-file: .node-version
       - name: Check CI build and artifact helpers
         run: |
-          python3 scripts/native-ci-cache-key.test.py
-          python3 scripts/native-ci-build.test.py
-          python3 scripts/native-build-release.test.py
-          node --test scripts/native-ci-artifact.test.mjs scripts/native-ci-media-assertions.test.mjs scripts/native-release-preflight.test.mjs scripts/native-merge-release.test.mjs
-          node --test scripts/native-image-release.test.mjs
+          python3 scripts/ci/cache-key.test.py
+          python3 scripts/ci/build.test.py
+          python3 scripts/release/build.test.py
+          node --test scripts/ci/artifact.test.mjs scripts/smoke/media-assertions.test.mjs scripts/release/preflight.test.mjs scripts/release/merge.test.mjs
+          node --test scripts/release/image.test.mjs
           bash packages/skills/agent-wechat/scripts/test-skill.sh
 
   docs:

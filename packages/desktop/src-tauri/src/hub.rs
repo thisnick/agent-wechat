@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
+    sync::atomic::{AtomicU32, Ordering},
     time::Duration,
 };
 use tokio::{
@@ -98,11 +99,15 @@ pub fn executable(resource: &Path, name: &str) -> Result<PathBuf> {
 }
 /// How long a hub that is still running may take to start listening.
 const STARTUP_LIMIT: Duration = Duration::from_secs(10 * 60);
+/// Starts this device's hub as a child of the app. `pid` holds the child's
+/// process ID from the moment it is spawned, so the app can stop it while it
+/// is still starting; the caller clears it once the child has stopped.
 pub async fn start(
     config: &Config,
     data: &Path,
     binaries: &Path,
     key: Zeroizing<String>,
+    pid: &AtomicU32,
 ) -> Result<OwnedHub> {
     config::token(&key)?;
     wechat_platform::private_dir(data)?;
@@ -111,7 +116,8 @@ pub async fn start(
     if !server_config.exists() {
         config::private_write(&server_config, b"schemaVersion = 1\n")?;
     }
-    // An occupied listener is never adopted, and an existing process is never stopped.
+    // An occupied listener is never adopted, and an existing process is never
+    // stopped here. `stop_leftover` stops one only when the user asks.
     drop(
         std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, config.local_port))
             .context("The local port is already in use; choose another port in desktop settings")?,
@@ -120,6 +126,9 @@ pub async fn start(
     let mut command = Command::new(executable(binaries, "wx")?);
     command
         .arg("serve")
+        // The hub stops itself if the app ends without stopping it first,
+        // for example after a crash or a forced quit.
+        .arg("--exit-with-parent")
         .arg("--data-dir")
         .arg(&data)
         .arg("--server-config")
@@ -159,6 +168,7 @@ pub async fn start(
     #[cfg(windows)]
     command.creation_flags(0x08000000); // CREATE_NO_WINDOW, independent of signature status.
     let mut child = command.spawn().context("Cannot start the bundled hub")?;
+    pid.store(child.id().unwrap_or(0), Ordering::Release);
     let mut input = child
         .stdin
         .take()
@@ -206,6 +216,40 @@ pub async fn stop(hub: &mut OwnedHub) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(35), hub.child.wait())
         .await
         .context("The hub is still stopping; wait before trying again")??;
+    Ok(())
+}
+/// The identity of a hub that an earlier run of this app left running: it
+/// listens on the local port, uses this app's data folder and accepts this
+/// app's saved key. Anything else on the port is never stopped.
+pub async fn leftover(config: &Config, data: &Path, key: &str) -> Option<Value> {
+    let data = std::fs::canonicalize(data).ok()?;
+    let value = identity(&local_connection(config), key).await.ok()?;
+    (value["dataDir"].as_str() == data.to_str()).then_some(value)
+}
+/// Asks a hub found by [`leftover`] to stop, and waits until it has exited.
+pub async fn stop_leftover(config: &Config, data: &Path, key: &str) -> Result<()> {
+    let value = leftover(config, data, key)
+        .await
+        .context("No hub from an earlier run is using the local port")?;
+    let pid = value["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .context("Invalid hub response")?;
+    let connection = local_connection(config);
+    let response = http(&connection)?.post(format!("{}/v1/daemon/shutdown", connection.endpoint))
+        .bearer_auth(key).json(&json!({"pid":value["pid"],"serverId":value["serverId"],"ownershipGeneration":value["ownershipGeneration"]}))
+        .timeout(Duration::from_secs(5)).send().await?;
+    if !response.status().is_success() {
+        bail!("The earlier hub refused the shutdown request");
+    }
+    // It is not this app's child, so wait for the process itself to go away.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(35);
+    while wechat_platform::process_identity(pid).is_some() {
+        if tokio::time::Instant::now() >= deadline {
+            bail!("The earlier hub is still stopping; wait before trying again");
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
     Ok(())
 }
 pub fn fresh_key() -> Zeroizing<String> {
@@ -269,6 +313,7 @@ mod tests {
             &data,
             binaries,
             Zeroizing::new(original_key.to_string()),
+            &AtomicU32::new(0),
         )
         .await
         .unwrap();
@@ -323,11 +368,50 @@ mod tests {
         let before = std::fs::read(data.join("storage-key")).unwrap();
         stop(&mut hub).await.unwrap();
         let replacement = fresh_key();
-        let mut restarted = start(&config, &data, binaries, replacement).await.unwrap();
+        let mut restarted = start(&config, &data, binaries, replacement, &AtomicU32::new(0))
+            .await
+            .unwrap();
         assert!(identity(&secure, &original_key).await.is_err());
         assert!(identity(&secure, client_key).await.is_ok());
         assert_eq!(std::fs::read(data.join("storage-key")).unwrap(), before);
         stop(&mut restarted).await.unwrap();
+    }
+    #[tokio::test]
+    #[ignore = "requires the freshly built wx executable through WX_BINARY"]
+    async fn leftover_hub_is_stopped_only_when_it_uses_this_data_and_key() {
+        let binary = PathBuf::from(std::env::var_os("WX_BINARY").expect("WX_BINARY is required"));
+        let directory = tempfile::tempdir().unwrap();
+        let data = directory.path().join("hub");
+        let other = directory.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        let mut config = Config {
+            local_port: port(),
+            ..Config::default()
+        };
+        while config.network_port == config.local_port {
+            config.network_port = port();
+        }
+        let key = fresh_key();
+        let pid = AtomicU32::new(0);
+        let mut hub = start(
+            &config,
+            &data,
+            binary.parent().unwrap(),
+            Zeroizing::new(key.to_string()),
+            &pid,
+        )
+        .await
+        .unwrap();
+        assert_eq!(Some(pid.load(Ordering::Acquire)), hub.child.id());
+        // A hub using another data folder, or refusing this key, is not this app's.
+        assert!(leftover(&config, &other, &key).await.is_none());
+        assert!(leftover(&config, &data, &fresh_key()).await.is_none());
+        assert!(stop_leftover(&config, &other, &key).await.is_err());
+        assert!(hub.child.try_wait().unwrap().is_none());
+        assert!(leftover(&config, &data, &key).await.is_some());
+        stop_leftover(&config, &data, &key).await.unwrap();
+        assert!(hub.child.try_wait().unwrap().is_some());
+        assert!(std::net::TcpListener::bind(("127.0.0.1", config.local_port)).is_ok());
     }
     #[tokio::test]
     async fn occupied_listener_is_never_adopted() {
@@ -337,11 +421,15 @@ mod tests {
             local_port: listener.local_addr().unwrap().port(),
             ..Config::default()
         };
-        assert!(
-            start(&config, directory.path(), directory.path(), fresh_key())
-                .await
-                .is_err()
-        );
+        assert!(start(
+            &config,
+            directory.path(),
+            directory.path(),
+            fresh_key(),
+            &AtomicU32::new(0)
+        )
+        .await
+        .is_err());
         assert!(listener.local_addr().is_ok());
     }
 }

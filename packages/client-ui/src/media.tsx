@@ -24,6 +24,7 @@ import {
   canRetrieve,
   downloadAsset,
   cachedOriginal,
+  isVideoMessage,
   videoAsset,
 } from "./media-variants.ts";
 import { useVisible } from "./visible.tsx";
@@ -212,7 +213,7 @@ export function MediaCard({
   const state = useSyncExternalStore(model.subscribe, model.snapshot);
   const gallery = useMediaViewer();
   const image = message.type === 3;
-  const video = message.type === 43;
+  const video = isVideoMessage(message);
   const sticker =
     message.type === 47 ||
     (message.type === 49 && message.appMessageType === 8);
@@ -423,8 +424,18 @@ export function AssetContent({
     let active = true;
     const lease = cache.acquire(asset);
     void lease.ready
-      .then((content) => {
+      .then(async (content) => {
         if (!active) return;
+        // Replace the placeholder only once the image has its size. An image
+        // shown before then is briefly empty, which shortens the conversation
+        // and can leave it scrolled away from the newest message.
+        if (type.startsWith("image/")) {
+          const decoded = new Image();
+          decoded.src = content.url;
+          // An image that can't be decoded is shown as before.
+          await decoded.decode().catch(() => {});
+          if (!active) return;
+        }
         baseUrl.current = content.url;
         setUrl(content.url);
         setBaseReady(true);

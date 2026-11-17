@@ -16,7 +16,7 @@ SDK:
 
 ```sh
 pnpm --filter @agent-wechat/shared build
-node --experimental-strip-types scripts/native-calls-api-smoke.mjs
+node --experimental-strip-types scripts/smoke/calls-api.mjs
 ```
 
 `WX_CALLS_FIXTURE_BINARY` selects the fixture executable. An adjacent `wx` binary

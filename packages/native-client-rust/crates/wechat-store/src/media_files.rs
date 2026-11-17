@@ -31,6 +31,15 @@ fn valid(name: &str) -> bool {
 }
 /// Write one payload and return the file name to store in its row.
 pub(crate) fn write(directory: &Path, sealed: &[u8]) -> Result<String> {
+    write_with(directory, |file| Ok(file.write_all(sealed)?))
+}
+/// Write one payload through `fill`, which receives the empty private file, and
+/// return the file name to store in its row. The file is published under its
+/// final name only after `fill` succeeds and the bytes reach the disk.
+pub(crate) fn write_with(
+    directory: &Path,
+    fill: impl FnOnce(&mut fs::File) -> Result<()>,
+) -> Result<String> {
     wechat_platform::private_dir(directory)?;
     let stem = uuid::Uuid::new_v4().simple().to_string();
     let name = format!("{stem}{SUFFIX}");
@@ -41,7 +50,7 @@ pub(crate) fn write(directory: &Path, sealed: &[u8]) -> Result<String> {
             .create_new(true)
             .mode(0o600)
             .open(&temporary)?;
-        file.write_all(sealed)?;
+        fill(&mut file)?;
         file.sync_all()?;
         drop(file);
         fs::rename(&temporary, directory.join(&name))?;
@@ -55,9 +64,24 @@ pub(crate) fn write(directory: &Path, sealed: &[u8]) -> Result<String> {
     }
     Ok(name)
 }
+/// Whether a payload file is still present as a regular file, without reading it.
+pub(crate) fn present(directory: &Path, name: &str) -> Result<bool> {
+    ensure!(valid(name), "invalid media file name");
+    match fs::symlink_metadata(directory.join(name)) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+        Ok(metadata) => Ok(metadata.is_file() && !wechat_platform::is_link(&metadata)),
+    }
+}
 /// Read one payload. A file that was deleted is reported as `media_not_cached`;
 /// nothing is downloaded or rebuilt to replace it.
 pub(crate) fn read(directory: &Path, name: &str) -> Result<Vec<u8>> {
+    let mut sealed = vec![];
+    open(directory, name)?.read_to_end(&mut sealed)?;
+    Ok(sealed)
+}
+/// Open one payload for streaming, with the same checks as [`read`].
+pub(crate) fn open(directory: &Path, name: &str) -> Result<fs::File> {
     ensure!(valid(name), "invalid media file name");
     let path = directory.join(name);
     match fs::symlink_metadata(&path) {
@@ -68,7 +92,7 @@ pub(crate) fn read(directory: &Path, name: &str) -> Result<Vec<u8>> {
             "media file must be a regular file"
         ),
     }
-    let mut file = wechat_platform::OpenOptions::new()
+    let file = wechat_platform::OpenOptions::new()
         .read(true)
         .open(&path)
         .context("cannot open media file")?;
@@ -76,9 +100,7 @@ pub(crate) fn read(directory: &Path, name: &str) -> Result<Vec<u8>> {
         wechat_platform::private_file(&file)? && wechat_platform::same_path_file(&path, &file)?,
         "media file must be private and stable"
     );
-    let mut sealed = vec![];
-    file.read_to_end(&mut sealed)?;
-    Ok(sealed)
+    Ok(file)
 }
 /// Remove a file whose row no longer names it. A missing file is not an error.
 pub(crate) fn remove(directory: &Path, name: &str) {

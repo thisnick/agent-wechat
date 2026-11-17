@@ -113,6 +113,6 @@ export interface WeChatMonitorOptions {
   abortSignal: AbortSignal;
   runtime: any;
   setStatus: (next: any) => void;
-  log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void };
+  log?: { info?: (...args: any[]) => void; warn?: (...args: any[]) => void; error?: (...args: any[]) => void };
   cfg: any;
 }

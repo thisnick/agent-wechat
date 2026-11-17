@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync, chmodSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync, readFileSync, chmodSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NativeConsumerState } from "./native-consumer-state.ts";
@@ -185,4 +186,21 @@ test("replacing historical custody revokes its old manifest without disturbing t
   assert.throws(() => prepared("old-history-run"), /source identity changed/);
   assert.equal(state.get(trigger.id)?.state, "needs_review"); assert.equal(state.get(trigger.id)?.dispatchManifest, undefined);
   assert.equal(state.get(b.id)?.state, "received"); assert.equal(state.get(b.id)?.message.body, "New historical occupant");
+});
+test("work held after an uncertain dispatch or phone read is pruned like finished work", t => {
+  const dir = mkdtempSync(join(tmpdir(), "native-custody-")); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const item = (id: string, cursor: number, extra: object) => [id, { message: message(id), origin: "live", cursor: String(cursor), ...extra }];
+  const items = Object.fromEntries([
+    item("held", 1, { state: "needs_review" }),
+    item("uncertain-read", 2, { state: "completed", phoneReadState: "needs_review" }),
+    item("rejected-read", 3, { state: "completed", phoneReadState: "rejected" }),
+    item("read-pending", 4, { state: "completed", readPending: true }),
+    ...Array.from({ length: 1000 }, (_, i) => item(`done${i}`, 10 + i, { state: "completed" })),
+  ]);
+  writeFileSync(join(dir, `${createHash("sha256").update("server\0a").digest("hex")}.json`),
+    JSON.stringify({ schemaVersion: 1, serverId: "server", accountId: "a", cursor: "2000", items }), { mode: 0o600 });
+  const state = new NativeConsumerState(dir, "server", "a");
+  state.accept("2001", message("new"), "live");
+  for (const id of ["held", "uncertain-read", "rejected-read"]) assert.equal(state.get(id), undefined, id);
+  for (const id of ["read-pending", "done0", "done999", "new"]) assert.ok(state.get(id), id);
 });

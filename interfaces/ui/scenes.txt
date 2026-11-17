@@ -3,10 +3,15 @@
 # `desktop` (1280x800), `narrow` (390x844), `compact` (320x700), joined by `+` for multiple sizes.
 # Format: ITEM | ATTRIBUTES | DESCRIPTION
 scene account-list | route /{server}/accounts, viewports desktop+narrow | The accounts on a hub: one signed in and one that still needs a QR code.
+scene channels-video-cards | route /{server}/{account}/chats/{thread}, viewports desktop+narrow | Received WeChat Channels cards with their cover, play button, publisher and length.
 scene chat-filters | route /{server}/{account}/chats, viewports desktop+compact | The conversation filter bar with All pinned beside the scrolling categories and unread badges for categories with new messages.
 scene chat-info | route /{server}/{account}/chats/{thread}/info, viewports desktop+narrow | Details of a group conversation with its pin, mute and group settings.
 scene chat-list | route /{server}/{account}/chats, viewports desktop+narrow | The full inbox with category and conversation unread counts and the newest conversation open beside it.
+scene composer-attachments | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | A photo and a video staged in the message box with previews, sizes, remove buttons and the unchecked Original choice.
+scene composer-attachments-original | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Original checked for a staged photo and video, with help that explains what it adds for each.
 scene contacts | route /{server}/{account}/contacts, viewports desktop | The contact list of an account.
+scene desktop-leftover-hub | route /servers, viewports desktop+narrow | The desktop app's first screen when a hub left running by an earlier session holds the local port.
+scene desktop-settings | route /servers, viewports desktop+narrow | Desktop settings, including whether this device's hub keeps running while another hub is used.
 scene direct-chat | route /{server}/{account}/chats/{thread}, viewports desktop+narrow | A direct conversation with text from both sides and a photo.
 scene group-chat | route /{server}/{account}/chats/{thread}, viewports desktop | A group conversation where each message names its sender, ending in a photo.
 scene hub-picker | route /servers, viewports desktop+narrow | The screen for choosing which hub to connect to.
@@ -18,4 +23,15 @@ scene new-group | route /{server}/{account}/new-chat, viewports desktop | The ne
 scene new-group-avatar | route /{server}/{account}/chats, viewports desktop | A newly received group shows its room avatar while its member list is unavailable.
 scene quoted-sender-names | route /{server}/{account}/chats/{thread}, viewports desktop+narrow | Quoted replies use supplied author names, cached names for older replies, and You for own messages.
 scene settings | route /{server}/{account}/settings, viewports desktop+narrow | Settings for the app, the hub and the signed-in account.
+scene stickers-dragging | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Holding a Saved sticker shows its existing image under the pointer, dims the source and marks its drop position without staging a send.
+scene stickers-edit | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Saved edit mode stays inside the composer tray with removal, visible drag feedback, Escape cancellation and keyboard placement.
+scene stickers-import | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Add to Saved shows each prepared file with its size, bytes and length, a size slider with a phone-size mark, a note when an image is shrunk to 1024 px, and smoothness, start and length for video, with one primary Add action.
+scene stickers-import-adjust | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Moving a slider prepares again after a pause, returns to an earlier setting without preparing it again, keeps Add off until the row matches its controls, and explains a result too large to send.
+scene stickers-import-retry | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | A partial import keeps its per-file results open; retry submits only the remaining item before returning to Saved.
+scene stickers-import-saved | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | A completed asynchronous import closes the dialog and selects Saved without reopening the picker or resubmitting the item.
+scene stickers-lazy-loading | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Missing Saved originals and pack thumbnails load on visibility, including after scrolling.
+scene stickers-loading | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Added pack contents show loading until the response arrives, with empty state only after an empty response.
+scene stickers-pack-detail | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Official pack detail has complete contents, captions, membership and a copyable ID.
+scene stickers-packs | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Official pack browser shows added and available packs in one dialog.
+scene stickers-picker | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Composer-anchored Saved picker with labeled added-pack tabs.
 scene unnamed-group-chat | route /{server}/{account}/chats/{thread}, viewports desktop+narrow | An unnamed group labeled with member names in the chat list and conversation header.

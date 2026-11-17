@@ -1,10 +1,11 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import type { MediaAsset, NativeMessage } from "@agent-wechat/shared";
-import { Link2, ArrowUpRight } from "lucide-react";
+import { Link2, ArrowUpRight, Play } from "lucide-react";
 import { sharedLinkTarget } from "./shared-link-target.ts";
 import type { Connection } from "./connection.ts";
 import { t } from "./i18n.ts";
-import { cachedVariant } from "./media-variants.ts";
+import { cachedVariant, isChannelsCard } from "./media-variants.ts";
+import { useMediaViewer } from "./media-viewer-context.ts";
 import { mediaPreviewIdentity } from "./media-preview-cache.ts";
 import { useVisible } from "./visible.tsx";
 import "./shared-link.css";
@@ -36,25 +37,53 @@ export function SharedLink({
   useEffect(() => {
     if (visible && !opening && thumbnail) model.ensure(thumbnail);
   }, [model, visible, opening, thumbnail]);
-  const target = sharedLinkTarget(link.url);
+  const gallery = useMediaViewer();
+  const channels = message.appMessageType === 51;
+  // A Channels card's own address is WeChat's upgrade notice, never the post.
+  const target = channels ? null : sharedLinkTarget(link.url);
+  const video =
+    isChannelsCard(message) &&
+    media.assets.some((asset) => asset.kind === "video");
   const title =
-    link.title?.trim() || target?.host || t("sharedLink.sharedLink");
+    (channels
+      ? link.description?.trim() || link.sourceName?.trim()
+      : link.title?.trim()) ||
+    target?.host ||
+    (channels ? t("sharedLink.wechatChannels") : t("sharedLink.sharedLink"));
+  const duration =
+    channels && link.durationSeconds
+      ? `${Math.floor(link.durationSeconds / 60)}:${String(
+          link.durationSeconds % 60,
+        ).padStart(2, "0")}`
+      : undefined;
   const content = (
     <>
       <span className="shared-link-art" ref={element} aria-hidden="true">
         <LinkThumbnail asset={thumbnail} connection={connection} />
+        {video && (
+          <span className="shared-link-play">
+            <Play size={18} fill="currentColor" />
+          </span>
+        )}
+        {video && duration && (
+          <span className="shared-link-duration">{duration}</span>
+        )}
       </span>
       <span className="shared-link-copy">
         <strong>{emojiText(title)}</strong>
-        {!compact && link.description?.trim() && (
+        {!compact && !channels && link.description?.trim() && (
           <span className="shared-link-description">{emojiText(link.description!)}</span>
         )}
         <span className="shared-link-source">
           <span>
-            {message.appMessageType === 51
-              ? `${t("sharedLink.wechatChannels")}${
-                  link.sourceName ? ` · ${link.sourceName}` : ""
-                }`
+            {channels
+              ? [
+                  t("sharedLink.wechatChannels"),
+                  link.sourceName,
+                  video ? undefined : duration,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")
               : target?.host ||
                 link.sourceName ||
                 t("sharedLink.sharedLink")}
@@ -68,6 +97,15 @@ export function SharedLink({
   // than putting an external-link target inside the jump-to-message control.
   return compact ? (
     <div className="shared-link-card compact-link-card">{content}</div>
+  ) : video && gallery ? (
+    <button
+      type="button"
+      className="bubble shared-link-card channels-video-card"
+      aria-label={t("sharedLink.playChannelsVideo", { title })}
+      onClick={() => gallery.open(message)}
+    >
+      {content}
+    </button>
   ) : target ? (
     <a
       className="bubble shared-link-card"

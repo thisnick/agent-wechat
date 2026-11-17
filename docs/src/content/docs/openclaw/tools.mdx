@@ -5,7 +5,9 @@ description: The WeChat tools your OpenClaw agent can call, and how to grant acc
 
 import { Aside } from '@astrojs/starlight/components';
 
-Besides replying, the agent gets tools for the **current chat**. They can't see other chats or accounts.
+Besides replying, the agent gets message tools for the **current chat**. Message
+history tools cannot read other chats or accounts. The owner-only sticker tool
+manages Saved stickers on the configured account.
 
 | Tool | What it does |
 | --- | --- |
@@ -15,8 +17,16 @@ Besides replying, the agent gets tools for the **current chat**. They can't see 
 | `wechat_media` | Downloads a message's image, file, video or voice and gives the agent the file. Images are also shown to the model. |
 | `wechat_send_share` | Sends a link card (title, URL, optional description and thumbnail) |
 | `wechat_recall` | Recalls a message your account sent in this chat |
+| `wechat_stickers` | Owner-only Saved sticker list, metadata, visual preview, original download, preparation, add, placement and removal |
 
 For example, asked "what was that address Sam sent?", the agent can call `wechat_search` with `{"query": "address"}`, then `wechat_media` on a matching photo.
+
+## Custom stickers
+
+Use [`wechat_stickers`](../stickers/) to prepare execution-workspace files,
+review actual image previews and manage Saved. Its eight actions are `list`,
+`get`, `preview`, `download`, `prepare`, `add`, `move` and `remove`.
+Official-pack browsing and membership are available in the desktop app and CLI.
 
 ## Calling
 

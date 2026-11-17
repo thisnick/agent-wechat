@@ -43,6 +43,16 @@ export const videoAsset = (
       assets.find((asset) => asset.variant === "normal")
     : assets.find((asset) => asset.variant === "thumbnail");
 
+// A received Channels card offers its post's video through the same viewer as a
+// video message; its cover is the card's thumbnail.
+export const isChannelsCard = (
+  message: import("@agent-wechat/shared").NativeMessage,
+): boolean =>
+  message.type === 49 && message.appMessageType === 51 && !!message.link;
+export const isVideoMessage = (
+  message: import("@agent-wechat/shared").NativeMessage,
+): boolean => message.type === 43 || isChannelsCard(message);
+
 export const conversationMedia = (
   messages: import("@agent-wechat/shared").NativeMessage[],
   account: string,
@@ -52,6 +62,6 @@ export const conversationMedia = (
     (message) =>
       message.accountId === account &&
       message.threadId === thread &&
-      [3, 43].includes(message.type) &&
+      (message.type === 3 || isVideoMessage(message)) &&
       !message.recall,
   );

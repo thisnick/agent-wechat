@@ -4,6 +4,7 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { validReport, publish } from './publish-comment.mjs';
+import { compareListing, parseListing, renderComment, surface } from './review.mjs';
 const marker = '<!-- agent-wechat-interfaces -->';
 const report = { number: 441, head: 'abc123', changed: true, body: `${marker}\nReport` };
 const run = { id: 1, workflow_id: 2, run_attempt: 1, event: 'pull_request', head_sha: 'abc123', head_branch: 'feature', head_repository: { id: 7 }, html_url: 'https://github.com/owner/repo/actions/runs/1', pull_requests: [] };
@@ -22,11 +23,11 @@ test('fork reports with no run PR association are accepted only for the matching
     assert.equal(validReport(bad, run, pr, 'owner/repo'), false);
 });
 
-async function harness(t, { comments = [], changed = true, currentAttempt = 1, currentPr = pr, workflowPath = '.github/workflows/interfaces.yml' } = {}) {
+async function harness(t, { comments = [], changed = true, body = report.body, currentAttempt = 1, currentPr = pr, workflowPath = '.github/workflows/interfaces.yml' } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'interface-comment-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const path = join(dir, 'report.json');
-  await writeFile(path, JSON.stringify({ ...report, changed }));
+  await writeFile(path, JSON.stringify({ ...report, changed, body }));
   const writes = [];
   const github = {
     rest: {
@@ -73,4 +74,24 @@ test('rejects a report from another producer workflow', async t => {
   const h = await harness(t, { workflowPath: '.github/workflows/other.yml' });
   await assert.rejects(h.execute, /Unexpected producer/);
   assert.deepEqual(h.writes, []);
+});
+
+test('a large generated report stays publishable after truncation', async t => {
+  const file = 'interfaces/cli/wx.txt';
+  const base = parseListing('');
+  const head = parseListing(Array.from({ length: 200 }, (_, i) =>
+    `wx synthetic-${i} | command | ${'description '.repeat(100)}`).join('\n'));
+  const body = renderComment({ baseline: false,
+    changesets: new Map([['@agent-wechat/cli', 'patch']]),
+    reports: [{ file, surface: surface(file), base, head, baseline: false,
+      result: compareListing('cli', base, head) }],
+  });
+  assert.ok(body.length <= 60000);
+  assert.match(body, /comment truncated; see the Files changed tab\.$/);
+  assert.equal((body.match(/^```/gm)?.length ?? 0) % 2, 0);
+  assert.equal(validReport({ ...report, body }, run, pr, 'owner/repo'), true);
+  const h = await harness(t, { body });
+  await h.execute();
+  assert.equal(h.writes.length, 1);
+  assert.ok(h.writes[0].body.length <= 65536);
 });

@@ -15,7 +15,7 @@ pub(super) fn authentication_required(error: &anyhow::Error) -> bool {
 }
 
 impl Core {
-    fn session_fence(&self, account: &str) -> Result<SessionFence> {
+    pub(crate) fn session_fence(&self, account: &str) -> Result<SessionFence> {
         Ok(SessionFence {
             authorization: authorization(&self.account_state(account)?)?,
             logout_epoch: self.store.runtime(account, "logout-epoch")?,
@@ -45,7 +45,7 @@ impl Core {
         fence: &SessionFence,
         desired: Option<&[u8]>,
     ) -> Result<()> {
-        self.session_state(account, fence)?;
+        let current = self.session_state(account, fence)?;
         self.check_state_profile(account, state)?;
         if let Some(accepted) = self.persisted_native_state(account, state)? {
             anyhow::ensure!(
@@ -56,9 +56,21 @@ impl Core {
             let _ = self.project_saved_login(account, &accepted);
             return Ok(());
         }
-        let sealed = self
-            .vault
-            .seal(account, "account-state", &serde_json::to_vec(state)?)?;
+        // Concurrent requests may reseal identical credentials with a new nonce.
+        // Preserve that stored record when the returned state already matches it.
+        // A changed cookie or credential still requires the original CAS below.
+        let current_bytes = zeroize::Zeroizing::new(serde_json::to_vec(&current)?);
+        let returned_bytes = zeroize::Zeroizing::new(serde_json::to_vec(state)?);
+        if current_bytes.as_slice() == returned_bytes.as_slice()
+            && self.store.runtime(account, "account-state")?.as_deref() != Some(expected)
+        {
+            anyhow::ensure!(
+                self.store.runtime(account, "desired")?.as_deref() == desired,
+                "session_superseded"
+            );
+            return Ok(());
+        }
+        let sealed = self.vault.seal(account, "account-state", &returned_bytes)?;
 
         self.prepare_call_authorization(account, state)?;
         self.store.save_network_authorization(
@@ -156,6 +168,55 @@ mod tests {
                 .unwrap();
         }
         (directory, core)
+    }
+
+    #[test]
+    fn identical_resealed_state_is_preserved_but_real_changes_are_fenced() {
+        let (_directory, core) = core();
+        let account = "one";
+        let returned = core.account_state(account).unwrap();
+        let expected = core
+            .store
+            .runtime(account, "account-state")
+            .unwrap()
+            .unwrap();
+        let fence = core.session_fence(account).unwrap();
+        core.save_state(account, &returned).unwrap();
+        let resealed = core
+            .store
+            .runtime(account, "account-state")
+            .unwrap()
+            .unwrap();
+        assert_ne!(expected, resealed);
+        core.save_network_state(account, &returned, &expected, &fence, Some(b"connected"))
+            .unwrap();
+        assert_eq!(
+            core.store
+                .runtime(account, "account-state")
+                .unwrap()
+                .unwrap(),
+            resealed
+        );
+        core.store
+            .put_runtime(account, "desired", b"disconnected")
+            .unwrap();
+        assert!(core
+            .save_network_state(account, &returned, &expected, &fence, Some(b"connected"))
+            .is_err());
+        core.store
+            .put_runtime(account, "desired", b"connected")
+            .unwrap();
+        let mut changed = returned.clone();
+        changed.cookie.push(7);
+        core.save_state(account, &changed).unwrap();
+        assert!(core
+            .save_network_state(account, &returned, &expected, &fence, Some(b"connected"))
+            .is_err());
+        changed.session_key.fill(8);
+        core.save_state(account, &changed).unwrap();
+        assert!(core
+            .save_network_state(account, &changed, &expected, &fence, Some(b"connected"))
+            .is_err());
     }
 
     #[tokio::test]

@@ -41,11 +41,11 @@ jobs:
         with:
           node-version-file: .node-version
       - id: crates
-        run: node scripts/native-crates-release.mjs trigger
+        run: node scripts/release/crates-release.mjs trigger
         env:
           GH_TOKEN: ${{ github.token }}
       - id: plan
-        run: node scripts/native-release-trigger.mjs
+        run: node scripts/release/trigger.mjs
         env:
           GH_TOKEN: ${{ github.token }}
   reserve-tag:
@@ -67,8 +67,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ needs.plan.outputs.version }}
         run: |
-          node scripts/native-release-policy.mjs --check-registry
-          node scripts/native-release-preflight.mjs --reserve-tag
+          node scripts/release/policy.mjs --check-registry
+          node scripts/release/preflight.mjs --reserve-tag
   build:
     needs: [plan, reserve-tag]
     if: needs.plan.outputs.publish == 'true'
@@ -96,15 +96,15 @@ jobs:
         env:
           RELEASE_VERSION: ${{ needs.plan.outputs.version }}
           GH_TOKEN: ${{ github.token }}
-        run: node scripts/native-release-preflight.mjs
+        run: node scripts/release/preflight.mjs
       - name: Validate versioned Changesets notes before building
         env:
           RELEASE_VERSION: ${{ needs.plan.outputs.version }}
         run: |
-          node --test scripts/native-release-policy.test.mjs
-          node scripts/native-release-policy.mjs --check-registry
-          node --test scripts/native-release-notes.test.mjs
-          node scripts/native-release-notes.mjs --output "$RUNNER_TEMP/native-release-notes.md"
+          node --test scripts/release/policy.test.mjs
+          node scripts/release/policy.mjs --check-registry
+          node --test scripts/release/notes.test.mjs
+          node scripts/release/notes.mjs --output "$RUNNER_TEMP/native-release-notes.md"
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @agent-wechat/cli build
       - run: pnpm --filter @agent-wechat/agent-wechat... build
@@ -121,11 +121,11 @@ jobs:
           labels: org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha,scope=native-linux-${{ runner.arch }}
           cache-to: type=gha,mode=max,scope=native-linux-${{ runner.arch }}
-      - run: bash scripts/native-build-release.sh
+      - run: bash scripts/release/build.sh
         env:
           NATIVE_RELEASE_BUILDER_IMAGE: native-release-builder:ci
           NATIVE_CI_ARTIFACT: true
-      - run: node scripts/native-package-smoke.mjs artifacts/native
+      - run: node scripts/smoke/package.mjs artifacts/native
       - uses: actions/upload-artifact@v7
         with:
           name: native-release-${{ matrix.target }}
@@ -176,8 +176,8 @@ jobs:
           path: artifacts/fragments
       - name: Verify and combine independently tested executables
         run: |
-          node --test scripts/native-merge-release.test.mjs
-          node scripts/native-merge-release.mjs artifacts/native artifacts/fragments/native-release-*
+          node --test scripts/release/merge.test.mjs
+          node scripts/release/merge.mjs artifacts/native artifacts/fragments/native-release-*
       - uses: actions/download-artifact@v8
         with:
           pattern: desktop-release-*
@@ -189,8 +189,8 @@ jobs:
         env:
           RELEASE_VERSION: ${{ needs.plan.outputs.version }}
         run: |
-          node scripts/native-release-policy.mjs --check-registry --github-output
-          node scripts/native-release-notes.mjs --output artifacts/release-notes.md
+          node scripts/release/policy.mjs --check-registry --github-output
+          node scripts/release/notes.mjs --output artifacts/release-notes.md
       - uses: actions/attest-build-provenance@v4.2.2
         with:
           subject-path: |
@@ -202,14 +202,14 @@ jobs:
           RELEASE_VERSION: ${{ needs.plan.outputs.version }}
           RELEASE_IS_PRERELEASE: ${{ steps.release_policy.outputs.prerelease }}
         run: |
-          node scripts/native-release-preflight.mjs --require-tag
+          node scripts/release/preflight.mjs --require-tag
           TAG="v$RELEASE_VERSION"
           RELEASE_FLAGS=(--prerelease=false)
           if [ "$RELEASE_IS_PRERELEASE" = true ]; then
             RELEASE_FLAGS=(--prerelease --latest=false)
           fi
           if gh release view "$TAG" --json body --jq .body > artifacts/existing-release-notes.md; then
-            node scripts/native-release-notes.mjs --existing artifacts/existing-release-notes.md --output artifacts/release-notes.md
+            node scripts/release/notes.mjs --existing artifacts/existing-release-notes.md --output artifacts/release-notes.md
             gh release edit "$TAG" --notes-file artifacts/release-notes.md "${RELEASE_FLAGS[@]}"
           else
             gh release create "$TAG" --verify-tag --title "$TAG" --notes-file artifacts/release-notes.md "${RELEASE_FLAGS[@]}"
@@ -257,20 +257,20 @@ jobs:
           cache: pnpm
       # setup-node registry-url generates an auth placeholder that conflicts with OIDC.
       - name: Install verified standalone npm 11.12.1
-        run: bash scripts/install-ci-npm.sh
+        run: bash scripts/ci/install-npm.sh
       - name: Check npm publisher
         run: |
           test "$(npm --version)" = "11.12.1"
-          node scripts/verify-ci-publisher.mjs
+          node scripts/release/verify-publisher.mjs
       - name: Validate npm stable or prerelease channel
         env:
           RELEASE_VERSION: ${{ needs.plan.outputs.version }}
-        run: node scripts/native-release-policy.mjs --check-registry
+        run: node scripts/release/policy.mjs --check-registry
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @agent-wechat/cli build
       - run: pnpm --filter @agent-wechat/agent-wechat... build
       - name: Verify native assets and embed npm checksum manifest
-        run: node scripts/native-prepare-package.mjs
+        run: node scripts/release/prepare-package.mjs
       - name: Publish to npm
         env:
           NPM_CONFIG_PROVENANCE: true

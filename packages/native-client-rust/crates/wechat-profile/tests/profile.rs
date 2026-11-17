@@ -404,6 +404,122 @@ fn contacts_threads_groups_and_room_aliases() {
     assert_eq!(m.items[0].room_display_name.as_deref(), Some("Room"));
 }
 #[test]
+fn contact_catalog_filters_deleted_rows_before_search_pagination() {
+    let d = fixture();
+    let c = Connection::open(d.path().join("account/db_storage/contact/contact.db")).unwrap();
+    c.execute_batch(
+        "ALTER TABLE contact ADD COLUMN delete_flag INTEGER;
+         UPDATE contact SET delete_flag=1 WHERE username='peer';
+         INSERT INTO contact(username,nick_name,remark,alias,local_type,delete_flag) VALUES
+         ('a_deleted','Catalog fixture','','',1,1),
+         ('b_present','Catalog fixture','','',1,0),
+         ('c_deleted','Catalog fixture','','',1,2),
+         ('d_nullable','Catalog fixture','','',1,NULL),
+         ('e_malformed','Catalog fixture','','',1,'unknown'),
+         ('z_deleted','Catalog fixture','','',1,-1);",
+    )
+    .unwrap();
+    drop(c);
+    let r = reader(d.path());
+    let all = r.contacts(&ListQuery::default()).unwrap();
+    assert_eq!(
+        all.items
+            .iter()
+            .map(|item| item.username.as_str())
+            .collect::<Vec<_>>(),
+        ["b_present", "d_nullable", "room@chatroom", "self"]
+    );
+    let query = ListQuery {
+        search: Some("Catalog fixture".into()),
+        limit: Some(1),
+        ..Default::default()
+    };
+    let first = r.contacts(&query).unwrap();
+    assert_eq!(first.items[0].username, "b_present");
+    let next = r
+        .contacts(&ListQuery {
+            cursor: Some(first.next_cursor.unwrap()),
+            ..query
+        })
+        .unwrap();
+    assert_eq!(next.items[0].username, "d_nullable");
+    assert!(next.next_cursor.is_none());
+    assert!(r
+        .contacts(&ListQuery {
+            search: Some("a_deleted".into()),
+            ..Default::default()
+        })
+        .unwrap()
+        .items
+        .is_empty());
+    assert_eq!(
+        r.contact("peer").unwrap().raw_fields["delete_flag"],
+        SqlValue::Integer("1".into())
+    );
+    assert_eq!(r.labels().unwrap()["peer"], "Work");
+    assert_eq!(
+        r.group_members("room@chatroom", &ListQuery::default())
+            .unwrap()
+            .items[0]
+            .username,
+        "peer"
+    );
+    assert_eq!(
+        r.threads(&ListQuery::default()).unwrap().items[0].label,
+        "Work"
+    );
+}
+
+#[test]
+fn contact_lookup_uses_exact_retained_identity_and_rejects_duplicates() {
+    let d = fixture();
+    let c = Connection::open(d.path().join("account/db_storage/contact/contact.db")).unwrap();
+    c.execute_batch(
+        "DROP TABLE contact;
+         CREATE TABLE contact(id INTEGER PRIMARY KEY,username TEXT COLLATE NOCASE,
+           nick_name TEXT,remark TEXT,alias TEXT,local_type INTEGER,delete_flag INTEGER);
+         INSERT INTO contact(username,nick_name,remark,alias,local_type,delete_flag) VALUES
+         ('wxid_peer','Display name','Remark','alias-peer',1,1),
+         ('wxid_peer_extra','Display name','Remark','alias-extra',1,0),
+         ('duplicate','First','','',1,0),
+         ('duplicate','Second','','',1,1);",
+    )
+    .unwrap();
+    drop(c);
+    let r = reader(d.path());
+    let retained = r.contact("wxid_peer").unwrap();
+    assert_eq!(retained.username, "wxid_peer");
+    assert_eq!(retained.label, "Remark");
+    assert_eq!(
+        retained.raw_fields["delete_flag"],
+        SqlValue::Integer("1".into())
+    );
+    for absent in [
+        "WXID_PEER",
+        "Display name",
+        "Remark",
+        "alias-peer",
+        "wxid_peer%",
+        "missing",
+    ] {
+        assert!(
+            matches!(r.contact(absent), Err(ProfileError::NotCached)),
+            "{absent}"
+        );
+    }
+    assert!(matches!(
+        r.contact("duplicate"),
+        Err(ProfileError::InvalidMetadata)
+    ));
+    for invalid in ["", "invalid\0name"] {
+        assert!(matches!(
+            r.contact(invalid),
+            Err(ProfileError::InvalidQuery)
+        ));
+    }
+}
+
+#[test]
 fn read_requires_quiescence_and_plaintext_opt_in() {
     let d = fixture();
     let loc = ProfileLocation::new(d.path().join("account")).unwrap();
@@ -1153,4 +1269,90 @@ fn selected_message_ids_keep_shard_namespaces_and_skip_only_missing_rows() {
         r.messages_by_ids(&vec![selected[0].clone(); 201], None),
         Err(ProfileError::InvalidQuery)
     ));
+}
+
+#[test]
+fn contact_and_member_search_preserves_non_ascii_exact_case_and_cross_field_terms() {
+    let d = fixture();
+    let c = Connection::open(d.path().join("account/db_storage/contact/contact.db")).unwrap();
+    c.execute(
+        "UPDATE contact SET nick_name=?1,remark=?2,alias=?3 WHERE username='peer'",
+        params!["ÉLODIE", "Team ONE", "synthetic_alias"],
+    )
+    .unwrap();
+    drop(c);
+    let r = reader(d.path());
+    for search in ["TEAM peer", "peer one", "ÉLODIE", "élodie team peer"] {
+        let q = ListQuery {
+            search: Some(search.into()),
+            ..Default::default()
+        };
+        assert_eq!(r.contacts(&q).unwrap().items.len(), 1, "contacts: {search}");
+        assert_eq!(
+            r.group_members("room@chatroom", &q).unwrap().items.len(),
+            1,
+            "members: {search}"
+        );
+    }
+}
+
+#[test]
+fn multi_term_profile_search_keeps_pagination_and_literal_matching() {
+    let d = fixture();
+    let c = Connection::open(d.path().join("account/db_storage/contact/contact.db")).unwrap();
+    c.execute_batch("UPDATE contact SET nick_name='ÉLODIE 星',remark='Team ONE 100%',alias='shared_alias' WHERE username='peer'; INSERT INTO contact VALUES(4,'peer_b','Élodie 星','Team ONE','shared_alias',1); INSERT INTO chatroom_member VALUES(3,4); UPDATE chat_room SET ext_buffer=NULL;").unwrap();
+    drop(c);
+    let r = reader(d.path());
+    let query = ListQuery {
+        limit: Some(1),
+        search: Some("team ÉLODIE 星".into()),
+        ..Default::default()
+    };
+    let first = r.contacts(&query).unwrap();
+    assert_eq!(first.items[0].username, "peer");
+    let next = ListQuery {
+        cursor: first.next_cursor.clone(),
+        ..query.clone()
+    };
+    let second = r.contacts(&next).unwrap();
+    assert_eq!(second.items[0].username, "peer_b");
+    assert!(second.next_cursor.is_none());
+    let different = ListQuery {
+        search: Some("other".into()),
+        ..next
+    };
+    assert!(matches!(
+        r.contacts(&different),
+        Err(ProfileError::InvalidCursor)
+    ));
+    let first = r.group_members("room@chatroom", &query).unwrap();
+    assert_eq!(first.items[0].username, "peer");
+    let second = r
+        .group_members(
+            "room@chatroom",
+            &ListQuery {
+                cursor: first.next_cursor,
+                ..query
+            },
+        )
+        .unwrap();
+    assert_eq!(second.items[0].username, "peer_b");
+    assert!(second.next_cursor.is_none());
+    for search in ["peer shared_alias", "100%", "  Élodie   ONE  "] {
+        let found = r
+            .contacts(&ListQuery {
+                search: Some(search.into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(found.items.len(), if search == "100%" { 1 } else { 2 });
+    }
+    assert!(r
+        .contacts(&ListQuery {
+            search: Some("' OR 1=1 --".into()),
+            ..Default::default()
+        })
+        .unwrap()
+        .items
+        .is_empty());
 }

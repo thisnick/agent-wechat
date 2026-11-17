@@ -300,6 +300,32 @@ pub(crate) fn contact_patch(record: &ContactRecord) -> Result<ContactProjection>
         fields: out,
     })
 }
+/// Personal remark fields that WeChat versions with field controls (field 89).
+pub(crate) const REMARK_FIELDS: [(u32, &str); 3] = [
+    (10, "remark"),
+    (11, "remark_pin_yin_initial"),
+    (12, "remark_quan_pin"),
+];
+/// The controlled remark fields of a contact record, as `contact_patch` would
+/// write them without the control. Only an exact lookup reply may supply these:
+/// it is the service's current value, so no version ordering is needed. Pushed
+/// updates queue such a lookup instead (see `contact_remarks`).
+pub(crate) fn controlled_remark_fields(record: &ContactRecord) -> Result<RawFields> {
+    let controlled = wechat_protocol::controlled_contact_fields(&record.raw)?;
+    let fields = p::decode(&record.raw)?;
+    let mut out = RawFields::new();
+    for (n, name) in REMARK_FIELDS {
+        if !controlled.contains(&n) {
+            continue;
+        }
+        if let Some(v) = p::optional_data(&fields, n)? {
+            let f = p::decode(v)?;
+            let text = std::str::from_utf8(p::optional_data(&f, 1)?.unwrap_or_default())?;
+            out.insert(name.into(), SqlValue::Text(text.to_string()));
+        }
+    }
+    Ok(out)
+}
 fn contact_catalog_result(
     count: usize,
     pages: u32,
@@ -552,14 +578,17 @@ impl Core {
         let mut cursor: Option<(&str, Vec<u8>)> = None;
         let mut count = 0;
         let mut rejected_slots = 0;
-        let mut apply = |record: &ContactRecord| -> Result<()> {
+        let mut apply = |record: &ContactRecord, exact_lookup: bool| -> Result<()> {
             self.invalidate_contact_pinning(account, record, id)?;
             ensure!(
                 !self.contact_pin_superseded(account, record, id)?,
                 "contact_pin_projection_superseded"
             );
             self.invalidate_contact_notifications(account, record, id)?;
-            let patch = self.upstream.contact_patch(record)?;
+            let mut patch = self.upstream.contact_patch(record)?;
+            if exact_lookup {
+                patch.fields.extend(controlled_remark_fields(record)?);
+            }
             let pin = contact_pin_patch(record)?;
             // Inspect the previous flag and update ordering before a full flag
             // replacement can erase evidence that pin state transitioned.
@@ -623,14 +652,14 @@ impl Core {
                         .context("unrequested_metadata_identity")?;
                     if reply.value.results.is_empty() || reply.value.results.get(index) == Some(&0)
                     {
-                        apply(record)?;
+                        apply(record, true)?;
                     }
                 }
                 "contacts"
             }
             ReceiptBody::GroupCatalog(page) => {
                 for record in &page.contacts {
-                    apply(record)?;
+                    apply(record, false)?;
                 }
                 if let Some(next) = page.next_cursor {
                     cursor = Some((
@@ -737,16 +766,18 @@ impl Core {
         Ok(count)
     }
     pub fn recover_metadata(&self, account: &str) -> Result<usize> {
+        let recovered_stickers = self.recover_saved_sticker_projections(account)?
+            + self.recover_sticker_pack_projections(account)?;
         let pending = self.store.pending_metadata(account)?;
         if pending.is_empty() {
-            return Ok(0);
+            return Ok(recovered_stickers);
         }
         if self.account_state(account).is_err()
             || self.write_options(account, "metadata-recovery").is_err()
         {
             return Ok(0);
         };
-        let mut n = 0;
+        let mut n = recovered_stickers;
         for (id, _) in pending {
             let Ok(receipt) = self.metadata_receipt(account, &id) else {
                 continue;
@@ -879,6 +910,13 @@ impl Core {
         hydration.applied = self.apply_metadata_receipt(account, &id, false)?;
         self.record_contact_hydration(account, &hydration)?;
         Ok(hydration)
+    }
+    /// Exact lookup of one known contact for a queued remark refresh. Returns
+    /// whether the service gave a settled answer (applied or rejected).
+    pub(super) fn refresh_contact_snapshot(&self, account: &str, username: &str) -> Result<bool> {
+        valid_name(username)?;
+        let outcome = self.metadata_contact_lookup(account, &[username.to_owned()])?;
+        Ok(outcome.unresolved == 0)
     }
     fn run_metadata(
         &self,

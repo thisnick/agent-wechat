@@ -1,5 +1,4 @@
-import type { VideoSendQuality } from "@agent-wechat/shared";
-import type { MediaOutbox } from "./media-outbox.ts";
+import type { MediaOutbox, SendQuality } from "./media-outbox.ts";
 import {
   MAX_COMPOSER_ATTACHMENTS,
   reviewAttachments,
@@ -11,7 +10,8 @@ import { t } from "./i18n.ts";
 export type StagedAttachment = ReviewedAttachment & { id: string };
 export type AttachmentDraft = {
   files: readonly StagedAttachment[];
-  videoQuality: VideoSendQuality;
+  /** One choice for every staged image and video, as in the official client. */
+  quality: SendQuality;
   submission?: string;
 };
 export type AttachmentBatch = AttachmentDraft & {
@@ -19,7 +19,7 @@ export type AttachmentBatch = AttachmentDraft & {
   thread: string;
   submission: string;
 };
-const empty: AttachmentDraft = { files: [], videoQuality: "normal" };
+const empty: AttachmentDraft = { files: [], quality: "normal" };
 const key = (account: string, thread: string) =>
   JSON.stringify([account, thread]);
 
@@ -72,10 +72,10 @@ export class AttachmentDrafts {
     const files = draft.files.filter((item) => item.id !== id);
     this.put(account, thread, files.length ? { ...draft, files } : undefined);
   }
-  quality(account: string, thread: string, videoQuality: VideoSendQuality) {
+  quality(account: string, thread: string, quality: SendQuality) {
     const draft = this.get(account, thread);
     if (!draft.submission && draft.files.length)
-      this.put(account, thread, { ...draft, videoQuality });
+      this.put(account, thread, { ...draft, quality });
   }
   claim(account: string, thread: string): AttachmentBatch | null {
     const draft = this.get(account, thread);
@@ -99,7 +99,7 @@ export class AttachmentDrafts {
         ? undefined
         : {
             files: batch.files,
-            videoQuality: batch.videoQuality,
+            quality: batch.quality,
           },
     );
     return true;
@@ -123,5 +123,5 @@ export async function sendAttachmentBatch(
   batch: AttachmentBatch,
 ) {
   for (const item of batch.files)
-    await outbox.send(batch.thread, item.file, item.kind, batch.videoQuality);
+    await outbox.send(batch.thread, item.file, item.kind, batch.quality);
 }

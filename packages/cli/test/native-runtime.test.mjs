@@ -10,7 +10,7 @@ import { promisify } from 'node:util';
 import { once } from 'node:events';
 import { assetName, fetchBytes, inspectBinary, installNative, installPath, manifestName, readManifest,
   resolveNative, targetKey, supportedTargets, targetFor, validateManifest } from '../scripts/native-runtime.mjs';
-import { prepareNativePackage, nativePackageUnpublished } from '../../../scripts/native-prepare-package.mjs';
+import { prepareNativePackage, nativePackageUnpublished } from '../../../scripts/release/prepare-package.mjs';
 const exec = promisify(execFile);
 const version = '0.16.0';
 const supportedTarget = targetFor();

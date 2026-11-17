@@ -1,9 +1,7 @@
 ---
 title: 消息类型
 description: 文本、媒体、引用回复、合并转发、链接分享卡片及撤回消息的处理方式。
-banner:
-  content: "本页面由机器翻译，尚未经人工审核。"
-sourceHash: 1be82ca438fb
+sourceHash: 71109ef55fc8
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -62,7 +60,7 @@ import { Aside } from '@astrojs/starlight/components';
 | 收到的类型 | 显示方式和限制 |
 | --- | --- |
 | 分享的文本（子类型 1） | 纯文本；完整的 HTTP(S) URL 可点击。 |
-| 微信视频号（51） | 标题、描述、作者和提供的链接；不播放视频号视频。 |
+| 微信视频号（51） | 封面、描述、发布者和时长。只有在你打开或请求时才会下载视频，之后可像收到的视频一样播放和保存。 |
 | 文件上传通知（74） | 文件名提示；不说明当前进度或最终是否可用。不会触发 OpenClaw 模型处理。 |
 | 群公告（87） | 纯文本形式的公告内容。 |
 

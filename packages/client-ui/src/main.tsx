@@ -47,6 +47,7 @@ import { Avatar, Button, Icon, LanguageSelect, Logo, Welcome } from "./ui.tsx";
 import { HistorySearch } from "./history-search.ts";
 import { MediaCard, PendingAttachments } from "./media.tsx";
 import { AttachmentPicker, AttachmentTray } from "./attachment-picker.tsx";
+import { StickerPicker, StickerDraftPreview, waitStickerJob, type StickerDraft } from "./stickers.tsx";
 import { sendAttachmentBatch } from "./attachment-drafts.ts";
 import { ComposerHelp } from "./composer-help.tsx";
 import { ConversationAvatar, HubAvatar } from "./avatars.tsx";
@@ -1022,6 +1023,27 @@ function Chats({
     draft = drafts[draftKey] ?? "";
   useSyncExternalStore(connection.attachmentDrafts.subscribe, connection.attachmentDrafts.snapshot);
   const attachments = connection.attachmentDrafts.get(state.account ?? "", state.selected ?? "");
+  const [stickerDrafts, setStickerDrafts] = useState<Record<string, StickerDraft>>({});
+  const stickerDraftsNow = useRef(stickerDrafts);
+  const stickerDraft = stickerDrafts[draftKey];
+  function putSticker(target: string, draft?: StickerDraft) {
+    const next = { ...stickerDraftsNow.current };
+    if (draft) next[target] = draft; else delete next[target];
+    stickerDraftsNow.current = next; setStickerDrafts(next);
+  }
+  async function sendStagedSticker(account: string, target: string, conversation: string, draft: StickerDraft) {
+    if (stickerDraftsNow.current[target]?.key !== draft.key || stickerDraftsNow.current[target]?.busy) return;
+    putSticker(target, { ...draft, busy: true, error: undefined });
+    try {
+      const job = draft.jobId ? await session.client.job(account, draft.jobId) : await session.client.sendSticker(account, { kind: "sticker", threadId: conversation, source: draft.source }, draft.key);
+      if (stickerDraftsNow.current[target]?.key === draft.key) putSticker(target, { ...draft, busy: true, jobId: job.id });
+      await waitStickerJob(session.client, account, job);
+      if (stickerDraftsNow.current[target]?.key === draft.key) putSticker(target);
+    } catch (error) {
+      const current = stickerDraftsNow.current[target];
+      if (current?.key === draft.key) putSticker(target, { ...current, busy: false, error: readableError(error) });
+    }
+  }
   const [attachmentSendError, setAttachmentSendError] = useState<{ target: string; message: string } | null>(null);
   const draftMentions = mentionDrafts[draftKey] ?? EMPTY_MENTIONS;
   const allowAllMention = canMentionAll(state.selectedGroup, state.selected);
@@ -1143,7 +1165,8 @@ function Chats({
   function send() {
     const text = draftsNow.current[draftKey] ?? draft;
     if (
-      (!text.trim() && !attachments.files.length) ||
+      (!text.trim() && !attachments.files.length && !stickerDraft) ||
+      !!stickerDraft?.busy ||
       (!text.trim() && !!reply) ||
       !!attachments.submission ||
       !state.account ||
@@ -1155,6 +1178,7 @@ function Chats({
       || allMentionBlocked
     )
       return;
+    const stickerAccount = state.account, stickerConversation = state.selected, stagedSticker = stickerDraft;
     const batch = attachments.files.length ? connection.attachmentDrafts.claim(state.account, state.selected) : null;
     if (attachments.files.length && !batch) return;
     const outbox = batch ? connection.mediaOutbox(batch.account) : null;
@@ -1172,6 +1196,7 @@ function Chats({
     void (text.trim() ? session.send(text, reply, draftMentions) : Promise.resolve(true)).then(async (queued) => {
       const current = batch ? connection.attachmentDrafts.finish(batch, queued) : true;
       if (queued) {
+        if (stagedSticker) await sendStagedSticker(stickerAccount, draftKey, stickerConversation, stagedSticker);
         if (current && batch && outbox) {
           void session.readOnInteraction(batch.account, batch.thread);
           await sendAttachmentBatch(outbox, batch);
@@ -1724,6 +1749,7 @@ function Chats({
                   </ConversationScroll>
                   <div className="composer-wrap">
                     <div className="composer" ref={composerInput}>
+                      {state.account && stickerDraft && <StickerDraftPreview connection={connection} account={state.account} draft={stickerDraft} remove={() => putSticker(draftKey)} />}
                       {!reply && pendingQuote.current && (
                         <div className="composer-reply">
                           <span className="reply-source">
@@ -1805,6 +1831,7 @@ function Chats({
                       {allMentionBlocked && <p className="mention-error" role="alert">{allMentionProblem(state.selectedGroup, state.selected)} <button type="button" onClick={() => { const next = removeAllMentions(draft, draftMentions); changeDraft(next.text, next.tokens); }}>{t("main.removeEveryone")}</button> <button type="button" disabled={!active || state.opening} onClick={() => { void session.refreshConversations(state.account, false, state.selected ?? undefined).catch(() => {}); }}>{t("main.refresh")}</button></p>}
                       <div className="composer-bottom">
                         <div className="composer-tools" role="group" aria-label={t("main.messageActions")}>
+                          {state.account && state.capabilities.stickers===true && <StickerPicker key={JSON.stringify([state.account, state.selected])} connection={connection} account={state.account} enabled={active && !!state.selected && !stickerDraft?.busy} stage={draft => { putSticker(draftKey, draft); focusMessage(); }} />}
                           {state.account && <AttachmentPicker key={JSON.stringify([state.account, state.selected])} connection={connection} account={state.account} threadId={state.selected}
                             composerRef={composerInput} mediaKinds={Array.isArray(state.capabilities.mediaKinds) ? state.capabilities.mediaKinds : []}
                             capabilities={state.capabilities}
@@ -1820,7 +1847,8 @@ function Chats({
                           className="send-btn"
                           disabled={
                             !state.selected ||
-                            (!draft.trim() && !attachments.files.length) ||
+                            (!draft.trim() && !attachments.files.length && !stickerDraft) ||
+                            !!stickerDraft?.busy ||
                             (!draft.trim() && !!reply) ||
                             !!attachments.submission ||
                             !active ||

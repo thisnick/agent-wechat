@@ -25,11 +25,11 @@ axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
-wechat-config = { path = "../wechat-config" }
 wechat-store = { path = "../wechat-store" }
 wechat-api = { path = "../wechat-api" }
 
 wechat-core = { path = "../wechat-core" }
+wechat-media = { path = "../wechat-media" }
 wechat-profile = { path = "../wechat-profile" }
 wechat-calls = { path = "../wechat-calls", features = ["native-opus"] }
 wechat-audio = { path = "../wechat-audio", features = ["native-audio"] }
@@ -47,4 +47,4 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 unicode-width = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }

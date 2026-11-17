@@ -1,50 +1,67 @@
-use anyhow::{ensure, Context, Result};
+use anyhow::{ensure, Result};
 
 /// Check the top-level movie boxes before invoking the MOV-family demuxer.
 /// Older QuickTime movies may omit `ftyp`; both layouts still need owned movie
 /// metadata and media bytes. This only checks container structure; callers must
 /// separately decode and validate streams before sending.
 pub fn inspect_video_container(input: &[u8]) -> Result<&'static str> {
-    let mut offset = 0;
+    inspect_video_reader(&mut std::io::Cursor::new(input), input.len() as u64)
+}
+
+/// [`inspect_video_container`] for a seekable source of `length` bytes, such
+/// as a file. Only box headers and the file-type brand are read.
+pub fn inspect_video_reader(
+    input: &mut (impl std::io::Read + std::io::Seek),
+    length: u64,
+) -> Result<&'static str> {
+    use std::io::SeekFrom;
+    let mut offset = 0u64;
     let mut boxes = 0;
     let mut movie = false;
     let mut media = false;
     let mut content_type = "video/quicktime";
     let mut file_type = false;
-    while offset < input.len() {
+    let mut read = |at: u64, buffer: &mut [u8]| -> Result<()> {
+        input.seek(SeekFrom::Start(at))?;
+        input
+            .read_exact(buffer)
+            .map_err(|_| anyhow::anyhow!("invalid_video_source"))
+    };
+    while offset < length {
         boxes += 1;
         ensure!(boxes <= 65_536, "invalid_video_source");
-        let remaining = &input[offset..];
-        ensure!(remaining.len() >= 8, "invalid_video_source");
-        let size = u32::from_be_bytes(remaining[..4].try_into().unwrap());
-        let (size, header) = match size {
-            0 => (remaining.len(), 8),
+        let remaining = length - offset;
+        ensure!(remaining >= 8, "invalid_video_source");
+        let mut head = [0u8; 8];
+        read(offset, &mut head)?;
+        let kind: [u8; 4] = head[4..8].try_into().unwrap();
+        let (size, header) = match u32::from_be_bytes(head[..4].try_into().unwrap()) {
+            0 => (remaining, 8),
             1 => {
-                ensure!(remaining.len() >= 16, "invalid_video_source");
-                let size = u64::from_be_bytes(remaining[8..16].try_into().unwrap());
-                (usize::try_from(size).context("invalid_video_source")?, 16)
+                ensure!(remaining >= 16, "invalid_video_source");
+                let mut large = [0u8; 8];
+                read(offset + 8, &mut large)?;
+                (u64::from_be_bytes(large), 16)
             }
-            size => (size as usize, 8),
+            size => (u64::from(size), 8),
         };
-        ensure!(
-            size >= header && size <= remaining.len(),
-            "invalid_video_source"
-        );
-        match &remaining[4..8] {
+        ensure!(size >= header && size <= remaining, "invalid_video_source");
+        match &kind {
             b"ftyp" => {
                 ensure!(
                     !file_type && size >= header + 8 && (size - header).is_multiple_of(4),
                     "invalid_video_source"
                 );
                 file_type = true;
-                let brand = &remaining[header..header + 4];
-                content_type = if brand == b"qt  " {
+                let mut brand = [0u8; 4];
+                read(offset + header, &mut brand)?;
+                content_type = if &brand == b"qt  " {
                     "video/quicktime"
                 } else if brand.starts_with(b"3g2") {
                     "video/3gpp2"
                 } else if brand.starts_with(b"3g") {
                     "video/3gpp"
-                } else if matches!(brand, b"mjp2" | b"mj2s") {
+                } else if matches!(&brand, b"mjp2" | b"mj2s") {
                     "video/mj2"
                 } else {
                     "video/mp4"
@@ -59,7 +76,6 @@ pub fn inspect_video_container(input: &[u8]) -> Result<&'static str> {
     ensure!(movie && media, "invalid_video_source");
     Ok(content_type)
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

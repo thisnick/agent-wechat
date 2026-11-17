@@ -19,6 +19,12 @@ export type DesktopSettings = {
   notificationsEnabled: boolean;
   notificationSoundEnabled: boolean;
   notificationStatus: string;
+  /** Whether this device's hub keeps running while another hub is selected. */
+  keepLocalHubRunning: boolean;
+  /** Why this device's hub last failed to start, until it starts. */
+  localHubError: string | null;
+  /** A hub from an earlier run of the app holds the local port and can be stopped. */
+  leftoverHub: boolean;
 };
 export async function desktopConnect(
   session: DesktopSession,

@@ -1,10 +1,10 @@
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
-import { remarkBasePath } from './remark-base-path.mjs';
-import { remarkHeadingIds } from './remark-heading-ids.mjs';
+import { remarkBasePath } from './plugins/remark-base-path.mjs';
+import { remarkHeadingIds } from './plugins/remark-heading-ids.mjs';
 import { locales, translatedLocales } from './locales.mjs';
-import { remarkMermaid } from './remark-mermaid.mjs';
-import { ogImage } from './og-image-integration.mjs';
+import { remarkMermaid } from './plugins/remark-mermaid.mjs';
+import { ogImage } from './plugins/og-image-integration.mjs';
 
 const base = '/agent-wechat';
 const site = 'https://thisnick.github.io';
@@ -82,6 +82,7 @@ export default defineConfig({
           { label: 'CLI recipes', translations: { 'zh-CN': 'CLI 常用命令' }, slug: 'use/cli' },
           { label: 'Manage groups', translations: { 'zh-CN': '管理群聊' }, slug: 'use/groups' },
           { label: 'Send attachments', translations: { 'zh-CN': '发送附件' }, slug: 'use/media' },
+          { label: 'Use and manage stickers', slug: 'use/stickers' },
           { label: 'Settings', translations: { 'zh-CN': '设置' }, slug: 'use/settings' },
           { label: 'Video and image quality', translations: { 'zh-CN': '视频与图片画质' }, slug: 'use/quality' },
           { label: 'OpenClaw', translations: { 'zh-CN': 'OpenClaw' }, items: [
@@ -91,6 +92,7 @@ export default defineConfig({
             { label: 'Remember earlier calls', translations: { 'zh-CN': '记忆过往通话' }, slug: 'openclaw/call-memory' },
             { label: 'Who the bot answers', translations: { 'zh-CN': '响应权限控制' }, slug: 'openclaw/access' },
             { label: 'Agent tools', translations: { 'zh-CN': '智能体工具' }, slug: 'openclaw/tools' },
+            { label: 'Manage Saved stickers', slug: 'openclaw/stickers' },
             { label: 'Read receipts', translations: { 'zh-CN': '已读回执' }, slug: 'openclaw/read-receipts' },
           ] },
           { label: 'Skills', slug: 'use/skills' },
@@ -113,6 +115,7 @@ export default defineConfig({
           { label: 'Calls API', translations: { 'zh-CN': '通话控制 API' }, slug: 'reference/calls-api' },
           { label: 'Call media API', translations: { 'zh-CN': '通话媒体 API' }, slug: 'reference/calls-media' },
           { label: 'Rust libraries', translations: { 'zh-CN': 'Rust 开发库' }, slug: 'reference/rust-libraries' },
+          { label: 'Sticker API', slug: 'reference/stickers' },
           { label: 'Troubleshooting', translations: { 'zh-CN': '故障排查' }, slug: 'reference/troubleshooting' },
           { label: 'Build from source', translations: { 'zh-CN': '源码构建' }, slug: 'reference/build' },
           { label: 'Translate', translations: { 'zh-CN': '参与翻译' }, slug: 'reference/translate' },

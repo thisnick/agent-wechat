@@ -1,12 +1,12 @@
 ---
 title: 管理群聊
 description: 查看群成员、创建与编辑群聊、调整群通知设置，以及发送与接收 @ 提醒。
-sourceHash: 8b0285748801
+sourceHash: 681c86c42611
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-使用 `wx groups` 命令管理普通微信群聊与群成员，使用 `wx chats mute/unmute` 修改群免打扰设置，并支持通过[@ 提醒](#mention-group-members)指定成员。修改群操作需要拥有 `admin` 范围的 Daemon 令牌，且微信服务端仍会严格校验你的账号在对应群聊中的实际权限。
+使用 `wx groups` 命令管理普通微信群聊与群成员，使用 `wx chats mute/unmute` 修改群免打扰设置，并支持通过[@ 提醒](#mention-group-members)指定成员。修改群操作需要拥有 `admin` 范围的 Daemon 令牌，并且需要微信对你在该群中的相应权限。
 
 ## 查看与刷新 \{#read-and-refresh}
 
@@ -16,10 +16,11 @@ import { Aside } from '@astrojs/starlight/components';
    wx groups list
    wx groups get '123456@chatroom'
    wx groups members list '123456@chatroom' --limit 50
+   wx groups members list '123456@chatroom' --search alice
    wx groups members get '123456@chatroom' wxid_alice
    ```
 
-   精准查询群成员将返回 `{"state":"present","member":{...}}` 或 `{"state":"unconfirmed","member":null}`。本地未找到该记录并不代表该成员已退群。
+   `--search` 可匹配成员的 ID、微信号、昵称、你为其设置的备注或其在本群中的名称，匹配规则与 [`groups find`](/reference/cli/) 一致。精准查询群成员将返回 `{"state":"present","member":{...}}` 或 `{"state":"unconfirmed","member":null}`。本地未找到该记录并不代表该成员已退群。
 
 2. 在需要时从微信服务器拉取最新数据：
 
@@ -52,7 +53,7 @@ import { Aside } from '@astrojs/starlight/components';
    wx operations get OPERATION_ID
    ```
 
-   检查操作记录中的 `remoteOutcome`、`members`、`unconfirmedMembers` 以及 `profileProjection`。`succeeded` 代表建群或修改请求已被服务端接受；对于部分成功的邀请操作请检查各个成员的具体状态。退出群聊会保留本地已保存的历史聊天记录。若遇到网络丢失响应，请务必复用相同的幂等键与一致参数重试。`needs_review` 表示微信端可能已经接收了请求，切勿随意更换新键重试，应主动查询已有操作记录。
+   检查操作记录中的 `remoteOutcome`、`members`、`unconfirmedMembers` 以及 `profileProjection`。`succeeded` 代表请求已被服务端接受，但各成员的处理结果可能不同。退出群聊会保留历史聊天记录。若遇到网络丢失响应，请务必复用相同的幂等键与一致参数重试。`needs_review` 表示微信端可能已经接收了请求，切勿随意更换新键重试，应主动查询已有操作记录。
 
 ## API 与 SDK \{#api-and-sdk}
 
@@ -71,7 +72,7 @@ const status = await client.operation(accountId, op.id);
 
 ### 桌面端应用 \{#in-the-app}
 
-在群聊输入框中键入 `@` 字符，或点击附件按钮旁的 **@ 提醒**。选择相应群成员即可在光标处插入 @ 标签；按退格键 (Backspace) 或标签上的 × 按钮即可将其移除。选中的接收成员将保存在草稿中。
+在群聊输入框中键入 `@` 字符，或点击附件按钮旁的 **提醒某人**。选择相应群成员即可在光标处插入 @ 标签；按退格键 (Backspace) 或标签上的 × 按钮即可将其移除。选中的接收成员将保存在草稿中。
 
 **“所有人” (Everyone)** 仅对群主和群管理员可用。如果你的群权限发生变更，应用会保留草稿，并允许你移除“所有人”或刷新群信息。省略该权限字段的旧版服务端将保留原有行为。
 
@@ -153,11 +154,11 @@ await client.sendText(accountId, groupId, "Hi @Alice\u2005, please check this", 
 }
 ```
 
-`self` 为 `true` 表示你在被提醒名单中；`all` 为 `true` 表示这是一条 @所有人 消息，独立于 `userIds`。若元数据缺失或异常，返回 `state: "unknown"` 且相关标记为 null。监听 `message.committed` 事件后获取消息详情即可读取这些字段。OpenClaw 的群 @ 触发门禁同时支持命中自身或者命中全员提醒。
+`self` 为 `true` 表示你在被提醒名单中；`all` 为 `true` 表示这是一条 @所有人 消息，独立于 `userIds`。若元数据缺失或异常，返回 `state: "unknown"` 且相关标记为 null。请获取 `message.committed` 事件所指定的消息，以读取这些字段。OpenClaw 的群 @ 触发门禁同时支持命中自身或者命中全员提醒。
 
 <Aside title="使用提示">
 - 已保存的群聊变更会触发 `group.updated`；版本号变动通知可能会触发群名单和公告的主动刷新。联系人同步流也会携带群免打扰状态。群免打扰处理具备测试 Fixture；独立的手机端免打扰切换以及其他设备编辑操作的自动下发仍待实机验证。
 - 未知的同步指令字段保持挂起状态。未完整重建的本地提示消息、全文搜索索引和部分私有配置可能会在受支持字段保存后使操作报告 `profileProjection: "partial"`。
-- 免打扰支持普通联系人单聊与群聊。自定义群备注、发布群公告、生成邀请二维码链接、转让群主及变更群管理员等操作暂不支持。OpenClaw 仅暴露了群主/管理员权限的[群信息工具](/openclaw/tools/)，未开放群修改工具。
+- 免打扰支持普通联系人单聊与群聊。自定义群备注、发布群公告、生成邀请二维码链接、转让群主及变更群管理员等操作暂不支持。OpenClaw 提供仅限群主使用的[群信息工具](/openclaw/tools/)，没有群修改工具。
 - 群成员提醒支持在本地已保存的群聊中发送普通文本。未知或重复的成员 ID、单聊会话以及富媒体消息载荷均不支持提醒。提醒可以配合[引用纯文本回复](/use/cli/#quoted-replies)同时使用；包含成员名称在内的引用评论正文上限为 16 KiB，其他文本（含名称）上限为 64 KiB。遇到网络超时请保留原有的发送幂等键；详见[消息发送与恢复机制](/how-it-works/sends/)。
 </Aside>

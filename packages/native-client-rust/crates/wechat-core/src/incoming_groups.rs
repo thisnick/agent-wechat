@@ -455,11 +455,13 @@ mod tests {
         ];
         if signals {
             f.extend([p::uint(53, 7), p::bytes(57, &p::uint(1, 2)), p::uint(64, 3)]);
+            // A non-remark control: remark-only controls queue a contact lookup
+            // instead of holding the update (see `contact_remarks`).
             let control = p::message(&[
                 p::uint(1, 1),
                 p::uint(2, 14),
                 p::uint(3, 1),
-                p::bytes(4, &p::uint(1, 10)),
+                p::bytes(4, &p::uint(1, 27)),
             ])
             .unwrap();
             f.push(p::bytes(

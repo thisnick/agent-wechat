@@ -21,13 +21,14 @@ dependencies = [
 
 [[package]]
 name = "agent-wechat-desktop"
-version = "2.3.2"
+version = "2.6.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
  "block2",
  "chrono",
  "keyring",
+ "libc",
  "mac-notification-sys",
  "notify-rust",
  "objc2",
@@ -5863,7 +5864,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-platform"
-version = "2.2.0"
+version = "2.6.0"
 dependencies = [
  "libc",
  "tempfile",

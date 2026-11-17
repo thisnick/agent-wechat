@@ -14,6 +14,7 @@
       "wechat_recall",
       "wechat_send_share",
       "wechat_group_info",
+      "wechat_stickers",
       "wechat_login",
       "wechat_call"
     ],

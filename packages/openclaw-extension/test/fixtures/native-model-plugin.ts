@@ -1,4 +1,4 @@
-// Built only by native-model-smoke.mjs into an isolated test plugin.
+// Built only by test/smoke/model.mjs into an isolated test plugin.
 import base from "../../index.ts";
 import { appendFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

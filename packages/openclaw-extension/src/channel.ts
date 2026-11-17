@@ -215,7 +215,6 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
     buildAccountSnapshot: ({ account, runtime }) => ({
       accountId: account?.accountId ?? "default", backend: "native",
       handoffUnconfirmed: (runtime as any)?.handoffUnconfirmed,
-      needsReview: (runtime as any)?.needsReview,
       enabled: account?.enabled ?? false, configured: Boolean(account?.native),
       running: runtime?.running ?? false, connected: runtime?.connected ?? false,
       linked: runtime?.linked ?? false,

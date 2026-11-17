@@ -3,7 +3,7 @@
 use anyhow::{bail, ensure, Context, Result};
 use std::{
     fs::File,
-    io::{Read, Write},
+    io::Read,
     path::Path,
     process::{Child, Command, Stdio},
     sync::{
@@ -13,7 +13,6 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use wechat_media::inspect_video_container;
 
 const OUTPUT_LIMIT: usize = wechat_protocol::media::MAX_NATIVE_UPLOAD_BYTES;
 const REPORT_LIMIT: usize = 65_536;
@@ -21,25 +20,19 @@ const STDERR_LIMIT: usize = 16_384;
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(300);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Produce one MP4 with H.264 Main/yuv420p, longest edge at most 720, at most 30
-/// frames/second, and stereo 48kHz AAC when the source has audio. The bitrate
-/// budget reserves 20% of the upload cap for muxing/encoder variation. Inputs
-/// that cannot fit even 32kbps video plus 64kbps audio are refused. A file-size
-/// stop is only a safety guard: independently decoded frame counts and video
-/// durations must still match before any bytes are returned.
+/// [`prepare_normal_file`] for a source held in memory.
+#[cfg(test)]
 pub(super) fn prepare_normal(
     input: &[u8],
     seconds: u32,
     mut cancelled: impl FnMut() -> Result<()>,
 ) -> Result<Vec<u8>> {
+    use std::io::Write;
     cancelled()?;
     validate_input_length(input.len())?;
-    inspect_video_container(input)?;
-    ensure!((1..=3600).contains(&seconds), "video_duration_limit");
-    let deadline = Instant::now() + PREPARE_TIMEOUT;
+    wechat_media::inspect_video_container(input)?;
     let dir = wechat_platform::private_tempdir("wechat-video-")?;
     let source = dir.path().join("source.mp4");
-    let output = dir.path().join("normal.mp4");
     let mut file = wechat_platform::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -50,6 +43,31 @@ pub(super) fn prepare_normal(
         file.write_all(chunk)?;
     }
     drop(file);
+    prepare_normal_file(&source, seconds, cancelled)
+}
+
+/// Produce one MP4 with H.264 Main/yuv420p, longest edge at most 720, at most 30
+/// frames/second, and stereo 48kHz AAC when the source has audio. The bitrate
+/// budget reserves 20% of the upload cap for muxing/encoder variation. Inputs
+/// that cannot fit even 32kbps video plus 64kbps audio are refused. A file-size
+/// stop is only a safety guard: independently decoded frame counts and video
+/// durations must still match before any bytes are returned.
+///
+/// The source is a private file that FFprobe and FFmpeg read directly; it is
+/// never loaded into memory.
+pub(super) fn prepare_normal_file(
+    source: &Path,
+    seconds: u32,
+    mut cancelled: impl FnMut() -> Result<()>,
+) -> Result<Vec<u8>> {
+    cancelled()?;
+    let length = std::fs::metadata(source)?.len();
+    validate_input_length(usize::try_from(length)?)?;
+    wechat_media::inspect_video_reader(&mut File::open(source)?, length)?;
+    ensure!((1..=3600).contains(&seconds), "video_duration_limit");
+    let deadline = Instant::now() + PREPARE_TIMEOUT;
+    let dir = wechat_platform::private_tempdir("wechat-video-")?;
+    let output = dir.path().join("normal.mp4");
     drop(
         wechat_platform::OpenOptions::new()
             .write(true)
@@ -57,7 +75,7 @@ pub(super) fn prepare_normal(
             .mode(0o600)
             .open(&output)?,
     );
-    let original = probe(&source, false, deadline, &mut cancelled)?;
+    let original = probe(source, false, deadline, &mut cancelled)?;
     ensure!(
         original.container_duration.ceil() as u32 == seconds,
         "video_duration_changed"
@@ -86,9 +104,10 @@ pub(super) fn prepare_normal(
         "1",
         "-i",
     ]);
-    command.arg(&source).args([
+    command.arg(source).args([
         "-map",
-        "0:v:0",
+        // `V` skips attached pictures (cover art), which FFmpeg lists as video.
+        "0:V:0",
         "-map",
         "0:a:0?",
         "-map_metadata",
@@ -98,7 +117,10 @@ pub(super) fn prepare_normal(
         "-sn",
         "-dn",
         "-vf",
-        "scale=w='min(720,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1,fps=30",
+        // Full-range sources (yuvj420p or color_range=pc) keep their range
+        // through the encoder on FFmpeg 7 and later unless it is converted
+        // here, and the result would fail the yuv420p check below.
+        "scale=w='min(720,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2:out_range=tv,setsar=1,fps=30",
         "-c:v",
         "libx264",
         "-preset",
@@ -182,16 +204,36 @@ fn parse_probe_inner(bytes: &[u8], normal: bool, require_frames: bool) -> Result
     ensure!(bytes.len() <= REPORT_LIMIT, "media_probe_output_limit");
     let result: serde_json::Value = serde_json::from_slice(bytes).context("media_probe_failed")?;
     let streams = result["streams"].as_array().context("media_probe_failed")?;
-    ensure!(streams.len() <= 8, "video_stream_limit");
+    // Phone recordings carry timed-metadata tracks (an iPhone MOV has several
+    // `mebx` data streams) that are never decoded or encoded: the playback copy
+    // maps one video and one audio stream and drops data and subtitles. Only
+    // video and audio count toward the limit; the total stays bounded so the
+    // probe report does too.
+    ensure!(streams.len() <= 32, "video_stream_limit");
+    ensure!(
+        streams
+            .iter()
+            .filter(|s| matches!(s["codec_type"].as_str(), Some("video" | "audio")))
+            .count()
+            <= 8,
+        "video_stream_limit"
+    );
+    // Cover art is a one-frame video stream marked as an attached picture; it is
+    // not encoded, so it does not count as the source's video.
     let videos: Vec<_> = streams
         .iter()
-        .filter(|s| s["codec_type"] == "video")
+        .filter(|s| s["codec_type"] == "video" && s["disposition"]["attached_pic"] != 1)
         .collect();
     let audios: Vec<_> = streams
         .iter()
         .filter(|s| s["codec_type"] == "audio")
         .collect();
-    ensure!(videos.len() == 1 && audios.len() <= 1, "video_stream_limit");
+    // A source may have several audio tracks; only the first is encoded, so
+    // the playback copy still has at most one.
+    ensure!(
+        videos.len() == 1 && (!normal || audios.len() <= 1),
+        "video_stream_limit"
+    );
     let video = videos[0];
     let width = video["width"].as_u64().context("media_probe_failed")?;
     let height = video["height"].as_u64().context("media_probe_failed")?;
@@ -293,7 +335,7 @@ fn probe(
             "-threads",
             "1",
             "-show_entries",
-            "stream=codec_name,codec_type,pix_fmt,width,height,duration,avg_frame_rate,nb_read_frames,sample_rate,channels:format=duration",
+            "stream=codec_name,codec_type,pix_fmt,width,height,duration,avg_frame_rate,nb_read_frames,sample_rate,channels:stream_disposition=attached_pic:format=duration",
             "-of",
             "json",
         ]);
@@ -401,6 +443,7 @@ fn execute(
 mod tests {
     use super::*;
     use serde_json::json;
+    use wechat_media::inspect_video_container;
 
     fn synthetic_video(muxer: &str, codec: &str, brand: Option<&str>) -> Vec<u8> {
         let dir = wechat_platform::private_tempdir("wechat-video-source-test-").unwrap();
@@ -718,5 +761,199 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
+    }
+
+    #[test]
+    fn source_probe_ignores_cover_art_and_extra_audio_tracks() {
+        let video = report()["streams"][0].clone();
+        let audio =
+            json!({"codec_type":"audio","codec_name":"aac","sample_rate":"48000","channels":2});
+        let cover = json!({"codec_type":"video","codec_name":"mjpeg","width":320,"height":320,"nb_read_frames":"1","disposition":{"attached_pic":1}});
+        let mut value = report();
+        value["streams"] = json!([video, audio, audio, cover]);
+        let bytes = serde_json::to_vec(&value).unwrap();
+        assert!(parse_probe(&bytes, false).unwrap().audio);
+        // The playback copy itself must still have one video and at most one
+        // audio stream.
+        assert!(parse_probe(&bytes, true)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("video_stream_limit"));
+        value["streams"] = json!([cover, audio]);
+        assert!(parse_probe(&serde_json::to_vec(&value).unwrap(), false)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("video_stream_limit"));
+    }
+
+    #[test]
+    fn source_probe_ignores_phone_metadata_tracks_but_keeps_its_limits() {
+        // The stream layout of an iPhone recording: HEVC video, AAC plus spatial
+        // audio, and seven timed-metadata (`mebx`) data streams.
+        let video = report()["streams"][0].clone();
+        let aac =
+            json!({"codec_type":"audio","codec_name":"aac","sample_rate":"48000","channels":2});
+        let spatial = json!({"codec_type":"audio","codec_name":"apple_apac","sample_rate":"48000","channels":4});
+        let metadata = json!({"codec_type":"data","avg_frame_rate":"0/0"});
+        let probe = |streams: Vec<serde_json::Value>| {
+            let mut value = report();
+            value["streams"] = serde_json::Value::Array(streams);
+            parse_probe(&serde_json::to_vec(&value).unwrap(), false)
+        };
+        let mut phone = vec![video.clone(), aac.clone(), spatial];
+        phone.extend(std::iter::repeat_n(metadata.clone(), 7));
+        assert!(probe(phone).unwrap().audio);
+        // Decoded streams keep their limit of eight.
+        let mut many_audio = vec![video.clone()];
+        many_audio.extend(std::iter::repeat_n(aac, 8));
+        assert!(probe(many_audio)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("video_stream_limit"));
+        // And the report as a whole stays bounded.
+        let mut many_data = vec![video];
+        many_data.extend(std::iter::repeat_n(metadata, 32));
+        assert!(probe(many_data)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("video_stream_limit"));
+    }
+
+    #[test]
+    fn normal_video_accepts_sources_with_cover_art_and_two_audio_tracks() {
+        let dir = wechat_platform::private_tempdir("wechat-video-streams-test-").unwrap();
+        let cover = dir.path().join("cover.jpg");
+        let plain = dir.path().join("plain.mp4");
+        let source = dir.path().join("source.mp4");
+        let ffmpeg = |args: &[&str], output: &Path| {
+            assert!(Command::new("ffmpeg")
+                .args(["-v", "error", "-nostdin"])
+                .args(args)
+                .arg(output)
+                .status()
+                .unwrap()
+                .success());
+        };
+        ffmpeg(
+            &["-f", "lavfi", "-i", "color=c=red:s=64x64", "-frames:v", "1"],
+            &cover,
+        );
+        ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x240:rate=10:duration=1",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000:duration=1",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=880:sample_rate=48000:duration=1",
+                "-map",
+                "0",
+                "-map",
+                "1",
+                "-map",
+                "2",
+                "-c:v",
+                "libx264",
+                "-threads",
+                "1",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+            ],
+            &plain,
+        );
+        let plain = plain.to_str().unwrap();
+        let cover = cover.to_str().unwrap();
+        ffmpeg(
+            &[
+                "-i",
+                plain,
+                "-i",
+                cover,
+                "-map",
+                "0",
+                "-map",
+                "1",
+                "-c",
+                "copy",
+                "-disposition:v:1",
+                "attached_pic",
+            ],
+            &source,
+        );
+        let input = std::fs::read(&source).unwrap();
+        let encoded = prepare_normal(&input, 1, || Ok(())).unwrap();
+        let output = dir.path().join("normal.mp4");
+        std::fs::write(&output, encoded).unwrap();
+        let probe = probe(&output, true, Instant::now() + PREPARE_TIMEOUT, &mut || {
+            Ok(())
+        })
+        .unwrap();
+        assert!(probe.audio);
+    }
+
+    #[test]
+    fn normal_video_converts_full_range_sources_to_limited_range() {
+        let dir = wechat_platform::private_tempdir("wechat-video-range-test-").unwrap();
+        let source = dir.path().join("source.mp4");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-nostdin",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x240:rate=10:duration=1",
+                "-c:v",
+                "libx264",
+                "-threads",
+                "1",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
+                "-color_range",
+                "pc",
+            ])
+            .arg(&source)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let input = std::fs::read(&source).unwrap();
+        let encoded = prepare_normal(&input, 1, || Ok(())).unwrap();
+        let output = dir.path().join("normal.mp4");
+        std::fs::write(&output, encoded).unwrap();
+        let report = Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=pix_fmt,color_range",
+                "-of",
+                "json",
+            ])
+            .arg(&output)
+            .output()
+            .unwrap();
+        assert!(report.status.success());
+        let report: serde_json::Value = serde_json::from_slice(&report.stdout).unwrap();
+        assert_eq!(report["streams"][0]["pix_fmt"], "yuv420p");
+        assert_ne!(report["streams"][0]["color_range"], "pc");
     }
 }

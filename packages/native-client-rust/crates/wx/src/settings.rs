@@ -65,7 +65,7 @@ pub fn valid_name(name: &str) -> Result<()> {
 impl File {
     pub fn load(
         explicit: Option<&Path>,
-        env: &wechat_config::Environment,
+        env: &crate::config::Environment,
         cwd: &Path,
         create: bool,
     ) -> Result<Self> {
@@ -96,7 +96,7 @@ impl File {
                 let mut parsed = match toml::from_str::<Settings>(text) {
                     Ok(value) => value,
                     Err(_) => {
-                        let legacy: wechat_config::ClientConfig = toml::from_str(text)
+                        let legacy: crate::config::ClientConfig = toml::from_str(text)
                             .map_err(|_| anyhow::anyhow!("invalid client configuration"))?;
                         if legacy.schema_version != 1 {
                             bail!("unsupported client configuration schemaVersion");
@@ -217,8 +217,8 @@ impl File {
         &self,
         selected: Option<&str>,
         url: Option<&str>,
-        server: &wechat_config::ServerConfig,
-    ) -> Result<(wechat_config::ClientConfig, Option<String>)> {
+        server: &crate::config::ServerConfig,
+    ) -> Result<(crate::config::ClientConfig, Option<String>)> {
         let environment_url = std::env::var("AGENT_WECHAT_URL").ok();
         let environment_name = std::env::var("AGENT_WECHAT_SERVER").ok();
         let direct = url.or_else(|| {
@@ -238,7 +238,7 @@ impl File {
         let name = self.server_name(name, direct)?;
         let saved = name.as_ref().and_then(|n| self.settings.servers.get(n));
         Ok((
-            wechat_config::ClientConfig {
+            crate::config::ClientConfig {
                 schema_version: 1,
                 endpoint: direct
                     .map(str::to_owned)
@@ -310,7 +310,7 @@ mod tests {
         file.save().unwrap();
         let loaded = File::load(
             Some(&file.path),
-            &wechat_config::Environment::default(),
+            &crate::config::Environment::default(),
             temp.path(),
             false,
         )

@@ -10,6 +10,8 @@
 // scene is also captured in every translation as `<scene>@<viewport>@<language>`
 // (see capture.spec.mjs); `ready` and `actions` stay in English.
 import { ACCOUNT, SPARE } from "./accounts.mjs";
+import { desktopBridge, LEFTOVER_HUB_SETTINGS } from "./desktop.mjs";
+import { readFile } from "node:fs/promises";
 
 /** Desktop, phone and compact phone sizes for visual review. */
 export const viewports = {
@@ -62,6 +64,19 @@ async function standardWorld(sim) {
     booked: mei.find((message) => message.body === "I booked the place near the station").id,
     photo: mei.find((message) => message.type === 3).id,
   };
+}
+
+/** Real media from the docs gallery, staged through the composer's own file input. */
+const composerFiles = {
+  "afternoon-walk.jpg": "image/jpeg",
+  "afternoon-walk.mp4": "video/mp4",
+};
+async function stageComposerFiles(page, names) {
+  await page.locator("input.attachment-input").setInputFiles(await Promise.all(names.map(async (name) => ({
+    name,
+    mimeType: composerFiles[name],
+    buffer: await readFile(new URL(`../../../docs/demo/gallery/fixtures/media/${name}`, import.meta.url)),
+  }))));
 }
 
 /** A row of the chat or contact list, found by the conversation's name rather than its preview text. */
@@ -239,6 +254,37 @@ export const scenes = [
       await expect(page.locator("img.media-preview")).toHaveCount(1);
     },
   },
+  ...["composer-attachments", "composer-attachments-original"].map((name) => ({
+    name,
+    route: "chat",
+    description: name === "composer-attachments"
+      ? "A photo and a video staged in the message box with previews, sizes, remove buttons and the unchecked Original choice."
+      : "Original checked for a staged photo and video, with help that explains what it adds for each.",
+    viewports: ["desktop", "narrow", "compact"],
+    setup: standardWorld,
+    target: (world) => ({ account: ACCOUNT.id, thread: world.mei }),
+    ready: async ({ page, expect }) => {
+      await expect(page.getByText("I booked the place near the station")).toBeVisible();
+    },
+    actions: async ({ page, expect }) => {
+      // Attachments open once the hub's capabilities and the conversation are loaded.
+      await expect(page.getByRole("button", { name: "Attach file" })).toBeEnabled();
+      await stageComposerFiles(page, ["afternoon-walk.jpg", "afternoon-walk.mp4"]);
+      const tray = page.getByRole("region", { name: "Staged attachments" });
+      await expect(tray.getByText("2 attachments")).toBeVisible();
+      await expect(tray.getByRole("img", { name: "Staged image" })).toBeVisible();
+      // Settling waits for images, not videos: wait for the first frame to show.
+      await expect.poll(() => tray.locator("video").evaluate((video) => video.readyState)).toBeGreaterThanOrEqual(2);
+      const original = tray.getByRole("checkbox", { name: "Original media quality" });
+      await expect(original).not.toBeChecked();
+      if (name === "composer-attachments") return;
+      await original.check();
+      // Focus, not hover: the screenshot moves the pointer away, which closes a hovered tip.
+      await tray.getByRole("button", { name: "About original media quality" }).focus();
+      await expect(page.getByRole("tooltip")).toContainText("full resolution");
+      await expect(page.getByRole("tooltip")).toContainText("unchanged video file");
+    },
+  })),
   {
     name: "group-chat",
     route: "chat",
@@ -374,6 +420,68 @@ export const scenes = [
     },
   },
   {
+    name: "channels-video-cards",
+    route: "chat",
+    description: "Received WeChat Channels cards with their cover, play button, publisher and length.",
+    viewports: ["desktop", "narrow"],
+    setup: standardWorld,
+    target: (world) => ({ account: ACCOUNT.id, thread: world.mei }),
+    prepare: async ({ page }) => {
+      // Synthetic card and media payloads exercise the normal message and preview paths.
+      const cover = await readFile(new URL("./fixtures/channels-cover.jpg", import.meta.url));
+      const cards = [
+        { description: "Sunset from the harbour ferry, all the way across #travel", sourceName: "Harbour Walks", durationSeconds: 96 },
+        { description: "A three-minute noodle recipe for busy weeknights", sourceName: "Kitchen Notes", durationSeconds: 158 },
+      ];
+      const ids = new Map();
+      const assets = (messageId, index) => [
+        { id: `channels-cover-${index}`, accountId: ACCOUNT.id, messageId, kind: "image", variant: "thumbnail", actualVariant: "thumbnail",
+          state: "available", contentType: "image/jpeg", byteLength: cover.length, sha256: "c".repeat(64), filename: "link-preview",
+          expiresAt: null, reason: null, retryable: false, jobId: null, autoDownloadAllowed: true,
+          contentUrl: `/v1/accounts/${ACCOUNT.id}/media/channels-cover-${index}/content`, officialWriteback: "unsupported" },
+        { id: `channels-video-${index}`, accountId: ACCOUNT.id, messageId, kind: "video", variant: "normal", actualVariant: null,
+          state: "pending", contentType: null, byteLength: null, sha256: null, filename: "channels-video.mp4", expiresAt: null,
+          reason: null, retryable: true, jobId: null, autoDownloadAllowed: false, contentUrl: null, officialWriteback: "unsupported" },
+      ];
+      await page.route(/\/threads\/[^/]+\/messages(?:\?.*)?$/, async (route) => {
+        const response = await route.fetch();
+        if (!response.ok()) return route.fulfill({ response });
+        const data = await response.json();
+        data.items = data.items.map((message, index) => {
+          if (index >= cards.length) return message;
+          const card = cards[index];
+          ids.set(message.id, index);
+          return { ...message, type: 49, appMessageType: 51, quote: null,
+            body: `[Channels video] ${card.sourceName}: ${card.description}`,
+            link: { title: null, url: null, ...card } };
+        });
+        await route.fulfill({ response, json: data });
+      });
+      await page.route(/\/media\/lookup$/, async (route) => {
+        const { messageIds } = route.request().postDataJSON();
+        if (!messageIds.some((id) => ids.has(id))) return route.fallback();
+        const response = await route.fetch();
+        const data = response.ok() ? await response.json() : { items: messageIds.map((messageId) => ({ messageId, assets: [], error: null })) };
+        data.items = data.items.map((item) => ids.has(item.messageId) ? { messageId: item.messageId, assets: assets(item.messageId, ids.get(item.messageId)), error: null } : item);
+        await route.fulfill({ json: data });
+      });
+      await page.route(/\/messages\/[^/]+\/media(?:\?.*)?$/, async (route) => {
+        const messageId = decodeURIComponent(new URL(route.request().url()).pathname.split("/").at(-2));
+        if (!ids.has(messageId)) return route.fallback();
+        await route.fulfill({ json: { items: assets(messageId, ids.get(messageId)) } });
+      });
+      await page.route(/\/media\/channels-cover-\d+\/content(?:\?.*)?$/, (route) => route.fulfill({ body: cover, contentType: "image/jpeg" }));
+    },
+    ready: async ({ page, expect }) => {
+      const cards = page.locator(".channels-video-card");
+      await expect(cards).toHaveCount(2);
+      await expect(page.getByText("WeChat Channels · Harbour Walks", { exact: true })).toBeVisible();
+      await expect(page.getByText("WeChat Channels · Kitchen Notes", { exact: true })).toBeVisible();
+      await expect(cards.locator(".shared-link-duration")).toHaveText(["2:38", "1:36"]);
+      await expect(cards.locator(".shared-link-art img")).toHaveCount(2);
+    },
+  },
+  {
     name: "chat-info",
     route: "info",
     description: "Details of a group conversation with its pin, mute and group settings.",
@@ -463,4 +571,372 @@ export const scenes = [
     },
     mask: hubAddress,
   },
+  {
+    name: "desktop-leftover-hub",
+    route: "servers",
+    description: "The desktop app's first screen when a hub left running by an earlier session holds the local port.",
+    viewports: ["desktop", "narrow"],
+    setup: async () => ({}),
+    prepare: ({ page }) =>
+      desktopBridge(page, {
+        bootstrapError: LEFTOVER_HUB_SETTINGS.localHubError,
+        settings: LEFTOVER_HUB_SETTINGS,
+      }),
+    target: () => ({}),
+    ready: async ({ page, expect }) => {
+      await expect(page.getByRole("heading", { name: "Welcome to AgentWechat" })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Stop leftover hub" })).toBeVisible();
+    },
+  },
+  {
+    name: "desktop-settings",
+    route: "servers",
+    description: "Desktop settings, including whether this device's hub keeps running while another hub is used.",
+    viewports: ["desktop", "narrow"],
+    setup: async () => ({}),
+    prepare: ({ page }) =>
+      desktopBridge(page, {
+        bootstrapError: LEFTOVER_HUB_SETTINGS.localHubError,
+        settings: LEFTOVER_HUB_SETTINGS,
+      }),
+    target: () => ({}),
+    ready: async ({ page, expect }) => {
+      await expect(page.getByRole("heading", { name: "Welcome to AgentWechat" })).toBeVisible();
+    },
+    actions: async ({ page, expect }) => {
+      await page.getByRole("button", { name: "Desktop settings" }).click();
+      await expect(page.getByRole("heading", { name: "Desktop settings" })).toBeVisible();
+      await expect(page.getByRole("checkbox", { name: "Keep this device’s hub running" })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Stop leftover hub" })).toBeVisible();
+    },
+  },
 ];
+
+// Synthetic media responses exercise the real picker, dialogs and composer.
+// Native protocol/profile acceptance is covered independently in the isolated lab.
+async function stickerFixtures(page, cold = false) {
+  await page.route(/\/capabilities$/, async route => {const response=await route.fetch();await route.fulfill({response,json:{...await response.json(),stickers:true}});});
+  const gif = await readFile(new URL('../../native-client-rust/crates/wechat-simulator/fixtures/sticker.gif', import.meta.url));
+  const ids = Array.from({ length: cold ? 48 : 8 }, (_, index) => String(index + 1).padStart(32, '0'));
+  const asset = id => ({ id: `sticker-${id}`, accountId: ACCOUNT.id, messageId: null, kind: 'sticker', variant: 'original', actualVariant: 'original', state: 'available', contentType: 'image/gif', byteLength: gif.length, sha256: 'a'.repeat(64), filename: `${id}.gif`, retryable: false, contentUrl: `/v1/accounts/${ACCOUNT.id}/media/sticker-${id}/content`, officialWriteback: 'complete' });
+  const pack = (id, name, added) => ({ id, name, description: 'A little encouragement for everyday conversations.', membership: added ? 'added' : 'not_added', contentReadiness: 'available', eligible: true, stickerCount: 8, icon: asset(id), cover: null });
+  const packs = [pack('pack.cats', 'Cozy cats', true), pack('pack.vibes', 'Good vibes', true), pack('pack.hello', 'Little hellos', false)];
+  const downloaded = new Set();
+  const saved = { items: ids.slice(0, cold ? 48 : 6).map(id => ({ id, caption: null, original: cold ? null : asset(id) })), revision: 'b'.repeat(64), freshness: 'profile' };
+  const imports = new Map();
+  await page.route(/\/jobs\/scene-add(?:-\d+)?$/, route => {
+    const job = imports.get(new URL(route.request().url()).pathname.split('/').pop());
+    const id = job.stickerId;
+    saved.items = [{ id, caption: job.caption, original: asset(id) }, ...saved.items.filter(item => item.id !== id)];
+    saved.revision = 'c'.repeat(64);
+    return route.fulfill({json:{id:job.id,kind:'sticker_saved',state:'available',result:{profileWriteback:'complete'}}});
+  });
+  await page.route(/\/custom-stickers(?:\/[^/?]+)?(?:\?.*)?$/, route => {
+    const tail = new URL(route.request().url()).pathname.split('/custom-stickers')[1];
+    if (route.request().method() === 'POST') {
+      const request = route.request();
+      const preparationId = request.postDataJSON().source.preparationId;
+      if (tail || !/^prep-scene(?:-\d+)?$/.test(preparationId) || !request.headers()['idempotency-key']) return route.fulfill({status:400,json:{error:{code:'invalid_sticker_source'}}});
+      if ([...imports.values()].some(job => job.preparationId === preparationId)) throw Error('The UI submitted a successful import twice');
+      const sequence = imports.size + 1, id = sequence === 1 ? 'scene-add' : `scene-add-${sequence}`;
+      imports.set(id, {id, preparationId, stickerId:String(100 + sequence).padStart(32, '0'), caption:sequence === 1 ? 'Imported sticker' : `Imported sticker ${sequence}`});
+      return route.fulfill({status:202,json:{id,kind:'sticker_saved',state:'queued'}});
+    }
+    if(route.request().method()==='PATCH') {
+      const moving=tail.slice(1),after=route.request().postDataJSON().position.afterId;
+      const item=saved.items.find(item=>item.id===moving);const rest=saved.items.filter(item=>item.id!==moving);
+      rest.splice(after===null ? 0 : rest.findIndex(item=>item.id===after)+1,0,item);saved.items=rest;
+      return route.fulfill({status:202,json:{id:'scene-move',kind:'sticker_saved',state:'available',result:{profileWriteback:'complete'}}});
+    }
+    const item = saved.items.find(item => item.id === tail.slice(1));
+    return route.fulfill({ json: tail ? {...item, original: !cold || downloaded.has(item.id) ? asset(item.id) : null} : saved });
+  });
+  await page.route(/\/sticker-packs(?:\/[^/?]+(?:\/stickers)?)?(?:\?.*)?$/, route => {
+    const url = new URL(route.request().url()), rest = url.pathname.split('/sticker-packs')[1];
+    if (rest.endsWith('/stickers')) { const packId = rest.split('/')[1]; return route.fulfill({ json: { packId, items: ids.map((id, index) => ({ id, packId, ordinal: index + 1, caption: ['Hello!', 'Thank you', 'You got this', 'Nice work', 'Yes!', 'Good night', 'Please', 'Cheers'][index], captions: [], original: cold ? null : asset(id), thumbnail: cold ? {...asset(id),id:`sticker_preview_${id}`,state:downloaded.has(`sticker_preview_${id}`) ? "available" : "pending"} : null })) } }); }
+    if (rest) return route.fulfill({ json: packs.find(pack => pack.id === rest.slice(1)) });
+    return route.fulfill({ json: { items: url.searchParams.get('membership') === 'added' ? packs.filter(pack => pack.membership === 'added') : packs, nextCursor: null, coverage: url.searchParams.has('membership') ? 'account_added' : 'available_feed' } });
+  });
+  await page.route(/\/sticker-downloads$/, route => {
+    const input=route.request().postDataJSON();downloaded.add(input.assetId || input.stickerId);
+    return route.fulfill({status:202,json:{id:'scene-download',state:'available'}});
+  });
+  await page.route(/\/media\/sticker_preview_[^/]+$/, route => route.fulfill({json:{...asset('preview'),id:new URL(route.request().url()).pathname.split('/').pop()}}));
+  await page.route(/\/media\/sticker(?:-|_preview_)[^/]+\/content(?:\?.*)?$/, route => route.fulfill({ body: gif, contentType: 'image/gif' }));
+}
+
+// Files the import scenes drop, and what the mocked hub knows about each. Files with
+// a `file` are real fixtures the UI measures itself; the PNGs are drawn in the page.
+const stickerGif = '../../native-client-rust/crates/wechat-simulator/fixtures/sticker.gif';
+const importSources = {
+  'afternoon-walk.mp4': { kind: 'video', type: 'video/mp4', width: 1280, height: 858, durationMs: 4000, file: '../../../docs/demo/gallery/fixtures/media/afternoon-walk.mp4' },
+  'photo.png': { kind: 'image', type: 'image/png', width: 800, height: 600 },
+  'poster.png': { kind: 'image', type: 'image/png', width: 1600, height: 1200 },
+  'wave-1.gif': { kind: 'gif', type: 'image/gif', width: 96, height: 96, durationMs: 1000, file: stickerGif },
+  'wave-2.gif': { kind: 'gif', type: 'image/gif', width: 96, height: 96, durationMs: 1000, file: stickerGif },
+};
+
+/**
+ * Uploads and preparations that follow the hub's rules closely enough to show real
+ * sizes: images keep their size unless shrunk, video defaults to 240 px and 10 fps, and
+ * results over 1 MiB, 200 frames or 10 s fail with the hub's codes. Returns the requests.
+ */
+async function stickerPreparations(page) {
+  const gif = await readFile(new URL(stickerGif, import.meta.url));
+  const requests = [];
+  await page.route(/\/uploads$/, route => {
+    const name = /filename="([^"]+)"/.exec(route.request().postDataBuffer()?.toString('latin1') ?? '')?.[1] ?? 'unknown';
+    return route.fulfill({ json: { id: `source-${name}`, name, mediaType: importSources[name]?.type ?? 'application/octet-stream', byteLength: 1, sha256: 'd'.repeat(64), createdAt: '2026-01-01T00:00:00Z' } });
+  });
+  await page.route(/\/sticker-preparations$/, route => {
+    const input = route.request().postDataJSON();
+    requests.push(input);
+    const id = requests.length === 1 ? 'prep-scene' : `prep-scene-${requests.length}`;
+    const fail = reason => route.fulfill({ json: { id, kind: 'sticker_prepare', state: 'failed', phase: 'preparing', reason, retryable: false } });
+    const source = importSources[input.sourceId.replace(/^source-/, '')];
+    const video = source.kind === 'video', longest = Math.max(source.width, source.height);
+    if (!video && input.fps !== null) return fail('sticker_option_unsupported');
+    if (!video && input.maxEdge === null && longest > 1024) return fail('sticker_adjustment_required');
+    const scale = Math.min(1, (input.maxEdge ?? (video ? 240 : longest)) / longest);
+    const width = Math.round(source.width * scale), height = Math.round(source.height * scale);
+    const durationMs = input.trim?.durationMs ?? source.durationMs ?? 0;
+    const frames = video ? Math.ceil((input.fps ?? 10) * durationMs / 1000) : source.kind === 'gif' ? 2 : 1;
+    if (frames > 200 || durationMs > 10_000) return fail('sticker_adjustment_required');
+    const byteLength = source.kind === 'gif' && scale === 1 && !input.trim ? gif.length : Math.round(width * height * frames * (video ? 0.12 : 0.6));
+    if (byteLength > 1024 * 1024) return fail('sticker_output_size_limit');
+    const asset = { id: `sticker-prepared-${id}`, state: 'available', contentType: 'image/gif', sha256: 'a'.repeat(64), byteLength };
+    return route.fulfill({ json: { id, kind: 'sticker_prepare', state: 'available', result: { id, sourceId: input.sourceId, original: asset, preview: asset, contactSheet: asset, width, height, durationMs, transformations: [], warnings: [], expiresAt: 9999999999 } } });
+  });
+  return requests;
+}
+
+async function dropStickerFiles(page, names) {
+  const files = await Promise.all(names.map(async name => {
+    const source = importSources[name];
+    return { name, type: source.type, width: source.width, height: source.height, encoded: source.file ? (await readFile(new URL(source.file, import.meta.url))).toString('base64') : null };
+  }));
+  await page.locator('.sticker-tray').evaluate(async (tray, files) => {
+    const transfer = new DataTransfer();
+    for (const file of files) {
+      let blob;
+      if (file.encoded) blob = new Blob([Uint8Array.from(atob(file.encoded), c => c.charCodeAt(0))]);
+      else {
+        const canvas = new OffscreenCanvas(file.width, file.height), context = canvas.getContext('2d');
+        context.fillStyle = '#9fd3b8'; context.fillRect(0, 0, file.width, file.height);
+        blob = await canvas.convertToBlob({ type: 'image/png' });
+      }
+      transfer.items.add(new File([blob], file.name, { type: file.type }));
+    }
+    tray.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer }));
+  }, files);
+}
+
+for (const mode of ['picker', 'edit', 'dragging', 'packs', 'pack-detail', 'import', 'import-adjust', 'import-saved', 'import-retry', 'lazy-loading', 'loading']) {
+  scenes.push({
+    name: `stickers-${mode}`,
+    route: 'chat',
+    description: { loading: 'Added pack contents show loading until the response arrives, with empty state only after an empty response.', 'lazy-loading': 'Missing Saved originals and pack thumbnails load on visibility, including after scrolling.', picker: 'Composer-anchored Saved picker with labeled added-pack tabs.', edit: 'Saved edit mode stays inside the composer tray with removal, visible drag feedback, Escape cancellation and keyboard placement.', dragging: 'Holding a Saved sticker shows its existing image under the pointer, dims the source and marks its drop position without staging a send.', packs: 'Official pack browser shows added and available packs in one dialog.', 'pack-detail': 'Official pack detail has complete contents, captions, membership and a copyable ID.', import: 'Add to Saved shows each prepared file with its size, bytes and length, a size slider with a phone-size mark, a note when an image is shrunk to 1024 px, and smoothness, start and length for video, with one primary Add action.', 'import-adjust': 'Moving a slider prepares again after a pause, returns to an earlier setting without preparing it again, keeps Add off until the row matches its controls, and explains a result too large to send.','import-saved': 'A completed asynchronous import closes the dialog and selects Saved without reopening the picker or resubmitting the item.', 'import-retry': 'A partial import keeps its per-file results open; retry submits only the remaining item before returning to Saved.' }[mode],
+    viewports: ['desktop', 'narrow', 'compact'],
+    preservePointer: mode === 'dragging',
+    setup: standardWorld,
+    target: world => ({ account: ACCOUNT.id, thread: world.mei }),
+    prepare: async ({ page }) => stickerFixtures(page, mode === "lazy-loading"),
+    ready: async ({ page, expect }) => { await expect(page.getByText('I booked the place near the station')).toBeVisible(); },
+    actions: async ({ page, expect }) => {
+      await page.getByRole('button', { name: 'Stickers', exact: true }).click();
+      await expect(page.getByRole('region', { name: 'Sticker picker' })).toBeVisible();
+      await expect(page.getByRole('tab', { name: 'Cozy cats' })).toBeVisible();
+      if (mode === 'loading') {
+        let finish;
+        const response = new Promise(resolve => { finish = resolve; });
+        await page.route(/\/sticker-packs\/pack.cats\/stickers(?:\?.*)?$/, async route => {
+          await response;
+          await route.fulfill({ json: { packId: 'pack.cats', items: [] } });
+        });
+        await page.getByRole('tab', { name: 'Cozy cats' }).click();
+        await expect(page.getByRole('region', { name: 'Sticker picker' }).getByRole('status')).toHaveText('Loading stickers…');
+        await expect(page.getByText('No stickers here yet')).toHaveCount(0);
+        finish();
+        await expect(page.getByRole('region', { name: 'Sticker picker' }).getByRole('status')).toHaveText('No stickers here yet');
+        await page.getByRole('tab', { name: 'Cozy cats' }).click();
+        await expect(page.getByRole('region', { name: 'Sticker picker' }).getByRole('status')).toHaveText('No stickers here yet');
+        let finishNext;
+        const nextResponse = new Promise(resolve => { finishNext = resolve; });
+        await page.route(/\/sticker-packs\/pack.vibes\/stickers(?:\?.*)?$/, async route => {
+          await nextResponse;
+          await route.fulfill({ json: { packId: 'pack.vibes', items: [] } });
+        });
+        await page.getByRole('tab', { name: 'Good vibes' }).click();
+        await expect(page.getByRole('region', { name: 'Sticker picker' }).getByRole('status')).toHaveText('Loading stickers…');
+        await expect(page.getByText('No stickers here yet')).toHaveCount(0);
+        finishNext();
+        await expect(page.getByRole('region', { name: 'Sticker picker' }).getByRole('status')).toHaveText('No stickers here yet');
+      }
+      if (mode === 'lazy-loading') {
+        await expect(page.locator('.sticker-cell img').first()).toBeVisible();
+        await expect.poll(()=>page.locator('.sticker-cell img').count()).toBeGreaterThan(3);
+        expect(await page.locator('.sticker-cell img').count()).toBeLessThan(25);
+        await page.locator('.sticker-cell').nth(24).scrollIntoViewIfNeeded();
+        await expect(page.locator('.sticker-cell').nth(24).locator('img')).toBeVisible();
+        await page.getByRole('tab',{name:'Cozy cats'}).click();
+        await page.locator('.sticker-grid').evaluate(el=>el.scrollTop=0);
+        await expect(page.locator('.sticker-cell img').first()).toBeVisible();
+        expect(await page.locator('.sticker-cell img').count()).toBeLessThan(48);
+        await page.locator('.sticker-cell').last().scrollIntoViewIfNeeded();
+        await expect(page.locator('.sticker-cell').last().locator('img')).toBeVisible();
+        await expect(page.locator('.sticker-draft')).toHaveCount(0);
+        await page.locator('.sticker-grid').evaluate(el=>el.scrollTop=0);
+      }
+      if (mode === 'edit' || mode === 'dragging') {
+        await expect(page.getByRole('button', { name: 'Edit', exact: true })).toBeEnabled();
+        if (mode === 'edit') await page.getByRole('button', { name: 'Edit', exact: true }).click();
+        const first=page.locator('.sticker-cell').first(),last=page.locator('.sticker-cell').last();
+        await expect(first.locator('img')).toBeVisible();
+        const moving=await first.getAttribute('data-sticker-id'),src=await first.locator('img').getAttribute('src');
+        const from=await first.boundingBox();
+        await page.mouse.move(from.x+from.width/2,from.y+from.height/3);await page.mouse.down();
+        await expect(page.getByText('Drag to reorder')).toBeVisible();
+        const to=await last.boundingBox(),ghost=page.locator('.sticker-drag-preview');
+        await page.mouse.move(to.x+to.width-4,to.y+to.height/3,{steps:8});
+        await expect(ghost).toBeVisible();
+        await expect(ghost).toHaveAttribute('data-sticker-drag-id',moving);
+        await expect(ghost.locator('img')).toHaveAttribute('src',src);
+        await expect(first).toHaveClass(/is-drag-source/);
+        await expect(last).toHaveAttribute('data-drop-side','after');
+        const previewBox = await ghost.boundingBox();
+        expect(previewBox.x).toBeLessThan(to.x+to.width-4);
+        expect(previewBox.x+previewBox.width).toBeGreaterThan(to.x+to.width-4);
+        await expect(page.locator('.sticker-draft')).toHaveCount(0);
+        if (mode === 'edit') {
+          await page.keyboard.press('Escape'); await expect(ghost).toHaveCount(0); await page.mouse.up();
+          await expect(page.locator('.sticker-cell').first()).toHaveAttribute('data-sticker-id',moving);
+          await expect(page.getByRole('region',{name:'Sticker picker'})).toBeVisible();
+          await page.mouse.move(from.x+from.width/2,from.y+from.height/3);await page.mouse.down();
+          await page.mouse.move(to.x+to.width-4,to.y+to.height/3,{steps:8});await page.mouse.up();
+          await expect(ghost).toHaveCount(0);
+          await expect(page.locator('.sticker-cell').last()).toHaveAttribute('data-sticker-id',moving);
+          await expect(page.locator('.sticker-draft')).toHaveCount(0);
+          await page.getByRole('button',{name:'Done',exact:true}).focus();await page.keyboard.press('Enter');
+          await page.locator('.sticker-tile').first().focus();await page.keyboard.press('Enter');
+          await expect(page.locator('.sticker-draft')).toHaveCount(1);
+          await page.locator('.sticker-draft button').click();
+          await page.getByRole('button',{name:'Stickers',exact:true}).click();
+          await expect(page.getByRole('button',{name:'Edit',exact:true})).toBeEnabled();
+          await page.getByRole('button',{name:'Edit',exact:true}).click();
+        }
+      }
+      if (mode === 'packs' || mode === 'pack-detail') {
+        await page.getByRole('button', { name: 'Browse packs', exact: true }).click();
+        await expect(page.getByRole('dialog', { name: 'Browse packs' })).toBeVisible();
+        if (mode === 'pack-detail') {
+          let detailReads=0;
+          page.on('request',request=>{if(new URL(request.url()).pathname.includes('/sticker-packs/pack.hello'))detailReads++;});
+          await page.getByRole('button', { name: /Little hellos Preview pack/ }).click();
+          await expect(page.getByRole('dialog', { name: 'Little hellos' })).toBeVisible();
+          const initialReads=detailReads;expect(initialReads).toBe(2);
+          await page.getByRole('button',{name:'Back',exact:true}).click();
+          await page.getByRole('button', { name: /Little hellos Preview pack/ }).click();
+          await expect(page.getByRole('dialog', { name: 'Little hellos' })).toBeVisible();
+          expect(detailReads).toBe(initialReads);
+          await page.locator('.sticker-pack-item').first().click(); await expect(page.locator('.sticker-draft')).toHaveCount(0); await expect(page.locator('.sticker-detail-cover img')).toBeVisible(); }
+      }
+      if (mode.startsWith('import')) {
+        if (mode === 'import-saved') await page.getByRole('tab', { name: 'Cozy cats' }).click();
+        const prepared = await stickerPreparations(page);
+        const files = { import: ['afternoon-walk.mp4', 'photo.png', 'poster.png', 'wave-1.gif'], 'import-adjust': ['afternoon-walk.mp4'], 'import-retry': ['wave-1.gif', 'wave-2.gif'] }[mode] ?? ['wave-1.gif'];
+        await dropStickerFiles(page, files);
+        await expect(page.locator('.composer-attachments')).toHaveCount(0);
+        const dialog = page.getByRole('dialog', { name: 'Add to Saved' });
+        await expect(dialog.getByRole('button', { name: 'Done', exact: true })).toHaveCount(0);
+        await expect(dialog.getByRole('button', { name: `Add ${files.length}`, exact: true })).toBeEnabled();
+        const options = name => dialog.getByRole('group', { name: `Options for ${name}` });
+        const requestFor = name => prepared.find(request => request.sourceId === `source-${name}`);
+        if (mode === 'import') {
+          const video = options('afternoon-walk.mp4');
+          await expect(video.getByRole('slider', { name: 'Size' })).toHaveAttribute('aria-valuetext', '240 pixels');
+          await expect(video.getByRole('slider', { name: 'Smoothness' })).toHaveAttribute('aria-valuetext', '10 frames per second');
+          await expect(video.getByRole('slider', { name: 'Start' })).toHaveAttribute('aria-valuetext', '0.0 seconds');
+          await expect(video.getByRole('slider', { name: 'Length' })).toHaveAttribute('aria-valuetext', '4.0 seconds');
+          await expect(options('photo.png').getByRole('slider', { name: 'Size' })).toHaveAttribute('aria-valuetext', 'Original size, 800 pixels');
+          await expect(options('poster.png').getByRole('slider', { name: 'Size' })).toHaveAttribute('aria-valuetext', '1024 pixels');
+          await expect(options('poster.png').getByText("Shrunk to WeChat's 1024 px limit.")).toBeVisible();
+          await expect(options('wave-1.gif').getByRole('slider')).toHaveCount(0);
+          for (const text of ['240 × 161 · 181 KB · 4.0s', '800 × 600 · 281 KB', '1024 × 768 · 461 KB', '96 × 96 · 5 KB · 1.0s']) await expect(dialog.getByText(text, { exact: true })).toBeVisible();
+          expect(prepared).toHaveLength(4);
+          expect(requestFor('afternoon-walk.mp4')).toMatchObject({ fit: false, maxEdge: 240, fps: 10, trim: null });
+          expect(requestFor('photo.png')).toMatchObject({ fit: false, maxEdge: null, fps: null, trim: null });
+          expect(requestFor('poster.png')).toMatchObject({ fit: false, maxEdge: 1024, fps: null, trim: null });
+          expect(requestFor('wave-1.gif')).toMatchObject({ fit: false, maxEdge: null, fps: null, trim: null });
+          await dialog.locator('.sticker-import-list').evaluate(list => { list.scrollTop = 0; });
+        }
+        if (mode === 'import-adjust') {
+          const size = dialog.getByRole('slider', { name: 'Size' }), add = dialog.locator('.sticker-add-submit');
+          await expect(dialog.getByText('240 × 161 · 181 KB · 4.0s', { exact: true })).toBeVisible();
+          await size.focus();
+          for (let step = 0; step < 4; step++) await page.keyboard.press('ArrowRight');
+          await expect(size).toHaveAttribute('aria-valuetext', '640 pixels');
+          await expect(add).toBeDisabled();
+          await expect(dialog.getByRole('alert')).toHaveText(/^Too large to send/);
+          // Only the size the slider rested on was prepared, not the stops passed on the way.
+          expect(prepared).toHaveLength(2);
+          expect(prepared[1]).toMatchObject({ maxEdge: 640, fps: 10, trim: null });
+          for (let step = 0; step < 4; step++) await page.keyboard.press('ArrowLeft');
+          await expect(add).toHaveText('Add 1');
+          await expect(add).toBeEnabled();
+          await expect(dialog.getByRole('alert')).toHaveCount(0);
+          await dialog.getByRole('slider', { name: 'Smoothness' }).focus();
+          await page.keyboard.press('ArrowRight');
+          await expect(dialog.getByText('240 × 161 · 217 KB · 4.0s', { exact: true })).toBeVisible();
+          await dialog.getByRole('slider', { name: 'Length' }).focus();
+          for (let step = 0; step < 10; step++) await page.keyboard.press('ArrowLeft');
+          await expect(dialog.getByText('240 × 161 · 163 KB · 3.0s', { exact: true })).toBeVisible();
+          // Returning to 240 px reused its result, so only the two new settings were prepared.
+          expect(prepared).toHaveLength(4);
+          expect(prepared[2]).toMatchObject({ maxEdge: 240, fps: 12, trim: null });
+          expect(prepared[3]).toMatchObject({ maxEdge: 240, fps: 12, trim: { startMs: 0, durationMs: 3000 } });
+          await size.focus();
+          await page.keyboard.press('End');
+          await expect(size).toHaveAttribute('aria-valuetext', '1024 pixels');
+          await expect(dialog.getByRole('alert')).toHaveText(/^Too large to send/);
+          await expect(add).toBeDisabled();
+          await size.blur();
+        }
+        if (mode === 'import-saved') {
+          let finish;
+          await page.route(/\/jobs\/scene-add$/, async route => { await new Promise(resolve => { finish = resolve; }); await route.fallback(); });
+          await page.getByRole('button', { name: 'Add 1', exact: true }).click();
+          await expect(dialog.getByRole('button', { name: 'Saving…', exact: true })).toBeDisabled();
+          await dialog.press('Escape'); await expect(dialog).toBeVisible();
+          await expect.poll(() => typeof finish).toBe('function'); finish();
+          await expect(dialog).toHaveCount(0);
+          await expect(page.getByRole('tab', { name: 'Saved', exact: true })).toHaveAttribute('aria-selected', 'true');
+          await expect(page.locator('.sticker-cell')).toHaveCount(7);
+          await expect(page.getByRole('button', { name: 'Imported sticker', exact: true })).toBeVisible();
+          await expect(page.locator('.sticker-draft')).toHaveCount(0);
+          await expect(page.getByRole('alert')).toHaveCount(0);
+        }
+        if (mode === 'import-retry') {
+          let attempts = 0, retryKey;
+          await page.route(/\/custom-stickers$/, async route => {
+            const request = route.request();
+            if (request.method() === 'POST' && request.postDataJSON().source.preparationId === 'prep-scene-2') {
+              attempts++;
+              if (attempts === 1) { retryKey = request.headers()['idempotency-key']; return route.fulfill({status:503,json:{error:{code:'service_unavailable'}}}); }
+              expect(request.headers()['idempotency-key']).toBe(retryKey);
+            }
+            await route.fallback();
+          });
+          await dialog.getByRole('button', { name: 'Add 2', exact: true }).click();
+          await expect(dialog.getByText('Added', { exact: true })).toHaveCount(1);
+          await expect(dialog.getByRole('alert')).toHaveCount(1);
+          await expect(dialog.getByRole('button', { name: 'Add 1', exact: true })).toBeEnabled();
+          await dialog.getByRole('button', { name: 'Add 1', exact: true }).click();
+          await expect(dialog).toHaveCount(0);
+          await expect(page.locator('.sticker-cell')).toHaveCount(8);
+          expect(attempts).toBe(2);
+          await expect(page.locator('.sticker-draft')).toHaveCount(0);
+        }
+      }
+    },
+  });
+}

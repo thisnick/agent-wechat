@@ -9,7 +9,12 @@ use base64::{
     Engine,
 };
 use md5::Md5;
-use rusqlite::{params, types::ValueRef, Connection, OptionalExtension, Row};
+use rusqlite::{
+    functions::FunctionFlags,
+    params,
+    types::{Value, ValueRef},
+    Connection, OptionalExtension, Row,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -18,6 +23,59 @@ use std::{
 };
 #[path = "thread_previews.rs"]
 mod thread_previews;
+
+/// Split a search query into lowercased whitespace-separated terms.
+fn search_terms(search: Option<&str>) -> Vec<String> {
+    search
+        .map(|s| {
+            s.split_whitespace()
+                .map(str::to_lowercase)
+                .filter(|t| !t.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// SQLite's built-in lower() only folds ASCII. Use the same Unicode mapping
+/// as the in-memory catalog, without changing the official database schema.
+fn register_search_lower(connection: &Connection) -> Result<()> {
+    connection.create_scalar_function(
+        "wechat_search_lower",
+        1,
+        FunctionFlags::SQLITE_UTF8
+            | FunctionFlags::SQLITE_DETERMINISTIC
+            | FunctionFlags::SQLITE_INNOCUOUS,
+        |context| {
+            let text = context.get::<String>(0)?;
+            Ok(text.to_lowercase())
+        },
+    )?;
+    Ok(())
+}
+
+/// Build a case-insensitive AND-of-terms predicate over `columns`.
+///
+/// Every term must appear in at least one column, but different terms may match
+/// different columns (for example a remark plus a WeChat ID). Parameters are
+/// appended to `params`; placeholders are numbered `?N` per SQLite.
+fn search_clause(columns: &[&str], terms: &[String], params: &mut Vec<Value>) -> String {
+    let mut clause = String::new();
+    for term in terms {
+        let idx = params.len() + 1;
+        params.push(Value::Text(term.clone()));
+        clause.push_str(" AND (");
+        for (i, column) in columns.iter().enumerate() {
+            if i > 0 {
+                clause.push_str(" OR ");
+            }
+            clause.push_str(&format!(
+                "instr(wechat_search_lower(coalesce({column}, '')), ?{idx})>0"
+            ));
+        }
+        clause.push(')');
+    }
+    clause
+}
 
 pub struct ProfileReader {
     pub(crate) snapshot: Snapshot,
@@ -366,6 +424,22 @@ impl ProfileReader {
             coverage: self.coverage(),
         })
     }
+    /// Read one retained contact or group row by its exact username, including
+    /// deleted rows. Callers must check its flags before admitting mutations.
+    /// Missing rows return `NotCached`; duplicate usernames return `InvalidMetadata`.
+    pub fn contact(&self, username: &str) -> Result<Contact> {
+        validate_name(username)?;
+        let c = self.snapshot.open(self.role("contact.db", "contacts")?)?;
+        let mut statement =
+            c.prepare("SELECT * FROM contact WHERE username=?1 COLLATE BINARY LIMIT 2")?;
+        let mut rows = statement.query_map([username], raw)?;
+        let record = rows.next().transpose()?.ok_or(ProfileError::NotCached)?;
+        if rows.next().transpose()?.is_some() {
+            return Err(ProfileError::InvalidMetadata);
+        }
+        contact(record)
+    }
+
     pub fn contacts(&self, q: &ListQuery) -> Result<Page<Contact>> {
         let n = limit(q.limit)?;
         let hash = query_hash("contacts", &q.search)?;
@@ -374,10 +448,39 @@ impl ProfileReader {
             Some(CursorKey::Name { name }) => name,
             _ => return Err(ProfileError::InvalidCursor),
         };
-        let c = self.snapshot.open(self.role("contact.db", "contacts")?)?;
-        let mut s=c.prepare("SELECT * FROM contact WHERE username>?1 AND (?2 IS NULL OR instr(username,?2)>0 OR instr(coalesce(nick_name,''),?2)>0 OR instr(coalesce(remark,''),?2)>0 OR instr(coalesce(alias,''),?2)>0) ORDER BY username LIMIT ?3")?;
+        let database = self.role("contact.db", "contacts")?;
+        let c = self.snapshot.open(database)?;
+        // Keep readable layouts without a deletion column working. When the
+        // marker exists, filter before pagination; historical labels and group
+        // rosters still read the retained rows independently.
+        let has_delete_flag = self
+            .schemas
+            .iter()
+            .filter(|schema| schema.database == database)
+            .flat_map(|schema| &schema.tables)
+            .filter(|table| table.name == "contact")
+            .flat_map(|table| &table.columns)
+            .any(|column| column.name == "delete_flag");
+        let present = if has_delete_flag {
+            "coalesce(delete_flag,0)=0"
+        } else {
+            "1"
+        };
+        register_search_lower(&c)?;
+        let terms = search_terms(q.search.as_deref());
+        let mut values = vec![Value::Text(after)];
+        let clause = search_clause(
+            &["username", "nick_name", "remark", "alias"],
+            &terms,
+            &mut values,
+        );
+        let limit = values.len() + 1;
+        values.push(Value::Integer((n + 1) as i64));
+        let mut s = c.prepare(&format!(
+            "SELECT * FROM contact WHERE username>?1 AND {present}{clause} ORDER BY username LIMIT ?{limit}"
+        ))?;
         let records = s
-            .query_map(params![after, q.search, n + 1], raw)?
+            .query_map(rusqlite::params_from_iter(values.iter()), raw)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let items = records
             .into_iter()
@@ -1327,9 +1430,21 @@ impl ProfileReader {
         {
             return Err(ProfileError::InvalidMetadata);
         }
-        let mut stmt=c.prepare("SELECT c.* FROM contact c JOIN chatroom_member m ON m.member_id=c.id WHERE m.room_id=?1 AND c.username>?2 AND (?3 IS NULL OR instr(c.username,?3)>0 OR instr(coalesce(c.nick_name,''),?3)>0 OR instr(coalesce(c.remark,''),?3)>0) ORDER BY c.username LIMIT ?4")?;
+        register_search_lower(&c)?;
+        let terms = search_terms(q.search.as_deref());
+        let mut values = vec![Value::Text(room_row.0.to_string()), Value::Text(after)];
+        let clause = search_clause(
+            &["c.username", "c.nick_name", "c.remark"],
+            &terms,
+            &mut values,
+        );
+        let limit = values.len() + 1;
+        values.push(Value::Integer((n + 1) as i64));
+        let mut stmt = c.prepare(&format!(
+            "SELECT c.* FROM contact c JOIN chatroom_member m ON m.member_id=c.id WHERE m.room_id=?1 AND c.username>?2{clause} ORDER BY c.username LIMIT ?{limit}"
+        ))?;
         let records = stmt
-            .query_map(params![room_row.0, after, q.search, n + 1], raw)?
+            .query_map(rusqlite::params_from_iter(values.iter()), raw)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let mut items = Vec::new();
         for r in records {

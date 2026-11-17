@@ -17,6 +17,7 @@ import { canReply } from "./reply.ts";
 import { messageSummary } from "./thread-preview.ts";
 import { emojiText } from "./emoji-text.ts";
 import { Button, Icon } from "./ui.tsx";
+import { waitStickerJob } from "./stickers.tsx";
 
 export function MessageActions({
   message,
@@ -32,6 +33,8 @@ export function MessageActions({
     ["text", "reply", "forwarded", "link"].includes(presentation) &&
     !!message.body;
   const photo = [3, 43].includes(message.type) && !message.recall && gallery;
+  const sticker = message.type === 47 && !message.recall && connection.session.snapshot().capabilities.stickers===true;
+  const saveKey=useRef(crypto.randomUUID()),saveBusy=useRef(false);
   const [status, setStatus] = useState("");
   const [open, setOpen] = useState(false);
   const menu = useRef<HTMLDetailsElement>(null);
@@ -66,7 +69,7 @@ export function MessageActions({
         {canRecall(message) && (
           <RecallButton message={message} connection={connection} />
         )}
-        {(copyable || photo) && (
+        {(copyable || photo || sticker) && (
           <details
             className="message-menu"
             ref={menu}
@@ -86,6 +89,23 @@ export function MessageActions({
               <Icon name="more" />
             </summary>
             <div className="message-menu-items">
+              {sticker && <button onClick={() => {
+                if (saveBusy.current) return;
+                saveBusy.current=true;setStatus(t("stickers.saving"));
+                const client=connection.session.client,account=message.accountId;
+                void (async()=> {
+                  let asset=(await client.mediaAssets(account,message.id)).items.find(item=>item.kind==="sticker" && item.variant==="original");
+                  if (!asset) throw Error(t("stickers.originalUnavailable"));
+                  if (asset.state!=="available") {
+                    await waitStickerJob(client,account,await client.transferMedia(account,{messageId:message.id,assetId:asset.id,quality:"original"}));
+                    asset=(await client.mediaAssets(account,message.id)).items.find(item=>item.id===asset!.id);
+                  }
+                  if (!asset || asset.state!=="available") throw Error(t("stickers.originalUnavailable"));
+                  await waitStickerJob(client,account,await client.addCustomSticker(account,{source:{kind:"message",messageId:message.id,assetId:asset.id}},saveKey.current));
+                  setStatus(t("stickers.savedReceived"));
+                })().catch(error=>setStatus(error instanceof Error ? error.message : t("stickers.originalUnavailable"))).finally(()=>{saveBusy.current=false;});
+                if (menu.current) menu.current.open=false;
+              }}>{t("stickers.saveReceived")}</button>}
               {copyable && (
                 <button
                   onClick={() => {

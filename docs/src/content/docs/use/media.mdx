@@ -14,7 +14,7 @@ Send attachments through the CLI, HTTP API or OpenClaw. The ordinary-file source
 | Ordinary file | 536,870,912 bytes |
 | Video source | 536,870,912 bytes (512 MiB) |
 | Image or voice | 26,214,383 bytes each (25 MiB minus 17 bytes) |
-| Sticker | Sending unavailable |
+| Sticker | Prepared GIFs and available Saved/added-pack references; see [stickers](/use/stickers/) |
 
 File attachments preserve source bytes. Image sends can resize/re-encode them. Voice sends take WAV, MP3, M4A, AAC, FLAC, Ogg (including `.opus`), WebM, CAF or AMR audio and convert it to a WeChat voice note. See [Video and image quality](/use/quality/) for outgoing preparation and how to request received copies.
 
@@ -91,13 +91,21 @@ File attachments preserve source bytes. Image sends can resize/re-encode them. V
 
 ## Download files
 
-Ordinary files and received videos download up to 512 MiB. Each download must match the size and MD5 in the message:
+Ordinary files and received videos download up to 512 MiB. Files and original video copies must match the size and MD5 in the message. For a normal video, WeChat can select another copy; the daemon checks its returned checksum and size before making it available:
 
 ```bash
 wx messages media filehelper MESSAGE_ID --output ./saved.pdf --wait 3600
 ```
 
 The CLI verifies size and SHA-256 before publishing the output. SDK clients can use `mediaContentStream` with `{ maxBytes: NATIVE_MAX_SOURCE_BYTES }`; the default retrieval bound is 128 MiB. Check the selected asset’s size and SHA-256 when saving the stream.
+
+A WeChat Channels card lists two assets: its cover (an `image` thumbnail) and the post's video (`video`, `normal`). The video is never downloaded automatically. Request it like any other attachment:
+
+```bash
+wx messages media filehelper MESSAGE_ID --quality normal --output ./post.mp4 --wait 600
+```
+
+Each request asks WeChat for a fresh copy of the post, so a deleted or private post fails with `channels_post_unavailable`. A downloaded video stays in the daemon's own media files, not in the WeChat profile. If that file is removed, the next request downloads it again.
 
 ## OpenClaw
 
@@ -107,12 +115,18 @@ Ordinary audio is sent as a file; `audioAsVoice` selects voice. Larger ordinary 
 
 Use OpenClaw’s `asDocument`/`forceDocument` option to send media as an ordinary file. Video quality options apply only to video sends.
 
+When someone sends a Channels card, the agent gets the post's publisher, description and length, plus the cover image. It downloads the video only by calling `wechat_media` (or `wechat_archive_media`) with the card's message ID; `quality: "thumbnail"` returns the cover instead.
+
 <Aside title="Good to know">
 - File detection uses the browser's media type first, then the extension when the type is missing or generic. A supported video container can still contain an unsupported codec; export it as MP4 if preparation fails. Some videos cannot be previewed by the browser before sending.
-- Sending a large file or an original-quality video holds about twice the source size in the daemon's memory while it uploads.
+- Large files and original-quality videos are sent, downloaded and served in small steps, so the daemon's memory use stays about the same whatever the size. While one is sent or downloaded, the daemon keeps a private copy in the system temporary directory (`TMPDIR`), so leave room there for your largest attachment.
+- Video players can seek in a downloaded video. The first seek checks the whole file once; later ones read only the part they ask for.
+- Staged uploads are written to disk as they arrive, so staging does not hold the file in memory. The daemon deletes an upload a day after every send that used it has finished. To delete one sooner, call `DELETE /uploads/{id}`; it returns 409 `upload_in_use` while a send or sticker preparation still needs it.
 - The daemon downloads and checks uploaded bytes before submitting the attachment message. `accepted` confirms WeChat accepted the message; it does not confirm recipient opening.
 - Server-side duplicate-file shortcuts are not supported. Uncertain reservations and sends require review; another send is never started automatically.
 - After a job stops during verification, `wx jobs retry JOB_ID --reuse-completed-upload` can reuse its saved object. This requires proof that submission never started; API clients use `POST /jobs/{id}/retry-completed-upload` with `reuseCompletedUpload: true`; the SDK accepts this option on `retryJob`.
 - Gateway and proxy timeouts also apply. After a lost response, inspect the same key; see [Sends and recovery](/how-it-works/sends/).
-- A received video download stops when WeChat returns bytes that differ from the message's size or MD5. For videos up to 25 MiB the job fails with `media_integrity_failed`, and its `result.cdnDownloadFailure` shows the advertised and delivered sizes and which checks matched. It never contains the file's bytes or hashes.
+- A normal video whose verified bytes differ from the message metadata can be downloaded through the daemon while its `officialWriteback` remains `blocked`. The official-profile cache keeps its existing identity checks.
+- Unrecognized video responses that differ from the message's size or MD5 stop the download. The job may include `result.cdnDownloadFailure` with advertised and delivered sizes and which checks matched. These diagnostics exclude file bytes and hashes.
+- A sandboxed OpenClaw agent, such as one that runs its shell over SSH, can't open files the media tools download. The tool result says so (`reachableFromSandbox: false`) instead of giving a path. Received attachments still reach a sandbox with the message.
 </Aside>

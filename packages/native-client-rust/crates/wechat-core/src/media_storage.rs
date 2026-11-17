@@ -2,7 +2,7 @@
 //!
 //! An image, file, video or voice note that was written into the official
 //! profile is read back from there; this store keeps no second copy. Media the
-//! profile has no place for (stickers, link thumbnails, quoted images) stays in
+//! profile has no supported place for (received sticker attachments, link thumbnails, quoted images) stays in
 //! an encrypted file owned by the account. A copy is released only after the
 //! profile returned the same bytes through the reader that later serves them.
 //!
@@ -10,7 +10,6 @@
 //! `control.sqlite`, deletes uploads no send job needs any more, and removes
 //! files nothing refers to. It never downloads, uploads or resends anything.
 use super::*;
-use md5::Md5;
 use std::collections::BTreeSet;
 
 /// A finished send keeps its upload this long, so a client that reuses the
@@ -29,6 +28,48 @@ impl Core {
         asset: &MediaAsset,
         key: &str,
     ) -> Result<Vec<u8>> {
+        if let Some(reference) = key.strip_prefix("sticker-message:") {
+            let (month, id) = reference
+                .split_once(':')
+                .context("unsupported_media_profile")?;
+            let identity = self.profile_identity(account)?;
+            let (location, _) = self.profile_location_keys(account)?;
+            let bytes = wechat_profile::read_message_sticker_cache(
+                &location,
+                identity.uin,
+                &identity.username,
+                month,
+                id,
+            )?;
+            ensure!(
+                asset.kind == MediaKind::Sticker
+                    && asset.byte_length == Some(bytes.len() as u64)
+                    && asset.sha256.as_deref() == Some(digest(&bytes).as_str()),
+                "media_integrity_failed"
+            );
+            return Ok(bytes);
+        }
+        if asset.kind == MediaKind::Sticker
+            && asset.message_id.is_none()
+            && (key.starts_with("sticker-saved:") || key.starts_with("sticker-pack:"))
+        {
+            let bytes = if let Some(id) = key.strip_prefix("sticker-saved:") {
+                self.saved_cache_bytes(account, id)?
+            } else if let Some(encoded) = key.strip_prefix("sticker-pack:") {
+                use base64::Engine;
+                let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded)?;
+                let (pack, item, role): (String, String, String) = serde_json::from_slice(&bytes)?;
+                self.pack_cache_item(account, &pack, &item, &role)?
+            } else {
+                bail!("unsupported_media_profile");
+            };
+            ensure!(
+                asset.byte_length == Some(bytes.len() as u64)
+                    && asset.sha256.as_deref() == Some(digest(&bytes).as_str()),
+                "media_integrity_failed"
+            );
+            return Ok(bytes);
+        }
         let read = || -> Result<Vec<u8>> {
             let source = source_message_id(
                 asset
@@ -116,21 +157,37 @@ impl Core {
         asset: &MediaAsset,
         bytes: &[u8],
     ) -> Result<bool> {
+        self.release_to_profile_payload(account, asset, Payload::Bytes(bytes))
+    }
+    /// [`Self::release_to_profile`] for a payload that may be a large file. A
+    /// file or video in the profile is checked in steps, not read whole.
+    pub(super) fn release_to_profile_payload(
+        &self,
+        account: &str,
+        asset: &MediaAsset,
+        payload: Payload<'_>,
+    ) -> Result<bool> {
         if asset.state != "available"
             || asset.official_writeback != "complete"
             || asset.actual_variant != Some(asset.variant)
             || asset.message_id.is_none()
-            || asset.byte_length != Some(bytes.len() as u64)
-            || asset.sha256.as_deref() != Some(digest(bytes).as_str())
+            || asset.byte_length != Some(payload.len())
+            || asset.sha256.as_deref() != Some(payload.sha256().as_str())
         {
             return Ok(false);
         }
         let key = match asset.kind {
-            MediaKind::File | MediaKind::Video => format!("{:x}", Md5::digest(bytes)),
+            MediaKind::File | MediaKind::Video => payload.md5(),
             MediaKind::Image | MediaKind::Voice => BY_MESSAGE.into(),
             MediaKind::Sticker => return Ok(false),
         };
-        if self.profile_media_bytes(account, asset, &key).is_err() {
+        let held = match asset.kind {
+            MediaKind::File | MediaKind::Video => {
+                self.profile_hardlink(account, asset, &key).is_ok()
+            }
+            _ => self.profile_media_bytes(account, asset, &key).is_ok(),
+        };
+        if !held {
             return Ok(false);
         }
         self.authorize_media_record(account, &self.store.media_asset(account, &asset.id)?)?;
@@ -141,6 +198,31 @@ impl Core {
             &key,
         )?;
         Ok(true)
+    }
+    /// Locate a file or video attachment in the official profile and check it
+    /// against the size and hash recorded when it was first verified, reading
+    /// it in steps. A deleted or changed file is an error.
+    pub(super) fn profile_hardlink(
+        &self,
+        account: &str,
+        asset: &MediaAsset,
+        key: &str,
+    ) -> Result<wechat_profile::VerifiedHardlink> {
+        let kind = match asset.kind {
+            MediaKind::File => wechat_profile::HardlinkKind::File,
+            MediaKind::Video => wechat_profile::HardlinkKind::Video,
+            _ => bail!("unsupported_media_variant"),
+        };
+        let verified = self
+            .profile_reader_owned(account)?
+            .verified_hardlink_file(kind, key)
+            .map_err(|_| anyhow::anyhow!("media_not_cached"))?;
+        ensure!(
+            asset.byte_length == Some(verified.byte_length)
+                && asset.sha256.as_deref() == Some(verified.sha256.as_str()),
+            "media_integrity_failed"
+        );
+        Ok(verified)
     }
     /// Decode the still preview of a WXGF image. Previews are made when asked
     /// for and are not stored.
@@ -214,6 +296,11 @@ impl Core {
                 break;
             }
         }
+        self.store.expire_sticker_preparation_assets(
+            account,
+            chrono::Utc::now().timestamp(),
+            1000,
+        )?;
         let uploads = self.release_finished_uploads(account)?;
         let compacted = self.store.compact_control(account).unwrap_or(false);
         Ok((removed_previews, uploads, compacted))
@@ -230,13 +317,16 @@ impl Core {
             .open_media_record(account, &format!("asset:{id}"), &sealed)?;
         self.release_to_profile(account, &asset, &bytes)
     }
-    /// Delete uploads whose every send job finished at least a day ago with
-    /// nothing left to retry, review or write to the profile. An upload that no
-    /// job has used yet is kept.
-    fn release_finished_uploads(&self, account: &str) -> Result<usize> {
-        let jobs = self
-            .store
-            .send_jobs_for_source_release(account, UPLOAD_GRACE_SECONDS)?;
+    /// Uploads named by send jobs and sticker preparations at least `grace`
+    /// seconds old, split into those an unfinished job still needs and those
+    /// only finished jobs used. `None` means a job's needs cannot be read, so
+    /// nothing may be released.
+    fn upload_use(
+        &self,
+        account: &str,
+        grace: i64,
+    ) -> Result<Option<(BTreeSet<String>, BTreeSet<String>)>> {
+        let jobs = self.store.send_jobs_for_source_release(account, grace)?;
         let mut needed = BTreeSet::new();
         let mut finished = BTreeSet::new();
         for (id, done) in jobs {
@@ -252,7 +342,7 @@ impl Core {
                 if done {
                     continue;
                 }
-                return Ok(0);
+                return Ok(None);
             };
             let ids = [
                 Some(plan.request.source_id.clone()),
@@ -265,6 +355,35 @@ impl Core {
             let set = if done { &mut finished } else { &mut needed };
             set.extend(ids.into_iter().flatten());
         }
+        for (source, done) in self
+            .store
+            .sticker_preparation_sources_for_release(account, grace)?
+        {
+            if done {
+                finished.insert(source);
+            } else {
+                needed.insert(source);
+            }
+        }
+        Ok(Some((needed, finished)))
+    }
+    /// Delete one upload now, for a caller that has finished with it, such as
+    /// after adding the sticker it was prepared into. An upload that an
+    /// unfinished send or preparation still needs is kept: `upload_in_use`.
+    /// Returns false when the upload no longer exists.
+    pub fn release_upload(&self, account: &str, id: &str) -> Result<bool> {
+        self.store.account(account)?;
+        let (needed, _) = self.upload_use(account, 0)?.context("upload_in_use")?;
+        ensure!(!needed.contains(id), "upload_in_use");
+        self.store.delete_media_source(account, id)
+    }
+    /// Delete uploads whose every send job finished at least a day ago with
+    /// nothing left to retry, review or write to the profile. An upload that no
+    /// job has used yet is kept.
+    fn release_finished_uploads(&self, account: &str) -> Result<usize> {
+        let Some((needed, finished)) = self.upload_use(account, UPLOAD_GRACE_SECONDS)? else {
+            return Ok(0);
+        };
         let mut removed = 0;
         for id in finished.difference(&needed) {
             if self.store.delete_media_source(account, id)? {
@@ -298,6 +417,31 @@ impl Core {
                 let _ = core
                     .guarded_storage_step(&id, |core, id| core.finish_media_storage(id))
                     .await;
+            }
+            // Release finished uploads and expired preparations every hour, so
+            // large uploads do not wait for the next restart.
+            let mut hourly = tokio::time::interval(std::time::Duration::from_secs(3600));
+            hourly.tick().await;
+            loop {
+                hourly.tick().await;
+                if core.stopping.load(Ordering::Acquire) {
+                    break;
+                }
+                let Ok(accounts) = core.store.accounts() else {
+                    continue;
+                };
+                for account in accounts {
+                    let _ = core
+                        .guarded_storage_step(&account.id, |core, id| {
+                            core.store.expire_sticker_preparation_assets(
+                                id,
+                                chrono::Utc::now().timestamp(),
+                                1000,
+                            )?;
+                            core.release_finished_uploads(id)
+                        })
+                        .await;
+                }
             }
         });
         Ok(())

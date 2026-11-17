@@ -13,7 +13,7 @@ These assets prepare the standalone native daemon. They do not include the offic
 | `@agent-wechat/shared` | Source SDK | Source SDK | Existing private TypeScript package; bundled into OpenClaw, no npm publication |
 | Rust library crates | Workspace/git/path and crates.io | Workspace/git/path and crates.io | Four public protocol/profile/support crates; internal calls/audio crates remain unpublished |
 
-The container packages the same daemon as the executable. It replaces the previous official-client-plus-UI-server runtime; it is optional when `wx serve` runs on the host. macOS ARM64 and Windows x64/ARM64 have native candidate jobs; machine acceptance and official-app profile compatibility are tracked in [the platform checklist](../../PLATFORM-ACCEPTANCE.md). musl is not provided. Protocol device identity belongs to the saved account/profile and is preserved independently of the host CPU architecture. Arbitrary official-build schemas still require separate evidence. Controlled live account validation was on x64; ARM64 CI exercises synthetic protocol/profile data and the real compiled runtime.
+The container packages the same daemon as the executable. It replaces the previous official-client-plus-UI-server runtime; it is optional when `wx serve` runs on the host. macOS ARM64 and Windows x64/ARM64 have native candidate jobs; machine acceptance and official-app profile compatibility are tracked in [the platform checklist](../../RELEASING.md#platform-release-candidate-acceptance). musl is not provided. Protocol device identity belongs to the saved account/profile and is preserved independently of the host CPU architecture. Arbitrary official-build schemas still require separate evidence. Controlled live account validation was on x64; ARM64 CI exercises synthetic protocol/profile data and the real compiled runtime.
 
 ## CI build and validation
 
@@ -54,14 +54,14 @@ pnpm install --frozen-lockfile
 pnpm --filter @agent-wechat/cli build
 pnpm --filter @agent-wechat/agent-wechat... build
 pnpm --filter @agent-wechat/cli test
-bash scripts/native-build-release.sh
-node scripts/native-package-smoke.mjs artifacts/native
+bash scripts/release/build.sh
+node scripts/smoke/package.mjs artifacts/native
 docker build -f deploy/native/Dockerfile -t agent-wechat-native:local .
 docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges agent-wechat-native:local --json version
-python3 scripts/native-container-smoke.py agent-wechat-native:local
+python3 scripts/smoke/container.py agent-wechat-native:local
 ```
 
-The build script requires Linux x64 or ARM64 and tests/runs its own native architecture. It refuses existing output files and emits an executable, single-architecture checksum fragment and codec notices; `native-merge-release.mjs` combines the independently tested fragments for publication. Dirty source is marked and rejected by publication. Tests use temporary directories without account material; no persistent service starts.
+The build script requires Linux x64 or ARM64 and tests/runs its own native architecture. It refuses existing output files and emits an executable, single-architecture checksum fragment and codec notices; `scripts/release/merge.mjs` combines the independently tested fragments for publication. Dirty source is marked and rejected by publication. Tests use temporary directories without account material; no persistent service starts.
 
 The runtime includes FFmpeg/FFprobe and independently compiled public SILK code. Direct binary operators must provision FFmpeg/FFprobe for audio/video source preparation. `wx licenses` and release notices preserve attribution. The Dockerfile-specific ignore file sends only reviewed build inputs. A `--platform` argument alone does not establish cross-architecture correctness; CI uses separate native workers.
 
@@ -69,13 +69,13 @@ The runtime includes FFmpeg/FFprobe and independently compiled public SILK code.
 
 The committed Changesets prerelease state selects `beta`; the pending major changeset plans `1.0.0-beta.0` for the public CLI/OpenClaw packages and the private bundled SDK. This implementation PR keeps current package versions; after its merge, CI generates the separate Version Packages PR with beta versions, changelogs and the Rust lockfile update. Beta publication does not require a local compiler.
 
-`native-release-policy.mjs` requires matching package/prerelease state, protects the existing public stable npm channels, and supplies GitHub prerelease metadata. Native beta releases are not marked Latest; npm uses Changesets beta mode. `latest` remains on the stable container packages until stable promotion. Entering beta mode is configuration, not publication. Exit it through a reviewed `changeset pre exit` and stable version PR. The existing release workflows target main; stable maintenance on another branch requires an explicit workflow setup.
+`scripts/release/policy.mjs` requires matching package/prerelease state, protects the existing public stable npm channels, and supplies GitHub prerelease metadata. Native beta releases are not marked Latest; npm uses Changesets beta mode. `latest` remains on the stable container packages until stable promotion. Entering beta mode is configuration, not publication. Exit it through a reviewed `changeset pre exit` and stable version PR. The existing release workflows target main; stable maintenance on another branch requires an explicit workflow setup.
 
 ## Release preparation, before npm publication
 
 This is an operator sequence for a future approved release, not an instruction to publish during implementation:
 
-1. Changesets versions `@agent-wechat/cli`; `native-sync-version.mjs` synchronizes the Rust workspace and lockfile in the version commit. Review/merge that version change first.
+1. Changesets versions `@agent-wechat/cli`; `scripts/release/sync-version.mjs` synchronizes the Rust workspace and lockfile in the version commit. Review/merge that version change first.
 2. Merging the Changesets **Version Packages** PR automatically starts **Prepare native release assets** for that exact main commit/version. A manual run with the version and publish confirmation remains available for recovery. Protect the `native-release` GitHub environment with required reviewers. It validates the versioned public-package changelogs before building, builds/tests all five OS/CPU targets on native workers, verifies and merges their manifests, then creates provenance attestations and uploads new exact-version assets. GitHub release notes include the exact CLI/OpenClaw entries generated by Changesets. It refuses to replace existing asset names.
 3. After native assets are published, **Prepare native release assets** calls **Publish native runtime image** for the same version and commit. It verifies the prepared source assets, tests and pushes both architectures with provenance and SBOM, and publishes the versioned multi-architecture tag. Stable versions also update `latest`. The same run then publishes the four Rust libraries.
 4. The **Publish npm packages** job starts after assets, image and crates succeed on the automatic version-merge run. It downloads the native manifest and binaries, checks `sourceCommit`, sizes and SHA-256 hashes, and runs the host binary identity check before embedding the checksums in the CLI package. Host deployment is a separate operator action.
@@ -86,7 +86,7 @@ The current package version may have earlier legacy-only releases. The new insta
 
 If npm publication partially succeeds, rerun failed jobs on the original native release run. Changesets skips already published package versions. A manual image workflow remains available for image recovery. The native asset upload refuses to replace existing files.
 
-`native-release-notes.mjs` reads the exact version from both public packages' `CHANGELOG.md` files after Changesets versioning has consumed the pending changeset files. It preserves Markdown links, nested lists and package headings, skips empty fixed-group entries and refuses missing/mismatched or entirely empty notes. Reruns update only the marked Changesets block in an existing GitHub release, retaining operator text outside it. Preview without publication with `node scripts/native-release-notes.mjs --output /tmp/agent-wechat-release-notes.md`; for a future version, version the packages/changelogs first. Old releases are not edited by running this preview.
+`scripts/release/notes.mjs` reads the exact version from both public packages' `CHANGELOG.md` files after Changesets versioning has consumed the pending changeset files. It preserves Markdown links, nested lists and package headings, skips empty fixed-group entries and refuses missing/mismatched or entirely empty notes. Reruns update only the marked Changesets block in an existing GitHub release, retaining operator text outside it. Preview without publication with `node scripts/release/notes.mjs --output /tmp/agent-wechat-release-notes.md`; for a future version, version the packages/changelogs first. Old releases are not edited by running this preview.
 
 ## Existing-profile operating store
 
@@ -144,4 +144,4 @@ This validates configuration; it does not prove native login, account synchroniz
 
 The example uses a separately installed native executable at `~/.local/bin/wx`. Provision the default durable directory, config and mode-0600 token before starting. The unit uses filesystem restrictions and a private temporary directory, with write access only to the default durable root. If `dataDir` differs or a direct official profile is used, explicitly extend `ReadWritePaths` and ensure the necessary parent paths exist. Do not weaken all filesystem restrictions to fix a missing path.
 
-`python3 scripts/native-service-verify.py /absolute/path/to/wx` checks a temporary copy of this unit against the built executable, leaving every other setting unchanged. It does not install a binary or unit, enable a service, or start one. Direct `systemd-analyze --user verify deploy/native/agent-wechat-native.service` also works once the configured `~/.local/bin/wx` exists; systemd verifies that executable as well as unit syntax. A headless host may need an approved user-session/linger arrangement; setting that up is an operator deployment step. Stop the service before a source/profile snapshot or official-client handoff. Preserve data when rolling binaries back; a binary rollback is not a schema downgrade.
+`python3 scripts/smoke/service.py /absolute/path/to/wx` checks a temporary copy of this unit against the built executable, leaving every other setting unchanged. It does not install a binary or unit, enable a service, or start one. Direct `systemd-analyze --user verify deploy/native/agent-wechat-native.service` also works once the configured `~/.local/bin/wx` exists; systemd verifies that executable as well as unit syntax. A headless host may need an approved user-session/linger arrangement; setting that up is an operator deployment step. Stop the service before a source/profile snapshot or official-client handoff. Preserve data when rolling binaries back; a binary rollback is not a schema downgrade.

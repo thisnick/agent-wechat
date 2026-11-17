@@ -21,6 +21,15 @@ pub(super) fn password_admission_error(error: wechat_profile::ProfileError) -> a
 
 impl Core {
     /// Local history keeps its account identity after network logout or forgetting.
+    pub(crate) fn profile_identity(
+        &self,
+        account: &str,
+    ) -> Result<wechat_profile::ProfileIdentity> {
+        let binding = self
+            .identity_binding(account)?
+            .context("profile_identity_unavailable")?;
+        self.read_bound_identity(account, &binding)
+    }
     pub(crate) fn profile_username(&self, account: &str) -> Result<Option<String>> {
         if let Some(binding) = self.identity_binding(account)? {
             return Ok(Some(self.read_bound_identity(account, &binding)?.username));

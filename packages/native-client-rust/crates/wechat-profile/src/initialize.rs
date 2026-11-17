@@ -10,6 +10,10 @@ use serde::Serialize;
 use std::{fs, io::Read, path::Path};
 
 pub(crate) const LAYOUTS: &[(&str, &str)] = &[
+    (
+        "emoticon/emoticon.db",
+        include_str!("layout/emoticon.db.sql"),
+    ),
     ("contact/contact.db", include_str!("layout/contact.db.sql")),
     ("session/session.db", include_str!("layout/session.db.sql")),
     (
@@ -87,7 +91,8 @@ pub fn initialize_profile(
         if rc != rusqlite::ffi::SQLITE_OK {
             return Err(ProfileError::Database);
         }
-        c.execute_batch("PRAGMA cipher_compatibility=4;PRAGMA cipher_page_size=4096;PRAGMA kdf_iter=256000;PRAGMA synchronous=FULL;PRAGMA journal_mode=DELETE;")?;
+        c.execute_batch("PRAGMA cipher_compatibility=4;PRAGMA cipher_page_size=4096;PRAGMA kdf_iter=256000;PRAGMA synchronous=FULL;")?;
+        enable_wal(&c)?;
         c.execute_batch(sql)?;
         if relative.ends_with("hardlink.db") {
             // The schema uses the observed v4 hardlink tables. Mark that version
@@ -102,7 +107,7 @@ pub fn initialize_profile(
                     Err(rusqlite::Error::InvalidQuery)
                 }
             })?;
-        drop(c);
+        finish_wal_database(c, &file)?;
         let mut page = [0u8; 4096];
         fs::File::open(&file)?.read_exact(&mut page)?;
         let mut salt = [0; 16];
@@ -147,6 +152,47 @@ pub fn initialize_profile(
             ],
         },
     ))
+}
+
+/// Switch a freshly keyed, still-empty database to WAL.
+///
+/// A stopped official Linux 4.1.13.26 profile has `-wal` and `-shm` files beside
+/// every database in `db_storage/`, so the official client keeps them in WAL
+/// mode. Matching it lets the owned reader pin a snapshot and run queries in
+/// parallel with the writer (WAL readers do not block a writer); a rollback
+/// journal forces every read to hold the account lock for its whole duration.
+pub(crate) fn enable_wal(c: &Connection) -> Result<()> {
+    let mode: String = c.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        return Err(ProfileError::Database);
+    }
+    Ok(())
+}
+
+/// Fold a new WAL database back into its main file and close it.
+///
+/// The salt is read from, and only the main file is fsynced, moved or persisted
+/// after this point, so every page must be in the `.db` before the last
+/// connection closes. Closing the last connection also deletes `-wal`/`-shm`;
+/// refuse to continue if either survives, because a stray sidecar would not
+/// travel with the renamed file.
+pub(crate) fn finish_wal_database(c: Connection, file: &Path) -> Result<()> {
+    let (busy, _, _): (i64, i64, i64) =
+        c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+    if busy != 0 {
+        return Err(ProfileError::Database);
+    }
+    c.close().map_err(|_| ProfileError::Database)?;
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = file.as_os_str().to_owned();
+        sidecar.push(suffix);
+        if fs::symlink_metadata(Path::new(&sidecar)).is_ok() {
+            return Err(ProfileError::Database);
+        }
+    }
+    Ok(())
 }
 
 fn publish_staging(source: std::path::PathBuf, target: &Path) -> Result<()> {

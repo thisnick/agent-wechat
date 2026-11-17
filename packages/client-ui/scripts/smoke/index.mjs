@@ -1,0 +1,818 @@
+// Real session model + SDK + owned Rust simulator processes; never loads native client defaults.
+import assert from "node:assert/strict";
+import { createServer } from "node:net";
+import { spawn, spawnSync, execFileSync } from "node:child_process";
+import { readFile, mkdtemp, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { resolve, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { NativeApiError, NativeWeChatClient } from "../../../shared/dist/index.js";
+import { HubSession } from "../../src/session.ts";
+import { HistorySearch } from "../../src/history-search.ts";
+import { LoginAttempt } from "../../src/login-attempt.ts";
+import { mediaJourney } from "./media.mjs";
+import { groupJourney } from "./group.mjs";
+import { accountJourney } from "./account.mjs";
+
+const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
+const binary =
+  process.env.WX_DEV_BINARY ??
+  join(
+    root,
+    "packages/native-client-rust/target/debug",
+    process.platform === "win32" ? "wx-dev.exe" : "wx-dev"
+  );
+const data = await mkdtemp(join(tmpdir(), "agentwechat-client-test-"));
+const children = new Set(),
+  sessions = [];
+let upstream, hub, token, controlToken, client;
+async function wait(label, condition, timeout = 30000) {
+  const deadline = Date.now() + timeout;
+  let last;
+  while (Date.now() < deadline) {
+    try {
+      const result = await condition();
+      if (result) return result;
+    } catch (e) {
+      last = e;
+    }
+    await new Promise((done) => setTimeout(done, 40));
+  }
+  throw new Error(`Timed out: ${label}`, { cause: last });
+}
+async function successfulOperation(label, operation) {
+  const result = await wait(label, async () => {
+    const current = await client.operation(operation.accountId, operation.id);
+    return (
+      ["succeeded", "failed", "cancelled", "needs_review"].includes(current.state) &&
+      current
+    );
+  });
+  assert.equal(result.state, "succeeded", `${label}: ${JSON.stringify(result)}`);
+  return result;
+}
+async function connectWhenIdle(account) {
+  const deadline = Date.now() + 30000;
+  for (;;) {
+    try {
+      return await client.connect(account);
+    } catch (error) {
+      // A busy account rejects login before admitting an operation. Reads or
+      // the previous worker can briefly retain its gate after polling finishes.
+      // Never resubmit after a transport error or an uncertain admission.
+      if (
+        !(error instanceof NativeApiError) ||
+        error.status !== 409 ||
+        error.code !== "operation_in_progress" ||
+        Date.now() >= deadline
+      ) {
+        throw error;
+      }
+      await new Promise((done) => setTimeout(done, 40));
+    }
+  }
+}
+async function start(command, args = []) {
+  const child = spawn(binary, [command, "--data-dir", data, ...args], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  children.add(child);
+  child.once("exit", () => children.delete(child));
+  let diagnostic = "";
+  child.stderr.on(
+    "data",
+    (data) => (diagnostic = (diagnostic + data).slice(-2000))
+  );
+  return new Promise((done, reject) => {
+    let output = "";
+    const timer = setTimeout(() => reject(new Error("Startup timeout")), 30000);
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("exit", (code) => {
+      clearTimeout(timer);
+      reject(new Error(`${command} stopped (${code}): ${diagnostic}`));
+    });
+    child.stdout.on("data", (data) => {
+      output += data;
+      if (output.includes("\n")) {
+        clearTimeout(timer);
+        try {
+          done({ child, ...JSON.parse(output.split("\n")[0]) });
+        } catch (e) {
+          reject(e);
+        }
+      }
+    });
+  });
+}
+async function control(body) {
+  const result = await fetch(`http://${upstream.upstream}/control`, {
+    method: "POST",
+    signal: AbortSignal.timeout(5000),
+    headers: {
+      Authorization: `Bearer ${controlToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  assert.equal(result.status, 200);
+  return result.json();
+}
+async function state() {
+  return (
+    await fetch(`http://${upstream.upstream}/state`, {
+      headers: { Authorization: `Bearer ${controlToken}` },
+    })
+  ).json();
+}
+async function login(account) {
+  await client.createAccount(account);
+  const op = await client.login(
+    account,
+    { strategy: "qr", qrRefresh: { mode: "manual", maxRefreshes: 0 } },
+    `login-${account}`
+  );
+  await wait(
+    "QR",
+    async () =>
+      (await client.operation(account, op.id)).state === "awaiting_scan"
+  );
+  await control({ op: "login", account, status: "approved" });
+  await wait("login", async () => {
+    const current = await client.operation(account, op.id);
+    if (["failed", "needs_review", "cancelled"].includes(current.state))
+      throw new Error(`Sign-in ended: ${JSON.stringify(current)}`);
+    return current.state === "succeeded";
+  });
+  await wait(
+    "baseline",
+    async () => (await client.messages(account, "sim_mei")).items.length === 1
+  );
+}
+function session(api = client) {
+  const result = new HubSession(api);
+  sessions.push(result);
+  return result;
+}
+async function stopHub() {
+  const status = await client.status();
+  await client.request("v1/daemon/shutdown", {
+    method: "POST",
+    body: JSON.stringify({
+      pid: status.pid,
+      serverId: status.serverId,
+      ownershipGeneration: status.ownershipGeneration,
+    }),
+  });
+  await wait(
+    "owned hub stopped",
+    () => hub.child.exitCode !== null || hub.child.signalCode !== null
+  );
+}
+async function launcherCheck() {
+  const reservation = createServer();
+  await new Promise((done) => reservation.listen(0, "127.0.0.1", done));
+  const port = reservation.address().port;
+  await new Promise((done) => reservation.close(done));
+  const child = spawn(
+    process.execPath,
+    [join(root, "packages/client-ui/scripts/dev.mjs")],
+    {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        WX_DEV_BINARY: binary,
+        CLIENT_UI_PORT: String(port),
+        CLIENT_UI_ORIGIN: "",
+      },
+    }
+  );
+  let diagnostics = "",
+    output = "";
+  child.stderr.on(
+    "data",
+    (chunk) => (diagnostics = (diagnostics + chunk).slice(-2000))
+  );
+  try {
+    const ready = await new Promise((done, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("UI launcher timeout: " + diagnostics)),
+        30000
+      );
+      child.once("error", (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+      child.once("exit", () => {
+        clearTimeout(timer);
+        reject(new Error("UI launcher stopped: " + diagnostics));
+      });
+      child.stdout.on("data", (chunk) => {
+        output += chunk;
+        const match = output.match(
+          /(http:\/\/127\.0\.0\.1:\d+)\/#dev=([0-9a-f]{64})/
+        );
+        if (match) {
+          clearTimeout(timer);
+          done({ endpoint: match[1], key: match[2] });
+        }
+      });
+    });
+    assert.equal((await fetch(ready.endpoint + "/__dev/session")).status, 403);
+    assert.equal(
+      (
+        await fetch(ready.endpoint + "/__dev/control", {
+          method: "POST",
+          body: "{}",
+        })
+      ).status,
+      403
+    );
+    const authorization = { Authorization: `Bearer ${ready.key}` };
+    assert.equal(
+      (
+        await fetch(ready.endpoint + "/__dev/session", {
+          headers: { ...authorization, Origin: "https://unrelated.example" },
+        })
+      ).status,
+      403
+    );
+    const response = await fetch(ready.endpoint + "/__dev/session", {
+      headers: authorization,
+    });
+    assert.equal(response.status, 200);
+    assert.match(
+      response.headers.get("set-cookie"),
+      /HttpOnly; SameSite=Strict/
+    );
+    const configuration = await response.json();
+    const clockUrl = ready.endpoint + "/__dev/state";
+    assert.equal((await fetch(clockUrl)).status, 403);
+    const clock = (
+      await (await fetch(clockUrl, { headers: authorization })).json()
+    ).clock;
+    await wait(
+      "preview clock advances",
+      async () =>
+        (
+          await (await fetch(clockUrl, { headers: authorization })).json()
+        ).clock > clock
+    );
+    assert.equal(configuration.simulator, true);
+    const api = new NativeWeChatClient({
+      baseUrl: configuration.endpoint,
+      token: configuration.token,
+    });
+    const status = await api.status();
+    assert.equal(status.version.backend, "simulator");
+    assert.deepEqual((await api.accounts()).items, []);
+    const directory = output.match(/Simulator data: (.+)/)?.[1];
+    assert.ok(directory);
+    child.kill("SIGTERM");
+    await wait(
+      "UI launcher shutdown",
+      () => child.exitCode !== null || child.signalCode !== null
+    );
+    assert.equal(child.exitCode, 0);
+    await assert.rejects(stat(directory), (error) => error.code === "ENOENT");
+    assert.throws(
+      () => process.kill(status.pid, 0),
+      (error) => error.code === "ESRCH"
+    );
+    await assert.rejects(fetch(ready.endpoint + "/v1/status"));
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGTERM");
+      await new Promise((done) => child.once("exit", done));
+    }
+  }
+}
+
+try {
+  upstream = await start("upstream");
+  controlToken = (await readFile(upstream.controlTokenFile, "utf8")).trim();
+  hub = await start("hub", ["--upstream", upstream.upstream]);
+  token = (await readFile(hub.tokenFile, "utf8")).trim();
+  client = new NativeWeChatClient({ baseUrl: hub.endpoint, token });
+  assert.equal((await client.status()).version.backend, "simulator");
+  await login("personal");
+  await login("work");
+  const resumeStorage = {
+    read: () => null,
+    write: () => {},
+  };
+  const activeLogin = await new LoginAttempt(
+    client,
+    "personal",
+    resumeStorage
+  ).open();
+  const resumedSession = await wait(
+    "auto sign-in resumes a working session",
+    async () => {
+      const operation = await client.operation("personal", activeLogin.id);
+      assert.notEqual(operation.state, "failed");
+      return operation.state === "succeeded" && operation;
+    }
+  );
+  assert.equal(resumedSession.result.method, "active_or_renewed");
+  await login("trusted-sign-in");
+  await client.logoutLocal("trusted-sign-in");
+  assert.equal((await client.account("trusted-sign-in")).authenticated, false);
+  let trustedRequest = null;
+  const trustedAttempt = new LoginAttempt(client, "trusted-sign-in", {
+    read: () => trustedRequest,
+    write: (value) => {
+      trustedRequest = value;
+    },
+  });
+  // The completed prior login may still be releasing its account admission.
+  // Keep one idempotency key across this wait, including uncertain responses.
+  const trustedLogin = await wait("trusted-device login admission", () =>
+    trustedAttempt.open()
+  );
+  const savedDevice = await wait(
+    "auto sign-in uses retained device trust after local logout",
+    async () => {
+      const operation = await client.operation(
+        "trusted-sign-in",
+        trustedLogin.id
+      );
+      assert.notEqual(operation.state, "failed");
+      return operation.state === "succeeded" && operation;
+    }
+  );
+  assert.equal(savedDevice.result.method, "approved_login");
+  assert.equal((await client.account("trusted-sign-in")).authenticated, true);
+  await client.createAccount("qr-refresh");
+  const renewing = await client.login(
+    "qr-refresh",
+    {
+      strategy: "qr",
+      timeoutSeconds: 900,
+      qrRefresh: { mode: "auto", maxRefreshes: 3 },
+    },
+    "auto-refresh-qr"
+  );
+  const firstCode = await wait("first QR generation", async () => {
+    const op = await client.operation("qr-refresh", renewing.id);
+    return op.state === "awaiting_scan" && op.result.qrGeneration === 1 && op;
+  });
+  const firstPng = await client.qr("qr-refresh", renewing.id, 1);
+  await control({ op: "advance", seconds: 121 });
+  const renewedCode = await wait("automatic QR renewal", async () => {
+    const op = await client.operation("qr-refresh", renewing.id);
+    return op.state === "awaiting_scan" && op.result.qrGeneration === 2 && op;
+  });
+  assert.ok(renewedCode.result.expiresAt > firstCode.result.expiresAt);
+  assert.notDeepEqual(await client.qr("qr-refresh", renewing.id, 2), firstPng);
+  await control({ op: "login", account: "qr-refresh", status: "expired" });
+  await wait(
+    "account-scoped QR expiry renews automatically",
+    async () =>
+      (
+        await client.operation("qr-refresh", renewing.id)
+      ).result.qrGeneration === 3
+  );
+  await client.cancelOperation("qr-refresh", renewing.id);
+  const a = session(),
+    b = session();
+  await Promise.all([a.activate("personal"), b.activate("personal")]);
+  await a.send("A real session-model send");
+  await wait("two session clients render accepted text", () =>
+    [a, b].every((s) =>
+      s
+        .snapshot()
+        .messages.some(
+          (m) =>
+            m.body === "A real session-model send" && m.direction === "outgoing"
+        )
+    )
+  );
+  assert.equal(a.snapshot().sends.length, 0);
+  await wait("thread previews include own sends in both clients", () =>
+    [a, b].every((s) =>
+      s
+        .snapshot()
+        .threads.some(
+          (thread) =>
+            thread.lastMessage?.text === "A real session-model send" &&
+            thread.lastMessage.direction === "outgoing"
+        )
+    )
+  );
+  await control({
+    op: "inbound",
+    account: "personal",
+    peer: "sim_mei",
+    body: "A real incoming push",
+  });
+  await wait("two session clients render inbound push", () =>
+    [a, b].every((s) =>
+      s.snapshot().messages.some((m) => m.body === "A real incoming push")
+    )
+  );
+  const quoteTarget = a
+    .snapshot()
+    .messages.find((message) => message.body === "A real incoming push");
+  await a.send("A native quoted reply", quoteTarget);
+  await wait(
+    "both clients render the native quote and exact target identity",
+    () =>
+      [a, b].every((session) =>
+        session
+          .snapshot()
+          .messages.some(
+            (message) =>
+              message.body === "A native quoted reply" &&
+              message.type === 49 &&
+              message.appMessageType === 57 &&
+              message.quote?.serverId === quoteTarget.serverId
+          )
+      )
+  );
+  const quotedReply = a
+    .snapshot()
+    .messages.find((message) => message.body === "A native quoted reply");
+  assert.equal(quotedReply.quote.state, "embedded");
+  assert.equal(quotedReply.quote.embeddedText, quoteTarget.body);
+  assert.equal(quotedReply.quote.senderId, quoteTarget.senderId);
+  assert.equal(quotedReply.quote.direction, quoteTarget.direction);
+  assert.equal(
+    (await a.revealQuote(quotedReply, new AbortController().signal)).id,
+    quoteTarget.id
+  );
+  await a.send("Reply to the reply", quotedReply);
+  await wait("nested reply references the immediate parent", () =>
+    [a, b].every((session) =>
+      session
+        .snapshot()
+        .messages.some(
+          (message) =>
+            message.body === "Reply to the reply" &&
+            message.quote?.serverId === quotedReply.serverId
+        )
+    )
+  );
+  // Incoming fixture time is independent of wall-clock outgoing sends. Use a
+  // different conversation to check its latest local message.
+  await control({
+    op: "inbound",
+    account: "personal",
+    peer: "sim_daniel",
+    body: "Sidebar incoming preview",
+  });
+  await wait(
+    "thread preview updates for an unselected incoming conversation",
+    () =>
+      [a, b].every((s) =>
+        s
+          .snapshot()
+          .threads.some(
+            (thread) =>
+              thread.lastMessage?.text === "Sidebar incoming preview" &&
+              thread.lastMessage.direction === "incoming"
+          )
+      )
+  );
+  await control({
+    op: "inbound",
+    account: "personal",
+    peer: "sim_mei",
+    body: "A phone self-send",
+    self_sent: true,
+  });
+  await wait("outgoing live self-send", () =>
+    [a, b].every((s) =>
+      s
+        .snapshot()
+        .messages.some(
+          (m) => m.body === "A phone self-send" && m.direction === "outgoing"
+        )
+    )
+  );
+
+  await control({
+    op: "send_fault",
+    account: "personal",
+    fault: "lost_acknowledgment",
+  });
+  await a.send("Accepted upstream, acknowledgment lost");
+  await wait("uncertain receipts in both clients", () =>
+    [a, b].every((s) =>
+      s.snapshot().sends.some((send) => send.intent?.state === "needs_review")
+    )
+  );
+  const uncertain = a
+    .snapshot()
+    .sends.find((send) => send.intent?.state === "needs_review");
+  const accepted = (await state()).accounts.find(
+    (x) => x.id === "personal"
+  ).acceptedSends;
+  await a.checkSend(uncertain.key);
+  assert.equal(
+    (await state()).accounts.find((x) => x.id === "personal").acceptedSends,
+    accepted
+  );
+  assert.equal(
+    a.snapshot().sends.find((s) => s.key === uncertain.key).intent.state,
+    "needs_review"
+  );
+
+  await control({ op: "send_fault", account: "personal", fault: "reject" });
+  await a.send("A rejected send");
+  await wait("rejection remains visible", () =>
+    a
+      .snapshot()
+      .sends.some(
+        (s) =>
+          s.text === "A rejected send" &&
+          ["rejected", "failed"].includes(s.intent?.state)
+      )
+  );
+  await control({
+    op: "advertise_image",
+    account: "personal",
+    peer: "sim_mei",
+  });
+  const image = await wait("media message", () =>
+    a.snapshot().messages.find((m) => m.type === 3)
+  );
+  assert.ok(
+    (await client.mediaAssets("personal", image.id)).items.every(
+      (asset) => asset.state !== "available"
+    )
+  );
+
+  let release, requested;
+  const held = new Promise((done) => {
+    release = done;
+  });
+  const started = new Promise((done) => {
+    requested = done;
+  });
+  let hold = true;
+  const delayed = new NativeWeChatClient({
+    baseUrl: hub.endpoint,
+    token,
+    fetch: async (input, init) => {
+      const response = await fetch(input, init);
+      if (hold && new URL(input).pathname === "/v1/accounts/personal/threads") {
+        hold = false;
+        requested();
+        await held;
+      }
+      return response;
+    },
+  });
+  const switching = session(delayed);
+  const old = switching.activate("personal");
+  await started;
+  await switching.activate("work");
+  release();
+  await old;
+  assert.equal(switching.snapshot().account, "work");
+  assert.ok(switching.snapshot().messages.every((m) => m.accountId === "work"));
+  assert.ok(
+    !switching
+      .snapshot()
+      .messages.some((m) => m.body === "A real incoming push")
+  );
+
+  const originalServer = (await client.status()).serverId;
+  const listen = new URL(hub.endpoint).host;
+  await stopHub();
+  await control({
+    op: "inbound",
+    account: "personal",
+    peer: "sim_mei",
+    body: "Catch-up after hub restart",
+    notify: false,
+  });
+  hub = await start("hub", [
+    "--upstream",
+    upstream.upstream,
+    "--listen",
+    listen,
+  ]);
+  assert.equal((await client.status()).serverId, originalServer);
+  await wait(
+    "both clients replay after restart",
+    () =>
+      [a, b].every((s) =>
+        s
+          .snapshot()
+          .messages.some((m) => m.body === "Catch-up after hub restart")
+      ),
+    60000
+  );
+  assert.equal(
+    a.snapshot().messages.filter((m) => m.body === "A real session-model send")
+      .length,
+    1
+  );
+  // Exercise manual history sync independently of the restarted push loop.
+  // Push/replay assertions above and below keep their normal connected account.
+  await client.disconnect("personal");
+  assert.equal(
+    (await client.account("personal")).incomingTransport,
+    "disconnected"
+  );
+  await control({ op: "advance", seconds: 1 });
+  for (let index = 0; index < 110; index++)
+    await control({
+      op: "inbound",
+      account: "personal",
+      peer: "sim_mei",
+      body: `History pagination fixture ${index}`,
+      notify: false,
+    });
+  let historyDrained = false;
+  // Manual sync exposes continuation pages; the fixture must drain them itself.
+  for (let page = 0; page < 8; page++) {
+    const synced = await successfulOperation(
+      `search history page ${page + 1} synchronized`,
+      await client.sync("personal")
+    );
+    assert.equal(typeof synced.result.continuation, "boolean");
+    if (!synced.result.continuation) {
+      historyDrained = true;
+      break;
+    }
+  }
+  assert.ok(historyDrained, "search fixture history drained within eight pages");
+  await wait(
+    "all search fixtures committed",
+    async () =>
+      (
+        await client.messages("personal", "sim_mei", {
+          query: "History pagination fixture",
+          limit: 200,
+        })
+      ).items.length === 110
+  );
+  const recent = await client.messages("personal", "sim_mei", { limit: 100 });
+  assert.ok(
+    !recent.items.some((message) => message.body === "A real incoming push")
+  );
+  const historySearch = new HistorySearch(client, "personal", "sim_mei");
+  await historySearch.search("A real incoming push");
+  assert.equal(historySearch.snapshot().error, null);
+  assert.deepEqual(
+    historySearch.snapshot().items.map((message) => message.body),
+    ["A real incoming push"]
+  );
+  await historySearch.search("History pagination fixture");
+  assert.ok(historySearch.snapshot().nextCursor);
+  while (historySearch.snapshot().nextCursor) await historySearch.more();
+  assert.equal(historySearch.snapshot().items.length, 110);
+  historySearch.close();
+  await successfulOperation(
+    "search fixture account reconnected",
+    await connectWhenIdle("personal")
+  );
+  await wait("search fixture push resumed", async () =>
+    (await client.account("personal")).incomingTransport === "simulator_push"
+  );
+  await client.createAccount("login-resume");
+  let savedLogin = null;
+  const loginStorage = {
+    read: () => savedLogin,
+    write: (value) => {
+      savedLogin = value;
+    },
+  };
+  const admittedLogin = await new LoginAttempt(
+    client,
+    "login-resume",
+    loginStorage
+  ).open();
+  await wait(
+    "resumable QR ready",
+    async () =>
+      (await client.operation("login-resume", admittedLogin.id)).state ===
+      "awaiting_scan"
+  );
+  const resumedLogin = await new LoginAttempt(
+    client,
+    "login-resume",
+    loginStorage
+  ).open();
+  assert.equal(resumedLogin.id, admittedLogin.id);
+  assert.equal(resumedLogin.state, "awaiting_scan");
+  await control({ op: "login", account: "login-resume", status: "scanned" });
+  await wait(
+    "resumed phone approval",
+    async () =>
+      (
+        await new LoginAttempt(client, "login-resume", loginStorage).open()
+      ).state === "awaiting_approval"
+  );
+  await client.cancelOperation("login-resume", admittedLogin.id);
+  const wx =
+    process.env.WX_BINARY ??
+    join(dirname(binary), process.platform === "win32" ? "wx.exe" : "wx");
+  const settingsArgs = [
+    "--server",
+    hub.endpoint,
+    "--token-file",
+    join(data, "hub-token"),
+    "--account",
+    "personal",
+    "--json",
+    "accounts",
+    "settings",
+  ];
+  await client.createAccount("cli-removal");
+  const removalArgs = ["--server", hub.endpoint, "--token-file", join(data, "hub-token"), "--json", "accounts", "remove", "cli-removal"];
+  assert.notEqual(spawnSync(wx, removalArgs).status, 0);
+  assert.notEqual(spawnSync(wx, [...removalArgs, "--confirm", "another-account"]).status, 0);
+  assert.equal((await client.account("cli-removal")).id, "cli-removal");
+  const removed = JSON.parse(execFileSync(wx, [...removalArgs, "--confirm", "cli-removal"], {encoding:"utf8"}));
+  assert.deepEqual(removed, {accountId:"cli-removal", removed:true, filesRetained:true});
+  assert.ok(!(await client.accounts()).items.some(account => account.id === "cli-removal"));
+  const cliSettings = (...args) =>
+    JSON.parse(
+      execFileSync(wx, [...settingsArgs, ...args], { encoding: "utf8" })
+    );
+  assert.equal(cliSettings().autoDownloadMaxBytes, 50 * 1024 * 1024);
+  assert.equal(
+    cliSettings("--auto-download-max-mb", "0").autoDownloadMaxBytes,
+    0
+  );
+  assert.equal(
+    (await client.accountSettings("personal")).autoDownloadMaxBytes,
+    0
+  );
+  assert.equal(
+    cliSettings("--auto-download-max-mb", "50").autoDownloadMaxBytes,
+    50 * 1024 * 1024
+  );
+  await mediaJourney({ client, control, wait, state, account: "personal" });
+  await login("account-controls");
+  await accountJourney({
+    client,
+    control,
+    wait,
+    account: "account-controls",
+    endpoint: hub.endpoint,
+    token,
+  });
+  await login("group-controls");
+  await groupJourney({
+    client,
+    wait,
+    account: "group-controls",
+    control,
+    state,
+  });
+  await launcherCheck();
+  console.log(
+    JSON.stringify({
+      ok: true,
+      checks: [
+        "real session model with two hub clients",
+        "automatic QR renewal with fresh PNG and expiration timestamp",
+        "automatic active-session resume and saved-device sign-in after local logout",
+        "canonical incoming and outgoing content",
+        "native quoted replies, exact reference resolution and replies to replies",
+        "phone-originated self-send",
+        "accepted/rejected/uncertain send states",
+        "status lookup without resubmission",
+        "advertised media unavailable",
+        "late real HTTP responses across account switch",
+        "SSE reconnect and replay across hub restart",
+        "conversation search beyond loaded history with paginated matches",
+        "reopened QR and phone approval resume the same login operation",
+        "incoming image/file/video/voice/sticker bytes, animation, hashes, ranges and account isolation",
+        "per-account CLI/API download limits, automatic image/video thumbnails and manual above-limit retrieval",
+        "outgoing media preparation, upload, readback and committed history",
+        "media rejection, uncertainty and receipt recovery without resubmission",
+        "account alias, read-state CAS, cached avatars, recoverable logout and confirmed profile removal",
+        "group creation/settings, members, leave/history, partial/rejected/uncertain outcomes and account isolation",
+        "UI launcher authentication and origin checks",
+        "UI launcher owned-child and disposable-state cleanup",
+      ],
+    })
+  );
+} finally {
+  for (const s of sessions) s.close();
+  if (client && hub) await stopHub().catch(() => {});
+  if (upstream && controlToken)
+    await fetch(`http://${upstream.upstream}/shutdown`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${controlToken}` },
+    }).catch(() => {});
+  for (const child of children) child.kill();
+  await Promise.all(
+    [...children].map(
+      (child) =>
+        new Promise((done) => {
+          if (child.exitCode !== null || child.signalCode !== null) done();
+          else child.once("exit", done);
+        })
+    )
+  );
+  await rm(data, { recursive: true, force: true });
+}

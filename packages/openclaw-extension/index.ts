@@ -10,6 +10,7 @@ import { registerNativePreparedBoundary } from "./src/native-prepared-boundary.j
 import { registerNativeHistoryTools } from "./src/native-history-tools.js";
 import { registerNativeShareTools } from "./src/native-share-tool.js";
 import { registerNativeRecallTools } from "./src/native-recall-tools.js";
+import { registerNativeStickerTools } from "./src/native-sticker-tool.js";
 import { registerNativeGroupTools } from "./src/native-group-tool.js";
 import { registerNativeLoginTool } from "./src/native-login.js";
 import { NativeCallService } from "./src/calls-service.js";
@@ -35,6 +36,7 @@ const plugin: {
     registerNativeShareTools(api);
     registerNativeRecallTools(api);
     registerNativeGroupTools(api);
+    registerNativeStickerTools(api);
     registerNativeLoginTool(api);
     let calls: NativeCallService | undefined;
     registerNativeCallTool(api, () => calls);

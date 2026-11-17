@@ -5,7 +5,7 @@ description: Choose image and video send quality, then download an available cop
 
 import { Aside } from '@astrojs/starlight/components';
 
-Image sends default to **standard** quality in the CLI and HTTP API. OpenClaw sends images at **original** quality automatically. Video sends default to normal quality.
+Image sends default to **standard** quality in the desktop and web client, CLI and HTTP API. OpenClaw sends images at **original** quality automatically. Video sends default to normal quality.
 
 ## Choose send quality
 
@@ -22,6 +22,12 @@ Image sends default to **standard** quality in the CLI and HTTP API. OpenClaw se
 The image source limit is 26,214,383 bytes. JPEGs allow 64 million pixels and 8,192 pixels per edge; large RGB and grayscale JPEGs use a reduced decode for previews. Other formats allow 16,777,216 pixels. For larger images or unchanged non-JPEG bytes, send a file attachment.
 
 **Videos:** MOV, MP4, 3GP, 3G2 and MJ2 sources allow 512 MiB. Playback uses H.264 Main at up to 720 pixels on the longest edge and 30 fps, with AAC audio when present. Preparation never shortens a video. Container support depends on its codecs.
+
+## Send from the desktop or web client
+
+1. Attach, paste or drop images and videos into the message box.
+2. Check **Original media quality** below the staged files. It applies to every image and video in that message. Files are always sent unchanged.
+3. Select **Send**.
 
 ## Send from the CLI
 

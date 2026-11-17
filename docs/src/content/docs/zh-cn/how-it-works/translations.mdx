@@ -1,9 +1,7 @@
 ---
 title: 译文如何保持最新
 description: 英文变动后译文会发生什么，以及如何审阅机器人提交的拉取请求。
-banner:
-  content: "本页面由机器翻译，尚未经人工审核。"
-sourceHash: 049632993cdc
+sourceHash: 84ccd69d8326
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -18,7 +16,7 @@ import { Aside } from '@astrojs/starlight/components';
 1. 阅读机器人的拉取请求。其末尾附有回译为英文的内容，因此即使你不懂该语言，也能审阅。
 2. 先将其合并到你的分支，再合并你的分支。
 
-机器人只能修改译文文件，并会丢弃任何未通过 `pnpm i18n check` 的译文，因此相应文本将保持英文。它所撰写的文档页面会显示“机器翻译”横幅，直到有人审阅该页面并从其 frontmatter 中删除 `banner`。
+机器人只能修改译文文件，并会丢弃任何未通过 `pnpm i18n check` 的译文，因此相应文本将保持英文。
 
 ## 机器人的工作流程 \{#what-the-bot-does}
 

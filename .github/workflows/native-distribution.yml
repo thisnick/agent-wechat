@@ -9,7 +9,9 @@ on:
       - 'packages/cli/**'
       - 'packages/shared/**'
       - 'packages/openclaw-extension/**'
-      - 'scripts/native-*'
+      - 'scripts/ci/**'
+      - 'scripts/release/**'
+      - 'scripts/smoke/**'
       - 'deploy/native/**'
       - '.github/workflows/native-*'
       - '.github/workflows/desktop.yml'
@@ -47,19 +49,18 @@ jobs:
               - 'packages/native-client-rust/**'
               - 'packages/cli/**'
               - 'rust-toolchain.toml'
-              - 'scripts/native-build-release*'
-              - 'scripts/native-ci-*'
-              - 'scripts/native-cli-*'
-              - 'scripts/native-container-smoke.py'
-              - 'scripts/native-export-smoke.py'
-              - 'scripts/native-merge-release*'
-              - 'scripts/native-package-smoke.mjs'
-              - 'scripts/native-platform-smoke.mjs'
-              - 'scripts/native-portable-build.mjs'
-              - 'scripts/native-release-manifest.mjs'
-              - 'scripts/native-release-preflight*'
-              - 'scripts/native-service-verify.py'
-              - 'scripts/native-simulator-smoke.mjs'
+              - 'scripts/release/build*'
+              - 'scripts/ci/**'
+              - 'scripts/smoke/media-assertions*.mjs'
+              - 'scripts/smoke/container.py'
+              - 'scripts/release/merge*'
+              - 'scripts/smoke/package.mjs'
+              - 'scripts/smoke/platform.mjs'
+              - 'scripts/release/portable-build.mjs'
+              - 'scripts/release/manifest.mjs'
+              - 'scripts/release/preflight*'
+              - 'scripts/smoke/service.py'
+              - 'scripts/smoke/simulator.mjs'
               - 'deploy/native/**'
               - '.github/workflows/native-client.yml'
               - '.github/workflows/native-distribution.yml'
@@ -74,14 +75,6 @@ jobs:
             openclaw:
               - 'packages/openclaw-extension/**'
               - 'packages/shared/**'
-              - 'scripts/native-gateway-smoke.mjs'
-              - 'scripts/native-smoke-plugin.mjs'
-              - 'scripts/native-model-smoke.mjs'
-              - 'scripts/native-conference-model-smoke.mjs'
-              - 'scripts/native-media-model-smoke.mjs'
-              - 'scripts/native-history-model-smoke.mjs'
-              - 'scripts/native-recall-model-smoke.mjs'
-              - 'scripts/native-archive-tools-smoke.mjs'
               - '.github/workflows/native-distribution.yml'
               - 'package.json'
               - '.node-version'
@@ -89,9 +82,9 @@ jobs:
               - 'pnpm-workspace.yaml'
             desktop:
               - 'deploy/native/Dockerfile'
-              - 'scripts/native-build-release.sh'
-              - 'scripts/native-portable-build.mjs'
-              - 'scripts/native-release-manifest.mjs'
+              - 'scripts/release/build.sh'
+              - 'scripts/release/portable-build.mjs'
+              - 'scripts/release/manifest.mjs'
               - '.github/workflows/native-portable.yml'
               - '.github/workflows/native-release.yml'
               - 'packages/desktop/**'
@@ -99,7 +92,7 @@ jobs:
               - 'packages/shared/**'
               - 'packages/native-client-rust/**'
               - 'packages/cli/**'
-              - 'scripts/native-ci-*'
+              - 'scripts/ci/**'
               - '.github/workflows/desktop.yml'
               - '.github/workflows/windows-signing.yml'
               - '.github/workflows/native-distribution.yml'
@@ -137,16 +130,16 @@ jobs:
           SMOKE_SUITE: ${{ matrix.suite }}
         run: |
           case "$SMOKE_SUITE" in
-            model|media-model) node "scripts/native-${SMOKE_SUITE}-smoke.mjs" ;;
+            model|media-model) node "packages/openclaw-extension/test/smoke/${SMOKE_SUITE}.mjs" ;;
             voice-current)
-              OPENCLAW_TEST_SDK_ROOT="$RUNNER_TEMP/openclaw-voice-current/node_modules/openclaw" node scripts/native-conference-model-smoke.mjs
+              OPENCLAW_TEST_SDK_ROOT="$RUNNER_TEMP/openclaw-voice-current/node_modules/openclaw" node packages/openclaw-extension/test/smoke/conference-model.mjs
               ;;
             tools)
-              node scripts/native-gateway-smoke.mjs
-              node scripts/native-conference-model-smoke.mjs
-              node scripts/native-history-model-smoke.mjs
-              node scripts/native-recall-model-smoke.mjs
-              node scripts/native-archive-tools-smoke.mjs
+              node packages/openclaw-extension/test/smoke/gateway.mjs
+              node packages/openclaw-extension/test/smoke/conference-model.mjs
+              node packages/openclaw-extension/test/smoke/history-model.mjs
+              node packages/openclaw-extension/test/smoke/recall-model.mjs
+              node packages/openclaw-extension/test/smoke/archive-tools.mjs
               ;;
             *) echo "Unknown smoke suite: $SMOKE_SUITE" >&2; exit 1 ;;
           esac
@@ -193,21 +186,21 @@ jobs:
             type=gha,scope=native-linux-artifact-${{ runner.arch }}
             type=gha,scope=native-linux-${{ runner.arch }}
           cache-to: type=gha,mode=max,scope=native-linux-artifact-${{ runner.arch }}
-      - run: bash scripts/native-build-release.sh
+      - run: bash scripts/release/build.sh
         env:
           NATIVE_RELEASE_BUILDER_IMAGE: native-release-builder:ci
           NATIVE_CI_ARTIFACT: true
-      - run: node scripts/native-package-smoke.mjs artifacts/native
+      - run: node scripts/smoke/package.mjs artifacts/native
       - name: Validate actual CLI lifecycle and account selection without a native login
         run: |
           VERSION=$(node -p "require('./packages/cli/package.json').version")
-          python3 scripts/native-cli-smoke.py "artifacts/native/wx-v${VERSION}-linux-${{ matrix.arch }}-gnu"
-          python3 scripts/native-cli-fixture-test.py "artifacts/native/wx-v${VERSION}-linux-${{ matrix.arch }}-gnu"
-          python3 scripts/native-export-smoke.py "artifacts/native/wx-v${VERSION}-linux-${{ matrix.arch }}-gnu"
+          python3 packages/native-client-rust/scripts/cli-smoke.py "artifacts/native/wx-v${VERSION}-linux-${{ matrix.arch }}-gnu"
+          python3 packages/native-client-rust/scripts/cli-fixture-test.py "artifacts/native/wx-v${VERSION}-linux-${{ matrix.arch }}-gnu"
+          python3 packages/native-client-rust/scripts/export-smoke.py "artifacts/native/wx-v${VERSION}-linux-${{ matrix.arch }}-gnu"
       - name: Validate real managed/external OpenClaw hosting without account credentials
         run: |
           VERSION=$(node -p "require('./packages/cli/package.json').version")
-          node --experimental-strip-types scripts/native-openclaw-smoke.mjs "artifacts/native/wx-v${VERSION}-linux-${{ matrix.arch }}-gnu"
+          node --experimental-strip-types packages/openclaw-extension/test/smoke/host.mjs "artifacts/native/wx-v${VERSION}-linux-${{ matrix.arch }}-gnu"
       - name: Build standalone image without publishing or starting a service
         uses: docker/build-push-action@v7.4.0
         with:
@@ -223,14 +216,14 @@ jobs:
           cache-to: type=gha,mode=max,scope=native-linux-${{ runner.arch }}
       - name: Check image identity without touching account data
         run: docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges agent-wechat-native:ci --json version
-      - run: python3 scripts/native-container-smoke.py agent-wechat-native:ci
+      - run: python3 scripts/smoke/container.py agent-wechat-native:ci
       - name: Validate deployment examples without applying them
         run: |
           mkdir -p deploy/native/secrets
           printf 'validation-placeholder-not-a-real-secret\n' > deploy/native/secrets/api-token
           docker compose -f deploy/native/compose.yaml config --quiet
           VERSION=$(node -p "require('./packages/cli/package.json').version")
-          python3 scripts/native-service-verify.py "$PWD/artifacts/native/wx-v${VERSION}-linux-${{ matrix.arch }}-gnu"
+          python3 scripts/smoke/service.py "$PWD/artifacts/native/wx-v${VERSION}-linux-${{ matrix.arch }}-gnu"
       - uses: actions/upload-artifact@v7
         with:
           name: native-validation-${{ matrix.target }}

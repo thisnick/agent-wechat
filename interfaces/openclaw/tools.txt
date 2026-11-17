@@ -6,7 +6,7 @@ tool wechat_archive_history | optional | Read the locally stored history of any 
 tool wechat_archive_history.cursor | string, max length 8192 | Opaque nextCursor from the same tool and query; do not invent one.
 tool wechat_archive_history.limit | integer, min 1, max 50, default 20 | Maximum number of results on this page.
 tool wechat_archive_history.threadId | string, required, min length 1, max length 4096 | Exact thread ID from wechat_archive_threads.
-tool wechat_archive_media | optional, catalog direct-only | Retrieve an attachment or quoted text/image/link from any thread in the configured WeChat account by its message ID. Use the parent quote message ID for quotes. Returns verified managed file paths and an image preview for vision. Cached bytes first; missing media requests a bounded server-owned download unless download=false. Preserve pending/expired/unavailable results and never automatically retry retryable=false. No sends or read marking.
+tool wechat_archive_media | optional, catalog direct-only | Retrieve an attachment, a Channels card's video, or quoted text/image/link from any thread in the configured WeChat account by its message ID. Use the parent quote message ID for quotes; quality thumbnail returns a Channels card's cover. Returns verified managed file paths and an image preview for vision. Cached bytes first; missing media requests a bounded server-owned download unless download=false. Preserve pending/expired/unavailable results and never automatically retry retryable=false. No sends or read marking.
 tool wechat_archive_media.download | boolean, default true | Set false to use cached media only without requesting a WeChat transfer.
 tool wechat_archive_media.messageId | string, required, min length 1, max length 4096 | Exact opaque message ID from an earlier result.
 tool wechat_archive_media.quality | string, values best|original|standard|thumbnail|normal|encoded, default best | best uses the best cached image, normal video or decoded voice. Explicit variants are strict and may be unavailable.
@@ -39,7 +39,7 @@ tool wechat_login.action | string, required, values status|start|wait|disconnect
 tool wechat_login.confirm | boolean | Required true for forget.
 tool wechat_login.force | boolean | With start, use QR instead of saved trust for a new login. An active login is still reused.
 tool wechat_login.timeoutMs | integer, min 1000, max 300000 | Wait bound in milliseconds; defaults to 30000. Start returns as soon as a QR is available.
-tool wechat_media | enabled by default, catalog direct-only | Retrieve a message attachment or quoted text/image/link from the current WeChat conversation. Use the parent quote message ID for quotes. Returns a verified local file path and an image preview for vision when applicable. Uses cached bytes first; download defaults to true and requests a bounded server-owned transfer if missing. Pending results may be checked again; never automatically retry confirmed expiry or retryable=false. Does not send messages or mark the thread read.
+tool wechat_media | enabled by default, catalog direct-only | Retrieve a message attachment, a Channels card's video, or quoted text/image/link from the current WeChat conversation. Use the parent quote message ID for quotes; quality thumbnail returns a Channels card's cover. Returns a verified local file path and an image preview for vision when applicable. Uses cached bytes first; download defaults to true and requests a bounded server-owned transfer if missing. Pending results may be checked again; never automatically retry confirmed expiry or retryable=false. Does not send messages or mark the thread read.
 tool wechat_media.download | boolean, default true | Set false to use cached media only without requesting a WeChat transfer.
 tool wechat_media.messageId | string, required, min length 1, max length 4096 | Exact opaque message ID from an earlier result.
 tool wechat_media.quality | string, values best|original|standard|thumbnail|normal|encoded, default best | best uses the best cached image, normal video or decoded voice. Explicit variants are strict and may be unavailable.
@@ -58,3 +58,20 @@ tool wechat_send_share.idempotencyKey | string, required, min length 1, max leng
 tool wechat_send_share.thumbnailUrl | string, min length 1, max length 8192 | Public HTTP(S) image URL advertised as the card thumbnail; no upload or page scraping.
 tool wechat_send_share.title | string, required, min length 1, max length 16384 | Card title shown in the chat.
 tool wechat_send_share.url | string, required, min length 1, max length 8192 | Link the card opens.
+tool wechat_stickers | enabled by default, catalog direct-only | Manage the configured account's custom Saved stickers and prepare image/GIF/MOV/MP4 files from the active execution workspace. Preparation does not save or send. Preview returns actual image content to model vision: sampled GIF frames or a representative still when animation decoding is unavailable. Download stages verified original bytes into the execution workspace. Mutations and missing-original acquisitions require a stable idempotency key; reuse it after timeouts. Official packs are outside this tool.
+tool wechat_stickers.action | string, required, values list|get|prepare|preview|download|add|move|remove | List/get Saved, preview/download one Saved or prepared item, prepare a source, add, move, or remove membership.
+tool wechat_stickers.afterId | string|null | Required for move: place after this Saved identity, or null for first.
+tool wechat_stickers.assetId | string | Verified original sticker asset belonging to messageId for add.
+tool wechat_stickers.durationMs | integer, min 1, max 10000 | Explicit retained duration in milliseconds; omitted means preserve duration.
+tool wechat_stickers.file | string | Workspace-relative source file for prepare; resolved on the session execution host.
+tool wechat_stickers.fit | boolean | Shrink a source larger than 1024 pixels to fit. Smaller sources keep their size and encoding.
+tool wechat_stickers.fps | integer, min 1, max 30 | Frame rate for a sticker made from video; default 10. Not accepted for images or GIFs.
+tool wechat_stickers.idempotencyKey | string, min length 1, max length 200 | Required stable key for prepare/add/move/remove and downloads that need acquisition. Reuse the key and identical intent after uncertain responses.
+tool wechat_stickers.maxEdge | integer, min 16, max 1024 | Shrink so the longest edge is at most this many pixels; never enlarges. Video defaults to 240.
+tool wechat_stickers.messageId | string | Received message identity when adding a received original instead of a preparation.
+tool wechat_stickers.output | string | New workspace-relative output for download, using the original format extension; existing files are never replaced.
+tool wechat_stickers.preparationId | string | Preparation job identity for preview/download; returned by prepare.
+tool wechat_stickers.revision | string | Collection revision returned by list; required for move/remove.
+tool wechat_stickers.sourceId | string | Existing daemon-owned upload instead of a workspace file.
+tool wechat_stickers.startMs | integer, min 0, max 4294967295 | Explicit segment start in milliseconds; requires durationMs.
+tool wechat_stickers.stickerId | string | Stable Saved sticker identity for get, preview, download, move, or remove.

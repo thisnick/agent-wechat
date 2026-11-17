@@ -7,8 +7,8 @@ on:
       - 'packages/rust-crates/**'
       - '.changeset/**'
       - 'rust-toolchain.toml'
-      - 'scripts/native-crates*'
-      - 'scripts/native-sync-version.mjs'
+      - 'scripts/release/crates*'
+      - 'scripts/release/sync-version.mjs'
       - '.github/workflows/rust-crates.yml'
       - '.github/workflows/native-release.yml'
   workflow_call:
@@ -42,9 +42,9 @@ jobs:
           workspaces: packages/native-client-rust -> target
           key: rust-library-packages
       - name: Check publication boundaries and package recovery
-        run: node --test scripts/native-crates.test.mjs
+        run: node --test scripts/release/crates.test.mjs
       - name: Build all five distributable source packages
-        run: node scripts/native-crates.mjs package
+        run: node scripts/release/crates.mjs package
         env:
           RELEASE_VERSION: ${{ inputs.version }}
       - name: Build public examples from the libraries
@@ -87,13 +87,13 @@ jobs:
           name: rust-library-packages
           path: ${{ runner.temp }}/rust-library-packages
       - name: Prepare the immutable Rust library release tag
-        run: node scripts/native-crates-release.mjs prepare
+        run: node scripts/release/crates-release.mjs prepare
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ inputs.version }}
       - name: Verify exact release source and existing registry state
         id: plan
-        run: node scripts/native-crates.mjs plan
+        run: node scripts/release/crates.mjs plan
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ inputs.version }}
@@ -104,7 +104,7 @@ jobs:
         id: auth
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
       - name: Publish and verify native libraries
-        run: node scripts/native-crates.mjs publish
+        run: node scripts/release/crates.mjs publish
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ inputs.version }}
@@ -112,7 +112,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
           CRATES_IO_BOOTSTRAP_TOKEN: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}
       - name: Publish Rust library release notes after registry verification
-        run: node scripts/native-crates-release.mjs finish
+        run: node scripts/release/crates-release.mjs finish
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ inputs.version }}

@@ -196,7 +196,7 @@ then run:
 docker run --rm --network none --read-only \
   --user "$(id -u):$(id -g)" --tmpfs /tmp:rw,nosuid,nodev,mode=1777 \
   --mount "type=bind,src=$PWD,dst=/app,readonly" --workdir /app \
-  node:24-trixie-slim node scripts/native-simulator-smoke.mjs
+  node:24-trixie-slim node scripts/smoke/simulator.mjs
 ```
 
 Linux x64 validation on 2026-10-22 passed the full Rust workspace suite, pinned

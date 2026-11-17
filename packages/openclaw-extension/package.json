@@ -1,6 +1,6 @@
 {
   "name": "@agent-wechat/agent-wechat",
-  "version": "2.3.2",
+  "version": "2.6.0",
   "license": "MIT",
   "type": "module",
   "files": [
@@ -17,7 +17,7 @@
     "@agent-wechat/shared": "workspace:*",
     "@types/node": "^22",
     "esbuild": "^0.25.0",
-    "openclaw": "2026.11.2",
+    "openclaw": "2026.11.4",
     "typescript": "^5.4.5"
   },
   "openclaw": {

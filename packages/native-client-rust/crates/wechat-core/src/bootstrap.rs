@@ -29,6 +29,7 @@ impl Core {
                     let state = self.state_unfenced(&account.id)?;
                     self.ensure_managed_profile(&account.id, &state)?;
                 } else if self.store.native_profile_creation_receipt(&account.id)? {
+                    self.convert_created_profile_to_wal(&account.id);
                     if let Some(binding) = self.identity_binding(&account.id)? {
                         let identity = self.read_bound_identity(&account.id, &binding)?;
                         self.hydrate_bound_image_key(&account.id, &identity)?;
@@ -60,6 +61,55 @@ impl Core {
             }
         }
         Ok(())
+    }
+    /// Move a profile this daemon created from the rollback journal to WAL.
+    ///
+    /// Only profiles with a native creation receipt are eligible; attached or
+    /// imported official profiles keep whatever mode their client chose. This
+    /// runs from startup recovery, before any worker, reader or projection opens
+    /// the profile, and only while the account lock is held. Failures never
+    /// stop the account: they are logged and retried on the next start.
+    fn convert_created_profile_to_wal(&self, account: &str) {
+        let result = (|| -> Result<Value> {
+            let Ok(gate) = self.gate(account)?.try_lock_owned() else {
+                bail!("account_busy");
+            };
+            let (location, keys) = self.profile_location_keys(account)?;
+            let options = self.write_options(account, "managed-wal-conversion")?;
+            let report = wechat_profile::convert_profile_to_wal(&location, &keys, &options)?;
+            drop(gate);
+            Ok(report.into())
+        })();
+        match result {
+            Ok(report) => {
+                let changed = report["converted"].as_u64().unwrap_or(0) > 0
+                    || report["skipped"].as_array().is_some_and(|s| !s.is_empty());
+                if changed {
+                    // A database that stays skipped (for example, missing) would
+                    // otherwise repeat the same event on every start.
+                    let digest = serde_json::to_vec(&report)
+                        .map(|bytes| format!("{:x}", Sha256::digest(bytes)))
+                        .unwrap_or_default();
+                    let _ = self.store.append_event_once(
+                        account,
+                        &format!("profile-wal-conversion:{digest}"),
+                        "profile.wal-conversion",
+                        &report,
+                    );
+                }
+            }
+            Err(error) => {
+                // Events are the daemon's only account log; a no-op pass stays
+                // silent, and each distinct failure reason is recorded once.
+                let reason = error.to_string();
+                let _ = self.store.append_event_once(
+                    account,
+                    &format!("profile-wal-conversion-skipped:{reason}"),
+                    "profile.wal-conversion-skipped",
+                    &json!({"reason":reason}),
+                );
+            }
+        }
     }
     pub(super) fn ensure_managed_profile(
         &self,
@@ -253,5 +303,154 @@ impl Core {
         wechat_profile::publish_mmkv_create(path, &pair, &self.write_options(account, purpose)?)?;
         self.store.clear_runtime(account, purpose)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PASSWORD: [u8; 32] = [7; 32];
+
+    fn open_keyed(path: &Path) -> rusqlite::Connection {
+        let db = rusqlite::Connection::open(path).unwrap();
+        assert_eq!(
+            unsafe {
+                rusqlite::ffi::sqlite3_key(
+                    db.handle(),
+                    PASSWORD.as_ptr().cast(),
+                    PASSWORD.len() as i32,
+                )
+            },
+            0
+        );
+        db.execute_batch(
+            "PRAGMA cipher_compatibility=4;PRAGMA cipher_page_size=4096;PRAGMA kdf_iter=256000;",
+        )
+        .unwrap();
+        db
+    }
+    fn modes(location: &ProfileLocation, keys: &KeyFile) -> Vec<String> {
+        keys.databases
+            .keys()
+            .map(|relative| {
+                open_keyed(&location.root().join("db_storage").join(relative))
+                    .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+                    .unwrap()
+            })
+            .collect()
+    }
+    fn set_mode(location: &ProfileLocation, keys: &KeyFile, mode: &str) {
+        for relative in keys.databases.keys() {
+            open_keyed(&location.root().join("db_storage").join(relative))
+                .query_row(&format!("PRAGMA journal_mode={mode}"), [], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap();
+        }
+    }
+    fn conversion_events(store: &Store) -> usize {
+        store
+            .events("one", 0, 200)
+            .unwrap()
+            .iter()
+            .filter(|e| e.kind == "profile.wal-conversion")
+            .count()
+    }
+
+    async fn created_profile() -> (tempfile::TempDir, Arc<Core>, Arc<Store>) {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&temp.path().join("data")).unwrap());
+        store.create_account("one").unwrap();
+        let core = Core::new(store.clone(), None).unwrap();
+        core.configure_profile_format_key(&[9; 16]).unwrap();
+        let mut accepted = super::super::tests::state();
+        accepted.database_password = PASSWORD.to_vec();
+        accepted.key_info = vec![8; 32];
+        accepted.auto_auth_key = wechat_protocol::protobuf::message(&[
+            wechat_protocol::protobuf::bytes(1, &wechat_protocol::protobuf::buffer(&[1; 16])),
+            wechat_protocol::protobuf::bytes(2, &wechat_protocol::protobuf::buffer(&[2; 16])),
+        ])
+        .unwrap();
+        core.install_login_state("one", &accepted, None).unwrap();
+        core.ensure_managed_profile("one", &accepted).unwrap();
+        (temp, core, store)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn created_rollback_profile_converts_at_startup_then_reads_in_parallel_and_stays_idempotent(
+    ) {
+        let (_temp, core, store) = created_profile().await;
+        let (location, keys) = core.profile_location_keys("one").unwrap();
+        assert!(modes(&location, &keys).iter().all(|m| m == "wal"));
+        // A profile written by an older build used the rollback journal.
+        set_mode(&location, &keys, "DELETE");
+        assert!(modes(&location, &keys).iter().all(|m| m == "delete"));
+        // No read before conversion: startup recovery runs ahead of any reader,
+        // and a connection cached in rollback mode keeps reporting that mode.
+        // Startup recovery runs before workers.
+        core.recover_managed_profiles().unwrap();
+        assert!(modes(&location, &keys).iter().all(|m| m == "wal"));
+        assert_eq!(conversion_events(&store), 1);
+        let (_, timing) = core
+            .read_timed("one", |view| {
+                view.catalog_page("one", "threads", None, &Default::default())
+            })
+            .await
+            .unwrap();
+        assert!(timing.parallel);
+        core.recover_managed_profiles().unwrap();
+        assert_eq!(conversion_events(&store), 1);
+        assert!(modes(&location, &keys).iter().all(|m| m == "wal"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn attached_official_profiles_keep_their_rollback_journal() {
+        let (_tmp, core) = crate::read_view::tests::fixture();
+        let (location, keys) = core.profile_location_keys("one").unwrap();
+        for relative in keys.databases.keys() {
+            let db = open_keyed_with(
+                &location.root().join("db_storage").join(relative),
+                &[42; 32],
+            );
+            db.query_row("PRAGMA journal_mode=DELETE", [], |r| r.get::<_, String>(0))
+                .unwrap();
+        }
+        core.recover_managed_profiles().unwrap();
+        for relative in keys.databases.keys() {
+            let db = open_keyed_with(
+                &location.root().join("db_storage").join(relative),
+                &[42; 32],
+            );
+            let mode: String = db
+                .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(mode, "delete");
+        }
+    }
+    fn open_keyed_with(path: &Path, password: &[u8; 32]) -> rusqlite::Connection {
+        let db = rusqlite::Connection::open(path).unwrap();
+        assert_eq!(
+            unsafe { rusqlite::ffi::sqlite3_key(db.handle(), password.as_ptr().cast(), 32) },
+            0
+        );
+        db.execute_batch(
+            "PRAGMA cipher_compatibility=4;PRAGMA cipher_page_size=4096;PRAGMA kdf_iter=256000;",
+        )
+        .unwrap();
+        db
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conversion_waits_out_a_busy_account_lock_without_touching_the_profile() {
+        let (_temp, core, _store) = created_profile().await;
+        let (location, keys) = core.profile_location_keys("one").unwrap();
+        set_mode(&location, &keys, "DELETE");
+        let guard = core.lock_account("one").await.unwrap();
+        core.recover_managed_profiles().unwrap();
+        assert!(modes(&location, &keys).iter().all(|m| m == "delete"));
+        drop(guard);
+        core.recover_managed_profiles().unwrap();
+        assert!(modes(&location, &keys).iter().all(|m| m == "wal"));
     }
 }

@@ -51,12 +51,15 @@ fn notification(packet: &Longlink) -> Result<Option<Notification>> {
             return Ok(None);
         }
         let selector = u32::try_from(p::scalar(&selectors, 1)?)?;
-        return Ok(
-            (selector == crate::contact_sync::CONTACT_SELECTOR as u32).then_some(Notification {
-                command: 356,
-                selector,
-            }),
-        );
+        // Contact notices vary their high selector bits with the kind of
+        // change: a phone mute toggle carried 0x20004 and a phone remark edit
+        // 0x4000004. Any notice sharing a contact-sync bit asks for the same
+        // contactsync drain; the drain itself still uses CONTACT_SELECTOR.
+        let contact_bits = crate::contact_sync::CONTACT_SELECTOR as u32;
+        return Ok((selector & contact_bits != 0).then_some(Notification {
+            command: 356,
+            selector,
+        }));
     }
     if packet.command != 24 {
         return Ok(None);
@@ -188,6 +191,19 @@ impl Connection {
         wire::decode_heartbeat(&self.rpc(state, 518, 238, &request, before_submit)?)
     }
 
+    /// One sticker piece (CGI 175) on the long link, which the official client
+    /// prefers over the short link while connected. Notifications that arrive
+    /// before the reply stay queued for [`Self::poll`].
+    pub(crate) fn sticker_chunk_guarded(
+        &mut self,
+        state: &mut AccountState,
+        chunk: &crate::sticker_send::StickerSendChunk<'_>,
+        before_submit: impl FnOnce() -> Result<()>,
+    ) -> Result<Vec<u8>> {
+        let request = crate::sticker_send::sticker_send_request(state, chunk)?;
+        self.rpc(state, 175, 68, &request, before_submit)
+    }
+
     pub(crate) fn sync_guarded(
         &mut self,
         state: &mut AccountState,
@@ -279,6 +295,34 @@ mod tests {
             }
         );
         assert!(inbox.pending.is_empty());
+    }
+    #[test]
+    fn contact_notices_with_other_contact_selector_bits_request_a_drain() {
+        use crate::protobuf as p;
+        let notice = |selector: u64| Longlink {
+            command: 356,
+            sequence: 0,
+            payload: p::message(&[
+                p::uint(2, 11),
+                p::bytes(
+                    3,
+                    &p::message(&[p::uint(1, 2048), p::bytes(2, &p::uint(1, selector))]).unwrap(),
+                ),
+            ])
+            .unwrap(),
+        };
+        for selector in [0x20004, 0x4000004, 0x20000] {
+            assert_eq!(
+                notification(&notice(selector)).unwrap(),
+                Some(Notification {
+                    command: 356,
+                    selector: selector as u32
+                })
+            );
+        }
+        for selector in [0, 0x8, 0x4000000] {
+            assert_eq!(notification(&notice(selector)).unwrap(), None);
+        }
     }
     #[test]
     fn contact_hint_coalesces_separately_from_message_work() {

@@ -45,6 +45,17 @@ pub trait PushConnection: Send {
     fn heartbeat(&mut self, state: &mut AccountState, cursor: &[u8]) -> Result<Heartbeat>;
     fn sync(&mut self, state: &mut AccountState, cursor: &[u8], scene: u32) -> Result<SyncBatch>;
     fn poll(&mut self, timeout: Duration) -> Result<Option<Notification>>;
+    /// Whether this connection can carry sticker pieces on its long link.
+    fn sends_sticker_chunks(&self) -> bool {
+        false
+    }
+    /// Submit one journaled sticker piece on this connection.
+    fn send_sticker_chunk(
+        &mut self,
+        _chunk: &wechat_protocol::sticker_send::StickerSendChunk<'_>,
+    ) -> Result<Vec<u8>> {
+        bail!("unsupported_simulator_operation")
+    }
 }
 
 /// Simulation implements decoded operations explicitly. All remaining native
@@ -393,6 +404,26 @@ pub trait Upstream: Send + Sync {
     ) -> Result<(Vec<u8>, wechat_protocol::media::ImageInspection)> {
         require_native(self.kind())?;
         wechat_protocol::media::fetch_sticker(descriptor, progress)
+    }
+    /// Resolve a Channels post's playback material and download its decoded video. Each
+    /// authenticated step is submitted once; `checkpoint` runs between steps and stops the
+    /// transfer when the account or asset is no longer current.
+    fn fetch_channels_video(
+        &self,
+        _state: &mut AccountState,
+        _post: &wechat_protocol::ChannelsPost,
+        _max_bytes: usize,
+        _checkpoint: &mut dyn FnMut() -> Result<()>,
+        _progress: media::Progress<'_>,
+    ) -> Result<wechat_protocol::media::ChannelsVideo> {
+        bail!(
+            "{}",
+            if self.kind() == UpstreamKind::Simulator {
+                "unsupported_simulator_operation"
+            } else {
+                "account_runtime_required"
+            }
+        )
     }
     fn push_connection(&self, _state: &AccountState) -> Result<Box<dyn PushConnection>> {
         bail!(

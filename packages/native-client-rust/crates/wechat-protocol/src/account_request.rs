@@ -12,7 +12,8 @@ pub struct AccountRequest<'a> {
 }
 
 macro_rules! operation {
-    ($name:ident($($arg:ident: $ty:ty),*) -> $result:ty => $raw:ident) => {
+    ($(#[$meta:meta])* $name:ident($($arg:ident: $ty:ty),*) -> $result:ty => $raw:ident) => {
+        $(#[$meta])*
         pub fn $name(&mut self, $($arg: $ty),*) -> Result<$result> {
             self.admit()?;
             self.transport.$raw(self.state, $($arg),*)
@@ -21,6 +22,119 @@ macro_rules! operation {
 }
 
 impl AccountRequest<'_> {
+    /// Submit one direct sticker upload chunk. Journal the attempt before calling;
+    /// an error after submission has an uncertain outcome and is not a retry grant.
+    pub fn upload_sticker_chunk(
+        &mut self,
+        source: &[u8],
+        offset: u32,
+    ) -> Result<crate::sticker_upload::StickerUploadAcknowledgement> {
+        self.admit()?;
+        self.transport
+            .upload_sticker_chunk_snapshot(self.state, source, offset)
+    }
+
+    /// Return one custom-list or metadata reply for caller-owned receipt retention.
+    /// The request must come from the bounded custom-sticker builders.
+    pub fn custom_stickers_raw(&mut self, request: &[u8]) -> Result<Vec<u8>> {
+        self.admit()?;
+        ensure!(request.len() <= 65536, "sticker_request_limit");
+        self.transport.authenticated_rpc(
+            self.state,
+            697,
+            "/cgi-bin/micromsg-bin/mmbatchemojidownload",
+            request,
+        )
+    }
+    /// Submit one journaled Saved membership/placement intent, returning even a
+    /// rejected service reply before decoding. A transport error is uncertain.
+    pub fn mutate_custom_sticker(
+        &mut self,
+        id: &str,
+        action: &crate::custom_stickers::CustomStickerMutation,
+    ) -> Result<Vec<u8>> {
+        let request = crate::custom_stickers::custom_sticker_mutation_request(id, action)?;
+        self.admit()?;
+        self.transport.authenticated_rpc(
+            self.state,
+            698,
+            "/cgi-bin/micromsg-bin/mmbackupemojioperate",
+            &request,
+        )
+    }
+    /// Submit one direct upload chunk and return its raw acknowledgement for
+    /// retention before validation. Callers must journal each attempted offset.
+    pub fn upload_sticker_chunk_raw(&mut self, source: &[u8], offset: u32) -> Result<Vec<u8>> {
+        let request = crate::sticker_upload::sticker_upload_request(source, offset)?;
+        self.admit()?;
+        self.transport.authenticated_rpc(
+            self.state,
+            703,
+            "/cgi-bin/micromsg-bin/mmemojiupload",
+            &request,
+        )
+    }
+
+    /// Read a native pack-list page for durable caller-owned receipt storage.
+    pub fn sticker_pack_page_raw(
+        &mut self,
+        feed: crate::sticker_packs::StickerPackFeed,
+        cursor: &[u8],
+    ) -> Result<Vec<u8>> {
+        let request = crate::sticker_packs::sticker_pack_list_request(self.state, feed, cursor)?;
+        self.admit()?;
+        self.transport
+            .sticker_pack_rpc_snapshot(self.state, 411, &request)
+    }
+    /// Read full metadata/content references for one product without acquiring media.
+    pub fn sticker_pack_detail_raw(&mut self, id: &str) -> Result<Vec<u8>> {
+        let request = crate::sticker_packs::sticker_pack_detail_request(self.state, id)?;
+        self.admit()?;
+        self.transport
+            .sticker_pack_rpc_snapshot(self.state, 412, &request)
+    }
+    /// Read localized caption rows for one product, retaining the complete reply.
+    pub fn sticker_pack_captions_raw(&mut self, id: &str) -> Result<Vec<u8>> {
+        let request = crate::sticker_packs::sticker_pack_captions_request(self.state, id)?;
+        self.admit()?;
+        self.transport
+            .sticker_pack_rpc_snapshot(self.state, 521, &request)
+    }
+    /// Submit one journaled eligible-free membership change. The caller checks
+    /// eligibility before adding, retains this reply and reconciles membership.
+    /// A transport error is uncertain and never an automatic retry grant.
+    pub fn sticker_pack_membership_raw(&mut self, id: &str, added: bool) -> Result<Vec<u8>> {
+        let request = crate::sticker_packs::sticker_pack_membership_request(self.state, id, added)?;
+        self.admit()?;
+        self.transport
+            .sticker_pack_rpc_snapshot(self.state, 413, &request)
+    }
+
+    /// Acquire one archive locator without changing pack membership. Journal the
+    /// attempt before calling and retain the raw reply before decoding it.
+    pub fn sticker_pack_acquisition_raw(&mut self, id: &str) -> Result<Vec<u8>> {
+        let request = crate::sticker_packs::sticker_pack_acquisition_request(self.state, id)?;
+        self.admit()?;
+        self.transport
+            .sticker_pack_rpc_snapshot(self.state, 423, &request)
+    }
+
+    /// Submit one journaled probe or byte continuation for a single sticker send.
+    /// Return raw bytes for durable retention before validating acknowledgement.
+    pub fn send_sticker_chunk_raw(
+        &mut self,
+        chunk: &crate::sticker_send::StickerSendChunk<'_>,
+    ) -> Result<Vec<u8>> {
+        let request = crate::sticker_send::sticker_send_request(self.state, chunk)?;
+        self.admit()?;
+        self.transport.authenticated_rpc(
+            self.state,
+            175,
+            "/cgi-bin/micromsg-bin/sendemoji",
+            &request,
+        )
+    }
+
     fn admit(&mut self) -> Result<()> {
         // A second operation must not label the first possibly accepted one
         // "not submitted". Each logical request has its own outcome/journal.
@@ -68,6 +182,16 @@ impl AccountRequest<'_> {
     operation!(download_avatars(ids: &[String]) -> Vec<crate::AvatarBytes> => download_avatars_snapshot);
     operation!(download_voice_chunk(server_id: u64, length: u32, offset: u32) -> crate::VoiceChunk => download_voice_chunk_snapshot);
     operation!(cdn_config() -> crate::media::CdnConfig => cdn_config_snapshot);
+    operation!(
+        /// Request a new H5 ticket for Channels post lookups. Submitted once, without renewal or retry.
+        channels_ticket() -> crate::ChannelsTicket => channels_ticket_snapshot);
+    operation!(
+        /// Request the authenticated page address for a Channels post. Submitted once.
+        channels_page(post: &crate::ChannelsPost) -> crate::ChannelsPage => channels_page_snapshot);
+    operation!(
+        /// Request a Channels post's detail and return its single video's fresh playback material.
+        /// Submitted once.
+        channels_media(post: &crate::ChannelsPost, ticket: &crate::ChannelsTicket, page: &crate::ChannelsPage) -> crate::ChannelsMedia => channels_media_snapshot);
     operation!(large_cdn_config(route: crate::media::LargeCdnRoute) -> crate::media::CdnConfig => large_cdn_config_snapshot);
     operation!(group_inventory(cursor: &[u8]) -> crate::GroupMetadataPage => group_inventory_snapshot);
     operation!(lookup_contacts_raw(ids: &[String]) -> Vec<u8> => lookup_contacts_raw_snapshot);

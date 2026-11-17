@@ -15,10 +15,11 @@ Use `wx groups` to manage ordinary groups and members, `wx chats mute/unmute` fo
    wx groups list
    wx groups get '123456@chatroom'
    wx groups members list '123456@chatroom' --limit 50
+   wx groups members list '123456@chatroom' --search alice
    wx groups members get '123456@chatroom' wxid_alice
    ```
 
-   Exact lookup returns `{"state":"present","member":{...}}` or `{"state":"unconfirmed","member":null}`. A missing row does not prove someone left.
+   `--search` matches a member's ID, WeChat ID, nickname, your remark or their name in this group. It follows the same rules as [`groups find`](/reference/cli/). Exact lookup returns `{"state":"present","member":{...}}` or `{"state":"unconfirmed","member":null}`. A missing row does not prove someone left.
 
 2. Refresh server data:
 

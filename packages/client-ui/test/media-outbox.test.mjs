@@ -140,7 +140,27 @@ test("normal video is the default and mixed attachments do not receive video qua
   await outbox.send("mei", file(), "file", "original");
   assert.equal(requests[0].videoQuality, "normal");
   assert.equal("videoQuality" in requests[1], false);
+  assert.equal("imageQuality" in requests[1], false);
   assert.equal("videoQuality" in outbox.snapshot()[1], false);
+});
+test("original images ask for the full-resolution copy and standard images keep the default request", async (t) => {
+  const saved = storage(), requests = [];
+  const outbox = new MediaOutbox({
+    upload: async () => ({ id: "source-1" }),
+    sendMedia: async (_account, request) => {
+      requests.push(request);
+      return job();
+    },
+  }, "a", saved);
+  t.after(() => outbox.close());
+  const photo = () => new File(["synthetic JPEG"], "photo.jpg", { type: "image/jpeg" });
+  await outbox.send("mei", photo(), "image", "original");
+  await outbox.send("mei", photo(), "image");
+  assert.equal(requests[0].imageQuality, "original");
+  assert.equal("videoQuality" in requests[0], false);
+  assert.equal("imageQuality" in requests[1], false, "standard is the hub's default, so it is not named");
+  assert.equal(saved.read()[0].imageQuality, "original");
+  assert.equal("imageQuality" in saved.read()[1], false);
 });
 test("late upload cancellation cannot submit an attachment", async (t) => {
   const late = deferred();

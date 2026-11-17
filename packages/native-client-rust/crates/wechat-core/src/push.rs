@@ -140,6 +140,16 @@ impl Core {
             .await?;
         self.drain_contact_sync(account, &fence).await?;
         ready.store(true, Ordering::Release);
+        // The official client sends sticker pieces on the long link while it is
+        // connected. This session runs them between polls until it ends.
+        let long_link = connection
+            .sends_sticker_chunks()
+            .then(|| self.open_long_link(account))
+            .flatten();
+        let mailbox = long_link
+            .as_ref()
+            .map(|registration| registration.mailbox.clone());
+        self.sticker_reconnected(account)?;
         self.store.append_event(
             account,
             "account.push",
@@ -178,8 +188,13 @@ impl Core {
                         .await?;
                 }
             }
+            let pieces = mailbox.clone();
             let result = blocking(move || {
-                let notification = connection.poll(Duration::from_secs(1))?;
+                let notification = poll_with_long_link(
+                    connection.as_mut(),
+                    pieces.as_deref(),
+                    Duration::from_secs(1),
+                )?;
                 Ok((connection, notification))
             })
             .await?;
@@ -269,6 +284,7 @@ impl Core {
             crate::calls::notifications::after_sync_staged(self, account, &id, &batch, origin);
         }
         let projection = self.project_pending_with_media(account, true)?;
+        let _ = self.schedule_sticker_reconciliation(account);
         if !batch.continuation {
             self.store.put_runtime(account, "history-caught-up", b"1")?;
         }
@@ -276,6 +292,30 @@ impl Core {
         Ok(
             json!({"batchId":id,"commandCount":batch.commands.len(),"continuation":batch.continuation,"projection":projection,"profileProjection":if self.store.pending_sync_count(account)?==0{"complete"}else{"pending"},"checkpointProjection":if self.store.pending_cursor_projection(account)?{"pending"}else{"complete"}}),
         )
+    }
+}
+
+/// Wait up to `timeout` for a notification. With a long-link mailbox, poll in
+/// short slices and run queued sticker pieces between them, so a piece waits at
+/// most one slice for the session.
+fn poll_with_long_link(
+    connection: &mut dyn crate::upstream::PushConnection,
+    mailbox: Option<&crate::long_link::LongLinkMailbox>,
+    timeout: Duration,
+) -> Result<Option<wechat_protocol::push::Notification>> {
+    let Some(mailbox) = mailbox else {
+        return connection.poll(timeout);
+    };
+    let deadline = Instant::now() + timeout;
+    loop {
+        mailbox.run(|chunk| connection.send_sticker_chunk(&chunk.borrowed()));
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(None);
+        }
+        if let Some(notification) = connection.poll(remaining.min(Duration::from_millis(50)))? {
+            return Ok(Some(notification));
+        }
     }
 }
 

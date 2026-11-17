@@ -110,6 +110,31 @@ async function settle(page, requests, avatarInitials) {
   await requests.idle();
 }
 
+/**
+ * Marks animated images so the screenshot shows their first frame, not whichever
+ * frame happened to be playing.
+ *
+ * Argos pauses GIFs before each screenshot, but it recognises one only by a `.gif` or
+ * `data:image/gif` URL, or by `data-image-type="gif"`. The UI shows stickers and other
+ * media from `blob:` URLs, so each GIF among those is marked here by its file header.
+ */
+async function markBlobGifs(page) {
+  await page.evaluate(() =>
+    Promise.all(
+      [...document.images].map(async (image) => {
+        const source = image.currentSrc || image.src;
+        if (!source.startsWith("blob:") || image.getAttribute("data-image-type") === "gif") return;
+        try {
+          const header = await (await fetch(source)).blob().then((blob) => blob.slice(0, 6).text());
+          if (header === "GIF87a" || header === "GIF89a") image.setAttribute("data-image-type", "gif");
+        } catch {
+          // A revoked URL can no longer be read; leave that image unmarked.
+        }
+      }),
+    ),
+  );
+}
+
 for (const scene of scenes) {
   for (const viewport of scene.viewports) {
     test.describe(scene.name, () => {
@@ -133,7 +158,10 @@ for (const scene of scenes) {
         await scene.actions?.({ page, expect, world });
         await settle(page, requests, sim.avatarInitials);
         const capture = async (name) => {
+          await markBlobGifs(page);
           const attachments = await argosScreenshot(page, name, {
+            // Moving the pointer to suppress hover would move an active drag too.
+            disableHover: !scene.preservePointer,
             mask: scene.mask?.(page, world) ?? [],
             maskColor: "#000000",
           });

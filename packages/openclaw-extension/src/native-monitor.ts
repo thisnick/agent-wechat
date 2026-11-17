@@ -298,16 +298,20 @@ export async function startNativeMonitor(opts: WeChatMonitorOptions): Promise<vo
     const account = resolveWeChatAccount(cfg as Record<string, unknown>, opts.account.accountId) ?? opts.account;
     if (account.backend !== "native" || JSON.stringify(account.native) !== JSON.stringify(native)) throw new Error("Native service configuration changed; restart required before processing");
     for (const item of state.items().filter(value => value.state === "received")) {
-      await dispatchNativeMessage({ client: host.client, state, account, message: item.message, cfg, core,
+      const outcome = await dispatchNativeMessage({ client: host.client, state, account, message: item.message, cfg, core,
         signal: opts.abortSignal, onDelivered: () => opts.setStatus({ accountId: account.accountId, lastOutboundAt: Date.now() }) });
+      // Never retried: resending could reply twice. Logged once, not kept as a status warning.
+      if (outcome === "needs_review") {
+        const line = `WeChat message ${item.message.id} was not retried: its model dispatch or reply could not be confirmed`;
+        if (opts.log?.warn) opts.log.warn(line); else opts.log?.error?.(line);
+      }
     }
     try { await flushRead(); }
     catch { opts.log?.error?.("Native read projection is pending; thread read receipt retained for retry"); }
-    const needsReview = state.items().filter(value => value.state === "needs_review" || value.phoneReadState === "needs_review" || value.phoneReadState === "rejected").length;
     const handoffUnconfirmed = native.readPolicy === "on_model_dispatch" && state.items().some(value => value.handoffUnconfirmed);
     const accountStatus = await host.client.account(native.accountId);
     opts.setStatus({ accountId: account.accountId, running: true, connected: true,
-      linked: accountStatus.authenticated === true && accountStatus.connection === "online", needsReview, handoffUnconfirmed });
+      linked: accountStatus.authenticated === true && accountStatus.connection === "online", handoffUnconfirmed });
   };
   let processing: Promise<void> | undefined;
   let processAgain = false;
@@ -349,7 +353,7 @@ export async function startNativeMonitor(opts: WeChatMonitorOptions): Promise<vo
     } catch (error) {
       if (opts.abortSignal.aborted) break;
       if (error instanceof NativeApiError && error.code === "event_cursor_expired") {
-        opts.setStatus({ accountId: opts.account.accountId, connected: false, running: false, needsReview: 1, lastError: "event_cursor_expired" });
+        opts.setStatus({ accountId: opts.account.accountId, connected: false, running: false, lastError: "event_cursor_expired" });
         throw new Error("Native journal cursor expired; explicit snapshot/replay is required before resuming");
       }
       opts.setStatus({ accountId: opts.account.accountId, connected: false, running: true });

@@ -90,8 +90,13 @@ export async function mentionsAcceptance({ script, until, key, resize, sentTexts
   await reloadPage(script, until);
   await until(`return ${editor}?.querySelectorAll('[data-mention-id]').length`, count => count === 2);
   assert.equal(await plain(), savedText);
+  // Draft restoration can finish before account capabilities arrive.
+  await until("const button=document.querySelector('button[aria-label=\"Mention someone\"]');return Boolean(button && !button.disabled)", Boolean);
   await keyboard({ key: "Enter", keyCode: 13 });
-  await until(`return ${editor}?.querySelectorAll('[data-mention-id]').length`, count => count === 2);
+  // The old two-token draft is already present before the request starts.
+  // Wait for the fixture request and rejected-send cleanup as well.
+  await until(`return {mentions:${editor}?.querySelectorAll('[data-mention-id]').length,pending:document.querySelectorAll('article[data-send-state]').length}`,
+    value => sentTexts.length === sends + 1 && value.mentions === 2 && value.pending === 0);
   assert.equal(sentTexts.length, sends + 1);
   const sent = sentTexts.at(-1);
   assert.equal(sent.text, savedText);

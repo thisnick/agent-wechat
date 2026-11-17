@@ -353,19 +353,17 @@ impl Core {
             .context("quote_sender_unavailable")?;
         ensure!(original.outgoing.is_some(), "quote_sender_unavailable");
         let reader = self.profile_reader(account)?;
-        let query = ListQuery {
-            limit: Some(100),
-            search: Some(sender.into()),
-            ..Default::default()
+        let mut name = match reader.contact(sender) {
+            Ok(contact) => contact.label,
+            Err(wechat_profile::ProfileError::NotCached) => sender.into(),
+            Err(error) => return Err(error.into()),
         };
-        let mut name = reader
-            .contacts(&query)?
-            .items
-            .into_iter()
-            .find(|c| c.username == sender)
-            .map(|c| c.label)
-            .unwrap_or_else(|| sender.into());
         if thread.ends_with("@chatroom") {
+            let query = ListQuery {
+                limit: Some(100),
+                search: Some(sender.into()),
+                ..Default::default()
+            };
             if let Ok(page) = reader.group_members(thread, &query) {
                 if let Some(member) = page.items.into_iter().find(|m| m.username == sender) {
                     name = member.label;

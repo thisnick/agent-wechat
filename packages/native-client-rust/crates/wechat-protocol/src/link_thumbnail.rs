@@ -42,24 +42,43 @@ pub fn fetch_link_thumbnail(
     progress: impl FnMut(u64, Option<u64>) -> Result<()>,
 ) -> Result<Vec<u8>> {
     let url = validate_link_thumbnail_url(value)?;
-    let host = url.host_str().unwrap().trim_matches(['[', ']']).to_owned();
-    let port = url.port_or_known_default().unwrap();
+    let address = public_address(
+        &url,
+        "link_thumbnail_dns_failed",
+        "link_thumbnail_dns_not_public",
+    )?;
+    fetch_at(url, address, progress)
+}
+/// Resolve a URL's host once and require every address to be public, so a fetch can pin its
+/// connection to the checked address. Returns an IPv4 address when one exists.
+pub(crate) fn public_address(
+    url: &reqwest::Url,
+    dns_failed: &'static str,
+    not_public: &'static str,
+) -> Result<SocketAddr> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!(dns_failed))?
+        .trim_matches(['[', ']'])
+        .to_owned();
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| anyhow::anyhow!(dns_failed))?;
     let addresses = (host.as_str(), port)
         .to_socket_addrs()
-        .map_err(|_| anyhow::anyhow!("link_thumbnail_dns_failed"))?
+        .map_err(|_| anyhow::anyhow!(dns_failed))?
         .collect::<Vec<_>>();
     ensure!(
         !addresses.is_empty()
             && addresses.len() <= 64
             && addresses.iter().all(|a| super::sticker::public_ip(a.ip())),
-        "link_thumbnail_dns_not_public"
+        not_public
     );
-    let address = addresses
+    Ok(*addresses
         .iter()
         .find(|a| a.is_ipv4())
         .or_else(|| addresses.first())
-        .unwrap();
-    fetch_at(url, *address, progress)
+        .unwrap())
 }
 fn fetch_at(
     url: reqwest::Url,

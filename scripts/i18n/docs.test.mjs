@@ -80,6 +80,16 @@ test('an unstamped translation is checked and reported as unrecorded', () => {
   assert.deepEqual(problems, []);
 });
 
+test('stamped hashes stay strings in YAML, even when they are all digits', () => {
+  // Unquoted, YAML reads 685429610874 as a number and the docs schema rejects the page.
+  for (const text of ['---\ntitle: A\nsourceHash: "old"\n---\nbody', 'body']) {
+    const stamped = stamp(text, '685429610874');
+    assert.match(stamped, /^sourceHash: "685429610874"$/m);
+    assert.equal(stamped.match(/^sourceHash:/gm).length, 1);
+    assert.equal(frontmatter(stamped).fields.sourceHash, '685429610874');
+  }
+});
+
 test('helpers', () => {
   assert.deepEqual(frontmatter('---\ntitle: "A"\nsourceHash: abc\n---\nbody').fields, { title: 'A', sourceHash: 'abc' });
   assert.equal(frontmatter(stamp('---\ntitle: A\nsourceHash: old\n---\nbody', 'new')).fields.sourceHash, 'new');
