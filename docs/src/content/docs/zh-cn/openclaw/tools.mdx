@@ -1,7 +1,7 @@
 ---
 title: 智能体工具
 description: OpenClaw 智能体可调用的微信工具，以及如何授权访问所有会话。
-sourceHash: 1ee65b6dfdd7
+sourceHash: "f8d680ef65c6"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -23,6 +23,20 @@ import { Aside } from '@astrojs/starlight/components';
 ## 自定义表情 \{#custom-stickers}
 
 使用 [`wechat_stickers`](../stickers/) 准备执行工作区中的文件、检查实际的图片预览并管理“我的表情”。它支持八种操作：`list`、`get`、`preview`、`download`、`prepare`、`add`、`move` 和 `remove`。浏览官方表情包及管理成员关系可在桌面应用和 CLI 中完成。
+
+## 联系人与好友申请 \{#contacts-and-friend-requests}
+
+可选的 `wechat_contacts` 和 `wechat_contact_request` 工具可用于已配置的账号。请仅将它们授权给面向所有者的智能体，并保留其现有的工具授权：
+
+```json
+{ "tools": { "alsoAllow": ["wechat_contacts", "wechat_contact_request"] } }
+```
+
+这两个工具都要求 OpenClaw 的可信所有者身份，以及当前的**私人所有者会话**。共享会话和缺少这些检查的宿主无法使用它们。模型无法选择其他账号，也无法自行提供所有者标记。
+
+`wechat_contacts` 支持 `list`、`get`、本地 `find`、精确 ID 的 `lookup`、服务器 `search` 和 `remove`。`wechat_contact_request` 支持 `list`、`get`、`send`、`accept`、删除本地记录的 `delete` 以及操作的 `status`。发送时使用搜索得到的 `recipientRef`；通过和删除时需要已检查的 `expectedVersion`。修改操作需要稳定的 `idempotencyKey`。出现不确定结果后，请查询原始操作，而不是再次发送。
+
+守护进程令牌还需要读取权限 `read` 和修改权限 `admin`。通过好友申请不会改变 OpenClaw 的允许列表或所有者权限。CLI、API 和搜索限制请参阅[联系人与好友申请](/use/contacts/)。
 
 ## 语音通话 \{#calling}
 
