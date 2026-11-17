@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { crateNames, isReleaseContext, publicationBatches, publicationPlan, publishPending, releaseVersionInput, syncCrateVersions, validateCrates, verifyReleaseSource } from './crates.mjs';
+import { crateNames, isReleaseContext, publicationBatches, publicationPlan, publishPending, releaseVersionInput, syncCrateVersions, validateCrates, verifyReleaseSource, waitForIndex } from './crates.mjs';
 import { cratePackage, readCratePolicy, readCrateVersion } from './crates-version.mjs';
 
 const version = '1.4.0-beta.2';
@@ -144,20 +144,50 @@ test('the fifth crate uses bootstrap after the existing dependencies use OIDC', 
     { credential: 'CRATES_IO_BOOTSTRAP_TOKEN', names: ['wechat-calls'] },
   ]);
   const writes = [];
+  const steps = [];
   const env = { CARGO_REGISTRY_TOKEN: 'synthetic-oidc', CRATES_IO_BOOTSTRAP_TOKEN: 'synthetic-bootstrap' };
-  publishPending(plan, { env, runCargo: (args, credentials) => writes.push({ args, credentials }) });
-  assert.deepEqual(writes.map(write => write.args.filter((_, i, args) => args[i - 1] === '-p')), [crateNames.slice(0, -1), ['wechat-calls']]);
-  assert.deepEqual(writes.map(write => write.credentials.CARGO_REGISTRY_TOKEN), ['synthetic-oidc', 'synthetic-bootstrap']);
+  await publishPending(plan, { env,
+    runCargo: (args, credentials) => { writes.push({ args, credentials }); steps.push(`publish ${args.at(-1)}`); },
+    waitUntilIndexed: async (name, indexed) => { assert.equal(indexed, version); steps.push(`index ${name}`); } });
+  // One crate per Cargo run, each visible in the index before its dependents publish.
+  assert.deepEqual(writes.map(write => write.args.filter((_, i, args) => args[i - 1] === '-p')), crateNames.map(name => [name]));
+  assert.deepEqual(steps, crateNames.flatMap(name => [`publish ${name}`, `index ${name}`]));
+  assert.deepEqual(writes.map(write => write.credentials.CARGO_REGISTRY_TOKEN), [...Array(4).fill('synthetic-oidc'), 'synthetic-bootstrap']);
   for (const credential of Object.keys(env)) {
-    assert.throws(() => publishPending(plan, { env: { ...env, [credential]: '' }, runCargo: () => assert.fail('must not publish before all credentials exist') }), /Missing publishing credential/);
+    await assert.rejects(publishPending(plan, { env: { ...env, [credential]: '' }, runCargo: () => assert.fail('must not publish before all credentials exist') }), /Missing publishing credential/);
   }
   let submissions = 0;
-  assert.throws(() => publishPending(plan, { env, runCargo: () => { submissions++; throw new Error('uncertain upload'); } }), /uncertain upload/);
+  await assert.rejects(publishPending(plan, { env, runCargo: () => { submissions++; throw new Error('uncertain upload'); },
+    waitUntilIndexed: () => assert.fail('must not wait after a failed upload') }), /uncertain upload/);
   assert.equal(submissions, 1);
+  submissions = 0;
+  await assert.rejects(publishPending(plan, { env, runCargo: () => { submissions++; },
+    waitUntilIndexed: async () => { throw new Error('index timeout'); } }), /index timeout/);
+  assert.equal(submissions, 1, 'a dependent crate must not publish before its dependency is indexed');
   // A rerun verifies the four existing versions, then resumes only the still-new name.
   const retry = await publicationPlan({ version, sourceCommit, checksums, readSource, fetchImpl: async url => url.includes('wechat-calls') ? missing() : registry(url) });
   assert.deepEqual(publicationBatches(retry), [{ credential: 'CRATES_IO_BOOTSTRAP_TOKEN', names: ['wechat-calls'] }]);
   assert.deepEqual(publicationBatches({ pending: [], newCrates: [] }), []);
+});
+
+test('publication waits until the uploaded version appears in the sparse index', async () => {
+  const urls = [];
+  const responses = [
+    () => missing(),
+    () => new Response(null, { status: 503 }),
+    () => new Response(`${JSON.stringify({ name: 'wechat-protocol', vers: '1.3.0' })}\n`),
+    () => new Response(`${JSON.stringify({ name: 'wechat-protocol', vers: '1.3.0' })}\n${JSON.stringify({ name: 'wechat-protocol', vers: version })}\n`),
+  ];
+  let clock = 0;
+  const sleeps = [];
+  await waitForIndex('wechat-protocol', version, { now: () => clock, sleep: async ms => { sleeps.push(ms); clock += ms; },
+    intervalMs: 1000, timeoutMs: 60000, fetchImpl: async url => { urls.push(url); return responses.shift()(); } });
+  assert.deepEqual(urls, Array(4).fill('https://index.crates.io/we/ch/wechat-protocol'));
+  assert.deepEqual(sleeps, [1000, 1000, 1000]);
+
+  clock = 0;
+  await assert.rejects(waitForIndex('wechat-calls', version, { now: () => clock, sleep: async ms => { clock += ms; },
+    intervalMs: 1000, timeoutMs: 3000, fetchImpl: async () => missing() }), /wechat-calls 1\.4\.0-beta\.2 is not in the crates\.io index.*rerun the job/);
 });
 
 test('credential batches retain dependency order even across alternating new names', () => {

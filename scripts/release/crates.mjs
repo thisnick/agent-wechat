@@ -146,15 +146,41 @@ export function publicationBatches(plan) {
   return batches;
 }
 
-export function publishPending(plan, { env, runCargo }) {
+// Cargo resolves a dependent crate through the sparse index, which can show an upload minutes after crates.io accepts it.
+export async function waitForIndex(name, version, { fetchImpl = fetch, sleep = ms => new Promise(done => setTimeout(done, ms)),
+  now = Date.now, timeoutMs = 15 * 60 * 1000, intervalMs = 10 * 1000 } = {}) {
+  // All five names are longer than three characters, so they use the two-level index path.
+  const url = `https://index.crates.io/${name.slice(0, 2)}/${name.slice(2, 4)}/${name}`;
+  const deadline = now() + timeoutMs;
+  let lastError;
+  for (;;) {
+    try {
+      const response = await request(url, fetchImpl);
+      if (response.status === 200 && (await response.text()).split('\n').filter(Boolean)
+        .some(line => { const entry = JSON.parse(line); return entry.name === name && entry.vers === version; })) return;
+    } catch (error) { lastError = error; } // Reading the index never writes, so keep polling until the deadline.
+    if (now() >= deadline) {
+      throw new Error(`${name} ${version} is not in the crates.io index after ${timeoutMs / 60000} minutes`
+        + `${lastError ? ` (${lastError.message})` : ''}; rerun the job to resume after it appears`);
+    }
+    await sleep(intervalMs);
+  }
+}
+
+export async function publishPending(plan, { env, runCargo, waitUntilIndexed = waitForIndex }) {
   const batches = publicationBatches(plan);
   // Validate every credential before the first possible registry write.
   for (const { credential } of batches) {
     if (!env[credential]) throw new Error(`Missing publishing credential: ${credential}`);
   }
+  // Publish one crate per Cargo run. Cargo waits only 60 seconds for an upload to reach the index (a longer
+  // `publish.timeout` needs nightly) and a multi-crate run then abandons every crate that depends on it.
+  // In a single-crate run that expiry is only a warning, so the script waits for the index itself.
   for (const { credential, names } of batches) {
-    runCargo(['publish', '--registry', 'crates-io', '--locked', ...selections(names)],
-      { CARGO_REGISTRY_TOKEN: env[credential] });
+    for (const name of names) {
+      runCargo(['publish', '--registry', 'crates-io', '--locked', '-p', name], { CARGO_REGISTRY_TOKEN: env[credential] });
+      await waitUntilIndexed(name, plan.version);
+    }
   }
 }
 
@@ -208,7 +234,7 @@ export async function main(command, { root = process.cwd(), allowDirty = false }
       `pending=${plan.pending.length > 0}\nbootstrap=${plan.bootstrap}\ntrusted=${plan.pending.some(name => !plan.newCrates.includes(name))}\n`);
     return console.log(JSON.stringify(plan));
   }
-  publishPending(plan, { env: process.env, runCargo: cargo });
+  await publishPending(plan, { env: process.env, runCargo: cargo });
   // Registry transport errors and uncertain uploads stop the job. A rerun verifies already-published source before continuing.
   const verified = await publicationPlan({ version: policy.version, sourceCommit, checksums });
   if (verified.pending.length) throw new Error('Crate publication has not finished; inspect registry state before retrying');
