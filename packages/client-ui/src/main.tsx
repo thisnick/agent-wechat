@@ -1,4 +1,4 @@
-import { OmniSearch, FriendRequests, RemoveContact, ContactRequestDialog, useContactRequests, type RequestSelection } from "./contact-requests.tsx";
+import { OmniSearch, FriendRequests, ContactDetails, ContactDetailDialog, contactSelectionKey, useContactRequests, type RequestSelection } from "./contact-requests.tsx";
 import "./contact-requests.css";
 import { ConversationRow } from "./conversation-row.tsx";
 import { ConversationFilterBar } from "./conversation-filter-bar.tsx";
@@ -1359,22 +1359,17 @@ function Chats({
                     .includes(query.toLowerCase()),
                 )
                 .map((c) => (
-                  <button
-                    key={c.id}
-                    className="chat-row"
-                    onClick={() => select(c.id)}
-                  >
-                    <HubAvatar
-                      connection={connection}
-                      account={state.account!}
-                      username={c.id}
-                      name={c.displayName || c.id}
-                    />
-                    <div className="chat-copy">
-                      <strong>{c.displayName || c.id}</strong>
-                      <p className="preview">{c.username}</p>
-                    </div>
-                  </button>
+                  <div key={c.id} className="contact-list-row">
+                    <button className="chat-row contact-list-main" onClick={() => select(c.id)}>
+                      <HubAvatar connection={connection} account={state.account!} username={c.id} name={c.displayName || c.id} />
+                      <div className="chat-copy"><strong>{c.displayName || c.id}</strong><p className="preview">{c.username}</p></div>
+                    </button>
+                    <button className="contact-list-details omni-action"
+                      aria-label={t("contactsUi.detailsFor", { name: c.displayName || c.id })}
+                      onClick={() => setRequestSelection({ contact: { id: c.id, displayName: c.displayName || c.id } })}>
+                      {t("contactsUi.details")}
+                    </button>
+                  </div>
                 ))}
           {!state.loading &&
             (section === "chats" ? threads.length : state.contacts.length) ===
@@ -1400,7 +1395,7 @@ function Chats({
           )}
         </div>
       </aside>
-      {view.name==="friend-requests" ? <FriendRequests connection={connection} account={state.account!} requests={requests} review={setRequestSelection} open={select} back={()=>router.push({name:"contacts",...here})}/> : <main className="workspace">
+      {view.name==="friend-requests" ? <FriendRequests connection={connection} account={state.account!} requests={requests} review={setRequestSelection} back={()=>router.push({name:"contacts",...here})}/> : <main className="workspace">
         <header className="chat-header">
           <Button
             icon="back"
@@ -1870,7 +1865,8 @@ function Chats({
         </ConversationNavigation>
       </main>}
       {omniScope!==null && <OmniSearch key={state.account} connection={connection} account={state.account!} initialScope={omniScope} suspended={requestSelection!==null} requests={requests.items} close={()=>setOmniScope(null)} review={setRequestSelection} open={(thread,message)=>{if(message)router.push({name:"message",...here,thread,message});else select(thread);}}/>}
-      {requestSelection && <ContactRequestDialog key={"request" in requestSelection ? requestSelection.request.id : "discovery" in requestSelection ? requestSelection.discovery.recipientRef : requestSelection.removeContact.id} connection={connection} account={state.account!} selection={requestSelection} close={()=>setRequestSelection(null)} changed={requests.refresh}/>}
+      {requestSelection && <ContactDetailDialog key={contactSelectionKey(requestSelection)} connection={connection} account={state.account!} selection={"request" in requestSelection ? { request: requests.items.find(item => item.id === requestSelection.request.id) ?? requestSelection.request } : requestSelection} close={()=>setRequestSelection(null)} changed={()=>{requests.refresh();void session.refresh().catch(()=>{});}} open={select} remove={contact=>setRequestSelection({removeContact:contact})}/>}
+
 
       {accountMenu && (
         <div
@@ -2401,7 +2397,7 @@ function Details({
         />
       )}
       {state.account && <ThreadNotifications key={state.account+threadId} connection={connection} account={state.account} threadId={threadId} />}
-      {state.account && !threadId.endsWith("@chatroom") && threadId!=="filehelper" && threadId!==state.accounts.find(a=>a.id===state.account)?.ownUsername && state.contacts.some(c=>c.id===threadId) && <RemoveContact connection={connection} account={state.account} id={threadId} name={name}/>}
+      {state.account && !threadId.endsWith("@chatroom") && threadId!=="filehelper" && threadId!==state.accounts.find(a=>a.id===state.account)?.ownUsername && state.contacts.some(c=>c.id===threadId) && <ContactDetails connection={connection} account={state.account} id={threadId} name={name}/>}
       {state.account && threadId.endsWith("@chatroom") && (
         <GroupSettings
           connection={connection}

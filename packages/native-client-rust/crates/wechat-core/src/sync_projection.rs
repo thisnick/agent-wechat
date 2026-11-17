@@ -535,6 +535,7 @@ impl Core {
                     blocked.reason = "contact_pin_projection_superseded";
                     return Err(blocked.into());
                 }
+                self.invalidate_contact_privacy(account, &contact, receipt)?;
             }
             if self.store.runtime(account, &fields_applied)?.is_none()
                 && self.store.runtime(account, &mute_applied)?.is_none()
@@ -607,6 +608,7 @@ impl Core {
                         applied_mute = true;
                     }
                 }
+                self.settle_contact_privacy_projection(account, &contact, &patch, receipt)?;
                 let member = match patch.fields.get("flag") {
                     Some(SqlValue::Integer(value)) => value.parse::<u64>().ok().map(|v| v & 1 != 0),
                     _ => None,

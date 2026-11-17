@@ -137,6 +137,10 @@ impl From<anyhow::Error> for ApiError {
         let message = error.to_string();
         for (code, status) in [
             ("stale_contact_request", StatusCode::PRECONDITION_FAILED),
+            ("stale_contact_privacy", StatusCode::PRECONDITION_FAILED),
+            ("contact_privacy_unresolved", StatusCode::CONFLICT),
+            ("contact_privacy_pending", StatusCode::CONFLICT),
+            ("contact_flags_unresolved", StatusCode::CONFLICT),
             ("stale_recipient_reference", StatusCode::CONFLICT),
             ("contact_request_not_actionable", StatusCode::CONFLICT),
             ("invalid_contact_input", StatusCode::BAD_REQUEST),

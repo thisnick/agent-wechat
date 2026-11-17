@@ -931,6 +931,24 @@
     "failed": "This action failed. Check its status for details.",
     "cancelled": "This action was cancelled before submission.",
     "working": "Working…",
-    "requestUnavailable": "This result has no friend-request reference. Search again to try adding this person."
+    "requestUnavailable": "This result has no friend-request reference. Search again to try adding this person.",
+    "details": "Details",
+    "detailsFor": "Details for {{name}}",
+    "contactDetails": "Contact details",
+    "privacy": "Privacy",
+    "fullAccess": "Full access",
+    "chatsOnly": "Chats Only",
+    "hideMyPosts": "Hide My Posts",
+    "hideTheirPosts": "Hide Their Posts",
+    "privacyBeforeRequest": "Choose what you share before sending or accepting the request.",
+    "privacyForContact": "Manage what you and this contact can see in Moments.",
+    "privacyLoading": "Loading privacy settings…",
+    "privacyUnavailable": "Privacy settings are unavailable. Refresh before making changes.",
+    "privacyPermission": "Administrator access is required to view or change privacy settings.",
+    "refreshPrivacy": "Refresh privacy settings",
+    "savePrivacy": "Save privacy",
+    "privacySaved": "Privacy settings saved",
+    "requestHistory": "Request history",
+    "deleteExplanation": "Delete this request history from your device. This does not decline the request on WeChat."
   }
 }

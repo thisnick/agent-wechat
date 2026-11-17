@@ -28,12 +28,18 @@ pub struct SendContactRequest {
     pub target: ContactRequestTarget,
     /// Verification greeting or history entry for this operation.
     pub message: String,
+    /// Optional privacy selections applied with this verification request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privacy: Option<ContactPrivacySettings>,
 }
 /// Acceptance input, bound to the latest received request.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AcceptContactRequest {
     /// Exact resolved verification target and private ticket.
     pub target: ContactRequestTarget,
+    /// Optional privacy selections applied while accepting this request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privacy: Option<ContactPrivacySettings>,
 }
 /// Authenticated verification acknowledgement; does not imply profile writeback.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -99,6 +105,7 @@ fn verification(
     target: &ContactRequestTarget,
     message: &str,
     operation: u32,
+    privacy: Option<&ContactPrivacySettings>,
 ) -> Result<ContactRpc> {
     bounded(&target.username, 512, false)?;
     bounded(&target.ticket, 65536, false)?;
@@ -113,10 +120,17 @@ fn verification(
             && !target.username.chars().any(char::is_whitespace),
         "ordinary_contact_required"
     );
-    let user = p::message(&[
+    let mut user_fields = vec![
         p::bytes(1, target.username.as_bytes()),
         p::bytes(if operation == 2 { 3 } else { 2 }, target.ticket.as_bytes()),
-    ])?;
+    ];
+    if let Some(flags) = privacy
+        .map(ContactPrivacySettings::verify_flags)
+        .filter(|flags| *flags != 0)
+    {
+        user_fields.push(p::uint(4, flags.into()));
+    }
+    let user = p::message(&user_fields)?;
     Ok(ContactRpc {
         cgi: 137,
         path: "/cgi-bin/micromsg-bin/verifyuser".into(),
@@ -136,14 +150,20 @@ pub fn send_contact_request_rpc(
     state: &AccountState,
     input: &SendContactRequest,
 ) -> Result<ContactRpc> {
-    verification(state, &input.target, &input.message, 2)
+    verification(
+        state,
+        &input.target,
+        &input.message,
+        2,
+        input.privacy.as_ref(),
+    )
 }
 /// Prepare operation 3 using the received ticket and empty verification text.
 pub fn accept_contact_request_rpc(
     state: &AccountState,
     input: &AcceptContactRequest,
 ) -> Result<ContactRpc> {
-    verification(state, &input.target, "", 3)
+    verification(state, &input.target, "", 3, input.privacy.as_ref())
 }
 /// Prepare account-scoped contact removal; preserves the other account's relationship.
 pub fn remove_contact_request(username: &str) -> Result<ContactRpc> {
@@ -172,6 +192,7 @@ impl NativeClient {
         let expected = match request.cgi {
             106 => "searchcontact",
             137 => "verifyuser",
+            3990 => "batchmodcontacttype",
             681 => "oplog",
             _ => bail!("invalid_contact_rpc"),
         };
@@ -361,10 +382,18 @@ mod tests {
             &SendContactRequest {
                 target: target.clone(),
                 message: "hello".into(),
+                privacy: None,
             },
         )
         .unwrap();
-        let accept = accept_contact_request_rpc(&state, &AcceptContactRequest { target }).unwrap();
+        let accept = accept_contact_request_rpc(
+            &state,
+            &AcceptContactRequest {
+                target,
+                privacy: None,
+            },
+        )
+        .unwrap();
         for (rpc, opcode, ticket_field, text) in [(send, 2, 3, "hello"), (accept, 3, 2, "")] {
             let fields = p::decode(&rpc.body).unwrap();
             assert_eq!(p::scalar(&fields, 2).unwrap(), opcode);
@@ -394,7 +423,8 @@ mod tests {
             &state(),
             &SendContactRequest {
                 target: found.target,
-                message: "hello".into()
+                message: "hello".into(),
+                privacy: None,
             }
         )
         .is_err());

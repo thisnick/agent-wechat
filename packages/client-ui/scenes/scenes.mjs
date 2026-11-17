@@ -508,7 +508,7 @@ export const scenes = [
   ...["friend-requests", "friend-request-review", "omni-search", "omni-message-search", "add-contact"].map(name => ({
     name,
     route: name.startsWith("friend-request") ? "friend-requests" : "contacts",
-    description: ({ "friend-requests": "Incoming and sent request history with an actionable Contacts badge.", "friend-request-review": "A separate request review dialog with acceptance and local-history deletion.", "omni-search": "One search surface for saved contacts, groups, messages and request history.", "omni-message-search": "Saved message search names its conversation and opens the matched message.", "add-contact": "A separate greeting dialog opened from server discovery in Contacts search." })[name],
+    description: ({ "friend-requests": "Incoming and sent request history with an actionable Contacts badge.", "friend-request-review": "The shared contact card with request history, privacy choices, acceptance and local-history deletion.", "omni-search": "One search surface for saved contacts, groups, messages and request history.", "omni-message-search": "Saved message search names its conversation and opens the matched message.", "add-contact": "The shared contact card with a greeting and privacy choices before sending a friend request." })[name],
     viewports: name === "omni-message-search" ? ["desktop", "compact"] : ["desktop", "narrow", "compact"],
     setup: standardWorld,
     prepare: prepareContactScenes,
@@ -520,7 +520,7 @@ export const scenes = [
     actions: async ({ page, expect }) => {
       if (name === "friend-request-review") {
         await page.getByRole("button", { name: "Review request", exact: true }).click();
-        await expect(page.getByRole("dialog", { name: "Review request" })).toBeVisible();
+        await expect(page.getByRole("dialog", { name: "Contact details" })).toBeVisible();
       } else if (name === "omni-search" || name === "omni-message-search" || name === "add-contact") {
         await page.locator(".search-trigger").focus();
         const search = page.getByRole("dialog", { name: "Search everything" });
@@ -535,7 +535,7 @@ export const scenes = [
           await search.getByRole("button", { name: "Contacts", exact: true }).click();
           await search.getByRole("combobox").fill("avery.example");
           await search.locator("[cmdk-item]").filter({ hasText: "Add contact" }).click();
-          const add = page.getByRole("dialog", { name: "Add contact" });
+          const add = page.getByRole("dialog", { name: "Contact details" });
           await expect(add).toBeVisible();
           await add.getByRole("textbox", { name: "Friend request message" }).fill("Hello, we met at the book club.");
         }
@@ -562,7 +562,7 @@ export const scenes = [
       await expect(page.locator("[cmdk-item]").filter({ hasText: "Add contact" })).toHaveCount(0);
       if (!known) {
         await match.click();
-        const dialog = page.getByRole("dialog", { name: "View" });
+        const dialog = page.getByRole("dialog", { name: "Contact details" });
         await expect(dialog).toContainText("This result has no friend-request reference.");
         await expect(dialog.getByRole("button", { name: "Send request", exact: true })).toHaveCount(0);
       }
@@ -584,6 +584,7 @@ export const scenes = [
       await page.route("**/v1/accounts/*/contact-mutations/by-idempotency-key?*", route => route.fulfill({ status: 404, json: { error: { code: "not_found" } } }));
       await page.route("**/v1/accounts/*/contact-requests", async route => {
         if (route.request().method() !== "POST") return route.fulfill({ json: { items: [...requestSceneRows, ...(sent ? [sentRow] : [])], nextCursor: null, pendingIncomingCount: 1, sourceGeneration: "scene", coverage: {}, asOfEventCursor: "0" } });
+        if (route.request().postDataJSON().privacy?.hideMyPosts !== true) throw Error("Send omitted the chosen privacy");
         attempts.push({ key: route.request().headers()["idempotency-key"], body: route.request().postData() });
         if (attempts.length === 1) return route.abort("failed");
         if (attempts.length !== 2 || JSON.stringify(attempts[0]) !== JSON.stringify(attempts[1])) throw Error("Request retry changed its original intent");
@@ -596,8 +597,9 @@ export const scenes = [
       await page.locator(".search-trigger").focus();
       await page.getByRole("combobox").fill("avery.example");
       await page.locator("[cmdk-item]").filter({ hasText: "Add contact" }).click();
-      const dialog = page.getByRole("dialog", { name: "Add contact" });
+      const dialog = page.getByRole("dialog", { name: "Contact details" });
       await dialog.getByRole("textbox", { name: "Friend request message" }).fill("Hello, we met at the book club.");
+      await dialog.getByRole("switch", { name: "Hide My Posts", exact: true }).check();
       await dialog.getByRole("button", { name: "Send request", exact: true }).click();
       await expect(dialog.getByRole("alert")).toBeVisible();
       await expect(dialog.getByRole("button", { name: "Send request", exact: true })).toHaveCount(0);
@@ -610,7 +612,184 @@ export const scenes = [
       await expect(sentResult).toContainText("View");
       await expect(page.locator("[cmdk-item]").filter({ hasText: "Add contact" })).toHaveCount(0);
       await sentResult.click();
-      await expect(page.getByRole("dialog", { name: "Request sent" })).toBeVisible();
+      await expect(page.getByRole("dialog", { name: "Contact details" })).toBeVisible();
+    },
+  },
+  ...["contact-details", "contact-details-search", "contact-privacy-saved", "contact-privacy-unavailable", "contact-privacy-retry"].map(name => ({
+    name, route: "contacts",
+    description: ({ "contact-details": "A saved contact card reached from the contact list by its keyboard-accessible Details action.", "contact-details-search": "Saved-contact search offers separate Message and Details actions; Details opens the shared card.", "contact-privacy-saved": "Moments selections survive Chats Only and save with the original privacy version.", "contact-privacy-unavailable": "Missing administrator permission disables privacy edits and submission.", "contact-privacy-retry": "An uncertain privacy save locks edits and retries only the same inspected intent." })[name],
+    viewports: name === "contact-privacy-retry" ? ["desktop"] : ["desktop", "compact"],
+    setup: standardWorld, target: () => ({ account: ACCOUNT.id }),
+    prepare: async ({ page }) => {
+      await prepareContactScenes({ page });
+      let privacy = { chatsOnly: false, hideMyPosts: false, hideTheirPosts: true };
+      const attempts = [];
+      await page.route("**/v1/accounts/*/contacts/sim_mei/privacy", route => {
+        if (route.request().method() !== "GET") throw Error("Privacy reads must use GET");
+        if (name === "contact-privacy-unavailable") return route.fulfill({ status: 403, json: { error: { code: "forbidden" } } });
+        return route.fulfill({ json: { privacy, version: "scene-privacy-v1" } });
+      });
+      await page.route("**/v1/accounts/*/contacts/sim_mei", async route => {
+        if (route.request().method() !== "PATCH") throw Error("Contact changes must use PATCH");
+        if (name === "contact-privacy-unavailable") throw Error("Unavailable privacy must not submit a contact change");
+        const body = route.request().postDataJSON();
+        if (body.expectedVersion !== "scene-privacy-v1" || body.privacy.chatsOnly !== false || body.privacy.hideMyPosts !== true || body.privacy.hideTheirPosts !== true) throw Error("Privacy submission lost the selected settings or source version");
+        attempts.push({ key: route.request().headers()["idempotency-key"], body: route.request().postData() });
+        if (name === "contact-privacy-retry" && attempts.length === 1) return route.abort("failed");
+        if (attempts.length > 1 && JSON.stringify(attempts[0]) !== JSON.stringify(attempts[1])) throw Error("Privacy retry changed its original intent");
+        privacy = body.privacy;
+        return route.fulfill({ status: 202, json: { id: "scene-privacy", accountId: ACCOUNT.id, kind: "contact_mutation", state: "succeeded", result: { action: "update_privacy" }, createdAt: FIXED_TIME, updatedAt: FIXED_TIME } });
+      });
+      await page.route("**/v1/accounts/*/contact-mutations/by-idempotency-key?*", route => route.fulfill({ status: 404, json: { error: { code: "not_found" } } }));
+    },
+    ready: async ({ page, expect }) => { await expect(row(page, "Mei Chen")).toBeVisible(); },
+    actions: async ({ page, expect }) => {
+      if (name === "contact-details-search") {
+        await page.locator(".search-trigger").focus();
+        const search = page.getByRole("dialog", { name: "Search everything" });
+        const match = search.locator("[cmdk-item]").filter({ hasText: "Mei Chen" });
+        await expect(match.getByRole("button", { name: "Message", exact: true })).toBeVisible();
+        await match.getByRole("button", { name: "Details for Mei Chen", exact: true }).click();
+        await expect(search).toHaveCount(0);
+      } else {
+        const details = page.getByRole("button", { name: "Details for Mei Chen", exact: true });
+        await details.focus();
+        await expect(details).toBeVisible();
+        await details.press("Enter");
+      }
+      const dialog = page.getByRole("dialog", { name: "Contact details" });
+      await expect(dialog).toBeVisible();
+      await expect(dialog.getByRole("button", { name: "Message", exact: true })).toBeVisible();
+      if (name === "contact-privacy-unavailable") {
+        await expect(dialog.getByRole("alert")).toContainText("Administrator access is required");
+        await expect(dialog.getByRole("radio", { name: "Full access", exact: true })).toHaveCount(0);
+        await expect(dialog.getByRole("button", { name: "Save privacy", exact: true })).toBeDisabled();
+        await expect(dialog.getByRole("button", { name: "Remove contact", exact: true })).toHaveCount(0);
+        return;
+      }
+      const hideMine = dialog.getByRole("switch", { name: "Hide My Posts", exact: true });
+      await expect(dialog.getByRole("switch", { name: "Hide Their Posts", exact: true })).toBeChecked();
+      await expect(dialog.getByRole("button", { name: "Save privacy", exact: true })).toBeDisabled();
+      if (name === "contact-privacy-saved" || name === "contact-privacy-retry") {
+        await hideMine.check();
+        await dialog.getByRole("radio", { name: "Chats Only", exact: true }).check();
+        await expect(hideMine).toHaveCount(0);
+        await dialog.getByRole("radio", { name: "Full access", exact: true }).check();
+        await expect(hideMine).toBeChecked();
+        await dialog.getByRole("button", { name: "Save privacy", exact: true }).click();
+        if (name === "contact-privacy-retry") {
+          await expect(dialog.getByRole("alert")).toBeVisible();
+          await expect(hideMine).toBeDisabled();
+          await expect(dialog.getByRole("button", { name: "Save privacy", exact: true })).toBeDisabled();
+          await dialog.getByRole("button", { name: "Check status", exact: true }).click();
+          await dialog.getByRole("button", { name: "Retry original request", exact: true }).click();
+        }
+        await expect(dialog.locator(".contact-change-status")).toContainText("Privacy settings saved");
+        await expect(hideMine).toBeChecked();
+      }
+    },
+  })),
+  {
+    name: "friend-request-privacy-accept", route: "friend-requests",
+    description: "Acceptance submits the selected privacy settings together with the exact request version.",
+    viewports: ["desktop", "compact"], setup: standardWorld, target: () => ({ account: ACCOUNT.id }),
+    prepare: async ({ page }) => {
+      await prepareContactScenes({ page });
+      let accepted = false;
+      const selected = { chatsOnly: true, hideMyPosts: true, hideTheirPosts: false };
+      await page.route("**/v1/accounts/*/contact-requests?*", route => route.fulfill({ json: { items: requestSceneRows.map(r => r.id === "fr_scene_casey" && accepted ? { ...r, isContact: true, actionable: false, version: "scene-accepted-v2" } : r), nextCursor: null, pendingIncomingCount: accepted ? 0 : 1 } }));
+      await page.route("**/v1/accounts/*/contacts/sim_casey/privacy", route => route.fulfill({ json: { privacy: selected, version: "scene-privacy-v1" } }));
+      await page.route("**/v1/accounts/*/contact-requests/fr_scene_casey/accept", route => {
+        const body = route.request().postDataJSON();
+        if (body.expectedVersion !== "scene-incoming-v1" || JSON.stringify(body.privacy) !== JSON.stringify({ chatsOnly: true, hideMyPosts: true, hideTheirPosts: false })) throw Error("Acceptance omitted the chosen privacy or current version");
+        accepted = true;
+        return route.fulfill({ status: 202, json: { id: "scene-accept", accountId: ACCOUNT.id, kind: "contact_mutation", state: "succeeded", result: { action: "accept_request" }, createdAt: FIXED_TIME, updatedAt: FIXED_TIME } });
+      });
+    },
+    ready: async ({ page, expect }) => { await expect(page.getByText("Casey Morgan", { exact: true })).toBeVisible(); },
+    actions: async ({ page, expect }) => {
+      await page.getByRole("button", { name: "Review request", exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: "Contact details" });
+      await dialog.getByRole("switch", { name: "Hide My Posts", exact: true }).check();
+      await dialog.getByRole("radio", { name: "Chats Only", exact: true }).check();
+      await dialog.getByRole("button", { name: "Accept request", exact: true }).click();
+      await expect(dialog.locator(".contact-change-status")).toContainText("Request accepted");
+      await expect(dialog.getByRole("button", { name: "Accept request", exact: true })).toHaveCount(0);
+      await expect(dialog.getByRole("button", { name: "Message", exact: true })).toBeVisible();
+      await expect(dialog.getByRole("radio", { name: "Chats Only", exact: true })).toBeChecked();
+      await expect(dialog.getByRole("radio", { name: "Full access", exact: true })).toBeEnabled();
+    },
+  },
+  {
+    name: "contact-details-sidebar", route: "info",
+    description: "A direct-conversation sidebar opens the same contact card and its checked privacy/removal actions.",
+    viewports: ["desktop"], setup: standardWorld, target: () => ({ account: ACCOUNT.id, thread: "sim_mei" }),
+    prepare: async ({ page }) => {
+      await prepareContactScenes({ page });
+      await page.route("**/v1/accounts/*/contacts/sim_mei/privacy", route => route.fulfill({ json: { privacy: { chatsOnly: false, hideMyPosts: false, hideTheirPosts: true }, version: "scene-privacy-v1" } }));
+    },
+    ready: async ({ page, expect }) => { await expect(page.getByRole("complementary", { name: "Conversation details" })).toBeVisible(); },
+    actions: async ({ page, expect }) => {
+      await page.getByRole("complementary", { name: "Conversation details" }).getByRole("button", { name: "Details", exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: "Contact details" });
+      await expect(dialog.getByRole("switch", { name: "Hide Their Posts", exact: true })).toBeChecked();
+      await expect(dialog.getByRole("button", { name: "Message", exact: true })).toBeVisible();
+      await expect(dialog.getByRole("button", { name: "Remove contact", exact: true })).toBeVisible();
+    },
+  },
+  {
+    name: "contact-details-remove", route: "contacts",
+    description: "Remove contact opens a distinct confirmation that preserves chat history and recovers an uncertain result with the original key.",
+    viewports: ["desktop", "compact"], setup: standardWorld, target: () => ({ account: ACCOUNT.id }),
+    prepare: async ({ page }) => {
+      await prepareContactScenes({ page });
+      await page.route("**/v1/accounts/*/contacts/sim_mei/privacy", route => route.fulfill({ json: { privacy: { chatsOnly: false, hideMyPosts: false, hideTheirPosts: false }, version: "scene-privacy-v1" } }));
+      await page.route("**/v1/accounts/*/contact-mutations/by-idempotency-key?*", route => route.fulfill({ status: 404, json: { error: { code: "not_found" } } }));
+      const attempts = [];
+      await page.route("**/v1/accounts/*/contacts/sim_mei", route => {
+        if (route.request().method() !== "DELETE") return route.continue();
+        attempts.push({ key: route.request().headers()["idempotency-key"], body: route.request().postData() });
+        if (attempts.length === 1) return route.abort("failed");
+        if (attempts.length !== 2 || JSON.stringify(attempts[0]) !== JSON.stringify(attempts[1])) throw Error("Remove contact retry changed the original intent");
+        return route.fulfill({ status: 202, json: { id: "scene-remove", accountId: ACCOUNT.id, kind: "contact_mutation", state: "succeeded", result: { action: "remove_contact" }, createdAt: FIXED_TIME, updatedAt: FIXED_TIME } });
+      });
+    },
+    ready: async ({ page, expect }) => { await expect(row(page, "Mei Chen")).toBeVisible(); },
+    actions: async ({ page, expect }) => {
+      const details = page.getByRole("button", { name: "Details for Mei Chen", exact: true });
+      await details.focus(); await details.press("Enter");
+      const card = page.getByRole("dialog", { name: "Contact details" });
+      await card.getByRole("button", { name: "Remove contact", exact: true }).click();
+      const confirmation = page.getByRole("dialog", { name: "Remove contact", exact: true });
+      await expect(confirmation).toContainText("Your chat history will be kept.");
+      await expect(confirmation.getByRole("button", { name: "Delete local history", exact: true })).toHaveCount(0);
+      await confirmation.getByRole("button", { name: "Remove contact", exact: true }).click();
+      await expect(confirmation.getByRole("alert")).toBeVisible();
+      await expect(confirmation.getByRole("button", { name: "Remove contact", exact: true })).toHaveCount(0);
+      await confirmation.getByRole("button", { name: "Check status", exact: true }).click();
+      await confirmation.getByRole("button", { name: "Retry original request", exact: true }).click();
+      await expect(confirmation.getByRole("status")).toContainText("Contact removed");
+    },
+  },
+  {
+    name: "friend-request-delete-history", route: "friend-requests",
+    description: "Delete local history removes the request conversation without presenting it as a server decline.",
+    viewports: ["desktop"], setup: standardWorld, target: () => ({ account: ACCOUNT.id }),
+    prepare: async ({ page }) => {
+      await prepareContactScenes({ page });
+      await page.route("**/v1/accounts/*/contact-requests/fr_scene_casey", route => {
+        if (route.request().method() !== "DELETE" || route.request().postDataJSON().expectedVersion !== "scene-incoming-v1") throw Error("History deletion lost its request version");
+        return route.fulfill({ status: 202, json: { id: "scene-delete", accountId: ACCOUNT.id, kind: "contact_mutation", state: "succeeded", result: { action: "delete_request" }, createdAt: FIXED_TIME, updatedAt: FIXED_TIME } });
+      });
+    },
+    ready: async ({ page, expect }) => { await expect(page.getByText("Casey Morgan", { exact: true })).toBeVisible(); },
+    actions: async ({ page, expect }) => {
+      await page.getByRole("button", { name: "Review request", exact: true }).click();
+      const card = page.getByRole("dialog", { name: "Contact details" });
+      await expect(card).toContainText("This does not decline the request on WeChat.");
+      await card.getByRole("button", { name: "Delete local history", exact: true }).click();
+      await expect(card.getByRole("status")).toContainText("Local history deleted");
+      await expect(card.getByRole("button", { name: "Accept request", exact: true })).toHaveCount(0);
     },
   },
   {

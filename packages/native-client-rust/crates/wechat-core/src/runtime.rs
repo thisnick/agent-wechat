@@ -1,8 +1,11 @@
 #[path = "contact_classification.rs"]
 mod contact_classification;
+#[path = "contact_privacy_state.rs"]
+mod contact_privacy_state;
 #[path = "contact_requests.rs"]
 mod contact_requests;
-pub use contact_requests::{ContactMutation, ContactRequestQuery};
+pub use contact_requests::{ContactMutation, ContactRequestQuery, ContactUpdate};
+pub use wechat_protocol::ContactPrivacySettings;
 #[path = "checkpoint.rs"]
 mod checkpoint;
 #[path = "contact_remarks.rs"]

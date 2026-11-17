@@ -1798,6 +1798,48 @@
         ],
         "type": "object"
       },
+      "NativeContactPrivacy": {
+        "description": "Current relationship privacy read from the supported official profile.",
+        "properties": {
+          "privacy": {
+            "$ref": "#/components/schemas/NativeContactPrivacySettings",
+            "description": "Current settings for this account's relationship."
+          },
+          "version": {
+            "description": "Account/contact-bound version required when saving a change.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "privacy",
+          "version"
+        ],
+        "type": "object"
+      },
+      "NativeContactPrivacySettings": {
+        "additionalProperties": false,
+        "description": "Relationship privacy selected by the account owner.",
+        "properties": {
+          "chatsOnly": {
+            "description": "Restrict this relationship to chats.",
+            "type": "boolean"
+          },
+          "hideMyPosts": {
+            "description": "Hide this account's Moments posts from this person.",
+            "type": "boolean"
+          },
+          "hideTheirPosts": {
+            "description": "Hide this person's Moments posts from this account.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "chatsOnly",
+          "hideMyPosts",
+          "hideTheirPosts"
+        ],
+        "type": "object"
+      },
       "NativeContactRequest": {
         "description": "One per-peer canonical request conversation with a current action/version.",
         "properties": {
@@ -1867,6 +1909,31 @@
           "attention",
           "state",
           "history"
+        ],
+        "type": "object"
+      },
+      "NativeContactRequestAccept": {
+        "additionalProperties": false,
+        "description": "Accept the inspected request with optional initial relationship privacy.",
+        "properties": {
+          "expectedVersion": {
+            "description": "Current request version returned by get/list.",
+            "type": "string"
+          },
+          "privacy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NativeContactPrivacySettings"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Initial relationship privacy; omission keeps the supported default."
+          }
+        },
+        "required": [
+          "expectedVersion"
         ],
         "type": "object"
       },
@@ -1996,6 +2063,17 @@
             "description": "Greeting supplied by the owner; no automatic default is inserted.",
             "type": "string"
           },
+          "privacy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NativeContactPrivacySettings"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Initial relationship privacy; omission keeps the supported default."
+          },
           "recipientRef": {
             "description": "Exact reference returned by discovery on this account.",
             "type": "string"
@@ -2084,6 +2162,25 @@
         },
         "required": [
           "query"
+        ],
+        "type": "object"
+      },
+      "NativeContactUpdate": {
+        "additionalProperties": false,
+        "description": "Update supported contact settings after inspecting their current version.",
+        "properties": {
+          "expectedVersion": {
+            "description": "Version returned by the privacy read on this account.",
+            "type": "string"
+          },
+          "privacy": {
+            "$ref": "#/components/schemas/NativeContactPrivacySettings",
+            "description": "Desired settings; unrelated contact flags are preserved."
+          }
+        },
+        "required": [
+          "privacy",
+          "expectedVersion"
         ],
         "type": "object"
       },
@@ -6098,7 +6195,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/NativeContactRequestVersion"
+                "$ref": "#/components/schemas/NativeContactRequestAccept"
               }
             }
           },
@@ -6426,6 +6523,143 @@
         "x-agent-wechat-sdk-response": [
           {
             "$ref": "#/components/schemas/NativeContact"
+          }
+        ]
+      },
+      "patch": {
+        "operationId": "updateContact",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Contact ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Repeating a request with the same key returns the original result instead of repeating the work.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NativeContactUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeOperation"
+                }
+              }
+            },
+            "description": "Accepted. The work continues in the background."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "Change relationship privacy against the inspected version.",
+        "tags": [
+          "contacts"
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/NativeOperation"
+          }
+        ]
+      }
+    },
+    "/v1/accounts/{a}/contacts/{id}/privacy": {
+      "get": {
+        "operationId": "contactPrivacy",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Contact ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeContactPrivacy"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "Read current relationship privacy from the official profile.",
+        "tags": [
+          "contacts"
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/NativeContactPrivacy"
           }
         ]
       }

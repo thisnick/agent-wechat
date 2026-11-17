@@ -19,11 +19,17 @@ pub enum ContactMutation {
     SendRequest {
         recipient_ref: String,
         message: String,
+        /// Optional relationship privacy selections for this request.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        privacy: Option<ContactPrivacySettings>,
     },
     /// Accept exactly the inspected request version.
     AcceptRequest {
         id: String,
         expected_version: String,
+        /// Optional relationship privacy selections for acceptance.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        privacy: Option<ContactPrivacySettings>,
     },
     /// Delete local per-peer history without a server rejection.
     DeleteRequest {
@@ -32,6 +38,15 @@ pub enum ContactMutation {
     },
     /// Remove membership while preserving chat history.
     RemoveContact { username: String },
+    /// Change the inspected canonical contact's relationship privacy selections.
+    UpdatePrivacy {
+        /// Exact saved ordinary contact identity.
+        username: String,
+        /// Desired relationship privacy selections.
+        privacy: ContactPrivacySettings,
+        /// Version returned by the canonical privacy read.
+        expected_version: String,
+    },
 }
 impl ContactMutation {
     fn name(&self) -> &'static str {
@@ -40,8 +55,19 @@ impl ContactMutation {
             Self::AcceptRequest { .. } => "accept_request",
             Self::DeleteRequest { .. } => "delete_request",
             Self::RemoveContact { .. } => "remove_contact",
+            Self::UpdatePrivacy { .. } => "update_privacy",
         }
     }
+}
+
+/// Supported updates to an existing contact, checked against its canonical version.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContactUpdate {
+    /// Complete desired relationship privacy selections.
+    pub privacy: ContactPrivacySettings,
+    /// Version returned by the canonical privacy read.
+    pub expected_version: String,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -111,7 +137,186 @@ fn flag(contact: &wechat_profile::Contact) -> bool {
         )
         || matches!((contact.raw_fields.get("flag"),contact.raw_fields.get("delete_flag")),(Some(wechat_profile::SqlValue::Integer(v)),Some(wechat_profile::SqlValue::Integer(d))) if v.parse::<u64>().is_ok_and(|v|v&1!=0)&&d=="0")
 }
+
+#[derive(Debug, Serialize)]
+struct ContactPrivacySnapshot {
+    privacy: ContactPrivacySettings,
+    version: String,
+}
+
+fn canonical_privacy(
+    account: &str,
+    username: &str,
+    contact: &wechat_profile::Contact,
+) -> Result<ContactPrivacySnapshot> {
+    ensure!(
+        contact.username == username,
+        "contact_privacy_identity_conflict"
+    );
+    let flags = match contact.raw_fields.get("flag") {
+        Some(wechat_profile::SqlValue::Integer(value)) => {
+            value.parse::<u32>().context("contact_flags_unresolved")?
+        }
+        _ => bail!("contact_flags_unresolved"),
+    };
+    let member = flag(contact);
+    let version = digest(&serde_json::to_vec(&(
+        "contact-privacy-v1",
+        account,
+        username,
+        flags,
+        member,
+    ))?);
+    Ok(ContactPrivacySnapshot {
+        privacy: ContactPrivacySettings::from_contact_flags(flags),
+        version,
+    })
+}
+
+fn ordinary_privacy_contact(contact: &wechat_profile::Contact, own: &str) -> Result<()> {
+    wechat_protocol::ordinary_identity(&contact.username)?;
+    let system = crate::peer_classification::peer_classification(&contact.username, None).category
+        == crate::PeerCategory::System;
+    let verified_service = matches!(contact.raw_fields.get("verify_flag"), Some(wechat_profile::SqlValue::Integer(value)) if value.parse::<u32>().is_ok_and(|value| value & 8 != 0));
+    ensure!(
+        !contact.is_group
+            && !contact.username.contains('@')
+            && contact.username != own
+            && contact.local_type == Some(1)
+            && !system
+            && !verified_service
+            && flag(contact),
+        "ordinary_contact_required"
+    );
+    Ok(())
+}
+
 impl Core {
+    /// Read relationship privacy and an account-bound version from the official contact row.
+    pub fn contact_privacy(&self, account: &str, username: &str) -> Result<Value> {
+        Ok(serde_json::to_value(
+            self.current_contact_privacy(account, username, None)?,
+        )?)
+    }
+
+    /// Update an existing contact once, retaining its original intent and reply.
+    pub async fn update_contact(
+        self: &Arc<Self>,
+        account: &str,
+        username: &str,
+        update: ContactUpdate,
+        key: &str,
+    ) -> Result<Operation> {
+        self.mutate_contact(
+            account,
+            ContactMutation::UpdatePrivacy {
+                username: username.into(),
+                privacy: update.privacy,
+                expected_version: update.expected_version,
+            },
+            key,
+        )
+        .await
+    }
+
+    fn current_contact_privacy(
+        &self,
+        account: &str,
+        username: &str,
+        expected_version: Option<&str>,
+    ) -> Result<ContactPrivacySnapshot> {
+        ensure!(
+            self.contact_privacy_resolved(account, username)?,
+            "contact_privacy_unresolved"
+        );
+        self.ensure_no_pending_contact_privacy(account, username)?;
+        let contact = self.profile_reader_owned(account)?.contact(username)?;
+        let snapshot = canonical_privacy(account, username, &contact)?;
+        ensure!(
+            expected_version.is_none_or(|expected| expected == snapshot.version),
+            "stale_contact_privacy"
+        );
+        let own = self
+            .profile_username(account)?
+            .context("profile_identity_unavailable")?;
+        ordinary_privacy_contact(&contact, &own)?;
+        Ok(snapshot)
+    }
+
+    fn ensure_no_pending_contact_privacy(&self, account: &str, username: &str) -> Result<()> {
+        let reader = self.profile_reader_owned(account)?;
+        let canonical = reader
+            .contact_for_request(username)?
+            .map(|contact| contact.username)
+            .unwrap_or_else(|| username.into());
+        for record in self.store.pending_contact_relationships(account)? {
+            if record.operation.state != "succeeded" {
+                continue;
+            }
+            let (attempt, _) = self.load_contact_attempt(&record)?;
+            let target = match &attempt.action {
+                ContactMutation::UpdatePrivacy { username, .. } => Some(username.as_str()),
+                ContactMutation::AcceptRequest {
+                    privacy: Some(_), ..
+                } => attempt
+                    .target
+                    .as_ref()
+                    .map(|target| target.username.as_str()),
+                _ => None,
+            };
+            if let Some(target) = target {
+                let target = reader
+                    .contact_for_request(target)?
+                    .map(|contact| contact.username)
+                    .unwrap_or_else(|| target.into());
+                ensure!(target != canonical, "contact_privacy_pending");
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_no_active_contact_privacy(
+        &self,
+        account: &str,
+        username: &str,
+        own_operation: Option<&str>,
+    ) -> Result<()> {
+        let reader = self.profile_reader_owned(account)?;
+        let canonical = reader
+            .contact_for_request(username)?
+            .map(|contact| contact.username)
+            .unwrap_or_else(|| username.into());
+        let active = self.store.active_contact_mutations(account)?;
+        ensure!(active.len() < 2000, "contact_privacy_pending");
+        for record in active {
+            if own_operation == Some(record.operation.id.as_str()) {
+                continue;
+            }
+            let (attempt, _) = self.load_contact_attempt(&record)?;
+            let target = match &attempt.action {
+                ContactMutation::UpdatePrivacy { username, .. } => Some(username.as_str()),
+                ContactMutation::SendRequest {
+                    privacy: Some(_), ..
+                }
+                | ContactMutation::AcceptRequest {
+                    privacy: Some(_), ..
+                } => attempt
+                    .target
+                    .as_ref()
+                    .map(|target| target.username.as_str()),
+                _ => None,
+            };
+            if let Some(target) = target {
+                let target = reader
+                    .contact_for_request(target)?
+                    .map(|contact| contact.username)
+                    .unwrap_or_else(|| target.into());
+                ensure!(target != canonical, "contact_privacy_pending");
+            }
+        }
+        Ok(())
+    }
+
     fn request_view(
         &self,
         account: &str,
@@ -333,11 +538,17 @@ impl Core {
                     worker.execute_contact(&a, &i, &mut permit)
                 })
                 .await;
-                if result.is_err() {
+                if let Err(error) = result {
+                    let code = match error.to_string().as_str() {
+                        "stale_contact_privacy" => Some("stale_contact_privacy"),
+                        "contact_privacy_unresolved" => Some("contact_privacy_unresolved"),
+                        "contact_privacy_pending" => Some("contact_privacy_pending"),
+                        _ => None,
+                    };
                     if let Ok(guard) = core.lock_account(&account).await {
                         let _ = blocking(move || {
                             let _guard = guard;
-                            core.hold_contact(&account, &id)
+                            core.hold_contact(&account, &id, code)
                         })
                         .await;
                     }
@@ -365,13 +576,23 @@ impl Core {
             ContactMutation::SendRequest {
                 recipient_ref,
                 message,
+                privacy,
             } => {
                 let resolved = self.recipient(account, recipient_ref, &state)?;
+                if privacy.is_some() {
+                    self.ensure_no_pending_contact_privacy(account, &resolved.target.username)?;
+                    self.ensure_no_active_contact_privacy(
+                        account,
+                        &resolved.target.username,
+                        None,
+                    )?;
+                }
                 let rpc = wechat_protocol::send_contact_request_rpc(
                     &state,
                     &SendContactRequest {
                         target: resolved.target.clone(),
                         message: message.clone(),
+                        privacy: *privacy,
                     },
                 )?;
                 target = Some(resolved.target);
@@ -380,6 +601,7 @@ impl Core {
             ContactMutation::AcceptRequest {
                 id,
                 expected_version,
+                ..
             }
             | ContactMutation::DeleteRequest {
                 id,
@@ -390,6 +612,16 @@ impl Core {
                     .contact_request(&request_username(id)?)?;
                 ensure!(&row.version == expected_version, "stale_contact_request");
                 if matches!(&action, ContactMutation::AcceptRequest { .. }) {
+                    if matches!(
+                        &action,
+                        ContactMutation::AcceptRequest {
+                            privacy: Some(_),
+                            ..
+                        }
+                    ) {
+                        self.ensure_no_pending_contact_privacy(account, &row.username)?;
+                        self.ensure_no_active_contact_privacy(account, &row.username, None)?;
+                    }
                     ensure!(
                         self.request_view(account, &row)?["actionable"] == true,
                         "contact_request_not_actionable"
@@ -401,7 +633,13 @@ impl Core {
                     };
                     let rpc = wechat_protocol::accept_contact_request_rpc(
                         &state,
-                        &AcceptContactRequest { target: t.clone() },
+                        &AcceptContactRequest {
+                            target: t.clone(),
+                            privacy: match &action {
+                                ContactMutation::AcceptRequest { privacy, .. } => *privacy,
+                                _ => None,
+                            },
+                        },
                     )?;
                     target = Some(t);
                     Some(rpc)
@@ -419,6 +657,25 @@ impl Core {
                     "ordinary_contact_required"
                 );
                 Some(wechat_protocol::remove_contact_request(username)?)
+            }
+            ContactMutation::UpdatePrivacy {
+                username,
+                privacy,
+                expected_version,
+            } => {
+                let before =
+                    self.current_contact_privacy(account, username, Some(expected_version))?;
+                self.ensure_no_active_contact_privacy(account, username, None)?;
+                if before.privacy == *privacy {
+                    None
+                } else {
+                    Some(wechat_protocol::contact_privacy_request(
+                        &state,
+                        username,
+                        &before.privacy,
+                        privacy,
+                    )?)
+                }
             }
         };
         self.write_options(account, "contact-admission")?;
@@ -497,7 +754,7 @@ impl Core {
         );
         Ok((a, r))
     }
-    fn hold_contact(&self, account: &str, id: &str) -> Result<Operation> {
+    fn hold_contact(&self, account: &str, id: &str, code: Option<&str>) -> Result<Operation> {
         let record = self.store.contact_mutation(account, id)?;
         let mut op = record.operation;
         if matches!(
@@ -510,7 +767,7 @@ impl Core {
                 "needs_review"
             };
             op.state = phase.into();
-            op.result["code"] = json!("contact_operation_interrupted");
+            op.result["code"] = json!(code.unwrap_or("contact_operation_interrupted"));
             op.updated_at = now();
             self.store
                 .advance_contact_mutation(&op, phase, record.step)?;
@@ -549,6 +806,7 @@ impl Core {
         if let ContactMutation::AcceptRequest {
             id,
             expected_version,
+            ..
         }
         | ContactMutation::DeleteRequest {
             id,
@@ -559,6 +817,33 @@ impl Core {
                 .profile_reader_owned(account)?
                 .contact_request(&request_username(id)?)?;
             ensure!(&row.version == expected_version, "stale_contact_request");
+        }
+        if let ContactMutation::UpdatePrivacy {
+            username,
+            expected_version,
+            ..
+        } = &attempt.action
+        {
+            self.current_contact_privacy(account, username, Some(expected_version))?;
+            self.ensure_no_active_contact_privacy(account, username, Some(id))?;
+        }
+        if matches!(
+            &attempt.action,
+            ContactMutation::SendRequest {
+                privacy: Some(_),
+                ..
+            } | ContactMutation::AcceptRequest {
+                privacy: Some(_),
+                ..
+            }
+        ) {
+            let username = &attempt
+                .target
+                .as_ref()
+                .context("contact_target_missing")?
+                .username;
+            self.ensure_no_pending_contact_privacy(account, username)?;
+            self.ensure_no_active_contact_privacy(account, username, Some(id))?;
         }
         ensure!(
             self.store.begin_contact_step(
@@ -602,7 +887,15 @@ impl Core {
         let mut op = self.store.contact_mutation(account, id)?.operation;
         if let Some(rpc) = &attempt.rpc {
             let raw = receipts.reply.as_deref().context("contact_reply_missing")?;
-            let accepted = if rpc.cgi == 681 {
+            let mut partial = false;
+            let accepted = if rpc.cgi == 3990 {
+                let result = wechat_protocol::decode_contact_privacy_reply(rpc, raw)?;
+                op.result["serviceCode"] = json!(result.service_code);
+                op.result["itemCodes"] = json!(result.item_codes);
+                op.result["partial"] = json!(result.partial);
+                partial = result.partial;
+                result.accepted
+            } else if rpc.cgi == 681 {
                 let r = wechat_protocol::decode_group_mutation(
                     &wechat_protocol::GroupRpc {
                         cgi: rpc.cgi,
@@ -621,10 +914,26 @@ impl Core {
                 op.result["serviceCode"] = json!(code);
                 code == 0
             };
-            op.result["remoteOutcome"] = json!(if accepted { "accepted" } else { "rejected" });
+            op.result["remoteOutcome"] = json!(if partial {
+                "partial"
+            } else if accepted {
+                "accepted"
+            } else {
+                "rejected"
+            });
             if !accepted {
                 op.state = "failed".into();
-                op.result["profileProjection"] = json!("not_applicable");
+                op.result["profileProjection"] = json!(if partial {
+                    "awaiting_contact_sync"
+                } else {
+                    "not_applicable"
+                });
+                if partial {
+                    op.result["code"] = json!("contact_privacy_partial");
+                    if let ContactMutation::UpdatePrivacy { username, .. } = &attempt.action {
+                        self.mark_partial_contact_privacy_pending(account, username, id)?;
+                    }
+                }
                 op.updated_at = now();
                 self.store.advance_contact_mutation(&op, "failed", 0)?;
                 return Ok(());
@@ -707,11 +1016,21 @@ impl Core {
                 op.result["peerId"] = json!(username);
                 op.result["relationship"] = json!("awaiting_contact_sync");
             }
+            ContactMutation::UpdatePrivacy {
+                username, privacy, ..
+            } => {
+                op.result["peerId"] = json!(username);
+                op.result["privacy"] = json!(privacy);
+                op.result["changed"] = json!(attempt.rpc.is_some());
+            }
         }
-        op.result["profileProjection"] = json!(if matches!(
-            attempt.action,
-            ContactMutation::AcceptRequest { .. } | ContactMutation::RemoveContact { .. }
-        ) {
+        let awaits_contact_sync =
+            matches!(
+                attempt.action,
+                ContactMutation::AcceptRequest { .. } | ContactMutation::RemoveContact { .. }
+            ) || matches!(attempt.action, ContactMutation::UpdatePrivacy { .. })
+                && attempt.rpc.is_some();
+        op.result["profileProjection"] = json!(if awaits_contact_sync {
             "awaiting_contact_sync"
         } else {
             "complete"
@@ -726,6 +1045,9 @@ impl Core {
                 attempt.target.as_ref().map(|t| t.username.as_str())
             }
             ContactMutation::RemoveContact { username } => Some(username.as_str()),
+            ContactMutation::UpdatePrivacy { username, .. } if attempt.rpc.is_some() => {
+                Some(username.as_str())
+            }
             _ => None,
         };
         if let Some(target) = target {
@@ -734,12 +1056,24 @@ impl Core {
                 .contact_for_request(target)?
             {
                 let member = flag(&contact);
-                if member == matches!(attempt.action, ContactMutation::AcceptRequest { .. }) {
+                if member
+                    == matches!(
+                        attempt.action,
+                        ContactMutation::AcceptRequest { .. }
+                            | ContactMutation::UpdatePrivacy { .. }
+                    )
+                {
                     self.settle_contact_relationship(account, &contact.username, member, id)?;
                 }
             }
         }
-        self.store.append_event_once(account,&format!("contact-mutation-event:{id}"),"friend_request.updated",&json!({"operationId":id,"action":attempt.action.name(),"requestId":op.result["requestId"]}))?;
+        let privacy_update = matches!(attempt.action, ContactMutation::UpdatePrivacy { .. });
+        self.store.append_event_once(
+            account,
+            &format!("contact-mutation-event:{id}"),
+            if privacy_update { "contact.updated" } else { "friend_request.updated" },
+            &json!({"operationId":id,"action":attempt.action.name(),"requestId":op.result["requestId"],"contactId":op.result["peerId"]}),
+        )?;
         Ok(())
     }
     pub(super) fn settle_contact_relationship(
@@ -749,14 +1083,27 @@ impl Core {
         member: bool,
         receipt: &str,
     ) -> Result<()> {
+        let current = if member {
+            self.profile_reader_owned(account)?.contact(username).ok()
+        } else {
+            None
+        };
+        let saved_privacy = if self.contact_privacy_resolved(account, username)? {
+            current
+                .as_ref()
+                .and_then(|contact| canonical_privacy(account, username, contact).ok())
+                .map(|snapshot| snapshot.privacy)
+        } else {
+            None
+        };
         if member {
             let reader = self.profile_reader_owned(account)?;
-            let alias = reader.contact(username).ok().and_then(|c| {
-                match c.raw_fields.get("encrypt_username") {
+            let alias = current
+                .as_ref()
+                .and_then(|c| match c.raw_fields.get("encrypt_username") {
                     Some(wechat_profile::SqlValue::Text(v)) if !v.is_empty() => Some(v.clone()),
                     _ => None,
-                }
-            });
+                });
             for identity in std::iter::once(username).chain(alias.as_deref()) {
                 if let Ok(row) = reader.contact_request(identity) {
                     if row.attention == Some(true) {
@@ -798,10 +1145,14 @@ impl Core {
             }
         }
         for record in self.store.pending_contact_relationships(account)? {
+            if record.operation.state != "succeeded" {
+                continue;
+            }
             let (a, _) = self.load_contact_attempt(&record)?;
             let matches = match &a.action {
-                ContactMutation::AcceptRequest { .. } => {
+                ContactMutation::AcceptRequest { privacy, .. } => {
                     member
+                        && privacy.is_none_or(|wanted| saved_privacy == Some(wanted))
                         && a.target.as_ref().is_some_and(|t| {
                             t.username == username
                                 || self
@@ -813,6 +1164,11 @@ impl Core {
                         })
                 }
                 ContactMutation::RemoveContact { username: peer } => !member && peer == username,
+                ContactMutation::UpdatePrivacy {
+                    username: peer,
+                    privacy,
+                    ..
+                } => member && peer == username && saved_privacy == Some(*privacy),
                 _ => false,
             };
             if matches {
@@ -821,6 +1177,28 @@ impl Core {
                 op.result["relationship"] = json!(if member { "contact" } else { "removed" });
                 op.updated_at = now();
                 self.store.advance_contact_mutation(&op, "succeeded", 0)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn settle_partial_contact_privacy(
+        &self,
+        account: &str,
+        username: &str,
+    ) -> Result<()> {
+        for record in self.store.pending_contact_relationships(account)? {
+            if record.operation.state != "failed" || record.operation.result["partial"] != true {
+                continue;
+            }
+            let (attempt, _) = self.load_contact_attempt(&record)?;
+            if matches!(&attempt.action, ContactMutation::UpdatePrivacy { username: peer, .. } if peer == username)
+            {
+                let mut op = record.operation;
+                op.result["profileProjection"] = json!("complete");
+                op.updated_at = now();
+                self.store
+                    .advance_contact_mutation(&op, "failed", record.step)?;
             }
         }
         Ok(())
@@ -968,3 +1346,7 @@ impl Core {
         Ok(true)
     }
 }
+
+#[cfg(test)]
+#[path = "contact_privacy_tests.rs"]
+mod tests;

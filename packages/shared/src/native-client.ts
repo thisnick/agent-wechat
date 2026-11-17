@@ -3,7 +3,7 @@ import type { NativeCallWebSocketFactory, NativeCallsClientOptions } from "./nat
 export * from "./native-calls.ts";
 
 /** Native v1 HTTP transport. This does not start a daemon or use the legacy API. */
-import type { NativeContactSearch, NativeContactRequestPage, NativeContactRequest, NativeContactRequestSend, TextMentions } from "./native.generated.js";
+import type { NativeContactSearch, NativeContactRequestPage, NativeContactRequest, NativeContactRequestSend, NativeContactRequestAccept, NativeContactPrivacy, NativeContactUpdate, TextMentions } from "./native.generated.js";
 export type NativeTextSendOptions = { quote?: QuoteSendReference; mentions?: TextMentions };
 export type NativeTextMentionOptions = NativeTextSendOptions & { mentions: TextMentions };
 import type { AccountSettings, NativeAccountRemoval, NativeUploadRelease, OfficialProfileRequest, OfficialProfileSelection, LoginRequest, QrRefresh, NativeTombstone, NativeMessage, QuoteSendReference, NativeThread, NativeContact, NativeGroup, NativeGroupMember, NativePage, NativeOperation, NativeSendIntent, ShareSendRequest, NativeEvent, NativeIdentity, NativeStatus, MediaAsset, MediaJob, NativeMediaJobRetryRequest, MediaTransferRequest, MediaSendRequest, OwnedMediaSource } from "./native.generated.js";
@@ -192,7 +192,11 @@ export class NativeWeChatClient {
   /** Submit one greeting. Keep the same key after an uncertain result. */
   sendContactRequest(accountId: string, input: NativeContactRequestSend, key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.contactMutation(accountId, "contact-requests", "POST", input, key, "send_request", signal); }
   /** Accept the inspected version of an incoming request. */
-  acceptContactRequest(accountId: string, requestId: string, expectedVersion: string, key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.contactMutation(accountId, `contact-requests/${id(requestId)}/accept`, "POST", { expectedVersion }, key, "accept_request", signal); }
+  acceptContactRequest(accountId: string, requestId: string, input: NativeContactRequestAccept | string, key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.contactMutation(accountId, `contact-requests/${id(requestId)}/accept`, "POST", typeof input === "string" ? { expectedVersion: input } : input, key, "accept_request", signal); }
+  /** Read existing relationship privacy; requires the account's admin scope. */
+  contactPrivacy(accountId: string, username: string, signal?: AbortSignal): Promise<NativeContactPrivacy> { return this.request(`v1/accounts/${id(accountId)}/contacts/${id(username)}/privacy`, { signal }); }
+  /** Save privacy once against the inspected version; retain the original key after uncertainty. */
+  updateContact(accountId: string, username: string, input: NativeContactUpdate, key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.contactMutation(accountId, `contacts/${id(username)}`, "PATCH", input, key, "update_privacy", signal); }
   /** Delete this account's local request history; no server rejection or cancellation. */
   deleteContactRequest(accountId: string, requestId: string, expectedVersion: string, key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.contactMutation(accountId, `contact-requests/${id(requestId)}`, "DELETE", { expectedVersion }, key, "delete_request", signal); }
   /** Remove this account's contact relationship while preserving chat history. */

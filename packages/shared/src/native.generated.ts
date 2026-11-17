@@ -1524,6 +1524,46 @@ request: NativeContactRequest | null,
  * Canonical saved contact ID when membership is established for this identity.
  */
 contactId: string | null, };
+export type NativeContactPrivacySettings = {
+/**
+ * Restrict this relationship to chats.
+ */
+chatsOnly: boolean,
+/**
+ * Hide this account's Moments posts from this person.
+ */
+hideMyPosts: boolean,
+/**
+ * Hide this person's Moments posts from this account.
+ */
+hideTheirPosts: boolean, };
+export type NativeContactPrivacy = {
+/**
+ * Current settings for this account's relationship.
+ */
+privacy: NativeContactPrivacySettings,
+/**
+ * Account/contact-bound version required when saving a change.
+ */
+version: string, };
+export type NativeContactUpdate = {
+/**
+ * Desired settings; unrelated contact flags are preserved.
+ */
+privacy: NativeContactPrivacySettings,
+/**
+ * Version returned by the privacy read on this account.
+ */
+expectedVersion: string, };
+export type NativeContactRequestAccept = {
+/**
+ * Current request version returned by get/list.
+ */
+expectedVersion: string,
+/**
+ * Initial relationship privacy; omission keeps the supported default.
+ */
+privacy?: NativeContactPrivacySettings, };
 export type NativeContactRequestSend = {
 /**
  * Exact reference returned by discovery on this account.
@@ -1532,7 +1572,11 @@ recipientRef: string,
 /**
  * Greeting supplied by the owner; no automatic default is inserted.
  */
-message: string, };
+message: string,
+/**
+ * Initial relationship privacy; omission keeps the supported default.
+ */
+privacy?: NativeContactPrivacySettings, };
 export type NativeContactRequestVersion = {
 /**
  * Current request version returned by get/list.

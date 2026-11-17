@@ -257,3 +257,218 @@
     padding: 12px 8px;
   }
 }
+
+/* A row still opens chat; its sibling action remains reachable by keyboard. */
+.contact-list-row {
+  position: relative;
+}
+.contact-list-main {
+  padding-right: 96px;
+}
+.contact-list-details {
+  position: absolute;
+  right: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0;
+}
+.contact-list-row:hover .contact-list-details,
+.contact-list-row:focus-within .contact-list-details {
+  opacity: 1;
+}
+.omni-result-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.contact-detail-dialog {
+  width: min(490px, calc(100vw - 32px));
+  padding: 24px;
+}
+.contact-request-heading h2 {
+  margin: 0;
+  font-size: 18px;
+}
+.contact-request-heading button {
+  display: flex;
+  padding: 6px;
+}
+.contact-detail-identity {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  margin: 0 0 22px;
+}
+.contact-detail-identity h3 {
+  margin: 0 0 5px;
+  font-size: 21px;
+  overflow-wrap: anywhere;
+}
+.contact-detail-identity p {
+  color: var(--muted);
+  margin: 0;
+  font-size: 13px;
+}
+.contact-detail-history h4 {
+  font-size: 13px;
+  font-weight: 500;
+  margin: 0 0 8px;
+  color: var(--muted);
+}
+.contact-detail-history {
+  max-height: 210px;
+  overflow: auto;
+  margin: 20px 0;
+}
+.contact-detail-history .request-history {
+  margin: 8px 0;
+}
+.request-history p {
+  margin: 7px 0 0;
+}
+.contact-detail-privacy {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+  margin-top: 22px;
+}
+.contact-detail-privacy > p {
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.contact-privacy-fields {
+  margin: 16px 0;
+  padding: 0;
+  border: 0;
+}
+.contact-privacy-fields legend {
+  padding: 0;
+  margin-bottom: 12px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.contact-access-options {
+  display: flex;
+  gap: 10px;
+}
+.contact-access-options label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 10px;
+  font-size: 14px;
+  cursor: pointer;
+}
+.contact-access-options label:has(input:checked) {
+  background: var(--accent-soft);
+  border-color: var(--accent-ink);
+}
+.contact-privacy-fields input {
+  accent-color: var(--accent-ink);
+}
+.contact-moments-options {
+  margin-top: 10px;
+}
+.contact-moments-options label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 11px 2px;
+  font-size: 14px;
+}
+.contact-moments-options input {
+  width: 17px;
+  height: 17px;
+  cursor: pointer;
+}
+.contact-privacy-fields:disabled {
+  opacity: 0.6;
+}
+.contact-delete-note {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  margin-top: 22px;
+}
+.contact-request-actions button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.contact-request-actions .contact-primary-action {
+  background: var(--accent-ink);
+  color: var(--surface);
+  border-color: var(--accent-ink);
+}
+.contact-request-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.contact-change-status {
+  font-size: 13px;
+  background: var(--accent-soft);
+  padding: 12px;
+  border-radius: 8px;
+}
+@media (hover: none) {
+  .contact-list-details {
+    opacity: 1;
+  }
+}
+@media (max-width: 420px) {
+  .contact-detail-dialog {
+    padding: 18px;
+  }
+  .contact-request-actions {
+    gap: 6px;
+  }
+  .contact-request-actions button {
+    flex-grow: 1;
+  }
+  .omni-result-actions {
+    margin-left: auto;
+  }
+  .contact-detail-history {
+    max-height: 150px;
+  }
+}
+
+.contact-detail-danger {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+  text-align: right;
+}
+.contact-detail-danger button {
+  color: var(--danger, #b42318);
+}
+.contact-detail-danger button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+@media (max-width: 420px) {
+  .contact-detail-dialog {
+    max-height: calc(100dvh - 24px);
+  }
+  .contact-access-options label {
+    font-size: 13px;
+    padding: 11px 8px;
+    gap: 6px;
+  }
+  .contact-detail-privacy {
+    margin-top: 16px;
+    padding-top: 6px;
+  }
+  .contact-request-actions {
+    margin-top: 18px;
+  }
+  .contact-detail-danger {
+    margin-top: 12px;
+    padding-top: 12px;
+  }
+}

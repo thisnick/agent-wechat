@@ -3,13 +3,20 @@
 # `desktop` (1280x800), `narrow` (390x844), `compact` (320x700), joined by `+` for multiple sizes.
 # Format: ITEM | ATTRIBUTES | DESCRIPTION
 scene account-list | route /{server}/accounts, viewports desktop+narrow | The accounts on a hub: one signed in and one that still needs a QR code.
-scene add-contact | route /{server}/{account}/contacts, viewports desktop+narrow+compact | A separate greeting dialog opened from server discovery in Contacts search.
+scene add-contact | route /{server}/{account}/contacts, viewports desktop+narrow+compact | The shared contact card with a greeting and privacy choices before sending a friend request.
 scene channels-video-cards | route /{server}/{account}/chats/{thread}, viewports desktop+narrow | Received WeChat Channels cards with their cover, play button, publisher and length.
 scene chat-filters | route /{server}/{account}/chats, viewports desktop+compact | The conversation filter bar with All pinned beside the scrolling categories and unread badges for categories with new messages.
 scene chat-info | route /{server}/{account}/chats/{thread}/info, viewports desktop+narrow | Details of a group conversation with its pin, mute and group settings.
 scene chat-list | route /{server}/{account}/chats, viewports desktop+narrow | The full inbox with category and conversation unread counts and the newest conversation open beside it.
 scene composer-attachments | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | A photo and a video staged in the message box with previews, sizes, remove buttons and the unchecked Original choice.
 scene composer-attachments-original | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Original checked for a staged photo and video, with help that explains what it adds for each.
+scene contact-details | route /{server}/{account}/contacts, viewports desktop+compact | A saved contact card reached from the contact list by its keyboard-accessible Details action.
+scene contact-details-remove | route /{server}/{account}/contacts, viewports desktop+compact | Remove contact opens a distinct confirmation that preserves chat history and recovers an uncertain result with the original key.
+scene contact-details-search | route /{server}/{account}/contacts, viewports desktop+compact | Saved-contact search offers separate Message and Details actions; Details opens the shared card.
+scene contact-details-sidebar | route /{server}/{account}/chats/{thread}/info, viewports desktop | A direct-conversation sidebar opens the same contact card and its checked privacy/removal actions.
+scene contact-privacy-retry | route /{server}/{account}/contacts, viewports desktop | An uncertain privacy save locks edits and retries only the same inspected intent.
+scene contact-privacy-saved | route /{server}/{account}/contacts, viewports desktop+compact | Moments selections survive Chats Only and save with the original privacy version.
+scene contact-privacy-unavailable | route /{server}/{account}/contacts, viewports desktop+compact | Missing administrator permission disables privacy edits and submission.
 scene contact-request-retry | route /{server}/{account}/contacts, viewports desktop | A lost submission response keeps the original key and greeting until an inspected retry completes.
 scene contact-search-without-reference | route /{server}/{account}/contacts, viewports desktop+compact | A server match without request material offers View and cannot send a friend request.
 scene contacts | route /{server}/{account}/contacts, viewports desktop | The contact list of an account.
@@ -17,7 +24,9 @@ scene desktop-leftover-hub | route /servers, viewports desktop+narrow | The desk
 scene desktop-settings | route /servers, viewports desktop+narrow | Desktop settings, including whether this device's hub keeps running while another hub is used.
 scene direct-chat | route /{server}/{account}/chats/{thread}, viewports desktop+narrow | A direct conversation with text from both sides and a photo.
 scene existing-contact-search | route /{server}/{account}/contacts, viewports desktop+compact | A server match without a verification ticket opens the saved contact with Message.
-scene friend-request-review | route /{server}/{account}/contacts/requests, viewports desktop+narrow+compact | A separate request review dialog with acceptance and local-history deletion.
+scene friend-request-delete-history | route /{server}/{account}/contacts/requests, viewports desktop | Delete local history removes the request conversation without presenting it as a server decline.
+scene friend-request-privacy-accept | route /{server}/{account}/contacts/requests, viewports desktop+compact | Acceptance submits the selected privacy settings together with the exact request version.
+scene friend-request-review | route /{server}/{account}/contacts/requests, viewports desktop+narrow+compact | The shared contact card with request history, privacy choices, acceptance and local-history deletion.
 scene friend-requests | route /{server}/{account}/contacts/requests, viewports desktop+narrow+compact | Incoming and sent request history with an actionable Contacts badge.
 scene group-chat | route /{server}/{account}/chats/{thread}, viewports desktop | A group conversation where each message names its sender, ending in a photo.
 scene hub-picker | route /servers, viewports desktop+narrow | The screen for choosing which hub to connect to.

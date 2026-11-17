@@ -12,9 +12,10 @@ pub(super) fn routes() -> Router<App> {
             "/v1/accounts/{a}/contact-requests/{id}/accept",
             post(accept),
         )
+        .api_route("/v1/accounts/{a}/contacts/{id}/privacy", get(privacy))
         .api_route(
             "/v1/accounts/{a}/contacts/{id}",
-            axum::routing::delete(remove),
+            axum::routing::delete(remove).patch(update_contact),
         )
         .api_route(
             "/v1/accounts/{a}/contact-mutations/by-idempotency-key",
@@ -96,6 +97,7 @@ async fn send(
         ContactMutation::SendRequest {
             recipient_ref: input.recipient_ref,
             message: input.message,
+            privacy: input.privacy.map(privacy_settings),
         },
     )
     .await
@@ -105,7 +107,7 @@ async fn accept(
     Extension(c): Extension<Claims>,
     Path((a, id)): Path<(String, String)>,
     headers: HeaderMap,
-    Json(input): Json<contracts::NativeContactRequestVersion>,
+    Json(input): Json<contracts::NativeContactRequestAccept>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     submit(
         app,
@@ -115,6 +117,7 @@ async fn accept(
         ContactMutation::AcceptRequest {
             id,
             expected_version: input.expected_version,
+            privacy: input.privacy.map(privacy_settings),
         },
     )
     .await
@@ -137,6 +140,54 @@ async fn delete(
         },
     )
     .await
+}
+fn privacy_settings(
+    input: contracts::NativeContactPrivacySettings,
+) -> wechat_core::ContactPrivacySettings {
+    wechat_core::ContactPrivacySettings {
+        chats_only: input.chats_only,
+        hide_my_posts: input.hide_my_posts,
+        hide_their_posts: input.hide_their_posts,
+    }
+}
+async fn privacy(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path((a, id)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    c.require(Some(&a), "admin")?;
+    let value = app
+        .core
+        .read(&a.clone(), move |core| core.contact_privacy(&a, &id))
+        .await?;
+    checked::<contracts::NativeContactPrivacy>(value)
+}
+async fn update_contact(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path((a, id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(input): Json<contracts::NativeContactUpdate>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    c.require(Some(&a), "admin")?;
+    let operation = app
+        .core
+        .update_contact(
+            &a,
+            &id,
+            wechat_core::ContactUpdate {
+                privacy: privacy_settings(input.privacy),
+                expected_version: input.expected_version,
+            },
+            idempotency_key(&headers)?,
+        )
+        .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        checked::<contracts::NativeOperation>(
+            serde_json::to_value(operation).map_err(anyhow::Error::from)?,
+        )?,
+    ))
 }
 async fn remove(
     State(app): State<App>,
@@ -216,6 +267,11 @@ mod tests {
                 json!({"expectedVersion":"current"}),
             ),
             ("DELETE", "contacts/peer", json!({})),
+            (
+                "PATCH",
+                "contacts/peer",
+                json!({"privacy":{"chatsOnly":true,"hideMyPosts":false,"hideTheirPosts":false},"expectedVersion":"current"}),
+            ),
         ] {
             for (bearer, key, status) in [
                 (&read, Some("key"), StatusCode::FORBIDDEN),
@@ -237,5 +293,34 @@ mod tests {
                 assert_eq!(response.status(), status, "{method} {path}");
             }
         }
+    }
+    #[tokio::test]
+    async fn privacy_read_requires_admin_on_the_selected_account() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&temp.path().join("data")).unwrap());
+        store.create_account("one").unwrap();
+        let read = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        store
+            .issue_token(
+                "reader",
+                &format!("{:x}", Sha256::digest(read.as_bytes())),
+                &["one".into()],
+                &["read".into()],
+                None,
+            )
+            .unwrap();
+        let app = crate::router(
+            Core::new(store, None).unwrap(),
+            "0123456789abcdef0123456789abcdef",
+        );
+        let request = Request::builder()
+            .uri("/v1/accounts/one/contacts/peer/privacy")
+            .header("authorization", format!("Bearer {read}"))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.oneshot(request).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
     }
 }

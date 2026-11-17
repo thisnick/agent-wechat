@@ -1,5 +1,5 @@
 import { Command } from "cmdk";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   NativeApiError,
   isNativeTombstone,
@@ -13,22 +13,30 @@ import { readableError } from "./session.ts";
 import { HubAvatar } from "./avatars.tsx";
 import { Icon } from "./ui.tsx";
 
-const contactActions = {
-  send: "send_request",
-  accept: "accept_request",
-  delete: "delete_request",
-  remove: "remove_contact",
-} as const;
-type ContactReceipt = {
-  key: string;
-  operation?: NativeOperation;
-  input?: { recipientRef: string; message: string };
-  action: keyof typeof contactActions;
-};
+import {
+  contactDetailActions,
+  contactChangeActions,
+  restoreContactChange,
+  defaultContactPrivacy,
+  sameContactPrivacy,
+  type ContactChange,
+  type ContactPrivacy,
+  type ContactPrivacySnapshot,
+} from "./contact-privacy.ts";
 export type RequestSelection =
   | { request: NativeContactRequest }
   | { discovery: NativeContactSearch }
+  | { contact: { id: string; displayName: string } }
   | { removeContact: { id: string; displayName: string } };
+export function contactSelectionKey(selection: RequestSelection) {
+  return "request" in selection
+    ? selection.request.id
+    : "discovery" in selection
+      ? (selection.discovery.recipientRef ?? selection.discovery.displayName)
+      : "contact" in selection
+        ? selection.contact.id
+        : `remove:${selection.removeContact.id}`;
+}
 export function useContactRequests(connection: Connection, account: string) {
   const [items, setItems] = useState<NativeContactRequest[]>([]),
     [count, setCount] = useState(0),
@@ -51,11 +59,13 @@ export function useContactRequests(connection: Connection, account: string) {
           const page = await connection.session.client.contactRequests(
             account,
             { limit: 200, cursor },
-            controller.signal
+            controller.signal,
           );
           if (controller.signal.aborted) return;
           all.push(
-            ...page.items.filter((item): item is NativeContactRequest => !isNativeTombstone(item))
+            ...page.items.filter(
+              (item): item is NativeContactRequest => !isNativeTombstone(item),
+            ),
           );
           cursor = page.nextCursor ?? undefined;
           if (++pages > 50) throw Error(t("contactsUi.tooManyRequests"));
@@ -73,7 +83,10 @@ export function useContactRequests(connection: Connection, account: string) {
   }, [connection, account, revision]);
   useEffect(() => {
     const off = connection.session.onEvent((event, a) => {
-      if (a === account && ["friend_request.updated", "contact.updated"].includes(event.kind))
+      if (
+        a === account &&
+        ["friend_request.updated", "contact.updated"].includes(event.kind)
+      )
         refresh();
     });
     const gap = connection.session.onEventGap((a) => {
@@ -90,22 +103,21 @@ function requestLabel(request: NativeContactRequest) {
   return request.isContact
     ? t("contactsUi.saved")
     : request.direction === "outgoing"
-    ? t("contactsUi.sent")
-    : t("contactsUi.incoming");
+      ? t("contactsUi.sent")
+      : t("contactsUi.incoming");
 }
 function requestAction(request: NativeContactRequest) {
   return request.isContact
-    ? t("contactsUi.message")
+    ? t("contactsUi.details")
     : request.actionable
-    ? t("contactsUi.review")
-    : t("contactsUi.view");
+      ? t("contactsUi.review")
+      : t("contactsUi.view");
 }
 export function FriendRequests({
   connection,
   account,
   requests,
   review,
-  open,
   back,
 }: {
   connection: Connection;
@@ -113,7 +125,6 @@ export function FriendRequests({
   back: () => void;
   requests: ReturnType<typeof useContactRequests>;
   review: (selection: RequestSelection) => void;
-  open: (id: string) => void;
 }) {
   const [direction, setDirection] = useState("all");
   return (
@@ -127,14 +138,19 @@ export function FriendRequests({
       </header>
       <div className="omni-scopes">
         {(["all", "incoming", "outgoing"] as const).map((d) => (
-          <button key={d} aria-pressed={direction === d} onClick={() => setDirection(d)}>
+          <button
+            key={d}
+            aria-pressed={direction === d}
+            onClick={() => setDirection(d)}
+          >
             {t(`contactsUi.${d === "outgoing" ? "sent" : d}`)}
           </button>
         ))}
       </div>
       {requests.error && (
         <p role="alert">
-          {requests.error} <button onClick={requests.refresh}>{t("main.refresh")}</button>
+          {requests.error}{" "}
+          <button onClick={requests.refresh}>{t("main.refresh")}</button>
         </p>
       )}
       {requests.items
@@ -149,23 +165,26 @@ export function FriendRequests({
             />
             <button
               className="omni-result-name"
-              onClick={() => (r.isContact ? open(r.peerId) : review({ request: r }))}
+              onClick={() => review({ request: r })}
             >
               <strong>{r.displayName}</strong>
               <span>
-                {requestLabel(r)} · {new Date(r.updatedAt * 1000).toLocaleString()}
+                {requestLabel(r)} ·{" "}
+                {new Date(r.updatedAt * 1000).toLocaleString()}
               </span>
               <span>{r.message}</span>
             </button>
             <button
               className="omni-action"
-              onClick={() => (r.isContact ? open(r.peerId) : review({ request: r }))}
+              onClick={() => review({ request: r })}
             >
               {requestAction(r)}
             </button>
           </div>
         ))}
-      {!requests.items.length && !requests.error && <p>{t("contactsUi.noRequests")}</p>}
+      {!requests.items.length && !requests.error && (
+        <p>{t("contactsUi.noRequests")}</p>
+      )}
     </main>
   );
 }
@@ -175,7 +194,7 @@ const scopeLabel = (scope: string) =>
     contacts: t("contactsUi.contacts"),
     groups: t("contactsUi.groups"),
     messages: t("contactsUi.messages"),
-  }[scope]);
+  })[scope];
 type Hit = {
   id: string;
   name: string;
@@ -223,13 +242,21 @@ export function OmniSearch({
         const client = connection.session.client;
         const [contacts, groups, messages] = await Promise.all([
           scope === "all" || scope === "contacts"
-            ? client.contacts(account, { query: search, limit: 30 }, abort.signal)
+            ? client.contacts(
+                account,
+                { query: search, limit: 30 },
+                abort.signal,
+              )
             : null,
           scope === "all" || scope === "groups"
             ? client.groups(account, { query: search, limit: 20 }, abort.signal)
             : null,
           search && (scope === "all" || scope === "messages")
-            ? client.searchMessages(account, { query: search, limit: 20 }, abort.signal)
+            ? client.searchMessages(
+                account,
+                { query: search, limit: 20 },
+                abort.signal,
+              )
             : null,
         ]);
         if (abort.signal.aborted) return;
@@ -257,11 +284,13 @@ export function OmniSearch({
               thread: m.threadId,
               name:
                 connection.session.snapshot().account === account
-                  ? connection.session.snapshot().threads.find((t) => t.id === m.threadId)
-                      ?.displayName ??
-                    connection.session.snapshot().contacts.find((c) => c.id === m.threadId)
-                      ?.displayName ??
-                    m.threadId
+                  ? (connection.session
+                      .snapshot()
+                      .threads.find((t) => t.id === m.threadId)?.displayName ??
+                    connection.session
+                      .snapshot()
+                      .contacts.find((c) => c.id === m.threadId)?.displayName ??
+                    m.threadId)
                   : m.threadId,
               subtitle: m.body ?? "",
               kind: "messages",
@@ -298,11 +327,12 @@ export function OmniSearch({
           !query.trim() ||
           `${r.displayName} ${r.peerId} ${r.history.map((h) => h.message).join(" ")}`
             .toLowerCase()
-            .includes(query.toLowerCase())
+            .includes(query.toLowerCase()),
       )
     : [];
   const merged = hits.filter(
-    (h) => h.kind !== "contacts" || !filteredRequests.some((r) => r.peerId === h.id)
+    (h) =>
+      h.kind !== "contacts" || !filteredRequests.some((r) => r.peerId === h.id),
   );
   for (const r of filteredRequests)
     merged.push({
@@ -338,6 +368,11 @@ export function OmniSearch({
       kind: "contacts",
       discovery: remote,
     });
+  const details = (h: Hit) => {
+    if (h.discovery) review({ discovery: h.discovery });
+    else if (h.request) review({ request: h.request });
+    else review({ contact: { id: h.id, displayName: h.name } });
+  };
   const activate = (h: Hit) => {
     if (h.discovery) review({ discovery: h.discovery });
     else if (h.request && !h.request.isContact) review({ request: h.request });
@@ -371,7 +406,11 @@ export function OmniSearch({
       </div>
       <div className="omni-scopes">
         {(["all", "contacts", "groups", "messages"] as const).map((s) => (
-          <button key={s} aria-pressed={scope === s} onClick={() => setScope(s)}>
+          <button
+            key={s}
+            aria-pressed={scope === s}
+            onClick={() => setScope(s)}
+          >
             {scopeLabel(s)}
           </button>
         ))}
@@ -394,24 +433,57 @@ export function OmniSearch({
                       <strong>{h.name}</strong>
                       <span>{h.subtitle}</span>
                     </span>
-                    <span className="omni-action">
-                      {h.discovery ? (
-                        h.discovery.recipientRef ? (
-                          t("main.findPerson")
-                        ) : (
-                          t("contactsUi.view")
-                        )
-                      ) : h.request ? (
-                        requestAction(h.request)
-                      ) : h.kind === "messages" ? (
-                        t("contactsUi.view")
-                      ) : (
-                        <>
+                    {h.kind === "contacts" &&
+                    !h.discovery &&
+                    (!h.request || h.request.isContact) ? (
+                      <span className="omni-result-actions">
+                        <button
+                          className="omni-action"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            activate(h);
+                          }}
+                        >
                           <Icon name="chat" />
                           {t("contactsUi.message")}
-                        </>
-                      )}
-                    </span>
+                        </button>
+                        <button
+                          className="omni-action"
+                          aria-label={t("contactsUi.detailsFor", {
+                            name: h.name,
+                          })}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ")
+                              e.stopPropagation();
+                          }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            details(h);
+                          }}
+                        >
+                          {t("contactsUi.details")}
+                        </button>
+                      </span>
+                    ) : (
+                      <span className="omni-action">
+                        {h.discovery ? (
+                          h.discovery.recipientRef ? (
+                            t("main.findPerson")
+                          ) : (
+                            t("contactsUi.view")
+                          )
+                        ) : h.request ? (
+                          requestAction(h.request)
+                        ) : h.kind === "messages" ? (
+                          t("contactsUi.view")
+                        ) : (
+                          <>
+                            <Icon name="chat" />
+                            {t("contactsUi.message")}
+                          </>
+                        )}
+                      </span>
+                    )}
                   </Command.Item>
                 ))}
             </Command.Group>
@@ -422,84 +494,220 @@ export function OmniSearch({
         {loading
           ? t("contactsUi.searchingWechat")
           : remoteError
-          ? t("contactsUi.discoveryUnavailable")
-          : t("contactsUi.contactsIncludeWechat")}
+            ? t("contactsUi.discoveryUnavailable")
+            : t("contactsUi.contactsIncludeWechat")}
       </div>
     </Command.Dialog>
   );
 }
-export function ContactRequestDialog({
+function PrivacyFields({
+  value,
+  disabled,
+  change,
+}: {
+  value: ContactPrivacy;
+  disabled: boolean;
+  change: (value: ContactPrivacy) => void;
+}) {
+  return (
+    <fieldset className="contact-privacy-fields" disabled={disabled}>
+      <legend>{t("contactsUi.privacy")}</legend>
+      <div className="contact-access-options">
+        {[false, true].map((chatsOnly) => (
+          <label key={String(chatsOnly)}>
+            <input
+              type="radio"
+              name="contact-access"
+              checked={value.chatsOnly === chatsOnly}
+              onChange={() => change({ ...value, chatsOnly })}
+            />
+            <span>
+              {t(chatsOnly ? "contactsUi.chatsOnly" : "contactsUi.fullAccess")}
+            </span>
+          </label>
+        ))}
+      </div>
+      {!value.chatsOnly && (
+        <div className="contact-moments-options">
+          {(["hideMyPosts", "hideTheirPosts"] as const).map((key) => (
+            <label key={key}>
+              <span>
+                {t(
+                  key === "hideMyPosts"
+                    ? "contactsUi.hideMyPosts"
+                    : "contactsUi.hideTheirPosts",
+                )}
+              </span>
+              <input
+                type="checkbox"
+                role="switch"
+                checked={value[key]}
+                onChange={(e) => change({ ...value, [key]: e.target.checked })}
+              />
+            </label>
+          ))}
+        </div>
+      )}
+    </fieldset>
+  );
+}
+export function ContactDetailDialog({
   connection,
   account,
   selection,
   close,
   changed,
+  open,
+  remove,
 }: {
   connection: Connection;
   account: string;
   selection: RequestSelection;
   close: () => void;
   changed: () => void;
+  open?: (id: string) => void;
+  remove?: (contact: { id: string; displayName: string }) => void;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
+  const actions = useMemo(
+    () => contactDetailActions(connection, account),
+    [connection, account],
+  );
   const request = "request" in selection ? selection.request : null;
   const discovery = "discovery" in selection ? selection.discovery : null;
+  const contact = "contact" in selection ? selection.contact : null;
   const removal = "removeContact" in selection ? selection.removeContact : null;
-  const receiptId = `contact-change:${
-    removal
-      ? `remove:${removal.id}`
-      : request
-      ? `${request.id}:${request.version}`
-      : discovery?.recipientRef
-  }`;
-  const [greeting, setGreeting] = useState(
-      () => connection.cache.readState<ContactReceipt>(account, receiptId)?.input?.message ?? ""
-    ),
-    [busy, setBusy] = useState(false),
-    [error, setError] = useState(""),
-    [retryOriginal, setRetryOriginal] = useState(false);
-  const [receipt, setReceipt] = useState<ContactReceipt | undefined>(() => {
-    const saved = connection.cache.readState<ContactReceipt>(account, receiptId);
-    return removal &&
+  const friendId = contact?.id ?? (request?.isContact ? request.peerId : null);
+  const name =
+    contact?.displayName ??
+    removal?.displayName ??
+    request?.displayName ??
+    discovery?.displayName ??
+    "";
+  const peer = friendId ?? removal?.id ?? request?.peerId;
+  const [receiptId] = useState(
+    () =>
+      `contact-change:${removal ? `remove:${removal.id}` : contact ? `privacy:${contact.id}` : request ? `${request.id}:${request.version}` : discovery?.recipientRef}`,
+  );
+  const [receipt, setReceipt] = useState<ContactChange | undefined>(() => {
+    const saved = restoreContactChange(
+      connection.cache.readState<ContactChange>(account, receiptId) ??
+        undefined,
+      {
+        requestId: request?.id,
+        version: request?.version,
+        contactId: removal?.id,
+      },
+    );
+    return (removal || contact) &&
       saved?.operation &&
       ["succeeded", "failed", "cancelled"].includes(saved.operation.state)
       ? undefined
       : saved;
   });
+  const [greeting, setGreeting] = useState(() =>
+    receipt?.action === "send" ? receipt.input.message : "",
+  );
+  const [privacy, setPrivacy] = useState<ContactPrivacy>(() =>
+    receipt?.action === "send"
+      ? (receipt.input.privacy ?? defaultContactPrivacy())
+      : receipt?.action === "accept"
+        ? (receipt.privacy ?? defaultContactPrivacy())
+        : receipt?.action === "privacy"
+          ? receipt.input.privacy
+          : defaultContactPrivacy(),
+  );
+  const [savedPrivacy, setSavedPrivacy] =
+    useState<ContactPrivacySnapshot | null>(null);
+  const [privacyLoading, setPrivacyLoading] = useState(false),
+    [privacyError, setPrivacyError] = useState("");
+  const [privacyRevision, setPrivacyRevision] = useState(0);
+  const [busy, setBusy] = useState(false),
+    [error, setError] = useState(""),
+    [retryOriginal, setRetryOriginal] = useState(false);
+  const [permissionDenied, setPermissionDenied] = useState(false);
+  const ended =
+    !!receipt?.operation &&
+    ["succeeded", "failed", "cancelled", "needs_review"].includes(
+      receipt.operation.state,
+    );
+  const privacySucceeded =
+    receipt?.action === "privacy" && receipt.operation?.state === "succeeded";
+  const completedFriendAction =
+    !!friendId &&
+    receipt?.operation?.state === "succeeded" &&
+    ["accept", "delete"].includes(receipt.action);
+  const editableReceipt = privacySucceeded || completedFriendAction;
+  const locked = busy || (!!receipt && !editableReceipt);
   useEffect(() => {
     const dialog = ref.current!;
     dialog.showModal();
     return () => dialog.close();
   }, []);
-  const save = (value: ContactReceipt) => {
+  useEffect(() => {
+    setSavedPrivacy(null);
+    setPrivacyError("");
+    if (!friendId) return;
+    const abort = new AbortController();
+    setPrivacyLoading(true);
+    void actions
+      .readPrivacy(friendId, abort.signal)
+      .then((value) => {
+        if (!abort.signal.aborted) {
+          setSavedPrivacy(value);
+          if (!(receipt?.action === "privacy" && !privacySucceeded))
+            setPrivacy(value.privacy);
+        }
+      })
+      .catch((e) => {
+        if (!abort.signal.aborted)
+          setPrivacyError(
+            e instanceof NativeApiError && e.status === 403
+              ? t("contactsUi.privacyPermission")
+              : readableError(e),
+          );
+      })
+      .finally(() => {
+        if (!abort.signal.aborted) setPrivacyLoading(false);
+      });
+    return () => abort.abort();
+  }, [actions, friendId, privacyRevision]);
+  const save = (value: ContactChange) => {
     connection.cache.writeState(account, receiptId, value);
     setReceipt(value);
   };
-  const ended =
-    receipt?.operation &&
-    ["succeeded", "failed", "cancelled", "needs_review"].includes(receipt.operation.state);
-  async function submit(pending: ContactReceipt) {
+  const finished = (pending: ContactChange, operation: NativeOperation) => {
+    save({ ...pending, operation });
+    if (
+      ["succeeded", "failed", "cancelled", "needs_review"].includes(
+        operation.state,
+      )
+    )
+      changed();
+    if (pending.action === "privacy" && operation.state === "succeeded") {
+      setSavedPrivacy(null);
+      setPrivacyLoading(true);
+      setPrivacyRevision((n) => n + 1);
+    }
+  };
+  async function submit(pending: ContactChange) {
     if (busy) return;
     setBusy(true);
     setError("");
     setRetryOriginal(false);
     try {
       await connection.cache.flush();
-      const client = connection.session.client;
-      const operation =
-        pending.action === "remove"
-          ? await client.removeContact(account, removal!.id, pending.key)
-          : pending.action === "send"
-          ? await client.sendContactRequest(account, pending.input!, pending.key)
-          : pending.action === "accept"
-          ? await client.acceptContactRequest(account, request!.id, request!.version, pending.key)
-          : await client.deleteContactRequest(account, request!.id, request!.version, pending.key);
-      save({ ...pending, operation });
-      if (["succeeded", "failed", "cancelled", "needs_review"].includes(operation.state)) changed();
+      finished(pending, await actions.submit(pending));
     } catch (e) {
       setError(readableError(e));
-      // Admission rejections cannot have submitted this intent. Uncertain
-      // transport failures retain their original key until inspected.
+      if (
+        e instanceof NativeApiError &&
+        e.status === 403 &&
+        ["send", "accept", "privacy"].includes(pending.action)
+      ) {
+        setPermissionDenied(true);
+        setError(t("contactsUi.privacyPermission"));
+      }
       if (
         e instanceof NativeApiError &&
         e.status >= 400 &&
@@ -510,26 +718,72 @@ export function ContactRequestDialog({
         connection.cache.writeState(account, receiptId, null);
         setReceipt(undefined);
         changed();
+        if (pending.action === "privacy") setPrivacyRevision((n) => n + 1);
       }
     } finally {
       setBusy(false);
     }
   }
-  async function change(action: "send" | "accept" | "delete" | "remove") {
-    if (busy || receipt || (action === "send" && !discovery?.recipientRef)) return;
-    const pending: ContactReceipt = {
-      key: crypto.randomUUID(),
-      action,
-      ...(discovery?.recipientRef
-        ? { input: { recipientRef: discovery.recipientRef, message: greeting } }
-        : {}),
-    };
+  async function change(action: ContactChange["action"]) {
+    if (
+      locked ||
+      (receipt && !editableReceipt) ||
+      (permissionDenied && ["send", "accept", "privacy"].includes(action))
+    )
+      return;
+    const key = crypto.randomUUID();
+    let pending: ContactChange;
+    if (action === "send" && discovery?.recipientRef)
+      pending = {
+        key,
+        action,
+        input: {
+          recipientRef: discovery.recipientRef,
+          message: greeting,
+          privacy: { ...privacy },
+        },
+      };
+    else if (action === "accept" && request?.actionable)
+      pending = {
+        key,
+        action,
+        requestId: request.id,
+        version: request.version,
+        privacy: { ...privacy },
+      };
+    else if (action === "delete" && request)
+      pending = {
+        key,
+        action,
+        requestId: request.id,
+        version: request.version,
+      };
+    else if (action === "remove" && removal)
+      pending = { key, action, contactId: removal.id };
+    else if (
+      action === "privacy" &&
+      friendId &&
+      savedPrivacy &&
+      !privacyError &&
+      !privacyLoading
+    )
+      pending = {
+        key,
+        action,
+        contactId: friendId,
+        input: {
+          privacy: { ...privacy },
+          expectedVersion: savedPrivacy.version,
+        },
+      };
+    else return;
     save(pending);
     await submit(pending);
   }
   async function check() {
     if (!receipt || busy) return;
     setBusy(true);
+    setError("");
     setRetryOriginal(false);
     try {
       const client = connection.session.client;
@@ -540,12 +794,11 @@ export function ContactRequestDialog({
         operation.accountId !== account ||
         operation.kind !== "contact_mutation" ||
         (operation.result as { action?: unknown } | null)?.action !==
-          contactActions[receipt.action] ||
+          contactChangeActions[receipt.action] ||
         (receipt.operation && operation.id !== receipt.operation.id)
       )
         throw Error(t("contactsUi.operationMismatch"));
-      save({ ...receipt, operation });
-      if (["succeeded", "failed", "cancelled", "needs_review"].includes(operation.state)) changed();
+      finished(receipt, operation);
     } catch (e) {
       setError(readableError(e));
       if (!receipt.operation && e instanceof NativeApiError && e.status === 404)
@@ -559,110 +812,253 @@ export function ContactRequestDialog({
     const timer = setTimeout(() => void check(), 800);
     return () => clearTimeout(timer);
   }, [receipt, ended, busy]);
-  const statusText = !receipt?.operation
-    ? t("contactsUi.checkBeforeRetry")
-    : receipt.operation.state === "succeeded"
-    ? receipt.action === "send"
-      ? t("contactsUi.sent")
-      : receipt.action === "accept"
-      ? t("contactsUi.accepted")
-      : receipt.action === "delete"
-      ? t("contactsUi.historyDeleted")
-      : t("contactsUi.contactRemoved")
-    : receipt.operation.state === "needs_review"
-    ? t("contactsUi.checkBeforeRetry")
-    : receipt.operation.state === "failed"
-    ? t("contactsUi.failed")
-    : receipt.operation.state === "cancelled"
-    ? t("contactsUi.cancelled")
-    : t("contactsUi.working");
+  const statusText =
+    !receipt?.operation || receipt.operation.state === "needs_review"
+      ? t("contactsUi.checkBeforeRetry")
+      : receipt.operation.state === "succeeded"
+        ? t(
+            (
+              {
+                send: "contactsUi.sent",
+                accept: "contactsUi.accepted",
+                delete: "contactsUi.historyDeleted",
+                remove: "contactsUi.contactRemoved",
+                privacy: "contactsUi.privacySaved",
+              } as const
+            )[receipt.action],
+          )
+        : receipt.operation.state === "failed"
+          ? t("contactsUi.failed")
+          : receipt.operation.state === "cancelled"
+            ? t("contactsUi.cancelled")
+            : t("contactsUi.working");
   const title = removal
     ? t("contactsUi.removeContact")
-    : discovery
-    ? discovery.recipientRef
-      ? t("main.findPerson")
-      : t("contactsUi.view")
-    : request?.direction === "outgoing"
-    ? t("contactsUi.sent")
-    : t("contactsUi.review");
+    : t("contactsUi.contactDetails");
+  const showPrivacy =
+    !removal &&
+    (!!friendId || !!discovery?.recipientRef || !!request?.actionable);
   return (
     <dialog
       ref={ref}
-      className="contact-request-dialog"
+      className="contact-request-dialog contact-detail-dialog"
+      aria-label={title}
       onCancel={(e) => {
         e.preventDefault();
         close();
       }}
       onClose={close}
-      aria-label={title}
     >
       <div className="contact-request-heading">
         <h2>{title}</h2>
         <button onClick={close} aria-label={t("contactsUi.close")}>
-          ×
+          <Icon name="close" />
         </button>
       </div>
-      <h3>{removal?.displayName ?? request?.displayName ?? discovery?.displayName}</h3>
-      {removal && <p>{t("contactsUi.removeExplanation")}</p>}
-      {request && <p>{requestLabel(request)}</p>}
-      {request?.history.map((h, i) => (
-        <div className="request-history" key={`${h.serverId}:${i}`}>
-          <small>
-            {t(`contactsUi.${h.direction === "outgoing" ? "sent" : "incoming"}`)} ·{" "}
-            {new Date(h.createdAt * 1000).toLocaleString()}
-          </small>
-          <p>{h.message}</p>
+      <div className="contact-detail-identity">
+        <HubAvatar
+          connection={connection}
+          account={account}
+          username={peer ?? name}
+          name={name}
+        />
+        <div>
+          <h3>{name}</h3>
+          <p>
+            {friendId || removal
+              ? t("contactsUi.saved")
+              : request
+                ? requestLabel(request)
+                : t("contactsUi.onWechat")}
+          </p>
         </div>
-      ))}
-      {discovery && !discovery.recipientRef && <p>{t("contactsUi.requestUnavailable")}</p>}
+      </div>
+      {removal && <p>{t("contactsUi.removeExplanation")}</p>}
+      {request && request.history.length > 0 && (
+        <section
+          className="contact-detail-history"
+          aria-label={t("contactsUi.requestHistory")}
+        >
+          <h4>{t("contactsUi.requestHistory")}</h4>
+          {request.history.map((h, i) => (
+            <div className="request-history" key={`${h.serverId}:${i}`}>
+              <small>
+                {t(
+                  `contactsUi.${h.direction === "outgoing" ? "sent" : "incoming"}`,
+                )}{" "}
+                · {new Date(h.createdAt * 1000).toLocaleString()}
+              </small>
+              <p>{h.message}</p>
+            </div>
+          ))}
+        </section>
+      )}
+      {discovery && !discovery.recipientRef && (
+        <p>{t("contactsUi.requestUnavailable")}</p>
+      )}
       {discovery?.recipientRef && (
-        <label>
+        <label className="contact-greeting">
           {t("contactsUi.greeting")}
           <textarea
             value={greeting}
             onChange={(e) => setGreeting(e.target.value)}
             maxLength={4096}
-            disabled={!!receipt}
+            disabled={locked}
           />
         </label>
       )}
-      {request?.direction === "outgoing" && <p>{t("contactsUi.sentExplanation")}</p>}
-      {receipt && <p role="status">{statusText}</p>}
+      {showPrivacy && (
+        <section className="contact-detail-privacy">
+          <p>
+            {t(
+              friendId
+                ? "contactsUi.privacyForContact"
+                : "contactsUi.privacyBeforeRequest",
+            )}
+          </p>
+          {privacyLoading && (
+            <p role="status">{t("contactsUi.privacyLoading")}</p>
+          )}
+          {privacyError && (
+            <div role="alert">
+              <p>{privacyError}</p>
+              <p>{t("contactsUi.privacyUnavailable")}</p>
+            </div>
+          )}
+          {(!friendId || savedPrivacy || receipt?.action === "privacy") && (
+            <PrivacyFields
+              value={privacy}
+              disabled={
+                locked ||
+                permissionDenied ||
+                (!!friendId &&
+                  (!savedPrivacy || privacyLoading || !!privacyError))
+              }
+              change={(value) => {
+                if (editableReceipt) {
+                  connection.cache.writeState(account, receiptId, null);
+                  setReceipt(undefined);
+                }
+                setPrivacy(value);
+              }}
+            />
+          )}
+          {friendId && (
+            <button
+              className="omni-action"
+              disabled={busy || privacyLoading || (!!receipt && !ended)}
+              onClick={() => setPrivacyRevision((n) => n + 1)}
+            >
+              {t("contactsUi.refreshPrivacy")}
+            </button>
+          )}
+        </section>
+      )}
+      {request?.direction === "outgoing" && !friendId && (
+        <p>{t("contactsUi.sentExplanation")}</p>
+      )}
+      {request && !receipt && (
+        <p className="contact-delete-note">
+          {t("contactsUi.deleteExplanation")}
+        </p>
+      )}
+      {receipt && (
+        <p role="status" className="contact-change-status">
+          {statusText}
+        </p>
+      )}
       {error && <p role="alert">{error}</p>}
       <div className="contact-request-actions">
         {request && !receipt && (
-          <button onClick={() => void change("delete")}>{t("contactsUi.deleteLocal")}</button>
+          <button
+            className="contact-delete-action"
+            disabled={busy}
+            onClick={() => void change("delete")}
+          >
+            {t("contactsUi.deleteLocal")}
+          </button>
         )}
         <button onClick={close}>{t("contactsUi.close")}</button>
+        {friendId && open && (
+          <button
+            onClick={() => {
+              close();
+              open(friendId);
+            }}
+          >
+            <Icon name="chat" />
+            {t("contactsUi.message")}
+          </button>
+        )}
         {receipt && retryOriginal && (
           <button disabled={busy} onClick={() => void submit(receipt)}>
             {t("contactsUi.retryOriginal")}
           </button>
         )}
-        {receipt && (
+        {receipt && !privacySucceeded && (
           <button disabled={busy} onClick={() => void check()}>
             {t("contactsUi.checkStatus")}
           </button>
         )}
-        {!receipt && (removal || discovery?.recipientRef || request?.actionable) && (
+        {friendId && (
           <button
-            disabled={busy || (!!discovery && !greeting.trim())}
-            onClick={() => void change(removal ? "remove" : discovery ? "send" : "accept")}
+            className="contact-primary-action"
+            disabled={
+              locked ||
+              permissionDenied ||
+              !savedPrivacy ||
+              privacyLoading ||
+              !!privacyError ||
+              sameContactPrivacy(privacy, savedPrivacy.privacy)
+            }
+            onClick={() => void change("privacy")}
           >
-            {removal
-              ? t("contactsUi.removeContact")
-              : discovery
-              ? t("contactsUi.sendRequest")
-              : t("contactsUi.accept")}
+            {t("contactsUi.savePrivacy")}
           </button>
         )}
+        {!receipt &&
+          (removal || discovery?.recipientRef || request?.actionable) && (
+            <button
+              className="contact-primary-action"
+              disabled={
+                busy ||
+                (!removal && permissionDenied) ||
+                (!!discovery && !greeting.trim())
+              }
+              onClick={() =>
+                void change(removal ? "remove" : discovery ? "send" : "accept")
+              }
+            >
+              {removal
+                ? t("contactsUi.removeContact")
+                : discovery
+                  ? t("contactsUi.sendRequest")
+                  : t("contactsUi.accept")}
+            </button>
+          )}
       </div>
+      {friendId &&
+        remove &&
+        savedPrivacy &&
+        !privacyLoading &&
+        !privacyError &&
+        !permissionDenied && (
+          <div className="contact-detail-danger">
+            <button
+              className="omni-action"
+              disabled={locked}
+              onClick={() => remove({ id: friendId, displayName: name })}
+            >
+              {t("contactsUi.removeContact")}
+            </button>
+          </div>
+        )}
     </dialog>
   );
 }
 
-/** Contact removal lives with conversation details and preserves saved chat history. */
-export function RemoveContact({
+/** Conversation details opens the same card and uses its membership/permission checks. */
+export function ContactDetails({
   connection,
   account,
   id,
@@ -673,18 +1069,24 @@ export function RemoveContact({
   id: string;
   name: string;
 }) {
-  const [show, setShow] = useState(false);
+  const [selection, setSelection] = useState<RequestSelection | null>(null);
   return (
     <div className="detail-section">
-      <button className="omni-action" onClick={() => setShow(true)}>
-        {t("contactsUi.removeContact")}
+      <button
+        className="omni-action"
+        onClick={() => setSelection({ contact: { id, displayName: name } })}
+      >
+        {t("contactsUi.details")}
       </button>
-      {show && (
-        <ContactRequestDialog
+      {selection && (
+        <ContactDetailDialog
+          key={contactSelectionKey(selection)}
           connection={connection}
           account={account}
-          selection={{ removeContact: { id, displayName: name } }}
-          close={() => setShow(false)}
+          selection={selection}
+          close={() => setSelection(null)}
+          open={() => setSelection(null)}
+          remove={(contact) => setSelection({ removeContact: contact })}
           changed={() => {
             void connection.session.refresh().catch(() => {});
           }}

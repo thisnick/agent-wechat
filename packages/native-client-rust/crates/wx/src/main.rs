@@ -391,6 +391,21 @@ enum ContactCommand {
         #[command(subcommand)]
         command: ContactRequestCommand,
     },
+    /// Change supplied contact privacy settings; keep omitted settings.
+    #[command(group(clap::ArgGroup::new("privacy_settings").args(["chats_only", "hide_my_posts", "hide_their_posts"]).required(true).multiple(true)))]
+    Set {
+        /// Exact existing contact ID.
+        id: String,
+        #[command(flatten)]
+        privacy: ContactPrivacyOptions,
+        #[command(flatten)]
+        options: MutationOptions,
+    },
+    /// Read an existing contact's relationship privacy.
+    Privacy {
+        #[command(subcommand)]
+        command: ContactPrivacyCommand,
+    },
     /// Remove this account's contact relationship while preserving chat history.
     Remove {
         /// Exact existing ordinary contact ID.
@@ -406,6 +421,28 @@ enum ContactCommand {
         /// One or two distinct contact IDs to look up live on WeChat.
         #[arg(required = true, num_args = 1..=2)]
         ids: Vec<String>,
+    },
+}
+
+#[derive(Args, Clone, Copy, Default)]
+struct ContactPrivacyOptions {
+    /// Whether to restrict this relationship to chats (true or false).
+    #[arg(long, action = clap::ArgAction::Set)]
+    chats_only: Option<bool>,
+    /// Whether to hide your posts from this contact (true or false).
+    #[arg(long, action = clap::ArgAction::Set)]
+    hide_my_posts: Option<bool>,
+    /// Whether to hide this contact's posts (true or false).
+    #[arg(long, action = clap::ArgAction::Set)]
+    hide_their_posts: Option<bool>,
+}
+
+#[derive(Subcommand)]
+enum ContactPrivacyCommand {
+    /// Read the contact's saved relationship privacy and current version.
+    Get {
+        /// Exact existing contact ID.
+        id: String,
     },
 }
 
@@ -435,6 +472,7 @@ enum ContactRequestCommand {
         id: String,
     },
     /// Send one friend request using an opaque result from contacts search.
+    /// When any privacy flag is supplied, omitted privacy flags default to false.
     Send {
         /// Exact recipientRef from discovery on this account.
         recipient_ref: String,
@@ -442,15 +480,20 @@ enum ContactRequestCommand {
         #[arg(long)]
         message: String,
         #[command(flatten)]
+        privacy: ContactPrivacyOptions,
+        #[command(flatten)]
         options: MutationOptions,
     },
     /// Accept the exact inspected version of an incoming request.
+    /// When any privacy flag is supplied, omitted privacy flags default to false.
     Accept {
         /// Request ID from list/get.
         id: String,
         /// Current version returned by list/get.
         #[arg(long)]
         expected_version: String,
+        #[command(flatten)]
+        privacy: ContactPrivacyOptions,
         #[command(flatten)]
         options: MutationOptions,
     },
@@ -1852,6 +1895,19 @@ async fn run(cli: Cli) -> Result<()> {
             command: Some(ContactCommand::Requests { command }),
             ..
         } => contact_requests_cli::requests(&r, &settings, command).await?,
+        Command::Contacts {
+            command: Some(ContactCommand::Privacy { command }),
+            ..
+        } => contact_requests_cli::privacy(&r, &settings, command).await?,
+        Command::Contacts {
+            command:
+                Some(ContactCommand::Set {
+                    id,
+                    privacy,
+                    options,
+                }),
+            ..
+        } => contact_requests_cli::set_contact(&r, &settings, id, privacy, options).await?,
         Command::Contacts {
             command: Some(ContactCommand::Remove { id, options }),
             ..
