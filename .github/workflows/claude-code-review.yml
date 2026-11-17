@@ -20,6 +20,12 @@ name: Claude Code Review
 # has write access. Skim a fork's pull request before labelling it: Claude
 # treats its text as material to review, but it is still outside text.
 #
+# Token: Anthropic's token exchange for the Claude GitHub App rejects runs
+# started by pull_request_target (anthropics/claude-code-action#713), so the
+# action uses this job's GITHUB_TOKEN instead. It expires when the job ends and
+# can do only what the permissions below allow; comments and inline findings
+# come from github-actions[bot] rather than claude[bot].
+#
 # Transcripts: each run uploads Claude's full transcript as an artifact,
 # encrypted to .github/claude-review/transcripts.pem, because anyone signed in
 # to GitHub can download a public repository's artifacts. The private key is
@@ -48,8 +54,7 @@ jobs:
     permissions:
       contents: read
       issues: read
-      pull-requests: write # the last step posts the summary and removes the label
-      id-token: write # the action exchanges it for the Claude GitHub App's token
+      pull-requests: write # inline findings, the summary comment and removing the label
     env:
       PR_NUMBER: ${{ github.event.pull_request.number }}
     steps:
@@ -84,6 +89,7 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
           prompt: |
             Review pull request #${{ env.PR_NUMBER }} in ${{ github.repository }} by following .github/claude-review/instructions.md.
             Head commit: ${{ env.HEAD_SHA }}
