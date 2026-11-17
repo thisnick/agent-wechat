@@ -202,6 +202,40 @@ wx contacts refresh | - | Refresh one entry from WeChat
 wx contacts refresh --detach | switch | Return as soon as the work is queued instead of waiting for it
 wx contacts refresh --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
 wx contacts refresh <ID> | position 1, required | ID of the contact or group, from the matching list command
+wx contacts remove | - | Remove this account's contact relationship while preserving chat history
+wx contacts remove --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx contacts remove --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse this key when retrying so the daemon applies the request only once
+wx contacts remove --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx contacts remove <ID> | position 1, required | Exact existing ordinary contact ID
+wx contacts requests | - | Inspect, send, accept or locally delete friend-request conversations
+wx contacts requests accept | - | Accept the exact inspected version of an incoming request
+wx contacts requests accept --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx contacts requests accept --expected-version | required, takes <EXPECTED_VERSION> | Current version returned by list/get
+wx contacts requests accept --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse this key when retrying so the daemon applies the request only once
+wx contacts requests accept --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx contacts requests accept <ID> | position 1, required | Request ID from list/get
+wx contacts requests delete | - | Delete local request conversation/history. Does not reject or cancel on WeChat
+wx contacts requests delete --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx contacts requests delete --expected-version | required, takes <EXPECTED_VERSION> | Current version returned by list/get
+wx contacts requests delete --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse this key when retrying so the daemon applies the request only once
+wx contacts requests delete --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx contacts requests delete <ID> | position 1, required | Request ID from list/get
+wx contacts requests get | - | Inspect one request, its verification history and current version
+wx contacts requests get <ID> | position 1, required | Exact request ID from list
+wx contacts requests list | - | List saved request conversations in both directions; history is not server pending proof
+wx contacts requests list --actionable | switch | Show only current incoming acceptance candidates
+wx contacts requests list --cursor | takes <CURSOR> | Exact nextCursor from the same query
+wx contacts requests list --direction | takes <DIRECTION>, values incoming|outgoing | Filter by incoming or outgoing direction
+wx contacts requests list --limit | takes <LIMIT> | Maximum number of rows on this page, from 1 to 200
+wx contacts requests list --search | takes <SEARCH> | Match saved names, peer identities and verification text
+wx contacts requests send | - | Send one friend request using an opaque result from contacts search
+wx contacts requests send --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx contacts requests send --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse this key when retrying so the daemon applies the request only once
+wx contacts requests send --message | required, takes <MESSAGE> | Owner-supplied verification greeting
+wx contacts requests send --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx contacts requests send <RECIPIENT_REF> | position 1, required | Exact recipientRef from discovery on this account
+wx contacts search | - | Discover a person on WeChat by WeChat ID. Phone lookup is unverified
+wx contacts search <QUERY> | position 1, required | Discovery query, distinct from local contacts find
 wx contacts sync | - | Refresh the catalog from WeChat
 wx contacts sync --detach | switch | Return as soon as the work is queued instead of waiting for it
 wx contacts sync --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends

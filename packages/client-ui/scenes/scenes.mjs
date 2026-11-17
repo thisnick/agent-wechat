@@ -89,6 +89,16 @@ const qr = (page) => [page.locator("img.login-qr")];
 /** The hub address includes the port the scenes server happened to get. */
 const hubAddress = (page) => [page.locator("#hub-address")];
 
+// Synthetic request conversations for visual review; never contact the live service.
+const requestSceneRows = [
+  { id: "fr_scene_casey", peerId: "sim_casey", displayName: "Casey Morgan", direction: "incoming", message: "Hello, we met at the book club.", updatedAt: 1700000800, version: "scene-incoming-v1", isContact: false, actionable: true, attention: true, state: "request_received", history: [{ serverId: "123", message: "Hello, we met at the book club.", createdAt: 1700000800, direction: "incoming" }] },
+  { id: "fr_scene_jordan", peerId: "sim_jordan", displayName: "Jordan Lee", direction: "outgoing", message: "Let's keep in touch.", updatedAt: 1700000700, version: "scene-outgoing-v1", isContact: false, actionable: false, attention: false, state: "request_sent", history: [{ serverId: "0", message: "Let's keep in touch.", createdAt: 1700000700, direction: "outgoing" }] },
+];
+async function prepareContactScenes({ page }) {
+  await page.route("**/v1/accounts/*/contact-requests*", route => route.request().method() === "GET" ? route.fulfill({ json: { items: requestSceneRows, nextCursor: null, pendingIncomingCount: 1, sourceGeneration: "scene", coverage: {}, asOfEventCursor: "0" } }) : route.continue());
+  await page.route("**/v1/accounts/*/search/contacts", route => route.fulfill({ json: { displayName: "avery.example", recipientRef: "scene-only-reference", expiresAt: 1700001400, source: "wechat", request: null, contactId: null } }));
+}
+
 export const scenes = [
   {
     name: "login-qr",
@@ -494,6 +504,88 @@ export const scenes = [
     },
     // The conversation ID of a group is random.
     mask: (page) => [page.locator(".peer-id")],
+  },
+  ...["friend-requests", "friend-request-review", "omni-search", "omni-message-search", "add-contact"].map(name => ({
+    name,
+    route: name.startsWith("friend-request") ? "friend-requests" : "contacts",
+    description: ({ "friend-requests": "Incoming and sent request history with an actionable Contacts badge.", "friend-request-review": "A separate request review dialog with acceptance and local-history deletion.", "omni-search": "One search surface for saved contacts, groups, messages and request history.", "omni-message-search": "Saved message search names its conversation and opens the matched message.", "add-contact": "A separate greeting dialog opened from server discovery in Contacts search." })[name],
+    viewports: name === "omni-message-search" ? ["desktop", "compact"] : ["desktop", "narrow", "compact"],
+    setup: standardWorld,
+    prepare: prepareContactScenes,
+    target: () => ({ account: ACCOUNT.id }),
+    ready: async ({ page, expect }) => {
+      if (name.startsWith("friend-request")) await expect(page.getByText("Casey Morgan", { exact: true })).toBeVisible();
+      else await expect(row(page, "Mei Chen")).toBeVisible();
+    },
+    actions: async ({ page, expect }) => {
+      if (name === "friend-request-review") {
+        await page.getByRole("button", { name: "Review request", exact: true }).click();
+        await expect(page.getByRole("dialog", { name: "Review request" })).toBeVisible();
+      } else if (name === "omni-search" || name === "omni-message-search" || name === "add-contact") {
+        await page.locator(".search-trigger").focus();
+        const search = page.getByRole("dialog", { name: "Search everything" });
+        await expect(search).toBeVisible();
+        if (name === "omni-message-search") {
+          await search.getByRole("button", { name: "Messages", exact: true }).click();
+          await search.getByRole("combobox").fill("station");
+          const match = search.locator("[cmdk-item]").filter({ hasText: "I booked the place near the station" });
+          await expect(match).toContainText("Mei Chen");
+        }
+        if (name === "add-contact") {
+          await search.getByRole("button", { name: "Contacts", exact: true }).click();
+          await search.getByRole("combobox").fill("avery.example");
+          await search.locator("[cmdk-item]").filter({ hasText: "Add contact" }).click();
+          const add = page.getByRole("dialog", { name: "Add contact" });
+          await expect(add).toBeVisible();
+          await add.getByRole("textbox", { name: "Friend request message" }).fill("Hello, we met at the book club.");
+        }
+      }
+    },
+  })),
+  {
+    name: "contact-request-retry",
+    route: "contacts",
+    description: "A lost submission response keeps the original key and greeting until an inspected retry completes.",
+    viewports: ["desktop"],
+    setup: standardWorld,
+    target: () => ({ account: ACCOUNT.id }),
+    prepare: async ({ page }) => {
+      await prepareContactScenes({ page });
+      const attempts = [];
+      let sent = false;
+      const sentRow = { id: "fr_scene_sent", peerId: "opaque_alias@stranger", displayName: "opaque_alias@stranger", direction: "outgoing", message: "Hello, we met at the book club.", updatedAt: 1700000800, version: "scene-sent-v1", isContact: false, actionable: false, attention: false, state: "request_sent", history: [{ serverId: "0", message: "Hello, we met at the book club.", createdAt: 1700000800, direction: "outgoing" }] };
+      await page.route("**/v1/accounts/*/search/contacts", route => route.fulfill({ json: { displayName: "avery.example", recipientRef: "scene-only-reference", expiresAt: 1700001400, source: "wechat", request: sent ? sentRow : null, contactId: null } }));
+      await page.route("**/v1/accounts/*/contact-mutations/by-idempotency-key?*", route => route.fulfill({ status: 404, json: { error: { code: "not_found" } } }));
+      await page.route("**/v1/accounts/*/contact-requests", async route => {
+        if (route.request().method() !== "POST") return route.fulfill({ json: { items: [...requestSceneRows, ...(sent ? [sentRow] : [])], nextCursor: null, pendingIncomingCount: 1, sourceGeneration: "scene", coverage: {}, asOfEventCursor: "0" } });
+        attempts.push({ key: route.request().headers()["idempotency-key"], body: route.request().postData() });
+        if (attempts.length === 1) return route.abort("failed");
+        if (attempts.length !== 2 || JSON.stringify(attempts[0]) !== JSON.stringify(attempts[1])) throw Error("Request retry changed its original intent");
+        sent = true;
+        return route.fulfill({ status: 202, json: { id: "scene-send", accountId: ACCOUNT.id, kind: "contact_mutation", state: "succeeded", result: { action: "send_request", remoteOutcome: "accepted", profileProjection: "complete" }, createdAt: FIXED_TIME, updatedAt: FIXED_TIME } });
+      });
+    },
+    ready: async ({ page, expect }) => { await expect(row(page, "Mei Chen")).toBeVisible(); },
+    actions: async ({ page, expect }) => {
+      await page.locator(".search-trigger").focus();
+      await page.getByRole("combobox").fill("avery.example");
+      await page.locator("[cmdk-item]").filter({ hasText: "Add contact" }).click();
+      const dialog = page.getByRole("dialog", { name: "Add contact" });
+      await dialog.getByRole("textbox", { name: "Friend request message" }).fill("Hello, we met at the book club.");
+      await dialog.getByRole("button", { name: "Send request", exact: true }).click();
+      await expect(dialog.getByRole("alert")).toBeVisible();
+      await expect(dialog.getByRole("button", { name: "Send request", exact: true })).toHaveCount(0);
+      await dialog.getByRole("button", { name: "Check status", exact: true }).click();
+      await dialog.getByRole("button", { name: "Retry original request", exact: true }).click();
+      await expect(dialog.getByText("Request sent", { exact: true })).toBeVisible();
+      await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
+      await expect(page.getByRole("combobox")).toHaveValue("avery.example");
+      const sentResult = page.locator("[cmdk-item]").filter({ hasText: "Request sent" });
+      await expect(sentResult).toContainText("View");
+      await expect(page.locator("[cmdk-item]").filter({ hasText: "Add contact" })).toHaveCount(0);
+      await sentResult.click();
+      await expect(page.getByRole("dialog", { name: "Request sent" })).toBeVisible();
+    },
   },
   {
     name: "contacts",

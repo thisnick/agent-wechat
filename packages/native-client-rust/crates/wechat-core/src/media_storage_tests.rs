@@ -166,7 +166,7 @@ fn downgrade_to_embedded_payloads(dir: &tempfile::TempDir) {
         let _ = cleared;
     }
     db.execute_batch(
-        "UPDATE media_assets SET profile_key=NULL;ALTER TABLE media_assets DROP COLUMN payload_file;ALTER TABLE media_assets DROP COLUMN profile_key;ALTER TABLE media_sources DROP COLUMN payload_file;PRAGMA user_version=12;",
+        "UPDATE media_assets SET profile_key=NULL;ALTER TABLE media_assets DROP COLUMN payload_file;ALTER TABLE media_assets DROP COLUMN profile_key;ALTER TABLE media_sources DROP COLUMN payload_file;DROP TABLE contact_mutations;PRAGMA user_version=12;",
     )
     .unwrap();
 }
@@ -370,7 +370,7 @@ fn earlier_database_payloads_load_unchanged_then_move_to_files_or_the_profile() 
     let version: i64 = control(&dir)
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 13);
+    assert_eq!(version, 14);
     let check = |core: &Core| {
         for (asset, bytes) in &cached {
             assert_eq!(&core.media_content("one", &asset.id).unwrap().bytes, bytes);

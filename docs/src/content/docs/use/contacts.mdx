@@ -1,0 +1,86 @@
+---
+title: Contacts and friend requests
+description: Find people, send and accept friend requests, and manage saved contacts.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Use the same account for discovery and the resulting friend request. Discovery returns a short-lived `recipientRef`; keep tickets and request history private.
+
+## Find and add someone
+
+1. Search your saved contacts or discover someone by WeChat ID:
+
+   ```bash
+   wx contacts find Alice
+   wx --json contacts search WECHAT_ID
+   ```
+
+   Server discovery returns `recipientRef`, `displayName` and `expiresAt`. The displayed name is your query. A match does not establish friendship.
+
+2. Send a greeting using the returned reference:
+
+   ```bash
+   wx --json contacts requests send RECIPIENT_REF \
+     --message "Hello, it's Alice" --idempotency-key add-alice-1
+   ```
+
+   The command returns an operation with `kind: "contact_mutation"`. Retain the operation ID and key if the response is lost. Reuse that key to follow the original attempt.
+
+3. List incoming and outgoing history:
+
+   ```bash
+   wx contacts requests list
+   wx contacts requests list --direction incoming --actionable
+   wx --json contacts requests get REQUEST_ID
+   ```
+
+## Accept or remove
+
+Accept the version you just inspected:
+
+```bash
+wx contacts requests accept REQUEST_ID --expected-version VERSION \
+  --idempotency-key accept-alice-1
+```
+
+A changed row returns `stale_contact_request`; read it again before deciding. An accepted server response and a confirmed saved contact are separate states. The contact sync stream confirms membership.
+
+Delete a request's entire local conversation, or remove an existing contact:
+
+```bash
+wx contacts requests delete REQUEST_ID --expected-version VERSION \
+  --idempotency-key delete-alice-history-1
+wx contacts remove CONTACT_ID --idempotency-key remove-alice-1
+```
+
+Deleting local history does not withdraw a sent request or notify the other person of rejection. Removing a contact preserves your chat history; the other person manages their own list.
+
+## In the app
+
+Focus the sidebar search field or press Command/Ctrl+K to search contacts, groups and messages. Contacts includes saved people, request history and debounced WeChat discovery. Choose Add or Review to open a separate dialog. Contacts + opens search with Contacts selected.
+
+Friend requests appears in the Contacts sidebar. The Contacts icon also shows the number of incoming requests needing review while Chats is open. A saved contact or group opens its conversation with Message.
+
+## HTTP and Rust
+
+All paths below are relative to `/v1/accounts/ACCOUNT_ID/`:
+
+| Method and path | Purpose |
+| --- | --- |
+| `POST search/contacts` | Discover with `{ "query": "WECHAT_ID" }` |
+| `GET contact-requests` | Page incoming and outgoing history; supports `direction`, `actionable`, `search`, `limit`, `cursor` |
+| `GET contact-requests/ID` | Inspect history and its current `version` |
+| `POST contact-requests` | Send with `recipientRef` and `message` |
+| `POST contact-requests/ID/accept` | Accept with `expectedVersion` |
+| `DELETE contact-requests/ID` | Delete local history with `expectedVersion` |
+| `DELETE contacts/ID` | Remove the saved contact |
+| `GET contact-mutations/by-idempotency-key?key=KEY` | Recover the original operation |
+
+Reads require `read`; mutations and operation-by-key recovery require `admin`. Every mutation requires `Idempotency-Key`. Follow the returned ID through `GET operations/ID`. An uncertain operation stops at `needs_review`; recovery never resends automatically.
+
+The protocol crate exposes typed discovery, send, accept and removal operations. The profile crate reads official-format request history and applies staged, version-checked changes. The daemon coordinates credentials, idempotency and sync; applications should use its API when it owns the profile.
+
+<Aside title="Good to know">
+WeChat-ID discovery is verified. The official client advertises phone lookup, but phone formatting and privacy-dependent results have not been verified here. Email and broad nickname directory searches are unsupported. Request sent means a successful send was recorded; it does not prove a request remains pending on the server. Accepting a contact does not grant OpenClaw access.
+</Aside>

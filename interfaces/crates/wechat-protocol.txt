@@ -51,6 +51,7 @@ enum wechat_protocol::media::MediaQuality | enum | MISSING DOC
 enum wechat_protocol::media_send::SendStatus | enum | MISSING DOC
 enum wechat_protocol::protobuf::Value | enum | MISSING DOC
 enum wechat_protocol::sticker_packs::StickerPackFeed | enum | Feed selected by the supported Linux pack-list producer.
+field wechat_protocol::AcceptContactRequest::target | wechat_protocol::client::contact_requests::ContactRequestTarget | Exact resolved verification target and private ticket.
 field wechat_protocol::AccountIdentity::own_username | alloc::string::String | MISSING DOC
 field wechat_protocol::AccountIdentity::uin | u32 | MISSING DOC
 field wechat_protocol::AccountState::auth_snapshot | wechat_protocol::client::AuthSnapshot | MISSING DOC
@@ -115,9 +116,27 @@ field wechat_protocol::ContactRecord::raw | alloc::vec::Vec<u8> | MISSING DOC
 field wechat_protocol::ContactRecord::remark | core::option::Option<alloc::string::String> | MISSING DOC
 field wechat_protocol::ContactRecord::small_avatar_url | core::option::Option<alloc::string::String> | MISSING DOC
 field wechat_protocol::ContactRecord::username | alloc::string::String | MISSING DOC
+field wechat_protocol::ContactRequestReply::service_code | i32 | Authenticated service response code.
+field wechat_protocol::ContactRequestTarget::scene | u32 | Verification source value accompanying the target.
+field wechat_protocol::ContactRequestTarget::ticket | alloc::string::String | Private verification ticket; never expose in public responses.
+field wechat_protocol::ContactRequestTarget::username | alloc::string::String | Exact canonical per-peer identity.
+field wechat_protocol::ContactRpc::body | alloc::vec::Vec<u8> | Serialized request bytes containing private account material.
+field wechat_protocol::ContactRpc::cgi | u16 | Supported contact service command number.
+field wechat_protocol::ContactRpc::path | alloc::string::String | Exact supported service request path.
+field wechat_protocol::ContactSearchResult::query | alloc::string::String | Original discovery query.
+field wechat_protocol::ContactSearchResult::target | wechat_protocol::client::contact_requests::ContactRequestTarget | Exact resolved verification target and private ticket.
 field wechat_protocol::DeviceProfile::client_version | i32 | MISSING DOC
 field wechat_protocol::DeviceProfile::device_id | alloc::vec::Vec<u8> | MISSING DOC
 field wechat_protocol::DeviceProfile::device_type | alloc::string::String | MISSING DOC
+field wechat_protocol::FriendMessage::content | alloc::string::String | Verification greeting retained in this history entry.
+field wechat_protocol::FriendMessage::encrypted_username | alloc::string::String | Stored discovery alias, preserved independently of the row identity.
+field wechat_protocol::FriendMessage::message_type | i32 | Verification message type from the supported sync envelope.
+field wechat_protocol::FriendMessage::operation | u32 | Verification operation value from the message.
+field wechat_protocol::FriendMessage::row_username | alloc::string::String | Per-peer profile row identity selected from the sync envelope.
+field wechat_protocol::FriendMessage::sender | bool | Whether this account sent the verification message.
+field wechat_protocol::FriendMessage::server_id | alloc::string::String | Decimal server message ID; locally sent entries use zero.
+field wechat_protocol::FriendMessage::target | wechat_protocol::client::contact_requests::ContactRequestTarget | Exact resolved verification target and private ticket.
+field wechat_protocol::FriendMessage::timestamp | u32 | Unix timestamp in seconds.
 field wechat_protocol::GroupDetail::announcement | alloc::string::String | MISSING DOC
 field wechat_protocol::GroupDetail::editor | alloc::string::String | MISSING DOC
 field wechat_protocol::GroupDetail::group_id | alloc::string::String | MISSING DOC
@@ -217,6 +236,8 @@ field wechat_protocol::RoomRoster::members | alloc::vec::Vec<wechat_protocol::wi
 field wechat_protocol::RoomRoster::owner | core::option::Option<alloc::string::String> | MISSING DOC
 field wechat_protocol::RoomRoster::room_id | alloc::string::String | MISSING DOC
 field wechat_protocol::RoomRoster::version | u32 | MISSING DOC
+field wechat_protocol::SendContactRequest::message | alloc::string::String | Verification greeting or history entry for this operation.
+field wechat_protocol::SendContactRequest::target | wechat_protocol::client::contact_requests::ContactRequestTarget | Exact resolved verification target and private ticket.
 field wechat_protocol::ServiceRejected::code | i32 | Signed code returned by that boundary.
 field wechat_protocol::ServiceRejected::service | wechat_protocol::errors::Service | Response boundary that reported the code.
 field wechat_protocol::SessionReadNotification::client_message_id | alloc::string::String | A stable request identity retained with the durable frozen boundary.
@@ -734,6 +755,7 @@ fn wechat_protocol::AccountPushConnection::heartbeat | fn(&mut self, cursor: &[u
 fn wechat_protocol::AccountPushConnection::poll | fn(&mut self, timeout: core::time::Duration) -> anyhow::Result<core::option::Option<wechat_protocol::push::Notification>> | Poll without an account lock. One-second slices observe account shutdown during long waits. A notification is returned only while its socket's credential generation remains current.
 fn wechat_protocol::AccountPushConnection::send_sticker_chunk_raw | fn(&mut self, chunk: &wechat_protocol::sticker_send::StickerSendChunk<'_>) -> anyhow::Result<alloc::vec::Vec<u8>> | Submit one journaled sticker probe or byte continuation on this long link. Same contract as `AccountRequest::send_sticker_chunk_raw`: return raw bytes for durable retention before validating the acknowledgement. A transport error after submission leaves the outcome uncertain.
 fn wechat_protocol::AccountPushConnection::sync | fn(&mut self, cursor: &[u8], scene: u32) -> anyhow::Result<wechat_protocol::wire::SyncBatch> | MISSING DOC
+fn wechat_protocol::AccountRequest::accept_contact_request | fn(&mut self, input: &wechat_protocol::client::contact_requests::AcceptContactRequest) -> anyhow::Result<wechat_protocol::client::contact_requests::ContactRequestReply> | Accept the supplied incoming request once, without profile writeback.
 fn wechat_protocol::AccountRequest::account | fn(&self) -> &wechat_protocol::client::AccountState | Read-only request context for protocol preparation and journal binding. These secret bytes are not an independent account owner or a handoff.
 fn wechat_protocol::AccountRequest::call_live_sync | fn(&mut self, request: &[u8], wait_timeout: core::time::Duration, before_submit: impl core::ops::function::FnOnce() -> anyhow::Result<()>, wait: impl for<'a> core::ops::function::FnOnce(core::pin::Pin<alloc::boxed::Box<dyn core::future::future::Future<Output = anyhow::Result<alloc::vec::Vec<u8>>> + core::marker::Send + 'a>>) -> anyhow::Result<alloc::vec::Vec<u8>>, retain_reply: impl core::ops::function::FnOnce(&[u8]) -> anyhow::Result<()>) -> anyhow::Result<alloc::vec::Vec<u8>> | Read-only call polling on an existing blocking worker. The caller owns the async wait/cancellation mechanism; this context retains the account lease until that transport future is dropped or completes.
 fn wechat_protocol::AccountRequest::call_rpc | fn(&mut self, route: wechat_protocol::calls::host_policy::CallHostRoute, request: &[u8], before_submit: impl core::ops::function::FnOnce() -> anyhow::Result<()>, retain_reply: impl core::ops::function::FnOnce(&[u8]) -> anyhow::Result<()>) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
@@ -741,6 +763,7 @@ fn wechat_protocol::AccountRequest::cdn_config | fn(&mut self) -> anyhow::Result
 fn wechat_protocol::AccountRequest::channels_media | fn(&mut self, post: &wechat_protocol::client::channels::ChannelsPost, ticket: &wechat_protocol::client::channels::ChannelsTicket, page: &wechat_protocol::client::channels::ChannelsPage) -> anyhow::Result<wechat_protocol::client::channels::ChannelsMedia> | Request a Channels post's detail and return its single video's fresh playback material. Submitted once.
 fn wechat_protocol::AccountRequest::channels_page | fn(&mut self, post: &wechat_protocol::client::channels::ChannelsPost) -> anyhow::Result<wechat_protocol::client::channels::ChannelsPage> | Request the authenticated page address for a Channels post. Submitted once.
 fn wechat_protocol::AccountRequest::channels_ticket | fn(&mut self) -> anyhow::Result<wechat_protocol::client::channels::ChannelsTicket> | Request a new H5 ticket for Channels post lookups. Submitted once, without renewal or retry.
+fn wechat_protocol::AccountRequest::contact_rpc_raw | fn(&mut self, request: &wechat_protocol::client::contact_requests::ContactRpc) -> anyhow::Result<alloc::vec::Vec<u8>> | Return protected authenticated contact reply bytes before interpretation.
 fn wechat_protocol::AccountRequest::contact_sync | fn(&mut self, cursor: &[u8], message_cursor: &[u8], continuation: bool) -> anyhow::Result<wechat_protocol::contact_sync::ContactSyncBatch> | MISSING DOC
 fn wechat_protocol::AccountRequest::custom_stickers_raw | fn(&mut self, request: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Return one custom-list or metadata reply for caller-owned receipt retention. The request must come from the bounded custom-sticker builders.
 fn wechat_protocol::AccountRequest::download_avatars | fn(&mut self, ids: &[alloc::string::String]) -> anyhow::Result<alloc::vec::Vec<wechat_protocol::wire::AvatarBytes>> | MISSING DOC
@@ -763,7 +786,10 @@ fn wechat_protocol::AccountRequest::lookup_room_receipt | fn(&mut self, room: &s
 fn wechat_protocol::AccountRequest::mutate_custom_sticker | fn(&mut self, id: &str, action: &wechat_protocol::custom_stickers::CustomStickerMutation) -> anyhow::Result<alloc::vec::Vec<u8>> | Submit one journaled Saved membership/placement intent, returning even a rejected service reply before decoding. A transport error is uncertain.
 fn wechat_protocol::AccountRequest::notify_read_session | fn(&mut self, request: &wechat_protocol::client::status_notify::SessionReadNotification) -> anyhow::Result<wechat_protocol::client::status_notify::SessionReadReply> | MISSING DOC
 fn wechat_protocol::AccountRequest::recall_message | fn(&mut self, request: &wechat_protocol::client::revoke::MessageRecall) -> anyhow::Result<wechat_protocol::client::revoke::MessageRecallReply> | MISSING DOC
+fn wechat_protocol::AccountRequest::remove_contact | fn(&mut self, username: &str) -> anyhow::Result<wechat_protocol::client::group_mutation::GroupMutationReply> | Remove this account's contact relationship once.
 fn wechat_protocol::AccountRequest::reserve_file_upload | fn(&mut self, destination: &str, client_id: &str, name: &str, length: usize, md5: &str) -> anyhow::Result<wechat_protocol::file_upload::FileUploadReservation> | MISSING DOC
+fn wechat_protocol::AccountRequest::search_contact | fn(&mut self, query: &str) -> anyhow::Result<wechat_protocol::client::contact_requests::ContactSearchResult> | Discover a contact by WeChat ID; does not establish friendship.
+fn wechat_protocol::AccountRequest::send_contact_request | fn(&mut self, input: &wechat_protocol::client::contact_requests::SendContactRequest) -> anyhow::Result<wechat_protocol::client::contact_requests::ContactRequestReply> | Submit a friend request once, without profile writeback.
 fn wechat_protocol::AccountRequest::send_file | fn(&mut self, destination: &str, client_id: &str, created_at: u32, upload: &wechat_protocol::media::UploadedMedia, reservation: core::option::Option<&wechat_protocol::file_upload::FileUploadReservation>) -> anyhow::Result<wechat_protocol::media_send::MediaSendResult> | MISSING DOC
 fn wechat_protocol::AccountRequest::send_image | fn(&mut self, destination: &str, client_id: &str, upload: &wechat_protocol::media::UploadedImage) -> anyhow::Result<wechat_protocol::media_send::MediaSendResult> | Submit the uploaded standard and thumbnail copies, including an original when present.
 fn wechat_protocol::AccountRequest::send_quote | fn(&mut self, destination: &str, client_id: &str, created_at: u32, content: &str, source: core::option::Option<&str>) -> anyhow::Result<wechat_protocol::media_send::MediaSendResult> | MISSING DOC
@@ -796,6 +822,7 @@ fn wechat_protocol::LoginAttempt::lan_login_state | fn(&self) -> core::option::O
 fn wechat_protocol::LoginAttempt::qr_svg | fn(&self) -> anyhow::Result<alloc::string::String> | MISSING DOC
 fn wechat_protocol::MessageRecall::for_source | fn(peer_username: alloc::string::String, server_id: alloc::string::String, local_id: u32, create_time: u32) -> Self | The native nonzero-local-ID formatter is peer_time_localId, with both numbers rendered as unsigned decimal. Keep it with the frozen target.
 fn wechat_protocol::MessageRecall::validate | fn(&self) -> anyhow::Result<()> | MISSING DOC
+fn wechat_protocol::NativeClient::accept_contact_request | async fn(&self, input: &wechat_protocol::client::contact_requests::AcceptContactRequest) -> anyhow::Result<wechat_protocol::client::contact_requests::ContactRequestReply> | Submit one acceptance with the exact received ticket.
 fn wechat_protocol::NativeClient::account_identity | fn(&self) -> anyhow::Result<wechat_protocol::client::account::AccountIdentity> | MISSING DOC
 fn wechat_protocol::NativeClient::account_lease | fn(&self) -> anyhow::Result<wechat_protocol::client::account::AccountLease> | MISSING DOC
 fn wechat_protocol::NativeClient::account_status | fn(&self) -> anyhow::Result<wechat_protocol::client::account::AccountStatus> | MISSING DOC
@@ -807,6 +834,7 @@ fn wechat_protocol::NativeClient::call_rpc_guarded | async fn<F>(&self, route: w
 fn wechat_protocol::NativeClient::call_rpc_observed | async fn<F, O>(&self, route: wechat_protocol::calls::host_policy::CallHostRoute, request: alloc::vec::Vec<u8>, before_submit: F, retain_reply: O) -> anyhow::Result<alloc::vec::Vec<u8>> where F: core::ops::function::FnOnce() -> anyhow::Result<()> + core::marker::Send + 'static, O: core::ops::function::Fn(&[u8]) -> anyhow::Result<()> + core::marker::Send + core::marker::Sync + 'static | Retain a verified call reply before adopting its cookie or returning it to the calling runtime. The callback must protect these account-specific bytes, must not log them, and must not reenter this client. Failure is an uncertain submitted operation, not permission to submit another request.
 fn wechat_protocol::NativeClient::cdn_config | async fn(&self) -> anyhow::Result<wechat_protocol::media::CdnConfig> | MISSING DOC
 fn wechat_protocol::NativeClient::complete_login | fn(&self, attempt: &mut wechat_protocol::client::LoginAttempt) -> anyhow::Result<wechat_protocol::client::AccountState> | Exchange an approved challenge for secret account credentials once. Keep the returned state in memory or an encrypted application vault.
+fn wechat_protocol::NativeClient::contact_rpc_raw | async fn(&self, request: &wechat_protocol::client::contact_requests::ContactRpc) -> anyhow::Result<alloc::vec::Vec<u8>> | Return authenticated contact reply bytes for protected caller-owned receipt storage.
 fn wechat_protocol::NativeClient::contact_sync | async fn(&self, cursor: &[u8], message_cursor: &[u8], continuation: bool) -> anyhow::Result<wechat_protocol::contact_sync::ContactSyncBatch> | MISSING DOC
 fn wechat_protocol::NativeClient::custom_sticker_metadata | async fn(&self, ids: &[alloc::string::String]) -> anyhow::Result<wechat_protocol::custom_stickers::CustomStickerPage> | Read transport metadata for known custom sticker identities.
 fn wechat_protocol::NativeClient::custom_sticker_page | async fn(&self, index: u32, data: &[u8]) -> anyhow::Result<wechat_protocol::custom_stickers::CustomStickerPage> | Read one custom-list page. The caller checks advancing cursors, retains the receipt and reconciles official-profile state after a complete list.
@@ -840,10 +868,13 @@ fn wechat_protocol::NativeClient::prepare_logout | fn(&self) -> anyhow::Result<w
 fn wechat_protocol::NativeClient::quiesce_and_export | async fn(&self) -> anyhow::Result<wechat_protocol::client::AccountState> | Stop and drain the client, then move its credentials out exactly once. All cloned handles remain stopped and cannot export the transferred state.
 fn wechat_protocol::NativeClient::recall_message | async fn(&self, request: &wechat_protocol::client::revoke::MessageRecall) -> anyhow::Result<wechat_protocol::client::revoke::MessageRecallReply> | MISSING DOC
 fn wechat_protocol::NativeClient::refresh_qr_login | fn(&self, attempt: &wechat_protocol::client::LoginAttempt) -> anyhow::Result<wechat_protocol::client::LoginAttempt> | Replace an expired, unscanned QR while preserving installation key-info.
+fn wechat_protocol::NativeClient::remove_contact | async fn(&self, username: &str) -> anyhow::Result<wechat_protocol::client::group_mutation::GroupMutationReply> | Remove this account's relationship, preserving remote and local chat history.
 fn wechat_protocol::NativeClient::renew_session | async fn(&self, computer_name: &str) -> anyhow::Result<()> | Explicitly renew this account once. Concurrent requests from the prior credential generation cannot submit or adopt responses after acceptance. There is no QR fallback and no retry after an uncertain auth outcome.
 fn wechat_protocol::NativeClient::renew_session_blocking | fn(&self, computer_name: &str) -> anyhow::Result<()> | Explicit authentication renewal on an existing blocking worker. This never retries the operation whose rejection prompted the caller to renew.
 fn wechat_protocol::NativeClient::request_blocking | fn<T>(&self, operation: impl core::ops::function::FnOnce(&mut wechat_protocol::client::account::request::AccountRequest<'_>) -> anyhow::Result<T>) -> anyhow::Result<T> | Execute one scoped account operation on the caller's blocking worker. Uses the same admission, generation, storage and handoff barriers as async operations. No executor or independent credential owner is constructed.
 fn wechat_protocol::NativeClient::reserve_file_upload | async fn(&self, destination: &str, progress_client_id: &str, file_name: &str, plaintext_bytes: usize, md5: &str) -> anyhow::Result<wechat_protocol::file_upload::FileUploadReservation> | MISSING DOC
+fn wechat_protocol::NativeClient::search_contact | async fn(&self, query: &str) -> anyhow::Result<wechat_protocol::client::contact_requests::ContactSearchResult> | Discover a contact without saving or requesting friendship.
+fn wechat_protocol::NativeClient::send_contact_request | async fn(&self, input: &wechat_protocol::client::contact_requests::SendContactRequest) -> anyhow::Result<wechat_protocol::client::contact_requests::ContactRequestReply> | Submit one request; the embedding application owns journals and profile writeback.
 fn wechat_protocol::NativeClient::send_file | async fn(&self, destination: &str, client_id: &str, created_at: u32, upload: &wechat_protocol::media::UploadedMedia, reservation: core::option::Option<&wechat_protocol::file_upload::FileUploadReservation>) -> anyhow::Result<wechat_protocol::media_send::MediaSendResult> | MISSING DOC
 fn wechat_protocol::NativeClient::send_image | async fn(&self, destination: &str, client_id: &str, upload: &wechat_protocol::media::UploadedImage) -> anyhow::Result<wechat_protocol::media_send::MediaSendResult> | Submit the uploaded standard and thumbnail copies, including an original when present.
 fn wechat_protocol::NativeClient::send_quote | async fn(&self, destination: &str, client_id: &str, created_at: u32, content: &str, source: core::option::Option<&str>) -> anyhow::Result<wechat_protocol::media_send::MediaSendResult> | MISSING DOC
@@ -880,6 +911,7 @@ fn wechat_protocol::StickerId::as_str | fn(&self) -> &str | Borrow the canonical
 fn wechat_protocol::StickerId::parse | fn(value: impl core::convert::AsRef<str>) -> anyhow::Result<Self> | Validate and normalize a 32-character hexadecimal content identity.
 fn wechat_protocol::StickerPackId::as_str | fn(&self) -> &str | Borrow the original product identity.
 fn wechat_protocol::StickerPackId::parse | fn(value: impl core::convert::AsRef<str>) -> anyhow::Result<Self> | Validate a nonempty bounded product identity without interpreting its spelling.
+fn wechat_protocol::accept_contact_request_rpc | fn(state: &wechat_protocol::client::AccountState, input: &wechat_protocol::client::contact_requests::AcceptContactRequest) -> anyhow::Result<wechat_protocol::client::contact_requests::ContactRpc> | Prepare operation 3 using the received ticket and empty verification text.
 fn wechat_protocol::business::AuthenticatedPacket::decode_verified_transport_reply | fn(&self, input: &[u8]) -> anyhow::Result<(alloc::vec::Vec<u8>, alloc::vec::Vec<u8>)> | Call only on the plaintext returned by the authenticated MMTLS transport.
 fn wechat_protocol::business::AuthenticatedPacket::prepare | fn(state: &wechat_protocol::client::AccountState, cgi: u16, plain: &[u8]) -> anyhow::Result<Self> | MISSING DOC
 fn wechat_protocol::business::Prelogin::decrypt_reply | fn(&self, reply: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
@@ -1002,6 +1034,7 @@ fn wechat_protocol::calls::voice_offer::VoiceOffer::internal_channel_identity | 
 fn wechat_protocol::calls::voice_offer::VoiceOffer::sdk_info | fn(&self) -> &[u8] | MISSING DOC
 fn wechat_protocol::contact_notification_request | fn(record: &wechat_protocol::wire::ContactRecord, muted: bool) -> anyhow::Result<wechat_protocol::client::group_mutation::GroupRpc> | Direct contact writes use the official full-contact oplog shape. Fetch a current record first; change only the mute bit and preserve all other bytes.
 fn wechat_protocol::contact_pinning_requests | fn(record: &wechat_protocol::wire::ContactRecord, pinned: bool) -> anyhow::Result<alloc::vec::Vec<wechat_protocol::client::group_mutation::GroupRpc>> | Ordinary Linux pin/unpin copies the complete contact, changes primary bit 0x800, and sends ModContact through oplog2. The secondary mask is a uint64. A folded group is removed from its message box in a preceding oplog74 step.
+fn wechat_protocol::contact_search_request | fn(state: &wechat_protocol::client::AccountState, query: &str) -> anyhow::Result<wechat_protocol::client::contact_requests::ContactRpc> | Build the supported direct discovery request with its authenticated base.
 fn wechat_protocol::contact_sync::decode | fn(input: &[u8]) -> anyhow::Result<wechat_protocol::contact_sync::ContactSyncBatch> | MISSING DOC
 fn wechat_protocol::contact_sync::request | fn(state: &wechat_protocol::client::AccountState, cursor: &[u8], message_cursor: &[u8], continuation: bool) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
 fn wechat_protocol::contact_sync::validate_cursor | fn(input: &[u8]) -> anyhow::Result<()> | SyncKeyBuffer: repeated field1 SyncKeyPair { key1:u32, value2:u64 }. Keep the supplied encoding intact, including unknown fields, for publication.
@@ -1027,6 +1060,9 @@ fn wechat_protocol::custom_stickers::custom_sticker_list_request | fn(index: u32
 fn wechat_protocol::custom_stickers::custom_sticker_metadata_request | fn(ids: &[alloc::string::String]) -> anyhow::Result<alloc::vec::Vec<u8>> | Encode a bounded metadata request for known collection identities.
 fn wechat_protocol::custom_stickers::custom_sticker_mutation_request | fn(id: &str, action: &wechat_protocol::custom_stickers::CustomStickerMutation) -> anyhow::Result<alloc::vec::Vec<u8>> | Encode one custom membership/placement operation, without a BaseRequest.
 fn wechat_protocol::custom_stickers::decode_custom_stickers | fn(raw: &[u8]) -> anyhow::Result<wechat_protocol::custom_stickers::CustomStickerPage> | Decode the shared list/metadata response without requiring generated fields that the service omits. Callers enforce advancing cursors and page limits.
+fn wechat_protocol::decode_contact_request | fn(reply: &[u8]) -> anyhow::Result<wechat_protocol::client::contact_requests::ContactRequestReply> | Decode one verification reply; rejection is a verified submission, never a retry hint.
+fn wechat_protocol::decode_contact_search | fn(reply: &[u8], query: &str) -> anyhow::Result<wechat_protocol::client::contact_requests::ContactSearchResult> | Decode only established discovery fields. A result is not proof of friendship.
+fn wechat_protocol::decode_friend_message | fn(message: &wechat_protocol::wire::AddMessage, own: &str) -> anyhow::Result<core::option::Option<wechat_protocol::client::contact_requests::FriendMessage>> | Decode supported ordinary verification records. Other message types return None. Malformed or unsupported verification XML returns an error so callers can retain the sync obligation instead of silently advancing its cursor.
 fn wechat_protocol::decode_group_detail | fn(raw: &[u8], group: &str) -> anyhow::Result<wechat_protocol::client::group_detail::GroupDetail> | MISSING DOC
 fn wechat_protocol::decode_group_inventory | fn(raw: &[u8]) -> anyhow::Result<wechat_protocol::client::group_inventory::GroupMetadataPage> | MISSING DOC
 fn wechat_protocol::decode_group_mutation | fn(rpc: &wechat_protocol::client::group_mutation::GroupRpc, raw: &[u8], requested: &[alloc::string::String]) -> anyhow::Result<wechat_protocol::client::group_mutation::GroupMutationReply> | MISSING DOC
@@ -1149,6 +1185,8 @@ fn wechat_protocol::quote_send::QuoteReference::validate | fn(&self) -> anyhow::
 fn wechat_protocol::quote_send::quote_send_request | fn(state: &wechat_protocol::client::AccountState, destination: &str, client_id: &str, created_at: u32, content: &str) -> anyhow::Result<alloc::vec::Vec<u8>> | Submit the persisted quote XML with the reply subtype in AppMsg.Type. Reference MsgSource inside the XML is separate from outgoing MsgSource.
 fn wechat_protocol::quote_send::quote_send_request_with_source | fn(state: &wechat_protocol::client::AccountState, destination: &str, client_id: &str, created_at: u32, content: &str, source: core::option::Option<&str>) -> anyhow::Result<alloc::vec::Vec<u8>> | Outgoing source belongs to this reply; embedded reference source stays in XML.
 fn wechat_protocol::quote_send::quote_xml | fn(sender: &str, text: &str, reference: &wechat_protocol::quote_send::QuoteReference) -> anyhow::Result<alloc::string::String> | Build an appmsg fragment, followed by fromusername, as required by the app-message carrier. Embedded source XML remains text inside content.
+fn wechat_protocol::remove_contact_request | fn(username: &str) -> anyhow::Result<wechat_protocol::client::contact_requests::ContactRpc> | Prepare account-scoped contact removal; preserves the other account's relationship.
+fn wechat_protocol::send_contact_request_rpc | fn(state: &wechat_protocol::client::AccountState, input: &wechat_protocol::client::contact_requests::SendContactRequest) -> anyhow::Result<wechat_protocol::client::contact_requests::ContactRpc> | Prepare operation 2 using the discovery ticket; no automatic fallback or retry.
 fn wechat_protocol::silk::decode | fn(input: &[u8]) -> anyhow::Result<alloc::vec::Vec<i16>> | MISSING DOC
 fn wechat_protocol::silk::encode | fn(pcm: &[i16]) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
 fn wechat_protocol::silk::validate_framing | fn(input: &[u8]) -> anyhow::Result<u32> | MISSING DOC
@@ -1198,6 +1236,7 @@ fn wechat_protocol::wire::text_send_request | fn(destination: &str, content: &st
 fn wechat_protocol::wire::text_send_request_with_source | fn(destination: &str, content: &str, created_at: u32, client_id: u32, source: core::option::Option<&str>) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
 fn wechat_protocol::wire::unix_time | fn() -> anyhow::Result<u32> | MISSING DOC
 fn wechat_protocol::wire::voice_request | fn(state: &wechat_protocol::client::AccountState, server_id: u64, total: u32, offset: u32) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
+impl core::clone::Clone for wechat_protocol::AcceptContactRequest | impl | -
 impl core::clone::Clone for wechat_protocol::AccountIdentity | impl | -
 impl core::clone::Clone for wechat_protocol::AccountInterrupted | impl | -
 impl core::clone::Clone for wechat_protocol::AccountLease | impl | -
@@ -1211,7 +1250,12 @@ impl core::clone::Clone for wechat_protocol::ChannelsPost | impl | -
 impl core::clone::Clone for wechat_protocol::ChannelsTicket | impl | -
 impl core::clone::Clone for wechat_protocol::ContactLookup | impl | -
 impl core::clone::Clone for wechat_protocol::ContactRecord | impl | -
+impl core::clone::Clone for wechat_protocol::ContactRequestReply | impl | -
+impl core::clone::Clone for wechat_protocol::ContactRequestTarget | impl | -
+impl core::clone::Clone for wechat_protocol::ContactRpc | impl | -
+impl core::clone::Clone for wechat_protocol::ContactSearchResult | impl | -
 impl core::clone::Clone for wechat_protocol::DeviceProfile | impl | -
+impl core::clone::Clone for wechat_protocol::FriendMessage | impl | -
 impl core::clone::Clone for wechat_protocol::GroupDetail | impl | -
 impl core::clone::Clone for wechat_protocol::GroupMemberResult | impl | -
 impl core::clone::Clone for wechat_protocol::GroupMetadataPage | impl | -
@@ -1232,6 +1276,7 @@ impl core::clone::Clone for wechat_protocol::OpenImContact | impl | -
 impl core::clone::Clone for wechat_protocol::OpenImServiceError | impl | -
 impl core::clone::Clone for wechat_protocol::RoomMember | impl | -
 impl core::clone::Clone for wechat_protocol::RoomRoster | impl | -
+impl core::clone::Clone for wechat_protocol::SendContactRequest | impl | -
 impl core::clone::Clone for wechat_protocol::Service | impl | -
 impl core::clone::Clone for wechat_protocol::ServiceRejected | impl | -
 impl core::clone::Clone for wechat_protocol::SessionReadNotification | impl | -
@@ -1453,6 +1498,7 @@ impl core::fmt::Debug for wechat_protocol::ChannelsMedia | impl | -
 impl core::fmt::Debug for wechat_protocol::ChannelsPage | impl | -
 impl core::fmt::Debug for wechat_protocol::ChannelsPost | impl | -
 impl core::fmt::Debug for wechat_protocol::ChannelsTicket | impl | -
+impl core::fmt::Debug for wechat_protocol::ContactRequestReply | impl | -
 impl core::fmt::Debug for wechat_protocol::DeviceProfile | impl | -
 impl core::fmt::Debug for wechat_protocol::Heartbeat | impl | -
 impl core::fmt::Debug for wechat_protocol::LoginAttempt | impl | -
@@ -1622,6 +1668,7 @@ impl core::ops::drop::Drop for wechat_protocol::media::PreparedUpload | impl | -
 impl core::ops::drop::Drop for wechat_protocol::mmtls::ShortSession | impl | -
 impl core::str::traits::FromStr for wechat_protocol::StickerId | impl | -
 impl core::str::traits::FromStr for wechat_protocol::StickerPackId | impl | -
+impl serde_core::de::Deserialize<'de> for wechat_protocol::AcceptContactRequest | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::AccountLifecycle | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::AccountState | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::AccountStatus | impl<'de> | -
@@ -1630,7 +1677,12 @@ impl serde_core::de::Deserialize<'de> for wechat_protocol::AuthSnapshot | impl<'
 impl serde_core::de::Deserialize<'de> for wechat_protocol::AvatarBytes | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::ContactLookup | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::ContactRecord | impl<'de> | -
+impl serde_core::de::Deserialize<'de> for wechat_protocol::ContactRequestReply | impl<'de> | -
+impl serde_core::de::Deserialize<'de> for wechat_protocol::ContactRequestTarget | impl<'de> | -
+impl serde_core::de::Deserialize<'de> for wechat_protocol::ContactRpc | impl<'de> | -
+impl serde_core::de::Deserialize<'de> for wechat_protocol::ContactSearchResult | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::DeviceProfile | impl<'de> | -
+impl serde_core::de::Deserialize<'de> for wechat_protocol::FriendMessage | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::GroupDetail | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::GroupMemberResult | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::GroupMetadataPage | impl<'de> | -
@@ -1646,6 +1698,7 @@ impl serde_core::de::Deserialize<'de> for wechat_protocol::MetadataReply | impl<
 impl serde_core::de::Deserialize<'de> for wechat_protocol::OpenImContact | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::RoomMember | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::RoomRoster | impl<'de> | -
+impl serde_core::de::Deserialize<'de> for wechat_protocol::SendContactRequest | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::SessionReadNotification | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::StickerId | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::StickerPackId | impl<'de> | -
@@ -1694,6 +1747,7 @@ impl serde_core::de::Deserialize<'de> for wechat_protocol::wire::SyncBatch | imp
 impl serde_core::de::Deserialize<'de> for wechat_protocol::wire::SyncCommand | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::wire::TextSendResult | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::wire::VoiceChunk | impl<'de> | -
+impl serde_core::ser::Serialize for wechat_protocol::AcceptContactRequest | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::AccountLifecycle | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::AccountState | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::AccountStatus | impl | -
@@ -1702,7 +1756,12 @@ impl serde_core::ser::Serialize for wechat_protocol::AuthSnapshot | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::AvatarBytes | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::ContactLookup | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::ContactRecord | impl | -
+impl serde_core::ser::Serialize for wechat_protocol::ContactRequestReply | impl | -
+impl serde_core::ser::Serialize for wechat_protocol::ContactRequestTarget | impl | -
+impl serde_core::ser::Serialize for wechat_protocol::ContactRpc | impl | -
+impl serde_core::ser::Serialize for wechat_protocol::ContactSearchResult | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::DeviceProfile | impl | -
+impl serde_core::ser::Serialize for wechat_protocol::FriendMessage | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::GroupDetail | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::GroupMemberResult | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::GroupMetadataPage | impl | -
@@ -1718,6 +1777,7 @@ impl serde_core::ser::Serialize for wechat_protocol::MetadataReply | impl<T> whe
 impl serde_core::ser::Serialize for wechat_protocol::OpenImContact | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::RoomMember | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::RoomRoster | impl | -
+impl serde_core::ser::Serialize for wechat_protocol::SendContactRequest | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::SessionReadNotification | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::StickerId | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::StickerPackId | impl | -
@@ -1796,6 +1856,7 @@ mod wechat_protocol::sticker_packs | - | Official pack metadata reads and member
 mod wechat_protocol::sticker_send | - | Single-intent sticker sends with a probe and bounded byte continuations.
 mod wechat_protocol::sticker_upload | - | Direct custom-sticker upload chunks. This operation does not send a chat message.
 mod wechat_protocol::wire | - | Typed numbered business messages for the supported native profile.
+struct wechat_protocol::AcceptContactRequest | struct { public fields } | Acceptance input, bound to the latest received request.
 struct wechat_protocol::AccountIdentity | struct { public fields } | MISSING DOC
 struct wechat_protocol::AccountLease | struct { private fields } | Cheap authority check for account workers. It carries no credentials and becomes invalid on shutdown or any accepted credential renewal. It cannot replace the final submission guard on an authenticated signaling request.
 struct wechat_protocol::AccountPersistenceFailed | struct unit | A verified response could not commit its account update. The response may still be retained independently; this error never authorizes resubmission.
@@ -1812,7 +1873,12 @@ struct wechat_protocol::ChannelsPost | struct { public fields } | A post this cl
 struct wechat_protocol::ChannelsTicket | struct { private fields } | A current H5 ticket for the transfer proxy.
 struct wechat_protocol::ContactLookup | struct { public fields } | MISSING DOC
 struct wechat_protocol::ContactRecord | struct { public fields } | MISSING DOC
+struct wechat_protocol::ContactRequestReply | struct { public fields } | Authenticated verification acknowledgement; does not imply profile writeback.
+struct wechat_protocol::ContactRequestTarget | struct { public fields } | Resolved verification material. Contains account-specific secrets; do not log or serialize it into a public API response.
+struct wechat_protocol::ContactRpc | struct { public fields } | A prepared contact operation; raw bytes contain tickets and require protected storage.
+struct wechat_protocol::ContactSearchResult | struct { public fields } | A discovery match. Display text is the submitted query, not an inferred server nickname.
 struct wechat_protocol::DeviceProfile | struct { public fields } | MISSING DOC
+struct wechat_protocol::FriendMessage | struct { public fields } | Decoded verification data. Contains tickets; never expose it directly in HTTP or logs.
 struct wechat_protocol::GroupDetail | struct { public fields } | MISSING DOC
 struct wechat_protocol::GroupMemberResult | struct { public fields } | MISSING DOC
 struct wechat_protocol::GroupMetadataPage | struct { public fields } | MISSING DOC
@@ -1833,6 +1899,7 @@ struct wechat_protocol::OpenImServiceError | struct { public fields } | A servic
 struct wechat_protocol::PendingLogout | struct { private fields } | One reserved terminal operation. Reservation stops account admission without sending anything. An embedding daemon can commit local logout inhibition before consuming this token to submit its optional remote logout. Dropping the token leaves the account stopped and sends no request.
 struct wechat_protocol::RoomMember | struct { public fields } | MISSING DOC
 struct wechat_protocol::RoomRoster | struct { public fields } | MISSING DOC
+struct wechat_protocol::SendContactRequest | struct { public fields } | Outgoing request input, bound to the actual discovery result.
 struct wechat_protocol::ServiceRejected | struct { public fields } | A verified response carried a non-zero service code. The request reached the service, so this error never shows that an operation was not submitted.
 struct wechat_protocol::SessionReadNotification | struct { public fields } | MISSING DOC
 struct wechat_protocol::SessionReadReply | struct { public fields } | MISSING DOC

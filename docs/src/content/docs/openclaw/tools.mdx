@@ -28,6 +28,20 @@ review actual image previews and manage Saved. Its eight actions are `list`,
 `get`, `preview`, `download`, `prepare`, `add`, `move` and `remove`.
 Official-pack browsing and membership are available in the desktop app and CLI.
 
+## Contacts and friend requests
+
+The optional `wechat_contacts` and `wechat_contact_request` tools work across the configured account. Grant them only to an owner-facing agent, preserving its existing tool grants:
+
+```json
+{ "tools": { "alsoAllow": ["wechat_contacts", "wechat_contact_request"] } }
+```
+
+Both require OpenClaw's trusted owner identity and a current **private owner session**. Shared conversations and hosts missing those checks cannot use them. The model cannot select another account or supply an owner flag.
+
+`wechat_contacts` supports `list`, `get`, local `find`, exact-ID `lookup`, server `search` and `remove`. `wechat_contact_request` supports `list`, `get`, `send`, `accept`, local-history `delete` and operation `status`. Sending uses a discovery `recipientRef`; accepting and deleting require the inspected `expectedVersion`. Mutations require a stable `idempotencyKey`. After uncertainty, inspect the original operation instead of sending again.
+
+The daemon token also needs `read` for reads and `admin` for changes. Accepting a friend never changes OpenClaw's allowlists or owner permissions. See [Contacts and friend requests](/use/contacts/) for the CLI, API and discovery limits.
+
 ## Calling
 
 The optional `wechat_call` tool checks status, places an allowed direct voice

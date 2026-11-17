@@ -20,6 +20,7 @@ const samples = {
   media: { server: "hub-1", account: "account-1", thread: "123@chatroom", message: "msg_9" },
   info: { server: "hub-1", account: "account-1", thread: "123@chatroom" },
   contacts: { server: "hub-1", account: "account-1" },
+  "friend-requests": { server: "hub-1", account: "account-1" },
   "new-chat": { server: "hub-1", account: "account-1" },
   settings: { server: "hub-1", account: "account-1" },
 };

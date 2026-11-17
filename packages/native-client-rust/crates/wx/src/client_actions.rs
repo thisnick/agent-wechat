@@ -252,6 +252,19 @@ pub async fn mutation(
     if options.wait > 900 {
         bail!("wait must be at most 900 seconds");
     }
+    let kind = if path == "contact-requests"
+        || path.starts_with("contact-requests/")
+        || path.starts_with("contacts/")
+    {
+        "contact_mutation"
+    } else {
+        "group_mutation"
+    };
+    let collection = if kind == "contact_mutation" {
+        "contact-mutations"
+    } else {
+        "group-mutations"
+    };
     let hash = format!(
         "{:x}",
         Sha256::digest(serde_json::to_vec(&(method.as_str(), path, &body))?)
@@ -259,7 +272,7 @@ pub async fn mutation(
     let key = options
         .idempotency_key
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let (receipt_path, mut saved) = receipt(config, r, path, "group_mutation", &hash, &key, None)?;
+    let (receipt_path, mut saved) = receipt(config, r, path, kind, &hash, &key, None)?;
     eprintln!("Change receipt: {}", receipt_path.display());
     let op = if let Some(id) = saved["operationId"].as_str() {
         r.get(&r.path(&format!("operations/{}", encode(id)))?)
@@ -268,12 +281,12 @@ pub async fn mutation(
         saved["state"] = json!("submitting");
         write_replace(&receipt_path, &saved)?;
         let op=r.request(method,&r.path(path)?,Some(body),Some(&key)).await
-            .with_context(||format!("group result unavailable; retain the same idempotency key from {} and inspect group-mutations/by-idempotency-key before a new action",receipt_path.display()))?;
+            .with_context(||format!("contact/group result unavailable; retain the same idempotency key from {} and inspect {collection}/by-idempotency-key before a new action",receipt_path.display()))?;
         if op["accountId"].as_str() != Some(r.account()?)
-            || op["kind"] != "group_mutation"
+            || op["kind"] != kind
             || op["id"].as_str().is_none_or(str::is_empty)
         {
-            bail!("group operation identity unverified; inspect the saved receipt");
+            bail!("contact/group operation identity unverified; inspect the saved receipt");
         }
         saved["operationId"] = op["id"].clone();
         saved["state"] = json!("accepted_by_daemon");
@@ -282,14 +295,14 @@ pub async fn mutation(
     };
     let id = saved["operationId"]
         .as_str()
-        .context("group operation receipt missing")?;
+        .context("contact/group operation receipt missing")?;
     let mut out =
         wait_operation_checked(r, op, if options.detach { 0 } else { options.wait }, |op| {
             if op["accountId"].as_str() != Some(r.account()?)
-                || op["kind"] != "group_mutation"
+                || op["kind"] != kind
                 || op["id"] != id
             {
-                bail!("group operation identity unverified");
+                bail!("contact/group operation identity unverified");
             }
             Ok(())
         })

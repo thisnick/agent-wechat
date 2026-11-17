@@ -3,16 +3,20 @@
 # `desktop` (1280x800), `narrow` (390x844), `compact` (320x700), joined by `+` for multiple sizes.
 # Format: ITEM | ATTRIBUTES | DESCRIPTION
 scene account-list | route /{server}/accounts, viewports desktop+narrow | The accounts on a hub: one signed in and one that still needs a QR code.
+scene add-contact | route /{server}/{account}/contacts, viewports desktop+narrow+compact | A separate greeting dialog opened from server discovery in Contacts search.
 scene channels-video-cards | route /{server}/{account}/chats/{thread}, viewports desktop+narrow | Received WeChat Channels cards with their cover, play button, publisher and length.
 scene chat-filters | route /{server}/{account}/chats, viewports desktop+compact | The conversation filter bar with All pinned beside the scrolling categories and unread badges for categories with new messages.
 scene chat-info | route /{server}/{account}/chats/{thread}/info, viewports desktop+narrow | Details of a group conversation with its pin, mute and group settings.
 scene chat-list | route /{server}/{account}/chats, viewports desktop+narrow | The full inbox with category and conversation unread counts and the newest conversation open beside it.
 scene composer-attachments | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | A photo and a video staged in the message box with previews, sizes, remove buttons and the unchecked Original choice.
 scene composer-attachments-original | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Original checked for a staged photo and video, with help that explains what it adds for each.
+scene contact-request-retry | route /{server}/{account}/contacts, viewports desktop | A lost submission response keeps the original key and greeting until an inspected retry completes.
 scene contacts | route /{server}/{account}/contacts, viewports desktop | The contact list of an account.
 scene desktop-leftover-hub | route /servers, viewports desktop+narrow | The desktop app's first screen when a hub left running by an earlier session holds the local port.
 scene desktop-settings | route /servers, viewports desktop+narrow | Desktop settings, including whether this device's hub keeps running while another hub is used.
 scene direct-chat | route /{server}/{account}/chats/{thread}, viewports desktop+narrow | A direct conversation with text from both sides and a photo.
+scene friend-request-review | route /{server}/{account}/contacts/requests, viewports desktop+narrow+compact | A separate request review dialog with acceptance and local-history deletion.
+scene friend-requests | route /{server}/{account}/contacts/requests, viewports desktop+narrow+compact | Incoming and sent request history with an actionable Contacts badge.
 scene group-chat | route /{server}/{account}/chats/{thread}, viewports desktop | A group conversation where each message names its sender, ending in a photo.
 scene hub-picker | route /servers, viewports desktop+narrow | The screen for choosing which hub to connect to.
 scene login-qr | route /{server}/{account}/login, viewports desktop+narrow | Sign-in screen of an account that is not signed in, showing the QR code to scan.
@@ -21,6 +25,8 @@ scene message-highlight | route /{server}/{account}/chats/{thread}/message/{mess
 scene new-chat | route /{server}/{account}/new-chat, viewports desktop | The dialog for starting a direct conversation from the contact list.
 scene new-group | route /{server}/{account}/new-chat, viewports desktop | The new chat dialog on its New group tab, with two contacts chosen.
 scene new-group-avatar | route /{server}/{account}/chats, viewports desktop | A newly received group shows its room avatar while its member list is unavailable.
+scene omni-message-search | route /{server}/{account}/contacts, viewports desktop+compact | Saved message search names its conversation and opens the matched message.
+scene omni-search | route /{server}/{account}/contacts, viewports desktop+narrow+compact | One search surface for saved contacts, groups, messages and request history.
 scene quoted-sender-names | route /{server}/{account}/chats/{thread}, viewports desktop+narrow | Quoted replies use supplied author names, cached names for older replies, and You for own messages.
 scene settings | route /{server}/{account}/settings, viewports desktop+narrow | Settings for the app, the hub and the signed-in account.
 scene stickers-dragging | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Holding a Saved sticker shows its existing image under the pointer, dims the source and marks its drop position without staging a send.

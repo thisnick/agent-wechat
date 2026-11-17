@@ -1,3 +1,6 @@
+#[path = "contact_requests.rs"]
+mod contact_requests;
+pub use contact_requests::*;
 #[path = "group_mutation.rs"]
 mod group_mutation;
 pub use group_mutation::*;

@@ -16,7 +16,9 @@
       "wechat_group_info",
       "wechat_stickers",
       "wechat_login",
-      "wechat_call"
+      "wechat_call",
+      "wechat_contacts",
+      "wechat_contact_request"
     ],
     "trustedToolPolicies": [
       "wechat-conference-consultation"
@@ -39,6 +41,12 @@
       "optional": true
     },
     "wechat_call": {
+      "optional": true
+    },
+    "wechat_contacts": {
+      "optional": true
+    },
+    "wechat_contact_request": {
       "optional": true
     }
   },

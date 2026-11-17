@@ -1,0 +1,1 @@
+CREATE TABLE FMessageTable(user_name_ TEXT, type_ INTEGER, timestamp_ INTEGER, encrypt_user_name_ TEXT, content_ TEXT, is_sender_ INTEGER, ticket_ TEXT, scene_ INTEGER, fmessage_detail_buf_ TEXT, remark_ TEXT, label_ids_ TEXT);

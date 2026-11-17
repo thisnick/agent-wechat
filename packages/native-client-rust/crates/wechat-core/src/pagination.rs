@@ -273,7 +273,7 @@ impl Core {
         }
         Ok(page)
     }
-    fn paginate_values(
+    pub(crate) fn paginate_values(
         &self,
         account: &str,
         query: &str,

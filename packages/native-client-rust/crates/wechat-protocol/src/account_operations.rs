@@ -664,3 +664,52 @@ impl NativeClient {
         .await
     }
 }
+
+impl NativeClient {
+    /// Discover a contact without saving or requesting friendship.
+    pub async fn search_contact(&self, query: &str) -> Result<crate::ContactSearchResult> {
+        let query = query.to_owned();
+        self.account_request(move |transport, state, _| {
+            transport.search_contact_snapshot(state, &query)
+        })
+        .await
+    }
+    /// Submit one request; the embedding application owns journals and profile writeback.
+    pub async fn send_contact_request(
+        &self,
+        input: &crate::SendContactRequest,
+    ) -> Result<crate::ContactRequestReply> {
+        let input = input.clone();
+        self.account_request(move |transport, state, _| {
+            transport.send_contact_request_snapshot(state, &input)
+        })
+        .await
+    }
+    /// Submit one acceptance with the exact received ticket.
+    pub async fn accept_contact_request(
+        &self,
+        input: &crate::AcceptContactRequest,
+    ) -> Result<crate::ContactRequestReply> {
+        let input = input.clone();
+        self.account_request(move |transport, state, _| {
+            transport.accept_contact_request_snapshot(state, &input)
+        })
+        .await
+    }
+    /// Remove this account's relationship, preserving remote and local chat history.
+    pub async fn remove_contact(&self, username: &str) -> Result<crate::GroupMutationReply> {
+        let username = username.to_owned();
+        self.account_request(move |transport, state, _| {
+            transport.remove_contact_snapshot(state, &username)
+        })
+        .await
+    }
+    /// Return authenticated contact reply bytes for protected caller-owned receipt storage.
+    pub async fn contact_rpc_raw(&self, request: &crate::ContactRpc) -> Result<Vec<u8>> {
+        let request = request.clone();
+        self.account_request(move |transport, state, _| {
+            transport.contact_rpc_raw_snapshot(state, &request)
+        })
+        .await
+    }
+}

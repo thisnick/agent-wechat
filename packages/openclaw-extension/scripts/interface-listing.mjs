@@ -59,7 +59,7 @@ function syntheticSetup() {
     calls: { voice },
   } } };
   const context = { config, getRuntimeConfig: () => config, messageChannel: 'agent-wechat', nativeChannelId: 'room@chatroom',
-    requesterSenderId: 'u1', senderIsOwner: true, agentId: 'main', sessionKey: 'agent:main:wechat:direct:u1', sessionId: 's', assertInvocationCurrent() {} };
+    requesterSenderId: 'u1', senderIsOwner: true, agentId: 'main', sessionKey: 'agent:main:wechat:direct:u1', sessionId: 's', memoryAudience: { kind: 'owner-private', agentId: 'main' }, assertMemoryAudienceCurrent() {}, assertInvocationCurrent() {} };
   return { config, context };
 }
 

@@ -1494,6 +1494,162 @@ members: Array<string>,
  * Name for the new group, up to 512 bytes. Optional.
  */
 name?: string, };
+export type NativeContactSearchRequest = {
+/**
+ * Exact WeChat ID query. Phone lookup has not been verified.
+ */
+query: string, };
+export type NativeContactSearch = {
+/**
+ * Display query for the discovered identity.
+ */
+displayName: string,
+/**
+ * Opaque recipient material; pass unchanged to send.
+ */
+recipientRef: string,
+/**
+ * Unix seconds after which a new discovery is required.
+ */
+expiresAt: number,
+/**
+ * Always `wechat` for this endpoint.
+ */
+source: string,
+/**
+ * Existing request conversation for the resolved identity, when retained locally.
+ */
+request: NativeContactRequest | null,
+/**
+ * Canonical saved contact ID when membership is established for this identity.
+ */
+contactId: string | null, };
+export type NativeContactRequestSend = {
+/**
+ * Exact reference returned by discovery on this account.
+ */
+recipientRef: string,
+/**
+ * Greeting supplied by the owner; no automatic default is inserted.
+ */
+message: string, };
+export type NativeContactRequestVersion = {
+/**
+ * Current request version returned by get/list.
+ */
+expectedVersion: string, };
+export type NativeContactRequestMessage = {
+/**
+ * Original server ID as a decimal string; sent entries may use zero.
+ */
+serverId: string,
+/**
+ * Verification text, treated as untrusted display data.
+ */
+message: string,
+/**
+ * Original event time in Unix seconds.
+ */
+createdAt: number,
+/**
+ * Incoming or outgoing.
+ */
+direction: string, };
+export type NativeContactRequest = {
+/**
+ * Opaque request identity.
+ */
+id: string,
+/**
+ * Saved peer identity; does not itself establish friendship.
+ */
+peerId: string,
+/**
+ * Saved contact label or retained peer identity.
+ */
+displayName: string,
+/**
+ * Incoming or outgoing current row direction.
+ */
+direction: string,
+/**
+ * Current verification text.
+ */
+message: string,
+/**
+ * Current row time in Unix seconds.
+ */
+updatedAt: number,
+/**
+ * Exact version for accept/delete preconditions.
+ */
+version: string,
+/**
+ * Whether current canonical membership establishes a contact.
+ */
+isContact: boolean,
+/**
+ * Whether the current incoming request can be accepted locally.
+ */
+actionable: boolean,
+/**
+ * Incoming request needing attention in navigation badges.
+ */
+attention: boolean,
+/**
+ * `contact`, `request_received` or `request_sent`; history is not server pending proof.
+ */
+state: string,
+/**
+ * Retained per-message verification history.
+ */
+history: Array<NativeContactRequestMessage>, };
+export type NativeContactRequestPage = {
+/**
+ * Canonical request rows in update-time order.
+ */
+items: Array<NativePageItem<NativeContactRequest>>,
+/**
+ * Opaque continuation, or null after the final page.
+ */
+nextCursor: string | null,
+/**
+ * Version of this filtered result collection.
+ */
+sourceGeneration: string,
+/**
+ * Local profile coverage description.
+ */
+coverage: unknown,
+/**
+ * Incoming actionable rows needing attention across all filters.
+ */
+pendingIncomingCount: number,
+/**
+ * Event boundary of the retained list, for continuing the existing account event stream.
+ */
+asOfEventCursor: string, };
+export type NativeContactRequestQuery = {
+/**
+ * Incoming or outgoing direction.
+ */
+direction: string | null,
+/**
+ * Include only current acceptance candidates when true.
+ */
+actionable: boolean | null,
+/**
+ * Match saved labels, peer identities or verification text.
+ */
+search: string | null,
+/**
+ * Page size, from 1 to 200; default 50.
+ */
+limit: number | null,
+/**
+ * Exact continuation from the same query.
+ */
+cursor: string | null, };
 export type NativeGroupNameRequest = {
 /**
  * The new group name. It must not be blank and can be up to 512 bytes.

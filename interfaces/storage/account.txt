@@ -18,7 +18,8 @@ migration account/V010__call_request_context.sql | sha256 e4e966151a7cdaf9 | -
 migration account/V011__call_non_submission.sql | sha256 6b7fb82dbc0894e0 | -
 migration account/V012__call_local_closure.sql | sha256 0f638990f3baa99e | -
 migration account/V013__media_files.sql | sha256 c70edfdce0f3e860 | -
-schema version | 13 | -
+migration account/V014__contact_mutations.sql | sha256 41d06bbf1a02261f | -
+schema version | 14 | -
 table apply_intents | CREATE TABLE apply_intents(id TEXT PRIMARY KEY,payload BLOB NOT NULL,state TEXT NOT NULL,created_at TEXT NOT NULL, stream TEXT NOT NULL DEFAULT 'message') | -
 table apply_intents.created_at | TEXT, not null | -
 table apply_intents.id | TEXT, primary key 1 | -
@@ -45,6 +46,15 @@ table call_sessions.updated_at | INTEGER, not null | -
 table consumer_offsets | CREATE TABLE consumer_offsets(consumer_id TEXT PRIMARY KEY,sequence INTEGER NOT NULL) | -
 table consumer_offsets.consumer_id | TEXT, primary key 1 | -
 table consumer_offsets.sequence | INTEGER, not null | -
+table contact_mutations | CREATE TABLE contact_mutations( operation_id TEXT PRIMARY KEY REFERENCES operations(id), key_hash TEXT NOT NULL UNIQUE, request_hash TEXT NOT NULL, phase TEXT NOT NULL CHECK(phase IN ('queued','submitting','received','projecting','succeeded','failed','cancelled','needs_review')), step INTEGER NOT NULL DEFAULT 0 CHECK(step>=0), encrypted_request BLOB NOT NULL, encrypted_receipts BLOB NOT NULL ) | -
+table contact_mutations.encrypted_receipts | BLOB, not null | -
+table contact_mutations.encrypted_request | BLOB, not null | -
+table contact_mutations.key_hash | TEXT, not null | -
+table contact_mutations.operation_id | TEXT, primary key 1 | -
+table contact_mutations.operation_id foreign key #0 | references operations(id), on delete NO ACTION | -
+table contact_mutations.phase | TEXT, not null | -
+table contact_mutations.request_hash | TEXT, not null | -
+table contact_mutations.step | INTEGER, not null, default 0 | -
 table copy_receipts | CREATE TABLE copy_receipts(id INTEGER PRIMARY KEY,manifest_json TEXT NOT NULL) | -
 table copy_receipts.id | INTEGER, primary key 1 | -
 table copy_receipts.manifest_json | TEXT, not null | -

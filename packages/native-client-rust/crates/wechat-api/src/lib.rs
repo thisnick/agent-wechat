@@ -4,6 +4,7 @@ mod actions;
 mod calls;
 #[cfg(test)]
 mod calls_interface_tests;
+mod contact_requests;
 pub mod contracts;
 mod groups;
 #[cfg(test)]
@@ -135,6 +136,14 @@ impl From<anyhow::Error> for ApiError {
     fn from(error: anyhow::Error) -> Self {
         let message = error.to_string();
         for (code, status) in [
+            ("stale_contact_request", StatusCode::PRECONDITION_FAILED),
+            ("stale_recipient_reference", StatusCode::CONFLICT),
+            ("contact_request_not_actionable", StatusCode::CONFLICT),
+            ("invalid_contact_input", StatusCode::BAD_REQUEST),
+            ("contact_discovery_rejected", StatusCode::BAD_GATEWAY),
+            ("invalid_recipient_reference", StatusCode::BAD_REQUEST),
+            ("invalid_contact_request_id", StatusCode::BAD_REQUEST),
+            ("invalid_contact_idempotency_key", StatusCode::BAD_REQUEST),
             ("sticker_preparation_not_found", StatusCode::NOT_FOUND),
             ("custom_sticker_not_found", StatusCode::NOT_FOUND),
             ("sticker_revision_mismatch", StatusCode::PRECONDITION_FAILED),
@@ -1328,6 +1337,7 @@ pub fn router(core: Arc<Core>, token: &str) -> Router {
         .merge(stickers::routes())
         .merge(actions::routes())
         .merge(groups::routes())
+        .merge(contact_requests::routes())
         .merge(call_routes())
         .with_state(app.clone());
     // Resolve aliases before route matching so scope checks and vault AAD always

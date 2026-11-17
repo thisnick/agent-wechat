@@ -15,6 +15,7 @@ export type RouteName =
   | "media"
   | "info"
   | "contacts"
+  | "friend-requests"
   | "new-chat"
   | "settings";
 
@@ -28,6 +29,7 @@ export type Route =
   | { name: "media"; server: string; account: string; thread: string; message: string }
   | { name: "info"; server: string; account: string; thread: string }
   | { name: "contacts"; server: string; account: string }
+  | { name: "friend-requests"; server: string; account: string }
   | { name: "new-chat"; server: string; account: string }
   | { name: "settings"; server: string; account: string };
 
@@ -50,6 +52,7 @@ export type RouteEntry = {
 
 /** Every route the app understands. The listing in interfaces/ui is generated from this. */
 export const routeTable: readonly RouteEntry[] = [
+  {pattern:"/{server}/{account}/contacts/requests",name:"friend-requests",description:"Incoming and sent friend-request conversations for one account."},
   {
     pattern: "/servers",
     name: "servers",

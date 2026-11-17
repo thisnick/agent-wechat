@@ -1,3 +1,8 @@
+#[path = "contact_classification.rs"]
+mod contact_classification;
+#[path = "contact_requests.rs"]
+mod contact_requests;
+pub use contact_requests::{ContactMutation, ContactRequestQuery};
 #[path = "checkpoint.rs"]
 mod checkpoint;
 #[path = "contact_remarks.rs"]
@@ -409,6 +414,7 @@ impl Core {
             core.store.recover_media_jobs(&account.id)?;
             core.store.recover_message_recalls(&account.id)?;
             core.store.recover_group_mutations(&account.id)?;
+            core.store.recover_contact_mutations(&account.id)?;
             core.recover_logout(&account.id)?;
             core.store.recover_interrupted_operations(&account.id)?;
             core.store.recover_call_sessions(&account.id)?;
@@ -420,6 +426,7 @@ impl Core {
             let _ = core.recover_saved_login(&account.id);
             let _ = core.recover_outgoing_recall_projections(&account.id);
             let _ = core.repair_group_mutations(&account.id);
+            let _ = core.repair_contact_mutations(&account.id);
             let _ = core.refresh_incoming_groups(&account.id, false);
         }
         Ok(core)
@@ -818,6 +825,9 @@ impl Core {
         let mut op = self.store.operation(account, id)?;
         if op.kind == "message_recall" {
             bail!("operation_cannot_cancel");
+        }
+        if op.kind == "contact_mutation" {
+            return self.store.cancel_contact_mutation(account, id);
         }
         if op.kind == "group_mutation" {
             return self.store.cancel_group_mutation(account, id);
@@ -1921,6 +1931,7 @@ impl Core {
     }
     pub fn recover_projection(&self, account: &str) -> Result<Value> {
         self.repair_group_mutations(account)?;
+        self.repair_contact_mutations(account)?;
         self.refresh_incoming_groups(account, false)?;
         if self.store.pending_sync(account)?.is_empty() {
             self.store.retry_blocked(account)?;
@@ -4560,7 +4571,7 @@ pub(crate) mod tests {
         core.install_login_state("fresh", &accepted, None).unwrap();
         let created = core.ensure_managed_profile("fresh", &accepted).unwrap();
         assert_eq!(created["state"], "created");
-        assert_eq!(created["databases"], 8);
+        assert_eq!(created["databases"], 9);
         assert!(store
             .runtime("fresh", "profile-bootstrap")
             .unwrap()

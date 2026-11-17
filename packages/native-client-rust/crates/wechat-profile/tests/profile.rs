@@ -419,6 +419,13 @@ fn contact_catalog_filters_deleted_rows_before_search_pagination() {
          ('z_deleted','Catalog fixture','','',1,-1);",
     )
     .unwrap();
+    c.execute_batch(
+        "ALTER TABLE contact ADD COLUMN flag INTEGER;
+        INSERT INTO contact(username,nick_name,local_type,delete_flag,flag) VALUES
+        ('c_removed_person','Catalog fixture',3,0,0),
+        ('c_removed_service','Catalog fixture',4,NULL,0);",
+    )
+    .unwrap();
     drop(c);
     let r = reader(d.path());
     let all = r.contacts(&ListQuery::default()).unwrap();
@@ -429,6 +436,11 @@ fn contact_catalog_filters_deleted_rows_before_search_pagination() {
             .collect::<Vec<_>>(),
         ["b_present", "d_nullable", "room@chatroom", "self"]
     );
+    assert_eq!(
+        r.contact("c_removed_person").unwrap().raw_fields["local_type"],
+        SqlValue::Integer("3".into())
+    );
+    assert_eq!(r.labels().unwrap()["c_removed_person"], "Catalog fixture");
     let query = ListQuery {
         search: Some("Catalog fixture".into()),
         limit: Some(1),
