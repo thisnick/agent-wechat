@@ -29,6 +29,8 @@ mod content;
 pub(crate) use content::VerifiedContent;
 #[path = "media_identity.rs"]
 mod identity;
+#[path = "media_plan_compaction.rs"]
+mod plan_compaction;
 #[path = "sticker_catalog.rs"]
 mod sticker_catalog;
 #[path = "sticker_jobs.rs"]
@@ -1064,24 +1066,13 @@ impl Core {
         };
         if msg.message_type == 34 {
             if let Some(server) = &msg.server_message_id {
-                let cached = msg.peer.as_ref().and_then(|chat| {
-                    let shards = reader
-                        .schemas()
-                        .iter()
-                        .filter(|schema| schema.database.rsplit('/').next() == Some("media_0.db"))
-                        .collect::<Vec<_>>();
-                    if shards.len() == 1 {
-                        reader
-                            .cached_voice(&shards[0].database, chat, &msg.id.local_id, Some(server))
-                            .ok()
-                            .map(|cached| cached.bytes)
-                    } else {
-                        None
-                    }
-                });
-                let inline = match cached {
-                    Some(bytes) => Some(bytes),
-                    None => self.native_inline(account, &msg)?,
+                // A plan keeps encoded audio only from a retained sync batch,
+                // which the profile does not hold yet. When the profile holds
+                // the note, a download reads that copy instead.
+                let inline = if plan_compaction::profile_voice(reader, &msg).is_some() {
+                    None
+                } else {
+                    self.native_inline(account, &msg)?
                 };
                 for (_, _, plan, _) in &mut plans {
                     if let DownloadPlan::Voice {
@@ -2147,8 +2138,12 @@ impl Core {
                 inline,
                 as_wav,
             } => {
+                // The profile's copy first: plans no longer keep audio the
+                // profile holds.
+                let complete = |v: &Vec<u8>| v.len() == length as usize;
                 let mut bytes = inline
-                    .filter(|v| v.len() == length as usize)
+                    .filter(complete)
+                    .or_else(|| self.profile_voice_for(account, &asset).filter(complete))
                     .unwrap_or_default();
                 if bytes.is_empty() {
                     let mut state = self.account_state(account)?;
@@ -4720,6 +4715,9 @@ fn video_thumbnail_file(
 #[cfg(test)]
 #[path = "media_concurrency_tests.rs"]
 mod concurrency_tests;
+#[cfg(test)]
+#[path = "media_plan_compaction_tests.rs"]
+mod plan_compaction_tests;
 #[cfg(test)]
 #[path = "media_storage_tests.rs"]
 mod storage_tests;

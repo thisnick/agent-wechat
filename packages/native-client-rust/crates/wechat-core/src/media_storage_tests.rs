@@ -69,7 +69,7 @@ fn sidecar_asset(core: &Core, id: &str, bytes: &[u8]) -> MediaAsset {
     .unwrap()
 }
 /// A voice note that exists in the official profile, with its two attachments.
-fn profile_voice(core: &Core) -> (Vec<u8>, Vec<MediaAsset>) {
+pub(super) fn profile_voice(core: &Core) -> (Vec<u8>, Vec<MediaAsset>) {
     let pcm: Vec<i16> = (0..16_000)
         .map(|n| ((n % 80) * 200 - 8000) as i16)
         .collect();

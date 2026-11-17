@@ -25,7 +25,9 @@ struct SavedJob {
     intent: SavedIntent,
     fence: MediaAuthorizationFence,
     // Operational receipts, never a second settled collection.
+    #[serde(with = "super::plan_compaction::plan_bytes::list")]
     reads: Vec<Vec<u8>>,
+    #[serde(with = "super::plan_compaction::plan_bytes::list")]
     replies: Vec<Vec<u8>>,
     upload_offset: u32,
     submitted: bool,

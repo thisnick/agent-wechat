@@ -8,9 +8,10 @@
 //!
 //! `maintain_media_storage` moves payloads that earlier versions stored inside
 //! `control.sqlite`, deletes uploads no send job needs any more, and removes
-//! files nothing refers to. It also runs sidecar retention (see
-//! `wechat_store`'s retention module), which reduces finished records to their
-//! receipts. It never downloads, uploads or resends anything.
+//! files nothing refers to. It rewrites sealed plans that repeat bytes the
+//! account keeps elsewhere (see `media_plan_compaction.rs`) and runs sidecar
+//! retention (see `wechat_store`'s retention module), which reduces finished
+//! records to their receipts. It never downloads, uploads or resends anything.
 use super::*;
 use std::collections::BTreeSet;
 
@@ -257,11 +258,12 @@ impl Core {
         // Uploads are released first: retention compacts a send only once its
         // upload is gone.
         let (previews, uploads, compacted) = self.finish_media_storage(account)?;
+        let plans = self.run_plan_compaction(account)?;
         let retention = self.run_retention(account)?;
         let compacted = self.store.compact_control(account).unwrap_or(false) || compacted;
         removed_previews += previews;
         Ok(
-            json!({"sweptFiles":swept,"movedPayloads":moved,"releasedToProfile":released,"removedPreviews":removed_previews,"removedUploads":uploads,"compacted":compacted,"retention":retention}),
+            json!({"sweptFiles":swept,"movedPayloads":moved,"releasedToProfile":released,"removedPreviews":removed_previews,"removedUploads":uploads,"compacted":compacted,"compactedPlans":plans,"retention":retention}),
         )
     }
     /// Run sidecar retention for one account until no step has work left.
@@ -467,6 +469,7 @@ impl Core {
                 let _ = core
                     .guarded_storage_step(&id, |core, id| core.finish_media_storage(id))
                     .await;
+                core.guarded_plan_compaction(&id).await;
                 core.guarded_retention(&id).await;
             }
             // Release finished uploads and expired preparations and run
@@ -492,6 +495,7 @@ impl Core {
                             core.release_finished_uploads(id)
                         })
                         .await;
+                    core.guarded_plan_compaction(&account.id).await;
                     core.guarded_retention(&account.id).await;
                 }
             }
@@ -500,7 +504,7 @@ impl Core {
     }
     /// One blocking storage step under the account's mutation guard. `None`
     /// when the step failed; the next start tries again.
-    async fn guarded_storage_step<T: Send + 'static>(
+    pub(super) async fn guarded_storage_step<T: Send + 'static>(
         self: &Arc<Self>,
         account: &str,
         step: impl FnOnce(&Core, &str) -> Result<T> + Send + 'static,

@@ -17,6 +17,7 @@ struct StickerSendPlan {
     offset: u32,
     probe: bool,
     submitted: bool,
+    #[serde(with = "super::plan_compaction::plan_bytes::list")]
     replies: Vec<Vec<u8>>,
     server_id: Option<String>,
 }
