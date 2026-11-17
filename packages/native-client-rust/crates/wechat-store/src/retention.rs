@@ -364,8 +364,9 @@ fn compact(tx: &Transaction, now: i64, budget: &mut i64) -> Result<usize> {
     // repair, while it was accepted but not yet written to the profile, and,
     // for an acquisition, by a later pack add that reuses one of the newest
     // owned archives of that pack. A finished acquisition of a pack that was
-    // not added needs no writeback. The row's update time is kept: it orders
-    // the newest acquisitions.
+    // not added needs no writeback, and a failed one without an owned archive
+    // cannot be repaired: repair never starts a transfer. The row's update
+    // time is kept: it orders the newest acquisitions.
     compacted += take(
         budget,
         tx.execute(
@@ -373,7 +374,8 @@ fn compact(tx: &Transaction, now: i64, budget: &mut i64) -> Result<usize> {
                 AND kind IN ('sticker_pack','sticker_saved','sticker_send','sticker_acquire')
                 AND state IN ('available','failed','cancelled','expired','unsupported')
                 AND NOT (coalesce(json_extract(data_json,'$.serverAcceptance'),'')='accepted' AND coalesce(json_extract(data_json,'$.profileWriteback'),'')!='complete'
-                    AND NOT (kind='sticker_acquire' AND state='available' AND json_extract(data_json,'$.profileWriteback')='not_applicable'))
+                    AND NOT (kind='sticker_acquire' AND state='available' AND json_extract(data_json,'$.profileWriteback')='not_applicable')
+                    AND NOT (kind='sticker_acquire' AND state!='available' AND NOT EXISTS(SELECT 1 FROM media_assets a WHERE a.id=media_jobs.id||'_archive' AND json_extract(a.metadata_json,'$.state')='available')))
                 AND NOT (kind='sticker_acquire' AND state='available' AND id IN ({}))
             LIMIT ?2)", reused_acquisition_ids()),
             params![before, (*budget).max(0)],
@@ -1630,9 +1632,33 @@ mod tests {
             "available",
             30,
         );
+        // Failed after acceptance with its archive owned: repair can finish
+        // it from those bytes. Without an archive it never can.
         sticker_job(
             &store,
             "failed-accepted",
+            "sticker_acquire",
+            acquired("not_applicable"),
+            "failed",
+            30,
+        );
+        store
+            .put_media_asset(
+                "a",
+                &MediaAssetRecord {
+                    id: "failed-accepted_archive".into(),
+                    message_id: None,
+                    variant: "original".into(),
+                    kind: "file".into(),
+                    metadata: json!({"state":"available","jobId":"failed-accepted"}),
+                    plan: b"sealed".to_vec(),
+                    payload: Some(b"archive".to_vec()),
+                },
+            )
+            .unwrap();
+        sticker_job(
+            &store,
+            "failed-no-archive",
             "sticker_acquire",
             acquired("not_applicable"),
             "failed",
@@ -1747,6 +1773,7 @@ mod tests {
         for id in [
             "acquired-0",
             "acquired-1",
+            "failed-no-archive",
             "failed-early",
             "rejected",
             "pack-done",
@@ -1785,6 +1812,7 @@ mod tests {
         assert!(repair.contains(&"promoting".to_string()));
         assert!(repair.contains(&"failed-accepted".to_string()));
         assert!(!repair.contains(&"acquired-1".to_string()));
+        assert!(!repair.contains(&"failed-no-archive".to_string()));
         // The core rewrites only the newest acquisitions that finished at least a day ago.
         let rewrite = store
             .reusable_sticker_acquisitions_after("a", now, "", 50)
