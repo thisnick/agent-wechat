@@ -372,10 +372,13 @@ impl Core {
         if command.id == 4 {
             // Native DelContact handler 0x6228370 calls 0x786f830. Lookup
             // 0x786e260 returning no Contact jumps to 0x786fe54 without mutation.
-            // Existing-row transitions
-            // involve category/flag/group state and remain blocked here.
+            // Ordinary existing rows use the supported membership/category transition.
+            // Other deletion paths remain blocked until their writer is supported.
             self.account_state(account)?;
             let username = deleted_contact_username(&command.payload)?;
+            if self.apply_received_contact_removal(account, &username, receipt, origin)? {
+                return Ok(());
+            }
             if !contact_absent(&self.profile_reader(account)?, &username)? {
                 let mut blocked = command_blocker(command);
                 blocked.reason = "unsupported_existing_contact_deletion";
@@ -402,6 +405,9 @@ impl Core {
         let parsed = if command.id == 5 {
             let message =
                 wechat_protocol::wire::decode_add_message(&command.payload, &state.own_username)?;
+            if self.apply_received_friend(account, &message, receipt)? {
+                return Ok(());
+            }
             if crate::sticker_control::supported_sticker_control(&message, &state.own_username) {
                 self.retain_control_raw(account, command, receipt)?;
                 self.retain_sticker_refresh(account, receipt)?;
@@ -529,6 +535,7 @@ impl Core {
                     blocked.reason = "contact_pin_projection_superseded";
                     return Err(blocked.into());
                 }
+                self.invalidate_contact_privacy(account, &contact, receipt)?;
             }
             if self.store.runtime(account, &fields_applied)?.is_none()
                 && self.store.runtime(account, &mute_applied)?.is_none()
@@ -600,6 +607,14 @@ impl Core {
                         self.store.put_runtime(account, &mute_applied, b"1")?;
                         applied_mute = true;
                     }
+                }
+                self.settle_contact_privacy_projection(account, &contact, &patch, receipt)?;
+                let member = match patch.fields.get("flag") {
+                    Some(SqlValue::Integer(value)) => value.parse::<u64>().ok().map(|v| v & 1 != 0),
+                    _ => None,
+                };
+                if let Some(member) = member {
+                    self.settle_contact_relationship(account, &contact.username, member, receipt)?;
                 }
                 self.settle_contact_notifications(
                     account,

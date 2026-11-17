@@ -89,6 +89,16 @@ const qr = (page) => [page.locator("img.login-qr")];
 /** The hub address includes the port the scenes server happened to get. */
 const hubAddress = (page) => [page.locator("#hub-address")];
 
+// Synthetic request conversations for visual review; never contact the live service.
+const requestSceneRows = [
+  { id: "fr_scene_casey", peerId: "sim_casey", displayName: "Casey Morgan", direction: "incoming", message: "Hello, we met at the book club.", updatedAt: 1700000800, version: "scene-incoming-v1", isContact: false, actionable: true, attention: true, state: "request_received", history: [{ serverId: "123", message: "Hello, we met at the book club.", createdAt: 1700000800, direction: "incoming" }] },
+  { id: "fr_scene_jordan", peerId: "sim_jordan", displayName: "Jordan Lee", direction: "outgoing", message: "Let's keep in touch.", updatedAt: 1700000700, version: "scene-outgoing-v1", isContact: false, actionable: false, attention: false, state: "request_sent", history: [{ serverId: "0", message: "Let's keep in touch.", createdAt: 1700000700, direction: "outgoing" }] },
+];
+async function prepareContactScenes({ page }) {
+  await page.route("**/v1/accounts/*/contact-requests*", route => route.request().method() === "GET" ? route.fulfill({ json: { items: requestSceneRows, nextCursor: null, pendingIncomingCount: 1, sourceGeneration: "scene", coverage: {}, asOfEventCursor: "0" } }) : route.continue());
+  await page.route("**/v1/accounts/*/search/contacts", route => route.fulfill({ json: { displayName: "avery.example", recipientRef: "scene-only-reference", expiresAt: 1700001400, source: "wechat", request: null, contactId: null } }));
+}
+
 export const scenes = [
   {
     name: "login-qr",
@@ -228,17 +238,15 @@ export const scenes = [
       await service.click();
       await expect(metro).toBeVisible();
       await expect(library).toBeVisible();
-      const search = page.getByRole("textbox", { name: "Search conversations" });
-      await search.fill("Metro");
-      await expect(library).toHaveCount(0);
-      await expect(metro).toBeVisible();
+      await page.locator(".search-trigger").click();
+      const search = page.getByRole("dialog", { name: "Search everything" });
+      await expect(search).toBeVisible();
+      await expect(search.getByRole("button", { name: "All", exact: true })).toHaveAttribute("aria-pressed", "true");
+      await page.keyboard.press("Escape");
       await expect(official).toHaveAttribute("aria-pressed", "true");
       await expect(all).toHaveAttribute("aria-pressed", "false");
-      await expect(all).toBeInViewport();
-      await expect(bar.getByRole("button", { name: "Groups 0 unread", exact: true }).locator(".filter-unread")).toHaveCount(0);
-      await search.clear();
-      await search.blur();
       await expect(library).toBeVisible();
+      await expect(metro).toBeVisible();
     },
   },
   {
@@ -494,6 +502,584 @@ export const scenes = [
     },
     // The conversation ID of a group is random.
     mask: (page) => [page.locator(".peer-id")],
+  },
+  {
+    name: "omni-progressive-search", route: "contacts",
+    description: "Contacts opens prefiltered; fast contact results remain usable while message search is pending or fails.",
+    viewports: ["desktop", "compact"], setup: standardWorld, target: () => ({ account: ACCOUNT.id }),
+    prepare: prepareContactScenes,
+    ready: async ({ page, expect }) => { await expect(row(page, "Mei Chen")).toBeVisible(); },
+    actions: async ({ page, expect }) => {
+      let release;
+      const gate = new Promise(resolve => { release = resolve; });
+      let messageStarted = false;
+      await page.route("**/v1/accounts/*/messages?*", async route => {
+        messageStarted = true;
+        await gate;
+        await route.fulfill({ status: 503, json: { error: { code: "unavailable" } } });
+      });
+      await page.locator(".search-trigger").click();
+      const search = page.getByRole("dialog", { name: "Search everything" });
+      await expect(search.getByRole("button", { name: "Friends", exact: true })).toHaveAttribute("aria-pressed", "true");
+      await search.getByRole("button", { name: "All", exact: true }).click();
+      await search.getByRole("combobox").fill("Mei");
+      try {
+        await expect.poll(() => messageStarted).toBe(true);
+        await expect(search.locator("[cmdk-item]").filter({ hasText: "Mei Chen" })).toBeVisible();
+      } finally { release(); }
+      await expect(search.getByRole("alert")).toBeVisible();
+      await expect(search.locator("[cmdk-item]").filter({ hasText: "Mei Chen" })).toBeVisible();
+    },
+  },
+  ...["friend-requests", "friend-request-review", "omni-search", "omni-message-search", "add-contact"].map(name => ({
+    name,
+    route: name.startsWith("friend-request") ? "friend-requests" : "contacts",
+    description: ({ "friend-requests": "Incoming and sent request history with an actionable Contacts badge.", "friend-request-review": "The shared contact card with request history, privacy choices, acceptance and local-history deletion.", "omni-search": "One search surface for saved contacts, groups, messages and request history.", "omni-message-search": "Message search limits long snippets to two lines while keeping the conversation name, original timestamp and View action visible.", "add-contact": "The shared contact card with a greeting and privacy choices before sending a friend request." })[name],
+    viewports: name === "omni-message-search" ? ["desktop", "compact"] : ["desktop", "narrow", "compact"],
+    setup: standardWorld,
+    prepare: async ({ page }) => {
+      await prepareContactScenes({ page });
+      if (name === "omni-message-search") await page.route("**/v1/accounts/*/messages?*", async route => {
+        const response = await route.fetch();
+        const body = await response.json();
+        body.items = body.items.map(message => message.body === "I booked the place near the station" ? {
+          ...message, body: message.body + ". " + "We can meet there before we walk to the cafe and discuss the weekend plans together. ".repeat(8),
+        } : message);
+        await route.fulfill({ response, json: body });
+      });
+    },
+    target: () => ({ account: ACCOUNT.id }),
+    ready: async ({ page, expect }) => {
+      if (name.startsWith("friend-request")) await expect(page.getByText("Casey Morgan", { exact: true })).toBeVisible();
+      else await expect(row(page, "Mei Chen")).toBeVisible();
+    },
+    actions: async ({ page, expect }) => {
+      if (name === "friend-request-review") {
+        await page.getByRole("button", { name: "Review request", exact: true }).click();
+        await expect(page.getByRole("dialog", { name: "Contact details" })).toBeVisible();
+      } else if (name === "omni-search" || name === "omni-message-search" || name === "add-contact") {
+        await page.locator(".search-trigger").focus();
+        const search = page.getByRole("dialog", { name: "Search everything" });
+        await expect(search).toBeVisible();
+        if (name === "omni-message-search") {
+          await search.getByRole("button", { name: "Messages", exact: true }).click();
+          await search.getByRole("combobox").fill("station");
+          const match = search.locator("[cmdk-item]").filter({ hasText: "I booked the place near the station" });
+          await expect(match).toContainText("Mei Chen");
+          await expect(match.locator("time")).toBeVisible();
+          await expect(match.locator("time")).toHaveAttribute("datetime", /2023-11-14T/);
+        }
+        if (name === "add-contact") {
+          await search.getByRole("button", { name: "Other people", exact: true }).click();
+          await search.getByRole("combobox").fill("avery.example");
+          await search.locator("[cmdk-item]").filter({ hasText: "Add contact" }).click();
+          const add = page.getByRole("dialog", { name: "Contact details" });
+          await expect(add).toBeVisible();
+          await add.getByRole("textbox", { name: "Friend request message" }).fill("Hello, we met at the book club.");
+        }
+      }
+    },
+  })),
+  ...[true, false].map(known => ({
+    name: known ? "existing-contact-search" : "contact-search-without-reference",
+    route: "contacts",
+    description: known ? "A server match without a verification ticket opens the saved contact with Message." : "A server match without request material offers View and cannot send a friend request.",
+    viewports: ["desktop", "compact"],
+    setup: standardWorld,
+    target: () => ({ account: ACCOUNT.id }),
+    prepare: async ({ page }) => {
+      await prepareContactScenes({ page });
+      await page.route("**/v1/accounts/*/search/contacts", route => route.fulfill({ json: { displayName: "mei.example", recipientRef: null, expiresAt: 1700001400, source: "wechat", request: null, contactId: known ? "sim_mei" : null } }));
+    },
+    ready: async ({ page, expect }) => { await expect(row(page, "Mei Chen")).toBeVisible(); },
+    actions: async ({ page, expect }) => {
+      await page.locator(".search-trigger").focus();
+      await page.getByRole("dialog", { name: "Search everything" }).getByRole("button", { name: "Other people", exact: true }).click();
+      await page.getByRole("combobox").fill("mei.example");
+      const match = page.locator("[cmdk-item]").filter({ hasText: "mei.example" });
+      await expect(match).toContainText(known ? "Message" : "View");
+      await expect(page.locator("[cmdk-item]").filter({ hasText: "Add contact" })).toHaveCount(0);
+      if (!known) {
+        await match.click();
+        const dialog = page.getByRole("dialog", { name: "Contact details" });
+        await expect(dialog).toContainText("This result has no friend-request reference.");
+        await expect(dialog.getByRole("button", { name: "Send request", exact: true })).toHaveCount(0);
+      }
+    },
+  })),
+  {
+    name: "contact-request-retry",
+    route: "contacts",
+    description: "A lost submission response keeps the original key and greeting until an inspected retry completes.",
+    viewports: ["desktop"],
+    setup: standardWorld,
+    target: () => ({ account: ACCOUNT.id }),
+    prepare: async ({ page }) => {
+      await prepareContactScenes({ page });
+      const attempts = [];
+      let sent = false;
+      const sentRow = { id: "fr_scene_sent", peerId: "opaque_alias@stranger", displayName: "opaque_alias@stranger", direction: "outgoing", message: "Hello, we met at the book club.", updatedAt: 1700000800, version: "scene-sent-v1", isContact: false, actionable: false, attention: false, state: "request_sent", history: [{ serverId: "0", message: "Hello, we met at the book club.", createdAt: 1700000800, direction: "outgoing" }] };
+      await page.route("**/v1/accounts/*/search/contacts", route => route.fulfill({ json: { displayName: "avery.example", recipientRef: "scene-only-reference", expiresAt: 1700001400, source: "wechat", request: sent ? sentRow : null, contactId: null } }));
+      await page.route("**/v1/accounts/*/contact-mutations/by-idempotency-key?*", route => route.fulfill({ status: 404, json: { error: { code: "not_found" } } }));
+      await page.route("**/v1/accounts/*/contact-requests", async route => {
+        if (route.request().method() !== "POST") return route.fulfill({ json: { items: [...requestSceneRows, ...(sent ? [sentRow] : [])], nextCursor: null, pendingIncomingCount: 1, sourceGeneration: "scene", coverage: {}, asOfEventCursor: "0" } });
+        if (route.request().postDataJSON().privacy?.hideMyPosts !== true) throw Error("Send omitted the chosen privacy");
+        attempts.push({ key: route.request().headers()["idempotency-key"], body: route.request().postData() });
+        if (attempts.length === 1) return route.abort("failed");
+        if (attempts.length !== 2 || JSON.stringify(attempts[0]) !== JSON.stringify(attempts[1])) throw Error("Request retry changed its original intent");
+        sent = true;
+        return route.fulfill({ status: 202, json: { id: "scene-send", accountId: ACCOUNT.id, kind: "contact_mutation", state: "succeeded", result: { action: "send_request", remoteOutcome: "accepted", profileProjection: "complete" }, createdAt: FIXED_TIME, updatedAt: FIXED_TIME } });
+      });
+    },
+    ready: async ({ page, expect }) => { await expect(row(page, "Mei Chen")).toBeVisible(); },
+    actions: async ({ page, expect }) => {
+      await page.locator(".search-trigger").focus();
+      await page.getByRole("dialog", { name: "Search everything" }).getByRole("button", { name: "Other people", exact: true }).click();
+      await page.getByRole("combobox").fill("avery.example");
+      await page.locator("[cmdk-item]").filter({ hasText: "Add contact" }).click();
+      const dialog = page.getByRole("dialog", { name: "Contact details" });
+      await dialog.getByRole("textbox", { name: "Friend request message" }).fill("Hello, we met at the book club.");
+      await dialog.getByRole("switch", { name: "Hide My Posts", exact: true }).check();
+      await dialog.getByRole("button", { name: "Send request", exact: true }).click();
+      await expect(dialog.getByRole("alert")).toBeVisible();
+      await expect(dialog.getByRole("button", { name: "Send request", exact: true })).toHaveCount(0);
+      await dialog.getByRole("button", { name: "Check status", exact: true }).click();
+      await dialog.getByRole("button", { name: "Retry original request", exact: true }).click();
+      await expect(dialog.getByText("Request sent", { exact: true })).toBeVisible();
+      await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
+      await expect(page.getByRole("combobox")).toHaveValue("avery.example");
+      const sentResult = page.locator("[cmdk-item]").filter({ hasText: "Request sent" });
+      await expect(sentResult).toContainText("View");
+      await expect(page.locator("[cmdk-item]").filter({ hasText: "Add contact" })).toHaveCount(0);
+      await sentResult.click();
+      await expect(page.getByRole("dialog", { name: "Contact details" })).toBeVisible();
+    },
+  },
+  ...["omni-section-pagination", "omni-pagination-query-change"].map(name => ({
+    name, route: "contacts",
+    description: "Each search section loads its own cursor, keeps earlier results on retry, deduplicates pages and shows message timestamps; query changes discard late pages.",
+    viewports: ["desktop", "compact"], setup: standardWorld, target: () => ({ account: ACCOUNT.id }),
+    prepare: prepareContactScenes,
+    ready: async ({ page, expect }) => { await expect(row(page, "Mei Chen")).toBeVisible(); },
+    actions: async ({ page, expect }) => {
+      const reads = [];
+      let releaseMessages, releaseStale;
+      const messageGate = new Promise(resolve => { releaseMessages = resolve; });
+      const staleGate = new Promise(resolve => { releaseStale = resolve; });
+      let groupRetries = 0, messagePages = 0, stalePages = 0;
+      const person = (id, relation, displayName) => ({ id, username: id, displayName, relation });
+      const message = (id, body, createdAt) => ({ id, accountId: ACCOUNT.id, threadId: "sim_mei", body, createdAt, serverId: "123" });
+      await page.route(/\/v1\/accounts\/[^/]+\/(contacts|groups|messages)\?.*/, async route => {
+        const url = new URL(route.request().url()), query = url.searchParams.get("query"), cursor = url.searchParams.get("cursor");
+        if (query !== "needle" && query !== "fresh") return route.continue();
+        const resource = url.pathname.split("/").at(-1), relation = url.searchParams.get("relation");
+        reads.push({ resource, relation, cursor, query });
+        let items = [], nextCursor = null;
+        if (query === "fresh") {
+          if (resource === "messages") items = [message("fresh", "Fresh query result", null)];
+        } else if (resource === "contacts" && relation === "friend") {
+          items = [person("friend-one", "friend", "Needle Friend One")];
+          if (cursor) { expect(cursor).toBe("friends-next"); items.push(person("friend-two", "friend", "Needle Friend Two")); }
+          else nextCursor = "friends-next";
+        } else if (resource === "contacts" && relation === "non_contact") {
+          items = [person("other-one", "non_contact", "Needle Person One")];
+        } else if (resource === "contacts" && relation === "unknown") {
+          if (cursor) { expect(cursor).toBe("unknown-next"); items = [person("other-three", "unknown", "Needle Person Three")]; }
+          else { items = [person("other-two", "unknown", "Needle Person Two")]; nextCursor = "unknown-next"; }
+        } else if (resource === "groups") {
+          items = [{ id: "needle-one@chatroom", displayName: "Needle Group One" }];
+          if (cursor) {
+            expect(cursor).toBe("groups-next");
+            if (++groupRetries === 1) return route.fulfill({ status: 503, json: { error: { code: "unavailable" } } });
+            items = [{ id: "needle-two@chatroom", displayName: "Needle Group Two" }];
+          } else nextCursor = "groups-next";
+        } else if (resource === "messages") {
+          if (cursor === "messages-next") {
+            messagePages++;
+            await messageGate;
+            items = [message("message-one", "First message match", "2023-11-14T20:03:00Z"), message("message-two", "Second message match", "1700000000"), message("message-no-time", "Message with no timestamp", null)];
+            nextCursor = "messages-third";
+          } else if (cursor === "messages-third") {
+            stalePages++;
+            await staleGate;
+            items = [message("stale", "Stale page must disappear", null)];
+          } else {
+            expect(cursor).toBeNull();
+            items = [message("message-one", "First message match", "2023-11-14T20:03:00Z")]; nextCursor = "messages-next";
+          }
+        }
+        await route.fulfill({ json: { items, nextCursor } });
+      });
+      try {
+        await page.locator(".search-trigger").click();
+        const search = page.getByRole("dialog", { name: "Search everything" });
+        await expect(search.getByRole("button", { name: "Friends", exact: true })).toHaveAttribute("aria-pressed", "true");
+        await search.getByRole("button", { name: "All", exact: true }).click();
+        await search.getByRole("combobox").fill("needle");
+        const section = label => search.getByRole("group", { name: label, exact: true });
+        const friends = section("Friends"), groups = section("Groups"), messages = section("Messages"), others = section("Other people");
+        await expect(friends.locator("[cmdk-item]")).toHaveCount(1);
+        await expect(groups.locator("[cmdk-item]")).toHaveCount(1);
+        await expect(others.locator("[cmdk-item]")).toHaveCount(2);
+        await expect(messages.locator("time")).toHaveAttribute("datetime", "2023-11-14T20:03:00.000Z");
+        await expect(messages.locator("time")).toHaveText(/Nov 14, 2023.*8:03 PM/);
+        const otherReads = reads.filter(read => read.resource !== "contacts").length;
+        await friends.getByRole("button", { name: "Load more Friends", exact: true }).click();
+        await expect(friends.locator("[cmdk-item]")).toHaveCount(2);
+        await expect(friends.getByRole("button", { name: "Load more Friends", exact: true })).toHaveCount(0);
+        expect(reads.filter(read => read.resource !== "contacts").length).toBe(otherReads);
+        await others.getByRole("button", { name: "Load more Other people", exact: true }).click();
+        await expect(others.locator("[cmdk-item]")).toHaveCount(3);
+        await groups.getByRole("button", { name: "Load more Groups", exact: true }).click();
+        await expect(groups.getByRole("alert")).toBeVisible();
+        await expect(groups.locator("[cmdk-item]")).toHaveCount(1);
+        await expect(friends.locator("[cmdk-item]")).toHaveCount(2);
+        await groups.getByRole("button", { name: "Load more Groups", exact: true }).click();
+        await expect(groups.locator("[cmdk-item]")).toHaveCount(2);
+        await expect(groups.getByRole("alert")).toHaveCount(0);
+        await messages.getByRole("button", { name: "Load more Messages", exact: true }).click();
+        await expect.poll(() => messagePages).toBe(1);
+        await expect(messages.getByRole("button", { name: "Load more Messages", exact: true })).toBeDisabled();
+        await expect(friends.locator("[cmdk-item]")).toHaveCount(2);
+        releaseMessages();
+        await expect(messages.locator("[cmdk-item]")).toHaveCount(3);
+        await expect(messages.locator("[cmdk-item]").filter({ hasText: "Second message match" }).locator("time")).toHaveAttribute("datetime", "2023-11-14T22:13:20.000Z");
+        await expect(messages.locator("[cmdk-item]").filter({ hasText: "Message with no timestamp" }).locator("time")).toHaveCount(0);
+        expect(messagePages).toBe(1);
+        if (name === "omni-pagination-query-change") {
+          await messages.getByRole("button", { name: "Load more Messages", exact: true }).click();
+          await expect.poll(() => stalePages).toBe(1);
+          await search.getByRole("combobox").fill("fresh");
+          await expect(messages).toContainText("Fresh query result");
+          releaseStale();
+          await expect(search.locator("[cmdk-item]").filter({ hasText: "Stale page must disappear" })).toHaveCount(0);
+          await expect(search.locator("[cmdk-item]").filter({ hasText: "First message match" })).toHaveCount(0);
+          expect(reads.filter(read => read.query === "fresh").every(read => read.cursor === null)).toBe(true);
+        }
+      } finally { releaseMessages(); releaseStale(); }
+    },
+  })),
+  ...["contact-search-saved-only", "contact-search-other-people"].map(name => ({
+    name, route: "contacts",
+    description: "Empty search shows saved contacts; typing adds a separate Other people section with clear source/membership labels and a separate WeChat discovery result.",
+    viewports: ["desktop", "compact"], setup: standardWorld, target: () => ({ account: ACCOUNT.id }),
+    prepare: async ({ page }) => {
+      await prepareContactScenes({ page });
+      await page.route(/\/v1\/accounts\/[^/]+\/contacts(?:\?.*)?$/, async route => {
+        const response = await route.fetch();
+        const body = await response.json();
+        const url = new URL(route.request().url());
+        const unknown = { id: "sim_mei", username: "sim_mei", displayName: "Mei Chen", relation: "unknown" };
+        const nonContact = { id: "sim_outsider", username: "sim_outsider", displayName: "Mei Rivera", relation: "non_contact" };
+        const relation = url.searchParams.get("relation");
+        const query = url.searchParams.get("query") || "";
+        if (relation === "unknown") body.items = query === "Mei" ? [unknown] : [];
+        else if (relation === "non_contact") body.items = query === "Mei" ? [nonContact] : [];
+        else {
+          body.items = body.items.map(row => row.id === "sim_mei" ? unknown : row);
+          body.items.push(nonContact);
+        }
+        await route.fulfill({ response, json: body });
+      });
+    },
+    ready: async ({ page, expect }) => { await expect(row(page, "Daniel Park")).toBeVisible(); },
+    actions: async ({ page, expect }) => {
+      const reads = [];
+      page.on("request", request => {
+        const url = new URL(request.url());
+        if (/\/contacts$/.test(url.pathname)) reads.push(url);
+      });
+      await page.locator(".search-trigger").click();
+      const search = page.getByRole("dialog", { name: "Search everything" });
+      for (const scope of ["Friends", "All"]) {
+        await search.getByRole("button", { name: scope, exact: true }).click();
+        await expect(search.locator("[cmdk-item]").filter({ hasText: "Daniel Park" })).toContainText("Contact");
+        await expect(search.locator("[cmdk-item]").filter({ hasText: "Mei Chen" })).toHaveCount(0);
+        await expect(search.locator("[cmdk-item]").filter({ hasText: "Mei Rivera" })).toHaveCount(0);
+      }
+      expect(reads.length).toBeGreaterThan(0);
+      expect(reads.every(url => url.searchParams.get("relation") === "friend")).toBe(true);
+      await search.getByRole("combobox").fill("Mei");
+      const otherPeople = search.getByRole("group", { name: "Other people", exact: true });
+      const unknown = otherPeople.locator("[cmdk-item]").filter({ hasText: "Mei Chen" });
+      const nonContact = otherPeople.locator("[cmdk-item]").filter({ hasText: "Mei Rivera" });
+      await expect(unknown).toContainText("From local history");
+      await expect(nonContact).toContainText("Not friends yet");
+      await expect(unknown.getByRole("button", { name: "Message", exact: true })).toBeVisible();
+      expect(new Set(reads.map(url => url.searchParams.get("relation")))).toEqual(new Set(["friend", "non_contact", "unknown"]));
+      await unknown.getByRole("button", { name: "Details for Mei Chen", exact: true }).click();
+      const cachedCard = page.getByRole("dialog", { name: "Contact details" });
+      await expect(cachedCard.getByRole("button", { name: "Add contact", exact: true })).toBeVisible();
+      await expect(cachedCard.getByRole("radio")).toHaveCount(0);
+      await cachedCard.getByRole("button", { name: "Close", exact: true }).click();
+      await expect(otherPeople).toBeVisible();
+      await search.getByRole("button", { name: "Friends", exact: true }).click();
+      await expect(otherPeople).toHaveCount(0);
+      await expect(search.getByRole("group", { name: "Add someone on WeChat", exact: true })).toHaveCount(0);
+      await search.getByRole("button", { name: "Other people", exact: true }).click();
+      await expect(otherPeople).toBeVisible();
+      await expect(search.getByRole("group", { name: "Friends", exact: true })).toHaveCount(0);
+      if (name === "contact-search-other-people") return;
+      await search.getByRole("combobox").fill("avery.example");
+      const discovery = search.getByRole("group", { name: "Add someone on WeChat", exact: true });
+      await expect(discovery.locator("[cmdk-item]")).toContainText("avery.example");
+      await expect(discovery.locator("[cmdk-item]")).toContainText("Add contact");
+      await expect(search).not.toContainText("On WeChat");
+      await expect(search).not.toContainText("Saved contact");
+      await discovery.locator("[cmdk-item]").click();
+      const card = page.getByRole("dialog", { name: "Contact details" });
+      await expect(card.getByRole("textbox", { name: "Friend request message" })).toBeVisible();
+      await expect(card.locator(".contact-detail-identity p")).toHaveCount(0);
+    },
+  })),
+  ...["unknown-contact", "unknown-contact-add", "non-contact"].map(name => ({
+    name, route: "info",
+    description: "A cached person opens from conversation details; confirmed non-contacts say Not friends yet, unknown membership has no label, and Add contact opens request review without submitting.",
+    viewports: ["desktop", "compact"], setup: standardWorld,
+    target: () => ({ account: ACCOUNT.id, thread: "sim_mei" }),
+    prepare: async ({ page }) => {
+      await prepareContactScenes({ page });
+      await page.route(/\/v1\/accounts\/[^/]+\/contacts(?:\?.*)?$/, async route => {
+        const response = await route.fetch();
+        const body = await response.json();
+        body.items = body.items.map(row => row.id === "sim_mei" ? { ...row, relation: name === "non-contact" ? "non_contact" : "unknown" } : row);
+        await route.fulfill({ response, json: body });
+      });
+    },
+    ready: async ({ page, expect }) => { await expect(page.getByRole("complementary", { name: "Conversation details" })).toBeVisible(); },
+    actions: async ({ page, expect }) => {
+      let submits = 0, lookups = 0, privacyReads = 0;
+      page.on("request", request => {
+        const path = new URL(request.url()).pathname;
+        if (path.endsWith("/contact-requests") && request.method() === "POST") submits++;
+        if (path.endsWith("/search/contacts")) lookups++;
+        if (path.endsWith("/privacy")) privacyReads++;
+      });
+      await page.getByRole("complementary", { name: "Conversation details" }).getByRole("button", { name: "Details", exact: true }).click();
+      const card = page.getByRole("dialog", { name: "Contact details" });
+      await expect(card.getByText("Contact", { exact: true })).toHaveCount(0);
+      await expect(card.getByText("On WeChat", { exact: true })).toHaveCount(0);
+      await expect(card.locator(".contact-detail-identity p")).toHaveCount(name === "non-contact" ? 1 : 0);
+      if (name === "non-contact") await expect(card.locator(".contact-detail-identity p")).toHaveText("Not friends yet");
+      await expect(card.getByRole("radio")).toHaveCount(0);
+      await expect(card.getByRole("button", { name: "Remove contact", exact: true })).toHaveCount(0);
+      await expect(card.getByRole("button", { name: "Message", exact: true })).toBeVisible();
+      await expect(card.getByRole("button", { name: "Add contact", exact: true })).toBeVisible();
+      if (name === "unknown-contact-add") {
+        await card.getByRole("button", { name: "Add contact", exact: true }).click();
+        await expect(card.getByRole("textbox", { name: "Friend request message" })).toBeVisible();
+        await expect(card.getByRole("radio", { name: "Full access", exact: true })).toBeVisible();
+        await expect(card.getByRole("button", { name: "Send request", exact: true })).toBeDisabled();
+        expect(lookups).toBe(1);
+      }
+      expect(submits).toBe(0);
+      expect(privacyReads).toBe(0);
+    },
+  })),
+  ...["contact-details", "contact-details-search", "contact-privacy-saved", "contact-privacy-unavailable", "contact-privacy-retry", "contact-privacy-syncing"].map(name => ({
+    name, route: "contacts",
+    description: ({ "contact-details": "A saved contact card reached from the contact list by its keyboard-accessible Details action.", "contact-details-search": "Saved-contact search offers separate Message and Details actions; Details opens the shared card.", "contact-privacy-saved": "Moments selections survive Chats Only and save with the original privacy version.", "contact-privacy-unavailable": "Missing administrator permission disables privacy edits and submission.", "contact-privacy-retry": "An uncertain privacy save locks edits and retries only the same inspected intent.", "contact-privacy-syncing": "One accepted PATCH waits through pending canonical GETs before showing saved settings, without another mutation." })[name],
+    viewports: name === "contact-privacy-retry" ? ["desktop"] : ["desktop", "compact"],
+    setup: standardWorld, target: () => ({ account: ACCOUNT.id }),
+    prepare: async ({ page }) => {
+      await prepareContactScenes({ page });
+      let privacy = { chatsOnly: false, hideMyPosts: false, hideTheirPosts: true };
+      const attempts = [];
+      let readbackReads = 0;
+      await page.route("**/v1/accounts/*/contacts/sim_mei/privacy", async route => {
+        if (route.request().method() !== "GET") throw Error("Privacy reads must use GET");
+        if (name === "contact-privacy-unavailable") return route.fulfill({ status: 403, json: { error: { code: "forbidden" } } });
+        if (name === "contact-privacy-syncing" && attempts.length) {
+          if (++readbackReads === 1) return route.fulfill({ status: 409, json: { error: { code: "contact_privacy_pending" } } });
+          await new Promise(resolve => setTimeout(resolve, 600));
+        }
+        return route.fulfill({ json: { privacy, version: attempts.length ? "scene-privacy-v2" : "scene-privacy-v1" } });
+      });
+      await page.route("**/v1/accounts/*/contacts/sim_mei", async route => {
+        if (route.request().method() !== "PATCH") throw Error("Contact changes must use PATCH");
+        if (name === "contact-privacy-unavailable") throw Error("Unavailable privacy must not submit a contact change");
+        const body = route.request().postDataJSON();
+        const expectedHide = name !== "contact-privacy-syncing";
+        if (body.expectedVersion !== "scene-privacy-v1" || body.privacy.chatsOnly !== false || body.privacy.hideMyPosts !== expectedHide || body.privacy.hideTheirPosts !== expectedHide) throw Error("Privacy submission lost the selected settings or source version");
+        attempts.push({ key: route.request().headers()["idempotency-key"], body: route.request().postData() });
+        if (name === "contact-privacy-retry" && attempts.length === 1) return route.abort("failed");
+        if (attempts.length > 1 && JSON.stringify(attempts[0]) !== JSON.stringify(attempts[1])) throw Error("Privacy retry changed its original intent");
+        privacy = body.privacy;
+        return route.fulfill({ status: 202, json: { id: "scene-privacy", accountId: ACCOUNT.id, kind: "contact_mutation", state: "succeeded", result: { action: "update_privacy" }, createdAt: FIXED_TIME, updatedAt: FIXED_TIME } });
+      });
+      await page.route("**/v1/accounts/*/contact-mutations/by-idempotency-key?*", route => route.fulfill({ status: 404, json: { error: { code: "not_found" } } }));
+    },
+    ready: async ({ page, expect }) => { await expect(row(page, "Mei Chen")).toBeVisible(); },
+    actions: async ({ page, expect }) => {
+      if (name === "contact-details-search") {
+        await page.locator(".search-trigger").focus();
+        const search = page.getByRole("dialog", { name: "Search everything" });
+        const match = search.locator("[cmdk-item]").filter({ hasText: "Mei Chen" });
+        await expect(match.getByRole("button", { name: "Message", exact: true })).toBeVisible();
+        await match.getByRole("button", { name: "Details for Mei Chen", exact: true }).click();
+        await expect(search).toHaveCount(0);
+      } else {
+        const details = page.getByRole("button", { name: "Details for Mei Chen", exact: true });
+        await details.focus();
+        await expect(details).toBeVisible();
+        await details.press("Enter");
+      }
+      const dialog = page.getByRole("dialog", { name: "Contact details" });
+      await expect(dialog).toBeVisible();
+      await expect(dialog.getByRole("button", { name: "Message", exact: true })).toBeVisible();
+      if (name === "contact-privacy-unavailable") {
+        await expect(dialog.getByRole("alert")).toContainText("Administrator access is required");
+        await expect(dialog.getByRole("radio", { name: "Full access", exact: true })).toHaveCount(0);
+        await expect(dialog.getByRole("button", { name: "Save privacy", exact: true })).toHaveCount(0);
+        await expect(dialog.getByRole("button", { name: "Remove contact", exact: true })).toHaveCount(0);
+        return;
+      }
+      const hideMine = dialog.getByRole("switch", { name: "Hide My Posts", exact: true });
+      await expect(dialog.getByRole("switch", { name: "Hide Their Posts", exact: true })).toBeChecked();
+      await expect(dialog.getByRole("button", { name: "Save privacy", exact: true })).toHaveCount(0);
+      if (name === "contact-privacy-saved" || name === "contact-privacy-retry" || name === "contact-privacy-syncing") {
+        let patchCount = 0;
+        page.on("request", request => { if (request.method() === "PATCH" && new URL(request.url()).pathname.endsWith("/contacts/sim_mei")) patchCount++; });
+        if (name === "contact-privacy-syncing") await dialog.getByRole("switch", { name: "Hide Their Posts", exact: true }).uncheck();
+        else await hideMine.check();
+        await dialog.getByRole("radio", { name: "Chats Only", exact: true }).check();
+        await expect(hideMine).toHaveCount(0);
+        await dialog.getByRole("radio", { name: "Full access", exact: true }).check();
+        if (name === "contact-privacy-syncing") await expect(hideMine).not.toBeChecked();
+        else await expect(hideMine).toBeChecked();
+        await dialog.getByRole("button", { name: "Save privacy", exact: true }).click();
+        if (name === "contact-privacy-syncing") {
+          await expect(dialog.locator(".contact-change-status")).toContainText("Waiting for saved privacy settings");
+          await expect(hideMine).toBeDisabled();
+          await expect(dialog.getByRole("button", { name: "Save privacy", exact: true })).toHaveCount(0);
+          await expect(dialog.getByRole("alert")).toHaveCount(0);
+        }
+        if (name === "contact-privacy-retry") {
+          await expect(dialog.getByRole("alert")).toBeVisible();
+          await expect(hideMine).toBeDisabled();
+          await expect(dialog.getByRole("button", { name: "Save privacy", exact: true })).toBeDisabled();
+          await dialog.getByRole("button", { name: "Check status", exact: true }).click();
+          await dialog.getByRole("button", { name: "Retry original request", exact: true }).click();
+        }
+        await expect(dialog.locator(".contact-change-status")).toContainText("Privacy settings saved");
+        if (name === "contact-privacy-syncing") {
+          await expect(hideMine).not.toBeChecked();
+          await expect(dialog.getByRole("switch", { name: "Hide Their Posts", exact: true })).not.toBeChecked();
+          await expect(hideMine).toBeEnabled();
+          await expect(dialog.getByRole("alert")).toHaveCount(0);
+          expect(patchCount).toBe(1);
+        } else await expect(hideMine).toBeChecked();
+      }
+    },
+  })),
+  {
+    name: "friend-request-privacy-accept", route: "friend-requests",
+    description: "Acceptance submits the selected privacy settings together with the exact request version.",
+    viewports: ["desktop", "compact"], setup: standardWorld, target: () => ({ account: ACCOUNT.id }),
+    prepare: async ({ page }) => {
+      await prepareContactScenes({ page });
+      let accepted = false;
+      const selected = { chatsOnly: true, hideMyPosts: true, hideTheirPosts: false };
+      await page.route("**/v1/accounts/*/contact-requests?*", route => route.fulfill({ json: { items: requestSceneRows.map(r => r.id === "fr_scene_casey" && accepted ? { ...r, isContact: true, actionable: false, version: "scene-accepted-v2" } : r), nextCursor: null, pendingIncomingCount: accepted ? 0 : 1 } }));
+      await page.route("**/v1/accounts/*/contacts/sim_casey/privacy", route => route.fulfill({ json: { privacy: selected, version: "scene-privacy-v1" } }));
+      await page.route("**/v1/accounts/*/contact-requests/fr_scene_casey/accept", route => {
+        const body = route.request().postDataJSON();
+        if (body.expectedVersion !== "scene-incoming-v1" || JSON.stringify(body.privacy) !== JSON.stringify({ chatsOnly: true, hideMyPosts: true, hideTheirPosts: false })) throw Error("Acceptance omitted the chosen privacy or current version");
+        accepted = true;
+        return route.fulfill({ status: 202, json: { id: "scene-accept", accountId: ACCOUNT.id, kind: "contact_mutation", state: "succeeded", result: { action: "accept_request" }, createdAt: FIXED_TIME, updatedAt: FIXED_TIME } });
+      });
+    },
+    ready: async ({ page, expect }) => { await expect(page.getByText("Casey Morgan", { exact: true })).toBeVisible(); },
+    actions: async ({ page, expect }) => {
+      await page.getByRole("button", { name: "Review request", exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: "Contact details" });
+      await dialog.getByRole("switch", { name: "Hide My Posts", exact: true }).check();
+      await dialog.getByRole("radio", { name: "Chats Only", exact: true }).check();
+      await dialog.getByRole("button", { name: "Accept request", exact: true }).click();
+      await expect(dialog.locator(".contact-change-status")).toContainText("Request accepted");
+      await expect(dialog.getByRole("button", { name: "Accept request", exact: true })).toHaveCount(0);
+      await expect(dialog.getByRole("button", { name: "Message", exact: true })).toBeVisible();
+      await expect(dialog.getByRole("radio", { name: "Chats Only", exact: true })).toBeChecked();
+      await expect(dialog.getByRole("radio", { name: "Full access", exact: true })).toBeEnabled();
+    },
+  },
+  {
+    name: "contact-details-sidebar", route: "info",
+    description: "A direct-conversation sidebar opens the same contact card and its checked privacy/removal actions.",
+    viewports: ["desktop"], setup: standardWorld, target: () => ({ account: ACCOUNT.id, thread: "sim_mei" }),
+    prepare: async ({ page }) => {
+      await prepareContactScenes({ page });
+      await page.route("**/v1/accounts/*/contacts/sim_mei/privacy", route => route.fulfill({ json: { privacy: { chatsOnly: false, hideMyPosts: false, hideTheirPosts: true }, version: "scene-privacy-v1" } }));
+    },
+    ready: async ({ page, expect }) => { await expect(page.getByRole("complementary", { name: "Conversation details" })).toBeVisible(); },
+    actions: async ({ page, expect }) => {
+      await page.getByRole("complementary", { name: "Conversation details" }).getByRole("button", { name: "Details", exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: "Contact details" });
+      await expect(dialog.getByRole("switch", { name: "Hide Their Posts", exact: true })).toBeChecked();
+      await expect(dialog.getByRole("button", { name: "Message", exact: true })).toBeVisible();
+      await dialog.locator(".contact-more summary").click();
+      await expect(dialog.getByRole("button", { name: "Remove contact", exact: true })).toBeVisible();
+    },
+  },
+  {
+    name: "contact-details-remove", route: "contacts",
+    description: "Remove contact opens a distinct confirmation that preserves chat history and recovers an uncertain result with the original key.",
+    viewports: ["desktop", "compact"], setup: standardWorld, target: () => ({ account: ACCOUNT.id }),
+    prepare: async ({ page }) => {
+      await prepareContactScenes({ page });
+      await page.route("**/v1/accounts/*/contacts/sim_mei/privacy", route => route.fulfill({ json: { privacy: { chatsOnly: false, hideMyPosts: false, hideTheirPosts: false }, version: "scene-privacy-v1" } }));
+      await page.route("**/v1/accounts/*/contact-mutations/by-idempotency-key?*", route => route.fulfill({ status: 404, json: { error: { code: "not_found" } } }));
+      const attempts = [];
+      await page.route("**/v1/accounts/*/contacts/sim_mei", route => {
+        if (route.request().method() !== "DELETE") return route.continue();
+        attempts.push({ key: route.request().headers()["idempotency-key"], body: route.request().postData() });
+        if (attempts.length === 1) return route.abort("failed");
+        if (attempts.length !== 2 || JSON.stringify(attempts[0]) !== JSON.stringify(attempts[1])) throw Error("Remove contact retry changed the original intent");
+        return route.fulfill({ status: 202, json: { id: "scene-remove", accountId: ACCOUNT.id, kind: "contact_mutation", state: "succeeded", result: { action: "remove_contact" }, createdAt: FIXED_TIME, updatedAt: FIXED_TIME } });
+      });
+    },
+    ready: async ({ page, expect }) => { await expect(row(page, "Mei Chen")).toBeVisible(); },
+    actions: async ({ page, expect }) => {
+      const details = page.getByRole("button", { name: "Details for Mei Chen", exact: true });
+      await details.focus(); await details.press("Enter");
+      const card = page.getByRole("dialog", { name: "Contact details" });
+      await card.locator(".contact-more summary").click();
+      await card.getByRole("button", { name: "Remove contact", exact: true }).click();
+      const confirmation = page.getByRole("dialog", { name: "Remove contact", exact: true });
+      await expect(confirmation).toContainText("Your chat history will be kept.");
+      await expect(confirmation.getByRole("button", { name: "Delete local history", exact: true })).toHaveCount(0);
+      await confirmation.getByRole("button", { name: "Remove contact", exact: true }).click();
+      await expect(confirmation.getByRole("alert")).toBeVisible();
+      await expect(confirmation.getByRole("button", { name: "Remove contact", exact: true })).toHaveCount(0);
+      await confirmation.getByRole("button", { name: "Check status", exact: true }).click();
+      await confirmation.getByRole("button", { name: "Retry original request", exact: true }).click();
+      await expect(confirmation.getByRole("status")).toContainText("Contact removed");
+    },
+  },
+  {
+    name: "friend-request-delete-history", route: "friend-requests",
+    description: "Delete local history removes the request conversation without presenting it as a server decline.",
+    viewports: ["desktop"], setup: standardWorld, target: () => ({ account: ACCOUNT.id }),
+    prepare: async ({ page }) => {
+      await prepareContactScenes({ page });
+      await page.route("**/v1/accounts/*/contact-requests/fr_scene_casey", route => {
+        if (route.request().method() !== "DELETE" || route.request().postDataJSON().expectedVersion !== "scene-incoming-v1") throw Error("History deletion lost its request version");
+        return route.fulfill({ status: 202, json: { id: "scene-delete", accountId: ACCOUNT.id, kind: "contact_mutation", state: "succeeded", result: { action: "delete_request" }, createdAt: FIXED_TIME, updatedAt: FIXED_TIME } });
+      });
+    },
+    ready: async ({ page, expect }) => { await expect(page.getByText("Casey Morgan", { exact: true })).toBeVisible(); },
+    actions: async ({ page, expect }) => {
+      await page.getByRole("button", { name: "Review request", exact: true }).click();
+      const card = page.getByRole("dialog", { name: "Contact details" });
+      await card.locator(".contact-more summary").click();
+      page.once("dialog", async confirmation => {
+        expect(confirmation.message()).toContain("This does not decline the request on WeChat.");
+        await confirmation.accept();
+      });
+      await card.getByRole("button", { name: "Delete local history", exact: true }).click();
+      await expect(card.getByRole("status")).toContainText("Local history deleted");
+      await expect(card.getByRole("button", { name: "Accept request", exact: true })).toHaveCount(0);
+    },
   },
   {
     name: "contacts",

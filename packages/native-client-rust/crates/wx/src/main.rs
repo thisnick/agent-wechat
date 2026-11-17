@@ -1,3 +1,4 @@
+mod contact_requests_cli;
 use anyhow::{bail, Context, Result};
 use clap::{Args, FromArgMatches, Parser, Subcommand};
 use serde_json::{json, Value};
@@ -380,6 +381,52 @@ enum ResourceAction {
 }
 #[derive(Subcommand)]
 enum ContactCommand {
+    /// List saved contacts with optional pagination.
+    List {
+        /// Return at most this many items.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Include all cached people, even non-contacts and unknown relationships.
+        #[arg(long)]
+        all: bool,
+        /// Continue from the next-page cursor of the previous result.
+        #[arg(long)]
+        cursor: Option<String>,
+    },
+
+    /// Discover a person on WeChat by WeChat ID. Phone lookup is unverified.
+    Search {
+        /// Discovery query, distinct from local contacts find.
+        query: String,
+    },
+    /// Inspect, send, accept or locally delete friend-request conversations.
+    Requests {
+        #[command(subcommand)]
+        command: ContactRequestCommand,
+    },
+    /// Change supplied contact privacy settings; keep omitted settings.
+    #[command(group(clap::ArgGroup::new("privacy_settings").args(["chats_only", "hide_my_posts", "hide_their_posts"]).required(true).multiple(true)))]
+    Set {
+        /// Exact existing contact ID.
+        id: String,
+        #[command(flatten)]
+        privacy: ContactPrivacyOptions,
+        #[command(flatten)]
+        options: MutationOptions,
+    },
+    /// Read an existing contact's relationship privacy.
+    Privacy {
+        #[command(subcommand)]
+        command: ContactPrivacyCommand,
+    },
+    /// Remove this account's contact relationship while preserving chat history.
+    Remove {
+        /// Exact existing ordinary contact ID.
+        id: String,
+        #[command(flatten)]
+        options: MutationOptions,
+    },
+
     #[command(flatten)]
     Catalog(CatalogCommand),
     /// Look up one or two known contact IDs live on WeChat without saving the result.
@@ -387,6 +434,91 @@ enum ContactCommand {
         /// One or two distinct contact IDs to look up live on WeChat.
         #[arg(required = true, num_args = 1..=2)]
         ids: Vec<String>,
+    },
+}
+
+#[derive(Args, Clone, Copy, Default)]
+struct ContactPrivacyOptions {
+    /// Whether to restrict this relationship to chats (true or false).
+    #[arg(long, action = clap::ArgAction::Set)]
+    chats_only: Option<bool>,
+    /// Whether to hide your posts from this contact (true or false).
+    #[arg(long, action = clap::ArgAction::Set)]
+    hide_my_posts: Option<bool>,
+    /// Whether to hide this contact's posts (true or false).
+    #[arg(long, action = clap::ArgAction::Set)]
+    hide_their_posts: Option<bool>,
+}
+
+#[derive(Subcommand)]
+enum ContactPrivacyCommand {
+    /// Read the contact's saved relationship privacy and current version.
+    Get {
+        /// Exact existing contact ID.
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ContactRequestCommand {
+    /// List saved request conversations in both directions; history is not server pending proof.
+    List {
+        /// Filter by incoming or outgoing direction.
+        #[arg(long,value_parser=["incoming","outgoing"])]
+        direction: Option<String>,
+        /// Show only current incoming acceptance candidates.
+        #[arg(long)]
+        actionable: bool,
+        /// Match saved names, peer identities and verification text.
+        #[arg(long)]
+        search: Option<String>,
+        /// Maximum number of rows on this page, from 1 to 200.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Exact nextCursor from the same query.
+        #[arg(long)]
+        cursor: Option<String>,
+    },
+    /// Inspect one request, its verification history and current version.
+    Get {
+        /// Exact request ID from list.
+        id: String,
+    },
+    /// Send one friend request using an opaque result from contacts search.
+    /// When any privacy flag is supplied, omitted privacy flags default to false.
+    Send {
+        /// Exact recipientRef from discovery on this account.
+        recipient_ref: String,
+        /// Owner-supplied verification greeting.
+        #[arg(long)]
+        message: String,
+        #[command(flatten)]
+        privacy: ContactPrivacyOptions,
+        #[command(flatten)]
+        options: MutationOptions,
+    },
+    /// Accept the exact inspected version of an incoming request.
+    /// When any privacy flag is supplied, omitted privacy flags default to false.
+    Accept {
+        /// Request ID from list/get.
+        id: String,
+        /// Current version returned by list/get.
+        #[arg(long)]
+        expected_version: String,
+        #[command(flatten)]
+        privacy: ContactPrivacyOptions,
+        #[command(flatten)]
+        options: MutationOptions,
+    },
+    /// Delete local request conversation/history. Does not reject or cancel on WeChat.
+    Delete {
+        /// Request ID from list/get.
+        id: String,
+        /// Current version returned by list/get.
+        #[arg(long)]
+        expected_version: String,
+        #[command(flatten)]
+        options: MutationOptions,
     },
 }
 
@@ -408,15 +540,6 @@ enum CatalogCommand {
         /// Seconds to wait for completion; the work keeps running after the wait ends.
         #[arg(long, default_value_t = 30)]
         wait: u64,
-    },
-    /// List saved entries with optional pagination.
-    List {
-        /// Return at most this many items.
-        #[arg(long)]
-        limit: Option<usize>,
-        /// Continue from the next-page cursor of the previous result.
-        #[arg(long)]
-        cursor: Option<String>,
     },
     /// Show a saved entry by ID.
     Get {
@@ -539,6 +662,16 @@ struct MutationOptions {
 }
 #[derive(Subcommand)]
 enum GroupCommand {
+    /// List saved entries with optional pagination.
+    List {
+        /// Return at most this many items.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Continue from the next-page cursor of the previous result.
+        #[arg(long)]
+        cursor: Option<String>,
+    },
+
     #[command(flatten)]
     Catalog(CatalogCommand),
     /// Fetch the member roster for a known group ID live from WeChat without saving it.
@@ -1765,6 +1898,44 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Calls { command } => {
             return calls_cli::run(&r, command.context("choose a calls command")?, cli.json).await;
         }
+        Command::Contacts {
+            command: Some(ContactCommand::Search { query }),
+            ..
+        } => {
+            r.post(&r.path("search/contacts")?, json!({"query":query}))
+                .await?
+        }
+        Command::Contacts {
+            command: Some(ContactCommand::Requests { command }),
+            ..
+        } => contact_requests_cli::requests(&r, &settings, command).await?,
+        Command::Contacts {
+            command: Some(ContactCommand::Privacy { command }),
+            ..
+        } => contact_requests_cli::privacy(&r, &settings, command).await?,
+        Command::Contacts {
+            command:
+                Some(ContactCommand::Set {
+                    id,
+                    privacy,
+                    options,
+                }),
+            ..
+        } => contact_requests_cli::set_contact(&r, &settings, id, privacy, options).await?,
+        Command::Contacts {
+            command: Some(ContactCommand::Remove { id, options }),
+            ..
+        } => {
+            client_actions::mutation(
+                &r,
+                &settings,
+                Method::DELETE,
+                &format!("contacts/{}", encode(&id)),
+                json!({}),
+                options,
+            )
+            .await?
+        }
         Command::LookupContacts { ids }
         | Command::Contacts {
             command: Some(ContactCommand::Lookup { ids }),
@@ -1864,6 +2035,13 @@ async fn run(cli: Cli) -> Result<()> {
                 &[("cursor", cursor), ("limit", limit.map(|v| v.to_string()))],
             ))
             .await?
+        }
+        Command::Contacts {
+            command: Some(ContactCommand::List { limit, cursor, all }),
+            ..
+        } => {
+            client_actions::catalog_list(&r, "contacts", limit, cursor, all.then_some("all"))
+                .await?
         }
         Command::Contacts {
             command: Some(ContactCommand::Catalog(command)),

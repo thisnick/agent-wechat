@@ -3,7 +3,7 @@ import type { NativeCallWebSocketFactory, NativeCallsClientOptions } from "./nat
 export * from "./native-calls.ts";
 
 /** Native v1 HTTP transport. This does not start a daemon or use the legacy API. */
-import type { TextMentions } from "./native.generated.js";
+import type { NativeContactSearch, NativeContactRequestPage, NativeContactRequest, NativeContactRequestSend, NativeContactRequestAccept, NativeContactPrivacy, NativeContactUpdate, TextMentions } from "./native.generated.js";
 export type NativeTextSendOptions = { quote?: QuoteSendReference; mentions?: TextMentions };
 export type NativeTextMentionOptions = NativeTextSendOptions & { mentions: TextMentions };
 import type { AccountSettings, NativeAccountRemoval, NativeUploadRelease, OfficialProfileRequest, OfficialProfileSelection, LoginRequest, QrRefresh, NativeTombstone, NativeMessage, QuoteSendReference, NativeThread, NativeContact, NativeGroup, NativeGroupMember, NativePage, NativeOperation, NativeSendIntent, ShareSendRequest, NativeEvent, NativeIdentity, NativeStatus, MediaAsset, MediaJob, NativeMediaJobRetryRequest, MediaTransferRequest, MediaSendRequest, OwnedMediaSource } from "./native.generated.js";
@@ -11,6 +11,8 @@ export type * from "./native.generated.js";
 export { NATIVE_MAX_SOURCE_BYTES, NATIVE_MAX_ORDINARY_SOURCE_BYTES, NATIVE_MAX_VIDEO_SOURCE_BYTES } from "./native.generated.ts";
 import { NATIVE_MAX_SOURCE_BYTES } from "./native.generated.ts";
 import type { NativeGroupCreateRequest, NativeGroupMemberLookup } from "./native.generated.js";
+/** Contact lists default to confirmed saved friends; all includes other cached people. */
+export type NativeContactListOptions = NativeListOptions & { relation?: "friend" | "non_contact" | "unknown" | "all" };
 export type NativeListOptions = { cursor?: string; limit?: number; query?: string; kind?: string };
 export function isNativeTombstone(value: unknown): value is NativeTombstone { const item = value as Partial<NativeTombstone> | null; return item?.deleted === true && typeof item.id === "string" && typeof item.version === "string"; }
 /** Validate a derived official notice without interpreting it as identity metadata. */
@@ -168,13 +170,42 @@ export class NativeWeChatClient {
     return this.request(`v1/accounts/${id(accountId)}/forget-credentials`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ confirm: true }) });
   }
   threads(accountId: string, options?: string | NativeListOptions): Promise<NativePage<NativeThread>> { return this.request(`v1/accounts/${id(accountId)}/threads${listQuery(options)}`); }
-  contacts(accountId: string, options?: string | NativeListOptions): Promise<NativePage<NativeContact>> { return this.request(`v1/accounts/${id(accountId)}/contacts${listQuery(options)}`); }
-  groups(accountId: string, options?: string | NativeListOptions): Promise<NativePage<NativeGroup>> { return this.request(`v1/accounts/${id(accountId)}/groups${listQuery(options)}`); }
+  contacts(accountId: string, options?: string | NativeContactListOptions, signal?: AbortSignal): Promise<NativePage<NativeContact>> { return this.request(`v1/accounts/${id(accountId)}/contacts${listQuery(options)}`, { signal }); }
+  groups(accountId: string, options?: string | NativeListOptions, signal?: AbortSignal): Promise<NativePage<NativeGroup>> { return this.request(`v1/accounts/${id(accountId)}/groups${listQuery(options)}`, { signal }); }
   thread(accountId: string, threadId: string, signal?: AbortSignal): Promise<NativeThread> { return this.request(`v1/accounts/${id(accountId)}/threads/${id(threadId)}`, { signal }); }
-  contact(accountId: string, username: string): Promise<NativeContact> { return this.request(`v1/accounts/${id(accountId)}/contacts/${id(username)}`); }
+  contact(accountId: string, username: string, signal?: AbortSignal): Promise<NativeContact> { return this.request(`v1/accounts/${id(accountId)}/contacts/${id(username)}`, { signal }); }
   group(accountId: string, roomId: string, signal?: AbortSignal): Promise<NativeGroup> { return this.request(`v1/accounts/${id(accountId)}/groups/${id(roomId)}`, { signal }); }
   groupMembers(accountId: string, roomId: string, options?: string | NativeListOptions, signal?: AbortSignal): Promise<NativePage<NativeGroupMember>> { return this.request(`v1/accounts/${id(accountId)}/groups/${id(roomId)}/members${listQuery(options)}`, { signal }); }
   groupMember(accountId: string, roomId: string, username: string, signal?: AbortSignal): Promise<NativeGroupMemberLookup> { return this.request(`v1/accounts/${id(accountId)}/groups/${id(roomId)}/members/${id(username)}`, { signal }); }
+  /** Look up one or two exact known usernames without saving them or proving friendship. */
+  lookupContacts(accountId: string, ids: string[], signal?: AbortSignal): Promise<{ items: Array<{ id: string; username: string; displayName: string }>; results: number[] }> { return this.request(`v1/accounts/${id(accountId)}/contacts/lookup`, { method: "POST", body: JSON.stringify({ ids }), signal }); }
+  /** Search WeChat once. Returned recipient references are private and account/session bound. */
+  searchContacts(accountId: string, query: string, signal?: AbortSignal): Promise<NativeContactSearch> { return this.request(`v1/accounts/${id(accountId)}/search/contacts`, { method: "POST", body: JSON.stringify({ query }), signal }); }
+  /** Read incoming and outgoing request history from the official profile. */
+  contactRequests(accountId: string, options?: { direction?: "incoming" | "outgoing"; actionable?: boolean; search?: string; limit?: number; cursor?: string }, signal?: AbortSignal): Promise<NativeContactRequestPage> { const query = new URLSearchParams(); for (const [k, v] of Object.entries(options ?? {})) if (v != null) query.set(k, String(v)); return this.request(`v1/accounts/${id(accountId)}/contact-requests${query.size ? `?${query}` : ""}`, { signal }); }
+  /** Read the current request version before accepting or deleting it. */
+  contactRequest(accountId: string, requestId: string, signal?: AbortSignal): Promise<NativeContactRequest> { return this.request(`v1/accounts/${id(accountId)}/contact-requests/${id(requestId)}`, { signal }); }
+  private async contactMutation(accountId: string, path: string, method: string, input: unknown, key: string, action: string, signal?: AbortSignal): Promise<NativeOperation> {
+    if (!key || key.length > 200 || /[\u0000-\u001f\u007f]/.test(key)) throw Error("A stable contact idempotency key is required");
+    const op = await this.request<NativeOperation>(`v1/accounts/${id(accountId)}/${path}`, { method, body: input == null ? undefined : JSON.stringify(input), headers: { "Idempotency-Key": key }, signal });
+    if (op.accountId !== accountId || op.kind !== "contact_mutation" || !op.id || (op.result as Record<string, unknown>)?.action !== action) throw Error("Native contact operation identity is invalid");
+    return op;
+  }
+  /** Submit one greeting. Keep the same key after an uncertain result. */
+  sendContactRequest(accountId: string, input: NativeContactRequestSend, key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.contactMutation(accountId, "contact-requests", "POST", input, key, "send_request", signal); }
+  /** Accept the inspected version of an incoming request. */
+  acceptContactRequest(accountId: string, requestId: string, input: NativeContactRequestAccept | string, key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.contactMutation(accountId, `contact-requests/${id(requestId)}/accept`, "POST", typeof input === "string" ? { expectedVersion: input } : input, key, "accept_request", signal); }
+  /** Read existing relationship privacy; requires the account's admin scope. */
+  contactPrivacy(accountId: string, username: string, signal?: AbortSignal): Promise<NativeContactPrivacy> { return this.request(`v1/accounts/${id(accountId)}/contacts/${id(username)}/privacy`, { signal }); }
+  /** Save privacy once against the inspected version; retain the original key after uncertainty. */
+  updateContact(accountId: string, username: string, input: NativeContactUpdate, key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.contactMutation(accountId, `contacts/${id(username)}`, "PATCH", input, key, "update_privacy", signal); }
+  /** Delete this account's local request history; no server rejection or cancellation. */
+  deleteContactRequest(accountId: string, requestId: string, expectedVersion: string, key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.contactMutation(accountId, `contact-requests/${id(requestId)}`, "DELETE", { expectedVersion }, key, "delete_request", signal); }
+  /** Remove this account's contact relationship while preserving chat history. */
+  removeContact(accountId: string, username: string, key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.contactMutation(accountId, `contacts/${id(username)}`, "DELETE", null, key, "remove_contact", signal); }
+  /** Recover the original operation after losing its response; never resend with a new key. */
+  contactMutationByKey(accountId: string, key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.request(`v1/accounts/${id(accountId)}/contact-mutations/by-idempotency-key?${new URLSearchParams({ key })}`, { signal }); }
+
   private async groupMutation(accountId: string, path: string, method: string, body: unknown, key: string, action: string, target: string | null, signal?: AbortSignal): Promise<NativeOperation> {
     if (typeof key !== "string" || !key || key.length > 200 || /[\u0000-\u001f\u007f]/.test(key)) throw new Error("A stable group idempotency key is required");
     const operation = await this.request<NativeOperation>(`v1/accounts/${id(accountId)}/${path}`, { method, body: JSON.stringify(body), headers: { "Idempotency-Key": key }, signal });
@@ -221,8 +252,8 @@ export class NativeWeChatClient {
     return message;
   }
   /** Account-wide local search, with the daemon's query-bound opaque cursor. */
-  async searchMessages(accountId: string, options: NativeListOptions): Promise<NativePage<NativeMessage>> {
-    const result = await this.request<NativePage<NativeMessage>>(`v1/accounts/${id(accountId)}/messages${listQuery(options)}`);
+  async searchMessages(accountId: string, options: NativeListOptions, signal?: AbortSignal): Promise<NativePage<NativeMessage>> {
+    const result = await this.request<NativePage<NativeMessage>>(`v1/accounts/${id(accountId)}/messages${listQuery(options)}`, { signal });
     for (const message of result.items) {
       if (isNativeTombstone(message)) continue;
       if (typeof message.id !== "string" || message.accountId !== accountId || typeof message.threadId !== "string" || !message.threadId

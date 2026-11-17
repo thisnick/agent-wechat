@@ -698,6 +698,20 @@
         ],
         "type": "object"
       },
+      "ContactMutationKeyQuery": {
+        "additionalProperties": false,
+        "description": "Original key for inspecting a contact mutation.",
+        "properties": {
+          "key": {
+            "description": "Original submitted idempotency key.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key"
+        ],
+        "type": "object"
+      },
       "ContentQuery": {
         "additionalProperties": false,
         "description": "Options for fetching media bytes.",
@@ -1716,7 +1730,7 @@
             ]
           },
           "relation": {
-            "description": "Relationship to this account. It currently always reports `unknown`, including for saved\nfriends.",
+            "description": "Relationship evidence: `friend` when membership is established, `non_contact` when\nknown flags do not establish membership, or `unknown` when flags are unavailable.",
             "type": "string"
           },
           "remark": {
@@ -1781,6 +1795,392 @@
           "coverage",
           "sourceGeneration",
           "asOfEventCursor"
+        ],
+        "type": "object"
+      },
+      "NativeContactPrivacy": {
+        "description": "Current relationship privacy read from the supported official profile.",
+        "properties": {
+          "privacy": {
+            "$ref": "#/components/schemas/NativeContactPrivacySettings",
+            "description": "Current settings for this account's relationship."
+          },
+          "version": {
+            "description": "Account/contact-bound version required when saving a change.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "privacy",
+          "version"
+        ],
+        "type": "object"
+      },
+      "NativeContactPrivacySettings": {
+        "additionalProperties": false,
+        "description": "Relationship privacy selected by the account owner.",
+        "properties": {
+          "chatsOnly": {
+            "description": "Restrict this relationship to chats.",
+            "type": "boolean"
+          },
+          "hideMyPosts": {
+            "description": "Hide this account's Moments posts from this person.",
+            "type": "boolean"
+          },
+          "hideTheirPosts": {
+            "description": "Hide this person's Moments posts from this account.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "chatsOnly",
+          "hideMyPosts",
+          "hideTheirPosts"
+        ],
+        "type": "object"
+      },
+      "NativeContactRequest": {
+        "description": "One per-peer canonical request conversation with a current action/version.",
+        "properties": {
+          "actionable": {
+            "description": "Whether the current incoming request can be accepted locally.",
+            "type": "boolean"
+          },
+          "attention": {
+            "description": "Incoming request needing attention in navigation badges.",
+            "type": "boolean"
+          },
+          "direction": {
+            "description": "Incoming or outgoing current row direction.",
+            "type": "string"
+          },
+          "displayName": {
+            "description": "Saved contact label or retained peer identity.",
+            "type": "string"
+          },
+          "history": {
+            "description": "Retained per-message verification history.",
+            "items": {
+              "$ref": "#/components/schemas/NativeContactRequestMessage"
+            },
+            "type": "array"
+          },
+          "id": {
+            "description": "Opaque request identity.",
+            "type": "string"
+          },
+          "isContact": {
+            "description": "Whether current canonical membership establishes a contact.",
+            "type": "boolean"
+          },
+          "message": {
+            "description": "Current verification text.",
+            "type": "string"
+          },
+          "peerId": {
+            "description": "Saved peer identity; does not itself establish friendship.",
+            "type": "string"
+          },
+          "state": {
+            "description": "`contact`, `request_received` or `request_sent`; history is not server pending proof.",
+            "type": "string"
+          },
+          "updatedAt": {
+            "description": "Current row time in Unix seconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "version": {
+            "description": "Exact version for accept/delete preconditions.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "peerId",
+          "displayName",
+          "direction",
+          "message",
+          "updatedAt",
+          "version",
+          "isContact",
+          "actionable",
+          "attention",
+          "state",
+          "history"
+        ],
+        "type": "object"
+      },
+      "NativeContactRequestAccept": {
+        "additionalProperties": false,
+        "description": "Accept the inspected request with optional initial relationship privacy.",
+        "properties": {
+          "expectedVersion": {
+            "description": "Current request version returned by get/list.",
+            "type": "string"
+          },
+          "privacy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NativeContactPrivacySettings"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Initial relationship privacy; omission keeps the supported default."
+          }
+        },
+        "required": [
+          "expectedVersion"
+        ],
+        "type": "object"
+      },
+      "NativeContactRequestMessage": {
+        "description": "One saved verification-history entry without protocol tickets or XML.",
+        "properties": {
+          "createdAt": {
+            "description": "Original event time in Unix seconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "direction": {
+            "description": "Incoming or outgoing.",
+            "type": "string"
+          },
+          "message": {
+            "description": "Verification text, treated as untrusted display data.",
+            "type": "string"
+          },
+          "serverId": {
+            "description": "Original server ID as a decimal string; sent entries may use zero.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "serverId",
+          "message",
+          "createdAt",
+          "direction"
+        ],
+        "type": "object"
+      },
+      "NativeContactRequestPage": {
+        "description": "One page of per-peer request conversations.",
+        "properties": {
+          "asOfEventCursor": {
+            "description": "Event boundary of the retained list, for continuing the existing account event stream.",
+            "type": "string"
+          },
+          "coverage": {
+            "description": "Local profile coverage description."
+          },
+          "items": {
+            "description": "Canonical request rows in update-time order.",
+            "items": {
+              "$ref": "#/components/schemas/NativePageItemOfNativeContactRequest"
+            },
+            "type": "array"
+          },
+          "nextCursor": {
+            "description": "Opaque continuation, or null after the final page.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pendingIncomingCount": {
+            "description": "Incoming actionable rows needing attention across all filters.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sourceGeneration": {
+            "description": "Version of this filtered result collection.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "items",
+          "nextCursor",
+          "sourceGeneration",
+          "coverage",
+          "pendingIncomingCount",
+          "asOfEventCursor"
+        ],
+        "type": "object"
+      },
+      "NativeContactRequestQuery": {
+        "additionalProperties": false,
+        "description": "Request-list filters. Both directions are included when omitted.",
+        "properties": {
+          "actionable": {
+            "description": "Include only current acceptance candidates when true.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "cursor": {
+            "description": "Exact continuation from the same query.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "direction": {
+            "description": "Incoming or outgoing direction.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "description": "Page size, from 1 to 200; default 50.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "search": {
+            "description": "Match saved labels, peer identities or verification text.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "NativeContactRequestSend": {
+        "additionalProperties": false,
+        "description": "Send one greeting to a resolved person.",
+        "properties": {
+          "message": {
+            "description": "Greeting supplied by the owner; no automatic default is inserted.",
+            "type": "string"
+          },
+          "privacy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NativeContactPrivacySettings"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Initial relationship privacy; omission keeps the supported default."
+          },
+          "recipientRef": {
+            "description": "Exact reference returned by discovery on this account.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "recipientRef",
+          "message"
+        ],
+        "type": "object"
+      },
+      "NativeContactRequestVersion": {
+        "additionalProperties": false,
+        "description": "Precondition for accepting or locally deleting the inspected request.",
+        "properties": {
+          "expectedVersion": {
+            "description": "Current request version returned by get/list.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "expectedVersion"
+        ],
+        "type": "object"
+      },
+      "NativeContactSearch": {
+        "description": "Sanitized discovery preview with a short-lived account/session-bound send reference.",
+        "properties": {
+          "contactId": {
+            "description": "Canonical saved contact ID when membership is established for this identity.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "displayName": {
+            "description": "Display query for the discovered identity.",
+            "type": "string"
+          },
+          "expiresAt": {
+            "description": "Unix seconds after which a new discovery is required.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "recipientRef": {
+            "description": "Opaque send reference when verification material is available; null for matches without it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "request": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NativeContactRequest"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Existing request conversation for the resolved identity, when retained locally."
+          },
+          "source": {
+            "description": "Always `wechat` for this endpoint.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "displayName",
+          "recipientRef",
+          "expiresAt",
+          "source",
+          "request",
+          "contactId"
+        ],
+        "type": "object"
+      },
+      "NativeContactSearchRequest": {
+        "additionalProperties": false,
+        "description": "Live WeChat contact discovery input. Email and broad nickname search are not supported.",
+        "properties": {
+          "query": {
+            "description": "Exact WeChat ID query. Phone lookup has not been verified.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "NativeContactUpdate": {
+        "additionalProperties": false,
+        "description": "Update supported contact settings after inspecting their current version.",
+        "properties": {
+          "expectedVersion": {
+            "description": "Version returned by the privacy read on this account.",
+            "type": "string"
+          },
+          "privacy": {
+            "$ref": "#/components/schemas/NativeContactPrivacySettings",
+            "description": "Desired settings; unrelated contact flags are preserved."
+          }
+        },
+        "required": [
+          "privacy",
+          "expectedVersion"
         ],
         "type": "object"
       },
@@ -2637,6 +3037,17 @@
         ],
         "description": "One entry on a page: the resource itself, or a tombstone when the resource has been removed\nsince the list was first read."
       },
+      "NativePageItemOfNativeContactRequest": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/NativeContactRequest"
+          },
+          {
+            "$ref": "#/components/schemas/NativeTombstone"
+          }
+        ],
+        "description": "One entry on a page: the resource itself, or a tombstone when the resource has been removed\nsince the list was first read."
+      },
       "NativePageItemOfNativeGroup": {
         "anyOf": [
           {
@@ -3380,6 +3791,13 @@
             "minimum": 0,
             "type": [
               "integer",
+              "null"
+            ]
+          },
+          "relation": {
+            "description": "Contact lists only: friend (default), non_contact, unknown, or all cached people.",
+            "type": [
+              "string",
               "null"
             ]
           },
@@ -5420,6 +5838,412 @@
         ]
       }
     },
+    "/v1/accounts/{a}/contact-mutations/by-idempotency-key": {
+      "get": {
+        "operationId": "contactMutationByKey",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The fields of this object are separate query parameters.",
+            "explode": true,
+            "in": "query",
+            "name": "contactMutationKeyQuery",
+            "schema": {
+              "$ref": "#/components/schemas/ContactMutationKeyQuery"
+            },
+            "style": "form"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeOperation"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "Inspect a contact operation using its original idempotency key.",
+        "tags": [
+          "contacts"
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/NativeOperation"
+          }
+        ]
+      }
+    },
+    "/v1/accounts/{a}/contact-requests": {
+      "get": {
+        "operationId": "contactRequests",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The fields of this object are separate query parameters.",
+            "explode": true,
+            "in": "query",
+            "name": "nativeContactRequestQuery",
+            "schema": {
+              "$ref": "#/components/schemas/NativeContactRequestQuery"
+            },
+            "style": "form"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeContactRequestPage"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "read"
+            ]
+          }
+        ],
+        "summary": "List saved incoming and outgoing request conversations.",
+        "tags": [
+          "contacts"
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/NativeContactRequestPage"
+          }
+        ]
+      },
+      "post": {
+        "operationId": "sendContactRequest",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Repeating a request with the same key returns the original result instead of repeating the work.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NativeContactRequestSend"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeOperation"
+                }
+              }
+            },
+            "description": "Accepted. The work continues in the background."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "Send one friend request with an account-bound discovery reference.",
+        "tags": [
+          "contacts"
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/NativeOperation"
+          }
+        ]
+      }
+    },
+    "/v1/accounts/{a}/contact-requests/{id}": {
+      "delete": {
+        "operationId": "deleteContactRequest",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque friend request conversation ID from list/get.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Repeating a request with the same key returns the original result instead of repeating the work.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NativeContactRequestVersion"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeOperation"
+                }
+              }
+            },
+            "description": "Accepted. The work continues in the background."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "Delete local request history; does not reject or cancel on the server.",
+        "tags": [
+          "contacts"
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/NativeOperation"
+          }
+        ]
+      },
+      "get": {
+        "operationId": "contactRequest",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque friend request conversation ID from list/get.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeContactRequest"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "read"
+            ]
+          }
+        ],
+        "summary": "Read a request conversation and its current version.",
+        "tags": [
+          "contacts"
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/NativeContactRequest"
+          }
+        ]
+      }
+    },
+    "/v1/accounts/{a}/contact-requests/{id}/accept": {
+      "post": {
+        "operationId": "acceptContactRequest",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque friend request conversation ID from list/get.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Repeating a request with the same key returns the original result instead of repeating the work.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NativeContactRequestAccept"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeOperation"
+                }
+              }
+            },
+            "description": "Accepted. The work continues in the background."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "Accept the exact inspected incoming request.",
+        "tags": [
+          "contacts"
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/NativeOperation"
+          }
+        ]
+      }
+    },
     "/v1/accounts/{a}/contact-sync": {
       "post": {
         "operationId": "syncContacts",
@@ -5584,6 +6408,74 @@
       }
     },
     "/v1/accounts/{a}/contacts/{id}": {
+      "delete": {
+        "operationId": "removeContact",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Contact ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Repeating a request with the same key returns the original result instead of repeating the work.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeOperation"
+                }
+              }
+            },
+            "description": "Accepted. The work continues in the background."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "Remove this account contact relationship, preserving chat history.",
+        "tags": [
+          "contacts"
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/NativeOperation"
+          }
+        ]
+      },
       "get": {
         "operationId": "getContact",
         "parameters": [
@@ -5638,6 +6530,143 @@
         "x-agent-wechat-sdk-response": [
           {
             "$ref": "#/components/schemas/NativeContact"
+          }
+        ]
+      },
+      "patch": {
+        "operationId": "updateContact",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Contact ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Repeating a request with the same key returns the original result instead of repeating the work.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NativeContactUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeOperation"
+                }
+              }
+            },
+            "description": "Accepted. The work continues in the background."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "Change relationship privacy against the inspected version.",
+        "tags": [
+          "contacts"
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/NativeOperation"
+          }
+        ]
+      }
+    },
+    "/v1/accounts/{a}/contacts/{id}/privacy": {
+      "get": {
+        "operationId": "contactPrivacy",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Contact ID.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeContactPrivacy"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "Read current relationship privacy from the official profile.",
+        "tags": [
+          "contacts"
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/NativeContactPrivacy"
           }
         ]
       }
@@ -8975,6 +10004,66 @@
         "summary": "Describe the layout of the account's saved WeChat profile.",
         "tags": [
           "accounts"
+        ]
+      }
+    },
+    "/v1/accounts/{a}/search/contacts": {
+      "post": {
+        "operationId": "searchContacts",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NativeContactSearchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeContactSearch"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "read"
+            ]
+          }
+        ],
+        "summary": "Discover a person on WeChat and return an opaque send reference.",
+        "tags": [
+          "contacts"
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/NativeContactSearch"
+          }
         ]
       }
     },

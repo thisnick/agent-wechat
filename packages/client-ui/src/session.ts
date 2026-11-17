@@ -1109,7 +1109,7 @@ export class HubSession {
     const promise = (async () => {
       const [contacts, capabilities, accounts] = await Promise.all([
         inventory((cursor) =>
-          this.client.contacts(account, { cursor, limit: 200 }),
+          this.client.contacts(account, { cursor, limit: 200, relation: "all" }),
         ),
         this.client.capabilities(account),
         this.now() - this.accountsCheckedAt < 5000

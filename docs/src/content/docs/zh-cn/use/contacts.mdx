@@ -1,0 +1,149 @@
+---
+title: 联系人
+description: 查找用户、发送和通过好友申请，以及管理已保存的联系人。
+sourceHash: "a8e20aa1b3b3"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+搜索和由此发出的好友申请请使用同一个账号。搜索会返回有效期较短的 `recipientRef`；请妥善保管凭证和申请记录，不要泄露。
+
+## 列出已保存的联系人 \{#list-saved-contacts}
+
+```bash
+wx contacts list
+wx contacts list --all
+```
+
+默认列出已确认的已保存联系人。`--all` 还会包含已缓存的非联系人，以及关系未知的人。对于已缓存的人员，仍可按精确条件读取联系人。
+
+## 查找并添加好友 \{#find-and-add-someone}
+
+1. 在已保存的联系人中搜索，或通过微信号搜索某人：
+
+   ```bash
+   wx contacts find Alice
+   wx --json contacts search WECHAT_ID
+   ```
+
+   服务器搜索会返回 `recipientRef`、`displayName` 和 `expiresAt`。显示的名称就是你的搜索词。搜到结果并不代表双方已是好友。如果 `recipientRef` 为 null，则该响应无法发送好友申请。`contactId` 用于标识已保存的联系人。
+
+2. 使用返回的引用发送附带留言的好友申请：
+
+   ```bash
+   wx --json contacts requests send RECIPIENT_REF \
+     --message "你好，我是 Alice" --idempotency-key add-alice-1
+   ```
+
+   命令会返回一个 `kind: "contact_mutation"` 的操作。如果响应丢失，请保留操作 ID 和幂等键。复用该键即可跟踪原始操作。
+
+3. 列出收到和发出的申请记录：
+
+   ```bash
+   wx contacts requests list
+   wx contacts requests list --direction incoming --actionable
+   wx --json contacts requests get REQUEST_ID
+   ```
+
+## 通过或删除 \{#accept-or-remove}
+
+通过你刚查看过的那个版本的申请：
+
+```bash
+wx contacts requests accept REQUEST_ID --expected-version VERSION \
+  --idempotency-key accept-alice-1
+```
+
+如果记录已发生变化，会返回 `stale_contact_request`；请重新读取后再做决定。服务器返回的“已通过”与已确认的联系人关系是两种不同的状态。联系人同步流会确认你们是否已成为好友。
+
+删除某个申请的全部本地记录，或删除一位已有的联系人：
+
+```bash
+wx contacts requests delete REQUEST_ID --expected-version VERSION \
+  --idempotency-key delete-alice-history-1
+wx contacts remove CONTACT_ID --idempotency-key remove-alice-1
+```
+
+删除本地记录不会撤回已发送的申请，也不会通知对方你已拒绝。删除联系人会保留你的聊天记录；对方自行管理其联系人列表。
+
+## 在应用中 \{#in-the-app}
+
+按下侧边栏搜索框或 Command/Ctrl+K 即可聚焦搜索。标签页分为 **全部**、**好友**、**其他人**、**群聊** 和 **消息**。在通讯录中搜索会打开“好友”；点击通讯录旁的 + 会打开“其他人”，用于添加好友。在“全部”中输入时，也会在“其他人”下搜索已缓存的人员。服务器搜索结果显示在 **在微信中添加好友** 下。好友显示“联系人”；已确认不是好友的人显示“尚未成为好友”；关系未知的人则在搜索中带有“来自本地聊天记录”的来源标签。
+
+每个分组都独立加载，并各自带有 **加载更多** 按钮。消息结果会显示原始日期和时间（如果可用，按你本地的时区显示）。选择“消息”可打开会话，选择“详情”可打开共享的联系人名片。
+
+好友申请显示在通讯录侧边栏中。打开“聊天”时，通讯录图标还会显示待处理的收到好友申请数量。已保存的联系人或群聊可通过“消息”打开会话。鼠标悬停或键盘聚焦到联系人行时，还会显示“详情”。隐私更新请参阅[隐私](#privacy)。
+
+已保存的联系人列表只包含有好友关系记录的人。关系未知的已缓存人员，仍可从其联系人名片发消息或添加。**添加联系人** 会先在微信中查找此人，然后打开好友申请留言和隐私选项；只有你选择 **发送申请** 后才会真正发送。
+
+## HTTP 与 Rust \{#http-and-rust}
+
+以下路径均相对于 `/v1/accounts/ACCOUNT_ID/`：
+
+| 方法和路径 | 用途 |
+| --- | --- |
+| `GET contacts` | 列出已确认的已保存联系人；默认为 `relation=friend` |
+| `GET contacts?relation=all` | 包含所有已缓存的人员；`unknown` 和 `non_contact` 可分别选择这些类别 |
+| `POST search/contacts` | 使用 `{ "query": "WECHAT_ID" }` 搜索 |
+| `GET contact-requests` | 分页查看收到和发出的记录；支持 `direction`、`actionable`、`search`、`limit`、`cursor` |
+| `GET contact-requests/ID` | 查看记录及其当前 `version` |
+| `POST contact-requests` | 使用 `recipientRef` 和 `message` 发送申请 |
+| `POST contact-requests/ID/accept` | 使用 `expectedVersion` 通过申请 |
+| `DELETE contact-requests/ID` | 使用 `expectedVersion` 删除本地记录 |
+| `DELETE contacts/ID` | 删除已保存的联系人 |
+| `GET contact-mutations/by-idempotency-key?key=KEY` | 恢复原始操作 |
+
+翻页使用 `nextCursor` 时，请保持 `relation` 和搜索文本不变，因为筛选会在分页之前进行。“好友”标签页使用已保存好友的默认设置；“其他人”则搜索本地其他关系类别。
+
+读取需要 `read` 权限；修改以及按键恢复操作需要 `admin` 权限。每次修改都必须提供 `Idempotency-Key`。使用返回的 ID，通过 `GET operations/ID` 跟踪操作。结果不确定的操作会停在 `needs_review`；恢复操作从不会自动重新发送。
+
+协议 crate 提供带类型的搜索、发送、通过和删除操作。profile crate 读取官方格式的申请记录，并应用分阶段、带版本检查的修改。守护进程负责协调凭据、幂等性和同步；当守护进程管理该 profile 时，应用应使用其 API。
+
+<Aside title="使用提示">
+已验证通过微信号搜索。官方客户端提供手机号搜索，但手机号格式以及受隐私设置影响的结果尚未在此验证。不支持邮箱搜索和范围较广的昵称目录搜索。“申请已发送”表示已记录一次成功的发送，并不能证明该申请在服务器上仍处于待处理状态。通过好友申请不会授予 OpenClaw 访问权限。
+</Aside>
+
+## 隐私 \{#privacy}
+
+在联系人名片中可以选择“仅聊天”、“不让对方看我的朋友圈”和“不看对方的朋友圈”。可以从联系人的“详情”按钮、搜索结果或好友申请中打开名片。发送申请或通过申请时会一并提交初始设置。对于已是好友的人，请选择“保存隐私设置”。删除联系人需要确认，并会保留聊天记录。
+
+### 通过 CLI 修改隐私设置 \{#change-privacy-from-the-cli}
+
+读取当前设置：
+
+```bash
+wx --json contacts privacy get CONTACT_ID
+```
+
+响应包含 `privacy` 及其 `version`。只修改你指定的选项：
+
+```bash
+wx contacts set CONTACT_ID --chats-only true \
+  --idempotency-key privacy-alice-1
+```
+
+未指定的参数会保留其当前值。其他设置请使用 `--hide-my-posts true|false` 和 `--hide-their-posts true|false`。命令会在提交前保存解析后的设置。复用同一个键会跟踪最初的那次修改，即使之后已有更新的设置。
+
+发送新申请或通过申请时，同样的可选参数用于设置初始隐私。未指定的初始选项使用默认设置：默认为“全部可见”，两个隐藏选项均为关闭。切换为“仅聊天”会保留两个隐藏选项的选择，因此切换回来时可以恢复。
+
+### 隐私 API 与 Rust \{#privacy-api-and-rust}
+
+读取和修改隐私设置都需要所选账号的 `admin` 权限。路径相对于 `/v1/accounts/ACCOUNT_ID/`：
+
+| 方法和路径 | 用途 |
+| --- | --- |
+| `GET contacts/CONTACT_ID/privacy` | 读取当前设置及其 `version` |
+| `PATCH contacts/CONTACT_ID` | 使用 `privacy` 和 `expectedVersion` 更新；需要 `Idempotency-Key` |
+
+目前 PATCH 接受完整的隐私设置值：
+
+```json
+{
+  "privacy": { "chatsOnly": true, "hideMyPosts": false, "hideTheirPosts": false },
+  "expectedVersion": "VERSION_FROM_PRIVACY_READ"
+}
+```
+
+其他联系人字段保持不变。版本过期会返回 `stale_contact_privacy`；在决定是否再次修改前，请先查看当前设置。已保存状态未确定时会返回 `contact_privacy_unresolved`。返回的操作会区分服务器已接受与已保存联系人中已确认这两种状态。
+
+Rust 协议 crate 提供 `ContactPrivacySettings`、请求构建器以及与请求匹配的响应解码。核心 crate 提供 `ContactUpdate`、`contact_privacy` 和 `update_contact`，负责协调幂等性、账号归属和已保存联系人的确认。隐私设置不会授予守护进程或 OpenClaw 的权限。

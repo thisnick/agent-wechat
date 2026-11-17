@@ -1,0 +1,149 @@
+---
+title: Contacts
+description: Find people, send and accept friend requests, and manage saved contacts.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Use the same account for discovery and the resulting friend request. Discovery returns a short-lived `recipientRef`; keep tickets and request history private.
+
+## List saved contacts
+
+```bash
+wx contacts list
+wx contacts list --all
+```
+
+The default lists confirmed saved contacts. `--all` includes cached non-contacts and people whose relationship is unknown. Exact contact reads still work for cached people.
+
+## Find and add someone
+
+1. Search your saved contacts or discover someone by WeChat ID:
+
+   ```bash
+   wx contacts find Alice
+   wx --json contacts search WECHAT_ID
+   ```
+
+   Server discovery returns `recipientRef`, `displayName` and `expiresAt`. The displayed name is your query. A match does not establish friendship. If `recipientRef` is null, that response cannot send a request. `contactId` identifies an already saved contact.
+
+2. Send a greeting using the returned reference:
+
+   ```bash
+   wx --json contacts requests send RECIPIENT_REF \
+     --message "Hello, it's Alice" --idempotency-key add-alice-1
+   ```
+
+   The command returns an operation with `kind: "contact_mutation"`. Retain the operation ID and key if the response is lost. Reuse that key to follow the original attempt.
+
+3. List incoming and outgoing history:
+
+   ```bash
+   wx contacts requests list
+   wx contacts requests list --direction incoming --actionable
+   wx --json contacts requests get REQUEST_ID
+   ```
+
+## Accept or remove
+
+Accept the version you just inspected:
+
+```bash
+wx contacts requests accept REQUEST_ID --expected-version VERSION \
+  --idempotency-key accept-alice-1
+```
+
+A changed row returns `stale_contact_request`; read it again before deciding. An accepted server response and a confirmed saved contact are separate states. The contact sync stream confirms membership.
+
+Delete a request's entire local conversation, or remove an existing contact:
+
+```bash
+wx contacts requests delete REQUEST_ID --expected-version VERSION \
+  --idempotency-key delete-alice-history-1
+wx contacts remove CONTACT_ID --idempotency-key remove-alice-1
+```
+
+Deleting local history does not withdraw a sent request or notify the other person of rejection. Removing a contact preserves your chat history; the other person manages their own list.
+
+## In the app
+
+Focus sidebar search or press Command/Ctrl+K. Tabs separate **All**, **Friends**, **Other people**, **Groups** and **Messages**. Contacts search opens Friends; Contacts + opens Other people for adding someone. In All, typing also searches cached people under Other people. Server discovery appears under **Add someone on WeChat**. Friends say Contact; confirmed non-contacts say Not friends yet; unknown membership uses a local-history source label in search.
+
+Each section loads independently and has its own **Load more** control. Message results show their original date and time in your local timezone when available. Choose Message to open the conversation or Details to open the shared contact card.
+
+Friend requests appears in the Contacts sidebar. The Contacts icon also shows the number of incoming requests needing review while Chats is open. A saved contact or group opens its conversation with Message. Contact rows also expose Details on hover or keyboard focus. See [Privacy](#privacy) for privacy updates.
+
+The saved-contact list includes only people with stored friendship evidence. A cached person with an unknown relationship can still be messaged or added from their contact card. **Add contact** first looks them up on WeChat, then opens the greeting and privacy choices; it does not send until you choose **Send request**.
+
+## HTTP and Rust
+
+All paths below are relative to `/v1/accounts/ACCOUNT_ID/`:
+
+| Method and path | Purpose |
+| --- | --- |
+| `GET contacts` | List confirmed saved contacts; `relation=friend` is the default |
+| `GET contacts?relation=all` | Include all cached people; `unknown` and `non_contact` select those categories |
+| `POST search/contacts` | Discover with `{ "query": "WECHAT_ID" }` |
+| `GET contact-requests` | Page incoming and outgoing history; supports `direction`, `actionable`, `search`, `limit`, `cursor` |
+| `GET contact-requests/ID` | Inspect history and its current `version` |
+| `POST contact-requests` | Send with `recipientRef` and `message` |
+| `POST contact-requests/ID/accept` | Accept with `expectedVersion` |
+| `DELETE contact-requests/ID` | Delete local history with `expectedVersion` |
+| `DELETE contacts/ID` | Remove the saved contact |
+| `GET contact-mutations/by-idempotency-key?key=KEY` | Recover the original operation |
+
+Keep `relation` and the search text unchanged when following `nextCursor`; filtering occurs before pagination. The Friends tab uses the saved-friend default; Other people searches the other local relationship categories.
+
+Reads require `read`; mutations and operation-by-key recovery require `admin`. Every mutation requires `Idempotency-Key`. Follow the returned ID through `GET operations/ID`. An uncertain operation stops at `needs_review`; recovery never resends automatically.
+
+The protocol crate exposes typed discovery, send, accept and removal operations. The profile crate reads official-format request history and applies staged, version-checked changes. The daemon coordinates credentials, idempotency and sync; applications should use its API when it owns the profile.
+
+<Aside title="Good to know">
+WeChat-ID discovery is verified. The official client advertises phone lookup, but phone formatting and privacy-dependent results have not been verified here. Email and broad nickname directory searches are unsupported. Request sent means a successful send was recorded; it does not prove a request remains pending on the server. Accepting a contact does not grant OpenClaw access.
+</Aside>
+
+
+## Privacy
+
+Use the contact card to choose Chats Only, Hide My Posts and Hide Their Posts. Open it from a contact's Details button, a search result, or a friend request. Initial settings are submitted with Send request or Accept. For an existing friend, choose Save privacy. Remove contact requires confirmation and preserves chat history.
+
+### Change privacy from the CLI
+
+Read the current settings:
+
+```bash
+wx --json contacts privacy get CONTACT_ID
+```
+
+The response contains `privacy` and its `version`. Change only the options you specify:
+
+```bash
+wx contacts set CONTACT_ID --chats-only true \
+  --idempotency-key privacy-alice-1
+```
+
+Omitted flags retain their current values. Use `--hide-my-posts true|false` and `--hide-their-posts true|false` for the other settings. The command saves its resolved settings before submission. Reusing the same key follows that original edit, even if newer settings exist.
+
+For a new request or acceptance, the same optional flags select initial privacy. Omitted initial options use the default full-access/off/off settings. Changing to Chats Only retains the hide selections, so changing back can restore them.
+
+### Privacy API and Rust
+
+Both privacy reads and edits require `admin` for the selected account. Paths are relative to `/v1/accounts/ACCOUNT_ID/`:
+
+| Method and path | Purpose |
+| --- | --- |
+| `GET contacts/CONTACT_ID/privacy` | Read current settings and their `version` |
+| `PATCH contacts/CONTACT_ID` | Update with `privacy` and `expectedVersion`; requires `Idempotency-Key` |
+
+The PATCH currently accepts a complete privacy value:
+
+```json
+{
+  "privacy": { "chatsOnly": true, "hideMyPosts": false, "hideTheirPosts": false },
+  "expectedVersion": "VERSION_FROM_PRIVACY_READ"
+}
+```
+
+Other contact fields remain unchanged. A stale version returns `stale_contact_privacy`; inspect the current settings before deciding on another edit. An unresolved saved state returns `contact_privacy_unresolved`. The returned operation distinguishes server acceptance from confirmation in the saved contact.
+
+The Rust protocol crate provides `ContactPrivacySettings`, request builders and correlated reply decoding. The core crate provides `ContactUpdate`, `contact_privacy` and `update_contact`, coordinating idempotency, account ownership and saved-contact confirmation. Privacy settings do not grant daemon or OpenClaw permissions.

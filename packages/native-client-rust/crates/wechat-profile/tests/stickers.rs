@@ -187,7 +187,7 @@ fn missing_subsystem_initialization_preserves_password_and_refuses_replacement()
     keys.databases.insert("emoticon/emoticon.db".into(), key);
     assert_eq!(
         verify_profile_password(&location, &keys, &[42; 32]).unwrap(),
-        8
+        9
     );
     let before = std::fs::read(&path).unwrap();
     assert!(apply_initialize_emoticon(&location, &keys, &[42; 32], &options).is_err());

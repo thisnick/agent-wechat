@@ -168,7 +168,8 @@ wx contacts find | - | Find saved entries matching a name or ID
 wx contacts find <QUERY> | position 1, required | Name or ID text to search for
 wx contacts get | - | Show a saved entry by ID
 wx contacts get <ID> | position 1, required | ID of the contact or group, from the matching list command
-wx contacts list | - | List saved entries with optional pagination
+wx contacts list | - | List saved contacts with optional pagination
+wx contacts list --all | switch | Include all cached people, even non-contacts and unknown relationships
 wx contacts list --cursor | takes <CURSOR> | Continue from the next-page cursor of the previous result
 wx contacts list --limit | takes <LIMIT> | Return at most this many items
 wx contacts lookup | - | Look up one or two known contact IDs live on WeChat without saving the result
@@ -198,10 +199,61 @@ wx contacts members remove --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse t
 wx contacts members remove --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
 wx contacts members remove <ID> | position 1, required | Group ID from wx groups list
 wx contacts members remove <MEMBERS> | position 2, required, repeatable | Member IDs to remove; give one or more
+wx contacts privacy | - | Read an existing contact's relationship privacy
+wx contacts privacy get | - | Read the contact's saved relationship privacy and current version
+wx contacts privacy get <ID> | position 1, required | Exact existing contact ID
 wx contacts refresh | - | Refresh one entry from WeChat
 wx contacts refresh --detach | switch | Return as soon as the work is queued instead of waiting for it
 wx contacts refresh --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
 wx contacts refresh <ID> | position 1, required | ID of the contact or group, from the matching list command
+wx contacts remove | - | Remove this account's contact relationship while preserving chat history
+wx contacts remove --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx contacts remove --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse this key when retrying so the daemon applies the request only once
+wx contacts remove --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx contacts remove <ID> | position 1, required | Exact existing ordinary contact ID
+wx contacts requests | - | Inspect, send, accept or locally delete friend-request conversations
+wx contacts requests accept | - | Accept the exact inspected version of an incoming request. When any privacy flag is supplied, omitted privacy flags default to false
+wx contacts requests accept --chats-only | takes <CHATS_ONLY>, values true|false | Whether to restrict this relationship to chats (true or false)
+wx contacts requests accept --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx contacts requests accept --expected-version | required, takes <EXPECTED_VERSION> | Current version returned by list/get
+wx contacts requests accept --hide-my-posts | takes <HIDE_MY_POSTS>, values true|false | Whether to hide your posts from this contact (true or false)
+wx contacts requests accept --hide-their-posts | takes <HIDE_THEIR_POSTS>, values true|false | Whether to hide this contact's posts (true or false)
+wx contacts requests accept --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse this key when retrying so the daemon applies the request only once
+wx contacts requests accept --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx contacts requests accept <ID> | position 1, required | Request ID from list/get
+wx contacts requests delete | - | Delete local request conversation/history. Does not reject or cancel on WeChat
+wx contacts requests delete --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx contacts requests delete --expected-version | required, takes <EXPECTED_VERSION> | Current version returned by list/get
+wx contacts requests delete --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse this key when retrying so the daemon applies the request only once
+wx contacts requests delete --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx contacts requests delete <ID> | position 1, required | Request ID from list/get
+wx contacts requests get | - | Inspect one request, its verification history and current version
+wx contacts requests get <ID> | position 1, required | Exact request ID from list
+wx contacts requests list | - | List saved request conversations in both directions; history is not server pending proof
+wx contacts requests list --actionable | switch | Show only current incoming acceptance candidates
+wx contacts requests list --cursor | takes <CURSOR> | Exact nextCursor from the same query
+wx contacts requests list --direction | takes <DIRECTION>, values incoming|outgoing | Filter by incoming or outgoing direction
+wx contacts requests list --limit | takes <LIMIT> | Maximum number of rows on this page, from 1 to 200
+wx contacts requests list --search | takes <SEARCH> | Match saved names, peer identities and verification text
+wx contacts requests send | - | Send one friend request using an opaque result from contacts search. When any privacy flag is supplied, omitted privacy flags default to false
+wx contacts requests send --chats-only | takes <CHATS_ONLY>, values true|false | Whether to restrict this relationship to chats (true or false)
+wx contacts requests send --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx contacts requests send --hide-my-posts | takes <HIDE_MY_POSTS>, values true|false | Whether to hide your posts from this contact (true or false)
+wx contacts requests send --hide-their-posts | takes <HIDE_THEIR_POSTS>, values true|false | Whether to hide this contact's posts (true or false)
+wx contacts requests send --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse this key when retrying so the daemon applies the request only once
+wx contacts requests send --message | required, takes <MESSAGE> | Owner-supplied verification greeting
+wx contacts requests send --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx contacts requests send <RECIPIENT_REF> | position 1, required | Exact recipientRef from discovery on this account
+wx contacts search | - | Discover a person on WeChat by WeChat ID. Phone lookup is unverified
+wx contacts search <QUERY> | position 1, required | Discovery query, distinct from local contacts find
+wx contacts set | - | Change supplied contact privacy settings; keep omitted settings
+wx contacts set --chats-only | takes <CHATS_ONLY>, values true|false | Whether to restrict this relationship to chats (true or false)
+wx contacts set --detach | switch | Return as soon as the work is queued instead of waiting for it
+wx contacts set --hide-my-posts | takes <HIDE_MY_POSTS>, values true|false | Whether to hide your posts from this contact (true or false)
+wx contacts set --hide-their-posts | takes <HIDE_THEIR_POSTS>, values true|false | Whether to hide this contact's posts (true or false)
+wx contacts set --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse this key when retrying so the daemon applies the request only once
+wx contacts set --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
+wx contacts set <ID> | position 1, required | Exact existing contact ID
 wx contacts sync | - | Refresh the catalog from WeChat
 wx contacts sync --detach | switch | Return as soon as the work is queued instead of waiting for it
 wx contacts sync --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends

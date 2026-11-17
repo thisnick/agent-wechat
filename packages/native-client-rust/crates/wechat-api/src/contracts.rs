@@ -278,8 +278,8 @@ pub struct NativeContact {
     pub remark: Option<String>,
     /// The custom WeChat ID the contact chose, which they can change. Null when none is saved.
     pub alias: Option<String>,
-    /// Relationship to this account. It currently always reports `unknown`, including for saved
-    /// friends.
+    /// Relationship evidence: `friend` when membership is established, `non_contact` when
+    /// known flags do not establish membership, or `unknown` when flags are unavailable.
     pub relation: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -771,6 +771,18 @@ pub fn typescript() -> String {
         NativeGroupMember::decl(),
         NativeGroupMemberLookup::decl(),
         NativeGroupCreateRequest::decl(),
+        NativeContactSearchRequest::decl(),
+        NativeContactSearch::decl(),
+        NativeContactPrivacySettings::decl(),
+        NativeContactPrivacy::decl(),
+        NativeContactUpdate::decl(),
+        NativeContactRequestAccept::decl(),
+        NativeContactRequestSend::decl(),
+        NativeContactRequestVersion::decl(),
+        NativeContactRequestMessage::decl(),
+        NativeContactRequest::decl(),
+        NativeContactRequestPage::decl(),
+        NativeContactRequestQuery::decl(),
         NativeGroupNameRequest::decl(),
         NativeGroupMembersRequest::decl(),
         NativeGroupMyNameRequest::decl(),
@@ -1077,4 +1089,167 @@ mod read_contract_tests {
             assert!(serde_json::from_value::<NativeReadRequest>(value).is_err());
         }
     }
+}
+
+/// Live WeChat contact discovery input. Email and broad nickname search are not supported.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeContactSearchRequest {
+    /// Exact WeChat ID query. Phone lookup has not been verified.
+    pub query: String,
+}
+/// Sanitized discovery preview with a short-lived account/session-bound send reference.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeContactSearch {
+    /// Display query for the discovered identity.
+    pub display_name: String,
+    /// Opaque send reference when verification material is available; null for matches without it.
+    pub recipient_ref: Option<String>,
+    /// Unix seconds after which a new discovery is required.
+    #[ts(type = "number")]
+    pub expires_at: i64,
+    /// Always `wechat` for this endpoint.
+    pub source: String,
+    /// Existing request conversation for the resolved identity, when retained locally.
+    pub request: Option<NativeContactRequest>,
+    /// Canonical saved contact ID when membership is established for this identity.
+    pub contact_id: Option<String>,
+}
+/// Send one greeting to a resolved person.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeContactRequestSend {
+    /// Exact reference returned by discovery on this account.
+    pub recipient_ref: String,
+    /// Greeting supplied by the owner; no automatic default is inserted.
+    pub message: String,
+    /// Initial relationship privacy; omission keeps the supported default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub privacy: Option<NativeContactPrivacySettings>,
+}
+/// Relationship privacy selected by the account owner.
+#[derive(Clone, Debug, Serialize, Deserialize, TS, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeContactPrivacySettings {
+    /// Restrict this relationship to chats.
+    pub chats_only: bool,
+    /// Hide this account's Moments posts from this person.
+    pub hide_my_posts: bool,
+    /// Hide this person's Moments posts from this account.
+    pub hide_their_posts: bool,
+}
+/// Current relationship privacy read from the supported official profile.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeContactPrivacy {
+    /// Current settings for this account's relationship.
+    pub privacy: NativeContactPrivacySettings,
+    /// Account/contact-bound version required when saving a change.
+    pub version: String,
+}
+/// Update supported contact settings after inspecting their current version.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeContactUpdate {
+    /// Desired settings; unrelated contact flags are preserved.
+    pub privacy: NativeContactPrivacySettings,
+    /// Version returned by the privacy read on this account.
+    pub expected_version: String,
+}
+/// Accept the inspected request with optional initial relationship privacy.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeContactRequestAccept {
+    /// Current request version returned by get/list.
+    pub expected_version: String,
+    /// Initial relationship privacy; omission keeps the supported default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub privacy: Option<NativeContactPrivacySettings>,
+}
+/// Precondition for accepting or locally deleting the inspected request.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeContactRequestVersion {
+    /// Current request version returned by get/list.
+    pub expected_version: String,
+}
+/// One saved verification-history entry without protocol tickets or XML.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeContactRequestMessage {
+    /// Original server ID as a decimal string; sent entries may use zero.
+    pub server_id: String,
+    /// Verification text, treated as untrusted display data.
+    pub message: String,
+    /// Original event time in Unix seconds.
+    #[ts(type = "number")]
+    pub created_at: i64,
+    /// Incoming or outgoing.
+    pub direction: String,
+}
+/// One per-peer canonical request conversation with a current action/version.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeContactRequest {
+    /// Opaque request identity.
+    pub id: String,
+    /// Saved peer identity; does not itself establish friendship.
+    pub peer_id: String,
+    /// Saved contact label or retained peer identity.
+    pub display_name: String,
+    /// Incoming or outgoing current row direction.
+    pub direction: String,
+    /// Current verification text.
+    pub message: String,
+    /// Current row time in Unix seconds.
+    #[ts(type = "number")]
+    pub updated_at: i64,
+    /// Exact version for accept/delete preconditions.
+    pub version: String,
+    /// Whether current canonical membership establishes a contact.
+    pub is_contact: bool,
+    /// Whether the current incoming request can be accepted locally.
+    pub actionable: bool,
+    /// Incoming request needing attention in navigation badges.
+    pub attention: bool,
+    /// `contact`, `request_received` or `request_sent`; history is not server pending proof.
+    pub state: String,
+    /// Retained per-message verification history.
+    pub history: Vec<NativeContactRequestMessage>,
+}
+/// One page of per-peer request conversations.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeContactRequestPage {
+    /// Canonical request rows in update-time order.
+    pub items: Vec<NativePageItem<NativeContactRequest>>,
+    /// Opaque continuation, or null after the final page.
+    pub next_cursor: Option<String>,
+    /// Version of this filtered result collection.
+    pub source_generation: String,
+    /// Local profile coverage description.
+    #[ts(type = "unknown")]
+    pub coverage: Value,
+    /// Incoming actionable rows needing attention across all filters.
+    pub pending_incoming_count: u32,
+    /// Event boundary of the retained list, for continuing the existing account event stream.
+    pub as_of_event_cursor: String,
+}
+/// Request-list filters. Both directions are included when omitted.
+#[derive(Serialize, Deserialize, TS, schemars::JsonSchema, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeContactRequestQuery {
+    /// Incoming or outgoing direction.
+    pub direction: Option<String>,
+    /// Include only current acceptance candidates when true.
+    pub actionable: Option<bool>,
+    /// Match saved labels, peer identities or verification text.
+    pub search: Option<String>,
+    /// Page size, from 1 to 200; default 50.
+    pub limit: Option<usize>,
+    /// Exact continuation from the same query.
+    pub cursor: Option<String>,
 }

@@ -1,0 +1,513 @@
+/* Unified search and friend requests share the existing account theme. */
+.search-trigger {
+  width: 100%;
+  text-align: left;
+  color: var(--muted);
+  cursor: pointer;
+  border: 1px solid var(--line);
+}
+.nav-btn {
+  position: relative;
+}
+.contact-request-badge {
+  position: absolute;
+  right: 1px;
+  top: 0;
+  background: var(--accent-ink);
+  color: var(--surface);
+  border-radius: 10px;
+  font-size: 11px;
+  min-width: 17px;
+  padding: 1px 4px;
+  text-align: center;
+}
+.friend-request-link {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  border: 0;
+  padding: 13px 16px;
+  background: var(--surface);
+  color: var(--ink);
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+}
+.friend-request-link .contact-request-badge {
+  position: static;
+}
+.omni-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.2);
+  z-index: 60;
+}
+.omni-search {
+  position: fixed;
+  left: max(20px, calc(50% - 330px));
+  top: 15%;
+  width: min(660px, calc(100vw - 40px));
+  max-height: 72vh;
+  z-index: 61;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  box-shadow: 0 20px 70px rgba(0, 0, 0, 0.2);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.omni-input {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px;
+  border-bottom: 1px solid var(--line);
+}
+.omni-input input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  outline-offset: 4px;
+}
+.omni-input button,
+.omni-scopes button,
+.omni-action,
+.contact-request-actions button,
+.contact-request-heading button {
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 7px 10px;
+  font: inherit;
+  cursor: pointer;
+}
+.omni-scopes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 12px 16px;
+}
+.omni-scopes button[aria-pressed="true"] {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+.omni-search [cmdk-list] {
+  overflow: auto;
+  max-height: 48vh;
+  padding: 0 12px 12px;
+}
+.omni-search [cmdk-group-heading] {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 10px 7px 4px;
+}
+.omni-search [cmdk-item] {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.omni-search [cmdk-item][data-selected="true"] {
+  background: var(--accent-soft);
+}
+.omni-search [cmdk-item] .omni-action {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.omni-search [cmdk-empty] {
+  padding: 16px;
+  color: var(--muted);
+}
+.omni-result-copy,
+.omni-result-name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+  gap: 3px;
+  overflow-wrap: anywhere;
+}
+.omni-result-copy span,
+.omni-result-name span {
+  color: var(--muted);
+  font-size: 12px;
+}
+.omni-result-copy strong,
+.omni-result-name strong {
+  font-weight: 500;
+}
+.omni-foot {
+  padding: 11px 18px;
+  color: var(--muted);
+  font-size: 12px;
+  border-top: 1px solid var(--line);
+}
+.friend-requests {
+  padding: 28px;
+  overflow: auto;
+}
+.friend-requests header p {
+  color: var(--muted);
+}
+.friend-requests .omni-scopes {
+  padding-left: 0;
+}
+.omni-result {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 18px 0;
+  border-bottom: 1px solid var(--line);
+}
+.omni-result-name {
+  background: transparent;
+  border: 0;
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+}
+.omni-action {
+  white-space: nowrap;
+}
+.contact-request-dialog {
+  width: min(440px, calc(100vw - 32px));
+  max-height: 85vh;
+  overflow: auto;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 24px;
+  z-index: 70;
+}
+.contact-request-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.3);
+}
+.contact-request-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.contact-request-dialog textarea {
+  display: block;
+  width: 100%;
+  min-height: 90px;
+  margin: 12px 0;
+  padding: 10px;
+  font: inherit;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.request-history {
+  padding: 12px;
+  background: var(--accent-soft);
+  border-radius: 8px;
+  margin: 12px 0;
+  overflow-wrap: anywhere;
+}
+.request-history small {
+  color: var(--muted);
+}
+.request-history p {
+  white-space: pre-wrap;
+}
+.contact-request-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 24px;
+}
+@media (max-width: 720px) {
+  .omni-search {
+    left: 12px;
+    width: calc(100vw - 24px);
+    top: 8%;
+  }
+  .friend-requests {
+    padding: 20px 14px;
+  }
+  .omni-result {
+    flex-wrap: wrap;
+  }
+  .omni-result .omni-action {
+    margin-left: auto;
+  }
+  .omni-input input {
+    font-size: 16px;
+  }
+  .omni-search [cmdk-item] {
+    flex-wrap: wrap;
+  }
+  .omni-scopes {
+    gap: 4px;
+    padding: 12px 8px;
+  }
+}
+
+/* A row still opens chat; its sibling action remains reachable by keyboard. */
+.contact-list-row {
+  position: relative;
+}
+.contact-list-main {
+  padding-right: 96px;
+}
+.contact-list-details {
+  position: absolute;
+  right: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0;
+}
+.contact-list-row:hover .contact-list-details,
+.contact-list-row:focus-within .contact-list-details {
+  opacity: 1;
+}
+.omni-result-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.contact-detail-dialog {
+  width: min(490px, calc(100vw - 32px));
+  padding: 24px;
+}
+.contact-request-heading h2 {
+  margin: 0;
+  font-size: 18px;
+}
+.contact-request-heading button {
+  display: flex;
+  padding: 6px;
+}
+.contact-detail-identity {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  margin: 0 0 22px;
+}
+.contact-detail-identity h3 {
+  margin: 0 0 5px;
+  font-size: 21px;
+  overflow-wrap: anywhere;
+}
+.contact-detail-identity p {
+  color: var(--muted);
+  margin: 0;
+  font-size: 13px;
+}
+.contact-detail-history h4 {
+  font-size: 13px;
+  font-weight: 500;
+  margin: 0 0 8px;
+  color: var(--muted);
+}
+.contact-detail-history {
+  max-height: 210px;
+  overflow: auto;
+  margin: 20px 0;
+}
+.contact-detail-history .request-history {
+  margin: 8px 0;
+}
+.request-history p {
+  margin: 7px 0 0;
+}
+.contact-detail-privacy {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+  margin-top: 22px;
+}
+.contact-detail-privacy > p {
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.contact-privacy-fields {
+  margin: 16px 0;
+  padding: 0;
+  border: 0;
+}
+.contact-privacy-fields legend {
+  padding: 0;
+  margin-bottom: 12px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.contact-access-options {
+  display: flex;
+  gap: 10px;
+}
+.contact-access-options label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 10px;
+  font-size: 14px;
+  cursor: pointer;
+}
+.contact-access-options label:has(input:checked) {
+  background: var(--accent-soft);
+  border-color: var(--accent-ink);
+}
+.contact-privacy-fields input {
+  accent-color: var(--accent-ink);
+}
+.contact-moments-options {
+  margin-top: 10px;
+}
+.contact-moments-options label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 11px 2px;
+  font-size: 14px;
+}
+.contact-moments-options input {
+  width: 17px;
+  height: 17px;
+  cursor: pointer;
+}
+.contact-privacy-fields:disabled {
+  opacity: 0.6;
+}
+.contact-delete-note {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  margin-top: 22px;
+}
+.contact-request-actions button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.contact-request-actions .contact-primary-action {
+  background: var(--accent-ink);
+  color: var(--surface);
+  border-color: var(--accent-ink);
+}
+.contact-request-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.contact-change-status {
+  font-size: 13px;
+  background: var(--accent-soft);
+  padding: 12px;
+  border-radius: 8px;
+}
+@media (hover: none) {
+  .contact-list-details {
+    opacity: 1;
+  }
+}
+@media (max-width: 420px) {
+  .contact-detail-dialog {
+    padding: 18px;
+  }
+  .contact-request-actions {
+    gap: 6px;
+  }
+  .contact-request-actions button {
+    flex-grow: 1;
+  }
+  .omni-result-actions {
+    margin-left: auto;
+  }
+  .contact-detail-history {
+    max-height: 150px;
+  }
+}
+
+.contact-detail-danger {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+  text-align: right;
+}
+.contact-detail-danger button {
+  color: var(--danger, #b42318);
+}
+.contact-detail-danger button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+@media (max-width: 420px) {
+  .contact-detail-dialog {
+    max-height: calc(100dvh - 24px);
+  }
+  .contact-access-options label {
+    font-size: 13px;
+    padding: 11px 8px;
+    gap: 6px;
+  }
+  .contact-detail-privacy {
+    margin-top: 16px;
+    padding-top: 6px;
+  }
+  .contact-request-actions {
+    margin-top: 18px;
+  }
+  .contact-detail-danger {
+    margin-top: 12px;
+    padding-top: 12px;
+  }
+}
+
+/* Shared card hierarchy: quiet header actions, one footer, expandable history. */
+.contact-request-heading h2 { flex: 1; }
+.contact-request-heading { gap: 6px; }
+.contact-more { position: relative; }
+.contact-more summary { display: flex; padding: 6px; cursor: pointer; list-style: none; color: var(--muted); }
+.contact-more summary::-webkit-details-marker { display: none; }
+.contact-more-menu { position: absolute; right: 0; top: 34px; width: 210px; padding: 6px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); box-shadow: 0 8px 24px #0002; z-index: 2; }
+.contact-more-menu button { width: 100%; text-align: left; border: 0; background: transparent; padding: 10px; }
+.contact-detail-history { max-height: none; overflow: visible; border-top: 1px solid var(--line); padding-top: 16px; }
+.contact-detail-history summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.contact-detail-privacy { border: 0; margin-top: 18px; padding-top: 0; }
+.contact-detail-privacy > p { margin-bottom: 12px; }
+.contact-latest-request { padding: 12px 14px; background: var(--accent-soft); border-radius: 8px; margin-bottom: 20px; }
+.contact-latest-request small { color: var(--muted); }
+.contact-latest-request p { margin: 5px 0 0; }
+.contact-request-actions { border-top: 1px solid var(--line); padding-top: 16px; }
+.contact-access-options { padding: 4px; gap: 4px; background: var(--canvas); border-radius: 9px; }
+.contact-access-options label { justify-content: center; border-color: transparent; padding: 9px; }
+.contact-access-options label:has(input:checked) { background: var(--surface); border-color: var(--line); }
+.contact-access-options input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.contact-access-options label:has(input:focus-visible) { outline: 2px solid var(--accent-ink); }
+.contact-moments-options input { appearance: none; position: relative; width: 34px; height: 20px; border-radius: 12px; background: var(--line); }
+.contact-moments-options input::before { content: ''; position: absolute; width: 14px; height: 14px; left: 3px; top: 3px; border-radius: 50%; background: var(--surface); }
+.contact-moments-options input:checked { background: var(--accent-ink); }
+.contact-moments-options input:checked::before { left: 17px; }
+
+.omni-result-copy time { color: var(--muted); font-size: 11px; }
+.omni-load-more { display: block; margin: 6px 10px 12px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--muted); cursor: pointer; }
+.omni-load-more:disabled { cursor: wait; opacity: .65; }
+
+.omni-message-snippet {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  line-height: 1.4;
+}

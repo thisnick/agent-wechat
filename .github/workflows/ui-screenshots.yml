@@ -44,8 +44,8 @@ jobs:
   scenes:
     name: UI screenshots
     runs-on: ubuntu-24.04
-    # Capturing the scenes takes about 14 minutes. A warm Rust cache builds the
-    # simulator in under 2 minutes; a cold one takes about 5, so allow for that.
+    # Two isolated Playwright workers capture all scenes. Keep room for cold
+    # Rust builds and failure diagnostics rather than trimming visual coverage.
     timeout-minutes: 30
     permissions:
       contents: read

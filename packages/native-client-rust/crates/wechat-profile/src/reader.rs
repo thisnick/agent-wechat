@@ -466,6 +466,20 @@ impl ProfileReader {
         } else {
             "1"
         };
+        let has_membership_fields = ["flag", "local_type"].iter().all(|name| {
+            self.schemas
+                .iter()
+                .filter(|schema| schema.database == database)
+                .flat_map(|schema| &schema.tables)
+                .filter(|table| table.name == "contact")
+                .flat_map(|table| &table.columns)
+                .any(|column| &column.name == name)
+        });
+        let removed = if has_membership_fields {
+            " AND NOT (coalesce(local_type,0) IN (3,4) AND typeof(flag)='integer' AND (flag&1)=0)"
+        } else {
+            ""
+        };
         register_search_lower(&c)?;
         let terms = search_terms(q.search.as_deref());
         let mut values = vec![Value::Text(after)];
@@ -477,7 +491,7 @@ impl ProfileReader {
         let limit = values.len() + 1;
         values.push(Value::Integer((n + 1) as i64));
         let mut s = c.prepare(&format!(
-            "SELECT * FROM contact WHERE username>?1 AND {present}{clause} ORDER BY username LIMIT ?{limit}"
+            "SELECT * FROM contact WHERE username>?1 AND {present}{removed}{clause} ORDER BY username LIMIT ?{limit}"
         ))?;
         let records = s
             .query_map(rusqlite::params_from_iter(values.iter()), raw)?

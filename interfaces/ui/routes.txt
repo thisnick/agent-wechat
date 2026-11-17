@@ -10,6 +10,7 @@ route /{server}/{account}/chats/{thread}/info | params server, account, thread |
 route /{server}/{account}/chats/{thread}/media/{message} | params server, account, thread, message | The photo and video viewer, opened on one message of a conversation.
 route /{server}/{account}/chats/{thread}/message/{message} | params server, account, thread, message | A conversation scrolled to one message, which is highlighted.
 route /{server}/{account}/contacts | params server, account | The contact list of an account.
+route /{server}/{account}/contacts/requests | params server, account | Incoming and sent friend-request conversations for one account.
 route /{server}/{account}/login | params server, account | Sign in to one account with a QR code.
 route /{server}/{account}/new-chat | params server, account | The dialog for starting a conversation or creating a group.
 route /{server}/{account}/settings | params server, account | Settings for the app, the hub and the account.

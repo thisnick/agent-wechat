@@ -176,6 +176,21 @@ impl AccountRequest<'_> {
     operation!(sync(cursor: &[u8]) -> crate::SyncBatch => sync_snapshot);
     operation!(sync_scene(cursor: &[u8], scene: u32) -> crate::SyncBatch => sync_scene_snapshot);
     operation!(heartbeat(cursor: &[u8]) -> crate::Heartbeat => heartbeat_snapshot);
+    operation!(
+        /// Discover a contact by WeChat ID; does not establish friendship.
+        search_contact(query: &str) -> crate::ContactSearchResult => search_contact_snapshot);
+    operation!(
+        /// Submit a friend request once, without profile writeback.
+        send_contact_request(input: &crate::SendContactRequest) -> crate::ContactRequestReply => send_contact_request_snapshot);
+    operation!(
+        /// Accept the supplied incoming request once, without profile writeback.
+        accept_contact_request(input: &crate::AcceptContactRequest) -> crate::ContactRequestReply => accept_contact_request_snapshot);
+    operation!(
+        /// Remove this account's contact relationship once.
+        remove_contact(username: &str) -> crate::GroupMutationReply => remove_contact_snapshot);
+    operation!(
+        /// Return protected authenticated contact reply bytes before interpretation.
+        contact_rpc_raw(request: &crate::ContactRpc) -> Vec<u8> => contact_rpc_raw_snapshot);
     operation!(lookup_contacts(ids: &[String]) -> crate::ContactLookup => lookup_contacts_snapshot);
     operation!(lookup_room(room: &str, version: u32) -> crate::RoomRoster => lookup_room_snapshot);
     operation!(init_contacts(contact_sequence: u32, room_sequence: u32) -> crate::InitContactPage => init_contacts_snapshot);

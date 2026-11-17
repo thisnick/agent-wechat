@@ -1,3 +1,5 @@
+import { OmniSearch, FriendRequests, ContactDetails, ContactDetailDialog, contactSelectionKey, useContactRequests, type RequestSelection } from "./contact-requests.tsx";
+import "./contact-requests.css";
 import { ConversationRow } from "./conversation-row.tsx";
 import { ConversationFilterBar } from "./conversation-filter-bar.tsx";
 import { conversationCategory, conversationUnreadCounts, savedConversationCategories } from "./conversation-filters.ts";
@@ -930,7 +932,12 @@ function Chats({
   const { session, simulator } = connection,
     state = useSyncExternalStore(session.subscribe, session.snapshot);
   const savedView = state.account ? connection.cache.view(state.account) : {};
-  const [query, setQuery] = useState("");
+  const [query] = useState("");
+  const [omniScope,setOmniScope]=useState<string|null>(null);
+  const [requestSelection,setRequestSelection]=useState<RequestSelection|null>(null);
+  const requests=useContactRequests(connection,state.account!);
+  useEffect(()=>{const handler=(event:KeyboardEvent)=>{if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==="k"){event.preventDefault();setOmniScope("all");}};window.addEventListener("keydown",handler);return()=>window.removeEventListener("keydown",handler);},[]);
+  useEffect(()=>{setOmniScope(null);setRequestSelection(null);},[state.account,connection]);
   const [categories, setCategories] = useState(() =>
     savedConversationCategories(state.account ? connection.cache.view(state.account) : {}),
   );
@@ -943,9 +950,9 @@ function Chats({
   const lastView = useRef<ViewRoute>({ name: "chats", ...here });
   if (isViewRoute(route)) lastView.current = route;
   const view = isViewRoute(route) ? route : lastView.current;
-  const section = view.name === "contacts" ? "contacts" : "chats";
+  const section = view.name === "contacts" || view.name === "friend-requests" ? "contacts" : "chats";
   const routeThread = "thread" in view ? view.thread : null;
-  const mobile = routeThread !== null;
+  const mobile = routeThread !== null || view.name === "friend-requests";
   const details = view.name === "info";
   const settings = route.name === "settings";
   const newChat = route.name === "new-chat";
@@ -1275,6 +1282,7 @@ function Chats({
           onClick={() => router.push({ name: "contacts", ...here })}
         >
           <Icon name="people" />
+          {requests.count>0 && <span className="contact-request-badge" aria-label={t("contactsUi.needsReview",{count:requests.count})}>{requests.count}</span>}
         </button>
         <div className="rail-spacer" />
         <button
@@ -1309,27 +1317,11 @@ function Chats({
             </h1>
             <Button
               icon="plus"
-              label={t("main.newConversation")}
-              onClick={() => router.push({ name: "new-chat", ...here })}
+              label={section === "contacts" ? t("main.findPerson") : t("main.newConversation")}
+              onClick={() => section === "contacts" ? setOmniScope("otherPeople") : router.push({ name: "new-chat", ...here })}
             />
           </div>
-          <label className="search">
-            <Icon name="search" />
-            <input
-              aria-label={
-                section === "chats"
-                  ? t("main.searchConversations")
-                  : t("main.searchContacts")
-              }
-              placeholder={
-                section === "chats"
-                  ? t("main.searchConversations")
-                  : t("main.findPerson")
-              }
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-            />
-          </label>
+          <button title={section === "contacts" ? t("main.searchContacts") : t("main.searchConversations")} className="search search-trigger" onFocus={()=>setOmniScope(section === "contacts" ? "contacts" : "all")} onClick={()=>setOmniScope(section === "contacts" ? "contacts" : "all")} aria-label={t("contactsUi.searchEverything")}><Icon name="search"/><span>{t("contactsUi.searchEverything")}</span></button>
           {section === "chats" && (
             <ConversationFilterBar
               selected={categories}
@@ -1344,6 +1336,7 @@ function Chats({
             <button onClick={dismissNotice}>{t("main.dismiss")}</button>
           </div>
         )}
+        {section==="contacts" && <button className="friend-request-link" onClick={()=>router.push({name:"friend-requests",...here})}><span>{t("contactsUi.requests")}</span>{requests.count>0&&<span className="contact-request-badge">{requests.count}</span>}</button>}
         <div className="chat-list">
           {section === "chats"
             ? threads.map((t, index) => (
@@ -1361,27 +1354,22 @@ function Chats({
               ))
             : state.contacts
                 .filter((c) =>
-                  (c.displayName || c.id)
+                  c.relation === "friend" && (c.displayName || c.id)
                     .toLowerCase()
                     .includes(query.toLowerCase()),
                 )
                 .map((c) => (
-                  <button
-                    key={c.id}
-                    className="chat-row"
-                    onClick={() => select(c.id)}
-                  >
-                    <HubAvatar
-                      connection={connection}
-                      account={state.account!}
-                      username={c.id}
-                      name={c.displayName || c.id}
-                    />
-                    <div className="chat-copy">
-                      <strong>{c.displayName || c.id}</strong>
-                      <p className="preview">{c.username}</p>
-                    </div>
-                  </button>
+                  <div key={c.id} className="contact-list-row">
+                    <button className="chat-row contact-list-main" onClick={() => select(c.id)}>
+                      <HubAvatar connection={connection} account={state.account!} username={c.id} name={c.displayName || c.id} />
+                      <div className="chat-copy"><strong>{c.displayName || c.id}</strong><p className="preview">{c.username}</p></div>
+                    </button>
+                    <button className="contact-list-details icon-btn"
+                      aria-label={t("contactsUi.detailsFor", { name: c.displayName || c.id })}
+                      onClick={() => setRequestSelection({ contact: { id: c.id, displayName: c.displayName || c.id } })}>
+                      <Icon name="panel" />
+                    </button>
+                  </div>
                 ))}
           {!state.loading &&
             (section === "chats" ? threads.length : state.contacts.length) ===
@@ -1407,7 +1395,7 @@ function Chats({
           )}
         </div>
       </aside>
-      <main className="workspace">
+      {view.name==="friend-requests" ? <FriendRequests connection={connection} account={state.account!} requests={requests} review={setRequestSelection} back={()=>router.push({name:"contacts",...here})}/> : <main className="workspace">
         <header className="chat-header">
           <Button
             icon="back"
@@ -1875,7 +1863,11 @@ function Chats({
             </PhotoViewer>
           </ReplyContext.Provider>
         </ConversationNavigation>
-      </main>
+      </main>}
+      {omniScope!==null && <OmniSearch key={state.account} connection={connection} account={state.account!} initialScope={omniScope} suspended={requestSelection!==null} requests={requests.items} close={()=>setOmniScope(null)} review={setRequestSelection} open={(thread,message)=>{if(message)router.push({name:"message",...here,thread,message});else select(thread);}}/>}
+      {requestSelection && <ContactDetailDialog key={contactSelectionKey(requestSelection)} connection={connection} account={state.account!} review={setRequestSelection} selection={"request" in requestSelection ? { request: requests.items.find(item => item.id === requestSelection.request.id) ?? requestSelection.request } : requestSelection} close={()=>setRequestSelection(null)} changed={()=>{requests.refresh();void session.refresh().catch(()=>{});}} open={select} remove={contact=>setRequestSelection({removeContact:contact})}/>}
+
+
       {accountMenu && (
         <div
           className="account-menu"
@@ -2405,6 +2397,7 @@ function Details({
         />
       )}
       {state.account && <ThreadNotifications key={state.account+threadId} connection={connection} account={state.account} threadId={threadId} />}
+      {state.account && !threadId.endsWith("@chatroom") && threadId!=="filehelper" && threadId!==state.accounts.find(a=>a.id===state.account)?.ownUsername && state.contacts.some(c=>c.id===threadId) && <ContactDetails connection={connection} account={state.account} id={threadId} name={name}/>}
       {state.account && threadId.endsWith("@chatroom") && (
         <GroupSettings
           connection={connection}

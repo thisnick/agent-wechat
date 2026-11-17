@@ -12,6 +12,8 @@ request AddCustomStickerRequest.source.messageId | string, required, when kind m
 request AddCustomStickerRequest.source.preparationId | string, required, when kind prepared | ID of a completed, unexpired preparation.
 request ContactLookupRequest | object, rejects unknown fields | Request to look up one or two contacts live on WeChat.
 request ContactLookupRequest.ids | array of string, required | One or two distinct contact IDs to look up.
+request ContactMutationKeyQuery | object, rejects unknown fields | Original key for inspecting a contact mutation.
+request ContactMutationKeyQuery.key | string, required | Original submitted idempotency key.
 request ContentQuery | object, rejects unknown fields | Options for fetching media bytes.
 request ContentQuery.representation | string, values original|preview | The file itself or its preview. Defaults to the original.
 request CreateAccountRequest | object, rejects unknown fields | Request to register a new account.
@@ -54,6 +56,35 @@ request MoveCustomStickerRequest.position | object, required, rejects unknown fi
 request MoveCustomStickerRequest.position.afterId | string, nullable | Place immediately after this identity; null places the item first.
 request NativeAccountRemovalRequest | object, rejects unknown fields | Request to remove a signed-out account.
 request NativeAccountRemovalRequest.confirmAccountId | string, required | Must repeat the account ID from the URL, to confirm the removal.
+request NativeContactRequestAccept | object, rejects unknown fields | Accept the inspected request with optional initial relationship privacy.
+request NativeContactRequestAccept.expectedVersion | string, required | Current request version returned by get/list.
+request NativeContactRequestAccept.privacy | object, nullable, rejects unknown fields | Initial relationship privacy; omission keeps the supported default.
+request NativeContactRequestAccept.privacy.chatsOnly | boolean, required | Restrict this relationship to chats.
+request NativeContactRequestAccept.privacy.hideMyPosts | boolean, required | Hide this account's Moments posts from this person.
+request NativeContactRequestAccept.privacy.hideTheirPosts | boolean, required | Hide this person's Moments posts from this account.
+request NativeContactRequestQuery | object, rejects unknown fields | Request-list filters. Both directions are included when omitted.
+request NativeContactRequestQuery.actionable | boolean, nullable | Include only current acceptance candidates when true.
+request NativeContactRequestQuery.cursor | string, nullable | Exact continuation from the same query.
+request NativeContactRequestQuery.direction | string, nullable | Incoming or outgoing direction.
+request NativeContactRequestQuery.limit | integer, nullable, min 0, format uint | Page size, from 1 to 200; default 50.
+request NativeContactRequestQuery.search | string, nullable | Match saved labels, peer identities or verification text.
+request NativeContactRequestSend | object, rejects unknown fields | Send one greeting to a resolved person.
+request NativeContactRequestSend.message | string, required | Greeting supplied by the owner; no automatic default is inserted.
+request NativeContactRequestSend.privacy | object, nullable, rejects unknown fields | Initial relationship privacy; omission keeps the supported default.
+request NativeContactRequestSend.privacy.chatsOnly | boolean, required | Restrict this relationship to chats.
+request NativeContactRequestSend.privacy.hideMyPosts | boolean, required | Hide this account's Moments posts from this person.
+request NativeContactRequestSend.privacy.hideTheirPosts | boolean, required | Hide this person's Moments posts from this account.
+request NativeContactRequestSend.recipientRef | string, required | Exact reference returned by discovery on this account.
+request NativeContactRequestVersion | object, rejects unknown fields | Precondition for accepting or locally deleting the inspected request.
+request NativeContactRequestVersion.expectedVersion | string, required | Current request version returned by get/list.
+request NativeContactSearchRequest | object, rejects unknown fields | Live WeChat contact discovery input. Email and broad nickname search are not supported.
+request NativeContactSearchRequest.query | string, required | Exact WeChat ID query. Phone lookup has not been verified.
+request NativeContactUpdate | object, rejects unknown fields | Update supported contact settings after inspecting their current version.
+request NativeContactUpdate.expectedVersion | string, required | Version returned by the privacy read on this account.
+request NativeContactUpdate.privacy | object, required, rejects unknown fields | Desired settings; unrelated contact flags are preserved.
+request NativeContactUpdate.privacy.chatsOnly | boolean, required | Restrict this relationship to chats.
+request NativeContactUpdate.privacy.hideMyPosts | boolean, required | Hide this account's Moments posts from this person.
+request NativeContactUpdate.privacy.hideTheirPosts | boolean, required | Hide this person's Moments posts from this account.
 request NativeForgetRequest | object, rejects unknown fields | Request to delete the account's saved login credentials.
 request NativeForgetRequest.confirm | boolean, required | Must be true. It confirms that the credentials should be deleted.
 request NativeGroupCreateRequest | object, rejects unknown fields | Request to create a group chat.
@@ -100,6 +131,7 @@ request PageQuery | object, rejects unknown fields | Paging and filter options f
 request PageQuery.cursor | string, nullable | The `nextCursor` of the previous page, up to 8192 characters. Send it with the same query.
 request PageQuery.kind | string, nullable | Only list chats of this kind: `direct`, `group` or `system`.
 request PageQuery.limit | integer, nullable, min 0, format uint | Items per page, from 1 to 200.
+request PageQuery.relation | string, nullable | Contact lists only: friend (default), non_contact, unknown, or all cached people.
 request PageQuery.search | string, nullable | Text to search for, up to 256 characters. The name `query` is accepted too.
 request QrQuery | object, rejects unknown fields | Options for fetching a login QR code.
 request QrQuery.generation | integer, nullable, min 0, format uint64 | Only return the QR code if it is still this generation. A newer code fails with `login_challenge_superseded`.
@@ -352,7 +384,7 @@ response NativeContact.classification.openIm.wordings[].text | string, required 
 response NativeContact.displayName | string, required, nullable | Name to show: the remark if set, else the nickname, else the username.
 response NativeContact.id | string, required | Contact ID. It is the same as `username`.
 response NativeContact.nickname | string, required, nullable | The name the contact chose for themselves. Null when none is saved.
-response NativeContact.relation | string, required | Relationship to this account. It currently always reports `unknown`, including for saved friends.
+response NativeContact.relation | string, required | Relationship evidence: `friend` when membership is established, `non_contact` when known flags do not establish membership, or `unknown` when flags are unavailable.
 response NativeContact.remark | string, required, nullable | Your private name for the contact. Null when none is saved.
 response NativeContact.username | string, required | The contact's WeChat username.
 response NativeContactPage | object | One page of a list. `items` holds the resources, `nextCursor` continues the list, and the other fields describe the saved data the list was read from.
@@ -382,7 +414,7 @@ response NativeContactPage.items[]<NativeContact>.classification.openIm.wordings
 response NativeContactPage.items[]<NativeContact>.displayName | string, required, nullable | Name to show: the remark if set, else the nickname, else the username.
 response NativeContactPage.items[]<NativeContact>.id | string, required | Contact ID. It is the same as `username`.
 response NativeContactPage.items[]<NativeContact>.nickname | string, required, nullable | The name the contact chose for themselves. Null when none is saved.
-response NativeContactPage.items[]<NativeContact>.relation | string, required | Relationship to this account. It currently always reports `unknown`, including for saved friends.
+response NativeContactPage.items[]<NativeContact>.relation | string, required | Relationship evidence: `friend` when membership is established, `non_contact` when known flags do not establish membership, or `unknown` when flags are unavailable.
 response NativeContactPage.items[]<NativeContact>.remark | string, required, nullable | Your private name for the contact. Null when none is saved.
 response NativeContactPage.items[]<NativeContact>.username | string, required | The contact's WeChat username.
 response NativeContactPage.items[]<NativeTombstone> | object | Stands in for a resource that was in the list when it was first read but is no longer in the saved profile. It keeps the resource's place in the list.
@@ -391,6 +423,84 @@ response NativeContactPage.items[]<NativeTombstone>.id | string, required | ID o
 response NativeContactPage.items[]<NativeTombstone>.version | string, required | Fingerprint of the saved profile data in which the resource is missing, the same value as `sourceGeneration` on the page.
 response NativeContactPage.nextCursor | string, required, nullable | Pass it as `cursor` with the same query to get the next page. Null on the last page.
 response NativeContactPage.sourceGeneration | string, required | Fingerprint of the saved profile data the page was read from. It changes when the profile files change.
+response NativeContactPrivacy | object | Current relationship privacy read from the supported official profile.
+response NativeContactPrivacy.privacy | object, required | Current settings for this account's relationship.
+response NativeContactPrivacy.privacy.chatsOnly | boolean, required | Restrict this relationship to chats.
+response NativeContactPrivacy.privacy.hideMyPosts | boolean, required | Hide this account's Moments posts from this person.
+response NativeContactPrivacy.privacy.hideTheirPosts | boolean, required | Hide this person's Moments posts from this account.
+response NativeContactPrivacy.version | string, required | Account/contact-bound version required when saving a change.
+response NativeContactRequest | object | One per-peer canonical request conversation with a current action/version.
+response NativeContactRequest.actionable | boolean, required | Whether the current incoming request can be accepted locally.
+response NativeContactRequest.attention | boolean, required | Incoming request needing attention in navigation badges.
+response NativeContactRequest.direction | string, required | Incoming or outgoing current row direction.
+response NativeContactRequest.displayName | string, required | Saved contact label or retained peer identity.
+response NativeContactRequest.history | array of object, required | Retained per-message verification history.
+response NativeContactRequest.history[] | object | One saved verification-history entry without protocol tickets or XML.
+response NativeContactRequest.history[].createdAt | integer, required, format int64 | Original event time in Unix seconds.
+response NativeContactRequest.history[].direction | string, required | Incoming or outgoing.
+response NativeContactRequest.history[].message | string, required | Verification text, treated as untrusted display data.
+response NativeContactRequest.history[].serverId | string, required | Original server ID as a decimal string; sent entries may use zero.
+response NativeContactRequest.id | string, required | Opaque request identity.
+response NativeContactRequest.isContact | boolean, required | Whether current canonical membership establishes a contact.
+response NativeContactRequest.message | string, required | Current verification text.
+response NativeContactRequest.peerId | string, required | Saved peer identity; does not itself establish friendship.
+response NativeContactRequest.state | string, required | `contact`, `request_received` or `request_sent`; history is not server pending proof.
+response NativeContactRequest.updatedAt | integer, required, format int64 | Current row time in Unix seconds.
+response NativeContactRequest.version | string, required | Exact version for accept/delete preconditions.
+response NativeContactRequestPage | object | One page of per-peer request conversations.
+response NativeContactRequestPage.asOfEventCursor | string, required | Event boundary of the retained list, for continuing the existing account event stream.
+response NativeContactRequestPage.coverage | any, required | Local profile coverage description.
+response NativeContactRequestPage.items | array of object, required | Canonical request rows in update-time order.
+response NativeContactRequestPage.items[] | object | One entry on a page: the resource itself, or a tombstone when the resource has been removed since the list was first read.
+response NativeContactRequestPage.items[]<NativeContactRequest> | object | One per-peer canonical request conversation with a current action/version.
+response NativeContactRequestPage.items[]<NativeContactRequest>.actionable | boolean, required | Whether the current incoming request can be accepted locally.
+response NativeContactRequestPage.items[]<NativeContactRequest>.attention | boolean, required | Incoming request needing attention in navigation badges.
+response NativeContactRequestPage.items[]<NativeContactRequest>.direction | string, required | Incoming or outgoing current row direction.
+response NativeContactRequestPage.items[]<NativeContactRequest>.displayName | string, required | Saved contact label or retained peer identity.
+response NativeContactRequestPage.items[]<NativeContactRequest>.history | array of object, required | Retained per-message verification history.
+response NativeContactRequestPage.items[]<NativeContactRequest>.history[] | object | One saved verification-history entry without protocol tickets or XML.
+response NativeContactRequestPage.items[]<NativeContactRequest>.history[].createdAt | integer, required, format int64 | Original event time in Unix seconds.
+response NativeContactRequestPage.items[]<NativeContactRequest>.history[].direction | string, required | Incoming or outgoing.
+response NativeContactRequestPage.items[]<NativeContactRequest>.history[].message | string, required | Verification text, treated as untrusted display data.
+response NativeContactRequestPage.items[]<NativeContactRequest>.history[].serverId | string, required | Original server ID as a decimal string; sent entries may use zero.
+response NativeContactRequestPage.items[]<NativeContactRequest>.id | string, required | Opaque request identity.
+response NativeContactRequestPage.items[]<NativeContactRequest>.isContact | boolean, required | Whether current canonical membership establishes a contact.
+response NativeContactRequestPage.items[]<NativeContactRequest>.message | string, required | Current verification text.
+response NativeContactRequestPage.items[]<NativeContactRequest>.peerId | string, required | Saved peer identity; does not itself establish friendship.
+response NativeContactRequestPage.items[]<NativeContactRequest>.state | string, required | `contact`, `request_received` or `request_sent`; history is not server pending proof.
+response NativeContactRequestPage.items[]<NativeContactRequest>.updatedAt | integer, required, format int64 | Current row time in Unix seconds.
+response NativeContactRequestPage.items[]<NativeContactRequest>.version | string, required | Exact version for accept/delete preconditions.
+response NativeContactRequestPage.items[]<NativeTombstone> | object | Stands in for a resource that was in the list when it was first read but is no longer in the saved profile. It keeps the resource's place in the list.
+response NativeContactRequestPage.items[]<NativeTombstone>.deleted | boolean, required | Always true, marking the resource as removed.
+response NativeContactRequestPage.items[]<NativeTombstone>.id | string, required | ID of the removed resource.
+response NativeContactRequestPage.items[]<NativeTombstone>.version | string, required | Fingerprint of the saved profile data in which the resource is missing, the same value as `sourceGeneration` on the page.
+response NativeContactRequestPage.nextCursor | string, required, nullable | Opaque continuation, or null after the final page.
+response NativeContactRequestPage.pendingIncomingCount | integer, required, min 0, format uint32 | Incoming actionable rows needing attention across all filters.
+response NativeContactRequestPage.sourceGeneration | string, required | Version of this filtered result collection.
+response NativeContactSearch | object | Sanitized discovery preview with a short-lived account/session-bound send reference.
+response NativeContactSearch.contactId | string, required, nullable | Canonical saved contact ID when membership is established for this identity.
+response NativeContactSearch.displayName | string, required | Display query for the discovered identity.
+response NativeContactSearch.expiresAt | integer, required, format int64 | Unix seconds after which a new discovery is required.
+response NativeContactSearch.recipientRef | string, required, nullable | Opaque send reference when verification material is available; null for matches without it.
+response NativeContactSearch.request | object, required, nullable | Existing request conversation for the resolved identity, when retained locally.
+response NativeContactSearch.request.actionable | boolean, required | Whether the current incoming request can be accepted locally.
+response NativeContactSearch.request.attention | boolean, required | Incoming request needing attention in navigation badges.
+response NativeContactSearch.request.direction | string, required | Incoming or outgoing current row direction.
+response NativeContactSearch.request.displayName | string, required | Saved contact label or retained peer identity.
+response NativeContactSearch.request.history | array of object, required | Retained per-message verification history.
+response NativeContactSearch.request.history[] | object | One saved verification-history entry without protocol tickets or XML.
+response NativeContactSearch.request.history[].createdAt | integer, required, format int64 | Original event time in Unix seconds.
+response NativeContactSearch.request.history[].direction | string, required | Incoming or outgoing.
+response NativeContactSearch.request.history[].message | string, required | Verification text, treated as untrusted display data.
+response NativeContactSearch.request.history[].serverId | string, required | Original server ID as a decimal string; sent entries may use zero.
+response NativeContactSearch.request.id | string, required | Opaque request identity.
+response NativeContactSearch.request.isContact | boolean, required | Whether current canonical membership establishes a contact.
+response NativeContactSearch.request.message | string, required | Current verification text.
+response NativeContactSearch.request.peerId | string, required | Saved peer identity; does not itself establish friendship.
+response NativeContactSearch.request.state | string, required | `contact`, `request_received` or `request_sent`; history is not server pending proof.
+response NativeContactSearch.request.updatedAt | integer, required, format int64 | Current row time in Unix seconds.
+response NativeContactSearch.request.version | string, required | Exact version for accept/delete preconditions.
+response NativeContactSearch.source | string, required | Always `wechat` for this endpoint.
 response NativeEvent | object | An entry in the account's event log, which keeps only about the most recent 10,000 events.
 response NativeEvent.createdAt | string, required | When the event was recorded, as an RFC 3339 time.
 response NativeEvent.cursor | string, required | Position of the event in the log, a decimal number written as a string that only increases. Pass the last one you handled as `after` to resume.
@@ -1094,6 +1204,8 @@ response StickerPackStickers.items[].thumbnail.variant | string, required, value
 response StickerPackStickers.packId | string, required | Product identity.
 route DELETE /v1/access-tokens/{id} | scope owner token, response untyped | Revoke an API token so it stops working.
 route DELETE /v1/accounts/{a} | scope admin, request NativeAccountRemovalRequest, response NativeAccountRemoval, sdk response NativeAccountRemoval | Unregister a signed-out account. Its local files are kept. The body must repeat the account ID to confirm.
+route DELETE /v1/accounts/{a}/contact-requests/{id} | scope admin, idempotency key required, request NativeContactRequestVersion, response NativeOperation, status 202, sdk response NativeOperation | Delete local request history; does not reject or cancel on the server.
+route DELETE /v1/accounts/{a}/contacts/{id} | scope admin, idempotency key required, response NativeOperation, status 202, sdk response NativeOperation | Remove this account contact relationship, preserving chat history.
 route DELETE /v1/accounts/{a}/custom-stickers/{id} | scope send, idempotency key required, response MediaJob, status 202, sdk response MediaJob | Remove Saved membership asynchronously using If-Match.
 route DELETE /v1/accounts/{a}/groups/{id}/announcement | scope admin, idempotency key required, response NativeOperation, status 202, sdk response NativeOperation | Clear the announcement of a group.
 route DELETE /v1/accounts/{a}/groups/{room}/members | scope admin, idempotency key required, request NativeGroupMembersRequest, response NativeOperation, status 202, sdk response NativeOperation | Remove members from a group.
@@ -1111,8 +1223,12 @@ route GET /v1/accounts/{a}/calls/current | scope calls, response CallSnapshot, s
 route GET /v1/accounts/{a}/calls/socket | scope calls, upgrade websocket, socket control | Open the call control WebSocket for commands and events. See calls-websocket.txt.
 route GET /v1/accounts/{a}/calls/{call}/media | scope calls, upgrade websocket, socket media | Open the call media WebSocket that carries audio for a call you own. See calls-websocket.txt.
 route GET /v1/accounts/{a}/capabilities | scope read, response untyped | List what this daemon can do for the account, such as media limits and group changes.
+route GET /v1/accounts/{a}/contact-mutations/by-idempotency-key | scope admin, query ContactMutationKeyQuery, response NativeOperation, sdk response NativeOperation | Inspect a contact operation using its original idempotency key.
+route GET /v1/accounts/{a}/contact-requests | scope read, query NativeContactRequestQuery, response NativeContactRequestPage, sdk response NativeContactRequestPage | List saved incoming and outgoing request conversations.
+route GET /v1/accounts/{a}/contact-requests/{id} | scope read, response NativeContactRequest, sdk response NativeContactRequest | Read a request conversation and its current version.
 route GET /v1/accounts/{a}/contacts | scope read, query PageQuery, response NativeContactPage, sdk response NativePage<NativeContact> | List the saved contacts.
 route GET /v1/accounts/{a}/contacts/{id} | scope read, response NativeContact, sdk response NativeContact | Show one saved contact.
+route GET /v1/accounts/{a}/contacts/{id}/privacy | scope admin, response NativeContactPrivacy, sdk response NativeContactPrivacy | Read current relationship privacy from the official profile.
 route GET /v1/accounts/{a}/custom-stickers | scope media, response CustomStickerList, sdk response CustomStickerList | Read ordered Saved membership from the official profile without a network refresh.
 route GET /v1/accounts/{a}/custom-stickers/{id} | scope media, response CustomSticker, sdk response CustomSticker | Read one Saved sticker by its stable identity.
 route GET /v1/accounts/{a}/event-log | scope read, query EventQuery, response untyped or sse NativeEvent, sdk response NativeEvent | Read events after a cursor as a JSON page. With Accept: text/event-stream it streams them instead.
@@ -1151,6 +1267,7 @@ route GET /v1/accounts/{a}/threads/{thread}/messages | scope read, query PageQue
 route GET /v1/status | scope read, response NativeStatus, sdk response NativeStatus | Show the daemon identity, version, data directory and state.
 route GET /v1/tokens | scope owner token, response untyped | List the API tokens that have been issued, without their secret values.
 route PATCH /v1/accounts/{a} | scope admin, request UpdateAccountRequest, response untyped | Change an account alias or whether it connects automatically when the daemon starts.
+route PATCH /v1/accounts/{a}/contacts/{id} | scope admin, idempotency key required, request NativeContactUpdate, response NativeOperation, status 202, sdk response NativeOperation | Change relationship privacy against the inspected version.
 route PATCH /v1/accounts/{a}/custom-stickers/{id} | scope send, idempotency key required, request MoveCustomStickerRequest, response MediaJob, status 202, sdk request MoveCustomStickerRequest, sdk response MediaJob | Change Saved placement using If-Match and a relative anchor.
 route PATCH /v1/accounts/{a}/groups/{id} | scope admin, idempotency key required, request NativeGroupNameRequest, response NativeOperation, status 202, sdk response NativeOperation | Rename a group.
 route PATCH /v1/accounts/{a}/settings | scope media, request AccountSettings, response AccountSettings, sdk request AccountSettings, sdk response AccountSettings | Replace the account settings, such as the largest file to download automatically.
@@ -1162,6 +1279,8 @@ route POST /v1/accounts/{a}/auth/logout-local | scope login, response untyped | 
 route POST /v1/accounts/{a}/avatars/{id}/refresh | scope media and read, request RefreshAvatarRequest (optional), response untyped, status 202, sdk response NativeOperation | Ask WeChat for the latest avatar of one contact, with optional group context for an OpenIM member. Poll the returned operation.
 route POST /v1/accounts/{a}/connect | scope login, response untyped, status 202, sdk response NativeOperation | Connect the signed-in account to WeChat. Poll the returned operation.
 route POST /v1/accounts/{a}/consumers/{consumer}/ack | scope read, request EventAckRequest, response untyped | Record how far a named consumer has read the event stream. It never marks messages read.
+route POST /v1/accounts/{a}/contact-requests | scope admin, idempotency key required, request NativeContactRequestSend, response NativeOperation, status 202, sdk response NativeOperation | Send one friend request with an account-bound discovery reference.
+route POST /v1/accounts/{a}/contact-requests/{id}/accept | scope admin, idempotency key required, request NativeContactRequestAccept, response NativeOperation, status 202, sdk response NativeOperation | Accept the exact inspected incoming request.
 route POST /v1/accounts/{a}/contact-sync | scope read, response untyped, status 202, sdk response NativeOperation | Start syncing the contact catalog from WeChat. Poll the returned operation.
 route POST /v1/accounts/{a}/contacts/lookup | scope read, request ContactLookupRequest, response untyped | Look up one or two contacts by ID live on WeChat, without saving the result.
 route POST /v1/accounts/{a}/contacts/{id}/refresh | scope read, response untyped, status 202, sdk response NativeOperation | Ask WeChat for the latest details of one contact. Poll the returned operation.
@@ -1185,6 +1304,7 @@ route POST /v1/accounts/{a}/media/lookup | scope media, request NativeMediaBatch
 route POST /v1/accounts/{a}/messages/{id}/media-transfers | scope media, request MediaTransferRequest, response untyped, status 202, sdk request MediaTransferRequest, sdk response MediaJob | Start downloading one media file of a message. Poll the returned job.
 route POST /v1/accounts/{a}/messages/{id}/recall | scope send, idempotency key required, request NativeRecallRequest, response NativeOperation, status 202, sdk response NativeOperation | Recall a message you sent, identified by its exact server ID. Poll the returned operation.
 route POST /v1/accounts/{a}/projection/recover | scope admin, response untyped | Repair the account profile from records the daemon already holds. It never resends messages or starts transfers.
+route POST /v1/accounts/{a}/search/contacts | scope read, request NativeContactSearchRequest, response NativeContactSearch, sdk response NativeContactSearch | Discover a person on WeChat and return an opaque send reference.
 route POST /v1/accounts/{a}/sends | scope varies, idempotency key required, request untyped, response untyped, status 202, sdk request NativeTextSendRequest|ShareSendRequest|MediaSendRequest|StickerSendRequest, sdk response NativeSendIntent|MediaJob | Send text, a share card, staged media or a stable sticker reference. The body shape follows its kind; the same Idempotency-Key returns the original send. Scope: send, plus read when a text send quotes a message.
 route POST /v1/accounts/{a}/sends/{id}/cancel | scope send, response untyped, sdk response NativeSendIntent|MediaJob | Cancel a send that has not gone out yet.
 route POST /v1/accounts/{a}/sticker-downloads | scope media, idempotency key required, request StickerDownloadRequest, response MediaJob, status 202, sdk request StickerDownloadRequest, sdk response MediaJob | Acquire one Saved original, one pack item, one selected pack or an advertised preview asset, independently of membership.

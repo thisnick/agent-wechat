@@ -17,6 +17,8 @@ pub struct CatalogQuery {
     pub cursor: Option<String>,
     pub search: Option<String>,
     pub thread_kind: Option<String>,
+    /// Contact membership filter: friend (default), non_contact, unknown, or all.
+    pub relation: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -152,6 +154,12 @@ impl Core {
         {
             bail!("invalid_request");
         }
+        let relation = q.relation.as_deref().unwrap_or("friend");
+        if (kind != "contacts" && q.relation.is_some())
+            || !matches!(relation, "friend" | "non_contact" | "unknown" | "all")
+        {
+            bail!("invalid_request");
+        }
         let query = format!(
             "{:x}",
             Sha256::digest(serde_json::to_vec(&(
@@ -161,6 +169,14 @@ impl Core {
                 &q.thread_kind
             ))?)
         );
+        let query = if kind == "contacts" {
+            format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(&(&query, relation))?)
+            )
+        } else {
+            query
+        };
         let limit = q.limit.unwrap_or(50);
         if !(1..=200).contains(&limit) {
             bail!("invalid_request");
@@ -256,6 +272,13 @@ impl Core {
                 message_limit,
             )?
         };
+        let rows = if kind == "contacts" && relation != "all" {
+            rows.into_iter()
+                .filter(|row| row["relation"] == relation)
+                .collect()
+        } else {
+            rows
+        };
         let metadata = json!({"sourceGeneration":reader.generation(),"coverage":reader.coverage(),"order":rows.iter().map(|r|r["id"].clone()).collect::<Vec<_>>()});
         let mut page = self.paginate_values(account, &query, q, rows, metadata)?;
         if kind == "threads" {
@@ -273,7 +296,7 @@ impl Core {
         }
         Ok(page)
     }
-    fn paginate_values(
+    pub(crate) fn paginate_values(
         &self,
         account: &str,
         query: &str,
@@ -499,7 +522,7 @@ impl Core {
                 }
                 "contacts" => {
                     let page = reader.contacts(&q)?;
-                    (page.items.into_iter().filter(|c|!c.is_group).map(|c|json!({"id":c.username,"username":c.username,"displayName":c.label,"nickname":c.nickname,"remark":c.remark,"alias":c.alias,"relation":"unknown","version":reader.generation()})).collect(),page.next_cursor)
+                    (page.items.into_iter().filter(|c|!c.is_group).map(|c|json!({"id":c.username,"username":c.username,"displayName":c.label,"nickname":c.nickname,"remark":c.remark,"alias":c.alias,"relation":crate::runtime::contact_requests::contact_relation(&c),"version":reader.generation()})).collect(),page.next_cursor)
                 }
                 "groups" => {
                     let page = reader.groups(&q)?;

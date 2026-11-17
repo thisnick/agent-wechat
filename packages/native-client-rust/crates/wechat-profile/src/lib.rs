@@ -38,6 +38,8 @@
 //! record the caller has already saved; the crate neither creates that record nor
 //! proves its existence. Unrecognized layouts remain unsupported for writes.
 // API naming policy for future changes is recorded in this crate's AGENTS.md.
+mod contact_requests;
+pub use contact_requests::*;
 mod dat;
 mod images;
 mod initialize;

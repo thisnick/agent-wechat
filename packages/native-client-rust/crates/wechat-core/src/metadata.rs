@@ -584,6 +584,7 @@ impl Core {
                 !self.contact_pin_superseded(account, record, id)?,
                 "contact_pin_projection_superseded"
             );
+            self.invalidate_contact_privacy(account, record, id)?;
             self.invalidate_contact_notifications(account, record, id)?;
             let mut patch = self.upstream.contact_patch(record)?;
             if exact_lookup {
@@ -612,6 +613,7 @@ impl Core {
             } else {
                 wechat_profile::apply_contact_patch(&location, &keys, &patch, &options)?;
             }
+            self.settle_contact_privacy_projection(account, record, &patch, id)?;
             self.settle_contact_notifications(account, record, &patch, false, id)?;
             self.settle_contact_pinning(account, record, &patch, pin_projection.is_some(), id)?;
             if pin_projection.is_some_and(|projection| projection.changed) {
