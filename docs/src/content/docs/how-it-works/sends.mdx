@@ -43,7 +43,7 @@ Repeating a key returns the original send for at least 90 days (365 days for gro
 | Send again with an old key | `409 idempotency_key_expired`. Nothing is sent. Use a new key. |
 | `GET /sends/{id}`, `wx jobs get ID` or `wx operations get ID` for a removed record | `410 operation_expired` |
 
-A `needs_review` send keeps its full record for 7 days, or until 100 newer uncertain sends pile up. Its state and the error code `review_expired` then stay on the receipt, so you can still look it up by key. Check the chat before sending it again with a new key.
+A `needs_review` send keeps its full record for 7 days, or until 100 newer uncertain sends pile up. After that its state stays `needs_review` and its error code becomes `review_expired`, so you can still look it up by key. A send that was still queued when you signed out keeps `logout_before_submission` instead, because it was never sent. Check the chat before sending again with a new key.
 
 ## After a restart
 
