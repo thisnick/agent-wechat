@@ -50,8 +50,9 @@ the directory holding the pull request's files (the PR checkout).
   "Earlier reviews" list names the ones before that. Count this review's round:
   1 if there is no previous summary; otherwise 2 plus the number of entries in
   that list.
-  Note which inline comments Claude already posted (from the `claude` bot) and
-  how the author answered each.
+  Note which inline comments earlier reviews posted and how the author answered
+  each. They come from `github-actions[bot]`, or from `claude[bot]` for older
+  reviews.
 
 ## 2. Map the change and choose the depth
 
