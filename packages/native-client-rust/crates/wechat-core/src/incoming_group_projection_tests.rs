@@ -100,6 +100,94 @@ impl crate::upstream::Upstream for IdleHeartbeat {
     }
 }
 
+/// Answers group metadata reads with fixed synthetic replies and counts them.
+struct RefreshReplies {
+    contact: Vec<u8>,
+    roster: Vec<u8>,
+    detail: Vec<u8>,
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl RefreshReplies {
+    fn reply(&self, raw: &[u8]) -> Result<Vec<u8>> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        Ok(raw.to_vec())
+    }
+}
+
+impl crate::upstream::Upstream for RefreshReplies {
+    fn kind(&self) -> crate::upstream::UpstreamKind {
+        crate::upstream::UpstreamKind::Native
+    }
+
+    fn lookup_contacts_raw(&self, _: &mut AccountState, _: &[String]) -> Result<Vec<u8>> {
+        self.reply(&self.contact)
+    }
+
+    fn lookup_room_raw(&self, _: &mut AccountState, _: &str, _: u32) -> Result<Vec<u8>> {
+        self.reply(&self.roster)
+    }
+
+    fn group_detail_raw(&self, _: &mut AccountState, _: &str) -> Result<Vec<u8>> {
+        self.reply(&self.detail)
+    }
+}
+
+#[test]
+fn superseded_refresh_records_are_not_processed_as_queued_jobs() {
+    let (_temp, mut core) = fixture();
+    let source = stage_source(&core, false, 0, false);
+    let (key, job) = ready_refresh(&core, &source);
+    let replies = Arc::new(RefreshReplies {
+        contact: job.contact_raw.clone().unwrap(),
+        roster: job.roster_raw.clone().unwrap(),
+        detail: job.detail_raw.clone().unwrap(),
+        reads: Default::default(),
+    });
+    Arc::get_mut(&mut Arc::get_mut(&mut core).unwrap().shared)
+        .unwrap()
+        .upstream = replies.clone();
+
+    // A later local change makes the stored replies stale, so the worker
+    // retains them under a superseded key and reads the metadata again.
+    core.mark_group_revision("one", ROOM, "later-local-change")
+        .unwrap();
+    assert_eq!(core.refresh_incoming_groups("one", true).unwrap(), 1);
+    assert_eq!(replies.reads.load(Ordering::SeqCst), 3);
+    assert!(core.store.runtime("one", &key).unwrap().is_none());
+    assert!(core.store.runtime("one", &done(&source)).unwrap().is_some());
+    let prior = format!("{key}:superseded:1");
+    let sealed = core.store.runtime("one", &prior).unwrap().unwrap();
+    let retained: Refresh =
+        serde_json::from_slice(&core.vault.open_record("one", &prior, &sealed).unwrap()).unwrap();
+    assert_eq!(retained.source, source);
+    assert!(retained.contact_raw.is_some());
+
+    // Neither the worker nor local repair may pick the retained record up.
+    replies.reads.store(0, Ordering::SeqCst);
+    core.projection_command_attempts.store(0, Ordering::Relaxed);
+    assert_eq!(
+        core.refresh_incoming_groups("one", true).unwrap(),
+        0,
+        "the worker ran a superseded record as a queued job"
+    );
+    assert_eq!(core.refresh_incoming_groups("one", false).unwrap(), 0);
+    assert_eq!(replies.reads.load(Ordering::SeqCst), 0);
+    assert_eq!(attempts(&core), 0);
+    assert!(core
+        .store
+        .incoming_group_refreshes("one")
+        .unwrap()
+        .is_empty());
+    assert!(core
+        .store
+        .runtime("one", &format!("{prior}:superseded:2"))
+        .unwrap()
+        .is_none());
+    // The retained record stays readable and unchanged.
+    assert_eq!(core.store.runtime("one", &prior).unwrap(), Some(sealed));
+}
+
 #[tokio::test]
 async fn group_refresh_projection_attempts_do_not_scale_with_unrelated_backlog() {
     for contact_stream in [false, true] {

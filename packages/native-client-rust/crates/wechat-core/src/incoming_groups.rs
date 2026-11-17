@@ -157,6 +157,8 @@ impl Core {
                         && current != job.contact_revision
                         && current.as_deref() != Some(key.as_bytes())
                     {
+                        // Retained for reference only. The queue reader skips
+                        // this suffixed key, so it is never run as a job.
                         let prior = format!("{}:superseded:{}", key, job.attempts);
                         self.store.put_runtime(
                             account,

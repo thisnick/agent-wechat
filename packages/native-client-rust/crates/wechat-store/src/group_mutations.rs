@@ -56,9 +56,13 @@ fn key_hash(key: &str) -> Result<String> {
     Ok(format!("{:x}", Sha256::digest(key.as_bytes())))
 }
 impl Store {
+    /// Queued incoming group refresh jobs, oldest first. A job key is
+    /// `incoming-group-pending:<sha256>`. Superseded replies are retained as
+    /// `incoming-group-pending:<sha256>:superseded:<n>`; they are not work, so
+    /// keys with a further `:` segment are excluded.
     pub fn incoming_group_refreshes(&self, account: &str) -> Result<Vec<(String, Vec<u8>)>> {
         self.control(account,|db| {
-            let mut q=db.prepare("SELECT key,value FROM runtime WHERE key GLOB 'incoming-group-pending:*' ORDER BY rowid LIMIT 4")?;
+            let mut q=db.prepare("SELECT key,value FROM runtime WHERE key GLOB 'incoming-group-pending:*' AND key NOT GLOB 'incoming-group-pending:*:*' ORDER BY rowid LIMIT 4")?;
             let rows=q.query_map([],|r|Ok((r.get(0)?,r.get(1)?)))?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
@@ -282,6 +286,34 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn incoming_group_queue_lists_only_live_refresh_jobs() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(&temp.path().join("data")).unwrap();
+        store.create_account("one").unwrap();
+        let live = format!("incoming-group-pending:{}", "a".repeat(64));
+        // Retained records are written before the live job so that they
+        // would come first in rowid order if the queue matched them.
+        for key in [
+            format!("incoming-group-pending:{}:superseded:1", "b".repeat(64)),
+            format!(
+                "incoming-group-pending:{}:superseded:1:superseded:2",
+                "b".repeat(64)
+            ),
+            format!("incoming-group-held:{}", "c".repeat(64)),
+            format!("incoming-group-receipt:{}", "c".repeat(64)),
+            live.clone(),
+        ] {
+            store.put_runtime("one", &key, b"sealed").unwrap();
+        }
+        let queued: Vec<_> = store
+            .incoming_group_refreshes("one")
+            .unwrap()
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        assert_eq!(queued, [live]);
+    }
     #[test]
     fn only_unsubmitted_intents_can_cancel_and_recovery_keeps_partial_steps_uncertain() {
         let temp = tempfile::tempdir().unwrap();
