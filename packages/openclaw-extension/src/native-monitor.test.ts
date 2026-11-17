@@ -320,10 +320,10 @@ test("incoming download status failures recover after ten minutes and media.read
       job: async (_account: string, id: string) => { polls++; assert.equal(id, "download-job");
         if (failStatus) { failStatus = false; throw new TypeError("synthetic network interruption"); }
         return { id, accountId: "a", assetId: "file-asset", kind: "download", state: ready ? "available" : "running" }; },
-      mediaContent: async () => ({ bytes: source, contentType: "application/pdf" }),
+      mediaContentStream: async () => ({ contentType: "application/pdf", stream: (async function* () { yield new Uint8Array(source); })(), cancel: async () => {} }),
     });
-    value.core.channel.media = { saveMediaBuffer: async () => ({ path: "/managed/synthetic.pdf" }) };
-    const params = { ...value, prepareAttachment: (input: Parameters<typeof prepareNativeAttachment>[0]) => prepareNativeAttachment({ ...input,
+    const saveMediaStream: any = async (stream: AsyncIterable<Uint8Array>) => { let size = 0; for await (const chunk of stream) size += chunk.byteLength; return { id: "pdf", path: "/managed/synthetic.pdf", size }; };
+    const params = { ...value, prepareAttachment: (input: Parameters<typeof prepareNativeAttachment>[0]) => prepareNativeAttachment({ ...input, saveMediaStream,
       ...(failureStage === "later" && transfers === 0 ? { waitMs: 0 } : {}) }) };
     assert.equal(await dispatchNativeMessage(params), "pending");
     if (failureStage === "later") assert.equal(await dispatchNativeMessage(params), "pending");
@@ -351,10 +351,10 @@ test("a received document reaches OpenClaw as a media fact and is named, not pat
   Object.assign(value.client, {
     mediaAssets: async () => ({ items: [{ id: "doc-asset", accountId: "a", messageId: "m1", kind: "file", variant: "original", actualVariant: "original",
       state: "available", byteLength: source.length, sha256, filename: "招标文件.doc", jobId: null }] }),
-    mediaContent: async () => ({ bytes: source, contentType: "application/msword" }),
+    mediaContentStream: async () => ({ contentType: "application/msword", stream: (async function* () { yield new Uint8Array(source); })(), cancel: async () => {} }),
   });
-  value.core.channel.media = { saveMediaBuffer: async () => ({ path: "/managed/招标文件---1.doc" }) };
-  assert.equal(await dispatchNativeMessage(value), "completed");
+  const saveMediaStream: any = async (stream: AsyncIterable<Uint8Array>) => { let size = 0; for await (const chunk of stream) size += chunk.byteLength; return { id: "doc", path: "/managed/招标文件---1.doc", size }; };
+  assert.equal(await dispatchNativeMessage({ ...value, prepareAttachment: input => prepareNativeAttachment({ ...input, saveMediaStream }) }), "completed");
   const ctx = value.runs[0].ctx;
   assert.equal(ctx.BodyForAgent, "[File: 招标文件.doc]"); assert.equal(ctx.MediaPath, undefined);
   assert.deepEqual(ctx.media.map((fact: any) => [fact.path, fact.url, fact.contentType, fact.kind, fact.fileName, fact.messageId, fact.hydrationSuppressed]),
