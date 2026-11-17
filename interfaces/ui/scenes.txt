@@ -40,7 +40,7 @@ scene new-chat | route /{server}/{account}/new-chat, viewports desktop | The dia
 scene new-group | route /{server}/{account}/new-chat, viewports desktop | The new chat dialog on its New group tab, with two contacts chosen.
 scene new-group-avatar | route /{server}/{account}/chats, viewports desktop | A newly received group shows its room avatar while its member list is unavailable.
 scene non-contact | route /{server}/{account}/chats/{thread}/info, viewports desktop+compact | A cached person opens from conversation details; confirmed non-contacts say Not friends yet, unknown membership has no label, and Add contact opens request review without submitting.
-scene omni-message-search | route /{server}/{account}/contacts, viewports desktop+compact | Saved message search names its conversation and opens the matched message.
+scene omni-message-search | route /{server}/{account}/contacts, viewports desktop+compact | Message search limits long snippets to two lines while keeping the conversation name, original timestamp and View action visible.
 scene omni-pagination-query-change | route /{server}/{account}/contacts, viewports desktop+compact | Each search section loads its own cursor, keeps earlier results on retry, deduplicates pages and shows message timestamps; query changes discard late pages.
 scene omni-progressive-search | route /{server}/{account}/contacts, viewports desktop+compact | Contacts opens prefiltered; fast contact results remain usable while message search is pending or fails.
 scene omni-search | route /{server}/{account}/contacts, viewports desktop+narrow+compact | One search surface for saved contacts, groups, messages and request history.

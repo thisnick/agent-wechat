@@ -462,7 +462,7 @@ export function OmniSearch({
                   >
                     <span className="omni-result-copy">
                       <strong>{h.name}</strong>
-                      {h.subtitle && <span>{h.subtitle}</span>}
+                      {h.subtitle && <span className={h.kind === "messages" ? "omni-message-snippet" : undefined}>{h.subtitle}</span>}
                       {h.createdAt && <time dateTime={h.createdAt}>{new Date(h.createdAt).toLocaleString(formatLocale(), { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</time>}
                     </span>
                     {(h.kind === "contacts" || h.kind === "otherPeople") &&

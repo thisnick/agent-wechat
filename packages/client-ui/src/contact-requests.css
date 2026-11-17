@@ -502,3 +502,12 @@
 .omni-result-copy time { color: var(--muted); font-size: 11px; }
 .omni-load-more { display: block; margin: 6px 10px 12px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--muted); cursor: pointer; }
 .omni-load-more:disabled { cursor: wait; opacity: .65; }
+
+.omni-message-snippet {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  line-height: 1.4;
+}

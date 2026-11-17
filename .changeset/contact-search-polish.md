@@ -14,3 +14,5 @@ Contact lists now default to confirmed saved friends across the API and CLI. Use
 Local contact search defaults to saved friends. When a query is entered, show other cached people in a separate Other people section. Show server discovery separately under Add someone on WeChat, label friends Contact and confirmed non-contacts Not friends yet, and omit a relationship label when membership is unknown.
 
 Separate Friends and Other people search tabs, route Contacts + to Other people, page each section independently, and show original dates and times on message matches.
+
+Limit message-search snippets to two lines while keeping the conversation name, original timestamp and View action visible.

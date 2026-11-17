@@ -534,10 +534,20 @@ export const scenes = [
   ...["friend-requests", "friend-request-review", "omni-search", "omni-message-search", "add-contact"].map(name => ({
     name,
     route: name.startsWith("friend-request") ? "friend-requests" : "contacts",
-    description: ({ "friend-requests": "Incoming and sent request history with an actionable Contacts badge.", "friend-request-review": "The shared contact card with request history, privacy choices, acceptance and local-history deletion.", "omni-search": "One search surface for saved contacts, groups, messages and request history.", "omni-message-search": "Saved message search names its conversation and opens the matched message.", "add-contact": "The shared contact card with a greeting and privacy choices before sending a friend request." })[name],
+    description: ({ "friend-requests": "Incoming and sent request history with an actionable Contacts badge.", "friend-request-review": "The shared contact card with request history, privacy choices, acceptance and local-history deletion.", "omni-search": "One search surface for saved contacts, groups, messages and request history.", "omni-message-search": "Message search limits long snippets to two lines while keeping the conversation name, original timestamp and View action visible.", "add-contact": "The shared contact card with a greeting and privacy choices before sending a friend request." })[name],
     viewports: name === "omni-message-search" ? ["desktop", "compact"] : ["desktop", "narrow", "compact"],
     setup: standardWorld,
-    prepare: prepareContactScenes,
+    prepare: async ({ page }) => {
+      await prepareContactScenes({ page });
+      if (name === "omni-message-search") await page.route("**/v1/accounts/*/messages?*", async route => {
+        const response = await route.fetch();
+        const body = await response.json();
+        body.items = body.items.map(message => message.body === "I booked the place near the station" ? {
+          ...message, body: message.body + ". " + "We can meet there before we walk to the cafe and discuss the weekend plans together. ".repeat(8),
+        } : message);
+        await route.fulfill({ response, json: body });
+      });
+    },
     target: () => ({ account: ACCOUNT.id }),
     ready: async ({ page, expect }) => {
       if (name.startsWith("friend-request")) await expect(page.getByText("Casey Morgan", { exact: true })).toBeVisible();
