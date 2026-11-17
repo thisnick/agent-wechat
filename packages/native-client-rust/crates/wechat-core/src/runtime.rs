@@ -156,6 +156,9 @@ pub struct CoreShared {
     pub(crate) official_profiles: AsyncMutex<()>,
     pub stopping: AtomicBool,
     pub(crate) read_pools: Mutex<BTreeMap<String, Arc<crate::read_view::ReadPool>>>,
+    /// Attachments whose whole content was checked, so a byte range of them can
+    /// be served without reading the rest; see `media_content_stream`.
+    pub(crate) verified_content: Mutex<crate::media::VerifiedContent>,
 }
 pub(crate) struct DownloadPermit {
     _account: tokio::sync::OwnedSemaphorePermit,
@@ -395,6 +398,7 @@ impl Core {
                 official_profiles: AsyncMutex::new(()),
                 stopping: AtomicBool::new(false),
                 read_pools: Mutex::new(BTreeMap::new()),
+                verified_content: Mutex::new(Default::default()),
             }),
         });
         for account in core.store.accounts()? {

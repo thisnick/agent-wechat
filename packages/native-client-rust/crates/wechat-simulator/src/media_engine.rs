@@ -372,7 +372,7 @@ fn fixture_object(
         &original.aes_key,
         &original.file_key,
     )?;
-    save_object(db, account, &metadata, &prepared.encrypted)?;
+    save_object(db, account, &metadata, &prepared.encrypted_bytes()?)?;
     Ok(metadata)
 }
 fn image_bytes() -> Result<Vec<u8>> {

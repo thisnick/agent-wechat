@@ -44,6 +44,8 @@ pub use channels_video::*;
 #[path = "sticker.rs"]
 mod sticker;
 pub use sticker::*;
+#[path = "upload_source.rs"]
+mod upload_source;
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct CdnLocation {
@@ -337,12 +339,53 @@ pub struct DownloadedMedia {
     pub sha256: String,
     pub advertised_size_matches: Option<bool>,
 }
-#[derive(Clone, Serialize, Deserialize)]
+/// What a download into a writer verified: everything [`DownloadedMedia`]
+/// reports except the bytes, which went to the writer.
+#[derive(Clone, Debug)]
+pub struct DownloadReceipt {
+    /// Plaintext bytes written.
+    pub byte_length: u64,
+    pub requested_quality: MediaQuality,
+    pub substituted_filetype: Option<u32>,
+    pub picture_format: Option<u32>,
+    pub md5: String,
+    pub sha256: String,
+    pub advertised_size_matches: Option<bool>,
+}
+impl DownloadedMedia {
+    /// The bytes and the receipt describing them.
+    pub fn into_parts(self) -> (Vec<u8>, DownloadReceipt) {
+        let receipt = DownloadReceipt {
+            byte_length: self.bytes.len() as u64,
+            requested_quality: self.requested_quality,
+            substituted_filetype: self.substituted_filetype,
+            picture_format: self.picture_format,
+            md5: self.md5,
+            sha256: self.sha256,
+            advertised_size_matches: self.advertised_size_matches,
+        };
+        (self.bytes, receipt)
+    }
+    fn from_receipt(receipt: DownloadReceipt, bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            requested_quality: receipt.requested_quality,
+            substituted_filetype: receipt.substituted_filetype,
+            picture_format: receipt.picture_format,
+            md5: receipt.md5,
+            sha256: receipt.sha256,
+            advertised_size_matches: receipt.advertised_size_matches,
+        }
+    }
+}
+/// One object ready to upload. Its ciphertext is produced chunk by chunk as it
+/// is sent (see `upload_source`), so a file source is never held in memory.
+#[derive(Clone)]
 pub struct PreparedUpload {
     pub kind: MediaQuality,
     pub aes_key: Vec<u8>,
     pub file_key: String,
-    pub encrypted: Vec<u8>,
+    source: upload_source::UploadSource,
     pub plaintext_bytes: u32,
     pub md5: String,
     pub sha256: String,
@@ -353,7 +396,6 @@ impl Drop for PreparedUpload {
     fn drop(&mut self) {
         self.aes_key.zeroize();
         self.file_key.zeroize();
-        self.encrypted.zeroize();
     }
 }
 impl fmt::Debug for PreparedUpload {
@@ -392,39 +434,19 @@ impl PreparedUpload {
         key: &[u8],
         file_key: &str,
     ) -> Result<Self> {
-        ensure!(
-            !raw.is_empty()
-                && raw.len() <= upload_plaintext_limit(kind)
-                && [
-                    MediaQuality::File,
-                    MediaQuality::LargeFile,
-                    MediaQuality::Original,
-                    MediaQuality::Video
-                ]
-                .contains(&kind),
-            "Unsupported upload profile"
-        );
-        ensure!(
-            !file_name.is_empty()
-                && file_name.len() <= 255
-                && file_name != "."
-                && file_name != ".."
-                && !file_name.contains(['/', '\\'])
-                && !file_name.chars().any(|c| c.is_control()),
-            "Invalid upload filename"
-        );
-        ensure!(
-            key.len() == 16
-                && file_key.len() == 32
-                && file_key.bytes().all(|b| b.is_ascii_hexdigit()),
-            "Invalid durable upload material"
-        );
-        encrypt_recipient(destination)?;
+        upload_source::check_upload_profile(
+            raw.len(),
+            kind,
+            file_name,
+            destination,
+            key,
+            file_key,
+        )?;
         Ok(Self {
             kind,
             aes_key: key.to_vec(),
             file_key: file_key.to_string(),
-            encrypted: ecb_encrypt(raw, key)?,
+            source: Self::memory_source(raw),
             plaintext_bytes: raw.len() as u32,
             md5: hex::encode(md5(raw)),
             sha256: hex::encode(sha256(raw)),
@@ -438,34 +460,11 @@ impl PreparedUpload {
                 && self.file_key.len() == 32
                 && self.file_key.bytes().all(|b| b.is_ascii_hexdigit())
                 && self.plaintext_bytes > 0
-                && self.plaintext_bytes as usize <= upload_plaintext_limit(self.kind)
-                && self.encrypted.len() == ((self.plaintext_bytes as usize / 16) + 1) * 16,
+                && self.plaintext_bytes as usize <= upload_plaintext_limit(self.kind),
             "Invalid prepared upload"
         );
-        // Validate persisted ciphertext without allocating a second whole file.
-        let mut decryptor =
-            Crypter::new(Cipher::aes_128_ecb(), Mode::Decrypt, &self.aes_key, None)?;
-        let mut buffer = zeroize::Zeroizing::new(vec![0; 128 * 1024 + 16]);
-        let mut md5 = Hasher::new(MessageDigest::md5())?;
-        let mut sha256 = Hasher::new(MessageDigest::sha256())?;
-        let mut plaintext_bytes = 0usize;
-        for chunk in self.encrypted.chunks(128 * 1024) {
-            let written = decryptor.update(chunk, &mut buffer)?;
-            md5.update(&buffer[..written])?;
-            sha256.update(&buffer[..written])?;
-            plaintext_bytes += written;
-        }
-        let written = decryptor.finalize(&mut buffer)?;
-        md5.update(&buffer[..written])?;
-        sha256.update(&buffer[..written])?;
-        plaintext_bytes += written;
-        ensure!(
-            plaintext_bytes == self.plaintext_bytes as usize
-                && hex::encode(md5.finish()?) == self.md5
-                && hex::encode(sha256.finish()?) == self.sha256,
-            "Prepared upload digest mismatch"
-        );
-        Ok(())
+        // A file source is checked chunk by chunk while it is sent.
+        self.check_memory_source()
     }
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -547,6 +546,24 @@ impl CdnClient {
     ) -> Result<DownloadedMedia> {
         self.download_with_transport(descriptor, progress, |path, fields| self.post(path, fields))
     }
+    /// Download into `sink`, decrypting each piece as it arrives, so the object
+    /// is never held in memory. Every check [`Self::download_with_progress`]
+    /// makes is made on the returned receipt. Until this returns `Ok`, the
+    /// bytes in `sink` are unverified: on an error the caller must discard them.
+    pub fn download_to_with_progress(
+        &self,
+        descriptor: &MediaDescriptor,
+        progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+        sink: &mut dyn std::io::Write,
+    ) -> Result<DownloadReceipt> {
+        self.download_on_route(
+            descriptor,
+            None,
+            progress,
+            |path, fields| self.post(path, fields),
+            sink,
+        )
+    }
     /// Download a storage object, as the official client does for sticker pack
     /// archives: `POST /downloadstorage` with the storage request fields
     /// (`apptype` 10, `isstorevideo` 0, `nocheckaeskey` 1, `enablehit` 1,
@@ -560,9 +577,15 @@ impl CdnClient {
         file_key: &str,
         progress: impl FnMut(u64, Option<u64>) -> Result<()>,
     ) -> Result<DownloadedMedia> {
-        self.download_on_route(descriptor, Some(file_key), progress, |path, fields| {
-            self.post(path, fields)
-        })
+        let mut bytes = vec![];
+        let receipt = self.download_on_route(
+            descriptor,
+            Some(file_key),
+            progress,
+            |path, fields| self.post(path, fields),
+            &mut bytes,
+        )?;
+        Ok(DownloadedMedia::from_receipt(receipt, bytes))
     }
     fn download_with_transport(
         &self,
@@ -570,7 +593,9 @@ impl CdnClient {
         progress: impl FnMut(u64, Option<u64>) -> Result<()>,
         post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
     ) -> Result<DownloadedMedia> {
-        self.download_on_route(descriptor, None, progress, post)
+        let mut bytes = vec![];
+        let receipt = self.download_on_route(descriptor, None, progress, post, &mut bytes)?;
+        Ok(DownloadedMedia::from_receipt(receipt, bytes))
     }
     fn download_on_route(
         &self,
@@ -578,7 +603,8 @@ impl CdnClient {
         storage_key: Option<&str>,
         mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
         mut post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
-    ) -> Result<DownloadedMedia> {
+        sink: &mut dyn std::io::Write,
+    ) -> Result<DownloadReceipt> {
         if let Some(key) = storage_key {
             ensure!(
                 descriptor.quality == MediaQuality::File
@@ -643,7 +669,18 @@ impl CdnClient {
         }
         let mut position = 0usize;
         let mut total = 0usize;
-        let mut encrypted = vec![];
+        // Pieces are decrypted as they arrive. The decryptor keeps the last
+        // block back until the padding is known.
+        let mut decryptor = Crypter::new(
+            Cipher::aes_128_ecb(),
+            Mode::Decrypt,
+            &descriptor.aes_key,
+            None,
+        )?;
+        let mut plain = zeroize::Zeroizing::new(vec![]);
+        let mut plaintext_bytes = 0usize;
+        let mut plaintext_md5 = Hasher::new(MessageDigest::md5())?;
+        let mut plaintext_sha256 = Hasher::new(MessageDigest::sha256())?;
         let mut substituted_filetype = None;
         let mut picture_format = None;
         let mut server_md5 = None;
@@ -792,11 +829,17 @@ impl CdnClient {
                 "Inconsistent CDN range response"
             );
             total = size;
-            if encrypted.is_empty() {
-                encrypted.try_reserve_exact(total)?;
-            }
             position += data.len();
-            encrypted.extend(data);
+            plain.resize(data.len() + 16, 0);
+            let count = decryptor.update(data, &mut plain)?;
+            plaintext_bytes += count;
+            ensure!(
+                plaintext_bytes <= plaintext_limit,
+                "Decoded CDN body too large"
+            );
+            plaintext_md5.update(&plain[..count])?;
+            plaintext_sha256.update(&plain[..count])?;
+            sink.write_all(&plain[..count])?;
             if !large {
                 for (key, target) in [
                     ("substituteftype", &mut substituted_filetype),
@@ -824,9 +867,24 @@ impl CdnClient {
             total > 0 && position == total,
             "CDN transfer did not finish within bound"
         );
-        let bytes = decrypt_cdn(&encrypted, &descriptor.aes_key)?;
-        ensure!(bytes.len() <= plaintext_limit, "Decoded CDN body too large");
-        let size_matches = descriptor.expected_bytes.map(|n| n == bytes.len() as u64);
+        ensure!(
+            total.is_multiple_of(16) && total <= MAX_LARGE_FILE_BYTES + 16,
+            "Invalid CDN ciphertext"
+        );
+        plain.resize(32, 0);
+        let count = decryptor.finalize(&mut plain)?;
+        plaintext_bytes += count;
+        ensure!(
+            plaintext_bytes <= plaintext_limit,
+            "Decoded CDN body too large"
+        );
+        plaintext_md5.update(&plain[..count])?;
+        plaintext_sha256.update(&plain[..count])?;
+        sink.write_all(&plain[..count])?;
+        sink.flush()?;
+        let size_matches = descriptor
+            .expected_bytes
+            .map(|n| n == plaintext_bytes as u64);
         // Normal-video plans are no longer strict so that a selected copy can be accepted, but
         // a video reply the CDN did not mark as selected must still match the advertised size.
         let size_rejected = video_selected_response != Some(true)
@@ -834,7 +892,7 @@ impl CdnClient {
                 || descriptor.strict_size
                 || descriptor.quality == MediaQuality::Video)
             && size_matches == Some(false);
-        let digest = hex::encode(md5(&bytes));
+        let digest = hex::encode(plaintext_md5.finish()?);
         let digest_matches = descriptor.expected_md5.as_ref().map(|expected| {
             expected.len() == 32
                 && expected.bytes().all(|b| b.is_ascii_hexdigit())
@@ -849,7 +907,7 @@ impl CdnClient {
             return Err(video_reply
                 .mismatch(
                     descriptor,
-                    bytes.len(),
+                    plaintext_bytes,
                     &digest,
                     digest_matches,
                     substituted_filetype,
@@ -858,7 +916,7 @@ impl CdnClient {
         }
         if video_selected_response == Some(true) {
             ensure!(
-                video_response_bytes.is_none_or(|size| size == bytes.len() as u64),
+                video_response_bytes.is_none_or(|size| size == plaintext_bytes as u64),
                 "CDN video response size mismatch"
             );
             ensure!(
@@ -878,14 +936,13 @@ impl CdnClient {
                 "CDN source checksum mismatch"
             );
         }
-        let sha = hex::encode(sha256(&bytes));
-        Ok(DownloadedMedia {
-            bytes,
+        Ok(DownloadReceipt {
+            byte_length: plaintext_bytes as u64,
+            sha256: hex::encode(plaintext_sha256.finish()?),
             requested_quality: descriptor.quality,
             substituted_filetype,
             picture_format,
             md5: digest,
-            sha256: sha,
             advertised_size_matches: size_matches,
         })
     }
@@ -906,25 +963,25 @@ impl CdnClient {
         mut post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
     ) -> Result<UploadedMedia> {
         prepared.validate()?;
-        let path = legacy_upload_path(
-            prepared.kind,
-            prepared.plaintext_bytes as usize,
-            prepared.encrypted.len(),
-        )?;
+        let total = prepared.encrypted_len();
+        let path = legacy_upload_path(prepared.kind, prepared.plaintext_bytes as usize, total)?;
         let mut file_id = None;
-        for (sequence, chunk) in prepared.encrypted.chunks(UPLOAD_CHUNK).enumerate() {
-            let start = sequence * UPLOAD_CHUNK;
-            progress(start as u64, Some(prepared.encrypted.len() as u64))?;
+        let mut chunks = prepared.ciphertext_chunks();
+        let mut sequence = 0u32;
+        while chunks.position() < total {
+            let start = chunks.position();
+            sequence += 1;
+            progress(start as u64, Some(total as u64))?;
+            let chunk = chunks.next(UPLOAD_CHUNK)?;
             let end = start + chunk.len() - 1;
-            let mut fields =
-                upload_fields(&self.config, prepared, sequence as u32 + 1, start, end)?;
+            let mut fields = upload_fields(&self.config, prepared, sequence, start, &chunk)?;
             fields.insert("filedata".into(), chunk.to_vec());
             let reply = post(path, &fields)?;
-            validate_upload_reply(&reply, sequence as u32 + 1, start, end, &mut file_id)?;
+            validate_upload_reply(&reply, sequence, start, end, &mut file_id)?;
             // The final correlated acknowledgement must reach the caller so it
             // can save completion before applying cancellation/logout fences.
-            if end + 1 < prepared.encrypted.len() {
-                progress((end + 1) as u64, Some(prepared.encrypted.len() as u64))?;
+            if end + 1 < total {
+                progress((end + 1) as u64, Some(total as u64))?;
             }
         }
         let file_id =
@@ -1298,17 +1355,22 @@ fn escaped_component(s: &str) -> String {
         })
         .collect()
 }
+/// Fields for one `/uploadv3` request carrying `chunk`, the ciphertext that
+/// starts at `start`.
 fn upload_fields(
     conf: &CdnConfig,
     p: &PreparedUpload,
     sequence: u32,
     start: usize,
-    end: usize,
+    chunk: &[u8],
 ) -> Result<CdnFields> {
+    let total = p.encrypted_len();
     ensure!(
-        sequence > 0 && start <= end && end < p.encrypted.len() && end - start < UPLOAD_CHUNK,
+        sequence > 0 && !chunk.is_empty() && chunk.len() <= UPLOAD_CHUNK && start < total,
         "Invalid upload range"
     );
+    let end = start + chunk.len() - 1;
+    ensure!(end < total, "Invalid upload range");
     let mut f = shared(conf, sequence, p.kind.filetype());
     for (k, v) in [
         ("hasthumb", 0),
@@ -1317,7 +1379,7 @@ fn upload_fields(
         ("enablehit", 0),
         ("existancecheck", 0),
         ("apptype", 0),
-        ("totalsize", p.encrypted.len() as u64),
+        ("totalsize", total as u64),
         ("rawtotalsize", p.plaintext_bytes as u64),
         ("thumbtotalsize", 0),
         ("rawthumbsize", 0),
@@ -1332,10 +1394,10 @@ fn upload_fields(
         ("touser", encrypt_recipient(&p.destination)?),
         ("filekey", p.file_key.clone()),
         ("localname", escaped_component(&p.file_name)),
-        ("filedatamd5", hex::encode(md5(&p.encrypted[start..=end]))),
+        ("filedatamd5", hex::encode(md5(chunk))),
         ("filemd5", p.md5.clone()),
         ("rawfilemd5", p.md5.clone()),
-        ("blockmd5", hex::encode(md5(&p.encrypted[start..=end]))),
+        ("blockmd5", hex::encode(md5(chunk))),
     ] {
         f.insert(k.into(), v.into_bytes());
     }
@@ -1393,7 +1455,7 @@ pub struct PreparedVariant {
     pub checksum: u32,
     pub encrypted_checksum: u32,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 pub struct PreparedImageUpload {
     pub original: PreparedUpload,
     pub standard: PreparedVariant,
@@ -1401,7 +1463,7 @@ pub struct PreparedImageUpload {
     pub width: u32,
     pub height: u32,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 pub struct PreparedVideoUpload {
     pub video: PreparedUpload,
     pub thumbnail: PreparedVariant,
@@ -1568,9 +1630,12 @@ impl PreparedImageUpload {
     }
     fn validate(&self) -> Result<()> {
         self.original.validate()?;
-        let raw = decrypt_cdn(&self.original.encrypted, &self.original.aes_key)?;
+        let raw = self
+            .original
+            .memory_plaintext()
+            .ok_or_else(|| anyhow::anyhow!("Prepared original must be held in memory"))?;
         ensure!(
-            jpeg_header_dimensions(&raw)? == (self.width, self.height),
+            jpeg_header_dimensions(raw)? == (self.width, self.height),
             "Prepared original dimensions differ"
         );
         self.standard.validate(&self.original.aes_key)?;
@@ -1723,13 +1788,17 @@ impl CdnClient {
         mut post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
     ) -> Result<UploadedImage> {
         p.validate()?;
-        let total = p.original.encrypted.len();
+        let total = p.original.encrypted_len();
         let mut file_id = None;
-        for (sequence, chunk) in p.original.encrypted.chunks(UPLOAD_CHUNK).enumerate() {
-            let start = sequence * UPLOAD_CHUNK;
-            let end = start + chunk.len() - 1;
+        let mut chunks = p.original.ciphertext_chunks();
+        let mut sequence = 0u32;
+        while chunks.position() < total {
+            let start = chunks.position();
+            sequence += 1;
             progress(start as u64, Some(total as u64))?;
-            let mut f = upload_fields(&self.config, &p.original, sequence as u32 + 1, start, end)?;
+            let chunk = chunks.next(UPLOAD_CHUNK)?;
+            let end = start + chunk.len() - 1;
+            let mut f = upload_fields(&self.config, &p.original, sequence, start, &chunk)?;
             f.insert("filedata".into(), chunk.to_vec());
             if start == 0 {
                 add_thumbnail(&mut f, &p.thumbnail);
@@ -1748,7 +1817,7 @@ impl CdnClient {
                 f.insert("midimgdata".into(), p.standard.encrypted.clone());
             }
             let reply = post("/uploadv3", &f)?;
-            validate_upload_reply(&reply, sequence as u32 + 1, start, end, &mut file_id)?;
+            validate_upload_reply(&reply, sequence, start, end, &mut file_id)?;
             if end + 1 < total {
                 progress((end + 1) as u64, Some(total as u64))?;
             }
@@ -1794,21 +1863,25 @@ impl CdnClient {
             "Video thumbnail outside limit"
         );
         let mut file_id = None;
-        for (sequence, chunk) in p.video.encrypted.chunks(UPLOAD_CHUNK).enumerate() {
-            let start = sequence * UPLOAD_CHUNK;
+        let total = p.video.encrypted_len();
+        let mut chunks = p.video.ciphertext_chunks();
+        let mut sequence = 0u32;
+        while chunks.position() < total {
+            let start = chunks.position();
+            sequence += 1;
+            progress(start as u64, Some(total as u64))?;
+            let chunk = chunks.next(UPLOAD_CHUNK)?;
             let end = start + chunk.len() - 1;
-            progress(start as u64, Some(p.video.encrypted.len() as u64))?;
-            let mut fields =
-                upload_fields(&self.config, &p.video, sequence as u32 + 1, start, end)?;
+            let mut fields = upload_fields(&self.config, &p.video, sequence, start, &chunk)?;
             fields.insert("filedata".into(), chunk.to_vec());
             if start == 0 {
                 add_thumbnail(&mut fields, &p.thumbnail);
             }
             put(&mut fields, "smallvideoflag", 0);
             let reply = post("/uploadv3", &fields)?;
-            validate_upload_reply(&reply, sequence as u32 + 1, start, end, &mut file_id)?;
-            if end + 1 < p.video.encrypted.len() {
-                progress((end + 1) as u64, Some(p.video.encrypted.len() as u64))?;
+            validate_upload_reply(&reply, sequence, start, end, &mut file_id)?;
+            if end + 1 < total {
+                progress((end + 1) as u64, Some(total as u64))?;
             }
         }
         let id =
@@ -2326,6 +2399,7 @@ mod tests {
     fn storage_download_uses_the_storage_route_and_fields() {
         let (descriptor, raw, ciphertext) = download_fixture(100_000, MediaQuality::File);
         let mut paths = vec![];
+        let mut bytes = vec![];
         let result = client()
             .download_on_route(
                 &descriptor,
@@ -2346,9 +2420,12 @@ mod tests {
                     assert_eq!(fields["filekey"], b"2_pack.fixture");
                     Ok(download_reply(fields, &descriptor, &ciphertext))
                 },
+                &mut bytes,
             )
             .unwrap();
-        assert_eq!(result.bytes, raw);
+        assert_eq!(bytes, raw);
+        assert_eq!(result.byte_length, raw.len() as u64);
+        assert_eq!(result.sha256, hex::encode(sha256(&raw)));
         assert_eq!(paths, ["/downloadstorage", "/downloadstorage"]);
         // Ordinary downloads keep their route and send no storage fields.
         client()
@@ -2365,11 +2442,17 @@ mod tests {
         // Storage keys must be usable and only whole-file descriptors qualify.
         let unused = |_: &str, _: &CdnFields| -> Result<CdnFields> { unreachable!() };
         assert!(client()
-            .download_on_route(&descriptor, Some(""), |_, _| Ok(()), unused)
+            .download_on_route(&descriptor, Some(""), |_, _| Ok(()), unused, &mut vec![])
             .is_err());
         let (video, _, _) = download_fixture(1000, MediaQuality::Video);
         assert!(client()
-            .download_on_route(&video, Some("2_pack.fixture"), |_, _| Ok(()), unused)
+            .download_on_route(
+                &video,
+                Some("2_pack.fixture"),
+                |_, _| Ok(()),
+                unused,
+                &mut vec![]
+            )
             .is_err());
     }
     #[test]
@@ -2802,11 +2885,11 @@ mod tests {
         .unwrap();
         p.validate().unwrap();
         assert_eq!(
-            decrypt_cdn(&p.encrypted, &p.aes_key).unwrap(),
+            decrypt_cdn(&p.encrypted_bytes().unwrap(), &p.aes_key).unwrap(),
             b"synthetic attachment"
         );
         let mut corrupt = p.clone();
-        corrupt.encrypted[0] ^= 1;
+        corrupt.replace_memory_source(b"Synthetic attachment");
         assert!(corrupt.validate().is_err());
     }
     #[test]
@@ -2911,7 +2994,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!((p.width, p.height), (4200, 64));
-        let total = p.original.encrypted.len();
+        let total = p.original.encrypted_len();
+        let encrypted = ecb_encrypt(&original, &p.original.aes_key).unwrap();
         let requests = std::cell::RefCell::new(vec![]);
         let reported = std::cell::RefCell::new(vec![]);
         let uploaded = client()
@@ -2930,7 +3014,7 @@ mod tests {
                     pack_cdn(fields)?;
                     let start = integer(fields, "rangestart")? as usize;
                     let end = integer(fields, "rangeend")? as usize;
-                    assert_eq!(fields["filedata"], p.original.encrypted[start..=end]);
+                    assert_eq!(fields["filedata"], encrypted[start..=end]);
                     let first = start == 0;
                     for key in ["thumbdata", "midimgdata", "midimgmd5", "imgwidth"] {
                         assert_eq!(fields.contains_key(key), first, "{key}");

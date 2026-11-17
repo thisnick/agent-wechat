@@ -21,6 +21,12 @@ use wechat_protocol::{
 use wechat_store::{MediaAssetRecord, MediaJobRecord, OwnedMediaSource};
 #[path = "media_auto.rs"]
 mod automatic;
+#[path = "media_plain.rs"]
+mod plain;
+use plain::{OwnedPayload, Payload, PlainFile};
+#[path = "media_content.rs"]
+mod content;
+pub(crate) use content::VerifiedContent;
 #[path = "media_identity.rs"]
 mod identity;
 #[path = "sticker_catalog.rs"]
@@ -1428,7 +1434,11 @@ impl Core {
             request.kind != MediaKind::Sticker,
             "sticker_send_unsupported"
         );
-        let (source, _) = self.source_bytes(account, &request.source_id)?;
+        // Only the metadata row is read here; the bytes are checked when the
+        // job runs, before any network request.
+        let source = self
+            .store
+            .media_source_metadata(account, &request.source_id)?;
         let extra_source = |id: &Option<String>| -> Result<Option<OwnedMediaSource>> {
             id.as_ref()
                 .map(|id| self.store.media_source_metadata(account, id))
@@ -1496,20 +1506,34 @@ impl Core {
         actual: Option<MediaVariant>,
         frames: Option<u32>,
     ) -> Result<MediaAsset> {
+        self.cache_asset_payload(account, id, Payload::Bytes(bytes), mime, actual, frames)
+    }
+    /// Keep this store's own encrypted copy of a verified attachment. A file
+    /// payload is sealed in steps, never read into memory.
+    fn cache_asset_payload(
+        &self,
+        account: &str,
+        id: &str,
+        payload: Payload<'_>,
+        mime: &str,
+        actual: Option<MediaVariant>,
+        frames: Option<u32>,
+    ) -> Result<MediaAsset> {
         let mut asset = self.media_asset(account, id)?;
         asset.preview = if mime == "image/x-wxgf" {
             ensure!(
                 matches!(asset.kind, MediaKind::Image | MediaKind::Sticker),
                 "unsupported_media"
             );
+            let bytes = payload.bytes().context("unsupported_media")?;
             Some(self.cache_wxgf_preview(account, id, bytes)?)
         } else {
             None
         };
         asset.state = "available".into();
         asset.content_type = Some(mime.into());
-        asset.byte_length = Some(bytes.len() as u64);
-        asset.sha256 = Some(digest(bytes));
+        asset.byte_length = Some(payload.len());
+        asset.sha256 = Some(payload.sha256());
         asset.actual_variant = actual;
         asset.retryable = false;
         asset.reason = None;
@@ -1532,9 +1556,13 @@ impl Core {
                 asset.filename = Some(format!("original.{extension}"));
             }
         }
-        let sealed = self
-            .vault
-            .seal_media(account, &format!("asset:{id}"), bytes)?;
+        let sealed = payload
+            .bytes()
+            .map(|bytes| {
+                self.vault
+                    .seal_media(account, &format!("asset:{id}"), bytes)
+            })
+            .transpose()?;
         self.authorize_media_record(account, &self.store.media_asset(account, id)?)?;
         let mut metadata = serde_json::to_value(&asset)?;
         if let Some(expiry) = self
@@ -1545,8 +1573,14 @@ impl Core {
         {
             metadata["preparationExpiresAt"] = expiry.clone();
         }
-        self.store
-            .save_media_asset(account, id, &metadata, Some(&sealed))?;
+        match (sealed, payload) {
+            (Some(sealed), _) => {
+                self.store
+                    .save_media_asset(account, id, &metadata, Some(&sealed))?;
+            }
+            (None, Payload::File(file)) => self.save_asset_file(account, id, &metadata, file)?,
+            (None, Payload::Bytes(_)) => unreachable!("bytes are sealed above"),
+        }
         Ok(asset)
     }
     fn cache_wxgf_preview(
@@ -1868,7 +1902,7 @@ impl Core {
             self.progress_media(account, id, n, t)
         };
         let mut official_writeback = None;
-        let (bytes, mime, actual, frames) = match plan {
+        let (payload, mime, actual, frames) = match plan {
             DownloadPlan::Cdn { mut descriptor }
             | DownloadPlan::LinkThumbnail {
                 source: crate::links::LinkThumbnail::Cdn(mut descriptor),
@@ -1899,7 +1933,12 @@ impl Core {
                 let fence = unlocked
                     .then(|| self.media_authorization_fence(account))
                     .transpose()?;
-                let (media, mime, frames) = cdn_transfer(
+                // A file or movie can be 512 MiB: it is decrypted into a private
+                // file as it arrives, and kept there until every check passed.
+                let streamed = matches!(asset.kind, MediaKind::File | MediaKind::Video)
+                    && asset.variant != MediaVariant::Thumbnail
+                    && !link_thumbnail;
+                let (payload, media, mime, frames) = cdn_transfer(
                     if unlocked {
                         permit.as_deref_mut()
                     } else {
@@ -1908,13 +1947,28 @@ impl Core {
                     self,
                     account,
                     || {
-                        let media = cdn.download(&descriptor, &progress)?;
-                        let (mime, frames) =
-                            validate_asset_bytes(asset.kind, asset.variant, &media.bytes)?;
-                        if mime == "image/x-wxgf" {
-                            self.cache_wxgf_preview(account, asset_id, &media.bytes)?;
+                        if streamed {
+                            let mut receipt = None;
+                            let file = PlainFile::write_with("wechat-media-download-", |output| {
+                                receipt = Some(cdn.download_to(&descriptor, &progress, output)?);
+                                Ok(())
+                            })?;
+                            let receipt = receipt.context("media_integrity_failed")?;
+                            ensure!(
+                                file.byte_length == receipt.byte_length
+                                    && file.sha256 == receipt.sha256,
+                                "media_integrity_failed"
+                            );
+                            let (mime, frames) = validate_asset_file(asset.kind, &file)?;
+                            return Ok((OwnedPayload::File(file), receipt, mime, frames));
                         }
-                        Ok((media, mime, frames))
+                        let (bytes, receipt) = cdn.download(&descriptor, &progress)?.into_parts();
+                        let (mime, frames) =
+                            validate_asset_bytes(asset.kind, asset.variant, &bytes)?;
+                        if mime == "image/x-wxgf" {
+                            self.cache_wxgf_preview(account, asset_id, &bytes)?;
+                        }
+                        Ok((OwnedPayload::Bytes(bytes), receipt, mime, frames))
                     },
                 )?;
                 if let Some(fence) = fence {
@@ -1922,7 +1976,8 @@ impl Core {
                 }
                 if link_thumbnail {
                     ensure!(
-                        media.bytes.len() <= wechat_protocol::media::MAX_LINK_THUMBNAIL_BYTES,
+                        media.byte_length
+                            <= wechat_protocol::media::MAX_LINK_THUMBNAIL_BYTES as u64,
                         "link_thumbnail_size_limit"
                     );
                 }
@@ -1941,17 +1996,17 @@ impl Core {
                 official_writeback = if asset.official_writeback == "unsupported" {
                     None
                 } else {
-                    match asset.kind {
-                        MediaKind::Image => {
-                            Some(self.project_received_image(account, id, &asset, &media.bytes))
+                    match (asset.kind, payload.as_payload()) {
+                        (MediaKind::Image, Payload::Bytes(bytes)) => {
+                            Some(self.project_received_image(account, id, &asset, bytes))
                         }
-                        MediaKind::File | MediaKind::Video => {
-                            Some(self.project_received_hardlink(account, id, &asset, &media.bytes))
-                        }
+                        (MediaKind::File | MediaKind::Video, payload) => Some(
+                            self.project_received_hardlink_payload(account, id, &asset, payload),
+                        ),
                         _ => None,
                     }
                 };
-                (media.bytes, mime, actual, frames)
+                (payload, mime, actual, frames)
             }
             DownloadPlan::LinkThumbnail {
                 source: crate::links::LinkThumbnail::Http(url),
@@ -1969,7 +2024,12 @@ impl Core {
                 }
                 let (mime, frames) =
                     validate_asset_bytes(MediaKind::Image, MediaVariant::Thumbnail, &bytes)?;
-                (bytes, mime, Some(MediaVariant::Thumbnail), frames)
+                (
+                    OwnedPayload::Bytes(bytes),
+                    mime,
+                    Some(MediaVariant::Thumbnail),
+                    frames,
+                )
             }
             DownloadPlan::Channels { object_id, nonce } => {
                 let post = wechat_protocol::ChannelsPost { object_id, nonce };
@@ -2013,7 +2073,12 @@ impl Core {
                                 facts: video.facts.clone(),
                             })
                         })?;
-                (video.bytes, mime, Some(MediaVariant::Normal), frames)
+                (
+                    OwnedPayload::Bytes(video.bytes),
+                    mime,
+                    Some(MediaVariant::Normal),
+                    frames,
+                )
             }
             DownloadPlan::Sticker { descriptor } => {
                 let mut state = self.account_state(account)?;
@@ -2030,7 +2095,7 @@ impl Core {
                     self.resume_media_state(account, id, &fence)?;
                 }
                 (
-                    bytes,
+                    OwnedPayload::Bytes(bytes),
                     inspection.content_type,
                     Some(MediaVariant::Original),
                     Some(inspection.frames),
@@ -2109,14 +2174,14 @@ impl Core {
                 official_writeback = Some(self.project_received_voice(account, id, &asset, &bytes));
                 if as_wav {
                     (
-                        wechat_protocol::silk::wav(&pcm)?,
+                        OwnedPayload::Bytes(wechat_protocol::silk::wav(&pcm)?),
                         "audio/wav".into(),
                         Some(MediaVariant::Normal),
                         None,
                     )
                 } else {
                     (
-                        bytes,
+                        OwnedPayload::Bytes(bytes),
                         "audio/silk".into(),
                         Some(MediaVariant::Encoded),
                         None,
@@ -2125,14 +2190,16 @@ impl Core {
             }
             DownloadPlan::CachedOnly => bail!("unsupported_media_transport"),
         };
-        self.progress_media(account, id, bytes.len() as u64, Some(bytes.len() as u64))?;
-        let mut asset = self.cache_asset(account, asset_id, &bytes, &mime, actual, frames)?;
+        let payload = payload.as_payload();
+        self.progress_media(account, id, payload.len(), Some(payload.len()))?;
+        let mut asset =
+            self.cache_asset_payload(account, asset_id, payload, &mime, actual, frames)?;
         if let Some(status) = official_writeback {
             asset.official_writeback = status.into();
             self.store
                 .save_media_asset(account, asset_id, &serde_json::to_value(&asset)?, None)?;
             // The copy stays whenever the profile cannot return these bytes.
-            let _ = self.release_to_profile(account, &asset, &bytes);
+            let _ = self.release_to_profile_payload(account, &asset, payload);
         }
         self.complete_download(account, id, &asset)
     }
@@ -2265,6 +2332,17 @@ impl Core {
         asset: &MediaAsset,
         bytes: &[u8],
     ) -> &'static str {
+        self.project_received_hardlink_payload(account, job, asset, Payload::Bytes(bytes))
+    }
+    /// Write a file or video into the official profile. A file payload is
+    /// hashed and copied in steps.
+    fn project_received_hardlink_payload(
+        &self,
+        account: &str,
+        job: &str,
+        asset: &MediaAsset,
+        payload: Payload<'_>,
+    ) -> &'static str {
         let attempt = || -> Result<()> {
             self.authorize_media_record(account, &self.store.media_asset(account, &asset.id)?)?;
             let source = source_message_id(
@@ -2281,8 +2359,13 @@ impl Core {
             let (location, keys) = self.profile_location_keys(account)?;
             match asset.kind {
                 MediaKind::File => {
-                    wechat_profile::cache_file_projection(
-                        &location, &keys, &source, &chat, bytes, &options,
+                    wechat_profile::cache_file_projection_payload(
+                        &location,
+                        &keys,
+                        &source,
+                        &chat,
+                        payload.profile(),
+                        &options,
                     )?;
                 }
                 MediaKind::Video => {
@@ -2292,8 +2375,14 @@ impl Core {
                         MediaVariant::Thumbnail => wechat_profile::VideoQuality::Thumbnail,
                         _ => bail!("unsupported_media_variant"),
                     };
-                    wechat_profile::cache_video_projection(
-                        &location, &keys, &source, &chat, quality, bytes, &options,
+                    wechat_profile::cache_video_projection_payload(
+                        &location,
+                        &keys,
+                        &source,
+                        &chat,
+                        quality,
+                        payload.profile(),
+                        &options,
                     )?;
                 }
                 _ => bail!("unsupported_media_variant"),
@@ -2659,7 +2748,7 @@ fn received_video_variant(
     kind: MediaKind,
     variant: MediaVariant,
     quality: MediaQuality,
-    media: &wechat_protocol::media::DownloadedMedia,
+    media: &wechat_protocol::media::DownloadReceipt,
 ) -> Option<MediaVariant> {
     let ordinary = media
         .substituted_filetype
@@ -2709,6 +2798,20 @@ fn validate_asset_bytes(
         return Ok((result.content_type, Some(result.frames)));
     }
     validate_media_bytes(kind, bytes)
+}
+/// [`validate_asset_bytes`] for a file or movie in a private file; only the
+/// movie's box headers are read.
+fn validate_asset_file(kind: MediaKind, file: &PlainFile) -> Result<(String, Option<u32>)> {
+    match kind {
+        MediaKind::Video => {
+            let content_type = file
+                .video_container()
+                .map_err(|_| anyhow::anyhow!("media_integrity_failed"))?;
+            Ok((content_type.into(), None))
+        }
+        MediaKind::File => Ok(("application/octet-stream".into(), None)),
+        _ => bail!("unsupported_media"),
+    }
 }
 fn validate_media_bytes(kind: MediaKind, bytes: &[u8]) -> Result<(String, Option<u32>)> {
     match kind {
@@ -3134,7 +3237,11 @@ impl Core {
             &row.payload,
         )?)?;
         self.progress_media(account, id, 0, None)?;
-        let (source, bytes) = self.source_bytes(account, &plan.request.source_id)?;
+        // The upload is decrypted once into a private file, checked against its
+        // record, and removed when this run returns. Large files and original
+        // videos are read from it in steps; nothing here holds them in memory.
+        let (source, source_file) = self.source_file(account, &plan.request.source_id)?;
+        let source_len = usize::try_from(source.byte_length)?;
         let source_size = |id: &Option<String>| -> Result<Option<u64>> {
             id.as_ref()
                 .map(|id| Ok(self.store.media_source_metadata(account, id)?.byte_length))
@@ -3155,7 +3262,7 @@ impl Core {
         }
         if row.phase == "readback"
             && plan.request.kind == MediaKind::File
-            && bytes.len() > MAX_ORDINARY_SOURCE_BYTES
+            && source_len > MAX_ORDINARY_SOURCE_BYTES
         {
             ensure!(
                 plan.reservation.is_some() && plan.uploaded_file.is_some(),
@@ -3165,8 +3272,8 @@ impl Core {
         if plan.reuse_completed_upload.is_some() {
             // This protected mode branches before every material, reservation
             // and upload path. Authenticate the source before any network I/O.
-            let source_md5 = hex_string(&wechat_protocol::crypto::md5(&bytes));
-            drop(bytes);
+            let source_md5 = source_file.md5.clone();
+            drop(source_file);
             return self.perform_reused_file_send(
                 account,
                 id,
@@ -3183,10 +3290,13 @@ impl Core {
                     self.save_state(account, state)?;
                     let cdn = CdnClient::new(conf, Duration::from_secs(25))?;
                     let fence = self.media_authorization_fence(account)?;
+                    // Readback only needs the digest, so nothing is kept.
                     let downloaded = cdn_transfer(permit, self, account, || {
-                        cdn.download_with_progress(&uploaded.descriptor, |n, t| {
-                            self.progress_media(account, id, n, t)
-                        })
+                        cdn.download_to_with_progress(
+                            &uploaded.descriptor,
+                            |n, t| self.progress_media(account, id, n, t),
+                            &mut std::io::sink(),
+                        )
                     })?;
                     *state = self.resume_media_state(account, id, &fence)?;
                     Ok(downloaded.sha256)
@@ -3210,9 +3320,10 @@ impl Core {
                 ensure!(plan.uploaded_video.is_none(), "video_preparation_missing");
                 let fence = self.media_authorization_fence(account)?;
                 let (seconds, normal) = cdn_transfer(permit.as_deref_mut(), self, account, || {
-                    let seconds =
-                        video_duration(&bytes, || self.progress_media(account, id, 0, None))?;
-                    let normal = video::prepare_normal(&bytes, seconds, || {
+                    let seconds = video_duration_file(&source_file, || {
+                        self.progress_media(account, id, 0, None)
+                    })?;
+                    let normal = video::prepare_normal_file(&source_file.path, seconds, || {
                         self.progress_media(account, id, 0, None)
                     })?;
                     Ok((seconds, normal))
@@ -3233,7 +3344,7 @@ impl Core {
                 });
                 self.store.save_media_job(account, &row)?;
             } else if plan.request.play_seconds.is_none() {
-                plan.request.play_seconds = Some(video_duration(&bytes, || {
+                plan.request.play_seconds = Some(video_duration_file(&source_file, || {
                     self.progress_media(account, id, 0, None)
                 })?);
                 self.save_send_plan(account, id, &plan)?;
@@ -3241,6 +3352,7 @@ impl Core {
         }
         if plan.request.kind == MediaKind::Voice {
             if plan.voice.is_empty() {
+                let bytes = source_file.read_bounded(MediaKind::Voice.max_source_bytes())?;
                 let pcm = audio_pcm(&bytes, || self.progress_media(account, id, 0, None))?;
                 ensure!(
                     !pcm.is_empty() && pcm.len() <= 300 * 16000,
@@ -3323,7 +3435,7 @@ impl Core {
                 },
             );
         }
-        if initialize_file_upload_ids(&mut plan, bytes.len())? {
+        if initialize_file_upload_ids(&mut plan, source_len)? {
             ensure!(
                 matches!(row.phase.as_str(), "queued" | "preparing"),
                 "file_reservation_needs_review"
@@ -3331,7 +3443,7 @@ impl Core {
             self.save_send_plan(account, id, &plan)?;
         }
         self.ensure_upload_material(account, id, &mut plan)?;
-        let modern_file = plan.request.kind == MediaKind::File && file_uses_multiphase(bytes.len());
+        let modern_file = plan.request.kind == MediaKind::File && file_uses_multiphase(source_len);
         let upload_route = modern_file.then_some(LargeCdnRoute::Upload);
         let mut cdn = self
             .account_upstream(account)?
@@ -3339,7 +3451,7 @@ impl Core {
         self.save_state(account, &state)?;
         let destination = plan.request.thread_id.clone();
         let progress_id = plan.file_upload_progress_id.clone();
-        if self.reserve_media_file_upload(account, id, &mut plan, bytes.len(), || {
+        if self.reserve_media_file_upload(account, id, &mut plan, source_len, || {
             self.native_request(account, &mut state, |request| {
                 request.reserve_file_upload(
                     &destination,
@@ -3347,8 +3459,8 @@ impl Core {
                         .as_deref()
                         .context("file_reservation_needs_review")?,
                     &source.name,
-                    bytes.len(),
-                    &hex_string(&wechat_protocol::crypto::md5(&bytes)),
+                    source_len,
+                    &source_file.md5,
                 )
             })
         })? {
@@ -3359,9 +3471,12 @@ impl Core {
         match plan.request.kind {
             MediaKind::File => {
                 if plan.uploaded_file.is_none() {
-                    let prepared = PreparedUpload::with_material(
-                        &bytes,
-                        file_upload_quality(bytes.len()),
+                    let prepared = PreparedUpload::from_file(
+                        source_file.open()?,
+                        source_file.byte_length,
+                        &source_file.md5,
+                        &source_file.sha256,
+                        file_upload_quality(source_len),
                         &source.name,
                         &plan.request.thread_id,
                         &material.key,
@@ -3412,6 +3527,7 @@ impl Core {
                         .map(|v| v.1);
                     let sizing = ImageVariantSizing::DownscaleOnly;
                     let quality = plan.request.image_quality.unwrap_or_default();
+                    let bytes = source_file.read_bounded(MediaKind::Image.max_source_bytes())?;
                     let (original, standard, thumbnail) =
                         image_variants(&bytes, standard, thumb, sizing, quality)?;
                     let prepared = PreparedImageUpload::with_material(
@@ -3459,7 +3575,9 @@ impl Core {
                         plan.request.video_quality.is_none(),
                         "video_preparation_missing"
                     );
-                    bytes.clone()
+                    // Sent as-is: the source is the normal video and keeps its
+                    // ordinary size limit, checked before it is read.
+                    source_file.read_bounded(MAX_ORDINARY_SOURCE_BYTES)?
                 };
                 ensure!(
                     normal.len() <= MAX_ORDINARY_SOURCE_BYTES,
@@ -3515,15 +3633,18 @@ impl Core {
                         .original_video_material
                         .as_ref()
                         .context("video_preparation_missing")?;
-                    let prepared = PreparedUpload::with_material(
-                        &bytes,
+                    let prepared = PreparedUpload::from_file(
+                        source_file.open()?,
+                        source_file.byte_length,
+                        &source_file.md5,
+                        &source_file.sha256,
                         MediaQuality::Video,
                         &source.name,
                         &plan.request.thread_id,
                         &raw_material.key,
                         &raw_material.file_key,
                     )?;
-                    let route = file_uses_multiphase(bytes.len()).then_some(LargeCdnRoute::Upload);
+                    let route = file_uses_multiphase(source_len).then_some(LargeCdnRoute::Upload);
                     let raw_cdn = self
                         .account_upstream(account)?
                         .media_transport_route(&mut state, route)?;
@@ -3551,7 +3672,7 @@ impl Core {
             }
             _ => bail!("unsupported_media_send"),
         }
-        drop(bytes);
+        drop(source_file);
         self.phase_media(account, id, "readback")?;
         if modern_file {
             let uploaded = plan
@@ -3571,8 +3692,9 @@ impl Core {
                 .is_some()
                 .then(|| self.media_authorization_fence(account))
                 .transpose()?;
+            // Readback only needs the digest, so nothing is kept.
             let downloaded = cdn_transfer(permit.as_deref_mut(), self, account, || {
-                cdn.download(&u.descriptor, &callback)
+                cdn.download_to(&u.descriptor, &callback, &mut std::io::sink())
             })?;
             if let Some(fence) = fence {
                 state = self.resume_media_state(account, id, &fence)?;
@@ -3608,7 +3730,7 @@ impl Core {
                 self.save_state(account, &state)?;
                 let fence = self.media_authorization_fence(account)?;
                 let downloaded = cdn_transfer(permit.as_deref_mut(), self, account, || {
-                    download_cdn.download(&variant.descriptor, &callback)
+                    download_cdn.download_to(&variant.descriptor, &callback, &mut std::io::sink())
                 })?;
                 state = self.resume_media_state(account, id, &fence)?;
                 ensure!(
@@ -3826,7 +3948,9 @@ impl Core {
             let server = row.data["serverMessageId"]
                 .as_str()
                 .context("accepted_media_identity_missing")?;
-            let (source, bytes) = self.source_bytes(account, &plan.request.source_id)?;
+            // Decrypted to a private file: a file or original video is written
+            // to the profile and the encrypted cache from it in steps.
+            let (source, source_file) = self.source_file(account, &plan.request.source_id)?;
             let (kind, content, summary) = match plan.request.kind {
                 MediaKind::File => (
                     49,
@@ -3889,6 +4013,7 @@ impl Core {
                     .map(|id| self.source_bytes(account, id).map(|v| v.1))
                     .transpose()?;
                 // Regenerate the exact bytes recorded by the uploaded image, including older jobs.
+                let bytes = source_file.read_bounded(MediaKind::Image.max_source_bytes())?;
                 Some(image_variants(
                     &bytes,
                     standard,
@@ -3900,14 +4025,15 @@ impl Core {
                 None
             };
             for asset in self.media_assets(account, &message_id)? {
-                let (raw, expected, mime): (std::borrow::Cow<'_, [u8]>, String, &str) =
+                // `None` stands for the source file itself.
+                let (raw, expected, mime): (Option<std::borrow::Cow<'_, [u8]>>, String, &str) =
                     match plan.request.kind {
                         MediaKind::Image => {
                             let variants = image_bytes.as_ref().unwrap();
                             let uploaded = &plan.uploaded_image.as_ref().unwrap().uploaded;
                             match asset.variant {
                                 MediaVariant::Original => (
-                                    variants.0.clone().into(),
+                                    Some(variants.0.clone().into()),
                                     uploaded
                                         .original
                                         .as_ref()
@@ -3917,12 +4043,12 @@ impl Core {
                                     "image/jpeg",
                                 ),
                                 MediaVariant::Standard => (
-                                    variants.1.clone().into(),
+                                    Some(variants.1.clone().into()),
                                     uploaded.standard.sha256.clone(),
                                     "image/jpeg",
                                 ),
                                 MediaVariant::Thumbnail => (
-                                    variants.2.clone().into(),
+                                    Some(variants.2.clone().into()),
                                     uploaded.thumbnail.sha256.clone(),
                                     "image/jpeg",
                                 ),
@@ -3930,7 +4056,7 @@ impl Core {
                             }
                         }
                         MediaKind::File => (
-                            std::borrow::Cow::Borrowed(bytes.as_slice()),
+                            None,
                             plan.uploaded_file.as_ref().unwrap().sha256.clone(),
                             "application/octet-stream",
                         ),
@@ -3947,19 +4073,23 @@ impl Core {
                                 } else {
                                     // Compatibility for a pre-thumbnail-checkpoint job:
                                     // accept regenerated bytes only on exact saved SHA.
-                                    video_thumbnail(&bytes, || Ok(()))?
+                                    video_thumbnail_file(&source_file, || Ok(()))?
                                 };
-                                (raw.into(), uploaded.thumbnail.sha256.clone(), "image/jpeg")
+                                (
+                                    Some(raw.into()),
+                                    uploaded.thumbnail.sha256.clone(),
+                                    "image/jpeg",
+                                )
                             } else if asset.variant == MediaVariant::Normal {
                                 (
                                     if let Some(source_id) = &plan.prepared_video_source_id {
-                                        self.source_bytes(account, source_id)?.1.into()
+                                        Some(self.source_bytes(account, source_id)?.1.into())
                                     } else {
                                         ensure!(
                                             plan.request.video_quality.is_none(),
                                             "video_preparation_missing"
                                         );
-                                        bytes.clone().into()
+                                        None
                                     },
                                     uploaded.video.sha256.clone(),
                                     "video/mp4",
@@ -3970,9 +4100,9 @@ impl Core {
                                     .as_ref()
                                     .context("uploaded_media_missing")?;
                                 (
-                                    bytes.clone().into(),
+                                    None,
                                     original.sha256.clone(),
-                                    wechat_media::inspect_video_container(&bytes)?,
+                                    source_file.video_container()?,
                                 )
                             } else {
                                 continue;
@@ -3980,19 +4110,31 @@ impl Core {
                         }
                         _ => continue,
                     };
-                ensure!(digest(&raw) == expected, "media_integrity_failed");
-                let status = match plan.request.kind {
-                    MediaKind::Image => self.project_received_image(account, id, &asset, &raw),
-                    MediaKind::File | MediaKind::Video => {
-                        self.project_received_hardlink(account, id, &asset, &raw)
+                let payload = match &raw {
+                    Some(bytes) => Payload::Bytes(bytes),
+                    None => Payload::File(&source_file),
+                };
+                ensure!(payload.sha256() == expected, "media_integrity_failed");
+                let status = match (plan.request.kind, payload.bytes()) {
+                    (MediaKind::Image, Some(bytes)) => {
+                        self.project_received_image(account, id, &asset, bytes)
+                    }
+                    (MediaKind::File | MediaKind::Video, _) => {
+                        self.project_received_hardlink_payload(account, id, &asset, payload)
                     }
                     _ => "unsupported",
                 };
                 if status != "complete" || official_media_writeback == "unsupported" {
                     official_media_writeback = status;
                 }
-                let mut cached =
-                    self.cache_asset(account, &asset.id, &raw, mime, Some(asset.variant), None)?;
+                let mut cached = self.cache_asset_payload(
+                    account,
+                    &asset.id,
+                    payload,
+                    mime,
+                    Some(asset.variant),
+                    None,
+                )?;
                 cached.official_writeback = status.into();
                 self.store.save_media_asset(
                     account,
@@ -4000,7 +4142,7 @@ impl Core {
                     &serde_json::to_value(&cached)?,
                     None,
                 )?;
-                let _ = self.release_to_profile(account, &cached, &raw);
+                let _ = self.release_to_profile_payload(account, &cached, payload);
             }
             message_ids.push(message_id);
         }
@@ -4199,15 +4341,11 @@ fn run_ffmpeg(
     output: &str,
     input_formats: &str,
     options: &[&str],
-    mut cancelled: impl FnMut() -> Result<()>,
+    cancelled: impl FnMut() -> Result<()>,
 ) -> Result<Vec<u8>> {
-    use std::{
-        io::Write,
-        process::{Command, Stdio},
-    };
+    use std::io::Write;
     let dir = wechat_platform::private_tempdir("wechat-media-")?;
     let input_path = dir.path().join("input.bin");
-    let output_path = dir.path().join(output);
     let mut f = wechat_platform::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -4215,6 +4353,19 @@ fn run_ffmpeg(
         .open(&input_path)?;
     f.write_all(input)?;
     drop(f);
+    run_ffmpeg_file(&input_path, output, input_formats, options, cancelled)
+}
+/// [`run_ffmpeg`] for an input already in a private file.
+fn run_ffmpeg_file(
+    input_path: &std::path::Path,
+    output: &str,
+    input_formats: &str,
+    options: &[&str],
+    mut cancelled: impl FnMut() -> Result<()>,
+) -> Result<Vec<u8>> {
+    use std::process::{Command, Stdio};
+    let dir = wechat_platform::private_tempdir("wechat-media-")?;
+    let output_path = dir.path().join(output);
     let mut command = Command::new("ffmpeg");
     command.args([
         "-v",
@@ -4244,7 +4395,7 @@ fn run_ffmpeg(
     }
     command
         .arg("-i")
-        .arg(&input_path)
+        .arg(input_path)
         .args(options)
         .args(["-fs", "33554432"])
         .arg(&output_path)
@@ -4372,16 +4523,13 @@ fn audio_pcm(bytes: &[u8], cancelled: impl FnMut() -> Result<()>) -> Result<Vec<
         .map(|s| i16::from_le_bytes([s[0], s[1]]))
         .collect())
 }
+#[cfg(test)]
 fn video_duration(input: &[u8], mut cancelled: impl FnMut() -> Result<()>) -> Result<u32> {
-    use std::{
-        io::Write,
-        process::{Command, Stdio},
-    };
+    use std::io::Write;
     cancelled()?;
     wechat_media::inspect_video_container(input)?;
     let dir = wechat_platform::private_tempdir("wechat-media-")?;
     let input_path = dir.path().join("input.bin");
-    let result_path = dir.path().join("probe.json");
     let mut source = wechat_platform::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -4389,6 +4537,24 @@ fn video_duration(input: &[u8], mut cancelled: impl FnMut() -> Result<()>) -> Re
         .open(&input_path)?;
     source.write_all(input)?;
     drop(source);
+    probe_duration(&input_path, cancelled)
+}
+/// The duration of a video in a private file, which FFprobe reads directly.
+fn video_duration_file(
+    source: &PlainFile,
+    mut cancelled: impl FnMut() -> Result<()>,
+) -> Result<u32> {
+    cancelled()?;
+    source.video_container()?;
+    probe_duration(&source.path, cancelled)
+}
+fn probe_duration(
+    input_path: &std::path::Path,
+    mut cancelled: impl FnMut() -> Result<()>,
+) -> Result<u32> {
+    use std::process::{Command, Stdio};
+    let dir = wechat_platform::private_tempdir("wechat-media-")?;
+    let result_path = dir.path().join("probe.json");
     let result = wechat_platform::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -4413,7 +4579,7 @@ fn video_duration(input: &[u8], mut cancelled: impl FnMut() -> Result<()>) -> Re
             "-of",
             "json",
         ])
-        .arg(&input_path)
+        .arg(input_path)
         .stdin(Stdio::null())
         .stdout(Stdio::from(result))
         .stderr(Stdio::null())
@@ -4464,20 +4630,37 @@ fn video_duration(input: &[u8], mut cancelled: impl FnMut() -> Result<()>) -> Re
     );
     Ok(duration.ceil() as u32)
 }
+const VIDEO_THUMBNAIL_OPTIONS: &[&str] = &[
+    "-frames:v",
+    "1",
+    "-vf",
+    "scale=240:240:force_original_aspect_ratio=decrease",
+    "-q:v",
+    "5",
+];
 fn video_thumbnail(bytes: &[u8], cancelled: impl FnMut() -> Result<()>) -> Result<Vec<u8>> {
     wechat_media::inspect_video_container(bytes)?;
     let jpeg = run_ffmpeg(
         bytes,
         "thumb.jpg",
         "mov",
-        &[
-            "-frames:v",
-            "1",
-            "-vf",
-            "scale=240:240:force_original_aspect_ratio=decrease",
-            "-q:v",
-            "5",
-        ],
+        VIDEO_THUMBNAIL_OPTIONS,
+        cancelled,
+    )?;
+    wechat_protocol::media::inspect_image(&jpeg)?;
+    Ok(jpeg)
+}
+/// [`video_thumbnail`] for a video in a private file.
+fn video_thumbnail_file(
+    source: &PlainFile,
+    cancelled: impl FnMut() -> Result<()>,
+) -> Result<Vec<u8>> {
+    source.video_container()?;
+    let jpeg = run_ffmpeg_file(
+        &source.path,
+        "thumb.jpg",
+        "mov",
+        VIDEO_THUMBNAIL_OPTIONS,
         cancelled,
     )?;
     wechat_protocol::media::inspect_image(&jpeg)?;
@@ -6944,8 +7127,8 @@ mod tests {
 }
 #[test]
 fn observed_video_subtype_only_satisfies_normal_video_requests() {
-    let mut media = wechat_protocol::media::DownloadedMedia {
-        bytes: vec![],
+    let mut media = wechat_protocol::media::DownloadReceipt {
+        byte_length: 0,
         requested_quality: wechat_protocol::media::MediaQuality::Video,
         substituted_filetype: Some(9),
         picture_format: None,

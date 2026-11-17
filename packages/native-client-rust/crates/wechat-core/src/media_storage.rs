@@ -10,7 +10,6 @@
 //! `control.sqlite`, deletes uploads no send job needs any more, and removes
 //! files nothing refers to. It never downloads, uploads or resends anything.
 use super::*;
-use md5::Md5;
 use std::collections::BTreeSet;
 
 /// A finished send keeps its upload this long, so a client that reuses the
@@ -158,21 +157,37 @@ impl Core {
         asset: &MediaAsset,
         bytes: &[u8],
     ) -> Result<bool> {
+        self.release_to_profile_payload(account, asset, Payload::Bytes(bytes))
+    }
+    /// [`Self::release_to_profile`] for a payload that may be a large file. A
+    /// file or video in the profile is checked in steps, not read whole.
+    pub(super) fn release_to_profile_payload(
+        &self,
+        account: &str,
+        asset: &MediaAsset,
+        payload: Payload<'_>,
+    ) -> Result<bool> {
         if asset.state != "available"
             || asset.official_writeback != "complete"
             || asset.actual_variant != Some(asset.variant)
             || asset.message_id.is_none()
-            || asset.byte_length != Some(bytes.len() as u64)
-            || asset.sha256.as_deref() != Some(digest(bytes).as_str())
+            || asset.byte_length != Some(payload.len())
+            || asset.sha256.as_deref() != Some(payload.sha256().as_str())
         {
             return Ok(false);
         }
         let key = match asset.kind {
-            MediaKind::File | MediaKind::Video => format!("{:x}", Md5::digest(bytes)),
+            MediaKind::File | MediaKind::Video => payload.md5(),
             MediaKind::Image | MediaKind::Voice => BY_MESSAGE.into(),
             MediaKind::Sticker => return Ok(false),
         };
-        if self.profile_media_bytes(account, asset, &key).is_err() {
+        let held = match asset.kind {
+            MediaKind::File | MediaKind::Video => {
+                self.profile_hardlink(account, asset, &key).is_ok()
+            }
+            _ => self.profile_media_bytes(account, asset, &key).is_ok(),
+        };
+        if !held {
             return Ok(false);
         }
         self.authorize_media_record(account, &self.store.media_asset(account, &asset.id)?)?;
@@ -183,6 +198,31 @@ impl Core {
             &key,
         )?;
         Ok(true)
+    }
+    /// Locate a file or video attachment in the official profile and check it
+    /// against the size and hash recorded when it was first verified, reading
+    /// it in steps. A deleted or changed file is an error.
+    pub(super) fn profile_hardlink(
+        &self,
+        account: &str,
+        asset: &MediaAsset,
+        key: &str,
+    ) -> Result<wechat_profile::VerifiedHardlink> {
+        let kind = match asset.kind {
+            MediaKind::File => wechat_profile::HardlinkKind::File,
+            MediaKind::Video => wechat_profile::HardlinkKind::Video,
+            _ => bail!("unsupported_media_variant"),
+        };
+        let verified = self
+            .profile_reader_owned(account)?
+            .verified_hardlink_file(kind, key)
+            .map_err(|_| anyhow::anyhow!("media_not_cached"))?;
+        ensure!(
+            asset.byte_length == Some(verified.byte_length)
+                && asset.sha256.as_deref() == Some(verified.sha256.as_str()),
+            "media_integrity_failed"
+        );
+        Ok(verified)
     }
     /// Decode the still preview of a WXGF image. Previews are made when asked
     /// for and are not stored.

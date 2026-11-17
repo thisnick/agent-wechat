@@ -70,7 +70,7 @@ fn upload_video_original(
         "Expected an original video upload and task ID"
     );
     prepared.validate()?;
-    if prepared.encrypted.len() < MAX_CDN_TRANSFER_BYTES {
+    if prepared.encrypted_len() < MAX_CDN_TRANSFER_BYTES {
         client.upload_with_transport(prepared, progress, post)
     } else {
         upload_large_file(&client.config, prepared, task_id, post, progress)
@@ -174,7 +174,7 @@ fn upload_large_file(
             || (prepared.kind == MediaQuality::Video
                 && prepared.plaintext_bytes as usize > MAX_NATIVE_UPLOAD_BYTES
                 && prepared.plaintext_bytes as usize <= wechat_media::MAX_VIDEO_SOURCE_BYTES))
-            && prepared.encrypted.len() >= MAX_CDN_TRANSFER_BYTES
+            && prepared.encrypted_len() >= MAX_CDN_TRANSFER_BYTES
             && task_id != 0,
         "Unsupported large-file upload profile"
     );
@@ -184,7 +184,7 @@ fn upload_large_file(
         "Missing authenticated CDN location"
     );
     prepared.validate()?;
-    let total = prepared.encrypted.len() as u64;
+    let total = prepared.encrypted_len() as u64;
     let mut sequence = 0u32;
     // No automatic retries: a failed request leaves the caller's persisted
     // source/key material intact and never submits a business message.
@@ -248,7 +248,7 @@ fn upload_large_file(
     let block_size = usize::try_from(integer(&reply, "blocksize_0")?)?;
     ensure!(
         [512 * 1024, 1024 * 1024].contains(&block_size)
-            && prepared.encrypted.len().div_ceil(block_size) <= MAX_BLOCKS,
+            && prepared.encrypted_len().div_ceil(block_size) <= MAX_BLOCKS,
         "Unsupported large-file block size"
     );
     let upinfo = opaque_field(&reply, "upinfo_0", MAX_UPLOAD_TOKEN_BYTES)?;
@@ -256,13 +256,19 @@ fn upload_large_file(
 
     let mut acknowledged = 0u64;
     let mut etags = Vec::new();
-    for (index, chunk) in prepared.encrypted.chunks(block_size).enumerate() {
+    // Each block is read and encrypted just before it is sent. The block that
+    // ends the object is only produced once the whole source matched its
+    // prepared digests, so a changed source never reaches `fin`.
+    let mut chunks = prepared.ciphertext_chunks();
+    let mut index = 0usize;
+    while (chunks.position() as u64) < total {
+        let chunk = chunks.next(block_size)?;
         let mut fields = CdnFields::new();
         put(&mut fields, "alreadyupsize", acknowledged);
         fields.insert("alreadyupbit".into(), acknowledged_bitmap(index));
         fields.insert("upinfo".into(), upinfo.clone());
         put(&mut fields, "offset", acknowledged);
-        fields.insert("blockmd5".into(), hex::encode(md5(chunk)).into_bytes());
+        fields.insert("blockmd5".into(), hex::encode(md5(&chunk)).into_bytes());
         fields.insert("blockdata".into(), chunk.to_vec());
         let reply = exchange("uploadblock", fields, acknowledged, &mut progress)?;
         ensure!(
@@ -272,6 +278,7 @@ fn upload_large_file(
         );
         etags.push(opaque_field(&reply, "etag", 8192)?);
         acknowledged += chunk.len() as u64;
+        index += 1;
         progress(acknowledged, Some(total))?;
     }
     ensure!(acknowledged == total, "Incomplete large-file upload");
@@ -415,21 +422,25 @@ mod tests {
     // offsets, encrypted block hashes, prior acknowledgements and both tokens.
     struct Peer<'a> {
         prepared: &'a PreparedUpload,
+        // The whole-object ciphertext, encrypted independently of the uploader.
+        encrypted: Vec<u8>,
         block_size: usize,
         requests: usize,
     }
 
     impl<'a> Peer<'a> {
         fn new(prepared: &'a PreparedUpload, block_size: usize) -> Self {
+            let raw = prepared.memory_plaintext().unwrap();
             Self {
                 prepared,
+                encrypted: ecb_encrypt(raw, &prepared.aes_key).unwrap(),
                 block_size,
                 requests: 0,
             }
         }
 
         fn blocks(&self) -> usize {
-            self.prepared.encrypted.len().div_ceil(self.block_size)
+            self.encrypted.len().div_ceil(self.block_size)
         }
 
         fn respond(&mut self, path: &str, fields: &CdnFields) -> Result<CdnFields> {
@@ -478,10 +489,7 @@ mod tests {
                     assert_eq!(integer(fields, "num")?, 1);
                     assert_eq!(integer(fields, "apptype")?, 1);
                     assert_eq!(integer(fields, "chatnum")?, 1);
-                    assert_eq!(
-                        integer(fields, "size_0")?,
-                        self.prepared.encrypted.len() as i64
-                    );
+                    assert_eq!(integer(fields, "size_0")?, self.encrypted.len() as i64);
                     assert_eq!(
                         integer(fields, "rawsize_0")?,
                         i64::from(self.prepared.plaintext_bytes)
@@ -515,8 +523,8 @@ mod tests {
                 "uploadblock" => {
                     let index = sequence - 2;
                     let offset = index * self.block_size;
-                    let end = (offset + self.block_size).min(self.prepared.encrypted.len());
-                    let expected = &self.prepared.encrypted[offset..end];
+                    let end = (offset + self.block_size).min(self.encrypted.len());
+                    let expected = &self.encrypted[offset..end];
                     assert_eq!(integer(fields, "offset")?, offset as i64);
                     assert_eq!(integer(fields, "alreadyupsize")?, offset as i64);
                     assert_eq!(fields["upinfo"], b"apply-token");
@@ -577,7 +585,7 @@ mod tests {
                 |done, total| {
                     events.borrow_mut().push("progress");
                     progress.borrow_mut().push(done);
-                    assert_eq!(total, Some(prepared.encrypted.len() as u64));
+                    assert_eq!(total, Some(prepared.encrypted_len() as u64));
                     Ok(())
                 },
             )
@@ -592,7 +600,7 @@ mod tests {
             assert!(positions.windows(2).all(|pair| pair[0] <= pair[1]));
             assert_eq!(
                 positions.last().copied(),
-                Some(prepared.encrypted.len() as u64)
+                Some(prepared.encrypted_len() as u64)
             );
             assert_eq!(result.descriptor.file_id, "completed-object");
             assert_eq!(result.descriptor.quality, MediaQuality::LargeFile);
@@ -691,7 +699,9 @@ mod tests {
         let mut wrong = raw.clone();
         wrong.kind = MediaQuality::File;
         let mut corrupt = raw.clone();
-        corrupt.encrypted[0] ^= 1;
+        let mut changed = corrupt.memory_plaintext().unwrap().to_vec();
+        changed[0] ^= 1;
+        corrupt.replace_memory_source(&changed);
         for (value, task) in [
             (&over, 987654321),
             (&wrong, 987654321),
@@ -761,7 +771,7 @@ mod tests {
                 "00112233445566778899aabbccddeeff",
             )
             .unwrap();
-            assert_eq!(prepared.encrypted.len(), ciphertext);
+            assert_eq!(prepared.encrypted_len(), ciphertext);
             let legacy = CdnClient::new(config(), Duration::from_secs(1)).unwrap();
             let rejected = legacy.upload_with_progress(&prepared, |_, _| {
                 panic!("Legacy transfer started for a multiphase file")
@@ -989,7 +999,9 @@ mod tests {
     #[test]
     fn invalid_persisted_material_and_task_are_rejected_before_network() {
         let mut altered = prepared().clone();
-        altered.encrypted[0] ^= 1;
+        let mut changed = altered.memory_plaintext().unwrap().to_vec();
+        changed[0] ^= 1;
+        altered.replace_memory_source(&changed);
         let small = PreparedUpload::with_material(
             b"small control",
             MediaQuality::File,

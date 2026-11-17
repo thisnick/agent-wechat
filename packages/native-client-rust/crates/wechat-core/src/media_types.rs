@@ -261,6 +261,20 @@ pub struct MediaContent {
     pub filename: Option<String>,
     pub source_sha256: Option<String>,
 }
+/// One attachment's bytes for a content response, read while it is sent.
+pub struct MediaContentStream {
+    pub content_type: String,
+    /// SHA-256 of the whole attachment.
+    pub sha256: String,
+    pub filename: Option<String>,
+    /// Length of the whole attachment.
+    pub byte_length: u64,
+    /// The inclusive byte range `body` returns, or `None` for all of it.
+    pub range: Option<(u64, u64)>,
+    /// The selected bytes. A read error means they failed a check; the
+    /// response must then be cut short, never completed.
+    pub body: Box<dyn std::io::Read + Send>,
+}
 
 #[cfg(test)]
 mod tests {

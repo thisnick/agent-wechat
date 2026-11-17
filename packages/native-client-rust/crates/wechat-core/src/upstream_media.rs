@@ -1,8 +1,8 @@
 //! Decoded media transport keeps preparation, receipts and writeback in Core.
 use anyhow::{bail, Result};
 use wechat_protocol::media::{
-    CdnClient, DownloadedMedia, MediaDescriptor, PreparedImageUpload, PreparedUpload,
-    PreparedVideoUpload, UploadedImage, UploadedMedia, UploadedVideo,
+    CdnClient, DownloadReceipt, DownloadedMedia, MediaDescriptor, PreparedImageUpload,
+    PreparedUpload, PreparedVideoUpload, UploadedImage, UploadedMedia, UploadedVideo,
 };
 
 pub type Progress<'a> = &'a dyn Fn(u64, Option<u64>) -> Result<()>;
@@ -16,6 +16,19 @@ pub trait MediaTransport {
         descriptor: &MediaDescriptor,
         progress: Progress<'_>,
     ) -> Result<DownloadedMedia>;
+    /// Download into `sink` with the same checks as [`Self::download`]. The
+    /// bytes in `sink` are unverified until this returns `Ok`. A transport that
+    /// cannot stream downloads whole and then writes.
+    fn download_to(
+        &self,
+        descriptor: &MediaDescriptor,
+        progress: Progress<'_>,
+        sink: &mut dyn std::io::Write,
+    ) -> Result<DownloadReceipt> {
+        let (bytes, receipt) = self.download(descriptor, progress)?.into_parts();
+        sink.write_all(&bytes)?;
+        Ok(receipt)
+    }
     fn upload(&self, prepared: &PreparedUpload, progress: Progress<'_>) -> Result<UploadedMedia>;
     fn upload_image(
         &self,
@@ -47,6 +60,14 @@ impl MediaTransport for CdnClient {
         progress: Progress<'_>,
     ) -> Result<DownloadedMedia> {
         self.download_with_progress(descriptor, progress)
+    }
+    fn download_to(
+        &self,
+        descriptor: &MediaDescriptor,
+        progress: Progress<'_>,
+        sink: &mut dyn std::io::Write,
+    ) -> Result<DownloadReceipt> {
+        self.download_to_with_progress(descriptor, progress, sink)
     }
     fn upload(&self, prepared: &PreparedUpload, progress: Progress<'_>) -> Result<UploadedMedia> {
         self.upload_with_progress(prepared, progress)
