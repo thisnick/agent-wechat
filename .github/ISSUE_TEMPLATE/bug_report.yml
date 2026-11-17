@@ -1,11 +1,13 @@
 name: Bug report
-description: Something doesn't work, is slow, or gets stuck.
+description: Something fails, gives the wrong result, or gets stuck.
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
         Thanks for reporting. To fix a bug we first need to see it happen, so the most useful thing you can give us is a way to reproduce it, ideally one that doesn't need your account.
+
+        If it works but is slow or uses too much CPU, memory or disk, use **Performance** instead.
 
         - One problem per issue.
         - Check the [troubleshooting guide](https://thisnick.github.io/agent-wechat/reference/troubleshooting/) first.
@@ -40,7 +42,7 @@ body:
       label: Actual result
       description: |
         Paste the exact error or output. Run commands with `--json` and include the job or operation result (`state`, `phase`, `reason`, `result`).
-        For slow or stuck behavior, give timings and sizes (how many messages, how large a file) and how you measured them.
+        If something gets stuck, say how long you waited and what `wx accounts status` showed.
     validations:
       required: true
 
