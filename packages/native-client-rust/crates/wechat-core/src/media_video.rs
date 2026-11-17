@@ -186,7 +186,20 @@ fn parse_probe_inner(bytes: &[u8], normal: bool, require_frames: bool) -> Result
     ensure!(bytes.len() <= REPORT_LIMIT, "media_probe_output_limit");
     let result: serde_json::Value = serde_json::from_slice(bytes).context("media_probe_failed")?;
     let streams = result["streams"].as_array().context("media_probe_failed")?;
-    ensure!(streams.len() <= 8, "video_stream_limit");
+    // Phone recordings carry timed-metadata tracks (an iPhone MOV has several
+    // `mebx` data streams) that are never decoded or encoded: the playback copy
+    // maps one video and one audio stream and drops data and subtitles. Only
+    // video and audio count toward the limit; the total stays bounded so the
+    // probe report does too.
+    ensure!(streams.len() <= 32, "video_stream_limit");
+    ensure!(
+        streams
+            .iter()
+            .filter(|s| matches!(s["codec_type"].as_str(), Some("video" | "audio")))
+            .count()
+            <= 8,
+        "video_stream_limit"
+    );
     // Cover art is a one-frame video stream marked as an attached picture; it is
     // not encoded, so it does not count as the source's video.
     let videos: Vec<_> = streams
@@ -750,6 +763,41 @@ mod tests {
             .contains("video_stream_limit"));
         value["streams"] = json!([cover, audio]);
         assert!(parse_probe(&serde_json::to_vec(&value).unwrap(), false)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("video_stream_limit"));
+    }
+
+    #[test]
+    fn source_probe_ignores_phone_metadata_tracks_but_keeps_its_limits() {
+        // The stream layout of an iPhone recording: HEVC video, AAC plus spatial
+        // audio, and seven timed-metadata (`mebx`) data streams.
+        let video = report()["streams"][0].clone();
+        let aac =
+            json!({"codec_type":"audio","codec_name":"aac","sample_rate":"48000","channels":2});
+        let spatial = json!({"codec_type":"audio","codec_name":"apple_apac","sample_rate":"48000","channels":4});
+        let metadata = json!({"codec_type":"data","avg_frame_rate":"0/0"});
+        let probe = |streams: Vec<serde_json::Value>| {
+            let mut value = report();
+            value["streams"] = serde_json::Value::Array(streams);
+            parse_probe(&serde_json::to_vec(&value).unwrap(), false)
+        };
+        let mut phone = vec![video.clone(), aac.clone(), spatial];
+        phone.extend(std::iter::repeat_n(metadata.clone(), 7));
+        assert!(probe(phone).unwrap().audio);
+        // Decoded streams keep their limit of eight.
+        let mut many_audio = vec![video.clone()];
+        many_audio.extend(std::iter::repeat_n(aac, 8));
+        assert!(probe(many_audio)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("video_stream_limit"));
+        // And the report as a whole stays bounded.
+        let mut many_data = vec![video];
+        many_data.extend(std::iter::repeat_n(metadata, 32));
+        assert!(probe(many_data)
             .err()
             .unwrap()
             .to_string()
