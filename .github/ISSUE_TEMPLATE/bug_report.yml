@@ -1,0 +1,152 @@
+name: Bug report
+description: Something fails, gives the wrong result, or gets stuck.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. To fix a bug we first need to see it happen, so the most useful thing you can give us is a way to reproduce it, ideally one that doesn't need your account.
+
+        If it works but is slow or uses too much CPU, memory or disk, use **Performance** instead.
+
+        - One problem per issue.
+        - Check the [troubleshooting guide](https://thisnick.github.io/agent-wechat/reference/troubleshooting/) first.
+        - Remove private data before posting: tokens, keys, wxids, phone numbers, names, message text, file IDs, URLs and MD5s. Mask the values but keep the field names, for example `"url": "<masked>"`.
+
+        You can write in English or Chinese. 中文也可以。
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: |
+        The exact commands or clicks, starting from a known state: a fresh data folder, or an existing profile.
+        Best of all is a reproduction that doesn't need your account, for example a generated file (an `ffmpeg` command), the image's size and format, or the field values involved.
+      placeholder: |
+        1. wx accounts create --alias test && wx auth login
+        2. wx messages send filehelper --file ./clip.mov
+        3. wx --json jobs get <job-id>
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+      description: |
+        Paste the exact error or output. Run commands with `--json` and include the job or operation result (`state`, `phase`, `reason`, `result`).
+        If something gets stuck, say how long you waited and what `wx accounts status` showed.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: How often does it happen?
+      options:
+        - Every time
+        - Sometimes
+        - Once so far
+    validations:
+      required: true
+
+  - type: dropdown
+    id: official-client
+    attributes:
+      label: Does the official WeChat app handle the same thing correctly?
+      description: For example, the same message shows in the phone or desktop app, or the same file sends from it.
+      options:
+        - Yes, it works in the official app
+        - No, it fails there too
+        - Didn't check, or doesn't apply
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `wx --json version`. If you built from source, the commit.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How do you run agent-wechat?
+      options:
+        - npm (wx launcher)
+        - Release binary
+        - Docker image
+        - Desktop app
+        - OpenClaw managed mode
+        - Built from source
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: OS and architecture
+      placeholder: e.g. Debian 13 arm64, macOS 15 Apple Silicon, Windows 11 x64
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where do you see it?
+      multiple: true
+      options:
+        - wx CLI
+        - HTTP API
+        - OpenClaw channel
+        - Desktop app or web UI
+        - Rust crates
+    validations:
+      required: true
+
+  - type: dropdown
+    id: profile
+    attributes:
+      label: How did you log in?
+      options:
+        - New profile created by agent-wechat (wx auth login)
+        - Existing official WeChat profile (wx auth login --official)
+        - Not sure
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Setup details
+      description: |
+        Anything else that might matter: the OpenClaw version, other WeChat clients signed in to the same account at the time (desktop, tablet, web), when it started (after an upgrade?), and the official WeChat version for an `--official` profile.
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Output of `wx accounts status`, and the relevant lines from `wx daemon logs` (or the Docker or systemd log). Remove private data.
+      render: shell
+
+  - type: textarea
+    id: cause
+    attributes:
+      label: Cause or fix (optional)
+      description: If you looked into the code, point to the file or function; a link at the release tag is best. If you have a patch, say how you tested it.
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Before you submit
+      options:
+        - label: I searched existing issues and didn't find this one.
+          required: true
+        - label: I removed tokens, keys, IDs, phone numbers, names and message text.
+          required: true
+        - label: It still happens on the latest release.

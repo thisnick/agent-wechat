@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and help
+    url: https://github.com/thisnick/agent-wechat/discussions
+    about: Ask how to set up or use agent-wechat.
+  - name: Troubleshooting guide
+    url: https://thisnick.github.io/agent-wechat/reference/troubleshooting/
+    about: Fixes for common install, login, profile, media and OpenClaw problems.
+  - name: Documentation
+    url: https://thisnick.github.io/agent-wechat/
+    about: Setup, CLI, HTTP API and OpenClaw guides.
