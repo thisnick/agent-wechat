@@ -1,5 +1,20 @@
 # @agent-wechat/desktop
 
+## 2.6.0
+
+### Minor Changes
+
+- [#541](https://github.com/thisnick/agent-wechat/pull/541) [`49d3614`](https://github.com/thisnick/agent-wechat/commit/49d36143a1b7dd5e4f11330b6ef12e86eea40ca1) Thanks [@thisnick](https://github.com/thisnick)! - The desktop app's local hub now runs only while the app needs it. It runs while **This device** is selected and stops when you switch to another hub, unless the new **Settings → Keep this device’s hub running** option is on; turn that on if the `wx` command or another app used this device's hub while the window showed a remote hub. Quitting with ⌘Q, from the Dock or by logging out now stops the hub too; before, only **Quit AgentWechat** in the tray or menu bar did, and the other ways left the hub running and holding its port. If an earlier session left its hub running, the app says so instead of failing to open the selected hub, and offers **Stop leftover hub**, which checks that the hub uses this app's data and key before stopping it.
+
+  `wx serve --exit-with-parent` stops the daemon gracefully once the process that started it exits, and `wx --json version` lists it as the `serve-exit-with-parent` capability. The desktop app starts its hub with it, so a crash or forced quit no longer leaves the hub behind. OpenClaw managed mode passes it too when the `wx` it finds reports that capability, so a Gateway that crashes or is killed no longer leaves its daemon holding the port; an older `wx` starts as before.
+
+### Patch Changes
+
+- [#553](https://github.com/thisnick/agent-wechat/pull/553) [`d0e0e7d`](https://github.com/thisnick/agent-wechat/commit/d0e0e7d483b1d7d78d1f0f152a17f05de2e3d963) Thanks [@thisnick](https://github.com/thisnick)! - The message box's **Original media quality** choice now also covers images. When it is checked, each staged image is sent with a full-resolution original as well as the compressed copy, as each staged video already includes its unchanged file. The choice appears whenever an image or video is staged, and its help explains what it adds for each. Standard image sends are unchanged.
+
+- Updated dependencies [[`d0e0e7d`](https://github.com/thisnick/agent-wechat/commit/d0e0e7d483b1d7d78d1f0f152a17f05de2e3d963)]:
+  - @agent-wechat/client-ui@0.4.3
+
 ## 2.5.0
 
 ### Minor Changes
