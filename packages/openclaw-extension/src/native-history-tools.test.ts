@@ -26,12 +26,20 @@ function fixture(context: Record<string, unknown> = {}, directory?: string, arch
     transferMedia: async (...args: any[]) => { calls.push(["transferMedia", ...args]); return { id: "download-job", accountId: "a", kind: "download", state: "queued", retryable: true }; },
     job: async (...args: any[]) => { calls.push(["job", args[0], args[1]]); return { id: "download-job", accountId: "a", kind: "download", state: "queued", retryable: true }; },
     mediaContent: async (...args: any[]) => { calls.push(["mediaContent", ...args]); return { bytes: content, contentType }; },
+    // Files and videos are streamed; recorded under the same name as a content read.
+    mediaContentStream: async (...args: any[]) => { calls.push(["mediaContent", ...args]); const bytes = new Uint8Array(content);
+      return { contentType, stream: (async function* () { yield bytes; })(), cancel: async () => {} }; },
   };
   const core = { channel: { pairing: { readAllowFromStore: async () => [] }, media: { saveMediaBuffer: async (bytes: Buffer, mime: string, _subdir: string, _max: number, filename: string) => {
     assert.ok(directory, "Only media tests may save a file"); const path = join(directory, filename); calls.push(["saveMedia", mime]); await writeFile(path, bytes); return { path };
   } } } };
   const toolContext: any = { getRuntimeConfig: () => cfg, messageChannel: "agent-wechat", nativeChannelId: "room@chatroom", requesterSenderId: "u1", assertInvocationCurrent: () => { guards++; }, ...context };
-  const tools = (archive ? createNativeArchiveTools : createNativeHistoryTools)(toolContext, { host: async () => ({ client }) as any, core });
+  const saveMediaStream: any = async (stream: AsyncIterable<Uint8Array>, mime: string, _subdir: string, _max: number, filename: string, _hint: undefined, options: any) => {
+    assert.ok(directory, "Only media tests may save a file"); const chunks: Buffer[] = []; for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+    options?.assertCommitAllowed?.(); const path = join(directory, filename); const bytes = Buffer.concat(chunks); calls.push(["saveMedia", mime]); await writeFile(path, bytes);
+    return { id: filename, path, size: bytes.length };
+  };
+  const tools = (archive ? createNativeArchiveTools : createNativeHistoryTools)(toolContext, { host: async () => ({ client }) as any, core, saveMediaStream });
   const run = async (name: string, input: any, signal?: AbortSignal) => { const tool = tools.find(tool => tool.name === name); assert.ok(tool); return tool.execute("tool-call", input, signal); };
   return { tools, calls, client, run, toolContext, guards: () => guards, config: () => cfg, setConfig: (value: any) => { cfg = value; }, setMessages: (value: any[]) => { messages = value; },
     setThreads: (value: any[]) => { threads = value; }, setAssets: (value: any[]) => { assets = value; }, setContent: (bytes: Buffer, mime: string) => { content = bytes; contentType = mime; } };

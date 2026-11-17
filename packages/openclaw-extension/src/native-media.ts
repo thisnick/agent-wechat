@@ -275,20 +275,29 @@ async function prepareNativeAttachmentInput(params: NativePrepareMediaParams): P
   }
   if (asset.byteLength != null && asset.byteLength > maxBytes) { const attachment: WeChatAttachment = { kind: attachmentKind, filename, status: "too_large" }; return { body: renderAttachmentBody("", attachment), attachment, pending: false }; }
   await authorize();
-  if (attachmentKind === "file" && asset.byteLength != null && asset.byteLength > 128 * 1024 * 1024) {
+  // Files and videos are streamed from the daemon into managed storage, so the
+  // gateway never holds one whole: the stream is hashed as it is written and
+  // only an attachment whose size and SHA-256 match is kept. Images, voice and
+  // stickers stay in memory because they are decoded or converted for the model.
+  if ((attachmentKind === "file" || attachmentKind === "video") && asset.byteLength != null && asset.sha256) {
     const content = await client.mediaContentStream(accountId, asset.id, { maxBytes, signal: params.signal });
     const mime = content.contentType.split(";", 1)[0].trim().toLowerCase();
     if (!/^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(mime)) { await content.cancel(); throw Error("Native attachment MIME type is unsupported"); }
     let saved;
     try {
       saved = await saveVerifiedManagedAttachmentStream({ stream: content.stream, mime, filename, maxBytes, expectedBytes: asset.byteLength,
-        expectedSha256: asset.sha256 ?? "", assertCurrent: guard, saveMediaStream: params.saveMediaStream ?? saveMediaStream });
+        expectedSha256: asset.sha256, assertCurrent: guard, saveMediaStream: params.saveMediaStream ?? saveMediaStream });
     } finally { await content.cancel(); }
     await authorize();
-    const attachment: WeChatAttachment = { kind: "file", filename, status: "ready", path: saved.path, mime };
-    return { body: renderAttachmentBody("", attachment), attachment, mediaMime: mime, pending: false, jobId: job?.id, retryable: false, variant: asset.actualVariant ?? asset.variant,
-      suppliedAssets: [{ id: asset.id, contextRole: "trigger", role: "file_reference", kind: "file", path: saved.path, mime, sha256: saved.sha256, byteLength: saved.size, runtimeMedia: false,
-        sourceSha256: saved.sha256, sourceByteLength: saved.size, sourceMime: mime, sourcePath: saved.path }] };
+    guard();
+    const actual = asset.actualVariant ?? asset.variant;
+    const attachment: WeChatAttachment = { kind: attachmentKind, filename, status: "ready", path: saved.path, mime,
+      quality: actual === "original" ? "full" : actual === "standard" ? "standard" : actual === "thumbnail" ? "thumbnail" : undefined };
+    const video = attachmentKind === "video";
+    return { body: renderAttachmentBody("", attachment), attachment, mediaMime: mime, pending: false, jobId: job?.id, retryable: false, variant: actual,
+      suppliedAssets: [{ id: asset.id, contextRole: "trigger", role: "file_reference", kind: attachmentKind, path: saved.path, mime, sha256: saved.sha256, byteLength: saved.size,
+        runtimeMedia: video, sourceSha256: saved.sha256, sourceByteLength: saved.size, sourceMime: mime, sourcePath: saved.path }],
+      mediaPath: video ? saved.path : undefined };
   }
   const content = await client.mediaContent(accountId, asset.id, { maxBytes, signal: params.signal });
   guard();
