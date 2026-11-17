@@ -244,8 +244,9 @@ fn expire_reviews(tx: &Transaction, account: &str, now: i64, budget: &mut i64) -
         "SELECT id FROM (SELECT id,created_at,ROW_NUMBER() OVER (ORDER BY created_at DESC,id DESC) AS n FROM outbox WHERE state='needs_review' AND length(payload)>0) WHERE created_at<=?1 OR n>?2 ORDER BY created_at,id LIMIT ?3",
         params![before, REVIEW_LIMIT, (*budget).max(0)],
     )? {
+        // A send held at logout was never submitted; keep that known outcome.
         tx.execute(
-            "UPDATE outbox SET payload=x'',error_code='review_expired' WHERE id=?1",
+            "UPDATE outbox SET payload=x'',error_code=CASE WHEN error_code='logout_before_submission' THEN error_code ELSE 'review_expired' END WHERE id=?1",
             [&id],
         )?;
         crate::outbox::event(tx, &crate::operations::read_send(tx, account, &id)?)?;
@@ -1019,6 +1020,27 @@ mod tests {
         });
         assert_eq!(settle(&store, now).expired_reviews, REVIEW_LIMIT as usize);
         assert_eq!(store.send_by_key("a", "key-5").unwrap().id, ids[5]);
+    }
+
+    #[test]
+    fn expiry_keeps_the_known_outcome_of_a_send_held_at_logout() {
+        let (_temp, store) = fixture();
+        let (send, _) = store
+            .create_send("a", "held", "peer", "hash", b"sealed", "client")
+            .unwrap();
+        store
+            .update_send(
+                "a",
+                &send.id,
+                "needs_review",
+                None,
+                Some("logout_before_submission"),
+            )
+            .unwrap();
+        settle(&store, unix_seconds() + 8 * DAY);
+        let held = store.send("a", &send.id).unwrap();
+        assert_eq!(held.error_code.as_deref(), Some("logout_before_submission"));
+        assert!(store.send_payload("a", &send.id).unwrap().is_empty());
     }
 
     fn contact_mutation(store: &Store, id: &str, key: &str, hash: &str) {
