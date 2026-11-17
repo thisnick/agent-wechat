@@ -69,6 +69,7 @@ jobs:
       - name: Check out the pull request as data
         env:
           EVENT_HEAD: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           git fetch --no-tags --filter=blob:none origin "+refs/pull/$PR_NUMBER/head:refs/remotes/review/head"
           git update-ref refs/remotes/review/base HEAD
@@ -79,7 +80,18 @@ jobs:
           # Symbolic links become plain files holding their target, so a link in
           # the pull request can't point Claude at a file outside the checkout.
           git -c core.symlinks=false worktree add --detach "$RUNNER_TEMP/pr" "$head"
-          { echo "PR_DIR=$RUNNER_TEMP/pr"; echo "HEAD_SHA=$head"; } >> "$GITHUB_ENV"
+          # The basics Claude needs, saved as files so the review doesn't depend
+          # on getting a command right.
+          ctx="$RUNNER_TEMP/review-context"
+          mkdir -p "$ctx"
+          gh pr view "$PR_NUMBER" -R "$GITHUB_REPOSITORY" \
+            --json title,body,author,baseRefName,headRefOid,isDraft,additions,deletions,changedFiles,files,commits,labels > "$ctx/pr.json"
+          gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate --jq '.[]' > "$ctx/comments.jsonl"
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" --paginate --jq '.[]' > "$ctx/review-comments.jsonl"
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --paginate --jq '.[]' > "$ctx/reviews.jsonl"
+          git diff --stat=200 review/base...review/head > "$ctx/diffstat.txt"
+          git diff review/base...review/head > "$ctx/diff.patch"
+          { echo "PR_DIR=$RUNNER_TEMP/pr"; echo "CONTEXT_DIR=$ctx"; echo "HEAD_SHA=$head"; } >> "$GITHUB_ENV"
 
       - name: Review
         id: review
@@ -94,6 +106,7 @@ jobs:
             Review pull request #${{ env.PR_NUMBER }} in ${{ github.repository }} by following .github/claude-review/instructions.md.
             Head commit: ${{ env.HEAD_SHA }}
             PR checkout: ${{ env.PR_DIR }}
+            Context files: ${{ env.CONTEXT_DIR }}
           # The inline-comment MCP server starts only when --allowedTools names it.
           # dontAsk denies every tool call the lists below don't allow, instead of
           # the action's default auto mode. The reviewer reads and comments: it
@@ -104,8 +117,9 @@ jobs:
             --model claude-opus-5-5
             --permission-mode dontAsk
             --add-dir ${{ env.PR_DIR }}
+            --add-dir ${{ env.CONTEXT_DIR }}
             --json-schema '{"type":"object","properties":{"summary":{"type":"string","description":"The review summary in Markdown, in the layout the instructions give"},"confidence":{"type":"integer","minimum":1,"maximum":10,"description":"Confidence in the pull request, from 1 to 10, as the instructions define it"},"important":{"type":"integer","minimum":0,"description":"Number of Important findings"},"nits":{"type":"integer","minimum":0,"description":"Number of Nit findings"},"preexisting":{"type":"integer","minimum":0,"description":"Number of Pre-existing findings"}},"required":["summary","confidence","important","nits","preexisting"],"additionalProperties":false}'
-            --allowedTools "Read" "Grep" "Glob" "mcp__github_inline_comment__create_inline_comment" "Agent" "Bash(gh pr view:*)" "Bash(gh pr diff:*)" "Bash(gh issue view:*)" "Bash(gh api repos/${{ github.repository }}/issues/${{ env.PR_NUMBER }}/comments:*)" "Bash(gh api repos/${{ github.repository }}/pulls/${{ env.PR_NUMBER }}/comments:*)" "Bash(git log:*)" "Bash(git show:*)" "Bash(git diff:*)" "Bash(git blame:*)" "Bash(git -C ${{ env.PR_DIR }} log:*)" "Bash(git -C ${{ env.PR_DIR }} show:*)" "Bash(git -C ${{ env.PR_DIR }} diff:*)" "Bash(git -C ${{ env.PR_DIR }} blame:*)"
+            --allowedTools "Read" "Grep" "Glob" "mcp__github_inline_comment__create_inline_comment" "Agent" "Task" "Bash(gh pr view:*)" "Bash(gh pr diff:*)" "Bash(gh issue view:*)" "Bash(gh api repos/${{ github.repository }}/issues/${{ env.PR_NUMBER }}/comments:*)" "Bash(gh api repos/${{ github.repository }}/pulls/${{ env.PR_NUMBER }}/comments:*)" "Bash(git log:*)" "Bash(git show:*)" "Bash(git diff:*)" "Bash(git blame:*)" "Bash(git -C ${{ env.PR_DIR }} log:*)" "Bash(git -C ${{ env.PR_DIR }} show:*)" "Bash(git -C ${{ env.PR_DIR }} diff:*)" "Bash(git -C ${{ env.PR_DIR }} blame:*)"
             --disallowedTools "Edit" "Write" "NotebookEdit" "WebFetch" "WebSearch" "Read(//proc/**)" "Read(//sys/**)" "Bash(*--output*)" "Bash(*--no-index*)" "Bash(gh api * -f *)" "Bash(gh api * -F *)" "Bash(gh api *--field*)" "Bash(gh api *--raw-field*)" "Bash(gh api * -X *)" "Bash(gh api *--method*)" "Bash(gh api *--input*)"
 
       # The steps below trust two files from the workspace. Stop if anything
