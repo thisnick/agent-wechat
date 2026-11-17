@@ -8,6 +8,10 @@ use wechat_profile::{
 };
 use wechat_protocol::wire::{AddMessage, SyncCommand};
 
+#[cfg(test)]
+#[path = "sync_replay_tests.rs"]
+mod sync_replay_tests;
+
 /// A safe, typed obligation. The sealed batch retains the original command;
 /// reporting this value never constitutes applying its native side effects.
 #[derive(Debug, Serialize)]
@@ -358,6 +362,36 @@ fn fields(message: &AddMessage, body: &[u8], sort: i64) -> Result<(RawFields, St
     Ok((fields, summary))
 }
 impl Core {
+    /// Mask a validated recall without applying its profile write or marking the command complete.
+    pub(super) fn mask_sync_recall_before_yield(
+        &self,
+        account: &str,
+        command: &SyncCommand,
+        receipt: &str,
+        own: &str,
+        origin: &str,
+    ) -> Result<()> {
+        if command.id != 5 {
+            return Ok(());
+        }
+        let Ok(message) = wechat_protocol::wire::decode_add_message(&command.payload, own) else {
+            return Ok(());
+        };
+        if let Ok(Some(recall)) = crate::recalls::incoming_recall(&message, own) {
+            if !crate::sticker_control::supported_sticker_control(&message, own)
+                && self.store.runtime(account, receipt)?.is_none()
+                && self
+                    .store
+                    .recall_marker(account, &recall.thread, &recall.server)?
+                    .is_none()
+            {
+                self.retain_control_raw(account, command, receipt)?;
+                self.mask_pending_sync_recall(account, &recall, origin, receipt)?;
+            }
+        }
+        Ok(())
+    }
+
     fn retain_control_raw(
         &self,
         account: &str,
@@ -782,7 +816,10 @@ impl Core {
             .as_deref()
             .context("missing_message_server_identity")?;
         let recall = self.store.recall_marker(account, &message.peer, sid)?;
-        if let Some(marker) = recall.as_ref() {
+        if let Some(marker) = recall
+            .as_ref()
+            .filter(|marker| !marker.awaits_sync_command())
+        {
             if wechat_profile::find_projected_message(
                 &location,
                 &keys,

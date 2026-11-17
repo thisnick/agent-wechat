@@ -1057,14 +1057,8 @@ async fn recover_projection(
     Path(a): Path<String>,
 ) -> ApiResult<Json<Value>> {
     c.require(Some(&a), "admin")?;
-    let guard = app.core.lock_account(&a).await?;
-    Ok(Json(
-        work(move || {
-            let _guard = guard;
-            app.core.recover_projection(&a)
-        })
-        .await?,
-    ))
+    // Core serializes recovery with background replay of the same journal.
+    Ok(Json(app.core.recover_projection_online(&a).await?))
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

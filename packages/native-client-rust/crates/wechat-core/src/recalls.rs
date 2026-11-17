@@ -305,11 +305,10 @@ impl Core {
         // They do not retain a second settled message or original-author field.
         let source = self.recall_source(account, thread, server);
         let known = source.as_ref().ok().and_then(|s| s.as_ref());
-        let control = if replacement_text.is_some()
-            && self
-                .store
-                .runtime(account, &format!("sync-control:{receipt}"))?
-                .is_some()
+        let control = if self
+            .store
+            .runtime(account, &format!("sync-control:{receipt}"))?
+            .is_some()
         {
             let parsed = self.recall_control(account, receipt)?;
             ensure!(
@@ -318,7 +317,10 @@ impl Core {
                     && parsed.replacement_text.as_deref() == replacement_text,
                 "recall_control_target_mismatch"
             );
-            Some(receipt)
+            Some(wechat_store::RecallControl {
+                receipt,
+                has_notice: replacement_text.is_some(),
+            })
         } else {
             None
         };
@@ -332,12 +334,41 @@ impl Core {
             origin,
             control,
         )?;
+        ensure!(!marker.awaits_sync_command(), "recall_sync_pending");
         source?;
         self.project_recall_with_notice(account, &marker, receipt, replacement_text)?;
         self.store
             .recall_marker(account, thread, server)?
             .context("recall_marker_missing")
     }
+
+    /// Mask the recalled message until the journaled command can settle the recall.
+    pub(crate) fn mask_pending_sync_recall(
+        &self,
+        account: &str,
+        recall: &IncomingRecall,
+        origin: &str,
+        receipt: &str,
+    ) -> Result<()> {
+        let source = self
+            .recall_source(account, &recall.thread, &recall.server)
+            .ok()
+            .flatten();
+        self.store.stage_sync_recall_mask(
+            account,
+            &recall.thread,
+            &recall.server,
+            source.as_ref().map(|(id, _)| id.as_str()),
+            source.as_ref().map(|(_, created)| *created),
+            recall.recalled_at,
+            origin,
+            wechat_store::RecallControl {
+                receipt,
+                has_notice: recall.replacement_text.is_some(),
+            },
+        )
+    }
+
     fn recall_source(
         &self,
         account: &str,
@@ -416,6 +447,11 @@ impl Core {
         marker: &RecallMarker,
         receipt: &str,
     ) -> Result<()> {
+        // The original can arrive before its staged recall command. Keep API
+        // reads masked, but let that command own the official recall write.
+        if marker.awaits_sync_command() {
+            return Ok(());
+        }
         self.project_recall_with_notice(account, marker, receipt, None)
     }
     fn project_recall_with_notice(

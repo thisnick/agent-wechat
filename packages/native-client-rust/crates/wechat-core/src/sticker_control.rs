@@ -210,10 +210,12 @@ impl Core {
             .put_runtime(account, "sticker-refresh-job", job.id.as_bytes())?;
         Ok(())
     }
+    /// Use the caller’s yield and session check when a sticker receipt unblocks replay.
     pub(crate) fn finish_sticker_controls(
         &self,
         account: &str,
         controls: &[StickerRefresh],
+        yield_writer: Option<&mut dyn FnMut() -> Result<()>>,
     ) -> Result<()> {
         let mut completed_receipt = false;
         for control in controls {
@@ -228,7 +230,7 @@ impl Core {
             }
         }
         if completed_receipt {
-            self.project_pending_with_media(account, false)?;
+            self.project_pending_with_yield(account, false, yield_writer)?;
         }
         Ok(())
     }
@@ -292,7 +294,7 @@ mod tests {
         core.store
             .put_runtime("one", &refresh.key, b"after")
             .unwrap();
-        core.finish_sticker_controls("one", std::slice::from_ref(&refresh))
+        core.finish_sticker_controls("one", std::slice::from_ref(&refresh), None)
             .unwrap();
         assert_eq!(
             core.store.runtime("one", &refresh.key).unwrap(),

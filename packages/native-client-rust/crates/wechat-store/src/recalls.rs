@@ -18,6 +18,20 @@ pub struct RecallMarker {
     pub projection_state: String,
 }
 
+/// A verified sync command. Only controls carrying a notice need a retained
+/// link back to the sealed bytes after the command is applied.
+pub struct RecallControl<'a> {
+    pub receipt: &'a str,
+    pub has_notice: bool,
+}
+
+impl RecallMarker {
+    /// The staged control masks reads immediately. Only replay may settle it.
+    pub fn awaits_sync_command(&self) -> bool {
+        self.projection_state == "awaiting_command"
+    }
+}
+
 fn marker(row: &rusqlite::Row<'_>) -> rusqlite::Result<RecallMarker> {
     Ok(RecallMarker {
         thread_id: row.get(0)?,
@@ -164,7 +178,7 @@ impl Store {
             None,
         )
     }
-    /// Retain the first existing sealed control receipt for replay, not its attributes.
+    /// Record a confirmed recall and retain any notice via its sealed control receipt.
     #[allow(clippy::too_many_arguments)]
     pub fn record_recall_with_control(
         &self,
@@ -175,9 +189,64 @@ impl Store {
         created: Option<i64>,
         recalled_at: Option<i64>,
         origin: &str,
-        control_receipt: Option<&str>,
+        control: Option<RecallControl<'_>>,
     ) -> Result<RecallMarker> {
-        if control_receipt.is_some_and(|receipt| {
+        self.write_recall_marker(
+            account,
+            thread,
+            server,
+            message_id,
+            created,
+            recalled_at,
+            origin,
+            control,
+            false,
+        )
+    }
+
+    /// Mask reads for a validated, staged sync command without emitting an event
+    /// or confirming an outgoing operation before replay reaches that command.
+    #[allow(clippy::too_many_arguments)]
+    pub fn stage_sync_recall_mask(
+        &self,
+        account: &str,
+        thread: &str,
+        server: &str,
+        message_id: Option<&str>,
+        created: Option<i64>,
+        recalled_at: Option<i64>,
+        origin: &str,
+        control: RecallControl<'_>,
+    ) -> Result<()> {
+        self.write_recall_marker(
+            account,
+            thread,
+            server,
+            message_id,
+            created,
+            recalled_at,
+            origin,
+            Some(control),
+            true,
+        )?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_recall_marker(
+        &self,
+        account: &str,
+        thread: &str,
+        server: &str,
+        message_id: Option<&str>,
+        created: Option<i64>,
+        recalled_at: Option<i64>,
+        origin: &str,
+        control: Option<RecallControl<'_>>,
+        mask_only: bool,
+    ) -> Result<RecallMarker> {
+        if control.as_ref().is_some_and(|control| {
+            let receipt = control.receipt;
             receipt.is_empty()
                 || receipt.len() > 512
                 || receipt.chars().any(|c| c.is_control() || c.is_whitespace())
@@ -204,29 +273,74 @@ impl Store {
             bail!("invalid_recall_identity");
         }
         self.control(account, |db| {
-            let tx=db.transaction()?;
-            if let Some(receipt) = control_receipt {
-                let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM runtime WHERE key=?1 AND length(value)>0)", [format!("sync-control:{receipt}")], |row| row.get(0))?;
+            let tx = db.transaction()?;
+            if let Some(control) = &control {
+                let exists: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM runtime WHERE key=?1 AND length(value)>0)",
+                    [format!("sync-control:{}", control.receipt)],
+                    |row| row.get(0),
+                )?;
                 anyhow::ensure!(exists, "recall_control_receipt_unavailable");
-                tx.execute("INSERT INTO runtime(key,value) VALUES(?1,?2) ON CONFLICT(key) DO NOTHING", params![control_key(thread, server)?, receipt.as_bytes()])?;
+                if control.has_notice {
+                    tx.execute(
+                        "INSERT INTO runtime(key,value) VALUES(?1,?2) ON CONFLICT(key) DO NOTHING",
+                        params![control_key(thread, server)?, control.receipt.as_bytes()],
+                    )?;
+                }
             }
-            let now=chrono::Utc::now().to_rfc3339();
-            let inserted=tx.execute("INSERT INTO message_recalls(thread_id,server_id,message_id,source_created_at,observed_at,recalled_at,origin) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(thread_id,server_id) DO NOTHING",
-                params![thread,server,message_id,created,now,recalled_at,origin])?;
-            // A control can precede its ordinary row. Binding that later source
-            // does not re-emit the recall or change its observation timestamp.
-            if message_id.is_some() {tx.execute("UPDATE message_recalls SET message_id=COALESCE(message_id,?3),source_created_at=COALESCE(source_created_at,?4) WHERE thread_id=?1 AND server_id=?2",params![thread,server,message_id,created])?;}
-            let result=tx.query_row(&format!("SELECT {COLUMNS} FROM message_recalls WHERE thread_id=?1 AND server_id=?2"),params![thread,server],marker)?;
-            if inserted==1 {
-                let seq:i64=tx.query_row("SELECT COALESCE(MAX(sequence),0)+1 FROM events",[],|r|r.get(0))?;
-                let occurred=recalled_at.and_then(|t|chrono::DateTime::from_timestamp(t,0)).map(|t|t.to_rfc3339());
-                let mut data=json!({"threadId":thread,"serverId":server,"observedAt":now,"origin":origin});
-                if let Some(id)=message_id {data["messageId"]=json!(id);}
-                if let Some(time)=occurred {data["recalledAt"]=json!(time);}
-                tx.execute("INSERT INTO events VALUES(?1,'message.recalled',?2,?3)",params![seq,serde_json::to_string(&data)?,now])?;
+            let now = chrono::Utc::now().to_rfc3339();
+            let state = if mask_only { "awaiting_command" } else { "pending" };
+            let inserted = tx.execute(
+                "INSERT INTO message_recalls(thread_id,server_id,message_id,source_created_at,observed_at,recalled_at,origin,projection_state)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(thread_id,server_id) DO NOTHING",
+                params![thread, server, message_id, created, now, recalled_at, origin, state],
+            )?;
+            // The original can arrive after the mask. Bind that source before
+            // promotion so the first event includes the message ID if known.
+            if message_id.is_some() {
+                tx.execute(
+                    "UPDATE message_recalls SET message_id=COALESCE(message_id,?3),source_created_at=COALESCE(source_created_at,?4)
+                     WHERE thread_id=?1 AND server_id=?2",
+                    params![thread, server, message_id, created],
+                )?;
+            }
+            // An independent observation cannot publish a staged mask's event.
+            let mut first_confirmation = !mask_only && inserted == 1;
+            if !mask_only && inserted == 0 && control.is_some() {
+                first_confirmation = tx.execute(
+                    "UPDATE message_recalls SET projection_state='pending'
+                     WHERE thread_id=?1 AND server_id=?2 AND projection_state='awaiting_command'",
+                    params![thread, server],
+                )? == 1;
+            }
+            let result = tx.query_row(
+                &format!("SELECT {COLUMNS} FROM message_recalls WHERE thread_id=?1 AND server_id=?2"),
+                params![thread, server],
+                marker,
+            )?;
+            if first_confirmation {
+                let seq: i64 = tx.query_row(
+                    "SELECT COALESCE(MAX(sequence),0)+1 FROM events", [], |row| row.get(0),
+                )?;
+                let mut data = json!({
+                    "threadId": thread, "serverId": server,
+                    "observedAt": result.observed_at, "origin": result.origin,
+                });
+                if let Some(id) = &result.message_id {
+                    data["messageId"] = json!(id);
+                }
+                if let Some(time) = result.recalled_at.and_then(|t|chrono::DateTime::from_timestamp(t,0)) {
+                    data["recalledAt"] = json!(time.to_rfc3339());
+                }
+                tx.execute(
+                    "INSERT INTO events VALUES(?1,'message.recalled',?2,?3)",
+                    params![seq, serde_json::to_string(&data)?, now],
+                )?;
                 crate::trim_events(&tx)?;
             }
-            crate::outgoing_recall::confirm_recall_in_transaction(&tx, account, thread, server)?;
+            if !mask_only && !result.awaits_sync_command() {
+                crate::outgoing_recall::confirm_recall_in_transaction(&tx, account, thread, server)?;
+            }
             tx.commit()?;
             Ok(result)
         })
@@ -388,7 +502,10 @@ mod tests {
                 None,
                 None,
                 "live",
-                Some("first")
+                Some(RecallControl {
+                    receipt: "first",
+                    has_notice: true
+                })
             )
             .is_err());
         assert!(store.recall_marker("one", "peer", "12").unwrap().is_none());
@@ -414,7 +531,10 @@ mod tests {
                 Some(42),
                 None,
                 "catchup",
-                Some("first"),
+                Some(RecallControl {
+                    receipt: "first",
+                    has_notice: true,
+                }),
             )
             .unwrap();
         store
@@ -426,7 +546,10 @@ mod tests {
                 None,
                 None,
                 "live",
-                Some("later"),
+                Some(RecallControl {
+                    receipt: "later",
+                    has_notice: true,
+                }),
             )
             .unwrap();
         assert_eq!(
@@ -508,7 +631,10 @@ mod tests {
                     None,
                     None,
                     "live",
-                    Some(receipt)
+                    Some(RecallControl {
+                        receipt,
+                        has_notice: true
+                    })
                 )
                 .is_err());
             assert!(store.recall_marker("one", "peer", "12").unwrap().is_none());
