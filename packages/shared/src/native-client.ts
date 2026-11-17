@@ -11,6 +11,8 @@ export type * from "./native.generated.js";
 export { NATIVE_MAX_SOURCE_BYTES, NATIVE_MAX_ORDINARY_SOURCE_BYTES, NATIVE_MAX_VIDEO_SOURCE_BYTES } from "./native.generated.ts";
 import { NATIVE_MAX_SOURCE_BYTES } from "./native.generated.ts";
 import type { NativeGroupCreateRequest, NativeGroupMemberLookup } from "./native.generated.js";
+/** Contact lists default to confirmed saved friends; all includes other cached people. */
+export type NativeContactListOptions = NativeListOptions & { relation?: "friend" | "non_contact" | "unknown" | "all" };
 export type NativeListOptions = { cursor?: string; limit?: number; query?: string; kind?: string };
 export function isNativeTombstone(value: unknown): value is NativeTombstone { const item = value as Partial<NativeTombstone> | null; return item?.deleted === true && typeof item.id === "string" && typeof item.version === "string"; }
 /** Validate a derived official notice without interpreting it as identity metadata. */
@@ -168,7 +170,7 @@ export class NativeWeChatClient {
     return this.request(`v1/accounts/${id(accountId)}/forget-credentials`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ confirm: true }) });
   }
   threads(accountId: string, options?: string | NativeListOptions): Promise<NativePage<NativeThread>> { return this.request(`v1/accounts/${id(accountId)}/threads${listQuery(options)}`); }
-  contacts(accountId: string, options?: string | NativeListOptions, signal?: AbortSignal): Promise<NativePage<NativeContact>> { return this.request(`v1/accounts/${id(accountId)}/contacts${listQuery(options)}`, { signal }); }
+  contacts(accountId: string, options?: string | NativeContactListOptions, signal?: AbortSignal): Promise<NativePage<NativeContact>> { return this.request(`v1/accounts/${id(accountId)}/contacts${listQuery(options)}`, { signal }); }
   groups(accountId: string, options?: string | NativeListOptions, signal?: AbortSignal): Promise<NativePage<NativeGroup>> { return this.request(`v1/accounts/${id(accountId)}/groups${listQuery(options)}`, { signal }); }
   thread(accountId: string, threadId: string, signal?: AbortSignal): Promise<NativeThread> { return this.request(`v1/accounts/${id(accountId)}/threads/${id(threadId)}`, { signal }); }
   contact(accountId: string, username: string, signal?: AbortSignal): Promise<NativeContact> { return this.request(`v1/accounts/${id(accountId)}/contacts/${id(username)}`, { signal }); }

@@ -131,6 +131,7 @@ request PageQuery | object, rejects unknown fields | Paging and filter options f
 request PageQuery.cursor | string, nullable | The `nextCursor` of the previous page, up to 8192 characters. Send it with the same query.
 request PageQuery.kind | string, nullable | Only list chats of this kind: `direct`, `group` or `system`.
 request PageQuery.limit | integer, nullable, min 0, format uint | Items per page, from 1 to 200.
+request PageQuery.relation | string, nullable | Contact lists only: friend (default), non_contact, unknown, or all cached people.
 request PageQuery.search | string, nullable | Text to search for, up to 256 characters. The name `query` is accepted too.
 request QrQuery | object, rejects unknown fields | Options for fetching a login QR code.
 request QrQuery.generation | integer, nullable, min 0, format uint64 | Only return the QR code if it is still this generation. A newer code fails with `login_challenge_superseded`.

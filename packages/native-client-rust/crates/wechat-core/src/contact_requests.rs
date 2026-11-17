@@ -449,6 +449,7 @@ impl Core {
                 cursor: q.cursor.clone(),
                 search: None,
                 thread_kind: None,
+                relation: None,
             },
             items,
             metadata,

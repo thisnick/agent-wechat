@@ -168,7 +168,8 @@ wx contacts find | - | Find saved entries matching a name or ID
 wx contacts find <QUERY> | position 1, required | Name or ID text to search for
 wx contacts get | - | Show a saved entry by ID
 wx contacts get <ID> | position 1, required | ID of the contact or group, from the matching list command
-wx contacts list | - | List saved entries with optional pagination
+wx contacts list | - | List saved contacts with optional pagination
+wx contacts list --all | switch | Include all cached people, even non-contacts and unknown relationships
 wx contacts list --cursor | takes <CURSOR> | Continue from the next-page cursor of the previous result
 wx contacts list --limit | takes <LIMIT> | Return at most this many items
 wx contacts lookup | - | Look up one or two known contact IDs live on WeChat without saving the result

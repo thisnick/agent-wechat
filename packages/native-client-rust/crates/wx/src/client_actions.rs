@@ -2,6 +2,24 @@ use super::*;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 
+pub async fn catalog_list(
+    r: &Remote,
+    kind: &str,
+    limit: Option<usize>,
+    cursor: Option<String>,
+    relation: Option<&str>,
+) -> Result<Value> {
+    r.get(&query(
+        r.path(kind)?,
+        &[
+            ("limit", limit.map(|v| v.to_string())),
+            ("cursor", cursor),
+            ("relation", relation.map(str::to_owned)),
+        ],
+    ))
+    .await
+}
+
 pub async fn catalog(
     r: &Remote,
     config: &settings::File,
@@ -42,13 +60,6 @@ pub async fn catalog(
             Ok(
                 json!({"state":"available","output":path,"byteLength":bytes.len(),"sha256":format!("{:x}",Sha256::digest(bytes))}),
             )
-        }
-        CatalogCommand::List { limit, cursor } => {
-            r.get(&query(
-                r.path(kind)?,
-                &[("limit", limit.map(|v| v.to_string())), ("cursor", cursor)],
-            ))
-            .await
         }
         CatalogCommand::Get { id } => r.get(&r.path(&format!("{kind}/{}", encode(&id)))?).await,
         CatalogCommand::Find { query: search } => {
@@ -151,6 +162,9 @@ pub async fn catalog(
 }
 pub async fn group(r: &Remote, config: &settings::File, command: GroupCommand) -> Result<Value> {
     match command {
+        GroupCommand::List { limit, cursor } => {
+            catalog_list(r, "groups", limit, cursor, None).await
+        }
         GroupCommand::Catalog(command) => catalog(r, config, "groups", command).await,
         GroupCommand::Lookup { room, version } => {
             r.get(&query(

@@ -291,6 +291,23 @@ mod tests {
         Ok(command)
     }
     #[test]
+    fn contact_list_requires_explicit_all_for_cached_people() {
+        assert!(matches!(
+            parse(&["list"]).unwrap(),
+            ContactCommand::List { all: false, .. }
+        ));
+        assert!(matches!(
+            parse(&["list", "--all", "--limit", "2", "--cursor", "next"]).unwrap(),
+            ContactCommand::List {
+                all: true,
+                limit: Some(2),
+                cursor: Some(_),
+                ..
+            }
+        ));
+        assert!(Cli::try_parse_from(["wx", "groups", "list", "--all"]).is_err());
+    }
+    #[test]
     fn parser_accepts_partial_edits_but_requires_a_valued_boolean_and_nonempty_set() {
         assert!(parse(&["privacy", "get", "peer"]).is_ok());
         assert!(parse(&["set", "peer", "--chats-only", "false"]).is_ok());

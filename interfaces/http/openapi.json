@@ -3794,6 +3794,13 @@
               "null"
             ]
           },
+          "relation": {
+            "description": "Contact lists only: friend (default), non_contact, unknown, or all cached people.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "search": {
             "description": "Text to search for, up to 256 characters. The name `query` is accepted too.",
             "type": [

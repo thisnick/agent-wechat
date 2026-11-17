@@ -250,7 +250,7 @@ export function OmniSearch({
       if (!abort.signal.aborted) setError(readableError(e));
     };
     if (scope === "all" || scope === "contacts")
-      void client.contacts(account, { query: search, limit: 30 }, abort.signal)
+      void client.contacts(account, { query: search, limit: 30, relation: "all" }, abort.signal)
         .then((page) => publish("contacts", page.items.filter((c): c is NativeContact => !isNativeTombstone(c)).map((c) => ({
           id: c.id, name: c.displayName ?? c.id, subtitle: t(c.relation === "friend" ? "contactsUi.saved" : "contactsUi.onWechat"), kind: "contacts",
         })))).catch(failed);

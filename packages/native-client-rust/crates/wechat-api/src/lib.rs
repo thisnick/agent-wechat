@@ -799,6 +799,8 @@ struct PageQuery {
     search: Option<String>,
     /// Only list chats of this kind: `direct`, `group` or `system`.
     kind: Option<String>,
+    /// Contact lists only: friend (default), non_contact, unknown, or all cached people.
+    relation: Option<String>,
 }
 impl PageQuery {
     fn catalog(&self) -> ApiResult<wechat_core::CatalogQuery> {
@@ -815,6 +817,7 @@ impl PageQuery {
             cursor: self.cursor.clone(),
             search: self.search.clone(),
             thread_kind: self.kind.clone(),
+            relation: self.relation.clone(),
         })
     }
     fn profile(&self) -> ApiResult<wechat_profile::ListQuery> {

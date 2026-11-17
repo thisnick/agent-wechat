@@ -7,6 +7,15 @@ import { Aside } from '@astrojs/starlight/components';
 
 Use the same account for discovery and the resulting friend request. Discovery returns a short-lived `recipientRef`; keep tickets and request history private.
 
+## List saved contacts
+
+```bash
+wx contacts list
+wx contacts list --all
+```
+
+The default lists confirmed saved contacts. `--all` includes cached non-contacts and people whose relationship is unknown. Exact contact reads still work for cached people.
+
 ## Find and add someone
 
 1. Search your saved contacts or discover someone by WeChat ID:
@@ -70,6 +79,8 @@ All paths below are relative to `/v1/accounts/ACCOUNT_ID/`:
 
 | Method and path | Purpose |
 | --- | --- |
+| `GET contacts` | List confirmed saved contacts; `relation=friend` is the default |
+| `GET contacts?relation=all` | Include all cached people; `unknown` and `non_contact` select those categories |
 | `POST search/contacts` | Discover with `{ "query": "WECHAT_ID" }` |
 | `GET contact-requests` | Page incoming and outgoing history; supports `direction`, `actionable`, `search`, `limit`, `cursor` |
 | `GET contact-requests/ID` | Inspect history and its current `version` |
@@ -78,6 +89,8 @@ All paths below are relative to `/v1/accounts/ACCOUNT_ID/`:
 | `DELETE contact-requests/ID` | Delete local history with `expectedVersion` |
 | `DELETE contacts/ID` | Remove the saved contact |
 | `GET contact-mutations/by-idempotency-key?key=KEY` | Recover the original operation |
+
+Keep `relation` and the search text unchanged when following `nextCursor`; filtering occurs before pagination. Omni-search explicitly requests all cached people.
 
 Reads require `read`; mutations and operation-by-key recovery require `admin`. Every mutation requires `Idempotency-Key`. Follow the returned ID through `GET operations/ID`. An uncertain operation stops at `needs_review`; recovery never resends automatically.
 

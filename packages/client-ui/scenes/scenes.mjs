@@ -881,7 +881,11 @@ export const scenes = [
     actions: async ({ page, expect }) => {
       await page.getByRole("button", { name: "Review request", exact: true }).click();
       const card = page.getByRole("dialog", { name: "Contact details" });
-      await expect(card).toContainText("This does not decline the request on WeChat.");
+      await card.locator(".contact-more summary").click();
+      page.once("dialog", async confirmation => {
+        expect(confirmation.message()).toContain("This does not decline the request on WeChat.");
+        await confirmation.accept();
+      });
       await card.getByRole("button", { name: "Delete local history", exact: true }).click();
       await expect(card.getByRole("status")).toContainText("Local history deleted");
       await expect(card.getByRole("button", { name: "Accept request", exact: true })).toHaveCount(0);

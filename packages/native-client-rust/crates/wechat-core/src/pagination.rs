@@ -17,6 +17,8 @@ pub struct CatalogQuery {
     pub cursor: Option<String>,
     pub search: Option<String>,
     pub thread_kind: Option<String>,
+    /// Contact membership filter: friend (default), non_contact, unknown, or all.
+    pub relation: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -152,6 +154,12 @@ impl Core {
         {
             bail!("invalid_request");
         }
+        let relation = q.relation.as_deref().unwrap_or("friend");
+        if (kind != "contacts" && q.relation.is_some())
+            || !matches!(relation, "friend" | "non_contact" | "unknown" | "all")
+        {
+            bail!("invalid_request");
+        }
         let query = format!(
             "{:x}",
             Sha256::digest(serde_json::to_vec(&(
@@ -161,6 +169,14 @@ impl Core {
                 &q.thread_kind
             ))?)
         );
+        let query = if kind == "contacts" {
+            format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(&(&query, relation))?)
+            )
+        } else {
+            query
+        };
         let limit = q.limit.unwrap_or(50);
         if !(1..=200).contains(&limit) {
             bail!("invalid_request");
@@ -255,6 +271,13 @@ impl Core {
                 own.as_deref(),
                 message_limit,
             )?
+        };
+        let rows = if kind == "contacts" && relation != "all" {
+            rows.into_iter()
+                .filter(|row| row["relation"] == relation)
+                .collect()
+        } else {
+            rows
         };
         let metadata = json!({"sourceGeneration":reader.generation(),"coverage":reader.coverage(),"order":rows.iter().map(|r|r["id"].clone()).collect::<Vec<_>>()});
         let mut page = self.paginate_values(account, &query, q, rows, metadata)?;

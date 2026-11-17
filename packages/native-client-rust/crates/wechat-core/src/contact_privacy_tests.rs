@@ -923,3 +923,119 @@ fn contact_relation_distinguishes_cached_unknown_and_removed_people() {
         .insert("delete_flag".into(), SqlValue::Integer("1".into()));
     assert_eq!(contact_relation(&contact), "non_contact");
 }
+
+#[test]
+fn contact_lists_default_to_friends_and_bind_filters_before_pagination() {
+    let (_temp, core) = super::super::groups::tests::fixture();
+    set_fields(&core, "cached-outsider", &[("flag", "0")]);
+    set_fields(&core, "saved-other", &[("flag", "1")]);
+    let (location, keys) = core.profile_location_keys("one").unwrap();
+    wechat_profile::apply_contact_patch(
+        &location,
+        &keys,
+        &ContactProjection {
+            username: "cached-unknown".into(),
+            fields: [("nick_name".into(), SqlValue::Text("Unknown Person".into()))].into(),
+        },
+        &core.write_options("one", "contact-list-test").unwrap(),
+    )
+    .unwrap();
+    let saved = core
+        .catalog_page("one", "contacts", None, &CatalogQuery::default())
+        .unwrap();
+    assert!(!saved["items"].as_array().unwrap().is_empty());
+    assert!(saved["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["relation"] == "friend"));
+    for relation in ["non_contact", "unknown"] {
+        let page = core
+            .catalog_page(
+                "one",
+                "contacts",
+                None,
+                &CatalogQuery {
+                    relation: Some(relation.into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(!page["items"].as_array().unwrap().is_empty());
+        assert!(page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["relation"] == relation));
+    }
+    let first = core
+        .catalog_page(
+            "one",
+            "contacts",
+            None,
+            &CatalogQuery {
+                limit: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(first["items"].as_array().unwrap().len(), 1);
+    let cursor = first["nextCursor"].as_str().unwrap().to_owned();
+    let next = core
+        .catalog_page(
+            "one",
+            "contacts",
+            None,
+            &CatalogQuery {
+                cursor: Some(cursor.clone()),
+                relation: Some("friend".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(next["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["relation"] == "friend"));
+    assert!(core
+        .catalog_page(
+            "one",
+            "contacts",
+            None,
+            &CatalogQuery {
+                cursor: Some(cursor),
+                relation: Some("all".into()),
+                ..Default::default()
+            }
+        )
+        .is_err());
+    let all = core
+        .catalog_page(
+            "one",
+            "contacts",
+            None,
+            &CatalogQuery {
+                relation: Some("all".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(all["items"].as_array().unwrap().len() > saved["items"].as_array().unwrap().len());
+    assert_eq!(
+        core.catalog_item("one", "contacts", "cached-unknown")
+            .unwrap()["relation"],
+        "unknown"
+    );
+    assert!(core
+        .catalog_page(
+            "one",
+            "contacts",
+            None,
+            &CatalogQuery {
+                relation: Some("invalid".into()),
+                ..Default::default()
+            }
+        )
+        .is_err());
+}

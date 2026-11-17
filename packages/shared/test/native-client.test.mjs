@@ -684,3 +684,15 @@ test('privacy mutations reject foreign operations and never retry a lost reply',
   await assert.rejects(client.updateContact('a','peer',input,'same-key'),/lost/);
   assert.equal(attempts,1);
 });
+
+test('contact list preserves explicit membership filters and pagination', async () => {
+  const queries=[];
+  const client=new NativeWeChatClient({...options, fetch: async url => {
+    queries.push(Object.fromEntries(new URL(url).searchParams));
+    return Response.json({items:[], nextCursor:null});
+  }});
+  await client.contacts('a');
+  await client.contacts('a',{relation:'all',cursor:'next',limit:2});
+  await client.contacts('a',{relation:'unknown',query:'person'});
+  assert.deepEqual(queries,[{}, {relation:'all',cursor:'next',limit:'2'}, {relation:'unknown',query:'person'}]);
+});
