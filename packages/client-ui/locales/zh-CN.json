@@ -46,6 +46,7 @@
     "dropAttach": "拖放以添加附件",
     "file": "文件",
     "image": "图片",
+    "includeFullResolutionImage": "同时附上每张图片的全分辨率原图，与压缩副本一并发送。JPEG 文件将原样发送，其中包含的任何相机或位置信息也会一并保留。",
     "includeUnchangedVideoFileAlongside": "随播放副本一起附上未经压缩的原始视频文件。",
     "originalMediaQuality": "原画质发送",
     "remove": "移除 {{name}}",

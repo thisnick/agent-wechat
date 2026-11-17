@@ -1,12 +1,12 @@
 ---
 title: 视频与图片画质
 description: 选择图片与视频的发送画质，然后下载可用的副本。
-sourceHash: ebcd9fd13404
+sourceHash: "36b5ab32930e"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-在 CLI 和 HTTP API 中，图片默认以**标准**画质发送。OpenClaw 会自动以**原图**画质发送图片。视频默认以普通画质发送。
+在桌面应用和网页客户端、CLI 以及 HTTP API 中，图片默认以**标准**画质发送。OpenClaw 会自动以**原图**画质发送图片。视频默认以普通画质发送。
 
 ## 选择发送画质 \{#choose-send-quality}
 
@@ -23,6 +23,12 @@ import { Aside } from '@astrojs/starlight/components';
 图片源文件的大小上限为 26,214,383 字节。JPEG 允许 6400 万像素，每条边最多 8,192 像素；较大的 RGB 与灰度 JPEG 会以降低分辨率的方式解码，用于生成预览。其他格式允许 16,777,216 像素。若图片更大，或需要保留非 JPEG 的原始字节，请作为文件附件发送。
 
 **视频：** MOV、MP4、3GP、3G2 和 MJ2 源文件最大允许 512 MiB。播放版使用 H.264 Main 配置，长边最多 720 像素，帧率最高 30 fps；若存在音频，则使用 AAC 编码。处理过程绝不会缩短视频时长。容器格式能否支持，取决于其所用的编解码器。
+
+## 从桌面应用或网页客户端发送 \{#send-from-the-desktop-or-web-client}
+
+1. 将图片和视频添加、粘贴或拖放到消息输入框中。
+2. 检查暂存文件下方的**原画质发送**选项。它适用于该条消息中的每张图片和视频；文件始终原样发送。
+3. 点击**发送**。
 
 ## 从 CLI 发送 \{#send-from-the-cli}
 
