@@ -32,7 +32,29 @@ impl CdnClient {
         );
         upload_large_file(
             &self.config,
-            prepared,
+            UploadRef::Memory(prepared),
+            task_id,
+            |path, fields| self.post(path, fields),
+            progress,
+        )
+    }
+
+    /// [`Self::upload_large_file_with_progress`] for an upload read from a
+    /// file in steps. The requests are the same; the block that ends the
+    /// object is sent only after the whole file matched its digests.
+    pub fn upload_large_file_from_file_with_progress(
+        &self,
+        prepared: &PreparedFileUpload,
+        task_id: u64,
+        progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+    ) -> Result<UploadedMedia> {
+        ensure!(
+            matches!(prepared.kind, MediaQuality::File | MediaQuality::LargeFile),
+            "Expected an ordinary file upload"
+        );
+        upload_large_file(
+            &self.config,
+            UploadRef::File(prepared),
             task_id,
             |path, fields| self.post(path, fields),
             progress,
@@ -50,7 +72,24 @@ impl CdnClient {
     ) -> Result<UploadedMedia> {
         upload_video_original(
             self,
-            prepared,
+            UploadRef::Memory(prepared),
+            task_id,
+            |path, fields| self.post(path, fields),
+            progress,
+        )
+    }
+
+    /// [`Self::upload_video_original_with_progress`] for an original read from
+    /// a file in steps.
+    pub fn upload_video_original_from_file_with_progress(
+        &self,
+        prepared: &PreparedFileUpload,
+        task_id: u64,
+        progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+    ) -> Result<UploadedMedia> {
+        upload_video_original(
+            self,
+            UploadRef::File(prepared),
             task_id,
             |path, fields| self.post(path, fields),
             progress,
@@ -60,17 +99,17 @@ impl CdnClient {
 
 fn upload_video_original(
     client: &CdnClient,
-    prepared: &PreparedUpload,
+    prepared: UploadRef<'_>,
     task_id: u64,
     post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
     progress: impl FnMut(u64, Option<u64>) -> Result<()>,
 ) -> Result<UploadedMedia> {
     ensure!(
-        prepared.kind == MediaQuality::Video && task_id != 0,
+        prepared.kind() == MediaQuality::Video && task_id != 0,
         "Expected an original video upload and task ID"
     );
     prepared.validate()?;
-    if prepared.encrypted.len() < MAX_CDN_TRANSFER_BYTES {
+    if prepared.encrypted_len() < MAX_CDN_TRANSFER_BYTES {
         client.upload_with_transport(prepared, progress, post)
     } else {
         upload_large_file(&client.config, prepared, task_id, post, progress)
@@ -79,7 +118,7 @@ fn upload_video_original(
 
 fn common_fields(
     conf: &CdnConfig,
-    prepared: &PreparedUpload,
+    prepared: UploadRef<'_>,
     task_id: u64,
     sequence: u32,
 ) -> CdnFields {
@@ -98,11 +137,11 @@ fn common_fields(
         ("from", 0),
         ("bizid", 1),
         ("appid", 0),
-        ("filetype", u64::from(prepared.kind.filetype())),
+        ("filetype", u64::from(prepared.kind().filetype())),
         ("optype", 0),
         ("expectbizid", 0),
         ("expectappid", 0),
-        ("expectfiletype", u64::from(prepared.kind.filetype())),
+        ("expectfiletype", u64::from(prepared.kind().filetype())),
         ("expectoptype", 0),
         ("frontid", conf.front_id as u64),
     ] {
@@ -113,7 +152,7 @@ fn common_fields(
         "clientostype".into(),
         conf.client_os_type.as_bytes().to_vec(),
     );
-    fields.insert("filekey".into(), prepared.file_key.as_bytes().to_vec());
+    fields.insert("filekey".into(), prepared.file_key().as_bytes().to_vec());
     if let Some(location) = conf.location {
         for (key, value) in [
             ("province", location.province),
@@ -159,22 +198,22 @@ fn opaque_field(reply: &CdnFields, key: &str, max_bytes: usize) -> Result<Vec<u8
 
 fn upload_large_file(
     conf: &CdnConfig,
-    prepared: &PreparedUpload,
+    prepared: UploadRef<'_>,
     task_id: u64,
     mut post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
     mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
 ) -> Result<UploadedMedia> {
     ensure!(
-        ((prepared.kind == MediaQuality::File
-            && prepared.plaintext_bytes as usize > MAX_NATIVE_UPLOAD_BYTES
-            && prepared.plaintext_bytes as usize <= MAX_CDN_TRANSFER_BYTES)
-            || (prepared.kind == MediaQuality::LargeFile
-                && prepared.plaintext_bytes as usize > MAX_CDN_TRANSFER_BYTES
-                && prepared.plaintext_bytes as usize <= MAX_LARGE_FILE_BYTES)
-            || (prepared.kind == MediaQuality::Video
-                && prepared.plaintext_bytes as usize > MAX_NATIVE_UPLOAD_BYTES
-                && prepared.plaintext_bytes as usize <= wechat_media::MAX_VIDEO_SOURCE_BYTES))
-            && prepared.encrypted.len() >= MAX_CDN_TRANSFER_BYTES
+        ((prepared.kind() == MediaQuality::File
+            && prepared.plaintext_bytes() as usize > MAX_NATIVE_UPLOAD_BYTES
+            && prepared.plaintext_bytes() as usize <= MAX_CDN_TRANSFER_BYTES)
+            || (prepared.kind() == MediaQuality::LargeFile
+                && prepared.plaintext_bytes() as usize > MAX_CDN_TRANSFER_BYTES
+                && prepared.plaintext_bytes() as usize <= MAX_LARGE_FILE_BYTES)
+            || (prepared.kind() == MediaQuality::Video
+                && prepared.plaintext_bytes() as usize > MAX_NATIVE_UPLOAD_BYTES
+                && prepared.plaintext_bytes() as usize <= wechat_media::MAX_VIDEO_SOURCE_BYTES))
+            && prepared.encrypted_len() >= MAX_CDN_TRANSFER_BYTES
             && task_id != 0,
         "Unsupported large-file upload profile"
     );
@@ -184,7 +223,7 @@ fn upload_large_file(
         "Missing authenticated CDN location"
     );
     prepared.validate()?;
-    let total = prepared.encrypted.len() as u64;
+    let total = prepared.encrypted_len() as u64;
     let mut sequence = 0u32;
     // No automatic retries: a failed request leaves the caller's persisted
     // source/key material intact and never submits a business message.
@@ -200,7 +239,7 @@ fn upload_large_file(
             let path = format!(
                 "/cdn/{}/{sequence}/{}/{phase}",
                 conf.uin,
-                prepared.kind.filetype()
+                prepared.kind().filetype()
             );
             let reply = post(&path, &fields)?;
             validate_reply(&reply, sequence, conf.version)?;
@@ -212,23 +251,23 @@ fn upload_large_file(
         ("apptype", 1),
         ("chatnum", 1),
         ("reqtype", 0),
-        ("type", u64::from(prepared.kind.filetype())),
+        ("type", u64::from(prepared.kind().filetype())),
         ("prepare", 0),
         ("num", 1),
-        ("type_0", u64::from(prepared.kind.filetype())),
+        ("type_0", u64::from(prepared.kind().filetype())),
         ("cpr_0", 0),
         ("size_0", total),
-        ("rawsize_0", prepared.plaintext_bytes as u64),
+        ("rawsize_0", prepared.plaintext_bytes() as u64),
         ("format_0", 0),
     ] {
         put(&mut apply, key, value);
     }
     apply.insert(
         "chatid".into(),
-        encrypt_recipient(&prepared.destination)?.into_bytes(),
+        encrypt_recipient(prepared.destination())?.into_bytes(),
     );
-    apply.insert("rawfilemd5_0".into(), prepared.md5.as_bytes().to_vec());
-    if let Some((_, extension)) = prepared.file_name.rsplit_once('.') {
+    apply.insert("rawfilemd5_0".into(), prepared.md5().as_bytes().to_vec());
+    if let Some((_, extension)) = prepared.file_name().rsplit_once('.') {
         if !extension.is_empty() {
             apply.insert("ext_0".into(), extension.as_bytes().to_vec());
         }
@@ -239,16 +278,16 @@ fn upload_large_file(
         "Large-file cache hits require unsupported key recovery"
     );
     ensure!(
-        integer(&reply, "type")? == i64::from(prepared.kind.filetype())
+        integer(&reply, "type")? == i64::from(prepared.kind().filetype())
             && integer(&reply, "num")? == 1
-            && integer(&reply, "type_0")? == i64::from(prepared.kind.filetype())
+            && integer(&reply, "type_0")? == i64::from(prepared.kind().filetype())
             && integer(&reply, "fin_0")? == 0,
         "Unsupported large-file apply result"
     );
     let block_size = usize::try_from(integer(&reply, "blocksize_0")?)?;
     ensure!(
         [512 * 1024, 1024 * 1024].contains(&block_size)
-            && prepared.encrypted.len().div_ceil(block_size) <= MAX_BLOCKS,
+            && prepared.encrypted_len().div_ceil(block_size) <= MAX_BLOCKS,
         "Unsupported large-file block size"
     );
     let upinfo = opaque_field(&reply, "upinfo_0", MAX_UPLOAD_TOKEN_BYTES)?;
@@ -256,13 +295,19 @@ fn upload_large_file(
 
     let mut acknowledged = 0u64;
     let mut etags = Vec::new();
-    for (index, chunk) in prepared.encrypted.chunks(block_size).enumerate() {
+    // Each block is produced just before it is sent. For a file, the block
+    // that ends the object is produced only once the whole source matched its
+    // prepared digests, so a changed source never reaches `fin`.
+    let mut chunks = prepared.chunks();
+    let mut index = 0usize;
+    while (chunks.position() as u64) < total {
+        let chunk = chunks.next(block_size)?;
         let mut fields = CdnFields::new();
         put(&mut fields, "alreadyupsize", acknowledged);
         fields.insert("alreadyupbit".into(), acknowledged_bitmap(index));
         fields.insert("upinfo".into(), upinfo.clone());
         put(&mut fields, "offset", acknowledged);
-        fields.insert("blockmd5".into(), hex::encode(md5(chunk)).into_bytes());
+        fields.insert("blockmd5".into(), hex::encode(md5(&chunk)).into_bytes());
         fields.insert("blockdata".into(), chunk.to_vec());
         let reply = exchange("uploadblock", fields, acknowledged, &mut progress)?;
         ensure!(
@@ -272,6 +317,7 @@ fn upload_large_file(
         );
         etags.push(opaque_field(&reply, "etag", 8192)?);
         acknowledged += chunk.len() as u64;
+        index += 1;
         progress(acknowledged, Some(total))?;
     }
     ensure!(acknowledged == total, "Incomplete large-file upload");
@@ -286,7 +332,7 @@ fn upload_large_file(
     let finished_upinfo = opaque_field(&reply, "upinfo", MAX_UPLOAD_TOKEN_BYTES)?;
     progress(acknowledged, Some(total))?;
     let mut complete = CdnFields::new();
-    put(&mut complete, "type", prepared.kind.filetype());
+    put(&mut complete, "type", prepared.kind().filetype());
     put(&mut complete, "num", 1);
     complete.insert("upinfo_0".into(), finished_upinfo);
     let reply = exchange("complete", complete, acknowledged, &mut progress)?;
@@ -297,29 +343,33 @@ fn upload_large_file(
     );
     // Return the correlated completion even if cancellation arrived while this
     // request was in flight. The caller persists it before checking its fence.
-    Ok(UploadedMedia {
-        descriptor: MediaDescriptor {
-            file_id,
-            aes_key: prepared.aes_key.clone(),
-            quality: prepared.kind,
-            expected_bytes: Some(prepared.plaintext_bytes as u64),
-            expected_md5: Some(prepared.md5.clone()),
-            strict_size: true,
-            expires_at: None,
-        },
-        plaintext_bytes: prepared.plaintext_bytes,
-        md5: prepared.md5.clone(),
-        sha256: prepared.sha256.clone(),
-        file_name: prepared.file_name.clone(),
-        width: None,
-        height: None,
-    })
+    Ok(prepared.uploaded(file_id, None, None))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::{cell::RefCell, sync::OnceLock};
+
+    // The fixtures below hold their uploads in memory.
+    fn upload_large_file(
+        conf: &CdnConfig,
+        prepared: &PreparedUpload,
+        task_id: u64,
+        post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
+        progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+    ) -> Result<UploadedMedia> {
+        super::upload_large_file(conf, UploadRef::Memory(prepared), task_id, post, progress)
+    }
+    fn upload_video_original(
+        client: &CdnClient,
+        prepared: &PreparedUpload,
+        task_id: u64,
+        post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
+        progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+    ) -> Result<UploadedMedia> {
+        super::upload_video_original(client, UploadRef::Memory(prepared), task_id, post, progress)
+    }
 
     #[test]
     fn acknowledgement_windows_cross_multiple_groups_without_wrapping() {
@@ -557,6 +607,75 @@ mod tests {
             }
             Ok(reply)
         }
+    }
+
+    #[test]
+    fn a_file_source_sends_the_same_blocks_and_a_changed_file_never_finishes() {
+        let memory = prepared();
+        let raw = vec![0x5a; MAX_CDN_TRANSFER_BYTES + 17];
+        let directory = wechat_platform::private_tempdir("wechat-large-file-test-").unwrap();
+        let path = directory.path().join("source");
+        std::fs::write(&path, &raw).unwrap();
+        let open = || {
+            PreparedFileUpload::new(
+                std::fs::File::open(&path).unwrap(),
+                raw.len() as u64,
+                &memory.md5,
+                &memory.sha256,
+                memory.kind,
+                &memory.file_name,
+                &memory.destination,
+                &memory.aes_key,
+                &memory.file_key,
+            )
+            .unwrap()
+        };
+        // The peer checks every block against the in-memory ciphertext.
+        let file = open();
+        let mut peer = Peer::new(memory, 512 * 1024);
+        let result = super::upload_large_file(
+            &config(),
+            UploadRef::File(&file),
+            987654321,
+            |path, fields| peer.respond(path, fields),
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(peer.requests, peer.blocks() + 3);
+        assert_eq!(result.descriptor.file_id, "completed-object");
+        assert_eq!(result.sha256, memory.sha256);
+        // Changed after preparation: every block but the last is sent, then the
+        // transfer stops before `fin`.
+        let mut changed = raw.clone();
+        let last = changed.len() - 1;
+        changed[last] ^= 1;
+        std::fs::write(&path, &changed).unwrap();
+        let file = open();
+        let mut peer = Peer::new(memory, 512 * 1024);
+        let mut phases = vec![];
+        let error = super::upload_large_file(
+            &config(),
+            UploadRef::File(&file),
+            987654321,
+            |path, fields| {
+                phases.push(path.rsplit('/').next().unwrap().to_string());
+                peer.respond(path, fields)
+            },
+            |_, _| Ok(()),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.to_string(), "Prepared upload digest mismatch");
+        assert!(!phases
+            .iter()
+            .any(|phase| phase == "fin" || phase == "complete"));
+        assert_eq!(
+            phases
+                .iter()
+                .filter(|phase| *phase == "uploadblock")
+                .count(),
+            peer.blocks() - 1
+        );
     }
 
     #[test]

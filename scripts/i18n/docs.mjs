@@ -26,12 +26,17 @@ export function frontmatter(text) {
   return { fields, body: text.slice(match[0].length) };
 }
 
-/** Sets `sourceHash` in a page's frontmatter. */
+/**
+ * Sets `sourceHash` in a page's frontmatter. The value is quoted because YAML reads
+ * a hash such as `685429610874` (all digits) or `123e45678901` as a number, which
+ * the docs collection schema rejects.
+ */
 export function stamp(text, sourceHash) {
+  const line = `sourceHash: "${sourceHash}"`;
   const match = text.match(/^---\n([\s\S]*?)\n---\n?/);
-  if (!match) return `---\nsourceHash: ${sourceHash}\n---\n${text}`;
+  if (!match) return `---\n${line}\n---\n${text}`;
   const lines = match[1].split('\n').filter(line => !line.startsWith('sourceHash:'));
-  return `---\n${[...lines, `sourceHash: ${sourceHash}`].join('\n')}\n---\n${text.slice(match[0].length)}`;
+  return `---\n${[...lines, line].join('\n')}\n---\n${text.slice(match[0].length)}`;
 }
 
 const fence = /^(```+|~~~+)([^\n]*)\n([\s\S]*?)^\1[ \t]*$/gm;

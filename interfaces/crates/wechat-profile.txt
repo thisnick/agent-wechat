@@ -8,6 +8,7 @@ enum wechat_profile::DecodeState | enum | MISSING DOC
 enum wechat_profile::HardlinkKind | enum | MISSING DOC
 enum wechat_profile::ImageQuality | enum | MISSING DOC
 enum wechat_profile::KeyInfoSource | enum | MISSING DOC
+enum wechat_profile::MediaPayload | enum<'a> | Plaintext for a profile cache write.
 enum wechat_profile::NativeGroupEdit | enum<'a> | Effects established for ordinary Linux group controls. This writer never deletes chat history and never treats a membership delta as a full roster.
 enum wechat_profile::ProfileError | enum | MISSING DOC
 enum wechat_profile::SqlValue | enum | MISSING DOC
@@ -150,6 +151,9 @@ field wechat_profile::KeyFile::image_dat | core::option::Option<wechat_profile::
 field wechat_profile::ListQuery::cursor | core::option::Option<alloc::string::String> | MISSING DOC
 field wechat_profile::ListQuery::limit | core::option::Option<usize> | MISSING DOC
 field wechat_profile::ListQuery::search | core::option::Option<alloc::string::String> | MISSING DOC
+field wechat_profile::MediaPayload::Bytes::0 | &'a [u8] | -
+field wechat_profile::MediaPayload::File::length | u64 | The file's expected size in bytes.
+field wechat_profile::MediaPayload::File::path | &'a std::path::Path | The file to read.
 field wechat_profile::MediaResourceProjection::chat | alloc::string::String | MISSING DOC
 field wechat_profile::MediaResourceProjection::details | alloc::vec::Vec<wechat_profile::model::RawFields> | MISSING DOC
 field wechat_profile::MediaResourceProjection::packed_info | alloc::vec::Vec<u8> | MISSING DOC
@@ -359,6 +363,11 @@ field wechat_profile::ThreadReadProjection::session_present | bool | MISSING DOC
 field wechat_profile::ThreadReadProjection::unread_count_after | i64 | MISSING DOC
 field wechat_profile::ThreadReadProjection::unread_count_before | i64 | MISSING DOC
 field wechat_profile::ThreadReadProjection::whole_thread | bool | MISSING DOC
+field wechat_profile::VerifiedHardlink::byte_length | u64 | Size of the file in bytes.
+field wechat_profile::VerifiedHardlink::md5 | alloc::string::String | Lowercase hex MD5 of the file's content.
+field wechat_profile::VerifiedHardlink::modified | std::time::SystemTime | The file's modification time when checked, used to notice a later change.
+field wechat_profile::VerifiedHardlink::path | std::path::PathBuf | Absolute path of the checked file.
+field wechat_profile::VerifiedHardlink::sha256 | alloc::string::String | Lowercase hex SHA-256 of the file's content.
 field wechat_profile::WalConversionReport::already_wal | alloc::vec::Vec<alloc::string::String> | Databases that were already in WAL mode and were not modified.
 field wechat_profile::WalConversionReport::converted | alloc::vec::Vec<alloc::string::String> | Databases switched from a rollback journal to WAL in this pass.
 field wechat_profile::WalConversionReport::skipped | alloc::vec::Vec<(alloc::string::String, alloc::string::String)> | Databases left unchanged, with a short reason (missing, unreadable, busy, unsupported journal mode). A later pass retries them.
@@ -374,6 +383,8 @@ fn wechat_profile::KeyFile::empty | fn(account_binding: impl core::convert::Into
 fn wechat_profile::KeyFile::from_json | fn(input: &[u8]) -> wechat_profile::Result<Self> | MISSING DOC
 fn wechat_profile::KeyFile::load | fn(path: impl core::convert::AsRef<std::path::Path>) -> wechat_profile::Result<Self> | MISSING DOC
 fn wechat_profile::KeyFile::write_new | fn(&self, path: impl core::convert::AsRef<std::path::Path>) -> wechat_profile::Result<()> | The caller must explicitly choose a protected output. This is the only serializer: secret material never implements public Serialize or Display.
+fn wechat_profile::MediaPayload::is_empty | fn(&self) -> bool | Whether the payload has no bytes.
+fn wechat_profile::MediaPayload::len | fn(&self) -> u64 | Size of the payload in bytes.
 fn wechat_profile::MmkvRecords::contains | fn(&self, name: &str) -> bool | MISSING DOC
 fn wechat_profile::MmkvRecords::is_empty | fn(&self) -> bool | MISSING DOC
 fn wechat_profile::MmkvRecords::len | fn(&self) -> usize | MISSING DOC
@@ -420,6 +431,7 @@ fn wechat_profile::ProfileReader::thread_exists | fn(&self, username: &str) -> w
 fn wechat_profile::ProfileReader::thread_muted | fn(&self, threads: &[alloc::string::String]) -> wechat_profile::Result<alloc::collections::btree::map::BTreeMap<alloc::string::String, core::option::Option<bool>>> | Derive notification preferences for a page without refreshing contacts. Direct contacts and groups use different official fields; incomplete identities and unexpected values remain unknown.
 fn wechat_profile::ProfileReader::thread_pinned | fn(&self, threads: &[alloc::string::String]) -> wechat_profile::Result<alloc::collections::btree::map::BTreeMap<alloc::string::String, core::option::Option<bool>>> | Read the saved pin bit for ordinary contacts and active groups in one query. Incomplete identities and unsupported built-in peers stay unknown.
 fn wechat_profile::ProfileReader::threads | fn(&self, q: &wechat_profile::model::ListQuery) -> wechat_profile::Result<wechat_profile::model::Page<wechat_profile::model::Thread>> | MISSING DOC
+fn wechat_profile::ProfileReader::verified_hardlink_file | fn(&self, kind: wechat_profile::media::HardlinkKind, md5: &str) -> wechat_profile::Result<wechat_profile::media::media_payload::VerifiedHardlink> | [`Self::cached_hardlink_file`] without reading the file into memory: every candidate row is checked by size and content MD5 in steps, and all candidates must hold the same bytes. Returns the first match.
 fn wechat_profile::ProfileReader::visit_messages_by_server_ids | fn<E>(&self, targets: &[(alloc::string::String, alloc::string::String)], own_username: core::option::Option<&str>, visit: impl core::ops::function::FnMut(wechat_profile::model::Message) -> core::result::Result<(), E>) -> core::result::Result<(), E> where E: core::convert::From<wechat_profile::ProfileError> + core::convert::From<rusqlite::error::Error> | Read quoted originals for one page from this captured snapshot. Group by conversation/shard, decode only matching rows, and retain at most two observations per identity just like the single-reference lookup. The visitor consumes each row before the next, avoiding a page of large bodies.
 fn wechat_profile::SchemaReport::require_writable | fn(&self) -> wechat_profile::Result<()> | No generic writer is authorized merely by a readable or additive schema.
 fn wechat_profile::SchemaReport::supports | fn(&self, capability: &str) -> bool | MISSING DOC
@@ -458,9 +470,11 @@ fn wechat_profile::apply_sticker_pack_captions | fn(location: &wechat_profile::s
 fn wechat_profile::apply_sticker_pack_content | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, pack: &str, files: &[wechat_profile::sticker_packs::StickerPackFileRecord], options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<()> | Register already verified, already published original/thumbnail aggregates. Replaces only supplied file rows, then changes only the existing package's download readiness. Other package fields and unspecified files are preserved. Missing membership fails; callers must not fabricate it from cached media. Filesystem publication precedes this SQL transaction and needs its own receipt.
 fn wechat_profile::apply_sticker_pack_membership | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, records: &[wechat_profile::sticker_packs::StickerPackRecord], removed: &[alloc::string::String], options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<()> | Reconcile package membership from a completed authoritative account list. New rows use complete supplied records with OR IGNORE; existing rows remain unchanged, including their readiness, timestamps and ordering. This does not implement the interactive manager's conditional full-record rank replacement. Selected removals delete package/file rows and only orphaned captions, while preserving every Saved/NonStore reference. The SQL changes use one transaction; cache cleanup is separate and remains the caller's durable responsibility. No media acquisition, purchase or account mutation is submitted here.
 fn wechat_profile::cache_file_projection | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, source: &wechat_profile::model::SourceMessageId, chat: &str, plaintext: &[u8], options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<wechat_profile::media::AppliedHardlinkCache> | Register an ordinary subtype6 attachment's verified bytes, resource row, filename pair and native hardlink. A new collision-bounded local name is an explicit allocation policy; an existing resource filename is retained.
+fn wechat_profile::cache_file_projection_payload | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, source: &wechat_profile::model::SourceMessageId, chat: &str, plaintext: wechat_profile::media::media_payload::MediaPayload<'_>, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<wechat_profile::media::AppliedHardlinkCache> | [`cache_file_projection`] for a payload that may be a large file. The file is hashed and copied in steps, never read into memory whole.
 fn wechat_profile::cache_hardlink_media_projection | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, source: &wechat_profile::model::SourceMessageId, chat: &str, kind: wechat_profile::media::HardlinkKind, filename: &str, plaintext: &[u8], options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<wechat_profile::media::AppliedHardlinkCache> | Register verified ordinary file/video bytes in the observed month/hardlink namespace. This does not invent a MessageResourceDetail subtype or packed attachment record; adapters with that metadata can register it separately. A digest prefix makes the local filename deterministic and collision bounded.
 fn wechat_profile::cache_image_projection | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, source: &wechat_profile::model::SourceMessageId, chat: &str, quality: wechat_profile::model::ImageQuality, plaintext: &[u8], options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<wechat_profile::media::AppliedImageCache> | Cache one actual JPEG/PNG quality under a deterministic local basename. The observed DAT/resource/hardlink representation is retained; basename allocation and UTC month are local policies, not a claim about the native generator. No other variant is removed. Original bytes must match the message XML MD5.
 fn wechat_profile::cache_video_projection | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, source: &wechat_profile::model::SourceMessageId, chat: &str, quality: wechat_profile::media::VideoQuality, plaintext: &[u8], options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<wechat_profile::media::AppliedHardlinkCache> | Cache one video representation using the resource basename plus its exact native suffix. Movie and JPEG thumbnail bytes are never interchanged, and adding one quality preserves every other resource detail and basename.
+fn wechat_profile::cache_video_projection_payload | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, source: &wechat_profile::model::SourceMessageId, chat: &str, quality: wechat_profile::media::VideoQuality, plaintext: wechat_profile::media::media_payload::MediaPayload<'_>, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<wechat_profile::media::AppliedHardlinkCache> | [`cache_video_projection`] for a payload that may be a large file. Only box headers are read to check the container; the rest is hashed and copied in steps.
 fn wechat_profile::cache_voice_projection | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, source: &wechat_profile::model::SourceMessageId, chat: &str, encoded: &[u8], options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<wechat_profile::media::AppliedVoiceCache> | Preserve the original encoded voice, independently of any WAV derivative. The supported media shard is selected only when no other media ordinal exists. The message row must already exist and be type 34 in its own table namespace.
 fn wechat_profile::choose_message_sort_sequence | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, peer: &str, server_id: &str, time: i64, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<i64> | Choose the first unused millisecond slot in this message's second, or retain the already stored slot for a replay. This is an independent collision policy within the observed native 1000-slots/second representation, not a recovered native rollover algorithm. Caller holds the lease through insertion.
 fn wechat_profile::compressed_profile_field | fn(bytes: &[u8]) -> wechat_profile::Result<wechat_profile::model::SqlValue> | WCDB compression state 4 observed on the supported fields. Compression is independent of media type; raw protocol bytes stay in the durable sidecar.
@@ -487,6 +501,7 @@ fn wechat_profile::official_account_directory | fn(username: &str, uin: u32) -> 
 fn wechat_profile::parse_dat_v2 | fn(data: &[u8]) -> wechat_profile::Result<wechat_profile::dat::DatLayout> | MISSING DOC
 fn wechat_profile::plan_saved_key_info | fn(home: impl core::convert::AsRef<std::path::Path>, username: &str, stopped: bool) -> wechat_profile::Result<wechat_profile::login_storage::SavedKeyInfoPlan> | Inspect only caller-confirmed stopped files, copying DB/WAL/SHM before SQLite. Existing databases must have the exact known unique-index/table shape.
 fn wechat_profile::publish_cache_file | fn(location: &wechat_profile::snapshot::ProfileLocation, relative: &str, bytes: &[u8], expected_sha256: &str, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<bool> | Create one content-verified cache file without replacing any existing path. The adapter supplies a native relative path, encoded bytes and expected SHA. Atomic publication is idempotent; SQL resource registration is a later step.
+fn wechat_profile::publish_cache_payload | fn(location: &wechat_profile::snapshot::ProfileLocation, relative: &str, payload: wechat_profile::media::media_payload::MediaPayload<'_>, expected_sha256: &str, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<bool> | [`publish_cache_file`] for a payload that may be a file. The copy is hashed as it is written and published only if it matches `expected_sha256`.
 fn wechat_profile::publish_legacy_key_info | fn(path: impl core::convert::AsRef<std::path::Path>, bytes: &[u8], expected_sha256: core::option::Option<&str>, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<bool> | Atomic legacy fallback publication with an expected old-generation SHA-256. None means a new file, never permission to overwrite unknown contents. The coordinator journals/retries this step under its exclusive profile lease.
 fn wechat_profile::publish_mmkv_append | fn(path: impl core::convert::AsRef<std::path::Path>, staged: &wechat_profile::mmkv::StagedMmkv, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<wechat_profile::mmkv::MmkvPublication> | Publish a previously staged append while the caller holds exclusive profile ownership and its durable intent. Data is replaced first: the old metadata still validates the unchanged ciphertext prefix. Metadata publication exposes the new span. Replay accepts the intermediate new-data/old-metadata state. This is not atomic with database, credential or sidecar cursor transactions.
 fn wechat_profile::publish_mmkv_append_guarded | fn(path: impl core::convert::AsRef<std::path::Path>, staged: &wechat_profile::mmkv::StagedMmkv, options: &wechat_profile::writer::WriteOptions, allowed: impl core::ops::function::FnMut() -> bool) -> wechat_profile::Result<wechat_profile::mmkv::MmkvPublication> | Recheck an external authorization fence before each independent data/metadata commit. If the fence closes between commits, the caller retains its sealed intent and the ordinary append replay rules accept the data-first state.
@@ -547,6 +562,7 @@ impl core::clone::Clone for wechat_profile::InstalledStickerPack | impl | -
 impl core::clone::Clone for wechat_profile::KeyFile | impl | -
 impl core::clone::Clone for wechat_profile::KeyInfoSource | impl | -
 impl core::clone::Clone for wechat_profile::ListQuery | impl | -
+impl core::clone::Clone for wechat_profile::MediaPayload | impl<'a> | -
 impl core::clone::Clone for wechat_profile::MediaResourceProjection | impl | -
 impl core::clone::Clone for wechat_profile::Message | impl | -
 impl core::clone::Clone for wechat_profile::MessageProjection | impl | -
@@ -585,6 +601,7 @@ impl core::clone::Clone for wechat_profile::Thread | impl | -
 impl core::clone::Clone for wechat_profile::ThreadExitReadOutcome | impl | -
 impl core::clone::Clone for wechat_profile::ThreadExitReadProjection | impl | -
 impl core::clone::Clone for wechat_profile::ThreadReadProjection | impl | -
+impl core::clone::Clone for wechat_profile::VerifiedHardlink | impl | -
 impl core::clone::Clone for wechat_profile::VerifiedImageQuality | impl | -
 impl core::clone::Clone for wechat_profile::VideoQuality | impl | -
 impl core::clone::Clone for wechat_profile::WalConversionReport | impl | -
@@ -600,6 +617,7 @@ impl core::cmp::Eq for wechat_profile::PeerOpenImApplication | impl | -
 impl core::cmp::Eq for wechat_profile::PeerOpenImWording | impl | -
 impl core::cmp::Eq for wechat_profile::SourceMessageId | impl | -
 impl core::cmp::Eq for wechat_profile::ThreadExitReadOutcome | impl | -
+impl core::cmp::Eq for wechat_profile::VerifiedHardlink | impl | -
 impl core::cmp::Eq for wechat_profile::VerifiedImageQuality | impl | -
 impl core::cmp::Eq for wechat_profile::VideoQuality | impl | -
 impl core::cmp::Eq for wechat_profile::WalConversionReport | impl | -
@@ -616,6 +634,7 @@ impl core::cmp::PartialEq for wechat_profile::PeerOpenImWording | impl | -
 impl core::cmp::PartialEq for wechat_profile::SourceMessageId | impl | -
 impl core::cmp::PartialEq for wechat_profile::SqlValue | impl | -
 impl core::cmp::PartialEq for wechat_profile::ThreadExitReadOutcome | impl | -
+impl core::cmp::PartialEq for wechat_profile::VerifiedHardlink | impl | -
 impl core::cmp::PartialEq for wechat_profile::VerifiedImageQuality | impl | -
 impl core::cmp::PartialEq for wechat_profile::VideoQuality | impl | -
 impl core::cmp::PartialEq for wechat_profile::WalConversionReport | impl | -
@@ -670,6 +689,7 @@ impl core::fmt::Debug for wechat_profile::InstalledStickerPack | impl | -
 impl core::fmt::Debug for wechat_profile::KeyFile | impl | -
 impl core::fmt::Debug for wechat_profile::KeyInfoSource | impl | -
 impl core::fmt::Debug for wechat_profile::ListQuery | impl | -
+impl core::fmt::Debug for wechat_profile::MediaPayload | impl<'a> | -
 impl core::fmt::Debug for wechat_profile::MediaResourceProjection | impl | -
 impl core::fmt::Debug for wechat_profile::Message | impl | -
 impl core::fmt::Debug for wechat_profile::MessageProjection | impl | -
@@ -704,6 +724,7 @@ impl core::fmt::Debug for wechat_profile::Thread | impl | -
 impl core::fmt::Debug for wechat_profile::ThreadExitReadOutcome | impl | -
 impl core::fmt::Debug for wechat_profile::ThreadExitReadProjection | impl | -
 impl core::fmt::Debug for wechat_profile::ThreadReadProjection | impl | -
+impl core::fmt::Debug for wechat_profile::VerifiedHardlink | impl | -
 impl core::fmt::Debug for wechat_profile::VerifiedImageQuality | impl | -
 impl core::fmt::Debug for wechat_profile::VideoQuality | impl | -
 impl core::fmt::Debug for wechat_profile::WalConversionReport | impl | -
@@ -714,6 +735,7 @@ impl core::marker::Copy for wechat_profile::DecodeState | impl | -
 impl core::marker::Copy for wechat_profile::HardlinkKind | impl | -
 impl core::marker::Copy for wechat_profile::ImageQuality | impl | -
 impl core::marker::Copy for wechat_profile::KeyInfoSource | impl | -
+impl core::marker::Copy for wechat_profile::MediaPayload | impl<'a> | -
 impl core::marker::Copy for wechat_profile::SavedKeyInfoPublication | impl | -
 impl core::marker::Copy for wechat_profile::StickerPackCacheKind | impl | -
 impl core::marker::Copy for wechat_profile::VerifiedImageQuality | impl | -
@@ -730,6 +752,7 @@ impl core::marker::StructuralPartialEq for wechat_profile::PeerOpenImWording | i
 impl core::marker::StructuralPartialEq for wechat_profile::SourceMessageId | impl | -
 impl core::marker::StructuralPartialEq for wechat_profile::SqlValue | impl | -
 impl core::marker::StructuralPartialEq for wechat_profile::ThreadExitReadOutcome | impl | -
+impl core::marker::StructuralPartialEq for wechat_profile::VerifiedHardlink | impl | -
 impl core::marker::StructuralPartialEq for wechat_profile::VerifiedImageQuality | impl | -
 impl core::marker::StructuralPartialEq for wechat_profile::VideoQuality | impl | -
 impl core::marker::StructuralPartialEq for wechat_profile::WalConversionReport | impl | -
@@ -905,6 +928,7 @@ struct wechat_profile::TableSchema | struct { public fields } | MISSING DOC
 struct wechat_profile::Thread | struct { public fields } | MISSING DOC
 struct wechat_profile::ThreadExitReadProjection | struct { public fields } | MISSING DOC
 struct wechat_profile::ThreadReadProjection | struct { public fields } | MISSING DOC
+struct wechat_profile::VerifiedHardlink | struct { public fields } | A file or video hardlink whose content was checked in steps.
 struct wechat_profile::WalConversionReport | struct { public fields } | Outcome of one conversion pass; every database lands in exactly one list.
 struct wechat_profile::WriteOptions | struct { public fields } | MISSING DOC
 type wechat_profile::RawFields | type = alloc::collections::btree::map::BTreeMap<alloc::string::String, wechat_profile::model::SqlValue> | MISSING DOC
@@ -928,6 +952,8 @@ variant wechat_profile::ImageQuality::Standard | - | MISSING DOC
 variant wechat_profile::ImageQuality::Thumbnail | - | MISSING DOC
 variant wechat_profile::KeyInfoSource::LatestDatabaseRow | - | MISSING DOC
 variant wechat_profile::KeyInfoSource::LegacyFallback | - | MISSING DOC
+variant wechat_profile::MediaPayload::Bytes | (&'a [u8]) | Bytes held in memory.
+variant wechat_profile::MediaPayload::File | { public fields } | A private file the caller owns and has already checked. `length` is the file's expected size; any other size is refused.
 variant wechat_profile::NativeGroupEdit::ClearAnnouncement | - | MISSING DOC
 variant wechat_profile::NativeGroupEdit::Leave | { public fields } | MISSING DOC
 variant wechat_profile::NativeGroupEdit::MyName | { public fields } | MISSING DOC

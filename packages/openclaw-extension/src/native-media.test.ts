@@ -42,16 +42,19 @@ test("PDF attachments preserve exact source bytes as file references without ima
   const metadata = asset({ kind: "file", filename: "synthetic.pdf", contentType: "application/octet-stream", byteLength: original.length,
     sha256: originalHash, animationFrames: null, expiresAt: 1 });
   const calls: string[] = [];
-  const client = { mediaAssets: async () => ({ items: [metadata] }), mediaContent: async (_account: string, _id: string, options: any) => {
-    calls.push("original"); assert.equal(options.representation, undefined);
-    return { bytes: original, contentType: "application/octet-stream" };
-  }, transferMedia: async () => { throw Error("Cached PDF must not request a transfer"); } } as unknown as NativeWeChatClient;
+  const client = { mediaAssets: async () => ({ items: [metadata] }), mediaContent: async () => assert.fail("Files stream into managed storage"),
+    mediaContentStream: async (_account: string, _id: string, options: any) => {
+      calls.push("original"); assert.equal(options.representation, undefined);
+      return { contentType: "application/octet-stream", stream: (async function* () { yield original.subarray(0, 7); yield original.subarray(7); })(), cancel: async () => {} };
+    }, transferMedia: async () => { throw Error("Cached PDF must not request a transfer"); } } as unknown as NativeWeChatClient;
   const result = await prepareNativeAttachment({ client, account, message: { ...message, type: 49, appMessageType: 6 },
     cfg: { get agents() { throw Error("PDF must not enter image preparation"); } },
-    core: { channel: { media: { saveMediaBuffer: async (buffer: Buffer, mime: string, subdir: string, _max: number, filename: string) => {
+    core: { channel: { media: { saveMediaBuffer: async () => assert.fail("Files are not buffered") } } },
+    saveMediaStream: (async (stream: AsyncIterable<Uint8Array>, mime: string, subdir: string, _max: number, filename: string, _hint: undefined, options: any) => {
+      const chunks: Buffer[] = []; for await (const chunk of stream) chunks.push(Buffer.from(chunk)); const buffer = Buffer.concat(chunks);
       calls.push("save"); assert.deepEqual(buffer, original); assert.equal(mime, "application/octet-stream"); assert.equal(subdir, "inbound");
-      const path = join(directory, filename); await writeFile(path, buffer); return { path };
-    } } } } });
+      options?.assertCommitAllowed?.(); const path = join(directory, filename); await writeFile(path, buffer); return { id: filename, path, size: buffer.length };
+    }) as any });
   assert.deepEqual(calls, ["original", "save"]);
   assert.equal(result.pending, false); assert.equal(result.attachment?.status, "ready"); assert.equal(result.attachment.kind, "file");
   assert.deepEqual(await readFile(result.attachment.path!), original);
@@ -63,6 +66,32 @@ test("PDF attachments preserve exact source bytes as file references without ima
   assert.equal(supplied.path, result.attachment.path); assert.equal(supplied.sourcePath, supplied.path);
   assert.equal(supplied.sha256, originalHash); assert.equal(supplied.sourceSha256, originalHash); assert.equal(supplied.byteLength, original.length);
   assert.equal(createHash("sha256").update(await readFile(supplied.path)).digest("hex"), originalHash);
+});
+test("received videos stream into managed storage as runtime media, and a changed stream is never kept", async () => {
+  const video = Buffer.concat([Buffer.from([0, 0, 0, 16, 102, 116, 121, 112, 105, 115, 111, 109, 0, 0, 2, 0]), Buffer.alloc(200_000, 7)]);
+  const sha256 = createHash("sha256").update(video).digest("hex");
+  const metadata = asset({ kind: "video", variant: "normal", actualVariant: "normal", contentType: "video/mp4", filename: "clip.mp4", byteLength: video.length, sha256 });
+  for (const changed of [false, true]) {
+    const delivered = Buffer.from(video); if (changed) delivered[delivered.length - 1] ^= 1;
+    let committed = 0, cancelled = 0;
+    const client = { mediaAssets: async () => ({ items: [metadata] }), mediaContent: async () => assert.fail("Videos must not be read into memory"),
+      mediaContentStream: async () => ({ contentType: "video/mp4", cancel: async () => { cancelled++; },
+        stream: (async function* () { for (let offset = 0; offset < delivered.length; offset += 65536) yield delivered.subarray(offset, offset + 65536); })() }) } as unknown as NativeWeChatClient;
+    const saveMediaStream: any = async (stream: AsyncIterable<Uint8Array>, mime: string, _subdir: string, _max: number, filename: string, _hint: undefined, options: any) => {
+      let size = 0; for await (const chunk of stream) size += chunk.byteLength;
+      // Like OpenClaw's store, a file is committed only after the whole stream was read.
+      options?.assertCommitAllowed?.(); committed++; assert.equal(mime, "video/mp4"); return { id: filename, path: `/managed/${filename}`, size };
+    };
+    const work = prepareNativeAttachment({ client, account, message: { ...message, type: 43 }, core: {}, saveMediaStream });
+    if (changed) { await assert.rejects(work, /integrity/); assert.equal(committed, 0); assert.equal(cancelled, 1); continue; }
+    const result = await work;
+    assert.equal(committed, 1); assert.equal(cancelled, 1);
+    assert.equal(result.attachment?.kind, "video"); assert.equal(result.attachment?.status, "ready"); assert.equal(result.mediaPath, "/managed/clip.mp4");
+    assert.equal(result.mediaMime, "video/mp4");
+    const supplied = result.suppliedAssets![0];
+    assert.equal(supplied.kind, "video"); assert.equal(supplied.runtimeMedia, true); assert.equal(supplied.role, "file_reference");
+    assert.equal(supplied.sha256, sha256); assert.equal(supplied.byteLength, video.length); assert.equal(supplied.path, "/managed/clip.mp4");
+  }
 });
 test("a 512 MiB file streams into managed storage and non-file retrieval keeps its existing bound", async () => {
   const chunk = new Uint8Array(64 * 1024), total = 512 * 1024 * 1024, digest = createHash("sha256");
@@ -664,6 +693,8 @@ test("Channels cards give agents the post text and cover; only the media tools f
   const video = new Uint8Array([0, 0, 0, 16, 102, 116, 121, 112, 105, 115, 111, 109, 0, 0, 2, 0]);
   const digest = (value: Uint8Array) => createHash("sha256").update(value).digest("hex");
   const saveMediaBuffer = async (buffer: Buffer) => { const path = join(directory, `${digest(buffer)}.bin`); await writeFile(path, buffer); return { path }; };
+  const saveMediaStream: any = async (stream: AsyncIterable<Uint8Array>) => { const chunks: Buffer[] = []; for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+    return { id: "video", size: Buffer.concat(chunks).length, ...await saveMediaBuffer(Buffer.concat(chunks)) }; };
   const cover = (ready: boolean) => asset({ id: "cover", kind: "image", variant: "thumbnail", actualVariant: ready ? "thumbnail" : null, state: ready ? "available" : "pending",
     contentType: "image/png", filename: "link-preview", byteLength: png.length, sha256: digest(png), officialWriteback: "unsupported" });
   const clip = (ready: boolean) => asset({ id: "clip", kind: "video", variant: "normal", actualVariant: ready ? "normal" : null, state: ready ? "available" : "pending",
@@ -686,10 +717,12 @@ test("Channels cards give agents the post text and cover; only the media tools f
   let videoReady = false; const tool: any[] = [];
   const toolClient = { mediaAssets: async () => ({ items: [cover(true), clip(videoReady)] }),
     transferMedia: async (_: string, request: any) => { tool.push(request); videoReady = true; return { id: "job", state: "available" }; },
-    mediaContent: async (_: string, id: string) => id === "clip" ? { bytes: video, contentType: "video/mp4" } : { bytes: png, contentType: "image/png" },
+    mediaContent: async (_: string, id: string) => { assert.equal(id, "cover", "Videos stream into managed storage"); return { bytes: png, contentType: "image/png" }; },
+    mediaContentStream: async (_: string, id: string) => { assert.equal(id, "clip");
+      return { contentType: "video/mp4", stream: (async function* () { yield video; })(), cancel: async () => {} }; },
   } as unknown as NativeWeChatClient;
   const fetched = await prepareNativeAttachment({ client: toolClient, account, message: channelsMessage, cfg: {}, channelsVideo: true,
-    core: { channel: { media: { saveMediaBuffer } } } });
+    core: { channel: { media: { saveMediaBuffer } } }, saveMediaStream });
   assert.deepEqual(tool, [{ messageId: "m", assetId: null, quality: "normal" }]);
   assert.equal(fetched.attachment?.kind, "video"); assert.equal(fetched.attachment?.status, "ready");
   assert.deepEqual(new Uint8Array(await readFile(fetched.attachment!.path!)), video);
@@ -697,7 +730,7 @@ test("Channels cards give agents the post text and cover; only the media tools f
 
   // Asking the tools for a thumbnail still returns the cover.
   const thumbnail = await prepareNativeAttachment({ client: toolClient, account, message: channelsMessage, cfg: {}, channelsVideo: true, quality: "thumbnail",
-    core: { channel: { media: { saveMediaBuffer } } } });
+    core: { channel: { media: { saveMediaBuffer } } }, saveMediaStream });
   assert.equal(thumbnail.attachment?.kind, "image"); assert.equal(thumbnail.variant, "thumbnail");
   assert.equal(tool.length, 1);
 });

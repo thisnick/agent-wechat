@@ -16,6 +16,11 @@ use std::{
     path::{Component, Path},
 };
 
+#[path = "media_payload.rs"]
+mod media_payload;
+use media_payload::PayloadDigests;
+pub use media_payload::{MediaPayload, VerifiedHardlink};
+
 pub const MAX_CACHED_MEDIA_BYTES: usize = 128 * 1024 * 1024;
 pub const MAX_CACHED_FILE_BYTES: usize = wechat_media::MAX_FILE_BYTES;
 fn hardlink_limit(kind: HardlinkKind) -> usize {
@@ -229,17 +234,18 @@ pub(crate) fn read_cache(root: &Path, relative: &Path, max: usize) -> Result<Vec
     }
     Ok(data)
 }
-fn cache_matches(root: &Path, relative: &Path, bytes: &[u8], max: usize) -> Result<bool> {
+fn cache_matches(
+    root: &Path,
+    relative: &Path,
+    payload: MediaPayload<'_>,
+    max: usize,
+) -> Result<bool> {
     let (mut file, before, path) = open_cache(root, relative, max)?;
-    if before.len() != bytes.len() as u64 {
+    if before.len() != payload.len() {
         return Ok(false);
     }
-    let mut buffer = [0; 64 * 1024];
-    for expected in bytes.chunks(buffer.len()) {
-        file.read_exact(&mut buffer[..expected.len()])?;
-        if &buffer[..expected.len()] != expected {
-            return Ok(false);
-        }
+    if !payload.same_as(&mut file)? {
+        return Ok(false);
     }
     cache_stable(&file, &before, &path)?;
     Ok(true)
@@ -832,27 +838,65 @@ pub fn publish_cache_file(
     expected_sha256: &str,
     options: &WriteOptions,
 ) -> Result<bool> {
+    publish_cache_payload(
+        location,
+        relative,
+        MediaPayload::Bytes(bytes),
+        expected_sha256,
+        options,
+    )
+}
+/// [`publish_cache_file`] for a payload that may be a file. The copy is hashed
+/// as it is written and published only if it matches `expected_sha256`.
+pub fn publish_cache_payload(
+    location: &ProfileLocation,
+    relative: &str,
+    payload: MediaPayload<'_>,
+    expected_sha256: &str,
+    options: &WriteOptions,
+) -> Result<bool> {
     if !options.exclusive_ownership_confirmed || options.durable_intent_id.is_empty() {
         return Err(ProfileError::SnapshotRequired);
     }
     if !crate::keys::valid_relative_path(relative)
         || !relative.starts_with("msg/")
         || !digest_hex(expected_sha256, 64)
-        || bytes.is_empty()
-        || bytes.len() > cache_path_limit(relative)
+        || payload.is_empty()
+        || payload.len() > cache_path_limit(relative) as u64
     {
         return Err(ProfileError::InvalidMetadata);
     }
-    if hex::encode(Sha256::digest(bytes)) != expected_sha256.to_ascii_lowercase() {
-        return Err(ProfileError::InvalidMetadata);
+    if let MediaPayload::Bytes(bytes) = payload {
+        if hex::encode(Sha256::digest(bytes)) != expected_sha256.to_ascii_lowercase() {
+            return Err(ProfileError::InvalidMetadata);
+        }
     }
-    apply_checked_cache_file(location, relative, bytes, cache_path_limit(relative))
+    apply_checked_cache_payload(
+        location,
+        relative,
+        payload,
+        Some(expected_sha256),
+        cache_path_limit(relative),
+    )
 }
 
 pub(crate) fn apply_checked_cache_file(
     location: &ProfileLocation,
     relative: &str,
     bytes: &[u8],
+    max: usize,
+) -> Result<bool> {
+    apply_checked_cache_payload(location, relative, MediaPayload::Bytes(bytes), None, max)
+}
+/// Publish `payload` at `relative` unless that path exists. An existing file
+/// must hold the same bytes. With `expected_sha256`, the copy is checked
+/// before it gets its final name, so a file source that changes mid-copy is
+/// never published.
+fn apply_checked_cache_payload(
+    location: &ProfileLocation,
+    relative: &str,
+    payload: MediaPayload<'_>,
+    expected_sha256: Option<&str>,
     max: usize,
 ) -> Result<bool> {
     let target = location.root.join(relative);
@@ -883,14 +927,22 @@ pub(crate) fn apply_checked_cache_file(
         }
     }
     if fs::symlink_metadata(&target).is_ok() {
-        if cache_matches(&location.root, Path::new(relative), bytes, max)? {
+        if cache_matches(&location.root, Path::new(relative), payload, max)? {
             return Ok(false);
         }
         return Err(ProfileError::SourceChanged);
     }
     use std::io::Write;
     let mut f = wechat_platform::private_tempfile_in(parent, ".wx-media-")?;
-    f.write_all(bytes)?;
+    let copied = {
+        let mut output = std::io::BufWriter::with_capacity(256 * 1024, &mut f);
+        let copied = payload.copy_hashed(&mut output)?;
+        output.flush()?;
+        copied
+    };
+    if expected_sha256.is_some_and(|expected| !copied.eq_ignore_ascii_case(expected)) {
+        return Err(ProfileError::SourceChanged);
+    }
     f.as_file().sync_all()?;
     f.persist_noclobber(&target)
         .map_err(|e| ProfileError::Io(e.error))?;
@@ -1338,24 +1390,24 @@ fn checked_decimal(s: &str) -> Result<u64> {
     s.parse().map_err(|_| ProfileError::InvalidMetadata)
 }
 fn bytes_match_metadata(
-    bytes: &[u8],
+    payload: MediaPayload<'_>,
     size: &str,
     md5: Option<&str>,
     require_md5: bool,
     max: usize,
-) -> Result<String> {
-    if bytes.is_empty() || bytes.len() > max || checked_decimal(size)? != bytes.len() as u64 {
+) -> Result<PayloadDigests> {
+    if payload.is_empty() || payload.len() > max as u64 || checked_decimal(size)? != payload.len() {
         return Err(ProfileError::InvalidMetadata);
     }
-    let digest = format!("{:x}", Md5::digest(bytes));
+    let digests = payload.digests()?;
     if let Some(expected) = md5.filter(|s| !s.is_empty()) {
-        if !digest_hex(expected, 32) || !expected.eq_ignore_ascii_case(&digest) {
+        if !digest_hex(expected, 32) || !expected.eq_ignore_ascii_case(&digests.md5) {
             return Err(ProfileError::InvalidMetadata);
         }
     } else if require_md5 {
         return Err(ProfileError::InvalidMetadata);
     }
-    Ok(digest)
+    Ok(digests)
 }
 fn protobuf_bytes(field: u32, bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
@@ -1525,20 +1577,21 @@ fn publish_plain_hardlink(
     binding: &MessageBinding,
     kind: HardlinkKind,
     filename: &str,
-    plaintext: &[u8],
-    hash: &str,
+    plaintext: MediaPayload<'_>,
+    digests: &PayloadDigests,
     options: &WriteOptions,
 ) -> Result<AppliedHardlinkCache> {
+    let hash = digests.md5.as_str();
     let month = chrono::DateTime::from_timestamp(binding.time, 0)
         .ok_or(ProfileError::InvalidMetadata)?
         .format("%Y-%m")
         .to_string();
     let relative_path = format!("{}/{month}/{filename}", kind.directory()?);
-    let mut changed = publish_cache_file(
+    let mut changed = publish_cache_payload(
         location,
         &relative_path,
         plaintext,
-        &hex::encode(Sha256::digest(plaintext)),
+        &digests.sha256,
         options,
     )?;
     let mut fields = RawFields::new();
@@ -1581,7 +1634,7 @@ fn publish_plain_hardlink(
     Ok(AppliedHardlinkCache {
         relative_path,
         changed,
-        plaintext_bytes: plaintext.len(),
+        plaintext_bytes: plaintext.len() as usize,
     })
 }
 
@@ -1594,6 +1647,25 @@ pub fn cache_file_projection(
     source: &SourceMessageId,
     chat: &str,
     plaintext: &[u8],
+    options: &WriteOptions,
+) -> Result<AppliedHardlinkCache> {
+    cache_file_projection_payload(
+        location,
+        keys,
+        source,
+        chat,
+        MediaPayload::Bytes(plaintext),
+        options,
+    )
+}
+/// [`cache_file_projection`] for a payload that may be a large file. The file
+/// is hashed and copied in steps, never read into memory whole.
+pub fn cache_file_projection_payload(
+    location: &ProfileLocation,
+    keys: &KeyFile,
+    source: &SourceMessageId,
+    chat: &str,
+    plaintext: MediaPayload<'_>,
     options: &WriteOptions,
 ) -> Result<AppliedHardlinkCache> {
     ownership(location, keys, options)?;
@@ -1615,13 +1687,14 @@ pub fn cache_file_projection(
     if !valid_component(title) || title.len() > 255 || title.chars().any(char::is_control) {
         return Err(ProfileError::InvalidMetadata);
     }
-    let hash = bytes_match_metadata(
+    let digests = bytes_match_metadata(
         plaintext,
         leaf("msg/appmsg/appattach/totallen")?,
         Some(leaf("msg/appmsg/md5")?),
         true,
         MAX_CACHED_FILE_BYTES,
     )?;
+    let hash = digests.md5.as_str();
     let extension = leaf("msg/appmsg/appattach/fileext")?;
     let kind = file_resource_type(extension) as i64;
     let mut local = format!("{hash}_{title}");
@@ -1667,7 +1740,7 @@ pub fn cache_file_projection(
     let mut nested = protobuf_bytes(1, title.as_bytes());
     nested.extend(protobuf_bytes(2, local.as_bytes()));
     let packed = protobuf_bytes(1, &nested);
-    let mut detail = downloaded_detail(kind, &binding, plaintext.len(), &packed);
+    let mut detail = downloaded_detail(kind, &binding, plaintext.len() as usize, &packed);
     retain_access(&mut detail, existing.as_ref())?;
     let mut result = publish_plain_hardlink(
         location,
@@ -1676,7 +1749,7 @@ pub fn cache_file_projection(
         HardlinkKind::File,
         &local,
         plaintext,
-        &hash,
+        &digests,
         options,
     )?;
     result.changed |= apply_media_resource_variants(
@@ -1707,6 +1780,29 @@ pub fn cache_video_projection(
     plaintext: &[u8],
     options: &WriteOptions,
 ) -> Result<AppliedHardlinkCache> {
+    cache_video_projection_payload(
+        location,
+        keys,
+        source,
+        chat,
+        quality,
+        MediaPayload::Bytes(plaintext),
+        options,
+    )
+}
+/// [`cache_video_projection`] for a payload that may be a large file. Only box
+/// headers are read to check the container; the rest is hashed and copied in
+/// steps.
+#[allow(clippy::too_many_arguments)]
+pub fn cache_video_projection_payload(
+    location: &ProfileLocation,
+    keys: &KeyFile,
+    source: &SourceMessageId,
+    chat: &str,
+    quality: VideoQuality,
+    plaintext: MediaPayload<'_>,
+    options: &WriteOptions,
+) -> Result<AppliedHardlinkCache> {
     ownership(location, keys, options)?;
     let binding = message_binding(location, keys, source, chat, options)?;
     if binding.kind & 0x7fffffff != 43 {
@@ -1719,7 +1815,7 @@ pub fn cache_video_projection(
         VideoQuality::Original => ("rawlength", "rawmd5"),
         VideoQuality::Thumbnail => ("cdnthumblength", "cdnthumbmd5"),
     };
-    let hash = bytes_match_metadata(
+    let digests = bytes_match_metadata(
         plaintext,
         attrs.get(size).ok_or(ProfileError::InvalidMetadata)?,
         attrs.get(digest).map(String::as_str),
@@ -1727,11 +1823,12 @@ pub fn cache_video_projection(
         MAX_CACHED_MEDIA_BYTES,
     )?;
     if quality == VideoQuality::Thumbnail {
-        if crate::images::validate_image(plaintext)?.0 != "image/jpeg" {
+        let thumbnail = plaintext.small_bytes(MAX_CACHED_MEDIA_BYTES)?;
+        if crate::images::validate_image(&thumbnail)?.0 != "image/jpeg" {
             return Err(ProfileError::InvalidMetadata);
         }
-    } else if wechat_media::inspect_video_container(plaintext).is_err() {
-        return Err(ProfileError::InvalidMetadata);
+    } else {
+        plaintext.video_container()?;
     }
     let existing = resource_snapshot(location, keys, &binding, chat, options)?;
     let (base, packed) = if let Some((packed, _)) = existing.as_ref() {
@@ -1767,7 +1864,12 @@ pub fn cache_video_projection(
         (base, packed)
     };
     let filename = format!("{base}{}", quality.suffix());
-    let mut detail = downloaded_detail(quality.resource_type(), &binding, plaintext.len(), &[]);
+    let mut detail = downloaded_detail(
+        quality.resource_type(),
+        &binding,
+        plaintext.len() as usize,
+        &[],
+    );
     retain_access(&mut detail, existing.as_ref())?;
     let mut result = publish_plain_hardlink(
         location,
@@ -1776,7 +1878,7 @@ pub fn cache_video_projection(
         HardlinkKind::Video,
         &filename,
         plaintext,
-        &hash,
+        &digests,
         options,
     )?;
     result.changed |= apply_media_resource_variants(
@@ -1902,13 +2004,83 @@ mod cache_limit_tests {
         let path = dir.path().join("fixture");
         let mut bytes = vec![3; 128 * 1024 + 7];
         fs::write(&path, &bytes).unwrap();
-        assert!(cache_matches(dir.path(), Path::new("fixture"), &bytes, bytes.len()).unwrap());
+        let same = |bytes: &[u8], max| {
+            cache_matches(
+                dir.path(),
+                Path::new("fixture"),
+                MediaPayload::Bytes(bytes),
+                max,
+            )
+        };
+        assert!(same(&bytes, bytes.len()).unwrap());
+        // A file payload is compared in steps too.
+        let copy = dir.path().join("copy");
+        fs::write(&copy, &bytes).unwrap();
+        let file = MediaPayload::File {
+            path: &copy,
+            length: bytes.len() as u64,
+        };
+        assert!(cache_matches(dir.path(), Path::new("fixture"), file, bytes.len()).unwrap());
         let last = bytes.len() - 1;
         bytes[last] ^= 1;
-        assert!(!cache_matches(dir.path(), Path::new("fixture"), &bytes, bytes.len()).unwrap());
+        assert!(!same(&bytes, bytes.len()).unwrap());
+        fs::write(&copy, &bytes).unwrap();
+        assert!(!cache_matches(dir.path(), Path::new("fixture"), file, bytes.len()).unwrap());
         assert!(matches!(
-            cache_matches(dir.path(), Path::new("fixture"), &bytes, bytes.len() - 1),
+            same(&bytes, bytes.len() - 1),
             Err(ProfileError::ResourceLimit)
         ));
+    }
+    #[test]
+    fn file_payloads_are_hashed_checked_and_published_only_when_they_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes: Vec<u8> = (0..300_000).map(|i| (i % 253) as u8).collect();
+        let source = dir.path().join("source");
+        fs::write(&source, &bytes).unwrap();
+        let payload = MediaPayload::File {
+            path: &source,
+            length: bytes.len() as u64,
+        };
+        let digests = payload.digests().unwrap();
+        assert_eq!(digests.md5, format!("{:x}", Md5::digest(&bytes)));
+        assert_eq!(digests.sha256, hex::encode(Sha256::digest(&bytes)));
+        // A stated length that differs from the file is refused.
+        let short = MediaPayload::File {
+            path: &source,
+            length: bytes.len() as u64 - 1,
+        };
+        assert!(matches!(short.digests(), Err(ProfileError::SourceChanged)));
+        let root = dir.path().join("profile");
+        fs::create_dir(&root).unwrap();
+        let location = ProfileLocation {
+            root: root.clone(),
+            storage: root.join("db_storage"),
+            account: "fixture".into(),
+        };
+        // A copy that does not match the expected digest is never published.
+        let wrong = hex::encode(Sha256::digest(b"other"));
+        assert!(matches!(
+            apply_checked_cache_payload(&location, "msg/file/x", payload, Some(&wrong), usize::MAX),
+            Err(ProfileError::SourceChanged)
+        ));
+        assert!(!root.join("msg/file/x").exists());
+        assert!(apply_checked_cache_payload(
+            &location,
+            "msg/file/x",
+            payload,
+            Some(&digests.sha256),
+            usize::MAX
+        )
+        .unwrap());
+        assert_eq!(fs::read(root.join("msg/file/x")).unwrap(), bytes);
+        // Publishing the same bytes again is a no-op.
+        assert!(!apply_checked_cache_payload(
+            &location,
+            "msg/file/x",
+            payload,
+            Some(&digests.sha256),
+            usize::MAX
+        )
+        .unwrap());
     }
 }

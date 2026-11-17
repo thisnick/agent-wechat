@@ -491,6 +491,13 @@ field wechat_protocol::media::ChannelsDownloadFailure::check | &'static str | `e
 field wechat_protocol::media::ChannelsDownloadFailure::facts | wechat_protocol::media::channels_video::ChannelsDownloadFacts | What the CDN delivered.
 field wechat_protocol::media::ChannelsVideo::bytes | alloc::vec::Vec<u8> | Decoded MP4 bytes.
 field wechat_protocol::media::ChannelsVideo::facts | wechat_protocol::media::channels_video::ChannelsDownloadFacts | Sizes, media type and box types observed during the download.
+field wechat_protocol::media::DownloadReceipt::advertised_size_matches | core::option::Option<bool> | Whether the plaintext length matched the advertised size, when one was advertised.
+field wechat_protocol::media::DownloadReceipt::byte_length | u64 | Plaintext bytes written.
+field wechat_protocol::media::DownloadReceipt::md5 | alloc::string::String | Lowercase hex MD5 of the plaintext.
+field wechat_protocol::media::DownloadReceipt::picture_format | core::option::Option<u32> | Picture format the CDN reported, when it said so.
+field wechat_protocol::media::DownloadReceipt::requested_quality | wechat_protocol::media::MediaQuality | Quality the download asked for.
+field wechat_protocol::media::DownloadReceipt::sha256 | alloc::string::String | Lowercase hex SHA-256 of the plaintext.
+field wechat_protocol::media::DownloadReceipt::substituted_filetype | core::option::Option<u32> | File type the CDN substituted for the requested one, when it said so.
 field wechat_protocol::media::DownloadedMedia::advertised_size_matches | core::option::Option<bool> | MISSING DOC
 field wechat_protocol::media::DownloadedMedia::bytes | alloc::vec::Vec<u8> | MISSING DOC
 field wechat_protocol::media::DownloadedMedia::md5 | alloc::string::String | MISSING DOC
@@ -507,6 +514,14 @@ field wechat_protocol::media::MediaDescriptor::expires_at | core::option::Option
 field wechat_protocol::media::MediaDescriptor::file_id | alloc::string::String | MISSING DOC
 field wechat_protocol::media::MediaDescriptor::quality | wechat_protocol::media::MediaQuality | MISSING DOC
 field wechat_protocol::media::MediaDescriptor::strict_size | bool | MISSING DOC
+field wechat_protocol::media::PreparedFileUpload::aes_key | alloc::vec::Vec<u8> | AES-128 key the object is encrypted with.
+field wechat_protocol::media::PreparedFileUpload::destination | alloc::string::String | Chat the upload is for.
+field wechat_protocol::media::PreparedFileUpload::file_key | alloc::string::String | Client file key that correlates the upload's requests.
+field wechat_protocol::media::PreparedFileUpload::file_name | alloc::string::String | File name sent with the upload.
+field wechat_protocol::media::PreparedFileUpload::kind | wechat_protocol::media::MediaQuality | CDN object type to upload as.
+field wechat_protocol::media::PreparedFileUpload::md5 | alloc::string::String | Lowercase hex MD5 of the plaintext.
+field wechat_protocol::media::PreparedFileUpload::plaintext_bytes | u32 | Size of the plaintext in bytes.
+field wechat_protocol::media::PreparedFileUpload::sha256 | alloc::string::String | Lowercase hex SHA-256 of the plaintext.
 field wechat_protocol::media::PreparedImageUpload::height | u32 | MISSING DOC
 field wechat_protocol::media::PreparedImageUpload::original | wechat_protocol::media::PreparedUpload | MISSING DOC
 field wechat_protocol::media::PreparedImageUpload::standard | wechat_protocol::media::PreparedVariant | MISSING DOC
@@ -1026,19 +1041,27 @@ fn wechat_protocol::is_session_rejected | fn(error: &anyhow::Error) -> bool | Tr
 fn wechat_protocol::login_lan_error_reason | fn(error: &anyhow::Error) -> core::option::Option<&'static str> | MISSING DOC
 fn wechat_protocol::media::CdnClient::download | fn(&self, descriptor: &wechat_protocol::media::MediaDescriptor) -> anyhow::Result<wechat_protocol::media::DownloadedMedia> | MISSING DOC
 fn wechat_protocol::media::CdnClient::download_storage_with_progress | fn(&self, descriptor: &wechat_protocol::media::MediaDescriptor, file_key: &str, progress: impl core::ops::function::FnMut(u64, core::option::Option<u64>) -> anyhow::Result<()>) -> anyhow::Result<wechat_protocol::media::DownloadedMedia> | Download a storage object, as the official client does for sticker pack archives: `POST /downloadstorage` with the storage request fields (`apptype` 10, `isstorevideo` 0, `nocheckaeskey` 1, `enablehit` 1, `existancecheck` 0 and `filekey`). `file_key` is the caller's task ID for the object; it correlates requests and is not a credential. Only whole-file descriptors are accepted; the downloaded bytes get the same size and integrity checks as an ordinary file download.
+fn wechat_protocol::media::CdnClient::download_to_with_progress | fn(&self, descriptor: &wechat_protocol::media::MediaDescriptor, progress: impl core::ops::function::FnMut(u64, core::option::Option<u64>) -> anyhow::Result<()>, sink: &mut dyn std::io::Write) -> anyhow::Result<wechat_protocol::media::DownloadReceipt> | Download into `sink`, decrypting each piece as it arrives, so the object is never held in memory. Every check [`Self::download_with_progress`] makes is made on the returned receipt. Until this returns `Ok`, the bytes in `sink` are unverified: on an error the caller must discard them.
 fn wechat_protocol::media::CdnClient::download_with_progress | fn(&self, descriptor: &wechat_protocol::media::MediaDescriptor, progress: impl core::ops::function::FnMut(u64, core::option::Option<u64>) -> anyhow::Result<()>) -> anyhow::Result<wechat_protocol::media::DownloadedMedia> | MISSING DOC
 fn wechat_protocol::media::CdnClient::new | fn(config: wechat_protocol::media::CdnConfig, timeout: core::time::Duration) -> anyhow::Result<Self> | MISSING DOC
 fn wechat_protocol::media::CdnClient::upload | fn(&self, prepared: &wechat_protocol::media::PreparedUpload) -> anyhow::Result<wechat_protocol::media::UploadedMedia> | MISSING DOC
+fn wechat_protocol::media::CdnClient::upload_file_with_progress | fn(&self, prepared: &wechat_protocol::media::upload_source::PreparedFileUpload, progress: impl core::ops::function::FnMut(u64, core::option::Option<u64>) -> anyhow::Result<()>) -> anyhow::Result<wechat_protocol::media::UploadedMedia> | [`Self::upload_with_progress`] for an upload read from a file in steps. The requests are the same as for the equivalent in-memory upload.
 fn wechat_protocol::media::CdnClient::upload_image | fn(&self, p: &wechat_protocol::media::PreparedImageUpload) -> anyhow::Result<wechat_protocol::media::UploadedImage> | MISSING DOC
 fn wechat_protocol::media::CdnClient::upload_image_with_progress | fn(&self, p: &wechat_protocol::media::PreparedImageUpload, progress: impl core::ops::function::FnMut(u64, core::option::Option<u64>) -> anyhow::Result<()>) -> anyhow::Result<wechat_protocol::media::UploadedImage> | Upload an image's original, standard and thumbnail copies, reporting the encrypted bytes of the original sent so far and their total before each request.
+fn wechat_protocol::media::CdnClient::upload_large_file_from_file_with_progress | fn(&self, prepared: &wechat_protocol::media::upload_source::PreparedFileUpload, task_id: u64, progress: impl core::ops::function::FnMut(u64, core::option::Option<u64>) -> anyhow::Result<()>) -> anyhow::Result<wechat_protocol::media::UploadedMedia> | [`Self::upload_large_file_with_progress`] for an upload read from a file in steps. The requests are the same; the block that ends the object is sent only after the whole file matched its digests.
 fn wechat_protocol::media::CdnClient::upload_large_file_with_progress | fn(&self, prepared: &wechat_protocol::media::PreparedUpload, task_id: u64, progress: impl core::ops::function::FnMut(u64, core::option::Option<u64>) -> anyhow::Result<()>) -> anyhow::Result<wechat_protocol::media::UploadedMedia> | Upload one ordinary file using previously persisted source/key material. Object readback and business-message submission remain separate operations.
 fn wechat_protocol::media::CdnClient::upload_video | fn(&self, p: &wechat_protocol::media::PreparedVideoUpload) -> anyhow::Result<wechat_protocol::media::UploadedVideo> | MISSING DOC
+fn wechat_protocol::media::CdnClient::upload_video_original_from_file_with_progress | fn(&self, prepared: &wechat_protocol::media::upload_source::PreparedFileUpload, task_id: u64, progress: impl core::ops::function::FnMut(u64, core::option::Option<u64>) -> anyhow::Result<()>) -> anyhow::Result<wechat_protocol::media::UploadedMedia> | [`Self::upload_video_original_with_progress`] for an original read from a file in steps.
 fn wechat_protocol::media::CdnClient::upload_video_original_with_progress | fn(&self, prepared: &wechat_protocol::media::PreparedUpload, task_id: u64, progress: impl core::ops::function::FnMut(u64, core::option::Option<u64>) -> anyhow::Result<()>) -> anyhow::Result<wechat_protocol::media::UploadedMedia> | Upload the unmodified original as a separate type-4 object. The normal rendition and thumbnail use their own paired upload and final metadata. Persist the task ID and prepared material before calling this method.
 fn wechat_protocol::media::CdnClient::upload_video_with_progress | fn(&self, p: &wechat_protocol::media::PreparedVideoUpload, progress: impl core::ops::function::FnMut(u64, core::option::Option<u64>) -> anyhow::Result<()>) -> anyhow::Result<wechat_protocol::media::UploadedVideo> | MISSING DOC
 fn wechat_protocol::media::CdnClient::upload_with_progress | fn(&self, prepared: &wechat_protocol::media::PreparedUpload, progress: impl core::ops::function::FnMut(u64, core::option::Option<u64>) -> anyhow::Result<()>) -> anyhow::Result<wechat_protocol::media::UploadedMedia> | MISSING DOC
 fn wechat_protocol::media::CdnConfig::validate | fn(&self) -> anyhow::Result<()> | MISSING DOC
+fn wechat_protocol::media::DownloadedMedia::into_parts | fn(self) -> (alloc::vec::Vec<u8>, wechat_protocol::media::DownloadReceipt) | The bytes and the receipt describing them.
 fn wechat_protocol::media::LargeFileDownloadControl::field_name | const fn(self) -> &'static str | MISSING DOC
 fn wechat_protocol::media::MediaQuality::filetype | fn(self) -> u32 | MISSING DOC
+fn wechat_protocol::media::PreparedFileUpload::encrypted_len | fn(&self) -> usize | Length of the encrypted object, including its padding block.
+fn wechat_protocol::media::PreparedFileUpload::new | fn(file: std::fs::File, length: u64, md5: &str, sha256: &str, kind: wechat_protocol::media::MediaQuality, file_name: &str, destination: &str, key: &[u8], file_key: &str) -> anyhow::Result<Self> | Prepare an upload of `file`. `length`, `md5` and `sha256` describe the file; the caller computed them while writing it. A file of another length is refused now, and changed bytes before the final request.
+fn wechat_protocol::media::PreparedFileUpload::to_memory | fn(&self) -> anyhow::Result<wechat_protocol::media::PreparedUpload> | The same upload held in memory, for transports that send one object per request. The file is read whole and checked against its digests.
 fn wechat_protocol::media::PreparedImageUpload::prepare | fn(original: &[u8], standard: &[u8], thumbnail: &[u8], file_name: &str, destination: &str) -> anyhow::Result<Self> | Supplied variants must be independent real JPEGs. This function decodes them fully but does not resize or invent an unsupplied representation.
 fn wechat_protocol::media::PreparedImageUpload::with_material | fn(original: &[u8], standard: &[u8], thumbnail: &[u8], file_name: &str, destination: &str, key: &[u8], file_key: &str) -> anyhow::Result<Self> | MISSING DOC
 fn wechat_protocol::media::PreparedUpload::prepare | fn(raw: &[u8], kind: wechat_protocol::media::MediaQuality, file_name: &str, destination: &str) -> anyhow::Result<Self> | Generate independent upload material. Persist either this result or the source bytes and its key/file-key before the first upload request.
@@ -1246,11 +1269,13 @@ impl core::clone::Clone for wechat_protocol::media::CdnConfig | impl | -
 impl core::clone::Clone for wechat_protocol::media::CdnLocation | impl | -
 impl core::clone::Clone for wechat_protocol::media::ChannelsDownloadFacts | impl | -
 impl core::clone::Clone for wechat_protocol::media::ChannelsDownloadFailure | impl | -
+impl core::clone::Clone for wechat_protocol::media::DownloadReceipt | impl | -
 impl core::clone::Clone for wechat_protocol::media::LargeCdnRoute | impl | -
 impl core::clone::Clone for wechat_protocol::media::LargeFileDownloadControl | impl | -
 impl core::clone::Clone for wechat_protocol::media::LargeFileDownloadError | impl | -
 impl core::clone::Clone for wechat_protocol::media::MediaDescriptor | impl | -
 impl core::clone::Clone for wechat_protocol::media::MediaQuality | impl | -
+impl core::clone::Clone for wechat_protocol::media::PreparedFileUpload | impl | -
 impl core::clone::Clone for wechat_protocol::media::PreparedImageUpload | impl | -
 impl core::clone::Clone for wechat_protocol::media::PreparedUpload | impl | -
 impl core::clone::Clone for wechat_protocol::media::PreparedVariant | impl | -
@@ -1466,11 +1491,13 @@ impl core::fmt::Debug for wechat_protocol::media::CdnConfig | impl | -
 impl core::fmt::Debug for wechat_protocol::media::ChannelsDownloadFacts | impl | -
 impl core::fmt::Debug for wechat_protocol::media::ChannelsDownloadFailure | impl | -
 impl core::fmt::Debug for wechat_protocol::media::ChannelsVideo | impl | -
+impl core::fmt::Debug for wechat_protocol::media::DownloadReceipt | impl | -
 impl core::fmt::Debug for wechat_protocol::media::LargeCdnRoute | impl | -
 impl core::fmt::Debug for wechat_protocol::media::LargeFileDownloadControl | impl | -
 impl core::fmt::Debug for wechat_protocol::media::LargeFileDownloadError | impl | -
 impl core::fmt::Debug for wechat_protocol::media::MediaDescriptor | impl | -
 impl core::fmt::Debug for wechat_protocol::media::MediaQuality | impl | -
+impl core::fmt::Debug for wechat_protocol::media::PreparedFileUpload | impl | -
 impl core::fmt::Debug for wechat_protocol::media::PreparedUpload | impl | -
 impl core::fmt::Debug for wechat_protocol::media::SourceEvidence | impl | -
 impl core::fmt::Debug for wechat_protocol::media::VideoRepresentationMismatch | impl | -
@@ -1590,6 +1617,7 @@ impl core::ops::drop::Drop for wechat_protocol::business::Prelogin | impl | -
 impl core::ops::drop::Drop for wechat_protocol::file_upload::FileUploadReservation | impl | -
 impl core::ops::drop::Drop for wechat_protocol::media::CdnConfig | impl | -
 impl core::ops::drop::Drop for wechat_protocol::media::MediaDescriptor | impl | -
+impl core::ops::drop::Drop for wechat_protocol::media::PreparedFileUpload | impl | -
 impl core::ops::drop::Drop for wechat_protocol::media::PreparedUpload | impl | -
 impl core::ops::drop::Drop for wechat_protocol::mmtls::ShortSession | impl | -
 impl core::str::traits::FromStr for wechat_protocol::StickerId | impl | -
@@ -1867,8 +1895,10 @@ struct wechat_protocol::media::CdnLocation | struct { public fields } | MISSING 
 struct wechat_protocol::media::ChannelsDownloadFacts | struct { public fields } | What the CDN delivered, kept for checks and failure diagnostics. Holds no address, token or key.
 struct wechat_protocol::media::ChannelsDownloadFailure | struct { public fields } | A downloaded video failed a check. Its message is the stable code `channels_integrity_failed`; `check` names which check and `facts` say what arrived.
 struct wechat_protocol::media::ChannelsVideo | struct { public fields } | A downloaded Channels video: the decoded bytes and what the CDN delivered.
+struct wechat_protocol::media::DownloadReceipt | struct { public fields } | What a download into a writer verified: everything [`DownloadedMedia`] reports except the bytes, which went to the writer.
 struct wechat_protocol::media::DownloadedMedia | struct { public fields } | MISSING DOC
 struct wechat_protocol::media::MediaDescriptor | struct { public fields } | MISSING DOC
+struct wechat_protocol::media::PreparedFileUpload | struct { private fields } | One object ready to upload from a private file. The file is read in steps while the object is sent; its length, MD5 and SHA-256 are checked again on the way, and the request that ends the object is only made once every byte read matched. Persist the key and file key before the first request, as for [`PreparedUpload`].
 struct wechat_protocol::media::PreparedImageUpload | struct { public fields } | MISSING DOC
 struct wechat_protocol::media::PreparedUpload | struct { public fields } | MISSING DOC
 struct wechat_protocol::media::PreparedVariant | struct { public fields } | MISSING DOC
