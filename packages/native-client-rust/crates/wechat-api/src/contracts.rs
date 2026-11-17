@@ -278,8 +278,8 @@ pub struct NativeContact {
     pub remark: Option<String>,
     /// The custom WeChat ID the contact chose, which they can change. Null when none is saved.
     pub alias: Option<String>,
-    /// Relationship to this account. It currently always reports `unknown`, including for saved
-    /// friends.
+    /// Relationship evidence: `friend` when membership is established, `non_contact` when
+    /// known flags do not establish membership, or `unknown` when flags are unavailable.
     pub relation: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]

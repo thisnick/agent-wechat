@@ -138,6 +138,18 @@ fn flag(contact: &wechat_profile::Contact) -> bool {
         || matches!((contact.raw_fields.get("flag"),contact.raw_fields.get("delete_flag")),(Some(wechat_profile::SqlValue::Integer(v)),Some(wechat_profile::SqlValue::Integer(d))) if v.parse::<u64>().is_ok_and(|v|v&1!=0)&&d=="0")
 }
 
+/// Relationship evidence from the retained canonical row, not presence in the contact table.
+pub(crate) fn contact_relation(contact: &wechat_profile::Contact) -> &'static str {
+    if flag(contact) {
+        "friend"
+    } else if matches!(contact.raw_fields.get("flag"), Some(wechat_profile::SqlValue::Integer(v)) if v.parse::<u32>().is_ok())
+    {
+        "non_contact"
+    } else {
+        "unknown"
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct ContactPrivacySnapshot {
     privacy: ContactPrivacySettings,

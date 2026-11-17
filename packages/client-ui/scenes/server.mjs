@@ -88,7 +88,7 @@ export async function startUiServer() {
   };
   const server = await createServer({
     root: packageDir,
-    cacheDir: join(packageDir, "node_modules/.vite-scenes"),
+    cacheDir: join(packageDir, `node_modules/.vite-scenes-${process.env.TEST_WORKER_INDEX ?? "local"}`),
     configFile: false,
     logLevel: "warn",
     clearScreen: false,

@@ -383,7 +383,7 @@ response NativeContact.classification.openIm.wordings[].text | string, required 
 response NativeContact.displayName | string, required, nullable | Name to show: the remark if set, else the nickname, else the username.
 response NativeContact.id | string, required | Contact ID. It is the same as `username`.
 response NativeContact.nickname | string, required, nullable | The name the contact chose for themselves. Null when none is saved.
-response NativeContact.relation | string, required | Relationship to this account. It currently always reports `unknown`, including for saved friends.
+response NativeContact.relation | string, required | Relationship evidence: `friend` when membership is established, `non_contact` when known flags do not establish membership, or `unknown` when flags are unavailable.
 response NativeContact.remark | string, required, nullable | Your private name for the contact. Null when none is saved.
 response NativeContact.username | string, required | The contact's WeChat username.
 response NativeContactPage | object | One page of a list. `items` holds the resources, `nextCursor` continues the list, and the other fields describe the saved data the list was read from.
@@ -413,7 +413,7 @@ response NativeContactPage.items[]<NativeContact>.classification.openIm.wordings
 response NativeContactPage.items[]<NativeContact>.displayName | string, required, nullable | Name to show: the remark if set, else the nickname, else the username.
 response NativeContactPage.items[]<NativeContact>.id | string, required | Contact ID. It is the same as `username`.
 response NativeContactPage.items[]<NativeContact>.nickname | string, required, nullable | The name the contact chose for themselves. Null when none is saved.
-response NativeContactPage.items[]<NativeContact>.relation | string, required | Relationship to this account. It currently always reports `unknown`, including for saved friends.
+response NativeContactPage.items[]<NativeContact>.relation | string, required | Relationship evidence: `friend` when membership is established, `non_contact` when known flags do not establish membership, or `unknown` when flags are unavailable.
 response NativeContactPage.items[]<NativeContact>.remark | string, required, nullable | Your private name for the contact. Null when none is saved.
 response NativeContactPage.items[]<NativeContact>.username | string, required | The contact's WeChat username.
 response NativeContactPage.items[]<NativeTombstone> | object | Stands in for a resource that was in the list when it was first read but is no longer in the saved profile. It keeps the resource's place in the list.

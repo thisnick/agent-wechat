@@ -1321,7 +1321,7 @@ function Chats({
               onClick={() => section === "contacts" ? setOmniScope("contacts") : router.push({ name: "new-chat", ...here })}
             />
           </div>
-          <button title={section === "contacts" ? t("main.searchContacts") : t("main.searchConversations")} className="search search-trigger" onFocus={()=>setOmniScope("all")} onClick={()=>setOmniScope("all")} aria-label={t("contactsUi.searchEverything")}><Icon name="search"/><span>{t("contactsUi.searchEverything")}</span></button>
+          <button title={section === "contacts" ? t("main.searchContacts") : t("main.searchConversations")} className="search search-trigger" onFocus={()=>setOmniScope(section === "contacts" ? "contacts" : "all")} onClick={()=>setOmniScope(section === "contacts" ? "contacts" : "all")} aria-label={t("contactsUi.searchEverything")}><Icon name="search"/><span>{t("contactsUi.searchEverything")}</span></button>
           {section === "chats" && (
             <ConversationFilterBar
               selected={categories}
@@ -1354,7 +1354,7 @@ function Chats({
               ))
             : state.contacts
                 .filter((c) =>
-                  (c.displayName || c.id)
+                  c.relation === "friend" && (c.displayName || c.id)
                     .toLowerCase()
                     .includes(query.toLowerCase()),
                 )
@@ -1364,10 +1364,10 @@ function Chats({
                       <HubAvatar connection={connection} account={state.account!} username={c.id} name={c.displayName || c.id} />
                       <div className="chat-copy"><strong>{c.displayName || c.id}</strong><p className="preview">{c.username}</p></div>
                     </button>
-                    <button className="contact-list-details omni-action"
+                    <button className="contact-list-details icon-btn"
                       aria-label={t("contactsUi.detailsFor", { name: c.displayName || c.id })}
                       onClick={() => setRequestSelection({ contact: { id: c.id, displayName: c.displayName || c.id } })}>
-                      {t("contactsUi.details")}
+                      <Icon name="panel" />
                     </button>
                   </div>
                 ))}
@@ -1865,7 +1865,7 @@ function Chats({
         </ConversationNavigation>
       </main>}
       {omniScope!==null && <OmniSearch key={state.account} connection={connection} account={state.account!} initialScope={omniScope} suspended={requestSelection!==null} requests={requests.items} close={()=>setOmniScope(null)} review={setRequestSelection} open={(thread,message)=>{if(message)router.push({name:"message",...here,thread,message});else select(thread);}}/>}
-      {requestSelection && <ContactDetailDialog key={contactSelectionKey(requestSelection)} connection={connection} account={state.account!} selection={"request" in requestSelection ? { request: requests.items.find(item => item.id === requestSelection.request.id) ?? requestSelection.request } : requestSelection} close={()=>setRequestSelection(null)} changed={()=>{requests.refresh();void session.refresh().catch(()=>{});}} open={select} remove={contact=>setRequestSelection({removeContact:contact})}/>}
+      {requestSelection && <ContactDetailDialog key={contactSelectionKey(requestSelection)} connection={connection} account={state.account!} review={setRequestSelection} selection={"request" in requestSelection ? { request: requests.items.find(item => item.id === requestSelection.request.id) ?? requestSelection.request } : requestSelection} close={()=>setRequestSelection(null)} changed={()=>{requests.refresh();void session.refresh().catch(()=>{});}} open={select} remove={contact=>setRequestSelection({removeContact:contact})}/>}
 
 
       {accountMenu && (

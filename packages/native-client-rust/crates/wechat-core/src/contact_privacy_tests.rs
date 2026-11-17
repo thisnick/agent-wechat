@@ -895,3 +895,31 @@ async fn contact_privacy_overflow_holds_admission_and_submission_but_replays_the
         SqlValue::Integer("1".into())
     );
 }
+
+#[test]
+fn contact_relation_distinguishes_cached_unknown_and_removed_people() {
+    let (_temp, core) = super::super::groups::tests::fixture();
+    let mut contact = core
+        .profile_reader_owned("one")
+        .unwrap()
+        .contact("peer")
+        .unwrap();
+    assert_eq!(contact_relation(&contact), "friend");
+    contact
+        .raw_fields
+        .insert("flag".into(), SqlValue::Integer("0".into()));
+    assert_eq!(contact_relation(&contact), "non_contact");
+    contact.raw_fields.insert("flag".into(), SqlValue::Null);
+    assert_eq!(contact_relation(&contact), "unknown");
+    contact
+        .raw_fields
+        .insert("flag".into(), SqlValue::Text("1".into()));
+    assert_eq!(contact_relation(&contact), "unknown");
+    contact
+        .raw_fields
+        .insert("flag".into(), SqlValue::Integer("1".into()));
+    contact
+        .raw_fields
+        .insert("delete_flag".into(), SqlValue::Integer("1".into()));
+    assert_eq!(contact_relation(&contact), "non_contact");
+}

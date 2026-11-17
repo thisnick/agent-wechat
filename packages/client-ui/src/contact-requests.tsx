@@ -3,6 +3,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   NativeApiError,
   isNativeTombstone,
+  type NativeContact,
+  type NativeGroup,
+  type NativeMessage,
   type NativeContactRequest,
   type NativeContactSearch,
   type NativeOperation,
@@ -238,69 +241,36 @@ export function OmniSearch({
     setError("");
     setHits([]);
     const search = query.trim();
-    void (async () => {
-      try {
-        const client = connection.session.client;
-        const [contacts, groups, messages] = await Promise.all([
-          scope === "all" || scope === "contacts"
-            ? client.contacts(
-                account,
-                { query: search, limit: 30 },
-                abort.signal,
-              )
-            : null,
-          scope === "all" || scope === "groups"
-            ? client.groups(account, { query: search, limit: 20 }, abort.signal)
-            : null,
-          search && (scope === "all" || scope === "messages")
-            ? client.searchMessages(
-                account,
-                { query: search, limit: 20 },
-                abort.signal,
-              )
-            : null,
-        ]);
-        if (abort.signal.aborted) return;
-        const rows: Hit[] = [];
-        for (const c of contacts?.items ?? [])
-          if (!isNativeTombstone(c))
-            rows.push({
-              id: c.id,
-              name: c.displayName ?? c.id,
-              subtitle: t("contactsUi.saved"),
-              kind: "contacts",
-            });
-        for (const g of groups?.items ?? [])
-          if (!isNativeTombstone(g))
-            rows.push({
-              id: g.id,
-              name: g.displayName ?? g.id,
-              subtitle: t("contactsUi.group"),
-              kind: "groups",
-            });
-        for (const m of messages?.items ?? [])
-          if (!isNativeTombstone(m))
-            rows.push({
-              id: m.id,
-              thread: m.threadId,
-              name:
-                connection.session.snapshot().account === account
-                  ? (connection.session
-                      .snapshot()
-                      .threads.find((t) => t.id === m.threadId)?.displayName ??
-                    connection.session
-                      .snapshot()
-                      .contacts.find((c) => c.id === m.threadId)?.displayName ??
-                    m.threadId)
-                  : m.threadId,
-              subtitle: m.body ?? "",
-              kind: "messages",
-            });
-        setHits(rows);
-      } catch (e) {
-        if (!abort.signal.aborted) setError(readableError(e));
-      }
-    })();
+    const client = connection.session.client;
+    const publish = (kind: Hit["kind"], rows: Hit[]) => {
+      if (!abort.signal.aborted)
+        setHits((current) => [...current.filter((hit) => hit.kind !== kind), ...rows]);
+    };
+    const failed = (e: unknown) => {
+      if (!abort.signal.aborted) setError(readableError(e));
+    };
+    if (scope === "all" || scope === "contacts")
+      void client.contacts(account, { query: search, limit: 30 }, abort.signal)
+        .then((page) => publish("contacts", page.items.filter((c): c is NativeContact => !isNativeTombstone(c)).map((c) => ({
+          id: c.id, name: c.displayName ?? c.id, subtitle: t(c.relation === "friend" ? "contactsUi.saved" : "contactsUi.onWechat"), kind: "contacts",
+        })))).catch(failed);
+    if (scope === "all" || scope === "groups")
+      void client.groups(account, { query: search, limit: 20 }, abort.signal)
+        .then((page) => publish("groups", page.items.filter((g): g is NativeGroup => !isNativeTombstone(g)).map((g) => ({
+          id: g.id, name: g.displayName ?? g.id, subtitle: t("contactsUi.group"), kind: "groups",
+        })))).catch(failed);
+    if (search && (scope === "all" || scope === "messages"))
+      void client.searchMessages(account, { query: search, limit: 20 }, abort.signal)
+        .then((page) => publish("messages", page.items.filter((m): m is NativeMessage => !isNativeTombstone(m)).map((m) => {
+          const snapshot = connection.session.snapshot();
+          return { id: m.id, thread: m.threadId, kind: "messages",
+            name: snapshot.account === account
+              ? (snapshot.threads.find((thread) => thread.id === m.threadId)?.displayName
+                ?? snapshot.contacts.find((contact) => contact.id === m.threadId)?.displayName ?? m.threadId)
+              : m.threadId,
+            subtitle: m.body ?? "",
+          };
+        }))).catch(failed);
     const timer = setTimeout(() => {
       if (!search || !["all", "contacts"].includes(scope)) return;
       setLoading(true);
@@ -310,7 +280,7 @@ export function OmniSearch({
           if (!abort.signal.aborted) setRemote(r);
         })
         .catch((e) => {
-          if (!abort.signal.aborted) setRemoteError(readableError(e));
+          if (!abort.signal.aborted) setRemoteError(e instanceof NativeApiError && e.code === "contact_discovery_rejected" ? t("contactsUi.discoveryRejected") : t("contactsUi.discoveryUnavailable"));
         })
         .finally(() => {
           if (!abort.signal.aborted) setLoading(false);
@@ -462,7 +432,7 @@ export function OmniSearch({
                             details(h);
                           }}
                         >
-                          {t("contactsUi.details")}
+                          <Icon name="panel" />
                         </button>
                       </span>
                     ) : (
@@ -495,7 +465,7 @@ export function OmniSearch({
         {loading
           ? t("contactsUi.searchingWechat")
           : remoteError
-            ? t("contactsUi.discoveryUnavailable")
+            ? remoteError
             : t("contactsUi.contactsIncludeWechat")}
       </div>
     </Command.Dialog>
@@ -560,6 +530,7 @@ export function ContactDetailDialog({
   changed,
   open,
   remove,
+  review,
 }: {
   connection: Connection;
   account: string;
@@ -568,24 +539,28 @@ export function ContactDetailDialog({
   changed: () => void;
   open?: (id: string) => void;
   remove?: (contact: { id: string; displayName: string }) => void;
+  review: (selection: RequestSelection) => void;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const actions = useMemo(
     () => contactDetailActions(connection, account),
     [connection, account],
   );
+  const lookupAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => lookupAbort.current?.abort(), [connection, account]);
   const request = "request" in selection ? selection.request : null;
   const discovery = "discovery" in selection ? selection.discovery : null;
   const contact = "contact" in selection ? selection.contact : null;
   const removal = "removeContact" in selection ? selection.removeContact : null;
-  const friendId = contact?.id ?? (request?.isContact ? request.peerId : null);
+  const savedContact = contact && connection.session.snapshot().contacts.find((row) => row.id === contact.id);
+  const friendId = (savedContact?.relation === "friend" ? contact?.id : null) ?? (request?.isContact ? request.peerId : null);
   const name =
     contact?.displayName ??
     removal?.displayName ??
     request?.displayName ??
     discovery?.displayName ??
     "";
-  const peer = friendId ?? removal?.id ?? request?.peerId;
+  const peer = contact?.id ?? friendId ?? removal?.id ?? request?.peerId;
   const [receiptId] = useState(
     () =>
       `contact-change:${removal ? `remove:${removal.id}` : contact ? `privacy:${contact.id}` : request ? `${request.id}:${request.version}` : discovery?.recipientRef}`,
@@ -628,6 +603,27 @@ export function ContactDetailDialog({
     [error, setError] = useState(""),
     [retryOriginal, setRetryOriginal] = useState(false);
   const [permissionDenied, setPermissionDenied] = useState(false);
+  async function findForRequest() {
+    if (!contact || busy) return;
+    lookupAbort.current?.abort();
+    const abort = new AbortController();
+    lookupAbort.current = abort;
+    setBusy(true);
+    setError("");
+    try {
+      const result = await connection.session.client.searchContacts(
+        account, savedContact?.alias || contact.id, abort.signal,
+      );
+      if (abort.signal.aborted || connection.session.snapshot().account !== account) return;
+      if (result.recipientRef) review({ discovery: result });
+      else setError(t("contactsUi.requestUnavailable"));
+    } catch (error) {
+      if (!abort.signal.aborted) setError(error instanceof NativeApiError && error.code === "contact_discovery_rejected"
+        ? t("contactsUi.discoveryRejected") : t("contactsUi.discoveryUnavailable"));
+    } finally {
+      if (!abort.signal.aborted) setBusy(false);
+    }
+  }
   const ended =
     !!receipt?.operation &&
     ["succeeded", "failed", "cancelled", "needs_review"].includes(
@@ -688,7 +684,7 @@ export function ContactDetailDialog({
           setPrivacyError(
             e instanceof NativeApiError && e.status === 403
               ? t("contactsUi.privacyPermission")
-              : readableError(e),
+              : t("contactsUi.privacyReadFailed"),
           );
       })
       .finally(() => {
@@ -873,6 +869,7 @@ export function ContactDetailDialog({
   const title = removal
     ? t("contactsUi.removeContact")
     : t("contactsUi.contactDetails");
+  const privacyDirty = !!savedPrivacy && !sameContactPrivacy(privacy, savedPrivacy.privacy);
   const showPrivacy =
     !removal &&
     (!!friendId || !!discovery?.recipientRef || !!request?.actionable);
@@ -889,6 +886,13 @@ export function ContactDetailDialog({
     >
       <div className="contact-request-heading">
         <h2>{title}</h2>
+        {!removal && (request || friendId) && <details className="contact-more">
+          <summary aria-label={t("contactsUi.moreActions")}><Icon name="more" /></summary>
+          <div className="contact-more-menu">
+            {request && !receipt && <button disabled={busy} onClick={() => { if (window.confirm(t("contactsUi.deleteExplanation"))) void change("delete"); }}>{t("contactsUi.deleteLocal")}</button>}
+            {friendId && remove && savedPrivacy && !privacyLoading && !privacyError && !permissionDenied && <button disabled={locked} onClick={() => remove({ id: friendId, displayName: name })}>{t("contactsUi.removeContact")}</button>}
+          </div>
+        </details>}
         <button onClick={close} aria-label={t("contactsUi.close")}>
           <Icon name="close" />
         </button>
@@ -912,25 +916,7 @@ export function ContactDetailDialog({
         </div>
       </div>
       {removal && <p>{t("contactsUi.removeExplanation")}</p>}
-      {request && request.history.length > 0 && (
-        <section
-          className="contact-detail-history"
-          aria-label={t("contactsUi.requestHistory")}
-        >
-          <h4>{t("contactsUi.requestHistory")}</h4>
-          {request.history.map((h, i) => (
-            <div className="request-history" key={`${h.serverId}:${i}`}>
-              <small>
-                {t(
-                  `contactsUi.${h.direction === "outgoing" ? "sent" : "incoming"}`,
-                )}{" "}
-                · {new Date(h.createdAt * 1000).toLocaleString()}
-              </small>
-              <p>{h.message}</p>
-            </div>
-          ))}
-        </section>
-      )}
+      {!friendId && request?.actionable && <div className="contact-latest-request"><small>{t("contactsUi.incoming")}</small><p>{request.message}</p></div>}
       {discovery && !discovery.recipientRef && (
         <p>{t("contactsUi.requestUnavailable")}</p>
       )}
@@ -987,7 +973,7 @@ export function ContactDetailDialog({
               }}
             />
           )}
-          {friendId && (
+          {friendId && privacyError && (
             <button
               className="omni-action"
               disabled={busy || privacyLoading || (!!receipt && !ended)}
@@ -998,13 +984,27 @@ export function ContactDetailDialog({
           )}
         </section>
       )}
+      {request && request.history.length > 0 && (
+        <details
+          className="contact-detail-history"
+          aria-label={t("contactsUi.requestHistory")}
+        >
+          <summary>{t("contactsUi.requestHistory")} · {request.history.length}</summary>
+          {request.history.map((h, i) => (
+            <div className="request-history" key={`${h.serverId}:${i}`}>
+              <small>
+                {t(
+                  `contactsUi.${h.direction === "outgoing" ? "sent" : "incoming"}`,
+                )}{" "}
+                · {new Date(h.createdAt * 1000).toLocaleString()}
+              </small>
+              <p>{h.message}</p>
+            </div>
+          ))}
+        </details>
+      )}
       {request?.direction === "outgoing" && !friendId && (
         <p>{t("contactsUi.sentExplanation")}</p>
-      )}
-      {request && !receipt && (
-        <p className="contact-delete-note">
-          {t("contactsUi.deleteExplanation")}
-        </p>
       )}
       {receipt && (
         <p role="status" className="contact-change-status">
@@ -1013,25 +1013,21 @@ export function ContactDetailDialog({
       )}
       {error && <p role="alert">{error}</p>}
       <div className="contact-request-actions">
-        {request && !receipt && (
-          <button
-            className="contact-delete-action"
-            disabled={busy}
-            onClick={() => void change("delete")}
-          >
-            {t("contactsUi.deleteLocal")}
-          </button>
-        )}
-        <button onClick={close}>{t("contactsUi.close")}</button>
-        {friendId && open && (
+        {friendId && privacyDirty && !locked && savedPrivacy && <button onClick={() => setPrivacy(savedPrivacy.privacy)}>{t("contactsUi.cancel")}</button>}
+        {(friendId || contact?.id) && open && !privacyDirty && (
           <button
             onClick={() => {
               close();
-              open(friendId);
+              open(friendId ?? contact!.id);
             }}
           >
             <Icon name="chat" />
             {t("contactsUi.message")}
+          </button>
+        )}
+        {contact && !friendId && !receipt && (
+          <button className="contact-primary-action" disabled={busy} onClick={() => void findForRequest()}>
+            {t("contactsUi.addContact")}
           </button>
         )}
         {receipt && retryOriginal && (
@@ -1044,7 +1040,7 @@ export function ContactDetailDialog({
             {t("contactsUi.checkStatus")}
           </button>
         )}
-        {friendId && (
+        {friendId && privacyDirty && (
           <button
             className="contact-primary-action"
             disabled={
@@ -1081,22 +1077,6 @@ export function ContactDetailDialog({
             </button>
           )}
       </div>
-      {friendId &&
-        remove &&
-        savedPrivacy &&
-        !privacyLoading &&
-        !privacyError &&
-        !permissionDenied && (
-          <div className="contact-detail-danger">
-            <button
-              className="omni-action"
-              disabled={locked}
-              onClick={() => remove({ id: friendId, displayName: name })}
-            >
-              {t("contactsUi.removeContact")}
-            </button>
-          </div>
-        )}
     </dialog>
   );
 }
@@ -1128,6 +1108,7 @@ export function ContactDetails({
           connection={connection}
           account={account}
           selection={selection}
+          review={setSelection}
           close={() => setSelection(null)}
           open={() => setSelection(null)}
           remove={(contact) => setSelection({ removeContact: contact })}

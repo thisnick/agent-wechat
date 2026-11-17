@@ -1730,7 +1730,7 @@
             ]
           },
           "relation": {
-            "description": "Relationship to this account. It currently always reports `unknown`, including for saved\nfriends.",
+            "description": "Relationship evidence: `friend` when membership is established, `non_contact` when\nknown flags do not establish membership, or `unknown` when flags are unavailable.",
             "type": "string"
           },
           "remark": {

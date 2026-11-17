@@ -1369,8 +1369,8 @@ remark: string | null,
  */
 alias: string | null,
 /**
- * Relationship to this account. It currently always reports `unknown`, including for saved
- * friends.
+ * Relationship evidence: `friend` when membership is established, `non_contact` when
+ * known flags do not establish membership, or `unknown` when flags are unavailable.
  */
 relation: string, classification?: PeerClassification, };
 export type NativeGroup = {

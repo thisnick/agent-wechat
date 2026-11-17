@@ -499,7 +499,7 @@ impl Core {
                 }
                 "contacts" => {
                     let page = reader.contacts(&q)?;
-                    (page.items.into_iter().filter(|c|!c.is_group).map(|c|json!({"id":c.username,"username":c.username,"displayName":c.label,"nickname":c.nickname,"remark":c.remark,"alias":c.alias,"relation":"unknown","version":reader.generation()})).collect(),page.next_cursor)
+                    (page.items.into_iter().filter(|c|!c.is_group).map(|c|json!({"id":c.username,"username":c.username,"displayName":c.label,"nickname":c.nickname,"remark":c.remark,"alias":c.alias,"relation":crate::runtime::contact_requests::contact_relation(&c),"version":reader.generation()})).collect(),page.next_cursor)
                 }
                 "groups" => {
                     let page = reader.groups(&q)?;

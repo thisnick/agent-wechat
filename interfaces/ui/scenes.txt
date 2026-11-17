@@ -38,6 +38,7 @@ scene new-chat | route /{server}/{account}/new-chat, viewports desktop | The dia
 scene new-group | route /{server}/{account}/new-chat, viewports desktop | The new chat dialog on its New group tab, with two contacts chosen.
 scene new-group-avatar | route /{server}/{account}/chats, viewports desktop | A newly received group shows its room avatar while its member list is unavailable.
 scene omni-message-search | route /{server}/{account}/contacts, viewports desktop+compact | Saved message search names its conversation and opens the matched message.
+scene omni-progressive-search | route /{server}/{account}/contacts, viewports desktop+compact | Contacts opens prefiltered; fast contact results remain usable while message search is pending or fails.
 scene omni-search | route /{server}/{account}/contacts, viewports desktop+narrow+compact | One search surface for saved contacts, groups, messages and request history.
 scene quoted-sender-names | route /{server}/{account}/chats/{thread}, viewports desktop+narrow | Quoted replies use supplied author names, cached names for older replies, and You for own messages.
 scene settings | route /{server}/{account}/settings, viewports desktop+narrow | Settings for the app, the hub and the signed-in account.
@@ -52,4 +53,6 @@ scene stickers-loading | route /{server}/{account}/chats/{thread}, viewports des
 scene stickers-pack-detail | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Official pack detail has complete contents, captions, membership and a copyable ID.
 scene stickers-packs | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Official pack browser shows added and available packs in one dialog.
 scene stickers-picker | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Composer-anchored Saved picker with labeled added-pack tabs.
+scene unknown-contact | route /{server}/{account}/contacts, viewports desktop+compact | An unknown relationship offers Add contact without friend-only controls; lookup opens request review without submitting.
+scene unknown-contact-add | route /{server}/{account}/contacts, viewports desktop+compact | An unknown relationship offers Add contact without friend-only controls; lookup opens request review without submitting.
 scene unnamed-group-chat | route /{server}/{account}/chats/{thread}, viewports desktop+narrow | An unnamed group labeled with member names in the chat list and conversation header.

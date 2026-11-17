@@ -472,3 +472,29 @@
     padding-top: 12px;
   }
 }
+
+/* Shared card hierarchy: quiet header actions, one footer, expandable history. */
+.contact-request-heading h2 { flex: 1; }
+.contact-request-heading { gap: 6px; }
+.contact-more { position: relative; }
+.contact-more summary { display: flex; padding: 6px; cursor: pointer; list-style: none; color: var(--muted); }
+.contact-more summary::-webkit-details-marker { display: none; }
+.contact-more-menu { position: absolute; right: 0; top: 34px; width: 210px; padding: 6px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); box-shadow: 0 8px 24px #0002; z-index: 2; }
+.contact-more-menu button { width: 100%; text-align: left; border: 0; background: transparent; padding: 10px; }
+.contact-detail-history { max-height: none; overflow: visible; border-top: 1px solid var(--line); padding-top: 16px; }
+.contact-detail-history summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.contact-detail-privacy { border: 0; margin-top: 18px; padding-top: 0; }
+.contact-detail-privacy > p { margin-bottom: 12px; }
+.contact-latest-request { padding: 12px 14px; background: var(--accent-soft); border-radius: 8px; margin-bottom: 20px; }
+.contact-latest-request small { color: var(--muted); }
+.contact-latest-request p { margin: 5px 0 0; }
+.contact-request-actions { border-top: 1px solid var(--line); padding-top: 16px; }
+.contact-access-options { padding: 4px; gap: 4px; background: var(--canvas); border-radius: 9px; }
+.contact-access-options label { justify-content: center; border-color: transparent; padding: 9px; }
+.contact-access-options label:has(input:checked) { background: var(--surface); border-color: var(--line); }
+.contact-access-options input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.contact-access-options label:has(input:focus-visible) { outline: 2px solid var(--accent-ink); }
+.contact-moments-options input { appearance: none; position: relative; width: 34px; height: 20px; border-radius: 12px; background: var(--line); }
+.contact-moments-options input::before { content: ''; position: absolute; width: 14px; height: 14px; left: 3px; top: 3px; border-radius: 50%; background: var(--surface); }
+.contact-moments-options input:checked { background: var(--accent-ink); }
+.contact-moments-options input:checked::before { left: 17px; }

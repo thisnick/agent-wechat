@@ -13,7 +13,7 @@ const site = 'https://thisnick.github.io';
 const moved = {
   'use/mentions': 'use/groups#mention-group-members',
   'use/video': 'use/quality',
-  'use/contacts': 'use/api#contacts',
+  'use/contact-privacy': 'use/contacts#privacy',
   'getting-started/overview': '',
   'getting-started/quickstart': 'setup/install',
   'getting-started/native-client': 'setup/requirements',
@@ -80,7 +80,7 @@ export default defineConfig({
         ] },
         { label: 'Use it', translations: { 'zh-CN': '使用指南' }, items: [
           { label: 'CLI recipes', translations: { 'zh-CN': 'CLI 常用命令' }, slug: 'use/cli' },
-          { label: 'Contacts and requests', slug: 'use/contacts' },
+          { label: 'Contacts', slug: 'use/contacts' },
           { label: 'Manage groups', translations: { 'zh-CN': '管理群聊' }, slug: 'use/groups' },
           { label: 'Send attachments', translations: { 'zh-CN': '发送附件' }, slug: 'use/media' },
           { label: 'Use and manage stickers', slug: 'use/stickers' },

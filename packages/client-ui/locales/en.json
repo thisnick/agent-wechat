@@ -892,6 +892,7 @@
     "sourceEmpty": "This file is empty. If you dragged it from a web page or app, save it first and add the saved file."
   },
   "contactsUi": {
+    "addContact": "Add contact",
     "searchEverything": "Search everything",
     "searchPlaceholder": "Name, message or WeChat ID",
     "all": "All",
@@ -951,6 +952,10 @@
     "requestHistory": "Request history",
     "deleteExplanation": "Delete this request history from your device. This does not decline the request on WeChat.",
     "privacyWaiting": "Waiting for saved privacy settings…",
-    "privacyReadbackUnavailable": "Privacy change accepted. Refresh to load the saved settings."
+    "privacyReadbackUnavailable": "Privacy change accepted. Refresh to load the saved settings.",
+    "moreActions": "More contact actions",
+    "cancel": "Cancel",
+    "privacyReadFailed": "We couldn’t read privacy settings for this person.",
+    "discoveryRejected": "WeChat couldn’t look up this query. Try an exact WeChat ID."
   }
 }

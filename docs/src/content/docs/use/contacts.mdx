@@ -1,5 +1,5 @@
 ---
-title: Contacts and friend requests
+title: Contacts
 description: Find people, send and accept friend requests, and manage saved contacts.
 ---
 
@@ -58,9 +58,11 @@ Deleting local history does not withdraw a sent request or notify the other pers
 
 ## In the app
 
-Focus the sidebar search field or press Command/Ctrl+K to search contacts, groups and messages. Contacts includes saved people, request history and debounced WeChat discovery. Choose Add, Review or Details to open the same contact card. The card keeps request actions, relationship privacy and contact removal together. Contacts + opens search with Contacts selected.
+Focus the sidebar search field or press Command/Ctrl+K to search contacts, groups and messages. Contacts includes saved people, request history and debounced WeChat discovery. Choose Add, Review or Details to open the same contact card. The card keeps request actions, relationship privacy and contact removal together. Both the Contacts search field and Contacts + open search with Contacts selected. Local contacts, groups and messages appear as their individual searches finish; WeChat discovery runs separately after a short typing pause.
 
-Friend requests appears in the Contacts sidebar. The Contacts icon also shows the number of incoming requests needing review while Chats is open. A saved contact or group opens its conversation with Message. Contact rows also expose Details on hover or keyboard focus. See [contact privacy](../contact-privacy/) for privacy updates.
+Friend requests appears in the Contacts sidebar. The Contacts icon also shows the number of incoming requests needing review while Chats is open. A saved contact or group opens its conversation with Message. Contact rows also expose Details on hover or keyboard focus. See [Privacy](#privacy) for privacy updates.
+
+The saved-contact list includes only people with stored friendship evidence. A cached person with an unknown relationship can still be messaged or added from their contact card. **Add contact** first looks them up on WeChat, then opens the greeting and privacy choices; it does not send until you choose **Send request**.
 
 ## HTTP and Rust
 
@@ -84,3 +86,49 @@ The protocol crate exposes typed discovery, send, accept and removal operations.
 <Aside title="Good to know">
 WeChat-ID discovery is verified. The official client advertises phone lookup, but phone formatting and privacy-dependent results have not been verified here. Email and broad nickname directory searches are unsupported. Request sent means a successful send was recorded; it does not prove a request remains pending on the server. Accepting a contact does not grant OpenClaw access.
 </Aside>
+
+
+## Privacy
+
+Use the contact card to choose Chats Only, Hide My Posts and Hide Their Posts. Open it from a contact's Details button, a search result, or a friend request. Initial settings are submitted with Send request or Accept. For an existing friend, choose Save privacy. Remove contact requires confirmation and preserves chat history.
+
+### Change privacy from the CLI
+
+Read the current settings:
+
+```bash
+wx --json contacts privacy get CONTACT_ID
+```
+
+The response contains `privacy` and its `version`. Change only the options you specify:
+
+```bash
+wx contacts set CONTACT_ID --chats-only true \
+  --idempotency-key privacy-alice-1
+```
+
+Omitted flags retain their current values. Use `--hide-my-posts true|false` and `--hide-their-posts true|false` for the other settings. The command saves its resolved settings before submission. Reusing the same key follows that original edit, even if newer settings exist.
+
+For a new request or acceptance, the same optional flags select initial privacy. Omitted initial options use the default full-access/off/off settings. Changing to Chats Only retains the hide selections, so changing back can restore them.
+
+### Privacy API and Rust
+
+Both privacy reads and edits require `admin` for the selected account. Paths are relative to `/v1/accounts/ACCOUNT_ID/`:
+
+| Method and path | Purpose |
+| --- | --- |
+| `GET contacts/CONTACT_ID/privacy` | Read current settings and their `version` |
+| `PATCH contacts/CONTACT_ID` | Update with `privacy` and `expectedVersion`; requires `Idempotency-Key` |
+
+The PATCH currently accepts a complete privacy value:
+
+```json
+{
+  "privacy": { "chatsOnly": true, "hideMyPosts": false, "hideTheirPosts": false },
+  "expectedVersion": "VERSION_FROM_PRIVACY_READ"
+}
+```
+
+Other contact fields remain unchanged. A stale version returns `stale_contact_privacy`; inspect the current settings before deciding on another edit. An unresolved saved state returns `contact_privacy_unresolved`. The returned operation distinguishes server acceptance from confirmation in the saved contact.
+
+The Rust protocol crate provides `ContactPrivacySettings`, request builders and correlated reply decoding. The core crate provides `ContactUpdate`, `contact_privacy` and `update_contact`, coordinating idempotency, account ownership and saved-contact confirmation. Privacy settings do not grant daemon or OpenClaw permissions.

@@ -238,17 +238,15 @@ export const scenes = [
       await service.click();
       await expect(metro).toBeVisible();
       await expect(library).toBeVisible();
-      const search = page.getByRole("textbox", { name: "Search conversations" });
-      await search.fill("Metro");
-      await expect(library).toHaveCount(0);
-      await expect(metro).toBeVisible();
+      await page.locator(".search-trigger").click();
+      const search = page.getByRole("dialog", { name: "Search everything" });
+      await expect(search).toBeVisible();
+      await expect(search.getByRole("button", { name: "All", exact: true })).toHaveAttribute("aria-pressed", "true");
+      await page.keyboard.press("Escape");
       await expect(official).toHaveAttribute("aria-pressed", "true");
       await expect(all).toHaveAttribute("aria-pressed", "false");
-      await expect(all).toBeInViewport();
-      await expect(bar.getByRole("button", { name: "Groups 0 unread", exact: true }).locator(".filter-unread")).toHaveCount(0);
-      await search.clear();
-      await search.blur();
       await expect(library).toBeVisible();
+      await expect(metro).toBeVisible();
     },
   },
   {
@@ -505,6 +503,34 @@ export const scenes = [
     // The conversation ID of a group is random.
     mask: (page) => [page.locator(".peer-id")],
   },
+  {
+    name: "omni-progressive-search", route: "contacts",
+    description: "Contacts opens prefiltered; fast contact results remain usable while message search is pending or fails.",
+    viewports: ["desktop", "compact"], setup: standardWorld, target: () => ({ account: ACCOUNT.id }),
+    prepare: prepareContactScenes,
+    ready: async ({ page, expect }) => { await expect(row(page, "Mei Chen")).toBeVisible(); },
+    actions: async ({ page, expect }) => {
+      let release;
+      const gate = new Promise(resolve => { release = resolve; });
+      let messageStarted = false;
+      await page.route("**/v1/accounts/*/messages?*", async route => {
+        messageStarted = true;
+        await gate;
+        await route.fulfill({ status: 503, json: { error: { code: "unavailable" } } });
+      });
+      await page.locator(".search-trigger").click();
+      const search = page.getByRole("dialog", { name: "Search everything" });
+      await expect(search.getByRole("button", { name: "Contacts", exact: true })).toHaveAttribute("aria-pressed", "true");
+      await search.getByRole("button", { name: "All", exact: true }).click();
+      await search.getByRole("combobox").fill("Mei");
+      try {
+        await expect.poll(() => messageStarted).toBe(true);
+        await expect(search.locator("[cmdk-item]").filter({ hasText: "Mei Chen" })).toBeVisible();
+      } finally { release(); }
+      await expect(search.getByRole("alert")).toBeVisible();
+      await expect(search.locator("[cmdk-item]").filter({ hasText: "Mei Chen" })).toBeVisible();
+    },
+  },
   ...["friend-requests", "friend-request-review", "omni-search", "omni-message-search", "add-contact"].map(name => ({
     name,
     route: name.startsWith("friend-request") ? "friend-requests" : "contacts",
@@ -615,6 +641,51 @@ export const scenes = [
       await expect(page.getByRole("dialog", { name: "Contact details" })).toBeVisible();
     },
   },
+  ...["unknown-contact", "unknown-contact-add"].map(name => ({
+    name, route: "contacts",
+    description: "An unknown relationship offers Add contact without friend-only controls; lookup opens request review without submitting.",
+    viewports: ["desktop", "compact"], setup: standardWorld,
+    target: () => ({ account: ACCOUNT.id }),
+    prepare: async ({ page }) => {
+      await prepareContactScenes({ page });
+      await page.route(/\/v1\/accounts\/[^/]+\/contacts(?:\?.*)?$/, async route => {
+        const response = await route.fetch();
+        const body = await response.json();
+        body.items = body.items.map(row => row.id === "sim_mei" ? { ...row, relation: "unknown" } : row);
+        await route.fulfill({ response, json: body });
+      });
+    },
+    ready: async ({ page, expect }) => { await expect(row(page, "Daniel Park")).toBeVisible(); },
+    actions: async ({ page, expect }) => {
+      let submits = 0, lookups = 0, privacyReads = 0;
+      page.on("request", request => {
+        const path = new URL(request.url()).pathname;
+        if (path.endsWith("/contact-requests") && request.method() === "POST") submits++;
+        if (path.endsWith("/search/contacts")) lookups++;
+        if (path.endsWith("/privacy")) privacyReads++;
+      });
+      await expect(row(page, "Mei Chen")).toHaveCount(0);
+      await page.locator(".search-trigger").click();
+      const match = page.locator("[cmdk-item]").filter({ hasText: "Mei Chen" });
+      await expect(match).not.toContainText("Saved contact");
+      await match.getByRole("button", { name: "Details for Mei Chen", exact: true }).click();
+      const card = page.getByRole("dialog", { name: "Contact details" });
+      await expect(card.getByText("Saved contact", { exact: true })).toHaveCount(0);
+      await expect(card.getByRole("radio")).toHaveCount(0);
+      await expect(card.getByRole("button", { name: "Remove contact", exact: true })).toHaveCount(0);
+      await expect(card.getByRole("button", { name: "Message", exact: true })).toBeVisible();
+      await expect(card.getByRole("button", { name: "Add contact", exact: true })).toBeVisible();
+      if (name === "unknown-contact-add") {
+        await card.getByRole("button", { name: "Add contact", exact: true }).click();
+        await expect(card.getByRole("textbox", { name: "Friend request message" })).toBeVisible();
+        await expect(card.getByRole("radio", { name: "Full access", exact: true })).toBeVisible();
+        await expect(card.getByRole("button", { name: "Send request", exact: true })).toBeDisabled();
+        expect(lookups).toBe(1);
+      }
+      expect(submits).toBe(0);
+      expect(privacyReads).toBe(0);
+    },
+  })),
   ...["contact-details", "contact-details-search", "contact-privacy-saved", "contact-privacy-unavailable", "contact-privacy-retry", "contact-privacy-syncing"].map(name => ({
     name, route: "contacts",
     description: ({ "contact-details": "A saved contact card reached from the contact list by its keyboard-accessible Details action.", "contact-details-search": "Saved-contact search offers separate Message and Details actions; Details opens the shared card.", "contact-privacy-saved": "Moments selections survive Chats Only and save with the original privacy version.", "contact-privacy-unavailable": "Missing administrator permission disables privacy edits and submission.", "contact-privacy-retry": "An uncertain privacy save locks edits and retries only the same inspected intent.", "contact-privacy-syncing": "One accepted PATCH waits through pending canonical GETs before showing saved settings, without another mutation." })[name],
@@ -669,13 +740,13 @@ export const scenes = [
       if (name === "contact-privacy-unavailable") {
         await expect(dialog.getByRole("alert")).toContainText("Administrator access is required");
         await expect(dialog.getByRole("radio", { name: "Full access", exact: true })).toHaveCount(0);
-        await expect(dialog.getByRole("button", { name: "Save privacy", exact: true })).toBeDisabled();
+        await expect(dialog.getByRole("button", { name: "Save privacy", exact: true })).toHaveCount(0);
         await expect(dialog.getByRole("button", { name: "Remove contact", exact: true })).toHaveCount(0);
         return;
       }
       const hideMine = dialog.getByRole("switch", { name: "Hide My Posts", exact: true });
       await expect(dialog.getByRole("switch", { name: "Hide Their Posts", exact: true })).toBeChecked();
-      await expect(dialog.getByRole("button", { name: "Save privacy", exact: true })).toBeDisabled();
+      await expect(dialog.getByRole("button", { name: "Save privacy", exact: true })).toHaveCount(0);
       if (name === "contact-privacy-saved" || name === "contact-privacy-retry" || name === "contact-privacy-syncing") {
         let patchCount = 0;
         page.on("request", request => { if (request.method() === "PATCH" && new URL(request.url()).pathname.endsWith("/contacts/sim_mei")) patchCount++; });
@@ -690,7 +761,7 @@ export const scenes = [
         if (name === "contact-privacy-syncing") {
           await expect(dialog.locator(".contact-change-status")).toContainText("Waiting for saved privacy settings");
           await expect(hideMine).toBeDisabled();
-          await expect(dialog.getByRole("button", { name: "Save privacy", exact: true })).toBeDisabled();
+          await expect(dialog.getByRole("button", { name: "Save privacy", exact: true })).toHaveCount(0);
           await expect(dialog.getByRole("alert")).toHaveCount(0);
         }
         if (name === "contact-privacy-retry") {
@@ -781,6 +852,7 @@ export const scenes = [
       const details = page.getByRole("button", { name: "Details for Mei Chen", exact: true });
       await details.focus(); await details.press("Enter");
       const card = page.getByRole("dialog", { name: "Contact details" });
+      await card.locator(".contact-more summary").click();
       await card.getByRole("button", { name: "Remove contact", exact: true }).click();
       const confirmation = page.getByRole("dialog", { name: "Remove contact", exact: true });
       await expect(confirmation).toContainText("Your chat history will be kept.");

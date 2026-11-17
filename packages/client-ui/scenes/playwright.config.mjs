@@ -1,7 +1,7 @@
 // Playwright configuration for the UI scenes. `pnpm scenes` runs it; see scripts/scenes.mjs.
 //
 // Everything that could make two runs differ is pinned here or in capture.spec.mjs:
-// one worker, one fixed locale, time zone, colour scheme, pixel ratio and motion
+// isolated workers, one fixed locale, time zone, colour scheme, pixel ratio and motion
 // setting, and no network beyond loopback. Screenshots upload to Argos only in CI.
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,8 +16,8 @@ export default defineConfig({
   testDir: here,
   testMatch: "capture.spec.mjs",
   outputDir: join(outputRoot, "results"),
-  fullyParallel: false,
-  workers: 1,
+  fullyParallel: true,
+  workers: 2,
   retries: process.env.CI ? 1 : 0,
   timeout: 90_000,
   expect: { timeout: 15_000 },
