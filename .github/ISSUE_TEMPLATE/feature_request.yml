@@ -5,57 +5,26 @@ body:
   - type: markdown
     attributes:
       value: |
-        agent-wechat follows the official WeChat client: existing WeChat features should work, and store their data, the way the official client does. Ideas that go beyond the official client are welcome, but they're separate proposals and need agreement before anyone builds them.
-
-        If you'd like to build it yourself, describe your approach here and wait for a reply before opening a pull request. That saves you rework.
-
-        You can write in English or Chinese. 中文也可以。
+        agent-wechat follows the official WeChat client. Ideas that go beyond it are welcome, but they need agreement before anyone builds them. If you'd like to build it yourself, describe your approach here and wait for a reply before opening a pull request. 中文也可以。
 
   - type: textarea
     id: problem
     attributes:
       label: What are you trying to do?
-      description: The task or use case, what stops you today, and any workaround you use now.
-    validations:
-      required: true
-
-  - type: dropdown
-    id: official-client
-    attributes:
-      label: Does the official WeChat client do this?
-      options:
-        - Yes, in the phone app
-        - Yes, in the desktop app
-        - Yes, in both
-        - No, this goes beyond the official client
-        - Not sure
+      description: The task, and what stops you today.
     validations:
       required: true
 
   - type: textarea
-    id: official-behavior
+    id: official-client
     attributes:
-      label: How does it work in the official client?
-      description: Which app and version, what you do, and what you see. Screenshots help; remove private data first.
+      label: Does the official WeChat client do this?
+      description: If it does, say which app (phone or desktop) and how it works there. If it doesn't, or you're not sure, say so.
+    validations:
+      required: true
 
   - type: textarea
     id: proposal
     attributes:
-      label: Proposed behavior
-      description: How you'd use it, through the wx CLI, HTTP API, OpenClaw tool or app. An example command and its output helps.
-
-  - type: textarea
-    id: done
-    attributes:
-      label: How would we know it's done?
-      description: Checks that show it works on a real account.
-      placeholder: Accepting a friend request from the CLI adds the friend, and they appear in the phone's contact list.
-
-  - type: checkboxes
-    id: checklist
-    attributes:
-      label: Before you submit
-      options:
-        - label: I searched existing issues and didn't find this one.
-          required: true
-        - label: I'd like to build this myself.
+      label: How should it work? (optional)
+      description: The command, API or OpenClaw tool you'd use, and how we'd know it works.
