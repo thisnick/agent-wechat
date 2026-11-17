@@ -315,11 +315,18 @@ impl Store {
     }
     /// Inspect a bounded window of already-retained batches without adding retention.
     pub fn recall_sync_evidence(&self, account: &str) -> Result<Vec<(String, Vec<u8>)>> {
+        self.recent_message_batches(account)
+    }
+    /// The newest [`crate::RECENT_MESSAGE_BATCHES`] message batches that still
+    /// hold their payload, skipping any batch over 4 MiB or one that would
+    /// take the total past 16 MiB. Retention keeps exactly this window, so recall evidence and the
+    /// voice fallback read the same batches.
+    pub(crate) fn recent_message_batches(&self, account: &str) -> Result<Vec<(String, Vec<u8>)>> {
         const MAX_BATCH: usize = 4 * 1024 * 1024;
         const MAX_TOTAL: usize = 16 * 1024 * 1024;
         self.control(account, |db| {
-            let mut query = db.prepare("SELECT id,length(payload),CASE WHEN length(payload)<=4194304 THEN payload ELSE NULL END FROM apply_intents WHERE stream='message' ORDER BY created_at DESC,id DESC LIMIT 256")?;
-            let mut rows = query.query([])?;
+            let mut query = db.prepare("SELECT id,length(payload),CASE WHEN length(payload)<=4194304 THEN payload ELSE NULL END FROM apply_intents WHERE stream='message' AND length(payload)>0 ORDER BY created_at DESC,id DESC LIMIT ?1")?;
+            let mut rows = query.query([crate::RECENT_MESSAGE_BATCHES])?;
             let mut result = Vec::new();
             let mut total = 0usize;
             while let Some(row) = rows.next()? {

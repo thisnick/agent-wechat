@@ -1138,6 +1138,8 @@ enum StoreCommand {
         #[arg(long)]
         allow_incomplete: bool,
     },
+    /// Show the selected account's sidecar size, largest record families and the unfinished work retention keeps whole.
+    Usage,
     /// Register a verified key file for the selected account.
     BindKeys {
         /// Private key file for this profile, such as one from wx profiles keys export.
@@ -2655,6 +2657,7 @@ fn offline(
             let manifest = store.export(&account, &destination, source_stopped)?;
             output.print(&projection.receipt(manifest.entries.len())?)
         }
+        StoreCommand::Usage => output.print(&store.storage_usage(&account)?),
         StoreCommand::BindKeys { keys_file } => {
             wechat_profile::KeyFile::load(&keys_file)?;
             store.set_keys_file(&account, &keys_file)?;

@@ -18,6 +18,7 @@ mod outgoing_recall;
 mod pagination;
 mod read_snapshot;
 mod recalls;
+mod retention;
 #[cfg(test)]
 mod schema_interface_tests;
 mod settings;
@@ -30,6 +31,10 @@ pub use operations::*;
 pub use outgoing_recall::*;
 pub use pagination::*;
 pub use recalls::*;
+pub use retention::{
+    aged_runtime, key_digest, RetentionStep, RuntimeRetention, StorageCount, StorageUsage,
+    READ_NOTIFICATION, RECENT_MESSAGE_BATCHES, REVIEW_DAYS, REVIEW_LIMIT,
+};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 pub use settings::AccountSettings;

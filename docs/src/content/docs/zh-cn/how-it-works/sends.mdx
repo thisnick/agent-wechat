@@ -1,7 +1,7 @@
 ---
 title: 消息发送与故障恢复
 description: 发送流程如何杜绝消息重复、needs_review 状态的含义，以及服务重启后如何保障数据一致性。
-sourceHash: 3534b506244a
+sourceHash: "8875e879939a"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -34,6 +34,17 @@ wx jobs get JOB_ID
 ```
 
 使用相同的幂等键和完全相同的内容再次提交，接口将幂等返回初次发送的已有记录。如果幂等键相同但请求体内容发生了变化，请求将被系统明确拒绝。
+
+## 幂等键的有效期 \{#how-long-a-key-works}
+
+同一个幂等键在至少 90 天内重复提交，都会返回原来的发送记录（群聊和联系人变更、撤回操作为 365 天）。之后，Daemon 只保留该键的一小段指纹：
+
+| 请求 | 结果 |
+| --- | --- |
+| 用旧的幂等键再次发送 | `409 idempotency_key_expired`。不会发出任何消息。请换用新的幂等键。 |
+| 对已删除的记录执行 `GET /sends/{id}`、`wx jobs get ID` 或 `wx operations get ID` | `410 operation_expired` |
+
+`needs_review` 状态的发送记录会完整保留 7 天，或直到之后累积了 100 条更新的未决发送为止。之后它的状态保持为 `needs_review`，错误码变为 `review_expired`，但你仍可以通过幂等键查询到它。如果在发送前退出登录时该消息仍在排队，则保持 `logout_before_submission` 状态，因为它从未被发出。使用新的幂等键重新发送前，请先查看聊天记录。
 
 ## 服务重启后的恢复机制 \{#after-a-restart}
 

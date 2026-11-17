@@ -34,6 +34,17 @@ wx jobs get JOB_ID
 
 Sending again with the same key and the same content returns the original send. The same key with different content is rejected.
 
+## How long a key works
+
+Repeating a key returns the original send for at least 90 days (365 days for group and contact changes and recalls). After that the daemon keeps only a short fingerprint of the key:
+
+| Request | Result |
+| --- | --- |
+| Send again with an old key | `409 idempotency_key_expired`. Nothing is sent. Use a new key. |
+| `GET /sends/{id}`, `wx jobs get ID` or `wx operations get ID` for a removed record | `410 operation_expired` |
+
+A `needs_review` send keeps its full record for 7 days, or until 100 newer uncertain sends pile up. After that its state stays `needs_review` and its error code becomes `review_expired`, so you can still look it up by key. A send that was still queued when you signed out keeps `logout_before_submission` instead, because it was never sent. Check the chat before sending again with a new key.
+
 ## After a restart
 
 Queued sends, downloads, read notices, the event log and the login all survive a restart. Work that was mid-flight when the daemon stopped comes back as `needs_review` rather than being repeated.

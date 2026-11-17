@@ -431,6 +431,12 @@ impl From<anyhow::Error> for ApiError {
                 "idempotency_conflict",
             ),
             (
+                "idempotency_key_expired",
+                StatusCode::CONFLICT,
+                "idempotency_key_expired",
+            ),
+            ("operation_expired", StatusCode::GONE, "operation_expired"),
+            (
                 "read_state_conflict",
                 StatusCode::CONFLICT,
                 "read_state_conflict",

@@ -49,6 +49,8 @@ impl Store {
             if logged_out || epoch.as_deref() != expected_logout_epoch {
                 bail!("auth_required");
             }
+            // A retired receipt means this boundary was already notified.
+            crate::retention::ensure_key_live(&tx, crate::retention::READ_NOTIFICATION, key)?;
             tx.execute(
                 "INSERT INTO runtime(key,value)VALUES(?1,?2)",
                 params![key, encrypted],
@@ -96,7 +98,7 @@ impl Store {
     }
     pub fn pending_text_projections(&self, account: &str) -> Result<Vec<String>> {
         self.control(account,|db|{
-            let mut statement=db.prepare("SELECT id FROM outbox WHERE state='accepted' AND server_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM runtime WHERE key='send-projected:'||outbox.id) ORDER BY created_at,id LIMIT 100")?;
+            let mut statement=db.prepare("SELECT id FROM outbox WHERE state='accepted' AND server_id IS NOT NULL AND length(payload)>0 AND NOT EXISTS(SELECT 1 FROM runtime WHERE key='send-projected:'||outbox.id) ORDER BY created_at,id LIMIT 100")?;
             let rows=statement.query_map([],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?;
             Ok(rows)
         })
@@ -117,11 +119,17 @@ impl Store {
     }
     pub fn send_by_key(&self, account: &str, key: &str) -> Result<SendIntent> {
         self.control(account, |db| {
-            let id: String = db.query_row(
-                "SELECT id FROM outbox WHERE idempotency_key=?1",
-                [key],
-                |r| r.get(0),
-            )?;
+            let id: Option<String> = db
+                .query_row(
+                    "SELECT id FROM outbox WHERE idempotency_key=?1",
+                    [key],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(id) = id else {
+                crate::retention::ensure_key_live(db, crate::retention::SEND_KEY, key)?;
+                return Err(rusqlite::Error::QueryReturnedNoRows.into());
+            };
             super::operations::read_send(db, account, &id)
         })
     }

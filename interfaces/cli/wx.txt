@@ -648,6 +648,7 @@ wx store restore-credentials | - | Restore saved credentials from an authorized 
 wx store restore-credentials --cursor-file | takes <CURSOR_FILE> | Private file with the raw sync cursor to restore along with the login state
 wx store restore-credentials --file | required, takes <FILE> | Private file with the saved login state to restore
 wx store schema | - | Inspect the selected account's official database schemas
+wx store usage | - | Show the selected account's sidecar size, largest record families and the unfinished work retention keeps whole
 wx sync | - | Fetch new messages for the selected account
 wx sync --detach | switch | Return as soon as the work is queued instead of waiting for it
 wx sync --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends

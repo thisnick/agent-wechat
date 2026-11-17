@@ -1627,6 +1627,44 @@ pub(super) mod tests {
         assert_eq!(changed.load(Ordering::SeqCst), 1);
     }
     #[test]
+    fn a_retired_key_replayed_after_newer_history_never_reaches_the_service() {
+        let (_temp, core) = fixture();
+        let calls = AtomicUsize::new(0);
+        let (old, created_old) = core.admit_group("one", create(), "old-key").unwrap();
+        assert!(created_old);
+        let done = core
+            .execute_group("one", &old.id, |_, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(created(false))
+            })
+            .unwrap();
+        assert_eq!(done.state, "succeeded");
+        // Newer history that has not run yet.
+        let (newer, _) = core.admit_group("one", create(), "newer-key").unwrap();
+        let later = chrono::Utc::now().timestamp() + 366 * 86_400;
+        let mut after = 0;
+        loop {
+            let step = core.store.retention_step("one", later, after).unwrap();
+            after = step.runtime_after;
+            if !step.more {
+                break;
+            }
+        }
+        let replay = core.admit_group("one", create(), "old-key").unwrap_err();
+        assert_eq!(replay.to_string(), "idempotency_key_expired");
+        assert_eq!(
+            core.store
+                .operation("one", &old.id)
+                .unwrap_err()
+                .to_string(),
+            "operation_expired"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let pending = core.store.group_mutation("one", &newer.id).unwrap();
+        assert_eq!(pending.phase, "queued");
+        assert!(!pending.encrypted_request.is_empty());
+    }
+    #[test]
     fn partial_create_retains_identity_and_never_invents_an_omitted_success() {
         let (_temp, core) = fixture();
         let (op, yes) = core.admit_group("one", create(), "key").unwrap();

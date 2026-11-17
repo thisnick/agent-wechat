@@ -33,6 +33,28 @@ If you logged in with `--official`, there's no `profile/` folder: the daemon use
 
 If you delete an attachment's file, fetching that attachment returns `media_not_cached`. The daemon doesn't download it again by itself.
 
+## How `control.sqlite` stays small
+
+`control.sqlite` holds work in progress, not history: queued sends, sync batches waiting to be written to the profile, and receipts that stop a request from running twice. The daemon cleans it up when it starts and then every hour. Cleanup only removes bytes the daemon already owns. It never sends, downloads or changes the profile.
+
+| Record | Kept in full while | Then |
+| --- | --- | --- |
+| Received message batches | waiting or blocked, or among the newest 256 | only the batch ID is kept, for 30 days |
+| Text and media sends | unfinished, or not yet in the profile, plus a day | a short receipt, for 90 days |
+| Group and contact changes, recalls | unfinished, or not yet in the profile, plus a day | a short receipt, for 365 days |
+| Duplicate checks for messages and events | 30 days | removed |
+| Raw WeChat replies kept for troubleshooting | 7 days | removed |
+
+A request with an unknown outcome (`needs_review`) keeps its full record for 7 days, or until 100 newer ones pile up. After that, sends and media jobs stay `needs_review`, and group and contact changes and recalls become `expired` with the code `review_expired`. Either way it can no longer be repaired automatically. See [Sends and recovery](/how-it-works/sends/#how-long-a-key-works).
+
+Freed space goes back to the disk. To see what is using space, stop the daemon and run:
+
+```bash
+wx store usage --account ID
+```
+
+It lists the file size, the largest tables and `runtime` key families, and unfinished work that cleanup has to keep.
+
 ## Back up
 
 Stop the daemon (`wx daemon stop`, `systemctl --user stop agent-wechat-native` or `docker compose stop`), then copy the data folder:
@@ -53,7 +75,10 @@ Set `dataDir` in `~/.config/agent-wechat/server/config.toml`, or pass `--data-di
 - **Damaged databases are kept.** If the daemon's own database fails a check, it keeps the original files and a recovery copy alongside.
 - **Starting can leave temporary copies.** Before opening a database that needs an upgrade or wasn't closed cleanly, the daemon checks a copy in a `.sqlite-admission-*` folder beside it. If the daemon is stopped during that check, the folder stays until that database next opens successfully, and is then removed.
 - **Older data folders are converted after start.** Earlier versions kept every attachment inside `control.sqlite`. The daemon moves them out in the background, deletes files nothing refers to, and then shrinks the database. Until that finishes, the folder can briefly need extra space for the attachments the profile doesn't hold.
-- **Upgrading `wx` never deletes data.** Rolling back the binary doesn't undo data migrations, so keep a backup from before the upgrade.
+- **Back up before upgrading.** An upgrade can change the data folder's format, and an older `wx` can't open a folder a newer one has upgraded. After that, cleanup permanently removes finished records from `control.sqlite`. To go back to an older version, restore the backup you made before upgrading.
 - **Recall markers live in the data folder.** A profile export doesn't include them.
+- **The first cleanup after upgrading can take a while.** It works in small steps, so other requests keep running. Removing the first large batch needs free disk space about twice the size of `control.sqlite`; without it the space is reclaimed later.
+- **Blocked sync batches are kept.** A batch with a command the daemon doesn't support stays whole until a later version can write it to the profile. `wx store usage` counts them under `syncBatchesBlocked`.
+- **`wx store usage` upgrades the data folder** to the installed version's format, like any other `wx store` command. Run it on a copy if you want to keep the original as it is.
 - OpenClaw keeps its own progress in `consumerStateDir`. Back that up too.
 </Aside>

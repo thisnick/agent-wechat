@@ -68,7 +68,8 @@ impl Store {
             let tx = db.transaction()?;
             let old: Option<Vec<u8>> = tx.query_row("SELECT payload FROM apply_intents WHERE id=?1", [id], |r| r.get(0)).optional()?;
             if let Some(old) = old {
-                if old != payload { bail!("sticker_projection_conflict"); }
+                // Retention empties the payload of a batch already applied.
+                if !old.is_empty() && old != payload { bail!("sticker_projection_conflict"); }
                 return Ok(());
             }
             tx.execute("INSERT INTO apply_intents(id,payload,state,created_at,stream) VALUES(?1,?2,'pending',?3,'stickers')", params![id,payload,chrono::Utc::now().to_rfc3339()])?;
@@ -114,7 +115,7 @@ impl Store {
         self.control(account,|db| {
             let tx=db.transaction()?;
             let old: Option<Vec<u8>>=tx.query_row("SELECT payload FROM apply_intents WHERE id=?1",[id],|r|r.get(0)).optional()?;
-            if let Some(old)=old {if old!=payload {bail!("sticker_projection_conflict");}return Ok(());}
+            if let Some(old)=old {if !old.is_empty() && old!=payload {bail!("sticker_projection_conflict");}return Ok(());}
             tx.execute("INSERT INTO apply_intents(id,payload,state,created_at,stream) VALUES(?1,?2,'pending',?3,'sticker_packs')",params![id,payload,chrono::Utc::now().to_rfc3339()])?;
             tx.execute("INSERT INTO runtime VALUES('sticker-pack-projection-latest',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[id.as_bytes()])?;
             tx.commit()?;Ok(())

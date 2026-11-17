@@ -77,11 +77,12 @@ impl Store {
             let row: Option<(String, String)> = db
                 .query_row(
                     "SELECT operation_id,request_hash FROM group_mutations WHERE key_hash=?1",
-                    [key],
+                    [&key],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .optional()?;
             let Some((id, saved)) = row else {
+                crate::retention::ensure_key_live(db, crate::retention::GROUP_KEY, &key)?;
                 return Ok(None);
             };
             if hash.is_some_and(|hash| hash != saved) {
@@ -122,6 +123,7 @@ impl Store {
                 }
                 return Ok((read(&tx, &op.account_id, &id)?.operation, false));
             }
+            crate::retention::ensure_key_live(&tx, crate::retention::GROUP_KEY, &key)?;
             tx.execute(
                 "INSERT INTO operations VALUES(?1,?2,?3,?4,?5,?6)",
                 params![
@@ -270,7 +272,7 @@ impl Store {
         self.control(account, |db| {
             let ids = {
                 let mut q = db
-                .prepare("SELECT operation_id FROM group_mutations WHERE phase='needs_review' OR (phase IN ('projecting','cancelled','failed','succeeded') AND json_extract((SELECT result_json FROM operations WHERE id=operation_id),'$.profileProjection')='pending')")?;
+                .prepare("SELECT operation_id FROM group_mutations WHERE (phase='needs_review' AND length(encrypted_request)>0) OR (phase IN ('projecting','cancelled','failed','succeeded') AND json_extract((SELECT result_json FROM operations WHERE id=operation_id),'$.profileProjection')='pending')")?;
                 let rows = q.query_map([], |r| r.get::<_, String>(0))?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()?
             };
