@@ -1,34 +1,54 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { MARKER, commentBody, parseOutput, publish } from './claude-review-comment.mjs';
+import { MARKER, commentBody, parseOutput, publish, scoreLine } from './claude-review-comment.mjs';
 
 const HEAD = 'abcdef0123456789abcdef0123456789abcdef01';
 const RUN = 'https://github.com/o/r/actions/runs/1';
+const result = fields => ({ confidence: 8, important: 0, nits: 0, preexisting: 0, ...fields });
 
-test('parseOutput accepts a summary and a finding count', () => {
-  assert.deepEqual(parseOutput(JSON.stringify({ summary: ' ## Claude review\n\nNone. ', findings: 0 })),
-    { summary: '## Claude review\n\nNone.', findings: 0 });
+test('parseOutput accepts a summary, a confidence score and counts', () => {
+  assert.deepEqual(
+    parseOutput(JSON.stringify({ summary: ' Looks right. ', confidence: 8, important: 1, nits: 2, preexisting: 0 })),
+    { summary: 'Looks right.', confidence: 8, important: 1, nits: 2, preexisting: 0 },
+  );
 });
 
 test('parseOutput rejects missing, empty or malformed output', () => {
-  for (const value of ['', undefined, 'not json', '{}', JSON.stringify({ summary: '  ', findings: 1 })])
+  for (const value of ['', undefined, 'not json', '{}', JSON.stringify({ summary: '  ', confidence: 5 })])
     assert.equal(parseOutput(value), null);
 });
 
-test('parseOutput drops a bad count and strips the marker from the summary', () => {
-  assert.deepEqual(parseOutput(JSON.stringify({ summary: `x ${MARKER} y`, findings: -1 })),
-    { summary: 'x  y', findings: null });
+test('parseOutput drops out-of-range values and strips the marker from the summary', () => {
+  assert.deepEqual(
+    parseOutput(JSON.stringify({ summary: `x ${MARKER} y`, confidence: 11, important: -1, nits: 1.5 })),
+    { summary: 'x  y', confidence: null, important: null, nits: null, preexisting: null },
+  );
+  assert.equal(parseOutput(JSON.stringify({ summary: 'x', confidence: 0 })).confidence, null);
 });
 
-test('a finished review posts the summary with the commit and run', () => {
-  const body = commentBody({ output: { summary: 'Summary', findings: 1 }, headSha: HEAD, runUrl: RUN });
-  assert.ok(body.startsWith(`${MARKER}\nSummary\n`));
-  assert.match(body, new RegExp(`Commit \`${HEAD}\` · \\[workflow run\\]\\(${RUN}\\) · 1 finding<`));
+test('scoreLine shows the score and the non-zero counts', () => {
+  assert.equal(scoreLine(result({ confidence: 4, important: 1, nits: 2, preexisting: 1 })),
+    '**Confidence: 4/10** · 1 important · 2 nits · 1 pre-existing');
+  assert.equal(scoreLine(result({ nits: 1 })), '**Confidence: 8/10** · 1 nit');
+});
+
+test('scoreLine says plainly when there is nothing to fix', () => {
+  assert.equal(scoreLine(result({ confidence: 9 })), '**Confidence: 9/10** · Nothing to fix');
+});
+
+test('scoreLine leaves out what it was not given', () => {
+  assert.equal(scoreLine({ confidence: null, important: null, nits: null, preexisting: null }), '');
+});
+
+test('a finished review posts the heading, score, summary, commit and run', () => {
+  const body = commentBody({ output: { ...result({ important: 1 }), summary: 'Summary' }, headSha: HEAD, runUrl: RUN });
+  assert.equal(body, `${MARKER}\n## Claude review of \`abcdef0\`\n\n**Confidence: 8/10** · 1 important\n\n`
+    + `Summary\n\n<sub>Commit \`${HEAD}\` · [workflow run](${RUN})</sub>\n`);
 });
 
 test('an unfinished review keeps the previous summary below one notice', () => {
   const first = commentBody({ output: null, headSha: HEAD, runUrl: RUN, outcome: 'failure',
-    previousBody: `${MARKER}\nOld summary\n` });
+    previousBody: `${MARKER}\n## Claude review of \`1234567\`\n\nOld summary\n` });
   assert.match(first, /did not finish\*\* \(failure\)/);
   assert.match(first, /Old summary/);
   const second = commentBody({ output: null, headSha: HEAD, runUrl: RUN, outcome: 'failure', previousBody: first });
@@ -58,7 +78,7 @@ function fakeGithub(comments) {
 
 const context = { repo: { owner: 'o', repo: 'r' }, payload: { pull_request: { number: 7 } } };
 const core = { warning() {} };
-const output = JSON.stringify({ summary: 'New', findings: 0 });
+const output = JSON.stringify({ summary: 'New', confidence: 9, important: 0, nits: 0, preexisting: 0 });
 
 test('publish updates the workflow bot comment and ignores look-alikes', async () => {
   const github = fakeGithub([

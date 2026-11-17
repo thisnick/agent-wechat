@@ -6,7 +6,9 @@ export const MARKER = '<!-- claude-review -->';
 const NOTICE_PREFIX = '> **The Claude review of';
 const MAX_SUMMARY = 60000;
 
-/** Returns the summary from the action's structured output, or null if there is none. */
+const count = value => (Number.isSafeInteger(value) && value >= 0 ? value : null);
+
+/** Returns the review result from the action's structured output, or null if there is none. */
 export function parseOutput(structuredOutput) {
   if (!structuredOutput) return null;
   let value;
@@ -16,13 +18,28 @@ export function parseOutput(structuredOutput) {
     return null;
   }
   if (typeof value?.summary !== 'string' || !value.summary.trim()) return null;
-  const findings = Number.isSafeInteger(value.findings) && value.findings >= 0 ? value.findings : null;
-  return { summary: value.summary.replaceAll(MARKER, '').trim().slice(0, MAX_SUMMARY), findings };
+  const confidence = Number.isSafeInteger(value.confidence) && value.confidence >= 1 && value.confidence <= 10
+    ? value.confidence : null;
+  return {
+    summary: value.summary.replaceAll(MARKER, '').trim().slice(0, MAX_SUMMARY),
+    confidence,
+    important: count(value.important),
+    nits: count(value.nits),
+    preexisting: count(value.preexisting),
+  };
 }
 
-function footer({ headSha, runUrl, findings }) {
-  const count = findings === null ? '' : ` · ${findings} ${findings === 1 ? 'finding' : 'findings'}`;
-  return `<sub>Commit \`${headSha}\` · [workflow run](${runUrl})${count}</sub>`;
+/** The line under the heading: the confidence score, then the findings by severity. */
+export function scoreLine(output) {
+  const parts = output.confidence === null ? [] : [`**Confidence: ${output.confidence}/10**`];
+  const counts = [
+    [output.important, 'important', 'important'],
+    [output.nits, 'nit', 'nits'],
+    [output.preexisting, 'pre-existing', 'pre-existing'],
+  ];
+  if (counts.every(([n]) => n === 0)) parts.push('Nothing to fix');
+  else for (const [n, one, many] of counts) if (n) parts.push(`${n} ${n === 1 ? one : many}`);
+  return parts.join(' · ');
 }
 
 /**
@@ -30,7 +47,11 @@ function footer({ headSha, runUrl, findings }) {
  * previous summary stays below a notice saying so, rather than disappearing.
  */
 export function commentBody({ output, headSha, runUrl, outcome, previousBody }) {
-  if (output) return `${MARKER}\n${output.summary}\n\n${footer({ headSha, runUrl, findings: output.findings })}\n`;
+  if (output) {
+    const score = scoreLine(output);
+    return `${MARKER}\n## Claude review of \`${headSha.slice(0, 7)}\`\n\n${score ? `${score}\n\n` : ''}`
+      + `${output.summary}\n\n<sub>Commit \`${headSha}\` · [workflow run](${runUrl})</sub>\n`;
+  }
   const notice = `${NOTICE_PREFIX} \`${headSha.slice(0, 7)}\` did not finish** (${outcome || 'unknown'}). `
     + `See the [workflow run](${runUrl}).`;
   const kept = (previousBody ?? '')
