@@ -39,6 +39,7 @@
   "attachmentPicker.dropAttach": {"source":"34a7a637100f"},
   "attachmentPicker.file": {"source":"50009ce1da4d"},
   "attachmentPicker.image": {"source":"1aa4cb0bcca7"},
+  "attachmentPicker.includeFullResolutionImage": {"source":"e5e8f6cfd51c","machine":"190edf6d20c2"},
   "attachmentPicker.includeUnchangedVideoFileAlongside": {"source":"97de46022503"},
   "attachmentPicker.originalMediaQuality": {"source":"d9a822629b7b"},
   "attachmentPicker.remove": {"source":"43e1269ac88a"},

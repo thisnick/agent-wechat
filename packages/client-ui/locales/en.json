@@ -47,6 +47,7 @@
     "dropAttach": "Drop to attach",
     "file": "File",
     "image": "Image",
+    "includeFullResolutionImage": "Include each image at full resolution alongside the compressed copy. JPEG files are sent unchanged, including any camera or location details they contain.",
     "includeUnchangedVideoFileAlongside": "Include the unchanged video file alongside the playback copy.",
     "originalMediaQuality": "Original media quality",
     "remove": "Remove {{name}}",

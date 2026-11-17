@@ -1,4 +1,5 @@
 import {
+  type ImageSendQuality,
   type MediaJob,
   type MediaKind,
   type NativeWeChatClient,
@@ -15,6 +16,7 @@ export type PendingMedia = {
   kind: MediaKind;
   size: number;
   videoQuality?: VideoSendQuality;
+  imageQuality?: ImageSendQuality;
   stage:
     | "uploading"
     | "submitting"
@@ -34,6 +36,15 @@ type FileSource = {
   arrayBuffer(): Promise<ArrayBuffer>;
 };
 type Storage = { read(): PendingMedia[]; write(value: PendingMedia[]): void };
+/** `original` also offers an image's full-resolution copy or a video's unchanged file. */
+export type SendQuality = "normal" | "original";
+/** Image sends name a quality only for originals, so standard requests stay as before. */
+function qualityFields(kind: MediaKind, quality: SendQuality) {
+  if (kind === "video") return { videoQuality: quality };
+  if (kind === "image" && quality === "original")
+    return { imageQuality: "original" as const };
+  return {};
+}
 const ended = new Set([
   "accepted",
   "failed",
@@ -98,7 +109,7 @@ export class MediaOutbox {
     threadId: string,
     file: FileSource,
     kind: MediaKind,
-    videoQuality: VideoSendQuality = "normal",
+    quality: SendQuality = "normal",
   ): Promise<void> {
     if (this.controller.signal.aborted) return;
     if (!threadId || !["file", "image", "video", "voice"].includes(kind))
@@ -113,7 +124,7 @@ export class MediaOutbox {
         name: file.name,
         kind,
         size: file.size,
-        ...(kind === "video" ? { videoQuality } : {}),
+        ...qualityFields(kind, quality),
         stage: "uploading",
       },
     ];
@@ -142,7 +153,7 @@ export class MediaOutbox {
           thumbnailSourceId: null,
           playSeconds: null,
           durationMs: null,
-          ...(kind === "video" ? { videoQuality } : {}),
+          ...qualityFields(kind, quality),
         },
         key,
       );

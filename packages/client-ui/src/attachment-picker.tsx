@@ -119,6 +119,8 @@ export function AttachmentTray({
   quality: (original: boolean) => void;
 }) {
   if (!draft.files.length) return null;
+  const images = draft.files.some((item) => item.kind === "image"),
+    videos = draft.files.some((item) => item.kind === "video");
   return (
     <section
       className="composer-attachments"
@@ -142,12 +144,12 @@ export function AttachmentTray({
           </li>
         ))}
       </ul>
-      {draft.files.some((item) => item.kind === "video") && (
-        <div className="composer-original-video">
+      {(images || videos) && (
+        <div className="composer-original-quality">
           <label>
             <input
               type="checkbox"
-              checked={draft.videoQuality === "original"}
+              checked={draft.quality === "original"}
               disabled={!!draft.submission}
               onChange={(event) => quality(event.target.checked)}
             />
@@ -156,7 +158,14 @@ export function AttachmentTray({
           <ComposerHelp
             label={t("attachmentPicker.aboutOriginalMediaQuality")}
           >
-            {t("attachmentPicker.includeUnchangedVideoFileAlongside")}
+            {images && (
+              <span>{t("attachmentPicker.includeFullResolutionImage")}</span>
+            )}
+            {videos && (
+              <span>
+                {t("attachmentPicker.includeUnchangedVideoFileAlongside")}
+              </span>
+            )}
           </ComposerHelp>
         </div>
       )}
