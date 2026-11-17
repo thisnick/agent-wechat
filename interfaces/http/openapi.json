@@ -2041,8 +2041,11 @@
             "type": "integer"
           },
           "recipientRef": {
-            "description": "Opaque recipient material; pass unchanged to send.",
-            "type": "string"
+            "description": "Opaque send reference when verification material is available; null for matches without it.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "request": {
             "anyOf": [

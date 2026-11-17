@@ -542,6 +542,32 @@ export const scenes = [
       }
     },
   })),
+  ...[true, false].map(known => ({
+    name: known ? "existing-contact-search" : "contact-search-without-reference",
+    route: "contacts",
+    description: known ? "A server match without a verification ticket opens the saved contact with Message." : "A server match without request material offers View and cannot send a friend request.",
+    viewports: ["desktop", "compact"],
+    setup: standardWorld,
+    target: () => ({ account: ACCOUNT.id }),
+    prepare: async ({ page }) => {
+      await prepareContactScenes({ page });
+      await page.route("**/v1/accounts/*/search/contacts", route => route.fulfill({ json: { displayName: "mei.example", recipientRef: null, expiresAt: 1700001400, source: "wechat", request: null, contactId: known ? "sim_mei" : null } }));
+    },
+    ready: async ({ page, expect }) => { await expect(row(page, "Mei Chen")).toBeVisible(); },
+    actions: async ({ page, expect }) => {
+      await page.locator(".search-trigger").focus();
+      await page.getByRole("combobox").fill("mei.example");
+      const match = page.locator("[cmdk-item]").filter({ hasText: "mei.example" });
+      await expect(match).toContainText(known ? "Message" : "View");
+      await expect(page.locator("[cmdk-item]").filter({ hasText: "Add contact" })).toHaveCount(0);
+      if (!known) {
+        await match.click();
+        const dialog = page.getByRole("dialog", { name: "View" });
+        await expect(dialog).toContainText("This result has no friend-request reference.");
+        await expect(dialog.getByRole("button", { name: "Send request", exact: true })).toHaveCount(0);
+      }
+    },
+  })),
   {
     name: "contact-request-retry",
     route: "contacts",

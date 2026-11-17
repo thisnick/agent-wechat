@@ -8,7 +8,7 @@ use super::*;
 pub struct ContactRequestTarget {
     /// Exact canonical per-peer identity.
     pub username: String,
-    /// Private verification ticket; never expose in public responses.
+    /// Private verification ticket; may be empty in a discovery match that cannot start verification. Never expose it in public responses.
     pub ticket: String,
     /// Verification source value accompanying the target.
     pub scene: u32,
@@ -80,9 +80,10 @@ pub fn decode_contact_search(reply: &[u8], query: &str) -> Result<ContactSearchR
     ServiceRejected::check(Service::Contact, p::base_code(&fields)?)?;
     let name = p::decode(p::data(&fields, 2)?)?;
     let username = std::str::from_utf8(p::data(&name, 1)?)?.to_owned();
-    let ticket = std::str::from_utf8(p::data(&fields, 30)?)?.to_owned();
+    let ticket =
+        std::str::from_utf8(p::optional_data(&fields, 30)?.unwrap_or_default())?.to_owned();
     bounded(&username, 512, false)?;
-    bounded(&ticket, 65536, false)?;
+    bounded(&ticket, 65536, true)?;
     // The supported direct WeChat-ID discovery producer uses scene 3.
     Ok(ContactSearchResult {
         query: query.into(),
@@ -387,7 +388,16 @@ mod tests {
             p::bytes(2, &p::bytes(1, b"opaque@stranger")),
         ])
         .unwrap();
-        assert!(decode_contact_search(&missing, "example").is_err());
+        let found = decode_contact_search(&missing, "example").unwrap();
+        assert!(found.target.ticket.is_empty());
+        assert!(send_contact_request_rpc(
+            &state(),
+            &SendContactRequest {
+                target: found.target,
+                message: "hello".into()
+            }
+        )
+        .is_err());
     }
     #[test]
     fn verification_sender_and_row_identity_come_from_different_sources() {

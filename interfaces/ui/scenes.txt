@@ -11,10 +11,12 @@ scene chat-list | route /{server}/{account}/chats, viewports desktop+narrow | Th
 scene composer-attachments | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | A photo and a video staged in the message box with previews, sizes, remove buttons and the unchecked Original choice.
 scene composer-attachments-original | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Original checked for a staged photo and video, with help that explains what it adds for each.
 scene contact-request-retry | route /{server}/{account}/contacts, viewports desktop | A lost submission response keeps the original key and greeting until an inspected retry completes.
+scene contact-search-without-reference | route /{server}/{account}/contacts, viewports desktop+compact | A server match without request material offers View and cannot send a friend request.
 scene contacts | route /{server}/{account}/contacts, viewports desktop | The contact list of an account.
 scene desktop-leftover-hub | route /servers, viewports desktop+narrow | The desktop app's first screen when a hub left running by an earlier session holds the local port.
 scene desktop-settings | route /servers, viewports desktop+narrow | Desktop settings, including whether this device's hub keeps running while another hub is used.
 scene direct-chat | route /{server}/{account}/chats/{thread}, viewports desktop+narrow | A direct conversation with text from both sides and a photo.
+scene existing-contact-search | route /{server}/{account}/contacts, viewports desktop+compact | A server match without a verification ticket opens the saved contact with Message.
 scene friend-request-review | route /{server}/{account}/contacts/requests, viewports desktop+narrow+compact | A separate request review dialog with acceptance and local-history deletion.
 scene friend-requests | route /{server}/{account}/contacts/requests, viewports desktop+narrow+compact | Incoming and sent request history with an actionable Contacts badge.
 scene group-chat | route /{server}/{account}/chats/{thread}, viewports desktop | A group conversation where each message names its sender, ending in a photo.

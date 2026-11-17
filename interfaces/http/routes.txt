@@ -458,7 +458,7 @@ response NativeContactSearch | object | Sanitized discovery preview with a short
 response NativeContactSearch.contactId | string, required, nullable | Canonical saved contact ID when membership is established for this identity.
 response NativeContactSearch.displayName | string, required | Display query for the discovered identity.
 response NativeContactSearch.expiresAt | integer, required, format int64 | Unix seconds after which a new discovery is required.
-response NativeContactSearch.recipientRef | string, required | Opaque recipient material; pass unchanged to send.
+response NativeContactSearch.recipientRef | string, required, nullable | Opaque send reference when verification material is available; null for matches without it.
 response NativeContactSearch.request | object, required, nullable | Existing request conversation for the resolved identity, when retained locally.
 response NativeContactSearch.request.actionable | boolean, required | Whether the current incoming request can be accepted locally.
 response NativeContactSearch.request.attention | boolean, required | Incoming request needing attention in navigation badges.

@@ -930,6 +930,7 @@
     "contactRemoved": "Contact removed",
     "failed": "This action failed. Check its status for details.",
     "cancelled": "This action was cancelled before submission.",
-    "working": "Working…"
+    "working": "Working…",
+    "requestUnavailable": "This result has no friend-request reference. Search again to try adding this person."
   }
 }

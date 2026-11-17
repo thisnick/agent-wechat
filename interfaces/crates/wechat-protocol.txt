@@ -118,7 +118,7 @@ field wechat_protocol::ContactRecord::small_avatar_url | core::option::Option<al
 field wechat_protocol::ContactRecord::username | alloc::string::String | MISSING DOC
 field wechat_protocol::ContactRequestReply::service_code | i32 | Authenticated service response code.
 field wechat_protocol::ContactRequestTarget::scene | u32 | Verification source value accompanying the target.
-field wechat_protocol::ContactRequestTarget::ticket | alloc::string::String | Private verification ticket; never expose in public responses.
+field wechat_protocol::ContactRequestTarget::ticket | alloc::string::String | Private verification ticket; may be empty in a discovery match that cannot start verification. Never expose it in public responses.
 field wechat_protocol::ContactRequestTarget::username | alloc::string::String | Exact canonical per-peer identity.
 field wechat_protocol::ContactRpc::body | alloc::vec::Vec<u8> | Serialized request bytes containing private account material.
 field wechat_protocol::ContactRpc::cgi | u16 | Supported contact service command number.

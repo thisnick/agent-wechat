@@ -16,7 +16,7 @@ Use the same account for discovery and the resulting friend request. Discovery r
    wx --json contacts search WECHAT_ID
    ```
 
-   Server discovery returns `recipientRef`, `displayName` and `expiresAt`. The displayed name is your query. A match does not establish friendship.
+   Server discovery returns `recipientRef`, `displayName` and `expiresAt`. The displayed name is your query. A match does not establish friendship. If `recipientRef` is null, that response cannot send a request. `contactId` identifies an already saved contact.
 
 2. Send a greeting using the returned reference:
 

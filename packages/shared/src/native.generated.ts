@@ -1505,9 +1505,9 @@ export type NativeContactSearch = {
  */
 displayName: string,
 /**
- * Opaque recipient material; pass unchanged to send.
+ * Opaque send reference when verification material is available; null for matches without it.
  */
-recipientRef: string,
+recipientRef: string | null,
 /**
  * Unix seconds after which a new discovery is required.
  */

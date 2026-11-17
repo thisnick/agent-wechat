@@ -396,7 +396,11 @@ export function OmniSearch({
                     </span>
                     <span className="omni-action">
                       {h.discovery ? (
-                        t("main.findPerson")
+                        h.discovery.recipientRef ? (
+                          t("main.findPerson")
+                        ) : (
+                          t("contactsUi.view")
+                        )
                       ) : h.request ? (
                         requestAction(h.request)
                       ) : h.kind === "messages" ? (
@@ -456,7 +460,11 @@ export function ContactRequestDialog({
     [retryOriginal, setRetryOriginal] = useState(false);
   const [receipt, setReceipt] = useState<ContactReceipt | undefined>(() => {
     const saved = connection.cache.readState<ContactReceipt>(account, receiptId);
-    return removal && saved?.operation && ["succeeded", "failed", "cancelled"].includes(saved.operation.state) ? undefined : saved;
+    return removal &&
+      saved?.operation &&
+      ["succeeded", "failed", "cancelled"].includes(saved.operation.state)
+      ? undefined
+      : saved;
   });
   useEffect(() => {
     const dialog = ref.current!;
@@ -508,11 +516,13 @@ export function ContactRequestDialog({
     }
   }
   async function change(action: "send" | "accept" | "delete" | "remove") {
-    if (busy || receipt) return;
+    if (busy || receipt || (action === "send" && !discovery?.recipientRef)) return;
     const pending: ContactReceipt = {
       key: crypto.randomUUID(),
       action,
-      ...(discovery ? { input: { recipientRef: discovery.recipientRef, message: greeting } } : {}),
+      ...(discovery?.recipientRef
+        ? { input: { recipientRef: discovery.recipientRef, message: greeting } }
+        : {}),
     };
     save(pending);
     await submit(pending);
@@ -569,7 +579,9 @@ export function ContactRequestDialog({
   const title = removal
     ? t("contactsUi.removeContact")
     : discovery
-    ? t("main.findPerson")
+    ? discovery.recipientRef
+      ? t("main.findPerson")
+      : t("contactsUi.view")
     : request?.direction === "outgoing"
     ? t("contactsUi.sent")
     : t("contactsUi.review");
@@ -602,7 +614,8 @@ export function ContactRequestDialog({
           <p>{h.message}</p>
         </div>
       ))}
-      {discovery && (
+      {discovery && !discovery.recipientRef && <p>{t("contactsUi.requestUnavailable")}</p>}
+      {discovery?.recipientRef && (
         <label>
           {t("contactsUi.greeting")}
           <textarea
@@ -631,7 +644,7 @@ export function ContactRequestDialog({
             {t("contactsUi.checkStatus")}
           </button>
         )}
-        {!receipt && (removal || discovery || request?.actionable) && (
+        {!receipt && (removal || discovery?.recipientRef || request?.actionable) && (
           <button
             disabled={busy || (!!discovery && !greeting.trim())}
             onClick={() => void change(removal ? "remove" : discovery ? "send" : "accept")}

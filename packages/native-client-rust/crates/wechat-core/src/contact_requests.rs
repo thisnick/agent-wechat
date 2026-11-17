@@ -232,7 +232,7 @@ impl Core {
                 let reader=core.profile_reader_owned(&account)?;
                 let existing=match reader.contact_request(&recipient.target.username){Ok(row)=>Some(core.request_view(&account,&row)?),Err(wechat_profile::ProfileError::NotCached)=>None,Err(e)=>return Err(e.into())};
                 let contact_id=reader.contact_for_request(&recipient.target.username)?.filter(flag).map(|c|c.username);
-                let reference=URL_SAFE_NO_PAD.encode(core.vault.seal(&account,"contact-recipient",&serde_json::to_vec(&recipient)?)?);
+                let reference=if recipient.target.ticket.is_empty() { None } else { Some(URL_SAFE_NO_PAD.encode(core.vault.seal(&account,"contact-recipient",&serde_json::to_vec(&recipient)?)?)) };
                 Ok(json!({"displayName":query,"recipientRef":reference,"expiresAt":expires,"source":"wechat","request":existing,"contactId":contact_id}))
             }).await
         }).await

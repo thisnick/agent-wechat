@@ -1100,8 +1100,8 @@ pub struct NativeContactSearchRequest {
 pub struct NativeContactSearch {
     /// Display query for the discovered identity.
     pub display_name: String,
-    /// Opaque recipient material; pass unchanged to send.
-    pub recipient_ref: String,
+    /// Opaque send reference when verification material is available; null for matches without it.
+    pub recipient_ref: Option<String>,
     /// Unix seconds after which a new discovery is required.
     #[ts(type = "number")]
     pub expires_at: i64,
