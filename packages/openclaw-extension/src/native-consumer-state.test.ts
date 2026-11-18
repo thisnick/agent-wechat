@@ -185,7 +185,7 @@ test("a version 1 file keeps its open work, reads and group context position and
   writeFileSync(join(dir, `${createHash("sha256").update("server\0a").digest("hex")}.json`),
     JSON.stringify({ schemaVersion: 1, serverId: "server", accountId: "a", cursor: "5", items,
       recalls: { [JSON.stringify(["dm", "77"])]: { threadId: "dm", serverId: "77", observedAt: "2026-10-21T12:00:00Z" } } }), { mode: 0o600 });
-  const state = new NativeConsumerState(dir, "server", "a");
+  const state = new NativeConsumerState(dir, "server", "a", { now: Date.parse("2026-10-20T13:00:00Z") });
   assert.equal(state.cursor, "5"); assert.deepEqual(state.heldOnOpen, ["crashed"]);
   assert.deepEqual(state.items().map(value => [value.id, value.state, value.revision]), [["queued", "received", "rev-queued"]]);
   assert.equal(state.readPending("r@chatroom"), true);
@@ -193,4 +193,45 @@ test("a version 1 file keeps its open work, reads and group context position and
   assert.deepEqual(state.groupBoundary("other@chatroom"), { cursor: "5", messageId: "other", createdAt: "2026-10-20T12:00:05Z" });
   const bytes = readFileSync(state.file, "utf8");
   assert.equal(JSON.parse(bytes).schemaVersion, 2); assert.ok(!bytes.includes("private fixture body")); assert.ok(!bytes.includes("observedAt"));
+});
+
+const version1 = (dir: string, items: Record<string, unknown>, extra: object = {}) => {
+  const file = join(dir, `${createHash("sha256").update("server\0a").digest("hex")}.json`);
+  writeFileSync(file, JSON.stringify({ schemaVersion: 1, serverId: "server", accountId: "a", cursor: "500", items, ...extra }), { mode: 0o600 });
+  return file;
+};
+test("a version 1 backlog keeps only the newest 100 recent live incoming messages", t => {
+  const dir = directory(t), now = Date.parse("2026-11-18T12:00:00Z");
+  const queued = (i: number, extra: object = {}, origin = "live") => [`q${i}`, { message: { ...message(`q${i}`, "t", String(i + 1)), createdAt: new Date(now - (400 - i) * 60000).toISOString() }, origin, state: "received", cursor: String(i + 1), ...extra }];
+  version1(dir, Object.fromEntries([
+    ...Array.from({ length: 150 }, (_, i) => queued(i)),
+    [`old`, { message: { ...message("old", "t", "990"), createdAt: "2026-11-16T12:00:00Z" }, origin: "live", state: "received", cursor: "200" }],
+    queued(160, {}, "catchup"), [`own`, { message: { ...message("own", "t", "991"), direction: "outgoing" }, origin: "live", state: "received", cursor: "201" }],
+  ]));
+  const state = new NativeConsumerState(dir, "server", "a", { now });
+  const kept = state.items().map(item => item.id);
+  assert.equal(kept.length, 100); assert.equal(kept[0], "q50"); assert.equal(kept.at(-1), "q149");
+  assert.deepEqual(state.skipped, { old: 1, limit: 50, full: 0 });
+});
+test("unusable version 1 records do not stop the upgrade, but another account's file is refused", t => {
+  const dir = directory(t);
+  version1(dir, { good: { message: message("good"), origin: "live", state: "received", cursor: "3" }, broken: { message: null, state: "received" },
+    mismatched: { message: message("other-id"), state: "received" }, odd: { message: { ...message("odd"), serverId: "not-a-number" }, origin: "live", state: "received", revision: 42 } },
+    { recalls: { bad: { threadId: "t" } } });
+  const state = new NativeConsumerState(dir, "server", "a", { now: Date.parse("2026-10-20T13:00:00Z") });
+  assert.deepEqual(state.items().map(item => [item.id, item.serverId]).sort(), [["good", "9007199254740999"], ["odd", null]]);
+  assert.equal(new NativeConsumerState(dir, "server", "a").items().length, 2);
+  const foreign = directory(t);
+  const file = version1(foreign, { x: { message: { ...message("x"), accountId: "someone-else" }, state: "received" } });
+  const bytes = readFileSync(file, "utf8");
+  assert.throws(() => new NativeConsumerState(foreign, "server", "a"), /preserved/); assert.equal(readFileSync(file, "utf8"), bytes);
+});
+test("the version 1 file is backed up once and an existing backup is never overwritten", t => {
+  const dir = directory(t), file = version1(dir, {}), original = readFileSync(file, "utf8");
+  writeFileSync(`${file}.v1-backup`, "earlier backup", { mode: 0o600 });
+  new NativeConsumerState(dir, "server", "a");
+  assert.equal(readFileSync(`${file}.v1-backup`, "utf8"), "earlier backup"); assert.notEqual(readFileSync(file, "utf8"), original);
+  const fresh = directory(t), freshFile = version1(fresh, {}), freshOriginal = readFileSync(freshFile, "utf8");
+  new NativeConsumerState(fresh, "server", "a");
+  assert.equal(readFileSync(`${freshFile}.v1-backup`, "utf8"), freshOriginal);
 });

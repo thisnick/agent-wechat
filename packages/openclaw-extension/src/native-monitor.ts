@@ -5,7 +5,7 @@ import { resolveStableChannelMessageIngress } from "openclaw/plugin-sdk/channel-
 import { toInboundMediaFacts } from "openclaw/plugin-sdk/channel-inbound";
 import { normalizeWeChatCommandBody, resolveWeChatIngress, resolveWeChatPolicyContext } from "./access-control.ts";
 import { ensureNativeHost } from "./native-host.ts";
-import { NativeConsumerState } from "./native-consumer-state.ts";
+import { NATIVE_CATCH_UP_LIMIT, NATIVE_CATCH_UP_WINDOW_MS, NativeConsumerState } from "./native-consumer-state.ts";
 import { invalidateNativePreparedInputs, nativeDispatchManifest, nativeSourceMessageSid, trackNativePreparedInput } from "./native-prepared-boundary.ts";
 import { nativeRecallInfo, type NativeRecallObservation } from "./native-recall-state.ts";
 import { submitNativeText } from "./native-send.ts";
@@ -57,10 +57,7 @@ type NativeDispatchParams = {
 };
 class NativeInputInvalidated extends Error {}
 
-/** A missed message is answered only if it was sent and reached the daemon within this window. */
-export const NATIVE_CATCH_UP_WINDOW_MS = 24 * 60 * 60 * 1000;
-/** One catch-up pass answers at most this many missed messages, the newest ones. */
-export const NATIVE_CATCH_UP_LIMIT = 100;
+export { NATIVE_CATCH_UP_LIMIT, NATIVE_CATCH_UP_WINDOW_MS };
 type NativeIntakeOptions = {
   now?: number;
   /** Catch-up only: false for a message that cannot start a turn, so it is not queued or counted. */

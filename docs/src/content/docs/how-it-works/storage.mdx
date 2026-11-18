@@ -84,5 +84,5 @@ Set `dataDir` in `~/.config/agent-wechat/server/config.toml`, or pass `--data-di
 - **The first cleanup after upgrading can take a while.** It works in small steps, so other requests keep running. Removing the first large batch needs free disk space about twice the size of `control.sqlite`; without it the space is reclaimed later.
 - **Blocked sync batches are kept.** A batch with a command the daemon doesn't support stays until a later version can write it to the profile, and the profile's saved sync position waits for it. `wx store usage` counts them under `syncBatchesBlocked` and lists the status and system controls that block them under `blockedControls`.
 - **`wx store usage` upgrades the data folder** to the installed version's format, like any other `wx store` command. Run it on a copy if you want to keep the original as it is.
-- OpenClaw keeps its own progress in `consumerStateDir`. Back that up too.
+- OpenClaw keeps its own progress in `consumerStateDir`. Back that up too. After an upgrade from an earlier plugin release, the first start converts that file to the new format and keeps the original beside it, ending in `.v1-backup`. An older plugin can't read the converted file; restoring the backup to go back makes it handle again the messages that arrived since the upgrade.
 </Aside>

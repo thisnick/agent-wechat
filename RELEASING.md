@@ -197,7 +197,10 @@ next mention. Two tests hold this contract:
 - `packages/openclaw-extension/src/native-consumer-compat.test.ts` loads the
   frozen `test/fixtures/native-compat/consumer-state-1.0.0-beta.13.json`, checks
   its migration, and dispatches a mention whose group context is read from the
-  pinned daemon JSON.
+  pinned daemon JSON. It also converts the frozen
+  `consumer-state-2.7.0.json`, written by the last schema version 1 writer
+  (2.4.2 through 2.7.0), and checks the cursor, queued work, interrupted turn,
+  pending reads, group context and backup.
 
 To change the message JSON on purpose, regenerate the pinned file with
 `UPDATE_NATIVE_COMPAT_FIXTURES=1 cargo +1.93.1 test -p wechat-core native_compat`

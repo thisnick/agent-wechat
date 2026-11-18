@@ -52,6 +52,10 @@ export type NativeGroupBoundary = { cursor: string; messageId?: string; createdA
 type State = { schemaVersion: 2; serverId: string; accountId: string; cursor: string;
   open: Record<string, NativeOpenItem>; reads: Record<string, ReadRequest>; boundaries: Record<string, NativeGroupBoundary> };
 
+/** A missed message is answered only if it was sent and reached the daemon within this window. */
+export const NATIVE_CATCH_UP_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** One catch-up pass answers at most this many missed messages, the newest ones. */
+export const NATIVE_CATCH_UP_LIMIT = 100;
 const OPEN_LIMIT = 5000;
 const AWAITING_HANDOFF_LIMIT = 100;
 const BOUNDARY_LIMIT = 5000;
@@ -71,17 +75,21 @@ export class NativeConsumerState {
   private dirty = false;
   /** Recalls seen while running. Messages read later from the daemon carry their own recall state. */
   private readonly recalls = new Set<string>();
-  constructor(directory: string, serverId: string, accountId: string) {
+  constructor(directory: string, serverId: string, accountId: string, options: { now?: number } = {}) {
     if (!isAbsolute(directory) || !serverId || !accountId) throw new Error("Native consumer state requires absolute storage and bound server/account identities");
     this.file = join(directory, `${createHash("sha256").update(`${serverId}\0${accountId}`).digest("hex")}.json`);
     this.value = { schemaVersion: 2, serverId, accountId, cursor: "0", open: {}, reads: {}, boundaries: {} };
     if (existsSync(this.file)) {
       const stat = lstatSync(this.file);
       if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16 * 1024 * 1024 || (stat.mode & 0o077)) throw new Error("Native consumer state is not a bounded private regular file");
-      const parsed = JSON.parse(readFileSync(this.file, "utf8"));
+      const bytes = readFileSync(this.file, "utf8");
+      const parsed = JSON.parse(bytes);
       if (parsed?.serverId !== serverId || parsed.accountId !== accountId || !decimal(parsed.cursor)) throw new Error("Native consumer identity or schema mismatch; state was preserved");
-      if (parsed.schemaVersion === 1) this.value = migrateVersion1(parsed, this.heldOnOpen);
-      else if (parsed.schemaVersion === 2) this.value = loadVersion2(parsed, this.heldOnOpen);
+      if (parsed.schemaVersion === 1) {
+        this.value = migrateVersion1(parsed, this.heldOnOpen, this.skipped, options.now ?? Date.now());
+        // The conversion drops data, so the earlier release's file is kept once beside the new one.
+        if (!existsSync(`${this.file}.v1-backup`)) this.write(`${this.file}.v1-backup`, bytes);
+      } else if (parsed.schemaVersion === 2) this.value = loadVersion2(parsed, this.heldOnOpen);
       else throw new Error("Native consumer identity or schema mismatch; state was preserved");
       this.persist();
     }
@@ -107,19 +115,23 @@ export class NativeConsumerState {
     return !!serverId && this.recalls.has(nativeRecallIdentity(threadId, serverId));
   }
   private persist(): void {
-    const directory = dirname(this.file);
+    const bytes = JSON.stringify(this.value);
+    if (Buffer.byteLength(bytes) > 16 * 1024 * 1024) throw new Error("Native custody state is full; intake paused without advancing acknowledgement");
+    this.write(this.file, bytes);
+    this.dirty = false;
+  }
+  /** Replace a private file in the consumer directory in one durable step. */
+  private write(file: string, bytes: string): void {
+    const directory = dirname(file);
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     const stat = lstatSync(directory);
     if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077)) throw new Error("Native consumer directory must be private (0700)");
-    const bytes = JSON.stringify(this.value);
-    if (Buffer.byteLength(bytes) > 16 * 1024 * 1024) throw new Error("Native custody state is full; intake paused without advancing acknowledgement");
-    const temporary = `${this.file}.${randomUUID()}.tmp`;
+    const temporary = `${file}.${randomUUID()}.tmp`;
     let fd: number | undefined;
     try {
       fd = openSync(temporary, "wx", 0o600); writeFileSync(fd, bytes); fsyncSync(fd); closeSync(fd); fd = undefined;
-      renameSync(temporary, this.file);
+      renameSync(temporary, file);
       const directoryFd = openSync(directory, "r"); try { fsyncSync(directoryFd); } finally { closeSync(directoryFd); }
-      this.dirty = false;
     } finally { if (fd !== undefined) closeSync(fd); try { unlinkSync(temporary); } catch {} }
   }
   private mutate(change: () => void): void {
@@ -339,48 +351,62 @@ function loadVersion2(parsed: any, held: string[]): State {
   return { schemaVersion: 2, serverId: parsed.serverId, accountId: parsed.accountId, cursor: parsed.cursor, open, reads: parsed.reads, boundaries: parsed.boundaries };
 }
 
-/** Version 1 kept a copy of every message. Keep only open work, pending reads and group context boundaries. */
-function migrateVersion1(parsed: any, held: string[]): State {
-  if (!parsed.items || typeof parsed.items !== "object") throw new Error("Native consumer identity or schema mismatch; state was preserved");
-  type V1Item = { message: NativeMessage; origin: string; state: string; cursor?: string; revision?: string; readPending?: boolean;
-    groupContext?: boolean; dispatchManifest?: NativeDispatchManifest };
-  const items = Object.entries(parsed.items as Record<string, V1Item>);
-  for (const [id, item] of items) {
-    if (item.message?.id !== id || item.message.accountId !== parsed.accountId || typeof item.message.threadId !== "string"
-      || !["received", "dispatching", "handed_off", "completed", "ignored", "needs_review"].includes(item.state)) throw new Error("Invalid native custody record; state was preserved");
-    nativeRecallInfo(item.message);
-    if ((item.cursor != null && !decimal(item.cursor)) || (item.groupContext != null && typeof item.groupContext !== "boolean")) throw new Error("Invalid native group context record; state was preserved");
-    if (item.revision != null && (typeof item.revision !== "string" || !item.revision || item.revision.length > 64)) throw Error("Invalid native custody revision; state was preserved");
-  }
-  if (parsed.recalls != null && (typeof parsed.recalls !== "object" || Array.isArray(parsed.recalls))) throw Error("Invalid native recall state; state was preserved");
-  for (const [key, recall] of Object.entries(parsed.recalls ?? {}) as Array<[string, NativeRecallObservation]>) {
-    validateNativeRecall(recall);
-    if (key !== nativeRecallIdentity(recall.threadId, recall.serverId)) throw Error("Invalid native recall identity; state was preserved");
+/**
+ * Version 1, written by every release before this format, kept a copy of
+ * every message. Keep what version 2 stores: the cursor, queued messages the
+ * catch-up rules would still answer, pending reads and group context
+ * boundaries. Records it cannot use are left out rather than stopping the
+ * upgrade; a record for another account still refuses the file.
+ */
+function migrateVersion1(parsed: any, held: string[], skipped: NativeConsumerState["skipped"], now: number): State {
+  if (!parsed.items || typeof parsed.items !== "object" || Array.isArray(parsed.items)) throw new Error("Native consumer identity or schema mismatch; state was preserved");
+  type V1Item = { message: NativeMessage; origin?: unknown; state: string; cursor?: string; revision?: unknown; readPending?: boolean;
+    groupContext?: boolean; dispatchManifest?: NativeDispatchManifest; runId?: string };
+  const items: Array<[string, V1Item]> = [];
+  for (const [id, item] of Object.entries(parsed.items as Record<string, V1Item>)) {
+    const message = item?.message;
+    if (message && message.accountId != null && message.accountId !== parsed.accountId) throw new Error("Native consumer identity or schema mismatch; state was preserved");
+    if (message?.id !== id || typeof message.threadId !== "string" || !message.threadId || typeof item.state !== "string") continue;
+    items.push([id, { ...item, cursor: decimal(item.cursor) ? item.cursor : undefined }]);
   }
   const state: State = { schemaVersion: 2, serverId: parsed.serverId, accountId: parsed.accountId, cursor: parsed.cursor, open: {}, reads: {}, boundaries: {} };
-  const byCursor = (a: V1Item, b: V1Item) => BigInt(a.cursor ?? "0") < BigInt(b.cursor ?? "0") ? -1 : BigInt(a.cursor ?? "0") > BigInt(b.cursor ?? "0") ? 1 : 0;
+  const serverId = (value: unknown) => decimal(value) ? value : null;
+  const time = (item: V1Item) => item.message.createdAt ? Date.parse(item.message.createdAt) : Number.NaN;
+  // Releases before the cursor field are ordered by creation time.
+  const order = (a: V1Item, b: V1Item) => {
+    const cursors = BigInt(a.cursor ?? "0") - BigInt(b.cursor ?? "0");
+    return cursors < 0n ? -1 : cursors > 0n ? 1 : (time(a) || 0) - (time(b) || 0);
+  };
+  // Queued work follows the catch-up rules, so an old backlog does not all get answered after the upgrade.
+  const queued = items.map(([, item]) => item).filter(item => item.state === "received" && item.origin === "live"
+    && item.message.direction === "incoming" && !item.message.recall).sort(order);
+  const recent = queued.filter(item => { const sent = time(item); if (Number.isFinite(sent) && sent < now - NATIVE_CATCH_UP_WINDOW_MS) { skipped.old++; return false; } return true; });
+  skipped.limit += Math.max(0, recent.length - NATIVE_CATCH_UP_LIMIT);
+  for (const item of recent.slice(-NATIVE_CATCH_UP_LIMIT)) {
+    const message = item.message, quoteServerId = serverId(message.quote?.serverId);
+    state.open[message.id] = { id: message.id, threadId: message.threadId, serverId: serverId(message.serverId), ...(quoteServerId ? { quoteServerId } : {}),
+      origin: "live", cursor: item.cursor ?? parsed.cursor,
+      revision: typeof item.revision === "string" && item.revision && item.revision.length <= 64 ? item.revision : randomUUID(), state: "received" };
+  }
   for (const [id, item] of items) {
-    const message = item.message;
-    if (item.state === "received" && !message.recall) state.open[id] = { id, threadId: message.threadId, serverId: message.serverId ?? null,
-      ...(message.quote?.serverId ? { quoteServerId: message.quote.serverId } : {}), origin: item.origin ?? "unknown",
-      cursor: item.cursor ?? parsed.cursor, revision: item.revision ?? randomUUID(), state: "received" };
-    if (item.state === "dispatching" || item.state === "handed_off") held.push(id);
-    if (item.readPending) {
-      const read = state.reads[message.threadId] ??= { token: randomUUID(), messages: [] };
-      read.messages = [...read.messages, { id, serverId: message.serverId ?? null }].slice(-READ_MESSAGE_LIMIT);
+    // A turn recorded as dispatching was interrupted; it is reported and not repeated.
+    if (item.state === "dispatching") held.push(id);
+    if (item.readPending === true) {
+      const read = state.reads[item.message.threadId] ??= { token: randomUUID(), messages: [] };
+      read.messages = [...read.messages, { id, serverId: serverId(item.message.serverId) }].slice(-READ_MESSAGE_LIMIT);
     }
   }
   // Context buffered by version 1 is now read from the profile. The boundary
   // starts at the oldest buffered message, or after the newest message handed
   // to the model, so the next mention sees the same context.
   for (const threadId of new Set(items.map(([, item]) => item.message.threadId).filter(thread => thread.endsWith("@chatroom")))) {
-    const inThread = items.map(([, item]) => item).filter(item => item.message.threadId === threadId && item.cursor).sort(byCursor);
-    const buffered = inThread.find(item => item.groupContext && item.state === "ignored" && item.origin === "live");
-    const offered = inThread.filter(item => item.dispatchManifest && ["dispatching", "handed_off", "completed", "needs_review"].includes(item.state)).at(-1);
-    if (buffered) state.boundaries[threadId] = { cursor: (BigInt(buffered.cursor!) > 0n ? BigInt(buffered.cursor!) - 1n : 0n).toString(),
-      ...(buffered.message.createdAt ? { createdAt: buffered.message.createdAt } : {}) };
-    else if (offered) state.boundaries[threadId] = { cursor: offered.cursor!, messageId: offered.message.id,
-      ...(offered.message.createdAt ? { createdAt: offered.message.createdAt } : {}) };
+    const inThread = items.map(([, item]) => item).filter(item => item.message.threadId === threadId).sort(order);
+    const buffered = inThread.find(item => item.groupContext === true && item.state === "ignored");
+    const offered = inThread.filter(item => ["dispatching", "handed_off", "completed", "needs_review"].includes(item.state)
+      && (item.dispatchManifest || item.runId || item.state === "completed")).at(-1);
+    const createdAt = (item: V1Item) => typeof item.message.createdAt === "string" ? { createdAt: item.message.createdAt } : {};
+    if (buffered) state.boundaries[threadId] = { cursor: buffered.cursor && BigInt(buffered.cursor) > 0n ? (BigInt(buffered.cursor) - 1n).toString() : "0", ...createdAt(buffered) };
+    else if (offered) state.boundaries[threadId] = { cursor: offered.cursor ?? "0", messageId: offered.message.id, ...createdAt(offered) };
   }
   return state;
 }

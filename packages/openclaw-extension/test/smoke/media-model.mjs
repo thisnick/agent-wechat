@@ -46,6 +46,11 @@ async function exercise(name, conversationAccess, readPolicy, dmScope = 'main') 
       if (url.pathname === '/v1/accounts/a/threads') return json({ items: [{ id: threadId, readStateVersion: '1' }], nextCursor: null, sourceGeneration: 'fixture', coverage: {} });
       if (url.pathname === '/v1/accounts/a/events') return json({ items: [], nextCursor: '0' });
       if (url.pathname === '/v1/accounts/a/events/stream') { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.write(': fixture\n\n'); streams.add(res); req.once('close', () => streams.delete(res)); return; }
+      if (url.pathname === `/v1/accounts/a/threads/${encodeURIComponent(threadId)}/messages`) {
+        // Group context for a mention is read from the chat's saved messages, newest first.
+        const saved = Object.values(JSON.parse(await readFile(join(temporary, 'daemon-messages.json'), 'utf8'))).filter(message => message.threadId === threadId);
+        return json({ items: saved.reverse(), nextCursor: null, sourceGeneration: 'fixture', coverage: {} });
+      }
       const lookup = /^\/v1\/accounts\/a\/messages\/([^/]+)$/.exec(url.pathname);
       if (lookup) {
         const message = JSON.parse(await readFile(join(temporary, 'daemon-messages.json'), 'utf8'))[decodeURIComponent(lookup[1])];

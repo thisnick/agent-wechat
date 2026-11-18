@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { NativeMessage, NativeWeChatClient } from "@agent-wechat/shared";
 import { NativeConsumerState } from "./native-consumer-state.ts";
-import { dispatchNativeMessage } from "./native-monitor.ts";
+import { dispatchNativeMessage, readNativeGroupHistory } from "./native-monitor.ts";
 import { prepareNativeAttachment } from "./native-media.ts";
 import { resolveWeChatAccount } from "./types.ts";
 
@@ -71,4 +71,34 @@ test("a mention gets the 1.0.0-beta.13 group context, read from the current daem
   assert.equal(value.state.groupBoundary(daemon.mention.threadId)?.messageId, daemon.mention.id);
   // The current version's write of the restored file must load again.
   assert.equal(new NativeConsumerState(value.directory, value.serverId, value.accountId).readPending(daemon.mention.threadId), true);
+});
+
+// 2.4.2 through 2.7.0 wrote the last version 1 files, so most upgrades start
+// from this shape. The file is frozen; it was written by that release's writer.
+const frozen270 = readFileSync(new URL("../test/fixtures/native-compat/consumer-state-2.7.0.json", import.meta.url), "utf8");
+test("a consumer file written by 2.7.0 converts without losing its place, its pending reads or its group context", async t => {
+  const directory = mkdtempSync(join(tmpdir(), "native-consumer-compat-")); t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const file = join(directory, `${createHash("sha256").update("fixture-daemon\0a").digest("hex")}.json`);
+  writeFileSync(file, frozen270); chmodSync(file, 0o600);
+  const earlier = JSON.parse(frozen270).items as Record<string, { message: NativeMessage }>;
+  const state = new NativeConsumerState(directory, "fixture-daemon", "a", { now: Date.parse("2026-11-17T13:00:00Z") });
+  assert.equal(state.cursor, "13");
+  // Only the recent live incoming message still waiting is kept; the interrupted turn is reported, not repeated.
+  assert.deepEqual(state.items().map(item => [item.id, item.state, item.cursor, item.serverId]), [["queued", "received", "7", earlier.queued.message.serverId]]);
+  assert.deepEqual(state.heldOnOpen, ["interrupted"]); assert.equal(state.skipped.old, 1);
+  assert.equal(state.readPending("wxid_peer"), true); assert.equal(state.readPending("room@chatroom"), true);
+  assert.deepEqual(state.groupBoundary("room@chatroom"), { cursor: "2", createdAt: earlier["group-context-1"].message.createdAt });
+  const bytes = readFileSync(file, "utf8");
+  assert.equal(JSON.parse(bytes).schemaVersion, 2);
+  for (const { message } of Object.values(earlier)) if (message.body) assert.ok(!bytes.includes(message.body), message.id);
+  assert.equal(readFileSync(`${file}.v1-backup`, "utf8"), frozen270);
+  // The next mention gets the context 2.7.0 had buffered, read from the daemon's messages.
+  const mention = { ...earlier["group-trigger"].message, id: "next-mention", serverId: "7000000000000000100", createdAt: "2026-11-17T12:59:00Z" };
+  state.accept("14", mention, "live");
+  const messages = [...Object.values(earlier).map(item => item.message), mention].filter(message => message.threadId === "room@chatroom");
+  const client = { messages: async () => ({ items: [...messages].reverse(), nextCursor: null, coverage: {}, sourceGeneration: "fixture" }) } as unknown as NativeWeChatClient;
+  assert.deepEqual((await readNativeGroupHistory({ client, state, message: mention, limit: 50, isCommand: () => false })).map(message => message.id), ["group-context-1", "group-context-2"]);
+  // A later start reads the new format and does not report the interrupted turn again.
+  const reopened = new NativeConsumerState(directory, "fixture-daemon", "a");
+  assert.deepEqual(reopened.heldOnOpen, []); assert.equal(reopened.cursor, "14"); assert.equal(readFileSync(`${file}.v1-backup`, "utf8"), frozen270);
 });
