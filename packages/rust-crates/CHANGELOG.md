@@ -1,5 +1,47 @@
 # @agent-wechat/rust-crates
 
+## 2.7.0
+
+### Minor Changes
+
+- [#578](https://github.com/thisnick/agent-wechat/pull/578) [`0627dcf`](https://github.com/thisnick/agent-wechat/commit/0627dcf0a1904251731591bcda479cd7d7fd64fc) Thanks [@thisnick](https://github.com/thisnick)! - Keep blocked sync batches and the event log from growing, and apply more session-entry controls.
+
+  - **Session entry.** A type-51 session-entry control (status opcode 2) now completes for a group or an ordinary contact once its unread clear is written, and for the built-in session holders the official Linux client ignores. Service accounts the official client's account classifier recognizes, `notifymessage`-style aggregates and hidden sessions still keep their batch blocked, because the official client does more for them. Session exit (opcode 5) and the other unmapped controls stay blocked.
+  - **Blocked batches.** A blocked batch outside the newest 256 keeps only the commands not yet written to the profile, plus contact records. Each blocked status or system control leaves a small record of its kind and peer type (never the peer), and `wx store usage` lists them under `blockedControls`.
+  - **Attachments never downloaded.** Message attachment rows that were listed but never downloaded, and aren't queued for automatic download, are removed after 7 days. Voice rows are kept. Reading one returns `operation_expired` (410) until listing the message's media again recreates it with the same ID.
+  - **Event log.** Consecutive `job.updated` events for the same job that differ only in transfer progress replace each other, so the 10,000-event log covers more time. No state is lost: the newest event for each state a job passed through stays.
+
+- [#562](https://github.com/thisnick/agent-wechat/pull/562) [`cc1f5f1`](https://github.com/thisnick/agent-wechat/commit/cc1f5f1b51e04547cb4e2652ee9189fd3432c998) Thanks [@thisnick](https://github.com/thisnick)! - Add relationship privacy reads and versioned contact updates, optional initial privacy for friend requests, and a shared contact detail card with privacy and contact removal. Add CLI contact updates that preserve omitted fields and retain the original merged input for recovery.
+
+- [#570](https://github.com/thisnick/agent-wechat/pull/570) [`3f4247c`](https://github.com/thisnick/agent-wechat/commit/3f4247ce1b1cf648082860a02b598a121ee0344d) Thanks [@thisnick](https://github.com/thisnick)! - Bound the growth of each account's `agent/control.sqlite`. Maintenance now reduces finished sync batches, text and media sends, group and contact changes, recalls and call actions to small receipts. Download records, which hold no payload, are kept. It removes finished metadata receipts, expired pagination views and old duplicate guards, and gives freed space back to the file system. Unfinished, blocked and still-uncertain work keeps its full records.
+
+  Uncertain (`needs_review`) records expire after 7 days, or once more than 100 newer ones exist in the same family. Expiry keeps the record and its unknown outcome but drops its sealed request and reply bytes; nothing is resent. Old receipts are removed after 90 days (text and media sends) or 365 days (group and contact changes and recalls). Their idempotency keys are kept as short digests, so reusing one returns `idempotency_key_expired` (409) instead of starting new work, and reading a removed send, media send job or operation returns `operation_expired` (410).
+
+  The voice fallback now reads the same newest 256 retained message batches as recall evidence, instead of up to 10,000. Add `wx store usage` to show a stopped account's sidecar size, its largest record families and the unfinished work that keeps records whole.
+
+- [#562](https://github.com/thisnick/agent-wechat/pull/562) [`8208b47`](https://github.com/thisnick/agent-wechat/commit/8208b474e2794561f74dafd9d58088c120adedb0) Thanks [@thisnick](https://github.com/thisnick)! - Add account-bound contact discovery and friend request history, sending, acceptance, local history deletion and contact removal through the Rust libraries, HTTP API and CLI. Add optional private-owner OpenClaw contact tools and unified contact, group and message search in the client UI.
+
+- [#573](https://github.com/thisnick/agent-wechat/pull/573) [`6eac2a5`](https://github.com/thisnick/agent-wechat/commit/6eac2a5512864bc837a064c93ccea5aa1aae403e) Thanks [@thisnick](https://github.com/thisnick)! - Shrink two kinds of encrypted plans in each account's `agent/control.sqlite` that repeated bytes the account already keeps.
+
+  - **Voice notes.** A voice attachment's plan no longer keeps the note's encoded audio when the official profile holds the note; a download reads the profile's copy first and otherwise fetches by server ID as before. Storage maintenance rewrites existing plans the same way, one row at a time, only after the profile returns identical bytes. Media cache repair is unchanged: it uses only owned bytes and never starts a transfer.
+  - **Sticker jobs.** A finished pack acquisition among the newest five of its pack keeps only the pack, item IDs, captions and archive locator, which is what adding the pack again reads to reuse its owned archive. Older and failed acquisitions and finished pack, Saved and send jobs drop their plans once nothing reads them: after a day, and only when they are not waiting for a profile write. Their job records and idempotency keys stay. New sticker job plans store raw bytes as base64 text instead of JSON number arrays; earlier plans still read.
+
+  An earlier version can't read sticker job plans written or reduced by this one. After downgrading, an unfinished sticker job or one awaiting a profile write fails, and adding a pack again doesn't reuse an earlier download. Voice plans stay readable.
+
+### Patch Changes
+
+- [#562](https://github.com/thisnick/agent-wechat/pull/562) [`6de620e`](https://github.com/thisnick/agent-wechat/commit/6de620ee73cc3fad4d2e974f8cb448e4facbe509) Thanks [@thisnick](https://github.com/thisnick)! - Show contact, group and message search results as each source responds, default Contacts search to its contact scope, and simplify the shared contact card with icon details actions, collapsed history and a single contextual footer.
+
+  Report stored contact membership evidence in the existing relation field. Keep unknown people out of the saved-contact list and offer a separate lookup and friend-request review from their contact cards.
+
+  Contact lists now default to confirmed saved friends across the API and CLI. Use the API relation filter or `wx contacts list --all` for other cached people. Exact reads and server discovery are unchanged.
+
+  Local contact search defaults to saved friends. When a query is entered, show other cached people in a separate Other people section. Show server discovery separately under Add someone on WeChat, label friends Contact and confirmed non-contacts Not friends yet, and omit a relationship label when membership is unknown.
+
+  Separate Friends and Other people search tabs, route Contacts + to Other people, page each section independently, and show original dates and times on message matches.
+
+  Limit message-search snippets to two lines while keeping the conversation name, original timestamp and View action visible.
+
 ## 2.6.0
 
 ### Minor Changes
