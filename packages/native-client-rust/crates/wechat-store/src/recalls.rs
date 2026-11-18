@@ -304,13 +304,14 @@ impl Store {
                     params![thread, server, message_id, created],
                 )?;
             }
-            // An independent observation cannot publish a staged mask's event.
+            // Only replay may promote the mask. Its freshly resolved source
+            // supersedes the provisional binding from the prescan.
             let mut first_confirmation = !mask_only && inserted == 1;
             if !mask_only && inserted == 0 && control.is_some() {
                 first_confirmation = tx.execute(
-                    "UPDATE message_recalls SET projection_state='pending'
+                    "UPDATE message_recalls SET projection_state='pending',message_id=?3,source_created_at=?4
                      WHERE thread_id=?1 AND server_id=?2 AND projection_state='awaiting_command'",
-                    params![thread, server],
+                    params![thread, server, message_id, created],
                 )? == 1;
             }
             let result = tx.query_row(

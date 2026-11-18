@@ -2,7 +2,8 @@
 use crate::{message_id, Core};
 use anyhow::{bail, ensure, Context, Result};
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
+use wechat_profile::ProfileReader;
 use wechat_protocol::wire::AddMessage;
 use wechat_store::RecallMarker;
 
@@ -301,10 +302,6 @@ impl Core {
             replacement_text.is_none_or(valid_notice),
             "unsupported_recall_notice"
         );
-        // Operation receipts survive missing keys and partial official writes.
-        // They do not retain a second settled message or original-author field.
-        let source = self.recall_source(account, thread, server);
-        let known = source.as_ref().ok().and_then(|s| s.as_ref());
         let control = if self
             .store
             .runtime(account, &format!("sync-control:{receipt}"))?
@@ -324,6 +321,23 @@ impl Core {
         } else {
             None
         };
+        // A staged mask already protects the original. Keep it staged until
+        // replay can resolve the target without binding an ambiguous source.
+        let source = match self.recall_source(account, thread, server) {
+            Err(error)
+                if control.is_some()
+                    && self
+                        .store
+                        .recall_marker(account, thread, server)?
+                        .is_some_and(|marker| marker.awaits_sync_command()) =>
+            {
+                return Err(error);
+            }
+            source => source,
+        };
+        // Other confirmed operations still keep their receipt when the native
+        // profile cannot be read or written.
+        let known = source.as_ref().ok().and_then(|s| s.as_ref());
         let marker = self.store.record_recall_with_control(
             account,
             thread,
@@ -349,11 +363,19 @@ impl Core {
         recall: &IncomingRecall,
         origin: &str,
         receipt: &str,
+        reader: &mut Option<Arc<ProfileReader>>,
     ) -> Result<()> {
-        let source = self
-            .recall_source(account, &recall.thread, &recall.server)
-            .ok()
-            .flatten();
+        if reader.is_none() {
+            *reader = self
+                .profile_reader_owned(account)
+                .or_else(|_| self.profile_reader(account).map(Arc::new))
+                .ok();
+        }
+        let source = reader.as_deref().and_then(|reader| {
+            Self::recall_source_in(reader, &recall.thread, &recall.server)
+                .ok()
+                .flatten()
+        });
         self.store.stage_sync_recall_mask(
             account,
             &recall.thread,
@@ -375,9 +397,15 @@ impl Core {
         thread: &str,
         server: &str,
     ) -> Result<Option<(String, i64)>> {
-        let messages = self
-            .profile_reader(account)?
-            .messages_by_server_id(thread, server, None)?;
+        Self::recall_source_in(&self.profile_reader(account)?, thread, server)
+    }
+
+    fn recall_source_in(
+        reader: &ProfileReader,
+        thread: &str,
+        server: &str,
+    ) -> Result<Option<(String, i64)>> {
+        let messages = reader.messages_by_server_id(thread, server, None)?;
         ensure!(messages.len() <= 1, "recall_target_ambiguous");
         messages
             .into_iter()
@@ -421,7 +449,15 @@ impl Core {
         account: &str,
         marker: &RecallMarker,
     ) -> Result<Option<String>> {
-        let reader = self.profile_reader(account)?;
+        self.recall_projection_notice_in(account, marker, &self.profile_reader(account)?)
+    }
+
+    fn recall_projection_notice_in(
+        &self,
+        account: &str,
+        marker: &RecallMarker,
+        reader: &ProfileReader,
+    ) -> Result<Option<String>> {
         let messages = reader.messages_by_server_id(&marker.thread_id, &marker.server_id, None)?;
         ensure!(messages.len() <= 1, "recall_target_ambiguous");
         // Settled text is read from the official message. A receipt is only a
@@ -441,6 +477,24 @@ impl Core {
             .recall_projection_notice(account, marker)?
             .unwrap_or_else(|| RECALLED_BODY.into()))
     }
+    /// Reuse the account's reader under the writer gate while retaining the
+    /// native shard coverage and target uniqueness checks.
+    pub(crate) fn projected_sync_recall_preview(
+        &self,
+        account: &str,
+        marker: &RecallMarker,
+    ) -> Result<String> {
+        let notice = if marker.awaits_sync_command() {
+            let reader = self
+                .profile_reader_owned(account)
+                .or_else(|_| self.profile_reader(account).map(Arc::new))?;
+            self.recall_projection_notice_in(account, marker, &reader)?
+        } else {
+            self.recall_projection_notice(account, marker)?
+        };
+        Ok(notice.unwrap_or_else(|| RECALLED_BODY.into()))
+    }
+
     pub(crate) fn project_recall_marker(
         &self,
         account: &str,

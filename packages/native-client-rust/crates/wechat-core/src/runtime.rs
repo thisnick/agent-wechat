@@ -2122,6 +2122,8 @@ impl Core {
         pending: &[(String, Vec<u8>)],
         own: &str,
     ) -> Result<()> {
+        // Open the reader on demand and drop it before native replay writes or yields.
+        let mut reader = None;
         for (id, encrypted) in pending {
             let batch = self.load_sync_batch(account, id, encrypted)?;
             let origin = self.sync_batch_origin(account, id)?;
@@ -2132,6 +2134,7 @@ impl Core {
                     &format!("projected:{id}:{index}"),
                     own,
                     &origin,
+                    &mut reader,
                 )?;
             }
         }

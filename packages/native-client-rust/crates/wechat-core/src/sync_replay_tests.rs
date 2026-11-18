@@ -313,29 +313,56 @@ async fn replay_masks_already_staged_recalls_before_releasing_the_writer() {
     let (_directory, core) = fixture();
     let original = batch(
         1,
-        vec![add(1, "peer", "synthetic_self", b"Private body", 77, 77)],
+        vec![
+            add(1, "peer", "synthetic_self", b"Private body one", 77, 77),
+            add(1, "peer", "synthetic_self", b"Private body two", 78, 78),
+        ],
     );
     core.commit_sync_batch("one", original, "fixture", "fixture")
         .unwrap();
-    let id = core.messages("one", "peer", None, None).unwrap()["items"][0]["id"]
-        .as_str()
+    let originals = core.messages("one", "peer", None, None).unwrap();
+    let targets: Vec<_> = originals["items"]
+        .as_array()
         .unwrap()
-        .to_owned();
+        .iter()
+        .map(|row| {
+            (
+                row["serverId"].as_str().unwrap().to_owned(),
+                row["id"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(targets.len(), 2);
     for (id, cursor, start, count) in [("older-a", 2, 100, 3), ("older-b", 3, 103, 6)] {
         stage(&core, id, &batch(cursor, text_commands(start, count)));
     }
-    let xml = b"<sysmsg type='revokemsg'><revokemsg><session>peer</session><newmsgid>77</newmsgid><replacemsg>Fixture recall</replacemsg></revokemsg></sysmsg>";
     let mut commands = text_commands(200, SYNC_REPLAY_CHUNK_SIZE);
-    commands.push(add(10002, "peer", "synthetic_self", xml, 299, 299));
+    for (server, command) in [(77, 299), (78, 300)] {
+        let xml = format!("<sysmsg type='revokemsg'><revokemsg><session>peer</session><newmsgid>{server}</newmsgid><replacemsg>Fixture recall</replacemsg></revokemsg></sysmsg>");
+        commands.push(add(
+            10002,
+            "peer",
+            "synthetic_self",
+            xml.as_bytes(),
+            command.into(),
+            command,
+        ));
+    }
     let (read, checked) = oneshot::channel();
     replay(core.clone(), batch(4, commands), move |core| {
         let _guard = tokio::runtime::Handle::current().block_on(core.lock_account("one"))?;
-        assert_eq!(committed_events(core), 1 + SYNC_REPLAY_CHUNK_SIZE);
+        assert_eq!(committed_events(core), 2 + SYNC_REPLAY_CHUNK_SIZE);
         assert_eq!(core.store.pending_sync_count("one")?, 2);
-        let message = core.message("one", &id)?;
-        assert_eq!(message["body"], "[Message recalled]");
-        assert_eq!(message["recall"]["replacementText"], "Fixture recall");
-        assert!(!message.to_string().contains("Private body"));
+        for (server, id) in &targets {
+            let marker = core.store.recall_marker("one", "peer", server)?.unwrap();
+            assert!(marker.awaits_sync_command());
+            assert_eq!(marker.message_id.as_deref(), Some(id.as_str()));
+
+            let message = core.message("one", id)?;
+            assert_eq!(message["body"], "[Message recalled]");
+            assert_eq!(message["recall"]["replacementText"], "Fixture recall");
+            assert!(!message.to_string().contains("Private body"));
+        }
         assert!(
             !core
                 .store
@@ -359,9 +386,245 @@ async fn replay_masks_already_staged_recalls_before_releasing_the_writer() {
             .iter()
             .filter(|event| event.kind == "message.recalled")
             .count(),
-        1,
+        2,
     );
     assert_eq!(core.store.pending_sync_count("one").unwrap(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn staged_recall_uses_the_retained_notice_in_the_native_session_preview() {
+    let (_directory, core) = fixture();
+    let target = 100 + SYNC_REPLAY_CHUNK_SIZE as u32 - 1;
+    let xml = format!("<sysmsg type='revokemsg'><revokemsg><session>peer</session><newmsgid>{target}</newmsgid><replacemsg>Fixture recall</replacemsg></revokemsg></sysmsg>");
+    let mut commands = text_commands(100, SYNC_REPLAY_CHUNK_SIZE);
+    commands.push(add(
+        10002,
+        "peer",
+        "synthetic_self",
+        xml.as_bytes(),
+        199,
+        199,
+    ));
+    replay(core, batch(1, commands), move |core| {
+        let _guard = tokio::runtime::Handle::current().block_on(core.lock_account("one"))?;
+        let marker = core
+            .store
+            .recall_marker("one", "peer", &target.to_string())?
+            .context("missing staged recall")?;
+        assert!(marker.awaits_sync_command());
+        let thread = core
+            .profile_reader("one")?
+            .threads(&Default::default())?
+            .items
+            .into_iter()
+            .find(|row| row.username == "peer")
+            .context("missing native session")?;
+        assert_eq!(
+            thread.raw_fields.get("summary"),
+            Some(&wechat_profile::SqlValue::Text("Fixture recall".into()))
+        );
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+fn recall_command(target: u32) -> SyncCommand {
+    let xml = format!("<sysmsg type='revokemsg'><revokemsg><session>peer</session><newmsgid>{target}</newmsgid><replacemsg>Fixture recall</replacemsg></revokemsg></sysmsg>");
+    add(10002, "peer", "synthetic_self", xml.as_bytes(), 199, 199)
+}
+
+#[tokio::test]
+async fn staged_recall_preview_rejects_an_unreadable_business_shard() {
+    let (_directory, core) = fixture();
+    let _guard = core.lock_account("one").await.unwrap();
+    let (location, _) = core.profile_location_keys("one").unwrap();
+    let messages = location.root().join("db_storage/message");
+    std::fs::copy(
+        messages.join("message_0.db"),
+        messages.join("biz_message_0.db"),
+    )
+    .unwrap();
+    core.mask_sync_recall_before_yield(
+        "one",
+        &recall_command(100),
+        "projected:fixture:1",
+        "synthetic_self",
+        "fixture",
+        &mut None,
+    )
+    .unwrap();
+    let marker = core
+        .store
+        .recall_marker("one", "peer", "100")
+        .unwrap()
+        .unwrap();
+    assert!(marker.awaits_sync_command());
+
+    let error = core
+        .projected_sync_recall_preview("one", &marker)
+        .unwrap_err();
+    assert!(
+        matches!(
+            error.downcast_ref::<wechat_profile::ProfileError>(),
+            Some(wechat_profile::ProfileError::KeyUnavailable(name)) if name == "message shards"
+        ),
+        "{error:#}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replay_defers_an_ambiguous_recall_until_its_source_is_unique() {
+    let (directory, core) = fixture();
+    let (_donor_directory, donor) = fixture();
+    let target = 100 + SYNC_REPLAY_CHUNK_SIZE as u32 - 1;
+    donor
+        .commit_sync_batch(
+            "one",
+            batch(1, text_commands(target, 1)),
+            "fixture",
+            "fixture",
+        )
+        .unwrap();
+
+    // Copy a valid keyed shard containing the same target that replay will
+    // insert in the ordinary message database.
+    let (donor_location, donor_keys) = donor.profile_location_keys("one").unwrap();
+    let (location, mut keys) = core.profile_location_keys("one").unwrap();
+    let original = "message/message_0.db";
+    let business = "message/biz_message_0.db";
+    let source = donor_location.root().join("db_storage").join(original);
+    {
+        let db = rusqlite::Connection::open(&source).unwrap();
+        let password = &state().database_password;
+        assert_eq!(
+            unsafe { rusqlite::ffi::sqlite3_key(db.handle(), password.as_ptr().cast(), 32) },
+            0
+        );
+        db.execute_batch(
+            "PRAGMA cipher_compatibility=4;PRAGMA cipher_page_size=4096;PRAGMA kdf_iter=256000;",
+        )
+        .unwrap();
+        let busy: i32 = db
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(busy, 0);
+    }
+    let business_path = location.root().join("db_storage").join(business);
+    std::fs::copy(source, &business_path).unwrap();
+    let mut key = donor_keys.databases[original].clone();
+    key.relative_path = business.into();
+    keys.databases.insert(business.into(), key);
+    let original_keys = core.store.keys_file("one").unwrap().unwrap();
+    let key_file = original_keys.with_file_name("business-shard-keys.json");
+    keys.write_new(&key_file).unwrap();
+    core.store.set_keys_file("one", &key_file).unwrap();
+
+    let mut commands = text_commands(100, SYNC_REPLAY_CHUNK_SIZE);
+    commands.push(recall_command(target));
+    let (checked, observed) = oneshot::channel();
+    let result = replay(core.clone(), batch(1, commands), move |core| {
+        let _guard = tokio::runtime::Handle::current().block_on(core.lock_account("one"))?;
+        let reader = core.profile_reader("one")?;
+        let copies = reader.messages_by_server_id("peer", &target.to_string(), None)?;
+        assert_eq!(copies.len(), 2);
+        for copy in copies {
+            let visible = core.message("one", &crate::message_id(&copy.id)?)?;
+            assert_eq!(visible["body"], "[Message recalled]");
+        }
+        let thread = reader
+            .threads(&Default::default())?
+            .items
+            .into_iter()
+            .find(|row| row.username == "peer")
+            .context("missing native session")?;
+        assert_eq!(
+            thread.raw_fields.get("summary"),
+            Some(&wechat_profile::SqlValue::Text("Replay text".into()))
+        );
+        assert_eq!(committed_events(core), SYNC_REPLAY_CHUNK_SIZE - 1);
+        assert!(core
+            .store
+            .events("one", 0, 100)?
+            .iter()
+            .all(|event| event.kind != "message.recalled"));
+        checked.send(()).unwrap();
+        Ok(())
+    })
+    .await
+    .unwrap();
+    observed
+        .await
+        .expect("must yield before applying the recall");
+    assert_eq!(result["projection"]["pendingBatches"], 1);
+    assert_eq!(committed_events(&core), SYNC_REPLAY_CHUNK_SIZE - 1);
+    let events = core.store.events("one", 0, 100).unwrap();
+    assert!(events
+        .iter()
+        .any(|event| event.kind == "projection.blocked"));
+    assert!(events.iter().all(|event| event.kind != "message.recalled"));
+    let target = target.to_string();
+    let marker = core
+        .store
+        .recall_marker("one", "peer", &target)
+        .unwrap()
+        .unwrap();
+    assert!(marker.awaits_sync_command());
+
+    // Quarantine the duplicate in this fixture and restore its original keys.
+    drop(core.profile_readers.lock().unwrap().remove("one"));
+    std::fs::rename(
+        business_path,
+        directory.path().join("quarantined-business.db"),
+    )
+    .unwrap();
+    core.store.set_keys_file("one", &original_keys).unwrap();
+    let originals = core
+        .profile_reader("one")
+        .unwrap()
+        .messages_by_server_id("peer", &target, None)
+        .unwrap();
+    assert_eq!(originals.len(), 1);
+    assert_eq!(originals[0].id.database, original);
+    let original_id = crate::message_id(&originals[0].id).unwrap();
+
+    let result = core.recover_projection_online("one").await.unwrap();
+    assert_eq!(result["projectedCommands"], 2);
+    assert_eq!(result["pendingBatches"], 0);
+    let events = core.store.events("one", 0, 100).unwrap();
+    let commits: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == "message.committed" && event.data["messageId"] == original_id)
+        .collect();
+    let recalls: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == "message.recalled")
+        .collect();
+    assert_eq!(commits.len(), 1);
+    assert_eq!(recalls.len(), 1);
+    assert!(recalls[0].cursor.parse::<u64>().unwrap() > commits[0].cursor.parse::<u64>().unwrap());
+    assert_eq!(recalls[0].data["messageId"], original_id);
+    assert_eq!(recalls[0].data["serverId"], target);
+    assert_eq!(
+        core.message("one", &original_id).unwrap()["body"],
+        "[Message recalled]"
+    );
+    let last_cursor = events.last().unwrap().cursor.parse().unwrap();
+    assert_eq!(
+        core.recover_projection_online("one").await.unwrap()["projectedCommands"],
+        0
+    );
+    assert!(core
+        .store
+        .events("one", last_cursor, 100)
+        .unwrap()
+        .iter()
+        .all(|event| {
+            !matches!(
+                event.kind.as_str(),
+                "message.committed" | "message.recalled"
+            )
+        }));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

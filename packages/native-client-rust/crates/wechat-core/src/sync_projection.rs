@@ -370,6 +370,7 @@ impl Core {
         receipt: &str,
         own: &str,
         origin: &str,
+        reader: &mut Option<Arc<wechat_profile::ProfileReader>>,
     ) -> Result<()> {
         if command.id != 5 {
             return Ok(());
@@ -386,7 +387,7 @@ impl Core {
                     .is_none()
             {
                 self.retain_control_raw(account, command, receipt)?;
-                self.mask_pending_sync_recall(account, &recall, origin, receipt)?;
+                self.mask_pending_sync_recall(account, &recall, origin, receipt, reader)?;
             }
         }
         Ok(())
@@ -908,7 +909,7 @@ impl Core {
                 &MessageSessionProjection {
                     source: source.clone(),
                     peer: message.peer.clone(),
-                    summary: self.recall_preview(account, marker)?,
+                    summary: self.projected_sync_recall_preview(account, marker)?,
                     outgoing: message.outgoing,
                     unread: false,
                     sender: None,
