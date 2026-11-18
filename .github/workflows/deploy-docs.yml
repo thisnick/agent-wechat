@@ -10,6 +10,7 @@ on:
       - 'pnpm-workspace.yaml'
       - 'package.json'
       - '.github/workflows/deploy-docs.yml'
+      - '.github/actions/apt-install/**'
   workflow_dispatch:
 
 permissions:
@@ -39,7 +40,9 @@ jobs:
 
       # Preview images for translated pages need CJK glyphs.
       - name: Install fonts
-        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
+        uses: ./.github/actions/apt-install
+        with:
+          packages: fonts-noto-cjk
 
       - name: Build docs
         run: pnpm --filter @agent-wechat/docs build

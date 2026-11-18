@@ -18,6 +18,7 @@ on:
       - '.github/workflows/native-image.yml'
       - '.github/workflows/native-distribution.yml'
       - '.github/workflows/desktop.yml'
+      - '.github/actions/apt-install/**'
       - 'scripts/i18n/**'
       - 'scripts/ci/**'
       - 'scripts/release/**'
@@ -94,6 +95,7 @@ jobs:
               - '.node-version'
               - 'pnpm-lock.yaml'
               - '.github/workflows/ci.yml'
+              - '.github/actions/apt-install/**'
 
   release-tools:
     needs: changes
@@ -203,9 +205,12 @@ jobs:
           node --test scripts/i18n/*.test.mjs
           node scripts/i18n/index.mjs check
 
-      # Preview images for translated pages need CJK glyphs.
+      # Preview images for translated pages need CJK glyphs. Reuses the copy the
+      # docs deployment caches from main (same runner image and package).
       - name: Install fonts
-        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
+        uses: ./.github/actions/apt-install
+        with:
+          packages: fonts-noto-cjk
 
       - name: Build docs
         run: pnpm --filter @agent-wechat/docs build

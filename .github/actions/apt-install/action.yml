@@ -1,0 +1,77 @@
+name: Install Ubuntu packages
+description: >-
+  Install Ubuntu packages with apt-get, starting from the .deb files an earlier
+  run saved in the Actions cache. A slow Ubuntu mirror then delays only the
+  packages that changed since that run, not every download.
+inputs:
+  packages:
+    description: Space-separated names of the Ubuntu packages to install.
+    required: true
+  save:
+    description: >-
+      Whether to save the packages to the cache when this run downloaded any.
+      Every event except a pull request saves: main-branch and scheduled runs
+      fill the cache, and pull requests read it.
+    default: ${{ github.event_name != 'pull_request' }}
+runs:
+  using: composite
+  steps:
+    - name: Name the package cache
+      id: cache
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        . /etc/os-release
+        # The same packages on the same release and architecture share one cache,
+        # whichever workflow installs them. Word splitting is deliberate.
+        list=$(printf '%s\n' $PACKAGES | sort -u | sha256sum | cut -c1-16)
+        echo "prefix=apt-v1-$VERSION_CODENAME-$(dpkg --print-architecture)-$list-" >> "$GITHUB_OUTPUT"
+    - name: Restore downloaded packages
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ runner.temp }}/apt-archives
+        # Never an exact match: restore the newest copy any earlier run saved.
+        key: ${{ steps.cache.outputs.prefix }}${{ github.run_id }}
+        restore-keys: ${{ steps.cache.outputs.prefix }}
+    - name: Install packages
+      id: install
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+        PREFIX: ${{ steps.cache.outputs.prefix }}
+        SAVED: ${{ runner.temp }}/apt-archives
+      run: |
+        shopt -s nullglob
+        # A directory of its own rather than /var/cache/apt/archives, which some
+        # images empty after every install, before the files could be saved.
+        archives=/var/cache/apt/actions-cache
+        sudo install -d -m 0755 "$archives"
+        mkdir -p "$SAVED"
+        cached=("$SAVED"/*.deb)
+        if [ ${#cached[@]} -gt 0 ]; then sudo cp "${cached[@]}" "$archives"/; fi
+        list_debs() { find "$archives" -maxdepth 1 -name '*.deb' -printf '%f\n' | sort; }
+        before=$(list_debs)
+        options=(-o Dir::Cache::Archives="$archives" -o APT::Keep-Downloaded-Packages=true)
+        sudo apt-get update
+        # apt checks every cached file against the signed package index it just
+        # fetched, and downloads any package that is missing or differs. Word
+        # splitting of $PACKAGES is deliberate.
+        sudo apt-get install -y "${options[@]}" $PACKAGES
+        # Remove versions the archive no longer offers, so the cache stays small.
+        sudo apt-get autoclean "${options[@]}"
+        downloaded=$(comm -13 <(printf '%s\n' "$before") <(list_debs) | grep -c . || true)
+        echo "Restored ${#cached[@]} package files from the cache; downloaded $downloaded."
+        if [ "$downloaded" -gt 0 ]; then
+          rm -f "$SAVED"/*.deb
+          cp "$archives"/*.deb "$SAVED"/
+          echo "save=true" >> "$GITHUB_OUTPUT"
+          echo "key=$PREFIX$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(cat /proc/sys/kernel/random/uuid)" >> "$GITHUB_OUTPUT"
+        fi
+    - name: Save downloaded packages
+      if: inputs.save == 'true' && steps.install.outputs.save == 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ runner.temp }}/apt-archives
+        # Jobs in one run can install the same packages; each saves its own copy.
+        key: ${{ steps.install.outputs.key }}

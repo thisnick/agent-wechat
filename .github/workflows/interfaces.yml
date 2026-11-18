@@ -70,9 +70,12 @@ jobs:
           workspaces: packages/native-client-rust -> target
           add-rust-environment-hash-key: false
           key: interfaces-${{ steps.rust.outputs.cachekey }}-${{ steps.cache-key.outputs.rust }}
+      # Reuses the cmake packages Native client's main-branch runs cache.
       - if: steps.affected.outputs.rust == 'true'
         name: Install native build tools
-        run: sudo apt-get update && sudo apt-get install -y cmake
+        uses: ./.github/actions/apt-install
+        with:
+          packages: cmake
       - if: steps.affected.outputs.openclaw == 'true'
         run: pnpm install --frozen-lockfile
       - if: steps.affected.outputs.listings != ''
