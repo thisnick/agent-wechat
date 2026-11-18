@@ -6,9 +6,8 @@
 //   pnpm interfaces --all            regenerate every listing
 //   pnpm interfaces --check [...]    compare instead of writing
 //   pnpm interfaces --list           show each listing and whether its sources changed
-//   pnpm interfaces --affected [...] print the names a run would check, one per line
-//   --no-cargo-tests                 leave out the listings that are cargo tests (cli, storage,
-//                                    websocket, http); CI checks those in the Native client job
+//   pnpm interfaces --affected [...] print the names a run would check, one per line (CI uses
+//                                    this to check only the listings a PR affects)
 //
 // "Changed" means changed since the merge base with origin/main (override with
 // INTERFACES_BASE), including uncommitted and untracked files. Needs cargo with the
@@ -22,6 +21,8 @@ const rust = 'packages/native-client-rust/';
 const rustShared = [`${rust}Cargo.toml`, `${rust}Cargo.lock`, 'rust-toolchain.toml'];
 // The Rust listings are tests in these packages. They always run as one cargo invocation over the
 // same package set: separate invocations resolve dependency features differently and rebuild them.
+// The tests live in the library and binary unit tests, so --lib --bins skips building the
+// integration tests, examples and doctests; the dependency features stay the same.
 const rustPackages = ['wx-native', 'wechat-store', 'wechat-api'];
 
 /** Each listing, the paths whose changes can affect it, and the commands that regenerate or check it. */
@@ -67,14 +68,12 @@ export const affects = (step, files) => files.some(file => [...step.sources, ...
 
 /**
  * The listings a run checks: the named ones; every listing when `files` is `null` (`--all`, or the
- * merge base is unknown); otherwise those whose sources changed. `--no-cargo-tests` leaves out the
- * listings that are cargo tests: CI's Native client test job already builds and runs them.
+ * merge base is unknown); otherwise those whose sources changed.
  */
 export function select(argv, files) {
   const named = argv.filter(arg => !arg.startsWith('--'));
-  const chosen = named.length ? steps.filter(step => named.includes(step.name))
+  return named.length ? steps.filter(step => named.includes(step.name))
     : files === null ? steps : steps.filter(step => affects(step, files));
-  return argv.includes('--no-cargo-tests') ? chosen.filter(step => !step.test) : chosen;
 }
 
 function main(argv) {
@@ -100,15 +99,14 @@ function main(argv) {
     console.log('No interface sources changed since the merge base with origin/main. Nothing to run (use --all to run everything).');
     return 0;
   }
-  const considered = argv.includes('--no-cargo-tests') ? steps.filter(step => !step.test) : steps;
-  const skipped = considered.filter(step => !selected.includes(step));
+  const skipped = steps.filter(step => !selected.includes(step));
   if (skipped.length && !named.length) console.log(`Skipping unchanged listings: ${skipped.map(step => step.name).join(', ')}.`);
   const started = process.hrtime.bigint();
   const results = [];
   const rustSteps = selected.filter(step => step.test);
   if (rustSteps.length) {
     const begin = process.hrtime.bigint();
-    const args = ['test', '--locked', '--quiet', '--manifest-path', `${rust}Cargo.toml`, ...rustPackages.flatMap(name => ['-p', name]), '--', ...rustSteps.map(step => step.test)];
+    const args = ['test', '--locked', '--quiet', '--manifest-path', `${rust}Cargo.toml`, ...rustPackages.flatMap(name => ['-p', name]), '--lib', '--bins', '--', ...rustSteps.map(step => step.test)];
     console.log(`> cargo ${args.join(' ')}`);
     let ok = true;
     try {

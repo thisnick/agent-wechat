@@ -24,11 +24,10 @@ test('a change to the CI job selects every listing', () => {
   assert.deepEqual(selected(['.github/workflows/interfaces.yml']), steps.map(step => step.name));
 });
 
-test('--no-cargo-tests leaves the cargo-test listings to the Native client job', () => {
+test('select runs named listings, every listing without a merge base, or the affected ones', () => {
   const names = (argv, files) => select(argv, files).map(step => step.name);
-  assert.deepEqual(names(['--no-cargo-tests'], ['packages/native-client-rust/Cargo.lock']), ['crates']);
-  assert.deepEqual(names(['--no-cargo-tests'], ['packages/native-client-rust/crates/wx/src/main.rs']), []);
-  assert.deepEqual(names(['--no-cargo-tests'], null), ['ui', 'scenes', 'crates', 'openclaw']);
-  assert.deepEqual(names(['--no-cargo-tests', 'http', 'ui'], null), ['ui']);
-  assert.deepEqual(names([], ['packages/native-client-rust/Cargo.lock']), ['cli', 'storage', 'websocket', 'http', 'crates']);
+  assert.deepEqual(names(['--check', 'http', 'ui'], ['README.md']), ['http', 'ui']);
+  assert.deepEqual(names(['--check'], null), steps.map(step => step.name));
+  assert.deepEqual(names(['--affected'], ['packages/native-client-rust/Cargo.lock']), ['cli', 'storage', 'websocket', 'http', 'crates']);
+  assert.deepEqual(names(['--affected'], ['docs/src/content/docs/use/media.mdx']), []);
 });

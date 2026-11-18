@@ -37,18 +37,12 @@ git diff interfaces/     # review what changed
 | `pnpm interfaces --list` | Shows each listing and whether its sources changed |
 | `pnpm interfaces --affected` | Prints the names a run would check, one per line, without running them |
 | `--check` with any of the above | Compares instead of writing |
-| `--no-cargo-tests` with any of the above | Leaves out `cli`, `storage`, `websocket` and `http`, the listings that are cargo tests |
 
 Each run prints how long each listing took. With warm build caches a full run takes about 5 seconds; the first run in a fresh checkout compiles the Rust test and rustdoc builds and takes a few minutes. The Rust listings run as one cargo invocation, and the crate listings use their own target directory (`target/interfaces-rustdoc`), so neither forces the other to rebuild.
 
-`pnpm interfaces --check` fails instead of writing. It needs the pinned Rust toolchain, `cmake` and Node.
+`pnpm interfaces --check` fails instead of writing. It needs the pinned Rust toolchain, `cmake` and Node. The CLI and storage listings are also checked by `cargo test`.
 
-CI checks each listing only when a PR changes its sources, using the same paths as `pnpm interfaces`:
-
-| Listings | Checked by |
-| --- | --- |
-| `cli`, `storage`, `websocket`, `http` | The Native client test job, in its "Check Rust interface listings" step. These listings are cargo tests, and that job already builds them. |
-| `ui`, `scenes`, `crates`, `openclaw` | The Interfaces up to date job, which installs only what the affected listings need |
+In CI, the Interfaces up to date job checks each listing only when a PR changes its sources, using the same paths as `pnpm interfaces`. It installs only what those listings need: Node for `ui` and `scenes`, `pnpm install` for `openclaw`, and Rust and `cmake` for the rest. A PR that changes no listing's sources passes without building anything.
 
 ## Format
 
@@ -72,8 +66,7 @@ tool wechat_history.limit | integer, min 1, max 50, default 20 | Maximum number 
 
 | Check | Fails when |
 | --- | --- |
-| Interfaces up to date | A UI, scene, crate or OpenClaw listing differs from what its generator produces |
-| Native client test | A CLI, storage, HTTP API or calls WebSocket listing differs from what its test produces |
+| Interfaces up to date | A listing whose sources the PR changed differs from its generator's output |
 | Interface docs | A row added or changed in this PR says `MISSING …`. Gaps from before a listing existed stay allowed until someone fixes them |
 | Interface approval | The PR changes `interfaces/` and the `interfaces-approved` label doesn't cover the current listings |
 

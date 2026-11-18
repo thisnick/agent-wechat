@@ -33,44 +33,44 @@ jobs:
           node-version-file: .node-version
           cache: pnpm
       # Each listing runs only when its sources changed: `steps` in scripts/interfaces/index.mjs
-      # maps every listing to its paths, the same way `pnpm interfaces` chooses locally. The CLI,
-      # storage, HTTP API and calls WebSocket listings are cargo tests that the Native client test
-      # job already builds and runs, so this job leaves them out (--no-cargo-tests).
+      # maps every listing to its paths, the same way `pnpm interfaces` chooses locally.
       - name: Choose the listings this PR affects
         id: affected
         env:
           INTERFACES_BASE: origin/${{ github.base_ref }}
         run: |
-          listings=$(node scripts/interfaces/index.mjs --affected --no-cargo-tests | xargs)
+          listings=$(node scripts/interfaces/index.mjs --affected | xargs)
           echo "Listings to check: ${listings:-none}"
           {
             echo "listings=$listings"
-            echo "crates=$(grep -qw crates <<<"$listings" && echo true || echo false)"
+            # cli, storage, websocket and http are cargo tests; crates reads rustdoc JSON.
+            echo "rust=$(grep -qwE 'cli|storage|websocket|http|crates' <<<"$listings" && echo true || echo false)"
             echo "openclaw=$(grep -qw openclaw <<<"$listings" && echo true || echo false)"
           } >> "$GITHUB_OUTPUT"
       # Required checks must always report, so a PR that affects no listing passes here.
       - name: Skip unchanged listings
         if: steps.affected.outputs.listings == ''
         run: echo "No listing checked here has changed sources."
-      # The crate listings read rustdoc JSON; UI routes and scenes need only Node.
-      - if: steps.affected.outputs.crates == 'true'
+      # UI routes and scenes need only Node.
+      - if: steps.affected.outputs.rust == 'true'
         name: Identify native build dependencies
         id: cache-key
         run: python scripts/ci/cache-key.py rust --github-output
-      - if: steps.affected.outputs.crates == 'true'
+      - if: steps.affected.outputs.rust == 'true'
         uses: dtolnay/rust-toolchain@stable
         id: rust
         with:
           toolchain: 1.93.1
-      # Only the rustdoc builds' own target directory. No main-branch run fills this cache, so a
-      # PR saves its own copy for its later pushes; it exists only for PRs that change the crates.
-      - if: steps.affected.outputs.crates == 'true'
+      # Covers the cargo-test build and the rustdoc builds in target/interfaces-rustdoc. The key
+      # follows the dependency set, so it no longer keeps one stale copy per compiler. No main-branch
+      # run fills it, so a PR saves its own copy for its later pushes.
+      - if: steps.affected.outputs.rust == 'true'
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: packages/native-client-rust -> target/interfaces-rustdoc
+          workspaces: packages/native-client-rust -> target
           add-rust-environment-hash-key: false
-          key: interfaces-rustdoc-${{ steps.rust.outputs.cachekey }}-${{ steps.cache-key.outputs.rust }}
-      - if: steps.affected.outputs.crates == 'true'
+          key: interfaces-${{ steps.rust.outputs.cachekey }}-${{ steps.cache-key.outputs.rust }}
+      - if: steps.affected.outputs.rust == 'true'
         name: Install native build tools
         run: sudo apt-get update && sudo apt-get install -y cmake
       - if: steps.affected.outputs.openclaw == 'true'
