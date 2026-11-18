@@ -1,7 +1,7 @@
 ---
 title: 智能体工具
 description: OpenClaw 智能体可调用的微信工具，以及如何授权访问所有会话。
-sourceHash: "f8d680ef65c6"
+sourceHash: "d608c4b1e3a6"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -32,9 +32,9 @@ import { Aside } from '@astrojs/starlight/components';
 { "tools": { "alsoAllow": ["wechat_contacts", "wechat_contact_request"] } }
 ```
 
-这两个工具都要求 OpenClaw 的可信所有者身份，以及当前的**私人所有者会话**。共享会话和缺少这些检查的宿主无法使用它们。模型无法选择其他账号，也无法自行提供所有者标记。
+这两个工具都要求 OpenClaw 的可信所有者身份，以及当前的**私人所有者会话**，即所有者本人与智能体之间的一对一聊天。它们不会出现在群聊、定时任务、子智能体或他人的会话中，模型也无法选择其他账号或自行提供所有者标记。OpenClaw 内置的智能体运行时会自行标记所有者私聊。Claude CLI 等 CLI 后端不会把这一标记传给工具，因此插件会检查已保存的会话：它必须是单聊、仍然有效，且回复发往所有者。
 
-`wechat_contacts` 支持 `list`、`get`、本地 `find`、精确 ID 的 `lookup`、服务器 `search` 和 `remove`。`wechat_contact_request` 支持 `list`、`get`、`send`、`accept`、删除本地记录的 `delete` 以及操作的 `status`。发送时使用搜索得到的 `recipientRef`；通过和删除时需要已检查的 `expectedVersion`。修改操作需要稳定的 `idempotencyKey`。出现不确定结果后，请查询原始操作，而不是再次发送。
+`wechat_contacts` 支持 `list`、`get`、本地 `find`、精确 ID 的 `lookup`、服务器 `search` 和 `remove`。`wechat_contact_request` 支持 `list`、`get`、`send`、`accept`、删除本地记录的 `delete` 以及操作的 `status`。发送时使用搜索得到的 `recipientRef`；接受和删除时需要已检查的 `expectedVersion`。修改操作需要稳定的 `idempotencyKey`。出现不确定结果后，请查询原始操作，而不是再次发送。
 
 守护进程令牌还需要读取权限 `read` 和修改权限 `admin`。通过好友申请不会改变 OpenClaw 的允许列表或所有者权限。CLI、API 和搜索限制请参阅[联系人与好友申请](/use/contacts/)。
 
@@ -85,7 +85,7 @@ import { Aside } from '@astrojs/starlight/components';
 2. 调用 `{"action":"start"}` 获取并展示登录二维码。使用手机微信扫码并确认登录。
 3. 调用 `{"action":"wait","timeoutMs":30000}` 等待登录完成。结果将包含任务 ID、状态和 `connected` 标记。
 
-重复调用 `start` 将持续跟随当前登录流。若要强制重新扫码，传入 `force: true` 将使用新二维码而非沿用信任。`disconnect` 保持本地信任凭据断开网络；`logout` 彻底登出；`forget` 配合 `confirm: true` 抹除本地身份验证凭证但保留聊天历史。该工具需要令牌具备 `login` [权限范围](/reference/tokens/)。
+重复调用 `start` 将持续跟随当前登录流。若要强制重新扫码，传入 `force: true` 将使用新二维码而非沿用信任。`disconnect` 保留已保存的信任，仅断开连接；`logout` 退出登录；`forget` 配合 `confirm: true` 抹除本地身份验证凭证但保留聊天历史。该工具需要令牌具备 `login` [权限范围](/reference/tokens/)。
 
 ## 仅限所有者查询的群组信息 \{#group-information-for-the-owner}
 
@@ -134,4 +134,5 @@ import { Aside } from '@astrojs/starlight/components';
 - **消息发送与撤回** 使用确定性的幂等键，网络重试绝不会重复发送。存疑的执行结果将返回 `needs_review`，绝不盲目重发。
 - 在 OpenClaw 精简工具模式下，历史记录、搜索与消息查询可通过 `tool_search` 发现。`wechat_media` 保持直接可调用状态，以便图像能够直接作为图片送入大模型多模态视窗。
 - 工具必须搭配对应的 [令牌权限](/reference/tokens/)：查询需 `read`，下载需 `media`，分享卡片和撤回需 `send`。
+- **通过 CLI 后端使用联系人工具时**，每个人都需要有各自的单聊会话（将 `session.dmScope` 设为 `per-peer`、`per-channel-peer` 或 `per-account-channel-peer`）。使用默认值 `main` 时，所有单聊共享同一个会话，插件无法判断该会话是否仅属于你。
 </Aside>
