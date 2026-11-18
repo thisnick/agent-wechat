@@ -1,5 +1,5 @@
 ---
-"@agent-wechat/agent-wechat": minor
+"@agent-wechat/agent-wechat": patch
 ---
 
 The OpenClaw plugin keeps its place with the event cursor instead of a copy of every message, and catches up on missed messages from the last 24 hours.
