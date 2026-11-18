@@ -50,6 +50,7 @@ An independent Claude reviewer posts inline comments and one summary comment, wi
 - Before opening a PR, have a fresh agent review the diff, one with none of your session's context: in Claude Code, run `/code-review` on the branch; with other agents, start a new session or subagent given only the diff and this guide. Fix what it finds, or say in the PR why not.
 - Answer every finding from the Claude review: fix it or reply with the reason, then resolve the thread. Fix a Pre-existing finding if it's small; otherwise open an issue for it.
 - After pushing fixes, add the `claude-review` label once to have the new commits reviewed, not after every push. On a fork's PR, it takes someone with write access to the repository.
+- After you push a PR, stay with it while its workflows run, if your environment can watch them (a fork's PR needs approval before its workflows run). Wait for the checks and the Claude review, fix CI failures, and answer the review as above. Each push of fixes plus one `claude-review` label starts the next round. Stop after three rounds and summarize any open findings in a PR comment for the maintainer.
 - Fill in the template's "Risk and rollback" section. Say plainly when installing the previous version would not undo the change, for example after a new migration or a changed stored format.
 - When a bug gets past review and turns up later, in a lab test, from a user or in production, add what the reviewer would have needed to know to this guide or to the review instructions.
 
