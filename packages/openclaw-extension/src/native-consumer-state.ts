@@ -385,12 +385,12 @@ function migrateVersion1(parsed: any, held: string[], skipped: NativeConsumerSta
     const cursors = BigInt(a.cursor ?? "0") - BigInt(b.cursor ?? "0");
     return cursors < 0n ? -1 : cursors > 0n ? 1 : (time(a) || 0) - (time(b) || 0);
   };
-  // Queued work follows the catch-up rules, so an old backlog does not all get answered after the upgrade.
+  // Queued work follows the catch-up rules: only recent live incoming messages are kept, and at the
+  // first start they count toward the catch-up limit only if the current policy would answer them.
   const queued = items.map(([, item]) => item).filter(item => item.state === "received" && item.origin === "live"
     && item.message.direction === "incoming" && !item.message.recall).sort(order);
   const recent = queued.filter(item => { const sent = time(item); if (Number.isFinite(sent) && sent < now - NATIVE_CATCH_UP_WINDOW_MS) { skipped.old++; return false; } return true; });
-  skipped.limit += Math.max(0, recent.length - NATIVE_CATCH_UP_LIMIT);
-  for (const item of recent.slice(-NATIVE_CATCH_UP_LIMIT)) {
+  for (const item of recent.slice(-OPEN_LIMIT)) {
     const message = item.message, quoteServerId = serverId(message.quote?.serverId);
     state.open[message.id] = { id: message.id, threadId: message.threadId, serverId: serverId(message.serverId), ...(quoteServerId ? { quoteServerId } : {}),
       origin: "live", cursor: item.cursor ?? parsed.cursor,

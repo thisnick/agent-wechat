@@ -200,7 +200,7 @@ const version1 = (dir: string, items: Record<string, unknown>, extra: object = {
   writeFileSync(file, JSON.stringify({ schemaVersion: 1, serverId: "server", accountId: "a", cursor: "500", items, ...extra }), { mode: 0o600 });
   return file;
 };
-test("a version 1 backlog keeps only the newest 100 recent live incoming messages", t => {
+test("a version 1 backlog keeps its recent live incoming messages for the startup limit to choose from", t => {
   const dir = directory(t), now = Date.parse("2026-11-18T12:00:00Z");
   const queued = (i: number, extra: object = {}, origin = "live") => [`q${i}`, { message: { ...message(`q${i}`, "t", String(i + 1)), createdAt: new Date(now - (400 - i) * 60000).toISOString() }, origin, state: "received", cursor: String(i + 1), ...extra }];
   version1(dir, Object.fromEntries([
@@ -210,8 +210,8 @@ test("a version 1 backlog keeps only the newest 100 recent live incoming message
   ]));
   const state = new NativeConsumerState(dir, "server", "a", { now });
   const kept = state.items().map(item => item.id);
-  assert.equal(kept.length, 100); assert.equal(kept[0], "q50"); assert.equal(kept.at(-1), "q149");
-  assert.deepEqual(state.skipped, { old: 1, limit: 50, full: 0 });
+  assert.equal(kept.length, 150); assert.equal(kept[0], "q0"); assert.equal(kept.at(-1), "q149");
+  assert.deepEqual(state.skipped, { old: 1, limit: 0, full: 0 });
 });
 test("unusable version 1 records do not stop the upgrade, but another account's file is refused", t => {
   const dir = directory(t);

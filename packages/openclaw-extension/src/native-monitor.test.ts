@@ -808,6 +808,19 @@ test("the catch-up limit holds at every acknowledgement and counts work already 
   await synchronizeNativeEvents(value.client, "a", reopened, { now });
   assert.equal(reopened.items().length, 150); assert.equal(reopened.items().at(-1)?.id, "new249");
 });
+test("at startup, queued work counts toward the limit only if the current policy would answer it", async t => {
+  const value = fixture(t); value.state.finish("m1"); const createdAt = new Date().toISOString();
+  // As an earlier release left it: unmentioned group messages queued before the direct messages.
+  for (let i = 0; i < 60; i++) value.add(String(2 + i), { ...value.message, id: `chatter${i}`, threadId: "r@chatroom", serverId: String(100 + i), createdAt });
+  for (let i = 0; i < 120; i++) value.add(String(100 + i), { ...value.message, id: `dm${i}`, serverId: String(1000 + i), createdAt });
+  value.add("300", { ...value.message, id: "gone", serverId: "9999", createdAt }); value.store.delete("gone");
+  const read = value.client.message;
+  value.client.message = async (account, id) => { if (id === "gone") throw new NativeApiError(404, "message_not_found"); return read(account, id); };
+  Object.assign(value.client, journal([]));
+  await synchronizeNativeEvents(value.client, "a", value.state, { includeQueued: true, answerable: message => !message.threadId.endsWith("@chatroom") });
+  assert.deepEqual(value.state.items().map(item => item.id), Array.from({ length: 100 }, (_, i) => `dm${20 + i}`));
+  assert.equal(value.state.skipped.limit, 20);
+});
 test("a late-delivered mention sent before the group boundary keeps that boundary as the stopping point", t => {
   const value = fixture(t, { group: true });
   value.state.beginDispatch("m1", { messageIds: ["m1"], assets: [] } as any, { boundary: { createdAt: "2026-10-20T12:00:00Z" } });

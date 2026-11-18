@@ -165,9 +165,7 @@ function withoutRecalledQuote(state: NativeConsumerState, message: NativeMessage
     ? { ...message, quote: undefined } : message;
 }
 function nativeContextEligible(message: NativeMessage): boolean {
-  return message.direction === "incoming" && !!message.senderId && [1, 3, 34, 43, 47, 48, 49].includes(message.type)
-    && !(message.type === 49 && message.appMessageType === 74) && !(message.type === 1 && !message.body)
-    && !(message.type === 48 && (!message.location || !message.body)) && !nativeRecallInfo(message);
+  return nativeTriggerEligible(message) && !nativeRecallInfo(message);
 }
 const HISTORY_PAGES = 5;
 /**
@@ -224,7 +222,7 @@ async function dispatchNativeMessageInput(params: NativeDispatchParams, revision
   if (message.type === 49 && message.appMessageType === 74) {
     state.finish(message.id, revision); return "ignored";
   }
-  if (custody.origin !== "live" || message.direction !== "incoming" || ![1,3,34,43,47,48,49].includes(message.type) || (message.type === 1 && !message.body) || (message.type === 48 && (!message.location || !message.body)) || !message.senderId) {
+  if (custody.origin !== "live" || !nativeTriggerEligible(message)) {
     state.finish(message.id, revision); return "ignored";
   }
   const admission = await resolveNativeAdmission(message, { account, cfg, core });
@@ -382,12 +380,27 @@ export async function synchronizeNativeEvents(client: NativeWeChatClient, accoun
     const from = state.cursor, to = await resumeFromCatchUpWindow(client, accountId, state, options);
     if (to) options.onResume?.(from, to);
   };
-  const queued = options.includeQueued ? state.items().filter(item => item.state === "received")
-    .sort((a, b) => BigInt(a.cursor) < BigInt(b.cursor) ? -1 : BigInt(a.cursor) > BigInt(b.cursor) ? 1 : 0)
-    .map(item => ({ id: item.id, revision: item.revision })) : [];
+  const queued: Array<{ id: string; revision: string }> = [];
   // Trimmed before each acknowledgement, so a crash cannot leave more than the limit queued.
   const trim = () => { state.skipped.limit += state.dropQueued(queued.splice(0, Math.max(0, queued.length - NATIVE_CATCH_UP_LIMIT))); };
   try {
+    if (options.includeQueued) {
+      const unanswered: Array<{ id: string; revision: string }> = [];
+      for (const item of state.items().filter(value => value.state === "received")
+        .sort((a, b) => BigInt(a.cursor) < BigInt(b.cursor) ? -1 : BigInt(a.cursor) > BigInt(b.cursor) ? 1 : 0)) {
+        const entry = { id: item.id, revision: item.revision };
+        // Stored work counts toward the limit only if the current policy would answer it,
+        // including work an earlier release queued without that check.
+        if (options.answerable) {
+          let message: NativeMessage | undefined;
+          try { message = await client.message(accountId, item.id); }
+          catch (error) { if (error instanceof NativeApiError && error.status === 404) { unanswered.push(entry); continue; } if (!(error instanceof NativeApiError)) throw error; }
+          if (message && !(await options.answerable(message))) { unanswered.push(entry); continue; }
+        }
+        queued.push(entry);
+      }
+      state.dropQueued(unanswered);
+    }
     trim();
     // A new consumer does not replay the daemon's whole event history.
     if (state.cursor === "0") await resume();
