@@ -1,5 +1,19 @@
 # @agent-wechat/wechat
 
+## 2.7.1
+
+### Patch Changes
+
+- [#583](https://github.com/thisnick/agent-wechat/pull/583) [`8e645ed`](https://github.com/thisnick/agent-wechat/commit/8e645ede3566fd6f4038b18bacac6955bed41c76) Thanks [@thisnick](https://github.com/thisnick)! - The owner-only `wechat_contacts` and `wechat_contact_request` tools now work for agents that run through a CLI backend such as Claude CLI. OpenClaw doesn't tell tools in those runs whether the chat is private, so the tools were never offered, even in the owner's own chat. When OpenClaw supplies no such answer, the plugin now checks the stored session itself: it must be the current direct chat, keyed by and replying to the owner. Groups, scheduled runs, sub-agents, other people's chats and the shared `main` direct-chat session still don't get the tools, and every call checks the session again before it acts and before it returns. When OpenClaw does supply an answer, that answer still decides.
+
+- [#585](https://github.com/thisnick/agent-wechat/pull/585) [`77e8466`](https://github.com/thisnick/agent-wechat/commit/77e8466e956c05131caa45598611c46b4b1ca7f4) Thanks [@thisnick](https://github.com/thisnick)! - The OpenClaw plugin keeps its place with the event cursor instead of a copy of every message, and catches up on missed messages from the last 24 hours.
+
+  - **No message copies.** `consumerStateDir` now holds the event cursor, the identities of messages still being handled, pending thread reads and each group's context boundary. Finished messages and recalls are no longer stored; the daemon commits each message once and applies recalls to the profile.
+  - **Upgrading.** The first start converts the file an earlier release wrote. It keeps the cursor, pending reads and each group's context position, so nothing is replayed and the next mention sees the same context. Messages the earlier release still had queued are kept if they are live, incoming and sent in the last 24 hours, and at the first start they count toward the catch-up limit of 100 only if the current policy would answer them; a turn it left interrupted is logged and not repeated. The original file stays beside the new one with a `.v1-backup` suffix. An earlier release cannot read the converted file; restoring the backup makes it handle again the messages that arrived since the upgrade.
+  - **Catching up.** After a restart the plugin answers messages that were sent and reached the daemon in the last 24 hours, at most the newest 100 that the current sender, group, mention and command policy would answer, counting messages already queued. Older or excess messages are skipped and logged. A new consumer directory, or a cursor the daemon no longer keeps, resumes at the start of the last 24 hours instead of replaying the event log or stopping. A large backlog no longer fills the queue and stops intake.
+  - **Group context** for a mention is read from the chat's saved messages, back to the last message handed to the model in that group, with the same sender and recall checks. It can now include messages from before the plugin started, up to `messages.groupChat.historyLimit`; it still leaves out the account's own messages and commands.
+  - A turn that was in progress when the Gateway stopped is logged at the next start and not repeated, as before.
+
 ## 2.7.0
 
 ### Minor Changes

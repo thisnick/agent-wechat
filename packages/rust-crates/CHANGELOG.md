@@ -1,5 +1,11 @@
 # @agent-wechat/rust-crates
 
+## 2.7.1
+
+### Patch Changes
+
+- [#592](https://github.com/thisnick/agent-wechat/pull/592) [`cb35c93`](https://github.com/thisnick/agent-wechat/commit/cb35c93f20b07a9faa1c7d017b0d2c6c656e33e3) Thanks [@thisnick](https://github.com/thisnick)! - Fix listing friend requests failing with `profile_unavailable` (409) on profiles the official client wrote. Requests stored with empty (SQL NULL) columns, such as the remark and labels, couldn't be read, so `wx contacts requests list`, `GET contact-requests` and the OpenClaw `wechat_contact_request` tool failed for every request. Empty columns now read as empty text or zero, and accepting, updating or deleting a request keeps an empty column empty unless the change gives it a value, so the stored row keeps its form. New request rows are written as before.
+
 ## 2.7.0
 
 ### Minor Changes
