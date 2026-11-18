@@ -100,6 +100,7 @@ See [CLI examples](https://thisnick.github.io/agent-wechat/use/cli/),
 | WeChat Channels | Receive Channels cards with their cover, publisher, description, and length, and download the post's video. |
 | Stickers | Receive stickers, including animated originals. Save images, GIFs, and MOV/MP4 clips as custom stickers; reorder or remove Saved stickers; browse and add eligible free official packs and export a pack as GIFs; send stickers from Saved or added packs. Sends use GIF originals; paid packs are unsupported. |
 | Mentions | Send real member mentions or mention everyone where permitted; inspect incoming mention metadata. |
+| Contacts | Find people by WeChat ID, send and accept friend requests, and remove contacts while keeping your chat history. Set per-contact privacy with Chats Only, Hide My Posts, and Hide Their Posts. |
 | Contacts and groups | Find contacts/groups, search a group's members, read member lists and avatars, and refresh saved metadata. |
 | Group management | Create/rename/leave groups, add/remove members, set your group display name, clear announcements, and mute notifications, subject to account permissions. Some profile updates remain partial. |
 | Organization | Pin/unpin supported chats and mute/unmute ordinary contacts and groups. |
@@ -111,8 +112,9 @@ Media availability depends on the received source, supported formats, and size
 limits. Search covers stored history, not all remote history.
 See [message types](https://thisnick.github.io/agent-wechat/how-it-works/message-types/),
 [media](https://thisnick.github.io/agent-wechat/use/media/),
-[stickers](https://thisnick.github.io/agent-wechat/use/stickers/), and
-[groups](https://thisnick.github.io/agent-wechat/use/groups/).
+[stickers](https://thisnick.github.io/agent-wechat/use/stickers/),
+[groups](https://thisnick.github.io/agent-wechat/use/groups/), and
+[contacts and privacy](https://thisnick.github.io/agent-wechat/use/contacts/).
 
 ## Use your existing official profile
 
@@ -123,7 +125,7 @@ its stored conversations, contacts, groups, and media.
 | Profile data | Read | Write |
 | --- | --- | --- |
 | Messages | Stored history and supported rich content | Newly received and accepted outgoing messages; supported recall updates |
-| Contacts | Saved contact metadata and avatars | Supported metadata received through WeChat sync |
+| Contacts | Saved contacts, avatars, friend request history, and contact privacy settings | Supported sync updates, friend request records, contact removals, and privacy changes |
 | Groups | Details, rosters, names, and notification settings | Supported synchronized fields and group-operation results; some updates remain partial |
 | Media | Supported cached images, video, files, and voice | Supported downloaded/sent cache files and associated resource records |
 | Conversation state | Conversations, unread state, supported pin/mute settings | Supported read-state, pinning, and notification updates |
@@ -131,8 +133,7 @@ its stored conversations, contacts, groups, and media.
 
 Offline profile commands can inspect supported stored history, contacts, groups,
 and media without a daemon or network connection, using source-preserving
-snapshots and the required keys. Contact writes here mean synchronized metadata;
-they do not imply arbitrary friend creation, deletion, or editing.
+snapshots and the required keys.
 
 Existing-profile compatibility targets recognized Linux layouts. Unknown files
 are preserved and unsupported database layouts are refused. General official
