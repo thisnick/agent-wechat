@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { affects, steps } from './index.mjs';
+import { affects, select, steps } from './index.mjs';
 
 const selected = files => steps.filter(step => affects(step, files)).map(step => step.name);
 
@@ -18,4 +18,16 @@ test('shared inputs and hand-edited listings select their listings', () => {
   assert.deepEqual(selected(['interfaces/http/openapi.json']), ['http']);
   assert.deepEqual(selected(['docs/src/content/docs/openclaw/tools.mdx']), ['openclaw']);
   assert.deepEqual(selected(['scripts/interfaces/review.mjs']), steps.map(step => step.name));
+});
+
+test('a change to the CI job selects every listing', () => {
+  assert.deepEqual(selected(['.github/workflows/interfaces.yml']), steps.map(step => step.name));
+});
+
+test('select runs named listings, every listing without a merge base, or the affected ones', () => {
+  const names = (argv, files) => select(argv, files).map(step => step.name);
+  assert.deepEqual(names(['--check', 'http', 'ui'], ['README.md']), ['http', 'ui']);
+  assert.deepEqual(names(['--check'], null), steps.map(step => step.name));
+  assert.deepEqual(names(['--affected'], ['packages/native-client-rust/Cargo.lock']), ['cli', 'storage', 'websocket', 'http', 'crates']);
+  assert.deepEqual(names(['--affected'], ['docs/src/content/docs/use/media.mdx']), []);
 });

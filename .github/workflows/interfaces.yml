@@ -24,53 +24,63 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
-      - uses: dorny/paths-filter@v4
-        id: filter
         with:
-          filters: |
-            relevant:
-              - 'interfaces/**'
-              - 'scripts/interfaces/**'
-              - 'scripts/release/crates.mjs'
-              - 'packages/native-client-rust/**'
-              - 'packages/openclaw-extension/**'
-              - 'packages/client-ui/**'
-              - 'packages/shared/**'
-              - 'docs/src/content/docs/openclaw/tools.mdx'
-              - 'rust-toolchain.toml'
-              - 'pnpm-lock.yaml'
-              - 'package.json'
-              - '.github/workflows/interfaces.yml'
-      # Required checks must always report, so unrelated PRs skip the build but still pass.
-      - name: Skip unrelated changes
-        if: github.event_name == 'pull_request' && steps.filter.outputs.relevant != 'true'
-        run: echo "No interface sources changed."
-      - if: github.event_name != 'pull_request' || steps.filter.outputs.relevant == 'true'
-        uses: pnpm/action-setup@v6
-      - if: github.event_name != 'pull_request' || steps.filter.outputs.relevant == 'true'
-        uses: actions/setup-node@v7
+          # The merge base with the PR's base branch decides which listings to check.
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .node-version
           cache: pnpm
-      - if: github.event_name != 'pull_request' || steps.filter.outputs.relevant == 'true'
+      # Each listing runs only when its sources changed: `steps` in scripts/interfaces/index.mjs
+      # maps every listing to its paths, the same way `pnpm interfaces` chooses locally.
+      - name: Choose the listings this PR affects
+        id: affected
+        env:
+          INTERFACES_BASE: origin/${{ github.base_ref }}
+        run: |
+          listings=$(node scripts/interfaces/index.mjs --affected | xargs)
+          echo "Listings to check: ${listings:-none}"
+          {
+            echo "listings=$listings"
+            # cli, storage, websocket and http are cargo tests; crates reads rustdoc JSON.
+            echo "rust=$(grep -qwE 'cli|storage|websocket|http|crates' <<<"$listings" && echo true || echo false)"
+            echo "openclaw=$(grep -qw openclaw <<<"$listings" && echo true || echo false)"
+          } >> "$GITHUB_OUTPUT"
+      # Required checks must always report, so a PR that affects no listing passes here.
+      - name: Skip unchanged listings
+        if: steps.affected.outputs.listings == ''
+        run: echo "No listing checked here has changed sources."
+      # UI routes and scenes need only Node.
+      - if: steps.affected.outputs.rust == 'true'
+        name: Identify native build dependencies
+        id: cache-key
+        run: python scripts/ci/cache-key.py rust --github-output
+      - if: steps.affected.outputs.rust == 'true'
         uses: dtolnay/rust-toolchain@stable
         id: rust
         with:
           toolchain: 1.93.1
-      - if: github.event_name != 'pull_request' || steps.filter.outputs.relevant == 'true'
+      # Covers the cargo-test build and the rustdoc builds in target/interfaces-rustdoc. The key
+      # follows the dependency set, so it no longer keeps one stale copy per compiler. No main-branch
+      # run fills it, so a PR saves its own copy for its later pushes.
+      - if: steps.affected.outputs.rust == 'true'
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: packages/native-client-rust -> target
           add-rust-environment-hash-key: false
-          key: interfaces-${{ steps.rust.outputs.cachekey }}
-      - if: github.event_name != 'pull_request' || steps.filter.outputs.relevant == 'true'
+          key: interfaces-${{ steps.rust.outputs.cachekey }}-${{ steps.cache-key.outputs.rust }}
+      - if: steps.affected.outputs.rust == 'true'
         name: Install native build tools
         run: sudo apt-get update && sudo apt-get install -y cmake
-      - if: github.event_name != 'pull_request' || steps.filter.outputs.relevant == 'true'
+      - if: steps.affected.outputs.openclaw == 'true'
         run: pnpm install --frozen-lockfile
-      - if: github.event_name != 'pull_request' || steps.filter.outputs.relevant == 'true'
-        name: Check every listing against the code
-        run: pnpm interfaces --check --all
+      - if: steps.affected.outputs.listings != ''
+        name: Check the affected listings against the code
+        env:
+          LISTINGS: ${{ steps.affected.outputs.listings }}
+        # Word splitting on purpose: one argument per listing name.
+        run: node scripts/interfaces/index.mjs --check $LISTINGS
       - if: failure()
         name: Explain a stale listing
         run: |
