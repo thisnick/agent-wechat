@@ -196,24 +196,58 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ContactRequestRecord> {
         ValueRef::Null => vec![],
         _ => return Err(rusqlite::Error::InvalidQuery),
     };
+    // Every column but the identity is nullable, and stored rows do hold NULL.
+    // NULL reads as the empty value; `null_columns` lets a write-back keep it.
+    let nullable_text = |i| r.get::<_, Option<String>>(i).map(Option::unwrap_or_default);
+    let nullable_integer = |i| r.get::<_, Option<i64>>(i).map(Option::unwrap_or_default);
     Ok(ContactRequestRecord {
         username: r.get(0)?,
-        message_type: r.get(1)?,
-        timestamp: r.get(2)?,
-        encrypted_username: r.get(3)?,
-        content: r.get(4)?,
-        sender: r.get::<_, i64>(5)? != 0,
-        ticket: r.get(6)?,
-        scene: r.get(7)?,
+        message_type: nullable_integer(1)?,
+        timestamp: nullable_integer(2)?,
+        encrypted_username: nullable_text(3)?,
+        content: nullable_text(4)?,
+        sender: nullable_integer(5)? != 0,
+        ticket: nullable_text(6)?,
+        scene: r.get::<_, Option<u32>>(7)?.unwrap_or_default(),
         detail,
-        remark: r.get(9)?,
-        label_ids: r.get(10)?,
+        remark: nullable_text(9)?,
+        label_ids: nullable_text(10)?,
         version: String::new(),
         history: vec![],
         attention: None,
         waiting: None,
         aged: None,
     })
+}
+/// The NULL columns of the stored row, by name; `None` when there is no row.
+fn null_columns(db: &Connection, username: &str) -> Result<Option<Vec<&'static str>>> {
+    let checks = COLUMNS[1..]
+        .iter()
+        .map(|c| format!("{c} IS NULL"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!("SELECT {checks} FROM FMessageTable WHERE user_name_=?1");
+    Ok(db
+        .query_row(&sql, [username], |r| {
+            let mut nulls = vec![];
+            for (i, column) in COLUMNS[1..].iter().enumerate() {
+                if r.get::<_, bool>(i)? {
+                    nulls.push(*column);
+                }
+            }
+            Ok(nulls)
+        })
+        .optional()?)
+}
+/// The integer to write for a column, or NULL when the stored column was NULL
+/// and the value is still zero.
+fn kept_integer(nulls: &[&str], column: &str, value: i64) -> Option<i64> {
+    (!(value == 0 && nulls.contains(&column))).then_some(value)
+}
+/// The text to write for a column, or NULL when the stored column was NULL and
+/// the value is still empty.
+fn kept_text<'a>(nulls: &[&str], column: &str, value: &'a str) -> Option<&'a str> {
+    (!(value.is_empty() && nulls.contains(&column))).then_some(value)
 }
 fn finish(mut row: ContactRequestRecord) -> Result<ContactRequestRecord> {
     row.version = hex::encode(Sha256::digest(
@@ -454,6 +488,10 @@ pub fn apply_contact_request_projection(
     if finish(input.clone())?.version != input.version {
         return Err(ProfileError::InvalidMetadata);
     }
+    // A column the row stored as NULL stays NULL when the change leaves it empty,
+    // so the stored row keeps its form; a value the change gives it is written.
+    // New rows are written as before.
+    let nulls = null_columns(&tx, &input.username)?.unwrap_or_default();
     tx.execute(
         "DELETE FROM FMessageTable WHERE user_name_=?1",
         [&input.username],
@@ -462,16 +500,17 @@ pub fn apply_contact_request_projection(
         "INSERT INTO FMessageTable VALUES(?1,?2,?3,?4,?5,?6,?7,?8,CAST(?9 AS TEXT),?10,?11)",
         params![
             input.username,
-            input.message_type,
-            input.timestamp,
-            input.encrypted_username,
-            input.content,
-            i64::from(input.sender),
-            input.ticket,
-            input.scene,
-            input.detail,
-            input.remark,
-            input.label_ids
+            kept_integer(&nulls, "type_", input.message_type),
+            kept_integer(&nulls, "timestamp_", input.timestamp),
+            kept_text(&nulls, "encrypt_user_name_", &input.encrypted_username),
+            kept_text(&nulls, "content_", &input.content),
+            kept_integer(&nulls, "is_sender_", i64::from(input.sender)),
+            kept_text(&nulls, "ticket_", &input.ticket),
+            kept_integer(&nulls, "scene_", i64::from(input.scene)),
+            (!(input.detail.is_empty() && nulls.contains(&"fmessage_detail_buf_")))
+                .then_some(&input.detail),
+            kept_text(&nulls, "remark_", &input.remark),
+            kept_text(&nulls, "label_ids_", &input.label_ids)
         ],
     )?;
     tx.commit()?;
@@ -745,5 +784,108 @@ mod tests {
             reader().contact_request("example_peer"),
             Err(ProfileError::NotCached)
         ));
+    }
+
+    /// Every non-identity column is nullable and stored rows do hold NULL. Rows
+    /// must read, and writing a row back must keep the columns it leaves empty NULL.
+    #[test]
+    fn rows_with_null_columns_read_and_keep_them_null_on_write_back() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("profile");
+        let (location, keys, _) = initialize_profile(&path, &[7; 32]).unwrap();
+        let options = WriteOptions {
+            exclusive_ownership_confirmed: true,
+            allow_plaintext: false,
+            durable_intent_id: "fixture-intent".into(),
+        };
+        let relative = crate::writer::find_database(&location, "general.db").unwrap();
+        let db = || crate::writer::open_write(&location, &relative, &keys, false).unwrap();
+        // A received request with NULL remark and labels.
+        let received = stage_contact_request_projection(None, &input("42", false, 100, "hello"))
+            .unwrap()
+            .row;
+        db().execute(
+            "INSERT INTO FMessageTable VALUES(?1,?2,?3,?4,?5,?6,?7,?8,CAST(?9 AS TEXT),NULL,NULL)",
+            params![
+                received.username,
+                received.message_type,
+                received.timestamp,
+                received.encrypted_username,
+                received.content,
+                i64::from(received.sender),
+                received.ticket,
+                received.scene,
+                received.detail
+            ],
+        )
+        .unwrap();
+        // Every nullable column NULL.
+        db().execute(
+            "INSERT INTO FMessageTable VALUES('sparse_peer',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL)",
+            [],
+        )
+        .unwrap();
+        let nulls = |user: &str| null_columns(&db(), user).unwrap().unwrap();
+        let reader = || {
+            ProfileReader::open(
+                location.clone(),
+                keys.clone(),
+                ReadOptions {
+                    stopped_or_consistent_snapshot: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        let rows = reader().contact_requests().unwrap();
+        assert_eq!(rows.len(), 2);
+        let peer = reader().contact_request("example_peer").unwrap();
+        assert_eq!((peer.remark.as_str(), peer.label_ids.as_str()), ("", ""));
+        assert_eq!(peer.history.len(), 1);
+        let sparse = reader().contact_request("sparse_peer").unwrap();
+        assert_eq!(
+            (sparse.message_type, sparse.timestamp, sparse.scene),
+            (0, 0, 0)
+        );
+        assert!(sparse.content.is_empty() && sparse.ticket.is_empty() && sparse.history.is_empty());
+
+        // A later message rewrites the whole row; remark_ and label_ids_ stay NULL.
+        let next =
+            stage_contact_request_projection(Some(&peer), &input("43", false, 101, "new")).unwrap();
+        apply_contact_request_projection(&location, &keys, &next, &options).unwrap();
+        assert!(nulls("example_peer").ends_with(&["remark_", "label_ids_"]));
+        assert_eq!(
+            reader().contact_request("example_peer").unwrap().version,
+            next.row.version
+        );
+        // Columns the message sets get values; the ones it leaves empty stay NULL.
+        let mut message = input("44", false, 102, "first");
+        message.username = "sparse_peer".into();
+        message.encrypted_username = String::new();
+        let filled = stage_contact_request_projection(Some(&sparse), &message).unwrap();
+        apply_contact_request_projection(&location, &keys, &filled, &options).unwrap();
+        // `is_sender_` stays NULL too: a received message leaves it 0, which is empty.
+        assert_eq!(
+            nulls("sparse_peer"),
+            ["encrypt_user_name_", "is_sender_", "remark_", "label_ids_"]
+        );
+        assert_eq!(
+            reader().contact_request("sparse_peer").unwrap().version,
+            filled.row.version
+        );
+
+        apply_contact_request_deletion(
+            &location,
+            &keys,
+            "example_peer",
+            &next.row.version,
+            &options,
+        )
+        .unwrap();
+        // New rows are written as before, with empty text.
+        let fresh =
+            stage_contact_request_projection(None, &input("45", false, 103, "again")).unwrap();
+        apply_contact_request_projection(&location, &keys, &fresh, &options).unwrap();
+        assert!(nulls("example_peer").is_empty());
     }
 }

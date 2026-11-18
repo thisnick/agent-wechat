@@ -15,3 +15,8 @@ root agent guide as well.
 - These are this library's API names, not evidence of the official client's
   internal names or recovery implementation. Preserve the boundary between
   official storage-format work here and caller-owned coordination/policy.
+- Expect NULL in any column an official table declares nullable, even where
+  fixtures always hold values. Read such a column as an `Option` (or map NULL
+  to its empty value) rather than decoding it straight into `String` or an
+  integer, or one row fails the whole read. When writing a row back, keep a
+  NULL column NULL if the change leaves it empty, so the row keeps its form.
