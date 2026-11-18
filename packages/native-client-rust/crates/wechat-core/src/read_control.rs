@@ -174,9 +174,6 @@ fn parse_thread_control(
 }
 
 impl Core {
-    /// Apply the supported read component once, even while the complete entry/exit
-    /// control remains blocked. Evaluated no-ops are durable too: a later local
-    /// session change must not make an older blocked control apply anew.
     /// Whether an entry control (opcode 2) is complete once its unread clear
     /// was evaluated, and why: `excluded_session_entry` for a built-in peer
     /// the official entry worker ignores, `ordinary_session_entry` for a group
@@ -206,6 +203,9 @@ impl Core {
             _ => None,
         })
     }
+    /// Apply the supported read component once, even while the complete entry/exit
+    /// control remains blocked. Evaluated no-ops are durable too: a later local
+    /// session change must not make an older blocked control apply anew.
     pub(super) fn apply_partial_thread_read(
         &self,
         account: &str,

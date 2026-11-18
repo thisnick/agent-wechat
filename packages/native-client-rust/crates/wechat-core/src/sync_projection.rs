@@ -112,12 +112,15 @@ fn message_blocker(message: &AddMessage) -> ProjectionBlocked {
     result.peer_kind = Some(peer_kind(&message.peer));
     let parse = || -> Result<(Vec<u32>, Option<&'static str>)> {
         // An incoming group system message carries the "sender:\n" envelope
-        // before its XML; classify the XML, never the sender.
+        // before its XML; classify the XML, never the sender. Without a valid
+        // envelope the whole content is tried.
         let body = if message.message_type == 10002
             && message.from.ends_with("@chatroom")
             && !message.outgoing
         {
-            envelope(message)?.1
+            envelope(message)
+                .map(|(_, body)| body)
+                .unwrap_or(&message.content[..])
         } else {
             &message.content[..]
         };
@@ -1095,12 +1098,9 @@ mod tests {
             assert_eq!(blocked.reason, "unsupported_sync_control");
             assert!(!serde_json::to_string(&blocked).unwrap().contains("secret"));
         }
-        // Without the envelope a group message is malformed metadata.
+        // A group message without an envelope is still labeled.
         message.content = b"<sysmsg type=\"dynacfg\"/>".to_vec();
-        assert_eq!(
-            message_blocker(&message).reason,
-            "invalid_sync_control_metadata"
-        );
+        assert_eq!(message_blocker(&message).system_kind, Some("dynacfg"));
         // A direct system message has no envelope.
         let mut direct = example();
         direct.message_type = 10002;

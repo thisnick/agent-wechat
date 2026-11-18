@@ -21,7 +21,7 @@
 //! | Raw replies and call diagnostics in `runtime` | 7 days, for offline investigation | - | after 7 days |
 //! | Metadata receipts in `runtime` | while their request is pending | - | once it finishes |
 //! | Pagination views | until they expire | - | once expired |
-//! | Message attachment rows never downloaded (`pending` or `expired`) | for [`IDLE_ASSET_DAYS`], while a job names them, or once they hold bytes | - | ID retired; reading the message's media recreates the row |
+//! | Message attachment rows never downloaded (`pending` or `expired`), except voice | for [`IDLE_ASSET_DAYS`], while a job or queued automatic download names them, or once they hold bytes | - | ID retired; reading the message's media recreates the row |
 //!
 //! Uncertain (`needs_review`) records expire after [`REVIEW_DAYS`] or once
 //! more than [`REVIEW_LIMIT`] newer ones exist in the same family. Expiry keeps
@@ -171,7 +171,7 @@ pub struct BlockedControlCount {
     pub operation_ids: Option<String>,
     /// System message kind, such as `dynacfg`.
     pub system_kind: Option<String>,
-    /// `group`, `builtin`, `classified` or `ordinary`.
+    /// `group`, `excluded`, `classified` or `ordinary`.
     pub peer_kind: Option<String>,
     /// Why the command is blocked.
     pub reason: Option<String>,
@@ -656,14 +656,17 @@ pub fn aged_runtime(key: &str) -> RuntimeRetention {
 }
 
 /// Remove message attachment rows that were never downloaded: no bytes here
-/// or in the profile, no job naming them, unchanged for [`IDLE_ASSET_DAYS`].
+/// or in the profile, no job or queued automatic download naming them,
+/// unchanged for [`IDLE_ASSET_DAYS`]. Voice rows stay: their plan can hold the
+/// only owned copy of a note's audio, from a sync batch that has since aged
+/// out.
 /// Their IDs are retired, so reading one returns `operation_expired` until
 /// listing the message's media recreates it.
 fn remove_idle_assets(tx: &Transaction, now: i64, budget: &mut i64) -> Result<usize> {
     let mut removed = 0;
     for id in ids(
         tx,
-        "SELECT id FROM media_assets a WHERE message_id IS NOT NULL AND payload IS NULL AND payload_file IS NULL AND profile_key IS NULL AND json_extract(metadata_json,'$.state') IN ('pending','expired') AND updated_at<=?1 AND NOT EXISTS(SELECT 1 FROM media_jobs j WHERE json_extract(j.data_json,'$.assetId')=a.id) LIMIT ?2",
+        "SELECT id FROM media_assets a WHERE message_id IS NOT NULL AND kind!='voice' AND payload IS NULL AND payload_file IS NULL AND profile_key IS NULL AND json_extract(metadata_json,'$.state') IN ('pending','expired') AND updated_at<=?1 AND NOT EXISTS(SELECT 1 FROM media_jobs j WHERE json_extract(j.data_json,'$.assetId')=a.id) AND NOT EXISTS(SELECT 1 FROM runtime r WHERE r.key IN ('received-media:'||a.id,'received-voice:'||a.id)) LIMIT ?2",
         params![cutoff(now, IDLE_ASSET_DAYS), (*budget).max(0)],
     )? {
         retire(tx, MEDIA_ASSET_ID, &id, now)?;
@@ -2185,6 +2188,15 @@ mod tests {
         asset("downloading", Some("msg-4"), "pending", 8);
         asset("unbound", None, "pending", 8);
         asset("in-profile", Some("msg-5"), "available", 8);
+        asset("queued", Some("msg-6"), "pending", 8);
+        store
+            .put_runtime("a", "received-media:queued", b"{}")
+            .unwrap();
+        asset("voice", Some("msg-7"), "pending", 8);
+        sql(&store, |db| {
+            db.execute("UPDATE media_assets SET kind='voice' WHERE id='voice'", [])?;
+            Ok(())
+        });
         sql(&store, |db| {
             db.execute(
                 "UPDATE media_assets SET profile_key='message' WHERE id='in-profile'",
@@ -2208,7 +2220,14 @@ mod tests {
         for id in ["pending", "expired"] {
             assert_eq!(error(store.media_asset("a", id)), "operation_expired");
         }
-        for id in ["recent", "downloading", "unbound", "in-profile"] {
+        for id in [
+            "recent",
+            "downloading",
+            "unbound",
+            "in-profile",
+            "queued",
+            "voice",
+        ] {
             assert!(store.media_asset("a", id).is_ok(), "{id} was removed");
         }
         // Listing the message's media again recreates the same ID.
