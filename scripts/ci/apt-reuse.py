@@ -5,19 +5,23 @@ apt installs a file already in its archives directory when only its size matches
 without checking its hash. Before the install, this copies each cached .deb file the install
 needs into that directory only if its SHA-256 matches the signed index that apt-get update
 just fetched. apt downloads anything missing or different as usual.
+
+Reuse only saves time, so any error here stages nothing and lets apt download everything.
 """
 import argparse
 import hashlib
-import os
 from pathlib import Path
-import shutil
 import subprocess
+import sys
 import tempfile
 from urllib.parse import unquote
 
 
 def parse_print_uris(output):
-    """File names from `apt-get --print-uris`, whose lines read: 'URI' FILE SIZE HASH."""
+    """File names from `apt-get --print-uris`, whose lines read: 'URI' FILE SIZE HASH.
+
+    apt 2.8 gives only an MD5 sum in HASH, so the SHA-256 comes from the index instead.
+    """
     return [line.split()[1] for line in output.splitlines() if line.startswith("'")]
 
 
@@ -39,12 +43,19 @@ def parse_records(output):
     return hashes
 
 
-def sha256(path):
+def copy_if_matches(source, destination, expected):
+    """Copy `source` to `destination` if its SHA-256 is in `expected`, reading it once."""
     digest = hashlib.sha256()
-    with open(path, "rb") as file:
-        for block in iter(lambda: file.read(1 << 20), b""):
+    partial = destination.with_name(destination.name + ".partial")
+    with open(source, "rb") as reader, open(partial, "wb") as writer:
+        for block in iter(lambda: reader.read(1 << 20), b""):
             digest.update(block)
-    return digest.hexdigest()
+            writer.write(block)
+    if digest.hexdigest() in expected:
+        partial.replace(destination)
+        return True
+    partial.unlink()
+    return False
 
 
 def stage(saved, archives, files, hashes):
@@ -57,8 +68,7 @@ def stage(saved, archives, files, hashes):
         cached = saved / filename
         if not cached.is_file():
             download.append(filename)
-        elif sha256(cached) in hashes.get(identity(filename), set()):
-            shutil.copyfile(cached, archives / filename)
+        elif copy_if_matches(cached, archives / filename, hashes.get(identity(filename), set())):
             reused.append(filename)
         else:
             download.append(filename)
@@ -76,34 +86,33 @@ def needed_files(packages):
 
 
 def index_hashes(files):
-    specs = sorted({f"{name}={version}" for name, version, _ in map(identity, files)})
+    specs = sorted({f"{name}:{architecture}={version}" for name, version, architecture in map(identity, files)})
     # A spec the index lacks makes apt-cache exit non-zero; its file is then simply downloaded.
     output = subprocess.run(["apt-cache", "show", *specs], stdout=subprocess.PIPE, text=True).stdout
     return parse_records(output)
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--saved", type=Path, required=True,
                         help="directory the Actions cache restored .deb files into")
     parser.add_argument("--archives", type=Path, required=True,
-                        help="the apt archives directory (Dir::Cache::Archives) the install will use")
-    parser.add_argument("--github-output", action="store_true",
-                        help="write download=COUNT to $GITHUB_OUTPUT")
+                        help="the empty apt archives directory (Dir::Cache::Archives) the install will use")
     parser.add_argument("packages", nargs="+", help="Ubuntu packages to install")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
-    files = needed_files(args.packages)
-    hashes = index_hashes(files) if files else {}
-    reused, download, rejected = stage(args.saved, args.archives, files, hashes)
+    try:
+        files = needed_files(args.packages)
+        hashes = index_hashes(files) if files else {}
+        reused, download, rejected = stage(args.saved, args.archives, files, hashes)
+    except Exception as error:  # noqa: BLE001 - reuse is optional; apt downloads instead
+        print(f"::warning title=Cached Ubuntu packages not reused::{type(error).__name__}: {error}")
+        return
     print(f"{len(files)} package files needed: {len(reused)} reused from the cache, "
           f"{len(download)} to download.")
     for filename in rejected:
         print(f"Not reusing {filename}: its SHA-256 differs from the package index.")
-    if args.github_output:
-        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-            output.write(f"download={len(download)}\n")
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
