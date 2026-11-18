@@ -17,6 +17,7 @@ on:
       - '.node-version'
       - '.github/workflows/ui-screenshots.yml'
       - '.github/actions/apt-install/**'
+      - 'scripts/ci/apt-reuse.py'
   push:
     branches: [main]
     paths:
@@ -28,6 +29,7 @@ on:
       - '.node-version'
       - '.github/workflows/ui-screenshots.yml'
       - '.github/actions/apt-install/**'
+      - 'scripts/ci/apt-reuse.py'
 
 permissions:
   contents: read

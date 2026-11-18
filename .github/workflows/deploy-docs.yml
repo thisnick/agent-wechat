@@ -10,7 +10,6 @@ on:
       - 'pnpm-workspace.yaml'
       - 'package.json'
       - '.github/workflows/deploy-docs.yml'
-      - '.github/actions/apt-install/**'
   workflow_dispatch:
 
 permissions:

@@ -45,6 +45,7 @@ on:
       - '.github/workflows/native-portable.yml'
       - '.github/workflows/desktop.yml'
       - '.github/actions/apt-install/**'
+      - 'scripts/ci/apt-reuse.py'
   schedule:
     - cron: '41 10 * * 0'
 permissions:

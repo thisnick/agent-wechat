@@ -96,6 +96,7 @@ jobs:
               - 'pnpm-lock.yaml'
               - '.github/workflows/ci.yml'
               - '.github/actions/apt-install/**'
+              - 'scripts/ci/apt-reuse.py'
 
   release-tools:
     needs: changes
@@ -172,6 +173,7 @@ jobs:
       - name: Check CI build and artifact helpers
         run: |
           python3 scripts/ci/cache-key.test.py
+          python3 scripts/ci/apt-reuse.test.py
           python3 scripts/ci/build.test.py
           python3 scripts/release/build.test.py
           node --test scripts/ci/artifact.test.mjs scripts/ci/claude-review-comment.test.mjs scripts/smoke/media-assertions.test.mjs scripts/release/preflight.test.mjs scripts/release/merge.test.mjs

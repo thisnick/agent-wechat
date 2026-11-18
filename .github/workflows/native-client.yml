@@ -23,6 +23,7 @@ on:
       - 'scripts/ci/cache-key*.py'
       - '.github/workflows/native-client.yml'
       - '.github/actions/apt-install/**'
+      - 'scripts/ci/apt-reuse.py'
   # PR runs only read the Rust cache, so main fills it. rust-cache stores
   # dependencies, not workspace crates, so main needs a run only when the
   # dependency set, compiler or this workflow changes. The weekly run renews
@@ -39,6 +40,7 @@ on:
       - 'scripts/ci/cache-key*.py'
       - '.github/workflows/native-client.yml'
       - '.github/actions/apt-install/**'
+      - 'scripts/ci/apt-reuse.py'
   schedule:
     - cron: '23 10 * * 0'
 
