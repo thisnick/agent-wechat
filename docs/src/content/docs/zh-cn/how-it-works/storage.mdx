@@ -1,7 +1,7 @@
 ---
 title: 数据存储与备份
 description: agent-wechat 的文件存放位置，以及需要备份哪些内容。
-sourceHash: "f548f43fc180"
+sourceHash: "05e733dd070c"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -85,5 +85,5 @@ tar -czf wechat-backup.tgz -C ~ .local/share/agent-wechat
 - **升级后首次清理可能需要一段时间。** 清理按小批进行，因此其他请求仍会继续运行。删除第一批大数据时，需要约为 `control.sqlite` 两倍大小的可用磁盘空间；空间不足时，剩余空间会稍后再回收。
 - **被阻塞的同步批次会被保留。** 包含 Daemon 不支持的命令的批次会一直保留，直到更高版本能将其写入 Profile，而 Profile 保存的同步位置也会等待该批次。`wx store usage` 会将它们计入 `syncBatchesBlocked`，并在 `blockedControls` 下列出阻塞这些批次的状态和系统控制项。
 - **`wx store usage` 会将数据目录升级** 到已安装版本的格式，与其他 `wx store` 命令一样。如果想保留原始文件，请在副本上运行。
-- OpenClaw 将自己的处理进度保存在 `consumerStateDir` 中，也请一并备份。
+- **`consumerStateDir`** 也需要一并备份，OpenClaw 将自己的处理进度保存在其中。从早期插件版本升级后，首次启动时会把该文件转换为新格式，并在旁边保留原文件，文件名以 `.v1-backup` 结尾。该备份仍包含消息正文，不再需要回退时请将其删除。旧版插件无法读取转换后的文件；若要回退，请恢复该备份，这样旧版插件会重新处理升级后收到的消息。
 </Aside>
