@@ -146,7 +146,28 @@ pub struct StorageUsage {
     pub runtime_families: Vec<StorageCount>,
     /// Records retention keeps whole until they finish or expire.
     pub unresolved: BTreeMap<String, i64>,
+    /// What keeps sync batches blocked, by form, for batches blocked since
+    /// these records were added.
+    pub blocked_controls: Vec<BlockedControlCount>,
     pub retired_keys: i64,
+}
+/// Commands of one form that keep sync batches blocked. Labels only: never a
+/// peer's identity or the control's contents.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockedControlCount {
+    /// AddMsg type, such as 51 (status) or 10002 (system).
+    pub message_type: Option<i64>,
+    /// Status operation IDs, as a JSON array.
+    pub operation_ids: Option<String>,
+    /// System message kind, such as `dynacfg`.
+    pub system_kind: Option<String>,
+    /// `group`, `builtin`, `classified` or `ordinary`.
+    pub peer_kind: Option<String>,
+    /// Why the command is blocked.
+    pub reason: Option<String>,
+    pub commands: i64,
+    pub batches: i64,
 }
 
 /// The first 16 bytes of SHA-256 over the family and value.
@@ -545,8 +566,9 @@ pub enum RuntimeRetention {
 /// or shortly after. A key naming an unfinished sync batch is always kept.
 pub fn aged_runtime(key: &str) -> RuntimeRetention {
     // Per-command projection receipts and their phase markers.
-    const COMMAND: [&str; 9] = [
+    const COMMAND: [&str; 10] = [
         "projected:",
+        "blocked-control:",
         "apply-origin:",
         "contact-fields:projected:",
         "contact-mute:projected:",
@@ -891,7 +913,25 @@ impl Store {
             ] {
                 unresolved.insert(name.to_owned(), db.query_row(sql, [], |r| r.get(0))?);
             }
+            let blocked_controls = {
+                let mut query = db.prepare(
+                    "SELECT json_extract(CAST(r.value AS TEXT),'$.messageType'),json_extract(CAST(r.value AS TEXT),'$.operationIds'),json_extract(CAST(r.value AS TEXT),'$.systemKind'),json_extract(CAST(r.value AS TEXT),'$.peerKind'),json_extract(CAST(r.value AS TEXT),'$.reason'),count(*),count(DISTINCT a.id) FROM apply_intents a JOIN runtime r ON r.key>'blocked-control:projected:'||a.id||':' AND r.key<'blocked-control:projected:'||a.id||';' WHERE a.state='blocked' AND json_valid(CAST(r.value AS TEXT)) GROUP BY 1,2,3,4,5 ORDER BY 6 DESC LIMIT 50",
+                )?;
+                let rows = query.query_map([], |r| {
+                    Ok(BlockedControlCount {
+                        message_type: r.get(0)?,
+                        operation_ids: r.get(1)?,
+                        system_kind: r.get(2)?,
+                        peer_kind: r.get(3)?,
+                        reason: r.get(4)?,
+                        commands: r.get(5)?,
+                        batches: r.get(6)?,
+                    })
+                })?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
             Ok(StorageUsage {
+                blocked_controls,
                 file_bytes: pragma("page_count")? * page,
                 free_bytes: pragma("freelist_count")? * page,
                 tables,

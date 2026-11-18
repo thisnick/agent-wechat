@@ -18,7 +18,24 @@ struct ProjectionBlocked {
     classification: &'static str,
     operation_ids: Vec<u32>,
     system_kind: Option<&'static str>,
+    /// A label for the control's peer, never its identity; see [`peer_kind`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    peer_kind: Option<&'static str>,
     reason: &'static str,
+}
+/// A diagnostic label for a control's peer: `group`, `builtin` (this account,
+/// `filehelper`, `weixin` or `fmessage`), `classified` (the shipped account
+/// classifier's set) or `ordinary`.
+pub(super) fn peer_kind(peer: &str, own: &str) -> &'static str {
+    if peer.ends_with("@chatroom") {
+        "group"
+    } else if peer == own || matches!(peer, "filehelper" | "weixin" | "fmessage") {
+        "builtin"
+    } else if super::contact_classification::classified_account(peer) {
+        "classified"
+    } else {
+        "ordinary"
+    }
 }
 impl std::fmt::Display for ProjectionBlocked {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -51,10 +68,11 @@ fn command_blocker(command: &SyncCommand) -> ProjectionBlocked {
         classification,
         operation_ids: vec![],
         system_kind: None,
+        peer_kind: None,
         reason: "unsupported_sync_control",
     }
 }
-fn message_blocker(message: &AddMessage) -> ProjectionBlocked {
+fn message_blocker(message: &AddMessage, own: &str) -> ProjectionBlocked {
     let mut result = ProjectionBlocked {
         command_id: 5,
         message_type: Some(message.message_type),
@@ -65,14 +83,26 @@ fn message_blocker(message: &AddMessage) -> ProjectionBlocked {
         },
         operation_ids: vec![],
         system_kind: None,
+        peer_kind: None,
         reason: "unsupported_message_projection_type",
     };
     if !matches!(message.message_type, 51 | 10002) {
         return result;
     }
     result.reason = "unsupported_sync_control";
+    result.peer_kind = Some(peer_kind(&message.peer, own));
     let parse = || -> Result<(Vec<u32>, Option<&'static str>)> {
-        let content = std::str::from_utf8(&message.content)?;
+        // An incoming group system message carries the "sender:\n" envelope
+        // before its XML; classify the XML, never the sender.
+        let body = if message.message_type == 10002
+            && message.from.ends_with("@chatroom")
+            && !message.outgoing
+        {
+            envelope(message)?.1
+        } else {
+            &message.content[..]
+        };
+        let content = std::str::from_utf8(body)?;
         ensure!(
             content.len() <= 1024 * 1024
                 && !content.to_ascii_uppercase().contains("<!DOCTYPE")
@@ -411,7 +441,7 @@ impl Core {
             if crate::sticker_control::supported_sticker_control(&message, &state.own_username) {
                 self.retain_control_raw(account, command, receipt)?;
                 self.retain_sticker_refresh(account, receipt)?;
-                let mut pending = message_blocker(&message);
+                let mut pending = message_blocker(&message, &state.own_username);
                 pending.reason = "sticker_reconciliation_pending";
                 return Err(pending.into());
             }
@@ -461,8 +491,23 @@ impl Core {
                     receipt,
                     super::read_control::PartialThreadRead::Entry,
                 )?;
-                // Entry also prepares sessions and notifies observers. Keep
-                // the full control blocked after its once-only unread effect.
+                // Linux 4.1.13.26: for a group or a peer the shipped account
+                // classifier leaves unclassified, the entry worker only clears
+                // unread through the notification time, with no session
+                // construction, observer or timer. Built-in and classified
+                // peers can prepare and store a session, so they stay blocked,
+                // as do hidden and excluded sessions, whose unread clear this
+                // writer skips.
+                if self.entry_read_completes(account, &read, receipt, &state.own_username)? {
+                    self.store.append_event_once(
+                        account,
+                        &format!("control-no-local-effect:{receipt}"),
+                        "account.control_observed",
+                        &json!({"commandId":5,"messageType":51,"operationIds":[2],"classification":"unclassified_session_entry","projection":"unread_only","policy":"linux_4_1_13_26","origin":origin}),
+                    )?;
+                    self.store.put_runtime(account, receipt, b"1")?;
+                    return Ok(());
+                }
             }
             if let Some(read) =
                 super::read_control::parse_remote_thread_exit_read(&message, &state.own_username)
@@ -505,13 +550,20 @@ impl Core {
                 return Ok(());
             }
             if ![1, 3, 34, 43, 47, 48, 49, 10000].contains(&message.message_type) {
-                let blocked = message_blocker(&message);
+                let blocked = message_blocker(&message, &state.own_username);
                 if matches!(message.message_type, 51 | 10002) {
                     self.store.append_event_once(
                         account,
                         &format!("control-observed:{receipt}"),
                         "account.control_observed",
                         &json!({"control":blocked,"origin":origin,"projection":"blocked"}),
+                    )?;
+                    // The event log keeps only the newest events; this record
+                    // stays while the batch is blocked (`wx store usage`).
+                    self.store.put_runtime(
+                        account,
+                        &format!("blocked-control:{receipt}"),
+                        &serde_json::to_vec(&blocked)?,
                     )?;
                 }
                 return Err(blocked.into());
@@ -990,7 +1042,7 @@ mod tests {
         let mut message = example();
         message.message_type = 51;
         message.content = b"<msg><op id=\"11\"><name>secret</name><arg>private</arg></op><op id=\"4\"><username>secret-user</username></op></msg>".to_vec();
-        let blocked = message_blocker(&message);
+        let blocked = message_blocker(&message, "self");
         assert_eq!(blocked.operation_ids, vec![11, 4]);
         assert_eq!(blocked.classification, "status_notification");
         assert_eq!(blocked.reason, "unsupported_sync_control");
@@ -1000,7 +1052,7 @@ mod tests {
             b"<!DOCTYPE msg [<!ENTITY e SYSTEM 'file:///private'>]><msg><op id=\"1\"/></msg>"
                 .to_vec();
         assert_eq!(
-            message_blocker(&message).reason,
+            message_blocker(&message, "self").reason,
             "invalid_sync_control_metadata"
         );
     }
@@ -1016,12 +1068,31 @@ mod tests {
             ("<sysmsg type=\"revokemsg\"/>", "revokemsg"),
             ("<sysmsg type=\"private-secret\"/>", "unknown"),
         ] {
-            message.content = raw.as_bytes().to_vec();
-            let blocked = message_blocker(&message);
+            // An incoming group system message carries its sender envelope.
+            message.content = format!("secret-sender:\n{raw}").into_bytes();
+            let blocked = message_blocker(&message, "self");
             assert_eq!(blocked.system_kind, Some(kind));
+            assert_eq!(blocked.peer_kind, Some("group"));
             assert_eq!(blocked.reason, "unsupported_sync_control");
             assert!(!serde_json::to_string(&blocked).unwrap().contains("secret"));
         }
+        // Without the envelope a group message is malformed metadata.
+        message.content = b"<sysmsg type=\"dynacfg\"/>".to_vec();
+        assert_eq!(
+            message_blocker(&message, "self").reason,
+            "invalid_sync_control_metadata"
+        );
+        // A direct system message has no envelope.
+        let mut direct = example();
+        direct.message_type = 10002;
+        direct.from = "weixin".into();
+        direct.peer = "weixin".into();
+        direct.content = b"<sysmsg type=\"dynacfg\"/>".to_vec();
+        let blocked = message_blocker(&direct, "self");
+        assert_eq!(
+            (blocked.system_kind, blocked.peer_kind),
+            (Some("dynacfg"), Some("builtin"))
+        );
     }
     fn example() -> AddMessage {
         AddMessage {
@@ -1970,14 +2041,16 @@ mod encrypted_roundtrip {
             )
             .unwrap();
         sessions.execute("INSERT INTO SessionTable(username,unread_count,is_hidden,last_timestamp,last_clear_unread_timestamp,draft,sort_timestamp,status)VALUES(?1,3,0,120,0,'preserved draft',130,7)", [ordinary_peer]).unwrap();
-        sessions.execute_batch("INSERT INTO SessionTable(username,unread_count,is_hidden,last_timestamp,last_clear_unread_timestamp)VALUES('hidden',4,1,100,0),('brandsessionholder',5,0,100,0),('uncertain',8,0,100,0);
+        sessions.execute_batch("INSERT INTO SessionTable(username,unread_count,is_hidden,last_timestamp,last_clear_unread_timestamp)VALUES('hidden',4,1,100,0),('brandsessionholder',5,0,100,0),('uncertain',8,0,100,0),('gh_synthetic',6,0,100,0);
             INSERT INTO SessionUnreadListTable_1(username_id,server_id,local_id,create_time)VALUES(1,9,1,95),(1,2,2,120);").unwrap();
+        // `gh_synthetic` is a peer the shipped account classifier classifies.
         let peers = [
             ordinary_peer,
             "hidden",
             "absent",
             "brandsessionholder",
             "uncertain",
+            "gh_synthetic",
         ];
         let commands: Vec<_> = peers.iter().enumerate().map(|(index, peer)| {
             add(51, "synthetic_self", peer,
@@ -1993,16 +2066,26 @@ mod encrypted_roundtrip {
                 br#"{"outcome":"needs_review","completeControl":false}"#,
             )
             .unwrap();
+        // Entry (opcode 2) completes for an unclassified peer or group once
+        // its unread clear was applied or found no session; exit never does.
+        let completes = |index: usize| operation == 2 && matches!(index, 0 | 2);
         for (index, command) in commands.iter().enumerate() {
             let receipt = format!("projected:partial-read-fixture:{index}");
-            let error = core
-                .apply_sync_command("one", command, &receipt, "live")
-                .unwrap_err();
-            assert_eq!(
-                projection_blocker(&error).unwrap()["operationIds"],
-                json!([operation])
-            );
-            assert!(store.runtime("one", &receipt).unwrap().is_none());
+            let outcome = core.apply_sync_command("one", command, &receipt, "live");
+            if completes(index) {
+                outcome.unwrap();
+                assert_eq!(
+                    store.runtime("one", &receipt).unwrap().as_deref(),
+                    Some(&b"1"[..])
+                );
+            } else {
+                let error = outcome.unwrap_err();
+                assert_eq!(
+                    projection_blocker(&error).unwrap()["operationIds"],
+                    json!([operation])
+                );
+                assert!(store.runtime("one", &receipt).unwrap().is_none());
+            }
             let marker = store
                 .runtime("one", &format!("{marker_prefix}:{receipt}"))
                 .unwrap()
@@ -2015,7 +2098,8 @@ mod encrypted_roundtrip {
                     "hidden_session",
                     "missing_session",
                     "excluded_peer",
-                    "needs_review"
+                    "needs_review",
+                    "applied"
                 ][index]
             );
         }
@@ -2077,9 +2161,10 @@ mod encrypted_roundtrip {
         let core = Core::new(store.clone(), None).unwrap();
         core.configure_profile_format_key(&[9; 16]).unwrap();
         let projected_before = store.runtime("one", "projected-cursor").unwrap();
+        let pending = if operation == 2 { 4 } else { 6 };
         for _ in 0..2 {
             let result = core.recover_projection("one").unwrap();
-            assert_eq!(result["pendingCommands"], 5);
+            assert_eq!(result["pendingCommands"], pending);
             assert_eq!(result["projectedCommands"], 0);
         }
         assert_eq!(store.pending_sync_count("one").unwrap(), 1);
@@ -2113,8 +2198,42 @@ mod encrypted_roundtrip {
                     && event.data["origin"] == origin
                     && event.data["completeControl"] == false)
                 .count(),
-            1
+            2
         );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == "account.control_observed"
+                    && event.data["classification"] == "unclassified_session_entry"
+                    && event.data["projection"] == "unread_only")
+                .count(),
+            if operation == 2 { 2 } else { 0 }
+        );
+        // What blocks the batch outlives the event log, as labels only.
+        let record: Value = serde_json::from_slice(
+            &store
+                .runtime("one", "blocked-control:projected:partial-read-fixture:5")
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(record["operationIds"], json!([operation]));
+        assert_eq!(record["peerKind"], "classified");
+        assert!(!record.to_string().contains("gh_synthetic"));
+        let usage = store.storage_usage("one").unwrap();
+        let blocked: i64 = usage
+            .blocked_controls
+            .iter()
+            .filter(|row| row.message_type == Some(51))
+            .map(|row| row.commands)
+            .sum();
+        assert_eq!(blocked, pending);
+        assert!(usage
+            .blocked_controls
+            .iter()
+            .any(|row| row.peer_kind.as_deref() == Some("classified")
+                && row.batches == 1
+                && row.operation_ids.as_deref() == Some(&format!("[{operation}]")[..])));
         assert_eq!(
             events
                 .iter()

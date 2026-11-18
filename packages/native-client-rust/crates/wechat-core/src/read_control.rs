@@ -177,6 +177,32 @@ impl Core {
     /// Apply the supported read component once, even while the complete entry/exit
     /// control remains blocked. Evaluated no-ops are durable too: a later local
     /// session change must not make an older blocked control apply anew.
+    /// Whether an entry control (opcode 2) is complete after its unread
+    /// clear: its peer is a group or one the shipped classifier leaves
+    /// unclassified, and the clear was applied or found no session.
+    pub(super) fn entry_read_completes(
+        &self,
+        account: &str,
+        read: &RemoteThreadRead,
+        receipt: &str,
+        own: &str,
+    ) -> Result<bool> {
+        if !matches!(
+            super::sync_projection::peer_kind(&read.thread, own),
+            "group" | "ordinary"
+        ) {
+            return Ok(false);
+        }
+        let marker = format!("{}:{receipt}", PartialThreadRead::Entry.marker_prefix());
+        let Some(value) = self.store.runtime(account, &marker)? else {
+            return Ok(false);
+        };
+        let outcome: Value = serde_json::from_slice(&value)?;
+        Ok(matches!(
+            outcome["outcome"].as_str(),
+            Some("applied" | "missing_session")
+        ))
+    }
     pub(super) fn apply_partial_thread_read(
         &self,
         account: &str,
