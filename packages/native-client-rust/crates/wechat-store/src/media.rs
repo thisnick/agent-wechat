@@ -114,6 +114,12 @@ pub(crate) fn read_asset(db: &Connection, id: &str) -> Result<MediaAssetRecord> 
     })
 }
 fn media_event(tx: &Connection, kind: &str, data: &Value) -> Result<i64> {
+    let seq = insert_event(tx, kind, data)?;
+    crate::trim_events(tx)?;
+    Ok(seq)
+}
+/// Append one event without trimming the log; returns its sequence number.
+fn insert_event(tx: &Connection, kind: &str, data: &Value) -> Result<i64> {
     let seq: i64 = tx.query_row("SELECT COALESCE(MAX(sequence),0)+1 FROM events", [], |r| {
         r.get(0)
     })?;
@@ -125,10 +131,6 @@ fn media_event(tx: &Connection, kind: &str, data: &Value) -> Result<i64> {
             serde_json::to_string(data)?,
             chrono::Utc::now().to_rfc3339()
         ],
-    )?;
-    tx.execute(
-        "DELETE FROM events WHERE sequence < ?1",
-        [seq.saturating_sub(10_000)],
     )?;
     Ok(seq)
 }
@@ -149,7 +151,7 @@ fn job_updated_event(tx: &Connection, job: &str, data: &Value) -> Result<()> {
             |r| r.get(0),
         )
         .optional()?;
-    let seq = media_event(tx, "job.updated", data)?;
+    let seq = insert_event(tx, "job.updated", data)?;
     if let Some(previous) = previous {
         let row: Option<(String, String)> = tx
             .query_row(
@@ -178,6 +180,8 @@ fn job_updated_event(tx: &Connection, job: &str, data: &Value) -> Result<()> {
             }
         }
     }
+    // Trim after the merge, so the log still holds its full row count.
+    crate::trim_events(tx)?;
     tx.execute(
         "INSERT INTO runtime(key,value)VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         params![key, seq.to_string().into_bytes()],
@@ -785,6 +789,31 @@ impl Store {
             read_asset(db, &asset.id)
         })
     }
+    /// Note that a listing just returned this asset, so retention's idle
+    /// clock restarts (at most one write a day per row). Returns whether the
+    /// row exists. A read snapshot changes nothing and reports `true`.
+    pub fn touch_media_asset(&self, account: &str, id: &str) -> Result<bool> {
+        if self.is_read_snapshot() {
+            return Ok(true);
+        }
+        let now = chrono::Utc::now();
+        self.control(account, |db| {
+            let touched = db.execute(
+                "UPDATE media_assets SET updated_at=?2 WHERE id=?1 AND updated_at<?3",
+                params![
+                    id,
+                    now.to_rfc3339(),
+                    (now - chrono::Duration::days(1)).to_rfc3339()
+                ],
+            )?;
+            Ok(touched == 1
+                || db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM media_assets WHERE id=?1)",
+                    [id],
+                    |r| r.get(0),
+                )?)
+        })
+    }
     pub fn media_asset(&self, account: &str, id: &str) -> Result<MediaAssetRecord> {
         self.control(account, |db| {
             crate::retention::expired_if_missing(
@@ -1283,6 +1312,52 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![json!("running"), json!("available")]
         );
+    }
+
+    #[test]
+    fn the_log_keeps_its_row_limit_when_merged_progress_leaves_gaps() {
+        let (_dir, s) = setup();
+        let (mut row, _) = s
+            .create_media_job(
+                "test",
+                "job",
+                "download:asset",
+                &"0".repeat(64),
+                "download",
+                &json!({"assetId":"asset","completedBytes":0}),
+                b"",
+            )
+            .unwrap();
+        let bulk = |count: i64| {
+            s.control("test", |db| {
+                let tx = db.transaction()?;
+                for n in 0..count {
+                    tx.execute(
+                        "INSERT INTO events VALUES((SELECT MAX(sequence)+1 FROM events),'account.push',?1,'2026-01-01T00:00:00+00:00')",
+                        [format!("{{\"n\":{n}}}")],
+                    )?;
+                }
+                tx.commit()?;
+                Ok(())
+            })
+            .unwrap();
+        };
+        bulk(9_000);
+        // Progress saves use up sequence numbers but leave one row, so the
+        // window would hold fewer rows if it were cut by sequence distance.
+        for bytes in 1..=300 {
+            row.data["completedBytes"] = bytes.into();
+            row = s.save_media_job("test", &row).unwrap();
+        }
+        bulk(1_500);
+        row.data["completedBytes"] = 301.into();
+        s.save_media_job("test", &row).unwrap();
+        let count: i64 = s
+            .control("test", |db| {
+                Ok(db.query_row("SELECT count(*) FROM events", [], |r| r.get(0))?)
+            })
+            .unwrap();
+        assert_eq!(count, crate::EVENT_LIMIT);
     }
 
     #[test]

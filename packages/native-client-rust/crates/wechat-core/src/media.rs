@@ -1106,7 +1106,14 @@ impl Core {
                 DownloadPlan::Sticker { descriptor } => descriptor.expires_at,
                 _ => None,
             };
-            let mut asset = if let Ok(existing) = self.store.media_asset(account, &id) {
+            // Listing restarts retention's idle clock for the row. A row
+            // retention removed in between is recreated below with the same ID.
+            let existing = self
+                .store
+                .media_asset(account, &id)
+                .ok()
+                .filter(|_| self.store.touch_media_asset(account, &id).unwrap_or(false));
+            let mut asset = if let Some(existing) = existing {
                 serde_json::from_value(existing.metadata)?
             } else {
                 let asset = MediaAsset {

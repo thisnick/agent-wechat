@@ -155,8 +155,9 @@ pub struct StorageUsage {
     pub runtime_families: Vec<StorageCount>,
     /// Records retention keeps whole until they finish or expire.
     pub unresolved: BTreeMap<String, i64>,
-    /// What keeps sync batches blocked, by form, for batches blocked since
-    /// these records were added.
+    /// Status and system controls (AddMsg types 51 and 10002) that keep sync
+    /// batches blocked, by form. Batches blocked by another kind of command,
+    /// or last retried before these records existed, aren't listed.
     pub blocked_controls: Vec<BlockedControlCount>,
     pub retired_keys: i64,
 }
@@ -246,11 +247,7 @@ fn operation_event(tx: &Connection, id: &str, kind: &str, state: &str, now: &str
             now
         ],
     )?;
-    let seq = tx.last_insert_rowid();
-    tx.execute(
-        "DELETE FROM events WHERE sequence<=?1",
-        [seq.saturating_sub(10_000)],
-    )?;
+    crate::trim_events(tx)?;
     Ok(())
 }
 fn ids(tx: &Connection, sql: &str, args: impl rusqlite::Params) -> Result<Vec<String>> {

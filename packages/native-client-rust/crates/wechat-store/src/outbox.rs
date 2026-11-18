@@ -9,11 +9,7 @@ pub(super) fn event(tx: &rusqlite::Transaction<'_>, intent: &SendIntent) -> Resu
             chrono::Utc::now().to_rfc3339()
         ],
     )?;
-    let seq = tx.last_insert_rowid();
-    tx.execute(
-        "DELETE FROM events WHERE sequence<=?1",
-        [seq.saturating_sub(10_000)],
-    )?;
+    crate::trim_events(tx)?;
     Ok(())
 }
 impl Store {
@@ -84,7 +80,7 @@ impl Store {
             let seq=tx.last_insert_rowid();
             tx.execute("INSERT INTO runtime VALUES(?1,?2)",params![receipt,seq.to_string().as_bytes()])?;
             tx.execute("DELETE FROM runtime WHERE key=?1",[pending_key])?;
-            tx.execute("DELETE FROM events WHERE sequence<=?1",[seq.saturating_sub(10_000)])?;
+            crate::trim_events(&tx)?;
             tx.commit()?;
             Ok(())
         })

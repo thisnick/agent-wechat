@@ -473,5 +473,18 @@ fn a_removed_never_downloaded_row_comes_back_when_the_message_is_listed() {
     for asset in &again {
         assert_eq!(core.media_asset("one", &asset.id).unwrap().state, "pending");
     }
+    // A listing restarts the idle clock: rows listed after aging stay.
+    control(&dir)
+        .execute(
+            "UPDATE media_assets SET updated_at=?1",
+            rusqlite::params![old],
+        )
+        .unwrap();
+    core.media_assets("one", &message).unwrap();
+    let retention = core.maintain_media_storage("one").unwrap()["retention"].clone();
+    assert_eq!(retention["idleAssets"], 0, "{retention}");
+    for asset in &again {
+        assert!(core.media_asset("one", &asset.id).is_ok());
+    }
     assert_eq!(upstream.voice_transfers.load(Ordering::SeqCst), 0);
 }

@@ -42,11 +42,7 @@ fn write(tx: &rusqlite::Transaction<'_>, op: &Operation) -> Result<()> {
             op.updated_at
         ],
     )?;
-    let seq = tx.last_insert_rowid();
-    tx.execute(
-        "DELETE FROM events WHERE sequence<=?1",
-        [seq.saturating_sub(10_000)],
-    )?;
+    crate::trim_events(tx)?;
     Ok(())
 }
 fn key_hash(key: &str) -> Result<String> {

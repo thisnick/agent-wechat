@@ -198,7 +198,7 @@ impl Store {
             tx.execute("DELETE FROM runtime WHERE key IN ('saved-login-publication','saved-login-projection-needed')",[])?;
             if prior.as_deref()!=Some(credential_generation.as_bytes()) {
                 tx.execute("INSERT INTO events(kind,data_json,created_at)VALUES('credentials.projected',?1,?2)",params![serde_json::to_string(&serde_json::json!({"officialSavedLogin":"complete"}))?,chrono::Utc::now().to_rfc3339()])?;
-                let seq=tx.last_insert_rowid();tx.execute("DELETE FROM events WHERE sequence<=?1",[seq.saturating_sub(10_000)])?;
+                crate::trim_events(&tx)?;
             }
             tx.commit()?;Ok(())
         })
