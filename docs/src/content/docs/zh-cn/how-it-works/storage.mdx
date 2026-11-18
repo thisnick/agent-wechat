@@ -1,7 +1,7 @@
 ---
 title: 数据存储与备份
 description: agent-wechat 的文件存放位置，以及需要备份哪些内容。
-sourceHash: "f5ac281946d3"
+sourceHash: "f548f43fc180"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -40,15 +40,17 @@ $TMPDIR                             离线检查用的临时只读快照
 
 | 记录 | 完整保留的条件 | 之后 |
 | --- | --- | --- |
-| 收到的消息批次 | 等待中或被阻塞，或属于最新的 256 批 | 仅保留批次 ID，保留 30 天 |
+| 收到的消息批次 | 等待中，或属于最新的 256 批 | 仅保留批次 ID，保留 30 天 |
+| 被阻塞的消息批次 | 属于最新的 256 批 | 仅保留尚未写入的命令，以及联系人记录 |
 | 文字和媒体发送 | 未完成，或尚未写入 Profile，再加一天 | 保留简短收据，保留 90 天 |
 | 表情任务（表情包、我的表情、发送、表情包下载） | 未完成，或尚未写入 Profile，再加一天 | 保留简短收据；每个表情包最新的 5 次下载会保留重新添加该表情包时复用文件所需的信息 |
 | 语音消息音频 | 直到 Profile 中已有相同的音频为止 | 从 Profile 中读取 |
 | 群聊和联系人变更、撤回 | 未完成，或尚未写入 Profile，再加一天 | 保留简短收据，保留 365 天 |
 | 消息和事件的重复检查 | 30 天 | 删除 |
 | 为排查问题保留的微信原始响应 | 7 天 | 删除 |
+| 未下载过的附件（语音消息除外） | 7 天，或在下载排队期间 | 删除；重新列出该消息的媒体即可将其恢复 |
 
-`needs_review` 状态的请求会完整保留 7 天，或直到之后又累积了 100 条更新的记录。之后，发送和媒体任务保持 `needs_review`，群聊和联系人变更与撤回则变为 `expired`，错误码为 `review_expired`。两种情况都无法再自动修复。参见[发送与故障恢复](/how-it-works/sends/#how-long-a-key-works)。
+结果未知（`needs_review`）的请求会完整保留 7 天，或直到之后又累积了 100 条更新的记录。之后，发送和媒体任务保持 `needs_review`，群聊和联系人变更与撤回则变为 `expired`，错误码为 `review_expired`。无论哪种情况，都无法再自动修复。参见[发送与故障恢复](/how-it-works/sends/#how-long-a-key-works)。
 
 释放的空间会归还给磁盘。要查看哪些内容占用了空间，请先停止 Daemon，然后运行：
 
@@ -66,7 +68,7 @@ wx store usage --account ID
 tar -czf wechat-backup.tgz -C ~ .local/share/agent-wechat
 ```
 
-对于使用 `--official` 挂载官方目录的用户，需在打包命令中连同 `xwechat_files .xwechat` 一并备份。仅仅备份 Profile 目录会丢失在途发送记录、OpenClaw 处理位点以及撤回标记；仅仅备份数据目录则没有任何聊天历史记录。
+使用 `--official` 时，请在该打包命令末尾追加 `xwechat_files .xwechat`。仅仅备份 Profile 目录会丢失在途发送记录、OpenClaw 处理位点以及撤回标记；仅仅备份数据目录则没有任何聊天历史记录。
 
 ## 修改数据路径 \{#change-locations}
 
@@ -81,7 +83,7 @@ tar -czf wechat-backup.tgz -C ~ .local/share/agent-wechat
 - **升级前请先备份。** 升级可能会改变数据目录的格式，旧版 `wx` 无法打开已被新版升级过的数据目录。此后，清理会永久删除 `control.sqlite` 中已完成的记录。如需回退到旧版本，请恢复你在升级前做的备份。
 - **撤回标记保存在数据目录中。** 导出 Profile 时不会包含它们。
 - **升级后首次清理可能需要一段时间。** 清理按小批进行，因此其他请求仍会继续运行。删除第一批大数据时，需要约为 `control.sqlite` 两倍大小的可用磁盘空间；空间不足时，剩余空间会稍后再回收。
-- **被阻塞的同步批次会被保留。** 包含 Daemon 不支持的命令的批次会整体保留，直到更高版本能将其写入 Profile。`wx store usage` 会将其计入 `syncBatchesBlocked`。
+- **被阻塞的同步批次会被保留。** 包含 Daemon 不支持的命令的批次会一直保留，直到更高版本能将其写入 Profile，而 Profile 保存的同步位置也会等待该批次。`wx store usage` 会将它们计入 `syncBatchesBlocked`，并在 `blockedControls` 下列出阻塞这些批次的状态和系统控制项。
 - **`wx store usage` 会将数据目录升级** 到已安装版本的格式，与其他 `wx store` 命令一样。如果想保留原始文件，请在副本上运行。
 - OpenClaw 将自己的处理进度保存在 `consumerStateDir` 中，也请一并备份。
 </Aside>
