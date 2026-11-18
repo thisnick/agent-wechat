@@ -1998,6 +1998,125 @@ mod encrypted_roundtrip {
         }
     }
 
+    #[test]
+    fn old_blocked_batches_keep_only_unapplied_commands_and_still_retry() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&temporary.path().join("data")).unwrap());
+        store.create_account("one").unwrap();
+        let core = Core::new(store.clone(), None).unwrap();
+        core.configure_profile_format_key(&[9; 16]).unwrap();
+        core.install_login_state("one", &state(), None).unwrap();
+        core.ensure_managed_profile("one", &state()).unwrap();
+        // Session exit always stays blocked; the other two were applied.
+        let exit = add(51, "synthetic_self", "peer",
+            b"<msg><op id=\"5\"><username>peer</username><name>lastMessage</name><arg><![CDATA[{\"messageSvrId\":\"9\",\"MsgCreateTime\":\"1700000000123\"}]]></arg></op></msg>",
+            801, 100);
+        let applied = add(
+            1,
+            "peer",
+            "synthetic_self",
+            b"already applied text",
+            800,
+            100,
+        );
+        let contact = SyncCommand {
+            id: 2,
+            payload: b"contact record bytes".to_vec(),
+        };
+        let commands = vec![applied.clone(), contact.clone(), exit.clone()];
+        let stage = |id: &str, commands: Vec<SyncCommand>| {
+            let batch = wechat_protocol::wire::SyncBatch {
+                code: 0,
+                flags: 0,
+                cursor: p::uint(1, 0),
+                commands,
+                continuation: false,
+            };
+            let sealed = core
+                .vault
+                .seal(
+                    "one",
+                    &format!("apply:{id}"),
+                    &serde_json::to_vec(&batch).unwrap(),
+                )
+                .unwrap();
+            let cursor = core
+                .vault
+                .seal("one", "received-cursor", &batch.cursor)
+                .unwrap();
+            store.stage_sync("one", id, &sealed, &cursor).unwrap();
+        };
+        let block = |id: &str| {
+            for index in 0..2 {
+                store
+                    .put_runtime("one", &format!("projected:{id}:{index}"), b"1")
+                    .unwrap();
+            }
+            store.block_sync("one", id).unwrap();
+        };
+        stage("old-blocked", commands.clone());
+        block("old-blocked");
+        for index in 0..wechat_store::RECENT_MESSAGE_BATCHES {
+            let id = format!("newer-{index:03}");
+            stage(&id, vec![]);
+            store.finish_sync("one", &id).unwrap();
+        }
+        stage("recent-blocked", commands.clone());
+        block("recent-blocked");
+        let open = |id: &str| -> wechat_protocol::wire::SyncBatch {
+            let (_, sealed) = store.retained_sync_batch("one", id).unwrap().unwrap();
+            serde_json::from_slice(
+                &core
+                    .vault
+                    .open_record("one", &format!("apply:{id}"), &sealed)
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        let payloads = |batch: &wechat_protocol::wire::SyncBatch| {
+            batch
+                .commands
+                .iter()
+                .map(|command| (command.id, command.payload.clone()))
+                .collect::<Vec<_>>()
+        };
+        let original = payloads(&open("recent-blocked"));
+
+        assert_eq!(
+            core.slim_blocked_batches("one", "", 20).unwrap().rewritten,
+            1
+        );
+        assert_eq!(
+            core.slim_blocked_batches("one", "", 20).unwrap().rewritten,
+            0
+        );
+        // Same positions and IDs; only the applied non-contact command is empty.
+        assert_eq!(
+            payloads(&open("old-blocked")),
+            vec![
+                (5, vec![]),
+                (2, contact.payload.clone()),
+                (5, exit.payload.clone())
+            ]
+        );
+        // The newest 256 message batches stay whole for recall evidence.
+        assert_eq!(payloads(&open("recent-blocked")), original);
+
+        // A retry skips the applied commands and blocks on the same one.
+        let result = core.recover_projection("one").unwrap();
+        assert_eq!(result["pendingCommands"], 2);
+        assert_eq!(result["projectedCommands"], 0);
+        assert_eq!(store.pending_sync("one").unwrap().len(), 0);
+        assert!(store
+            .runtime("one", "projected:old-blocked:2")
+            .unwrap()
+            .is_none());
+        assert!(store
+            .runtime("one", "blocked-control:projected:old-blocked:2")
+            .unwrap()
+            .is_some());
+    }
+
     fn partial_read_fixture(
         operation: u32,
         ordinary_peer: &str,

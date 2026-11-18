@@ -7,7 +7,13 @@
 //! | --- | --- | --- |
 //! | Voice asset plan | the official profile does not return the note's encoded audio | server ID and length; a download reads the profile's copy first |
 //! | Finished sticker acquisition, among the newest of its pack | unfinished, or awaiting a profile write; for a day | pack, item IDs, captions and archive locator |
+//! | Blocked message batch outside the newest 256 | never fully: unapplied commands and contact records stay | every command, in place; an applied one other than a contact record keeps its ID with an empty payload |
 //!
+//! A blocked batch is retried command by command, skipping each one with a
+//! `projected:{batch}:{index}` receipt, so an applied command's bytes are never
+//! read again. Contact records (command 2) stay whole: resuming a held group
+//! refresh re-reads its source record by index. Recall evidence and the voice
+//! fallback read only the newest 256 message batches, which stay whole.
 //! Each rewrite is one compare-and-swap row update, so a crash leaves the
 //! old plan or the new one. A rewrite reads only the sealed plan and the
 //! official profile; it never sends a request or starts a transfer. Running it
@@ -132,13 +138,15 @@ pub(super) struct PlanCompaction {
     pub(super) voice: usize,
     /// Finished sticker acquisitions reduced to what reuse reads.
     pub(super) sticker_acquisitions: usize,
+    /// Old blocked sync batches reduced to their unapplied commands.
+    pub(super) blocked_batches: usize,
 }
 /// One bounded step: plans rewritten and where the next step starts.
 #[derive(Debug, Default)]
-pub(super) struct PlanStep {
-    pub(super) rewritten: usize,
+pub(crate) struct PlanStep {
+    pub(crate) rewritten: usize,
     /// The last ID examined, or `None` when nothing is left.
-    pub(super) next: Option<String>,
+    pub(crate) next: Option<String>,
 }
 fn step(rewritten: usize, examined: &[String], limit: usize) -> PlanStep {
     PlanStep {
@@ -245,7 +253,61 @@ impl Core {
         }
         Ok(step(rewritten, &examined, limit))
     }
-    /// Run both rewrites for one account until neither has work left.
+    /// Keep only the unapplied commands, and every contact record, of up to
+    /// `limit` blocked message batches after `after` that are outside the
+    /// newest 256. Indices and command IDs never change.
+    pub(crate) fn slim_blocked_batches(
+        &self,
+        account: &str,
+        after: &str,
+        limit: usize,
+    ) -> Result<PlanStep> {
+        let rows = self
+            .store
+            .old_blocked_batches_after(account, after, limit)?;
+        let examined = rows.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
+        let mut rewritten = 0;
+        for (id, sealed) in &rows {
+            if self
+                .slim_blocked_batch(account, id, sealed)
+                .unwrap_or(false)
+            {
+                rewritten += 1;
+            }
+        }
+        Ok(step(rewritten, &examined, limit))
+    }
+    fn slim_blocked_batch(&self, account: &str, id: &str, sealed: &[u8]) -> Result<bool> {
+        let purpose = format!("apply:{id}");
+        let mut batch: wechat_protocol::wire::SyncBatch =
+            serde_json::from_slice(&self.vault.open_record(account, &purpose, sealed)?)?;
+        let mut changed = false;
+        for start in (0..batch.commands.len()).step_by(500) {
+            let end = batch.commands.len().min(start + 500);
+            let receipts = (start..end)
+                .map(|index| format!("projected:{id}:{index}"))
+                .collect::<Vec<_>>();
+            let applied = self.store.runtime_keys(account, &receipts)?;
+            for (index, command) in batch.commands[start..end].iter_mut().enumerate() {
+                if command.id != 2
+                    && !command.payload.is_empty()
+                    && applied.contains(&receipts[index])
+                {
+                    command.payload.clear();
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            return Ok(false);
+        }
+        let resealed = self
+            .vault
+            .seal(account, &purpose, &serde_json::to_vec(&batch)?)?;
+        self.store
+            .replace_blocked_batch_payload(account, id, sealed, &resealed)
+    }
+    /// Run every rewrite for one account until none has work left.
     pub(super) fn run_plan_compaction(&self, account: &str) -> Result<PlanCompaction> {
         let mut total = PlanCompaction::default();
         let mut after = String::new();
@@ -262,22 +324,27 @@ impl Core {
             let Some(next) = step.next else { break };
             after = next;
         }
+        after.clear();
+        for _ in 0..PLAN_STEPS {
+            let step = self.slim_blocked_batches(account, &after, PLAN_STEP)?;
+            total.blocked_batches += step.rewritten;
+            let Some(next) = step.next else { break };
+            after = next;
+        }
         Ok(total)
     }
     /// [`Self::run_plan_compaction`] one small step at a time under the
     /// account's mutation guard, so other work for the account interleaves.
     pub(super) async fn guarded_plan_compaction(self: &Arc<Self>, account: &str) {
-        for voice in [true, false] {
+        for family in 0..3 {
             let mut after = String::new();
             for _ in 0..PLAN_STEPS {
                 let from = after.clone();
                 let Some(step) = self
-                    .guarded_storage_step(account, move |core, id| {
-                        if voice {
-                            core.compact_voice_plans(id, &from, PLAN_STEP)
-                        } else {
-                            core.compact_sticker_plans(id, &from, PLAN_STEP)
-                        }
+                    .guarded_storage_step(account, move |core, id| match family {
+                        0 => core.compact_voice_plans(id, &from, PLAN_STEP),
+                        1 => core.compact_sticker_plans(id, &from, PLAN_STEP),
+                        _ => core.slim_blocked_batches(id, &from, PLAN_STEP),
                     })
                     .await
                 else {

@@ -803,6 +803,48 @@ impl Store {
             .collect()
         })
     }
+    /// Blocked message batches outside the newest [`RECENT_MESSAGE_BATCHES`]
+    /// (the window recall evidence and the voice fallback read), after
+    /// `after` in ID order, with their sealed payloads. The core opens each
+    /// and keeps only the commands that are not yet applied. Reads only.
+    pub fn old_blocked_batches_after(
+        &self,
+        account: &str,
+        after: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        self.control(account, |db| {
+            let mut query = db.prepare(
+                "SELECT id,payload FROM apply_intents WHERE state='blocked' AND stream='message' AND length(payload)>0 AND id>?1 AND id NOT IN (SELECT id FROM apply_intents WHERE stream='message' ORDER BY created_at DESC,id DESC LIMIT ?2) ORDER BY id LIMIT ?3",
+            )?;
+            let rows = query.query_map(
+                params![after, RECENT_MESSAGE_BATCHES, limit as i64],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+    }
+    /// Replace a blocked batch's sealed payload if the batch is still blocked
+    /// and its payload is still `expected`. One row update. Returns whether
+    /// it was replaced. A read snapshot changes nothing.
+    pub fn replace_blocked_batch_payload(
+        &self,
+        account: &str,
+        id: &str,
+        expected: &[u8],
+        payload: &[u8],
+    ) -> Result<bool> {
+        anyhow::ensure!(!payload.is_empty(), "invalid sync batch payload");
+        if self.is_read_snapshot() {
+            return Ok(false);
+        }
+        self.control(account, |db| {
+            Ok(db.execute(
+                "UPDATE apply_intents SET payload=?3 WHERE id=?1 AND state='blocked' AND payload=?2",
+                params![id, expected, payload],
+            )? == 1)
+        })
+    }
     /// Replace an asset's sealed plan if it is still `expected`. One row
     /// update: a crash leaves the old plan or the new one. Returns whether it
     /// was replaced. A read snapshot changes nothing.
