@@ -36,7 +36,7 @@ The optional `wechat_contacts` and `wechat_contact_request` tools work across th
 { "tools": { "alsoAllow": ["wechat_contacts", "wechat_contact_request"] } }
 ```
 
-Both require OpenClaw's trusted owner identity and a current **private owner session**. Shared conversations and hosts missing those checks cannot use them. The model cannot select another account or supply an owner flag.
+Both require OpenClaw's trusted owner identity and a current **private owner session**: the owner's own one-to-one chat with the agent. They don't appear in groups, scheduled runs, sub-agents or other people's chats, and the model cannot select another account or supply an owner flag. OpenClaw's built-in agent runtime marks owner-private chats itself. CLI backends such as Claude CLI don't pass that to tools, so for them the plugin checks the stored session: a direct chat, still current, whose replies go to the owner.
 
 `wechat_contacts` supports `list`, `get`, local `find`, exact-ID `lookup`, server `search` and `remove`. `wechat_contact_request` supports `list`, `get`, `send`, `accept`, local-history `delete` and operation `status`. Sending uses a discovery `recipientRef`; accepting and deleting require the inspected `expectedVersion`. Mutations require a stable `idempotencyKey`. After uncertainty, inspect the original operation instead of sending again.
 
@@ -159,4 +159,5 @@ An agent with archive tools can read your whole WeChat account, whoever is talki
 - **Sends and recalls** use a stable key, so a retry after a lost response never sends twice. An uncertain result comes back as `needs_review` rather than being retried.
 - With OpenClaw's compact tool catalog, history, search and message lookup are found through `tool_search`. `wechat_media` stays directly callable so images reach the model as images.
 - Tools need the matching [token scopes](/reference/tokens/): `read` for lookups, `media` for downloads, `send` for shares and recalls.
+- **Contact tools with a CLI backend** need each person in their own direct-chat session (`session.dmScope` set to `per-peer`, `per-channel-peer` or `per-account-channel-peer`). With the default `main`, all direct chats share one session, so the plugin can't tell it is yours alone.
 </Aside>

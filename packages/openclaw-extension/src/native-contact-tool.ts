@@ -1,26 +1,140 @@
 import type { ChannelAgentTool } from "openclaw/plugin-sdk/channel-contract";
-import type { OpenClawPluginApi, OpenClawPluginToolContext } from "openclaw/plugin-sdk/core";
+import type {
+  OpenClawPluginApi,
+  OpenClawPluginToolContext,
+  PluginRuntime,
+} from "openclaw/plugin-sdk/core";
 import { ensureNativeHost } from "./native-host.ts";
 import { resolveWeChatAccount } from "./types.ts";
 import { nativeConfigurationKey } from "./native-secrets.ts";
 const names = ["wechat_contacts", "wechat_contact_request"];
-/** Account-wide contact tools require live owner authority and a trusted private audience. */
+type SessionReader = Pick<PluginRuntime["agent"]["session"], "resolveStorePath"> &
+  Partial<Pick<PluginRuntime["agent"]["session"], "getSessionEntry" | "getSessionEntryAsync">>;
+type RouteResolver = Pick<PluginRuntime["channel"]["routing"], "resolveAgentRoute">;
+type StoredSession = Awaited<ReturnType<PluginRuntime["agent"]["session"]["getSessionEntryAsync"]>>;
+const PER_PERSON_DM_SCOPES = new Set(["per-peer", "per-channel-peer", "per-account-channel-peer"]);
+/**
+ * The owner's own chat, judged from the stored session as OpenClaw judges an
+ * owner-private memory audience (a root `direct` session of this incarnation),
+ * plus: its external delivery route goes back to the requester (a WeChat route on
+ * the plugin's account), and OpenClaw's router gives this requester exactly this
+ * session under a per-person DM scope. Cron and `main` sessions route nowhere
+ * external, and a session shared with others is not the requester's own.
+ */
+function isOwnerChatSession(
+  entry: StoredSession,
+  context: OpenClawPluginToolContext,
+  owner: { cfg: unknown; accountId: string; routing?: RouteResolver }
+): boolean {
+  const sender = context.requesterSenderId;
+  const route = entry?.delivery?.kind === "external" ? entry.delivery.context : undefined;
+  if (
+    !entry ||
+    !sender ||
+    entry.sessionId !== context.sessionId ||
+    entry.chatType !== "direct" ||
+    entry.spawnedBy !== undefined ||
+    !route?.channel ||
+    route.threadId !== undefined ||
+    (route.channel === "agent-wechat" && (route.accountId ?? "default") !== owner.accountId) ||
+    ![sender, `${route.channel}:${sender}`, ...(route.channel === "agent-wechat" ? [`wechat:${sender}`] : [])].includes(
+      route.to ?? ""
+    )
+  )
+    return false;
+  try {
+    const resolved = owner.routing?.resolveAgentRoute({
+      cfg: owner.cfg as never,
+      channel: route.channel,
+      accountId: route.accountId,
+      peer: { kind: "direct", id: sender },
+    });
+    return (
+      !!resolved &&
+      resolved.agentId === context.agentId &&
+      resolved.sessionKey === context.sessionKey &&
+      PER_PERSON_DM_SCOPES.has(resolved.dmScope ?? "")
+    );
+  } catch {
+    return false;
+  }
+}
+/** Account-wide contact tools require live owner authority in the owner's private chat. */
 export function createNativeContactTools(
   context: OpenClawPluginToolContext,
-  dependencies: { host?: typeof ensureNativeHost } = {}
+  dependencies: { host?: typeof ensureNativeHost; sessions?: SessionReader; routing?: RouteResolver } = {}
 ): ChannelAgentTool[] {
-  const privateOwner = () =>
-    context.senderIsOwner === true &&
-    context.memoryAudience?.kind === "owner-private" &&
-    typeof context.assertMemoryAudienceCurrent === "function" &&
-    typeof context.assertInvocationCurrent === "function";
-  if (!privateOwner()) return [];
   const currentConfig = () =>
     context.getRuntimeConfig?.() ?? context.runtimeConfig ?? context.config;
+  const ownerAuthority = () =>
+    context.senderIsOwner === true && typeof context.assertInvocationCurrent === "function";
+  // A memory audience that OpenClaw resolves decides privacy whenever it is supplied.
+  const audienceOwner = () =>
+    context.memoryAudience?.kind === "owner-private" &&
+    typeof context.assertMemoryAudienceCurrent === "function";
+  // OpenClaw's Claude CLI tool bridge passes the owner bit, session and requester
+  // but no memory audience. Without one, check the stored session ourselves.
+  const noAudience = () =>
+    context.memoryAudience === undefined &&
+    context.assertMemoryAudienceCurrent === undefined &&
+    !!context.agentId &&
+    !!context.sessionKey &&
+    !!context.sessionId &&
+    !!context.requesterSenderId;
   const selected = resolveWeChatAccount(currentConfig() as Record<string, unknown>);
+  if (!selected?.enabled || !selected.native) return [];
+  const sessionQuery = () => {
+    const agentId = context.agentId!;
+    const cfg = currentConfig() as { session?: { store?: string } } | undefined;
+    return {
+      agentId,
+      storePath: dependencies.sessions!.resolveStorePath(cfg?.session?.store, { agentId }),
+      sessionKey: context.sessionKey!,
+      readConsistency: "latest" as const,
+    };
+  };
+  const ownerChat = (entry: StoredSession) =>
+    isOwnerChatSession(entry, context, {
+      cfg: currentConfig(),
+      accountId: selected.accountId,
+      routing: dependencies.routing,
+    });
+  // Whether the model sees the tools needs an answer now, so it uses the
+  // synchronous read; without one the tools stay hidden. Each call decides with a
+  // fresh asynchronous read before its effect and again before its result.
+  const readOwnerChatNow = () => {
+    try {
+      return ownerChat(dependencies.sessions?.getSessionEntry?.(sessionQuery()));
+    } catch {
+      return false;
+    }
+  };
+  const viaAudience = audienceOwner();
+  if (!ownerAuthority() || !(viaAudience || (noAudience() && readOwnerChatNow()))) return [];
+  const privateOwner = () => ownerAuthority() && (viaAudience ? audienceOwner() : noAudience());
+  const ownerSessionCurrent = async (afterChange: boolean) => {
+    if (viaAudience) return;
+    const sessions = dependencies.sessions;
+    let entry: StoredSession;
+    try {
+      entry = sessions?.getSessionEntryAsync
+        ? await sessions.getSessionEntryAsync(sessionQuery())
+        : sessions?.getSessionEntry?.(sessionQuery());
+    } catch {
+      throw Error(
+        afterChange
+          ? "Could not reread the OpenClaw session before returning; a change may already have been made. Check it with status and the same idempotency key."
+          : "Could not read the OpenClaw session to confirm the private owner chat"
+      );
+    }
+    if (!ownerChat(entry))
+      throw Error(
+        afterChange
+          ? "A private OpenClaw owner session is required to return this result; a change may already have been made. Check it with status and the same idempotency key."
+          : "A private OpenClaw owner session is required"
+      );
+  };
   if (
-    !selected?.enabled ||
-    !selected.native ||
     (context.agentAccountId && context.agentAccountId !== selected.accountId) ||
     (context.deliveryContext?.channel === "agent-wechat" &&
       context.deliveryContext.accountId &&
@@ -174,7 +288,7 @@ export function createNativeContactTools(
         signal?.throwIfAborted();
         if (!privateOwner()) throw Error("A private OpenClaw owner session is required");
         context.assertInvocationCurrent!();
-        context.assertMemoryAudienceCurrent!();
+        context.assertMemoryAudienceCurrent?.();
         const current = resolveWeChatAccount(currentConfig() as Record<string, unknown>);
         if (
           !current?.enabled ||
@@ -186,8 +300,12 @@ export function createNativeContactTools(
           throw Error("WeChat account configuration changed; start a new turn");
         return current.native;
       };
+      guard();
+      await ownerSessionCurrent(false);
       const native = guard();
       const { client } = await (dependencies.host ?? ensureNativeHost)(native);
+      guard();
+      await ownerSessionCurrent(false);
       guard();
       const id = args.id as string,
         key = args.idempotencyKey as string;
@@ -276,6 +394,10 @@ export function createNativeContactTools(
           }
         }
       guard();
+      // Only a mutation (an action that takes an idempotency key) may have changed
+      // something by now; a read just fails with the plain owner-session error.
+      await ownerSessionCurrent((required[action] ?? []).includes("idempotencyKey"));
+      guard();
       const details = { accountId, result };
       return { content: [{ type: "text" as const, text: JSON.stringify(details) }], details };
     },
@@ -283,7 +405,14 @@ export function createNativeContactTools(
 }
 export function registerNativeContactTools(api: OpenClawPluginApi): void {
   api.registerTool(
-    { contextVersion: 2, create: (context) => createNativeContactTools(context) },
+    {
+      contextVersion: 2,
+      create: (context) =>
+        createNativeContactTools(context, {
+          sessions: api.runtime?.agent?.session,
+          routing: api.runtime?.channel?.routing,
+        }),
+    },
     { names, optional: true }
   );
 }
