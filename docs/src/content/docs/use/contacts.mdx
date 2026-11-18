@@ -149,4 +149,4 @@ The PATCH currently accepts a complete privacy value:
 
 Other contact fields remain unchanged. A stale version returns `stale_contact_privacy`; inspect the current settings before deciding on another edit. An unresolved saved state returns `contact_privacy_unresolved`. The returned operation distinguishes server acceptance from confirmation in the saved contact.
 
-The Rust protocol crate provides `ContactPrivacySettings`, request builders and correlated reply decoding. The core crate provides `ContactUpdate`, `contact_privacy` and `update_contact`, coordinating idempotency, account ownership and saved-contact confirmation. Privacy settings do not grant daemon or OpenClaw permissions.
+The Rust protocol crate provides `ContactPrivacySettings`, request builders and correlated reply decoding. The core crate provides `ContactUpdate`, `contact_privacy` and `update_contact`, coordinating idempotency, account ownership and saved-contact confirmation. In OpenClaw, private owner sessions can see available settings through `wechat_contacts` list, find, and get.

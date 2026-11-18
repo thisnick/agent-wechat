@@ -911,7 +911,7 @@ export const scenes = [
   },
   ...["contact-details", "contact-details-search", "contact-privacy-saved", "contact-privacy-unavailable", "contact-privacy-refresh", "contact-privacy-retry", "contact-privacy-syncing"].map(name => ({
     name, route: "contacts",
-    description: ({ "contact-details": "A saved contact card reached from the contact list by its keyboard-accessible Details action.", "contact-details-search": "Saved-contact search offers separate Message and Details actions; Details opens the shared card.", "contact-privacy-saved": "Moments selections survive Chats Only and save with the original privacy version.", "contact-privacy-unavailable": "Unresolved privacy leaves the contact available and offers a contact refresh.", "contact-privacy-refresh": "Refreshing a contact updates the displayed name and privacy together.", "contact-privacy-retry": "An uncertain privacy save locks edits and retries only the same inspected intent.", "contact-privacy-syncing": "One accepted PATCH waits through pending canonical GETs before showing saved settings, without another mutation." })[name],
+    description: ({ "contact-details": "A saved contact card reached from the contact list by its keyboard-accessible Details action.", "contact-details-search": "Saved-contact search offers separate Message and Details actions; Details opens the shared card.", "contact-privacy-saved": "Moments selections survive Chats Only and save with the original privacy version.", "contact-privacy-unavailable": "A contact card omits privacy controls when the hub has no settings.", "contact-privacy-refresh": "Refreshing a contact updates the displayed name and privacy together.", "contact-privacy-retry": "An uncertain privacy save locks edits and retries only the same inspected intent.", "contact-privacy-syncing": "One accepted PATCH waits through pending canonical GETs before showing saved settings, without another mutation." })[name],
     viewports: name === "contact-privacy-retry" ? ["desktop"] : ["desktop", "compact"],
     setup: standardWorld, target: () => ({ account: ACCOUNT.id }),
     prepare: async ({ page }) => {
@@ -987,15 +987,16 @@ export const scenes = [
       await expect(dialog).toBeVisible();
       await expect(dialog.getByRole("button", { name: "Message", exact: true })).toBeVisible();
       if (name === "contact-privacy-unavailable") {
-        await expect(dialog.getByRole("alert")).toContainText("Privacy settings are unavailable");
-        await expect(dialog.getByRole("radio", { name: "Full access", exact: true })).toHaveCount(0);
+        await expect(dialog.locator(".contact-detail-privacy")).toHaveCount(0);
+        await expect(dialog.getByRole("alert")).toHaveCount(0);
         await expect(dialog.getByRole("button", { name: "Save privacy", exact: true })).toHaveCount(0);
-        await expect(dialog.getByRole("button", { name: "Remove contact", exact: true })).toHaveCount(0);
         return;
       }
       if (name === "contact-privacy-refresh") {
+        await dialog.locator(".contact-more summary").click();
         await dialog.getByRole("button", { name: "Refresh contact", exact: true }).click();
         await expect(dialog.getByText("Mei Chen (updated)", { exact: true })).toBeVisible();
+        await dialog.locator(".contact-more summary").click();
       }
       const hideMine = dialog.getByRole("switch", { name: "Hide My Posts", exact: true });
       await expect(dialog.getByRole("switch", { name: "Hide Their Posts", exact: true })).toBeChecked();
@@ -1075,15 +1076,14 @@ export const scenes = [
     name: "contact-details-sidebar", route: "info",
     description: "A direct-conversation sidebar opens the same contact card and its checked privacy/removal actions.",
     viewports: ["desktop"], setup: standardWorld, target: () => ({ account: ACCOUNT.id, thread: "sim_mei" }),
-    prepare: async ({ page }) => {
-      await prepareContactScenes({ page });
-      await page.route("**/v1/accounts/*/contacts/sim_mei", route => route.fulfill({ json: { privacy: { chatsOnly: false, hideMyPosts: false, hideTheirPosts: true }, privacyVersion: "scene-privacy-v1" } }));
-    },
+    prepare: prepareContactScenes,
     ready: async ({ page, expect }) => { await expect(page.getByRole("complementary", { name: "Conversation details" })).toBeVisible(); },
     actions: async ({ page, expect }) => {
       await page.getByRole("complementary", { name: "Conversation details" }).getByRole("button", { name: "Details", exact: true }).click();
       const dialog = page.getByRole("dialog", { name: "Contact details" });
-      await expect(dialog.getByRole("switch", { name: "Hide Their Posts", exact: true })).toBeChecked();
+      const hideTheirPosts = dialog.getByRole("switch", { name: "Hide Their Posts", exact: true });
+      await expect(hideTheirPosts).toBeVisible();
+      await expect(hideTheirPosts).not.toBeChecked();
       await expect(dialog.getByRole("button", { name: "Message", exact: true })).toBeVisible();
       await dialog.locator(".contact-more summary").click();
       await expect(dialog.getByRole("button", { name: "Remove contact", exact: true })).toBeVisible();

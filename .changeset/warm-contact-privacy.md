@@ -1,5 +1,6 @@
 ---
 "@agent-wechat/client-ui": patch
+"@agent-wechat/cli": patch
 "@agent-wechat/rust-crates": minor
 "@agent-wechat/shared": minor
 ---

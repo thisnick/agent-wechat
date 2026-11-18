@@ -919,7 +919,8 @@ export function ContactDetailDialog({
       savedPrivacy &&
       !privacyError &&
       !privacyConflict &&
-      !privacyLoading
+      !privacyLoading &&
+      !contactRefreshing
     )
       pending = {
         key,
@@ -998,9 +999,9 @@ export function ContactDetailDialog({
     ? t("contactsUi.removeContact")
     : t("contactsUi.contactDetails");
   const privacyDirty = !!savedPrivacy && !sameContactPrivacy(privacy, savedPrivacy.privacy);
-  const showPrivacy =
-    !removal &&
-    (!!friendId || !!discovery?.recipientRef || !!request?.actionable);
+  const showPrivacy = !removal && (friendId
+    ? !!(savedPrivacy || draft || privacyLoading || privacyError)
+    : !!(discovery?.recipientRef || request?.actionable));
   return (
     <dialog
       ref={ref}
@@ -1018,7 +1019,10 @@ export function ContactDetailDialog({
           <summary aria-label={t("contactsUi.moreActions")}><Icon name="more" /></summary>
           <div className="contact-more-menu">
             {request && !receipt && <button disabled={busy} onClick={() => { if (window.confirm(t("contactsUi.deleteExplanation"))) void change("delete"); }}>{t("contactsUi.deleteLocal")}</button>}
-            {friendId && remove && savedPrivacy && !privacyLoading && !privacyError && !permissionDenied && <button disabled={locked} onClick={() => remove({ id: friendId, displayName: name })}>{t("contactsUi.removeContact")}</button>}
+            {friendId && !privacyDenied && <button disabled={locked || contactRefreshing} onClick={() => void refreshContact()}>
+              {t(contactRefreshing ? "contactsUi.refreshingContact" : "contactsUi.refreshPrivacy")}
+            </button>}
+            {friendId && remove && !privacyDenied && !permissionDenied && <button disabled={locked || contactRefreshing} onClick={() => remove({ id: friendId, displayName: name })}>{t("contactsUi.removeContact")}</button>}
           </div>
         </details>}
         <button onClick={close} aria-label={t("contactsUi.close")}>
@@ -1085,7 +1089,7 @@ export function ContactDetailDialog({
                 locked ||
                 permissionDenied ||
                 (!!friendId &&
-                  (!savedPrivacy || privacyLoading || !!privacyError || privacyConflict))
+                  (!savedPrivacy || privacyLoading || contactRefreshing || !!privacyError || privacyConflict))
               }
               change={(value) => {
                 if (editableReceipt) {
@@ -1097,15 +1101,6 @@ export function ContactDetailDialog({
                 } else setInitialPrivacy(value);
               }}
             />
-          )}
-          {friendId && privacyError && !privacyDenied && (
-            <button
-              className="omni-action"
-              disabled={busy || privacyLoading || contactRefreshing || (!!receipt && !ended)}
-              onClick={() => void refreshContact()}
-            >
-              {t(contactRefreshing ? "contactsUi.refreshingContact" : "contactsUi.refreshPrivacy")}
-            </button>
           )}
         </section>
       )}
@@ -1174,6 +1169,7 @@ export function ContactDetailDialog({
               !savedPrivacy ||
               privacyLoading ||
               !!privacyError ||
+              contactRefreshing ||
               privacyConflict ||
               sameContactPrivacy(privacy, savedPrivacy.privacy)
             }

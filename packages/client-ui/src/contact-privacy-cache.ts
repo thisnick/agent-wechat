@@ -82,7 +82,7 @@ export class ContactPrivacyCache {
     };
   }
 
-  async read(account: string, id: string, signal: AbortSignal): Promise<NativeContactPrivacy> {
+  async read(account: string, id: string, signal: AbortSignal): Promise<NativeContactPrivacy | undefined> {
     const lifetime = this.lifetime.signal;
     const session = this.session;
     if (account !== this.account) throw new DOMException("Account changed", "AbortError");
@@ -99,14 +99,16 @@ export class ContactPrivacyCache {
         if (current) return current;
         throw new NativeApiError(409, "contact_privacy_pending");
       }
-      if (!snapshot) {
-        throw contact.privacyPending
-          ? new NativeApiError(409, "contact_privacy_pending")
-          : new NativeApiError(409, "contact_privacy_unresolved");
+      if (contact.privacyPending) {
+        throw new NativeApiError(409, "contact_privacy_pending");
       }
       this.reads.set(id, Symbol());
-      this.entries.set(id, snapshot);
-      this.notify();
+      if (snapshot) {
+        this.entries.set(id, snapshot);
+        this.notify();
+      } else if (this.entries.delete(id)) {
+        this.notify();
+      }
       return snapshot;
     } catch (error) {
       if (this.reads.get(id) === read) {

@@ -271,16 +271,23 @@ test("the live inventory warms a closed contact, and a newer inventory clears un
   assert.equal(cache.get("one", "peer"), undefined);
 });
 
-test("contact details distinguish pending privacy from unavailable privacy", async () => {
-  for (const pending of [true, false]) {
+test("missing contact privacy stays blank and pending privacy is retried", async () => {
+  let legacyReads = 0;
+  for (const pending of [undefined, true]) {
     const cache = new ContactPrivacyCache({
-      contact: async () => ({ id: "peer", privacyPending: pending }),
+      contact: async () => ({ id: "peer", relation: "friend", privacyPending: pending }),
+      contactPrivacy: async () => { legacyReads++; },
     });
     cache.reset("one");
-    await assert.rejects(cache.read("one", "peer", new AbortController().signal), {
-      code: pending ? "contact_privacy_pending" : "contact_privacy_unresolved",
-    });
+    const read = cache.read("one", "peer", new AbortController().signal);
+    if (pending) {
+      await assert.rejects(read, { code: "contact_privacy_pending" });
+    } else {
+      assert.equal(await read, undefined);
+      assert.equal(cache.get("one", "peer"), undefined);
+    }
   }
+  assert.equal(legacyReads, 0);
 });
 
 for (const sameSession of [true, false]) {
