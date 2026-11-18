@@ -96,6 +96,8 @@ payloads! {
     "NativeContactSearchRequest" => crate::contracts::NativeContactSearchRequest,
     "NativeContactSearch" => crate::contracts::NativeContactSearch,
     "NativeContactPrivacy" => crate::contracts::NativeContactPrivacy,
+    "NativeContactPrivacySnapshotQuery" => crate::contracts::NativeContactPrivacySnapshotQuery,
+    "NativeContactPrivacySnapshots" => crate::contracts::NativeContactPrivacySnapshots,
     "NativeContactPrivacySettings" => crate::contracts::NativeContactPrivacySettings,
     "NativeContactUpdate" => crate::contracts::NativeContactUpdate,
     "NativeContactRequestAccept" => crate::contracts::NativeContactRequestAccept,

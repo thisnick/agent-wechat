@@ -1,3 +1,4 @@
+import { ContactPrivacyCache } from "../src/contact-privacy-cache.ts";
 import { NativeApiError } from "@agent-wechat/shared";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -27,7 +28,10 @@ test("the card adapter keeps privacy with the send and acceptance, and versions 
       },
     ]),
   );
-  const actions = contactDetailActions({ session: { client } }, "account");
+  const actions = contactDetailActions({ session: {
+    client,
+    contactPrivacy: { read: client.contactPrivacy },
+  } }, "account");
   const signal = new AbortController().signal;
   await actions.readPrivacy("peer", signal);
   await actions.submit({
@@ -227,4 +231,47 @@ test("pending privacy readback has both a deadline and a finite GET budget", asy
     (error) => error.code === "contact_privacy_pending",
   );
   assert.equal(reads, 8);
+});
+
+
+test("an invalidated batch cannot repopulate privacy after a contact update or account switch", async () => {
+  const snapshot = version => ({ privacy, version });
+  let complete, start;
+  const requestStarted = new Promise(resolve => { start = resolve; });
+  const cache = new ContactPrivacyCache({
+    contactPrivacySnapshots: () => new Promise(resolve => { complete = resolve; start(); }),
+    contactPrivacy: async () => snapshot("current"),
+  });
+  cache.reset("first");
+  cache.warm("first", ["peer"]);
+  await requestStarted;
+  cache.invalidate("first", "peer");
+  await cache.read("first", "peer", new AbortController().signal);
+  complete({ snapshots: { peer: snapshot("stale") } });
+  await Promise.resolve();
+  assert.equal(cache.get("first", "peer").version, "current");
+  cache.reset("second");
+  assert.equal(cache.get("first", "peer"), undefined);
+  assert.equal(cache.get("second", "peer"), undefined);
+});
+
+test("closing a cold card allows the next catalog to warm the same contact", async () => {
+  const cache = new ContactPrivacyCache({
+    contactPrivacy: (_account, _id, signal) => new Promise((_, reject) => {
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    }),
+    contactPrivacySnapshots: async () => ({ snapshots: { peer: { privacy, version: "warm" } } }),
+  });
+  cache.reset("one");
+  const dialog = new AbortController();
+  const point = cache.read("one", "peer", dialog.signal);
+  dialog.abort();
+  await assert.rejects(point, { name: "AbortError" });
+  const warmed = new Promise(resolve => cache.subscribe(resolve));
+  cache.warm("one", ["peer"]);
+  await warmed;
+  assert.equal(cache.get("one", "peer").version, "warm");
+  cache.reset("one", new NativeApiError(401, "unauthorized"));
+  assert.equal(cache.denied("one"), true);
+  assert.equal(cache.get("one", "peer"), undefined);
 });

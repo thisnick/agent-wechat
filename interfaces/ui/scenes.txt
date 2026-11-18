@@ -14,6 +14,7 @@ scene contact-details | route /{server}/{account}/contacts, viewports desktop+co
 scene contact-details-remove | route /{server}/{account}/contacts, viewports desktop+compact | Remove contact opens a distinct confirmation that preserves chat history and recovers an uncertain result with the original key.
 scene contact-details-search | route /{server}/{account}/contacts, viewports desktop+compact | Saved-contact search offers separate Message and Details actions; Details opens the shared card.
 scene contact-details-sidebar | route /{server}/{account}/chats/{thread}/info, viewports desktop | A direct-conversation sidebar opens the same contact card and its checked privacy/removal actions.
+scene contact-privacy-cached | route /{server}/{account}/contacts, viewports desktop+compact | Contact details reopen with prefetched canonical privacy and no per-contact lookup.
 scene contact-privacy-retry | route /{server}/{account}/contacts, viewports desktop | An uncertain privacy save locks edits and retries only the same inspected intent.
 scene contact-privacy-saved | route /{server}/{account}/contacts, viewports desktop+compact | Moments selections survive Chats Only and save with the original privacy version.
 scene contact-privacy-syncing | route /{server}/{account}/contacts, viewports desktop+compact | One accepted PATCH waits through pending canonical GETs before showing saved settings, without another mutation.

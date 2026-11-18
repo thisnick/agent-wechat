@@ -113,6 +113,24 @@ fn contact_privacy_optional_fields_preserve_existing_idempotency_inputs() {
 }
 
 #[test]
+fn contact_privacy_batch_uses_point_versions_and_omits_unavailable_ids() {
+    let (_temp, core) = super::super::groups::tests::fixture();
+    let ids = ["peer".to_owned(), "other".to_owned(), "missing".to_owned()];
+    let peer = core.contact_privacy("one", "peer").unwrap();
+    let other = core.contact_privacy("one", "other").unwrap();
+    let batch = core.contact_privacy_snapshots("one", &ids).unwrap();
+    assert_eq!(batch, json!({"snapshots": {"peer": peer, "other": other}}));
+    core.mark_partial_contact_privacy_pending("one", "peer", "test")
+        .unwrap();
+    let batch = core.contact_privacy_snapshots("one", &ids).unwrap();
+    assert_eq!(batch, json!({"snapshots": {"other": other}}));
+    assert!(core.contact_privacy_snapshots("one", &[]).is_err());
+    assert!(core
+        .contact_privacy_snapshots("one", &vec!["peer".into(); 201])
+        .is_err());
+}
+
+#[test]
 fn contact_privacy_version_binds_account_peer_full_flags_and_membership() {
     let (_temp, core) = super::super::groups::tests::fixture();
     let first = core.contact_privacy("one", "peer").unwrap();

@@ -950,6 +950,7 @@
     "privacyBeforeRequest": "Choose what you share before sending or accepting the request.",
     "privacyForContact": "Manage what you and this contact can see in Moments.",
     "privacyLoading": "Loading privacy settings…",
+    "privacyConflict": "Privacy settings changed. Cancel to use the latest settings before editing again.",
     "privacyUnavailable": "Privacy settings are unavailable. Refresh before making changes.",
     "privacyPermission": "Administrator access is required to view or change privacy settings.",
     "refreshPrivacy": "Refresh privacy settings",

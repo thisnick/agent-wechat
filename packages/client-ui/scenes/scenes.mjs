@@ -94,7 +94,9 @@ const requestSceneRows = [
   { id: "fr_scene_casey", peerId: "sim_casey", displayName: "Casey Morgan", direction: "incoming", message: "Hello, we met at the book club.", updatedAt: 1700000800, version: "scene-incoming-v1", isContact: false, actionable: true, attention: true, state: "request_received", history: [{ serverId: "123", message: "Hello, we met at the book club.", createdAt: 1700000800, direction: "incoming" }] },
   { id: "fr_scene_jordan", peerId: "sim_jordan", displayName: "Jordan Lee", direction: "outgoing", message: "Let's keep in touch.", updatedAt: 1700000700, version: "scene-outgoing-v1", isContact: false, actionable: false, attention: false, state: "request_sent", history: [{ serverId: "0", message: "Let's keep in touch.", createdAt: 1700000700, direction: "outgoing" }] },
 ];
+const privacyWarmResponse = new WeakMap();
 async function prepareContactScenes({ page }) {
+  await page.route("**/v1/accounts/*/contact-privacy/snapshots", route => route.fulfill({ json: { snapshots: {} } }));
   await page.route("**/v1/accounts/*/contact-requests*", route => route.request().method() === "GET" ? route.fulfill({ json: { items: requestSceneRows, nextCursor: null, pendingIncomingCount: 1, sourceGeneration: "scene", coverage: {}, asOfEventCursor: "0" } }) : route.continue());
   await page.route("**/v1/accounts/*/search/contacts", route => route.fulfill({ json: { displayName: "avery.example", recipientRef: "scene-only-reference", expiresAt: 1700001400, source: "wechat", request: null, contactId: null } }));
 }
@@ -876,6 +878,36 @@ export const scenes = [
       expect(privacyReads).toBe(0);
     },
   })),
+  {
+    name: "contact-privacy-cached", route: "contacts",
+    description: "Contact details reopen with prefetched canonical privacy and no per-contact lookup.",
+    viewports: ["desktop", "compact"], setup: standardWorld, target: () => ({ account: ACCOUNT.id }),
+    prepare: async ({ page }) => {
+      await prepareContactScenes({ page });
+      privacyWarmResponse.set(page, page.waitForResponse(response => response.url().endsWith("/contact-privacy/snapshots")));
+      await page.route("**/v1/accounts/*/contact-privacy/snapshots", route => {
+        const ids = route.request().postDataJSON().ids;
+        if (!ids.includes("sim_mei")) throw Error("The batch must include the saved friend");
+        return route.fulfill({ json: { snapshots: { sim_mei: { privacy: { chatsOnly: false, hideMyPosts: false, hideTheirPosts: true }, version: "warm-snapshot" } } } });
+      });
+    },
+    ready: async ({ page, expect }) => { await expect(row(page, "Mei Chen")).toBeVisible(); },
+    actions: async ({ page, expect }) => {
+      let points = 0;
+      await page.route("**/v1/accounts/*/contacts/sim_mei/privacy", route => { points++; return route.abort(); });
+      const trigger = page.getByRole("button", { name: "Details for Mei Chen", exact: true });
+      // The warm request begins shortly after the catalog arrives.
+      await (await privacyWarmResponse.get(page)).finished();
+      const dialog = page.getByRole("dialog", { name: "Contact details" });
+      for (let i = 0; i < 2; i++) {
+        await trigger.focus();
+        await trigger.press("Enter");
+        await expect(dialog.getByRole("switch", { name: "Hide Their Posts", exact: true })).toBeChecked();
+        if (i === 0) await dialog.getByRole("button", { name: "Close", exact: true }).click();
+      }
+      expect(points).toBe(0);
+    },
+  },
   ...["contact-details", "contact-details-search", "contact-privacy-saved", "contact-privacy-unavailable", "contact-privacy-retry", "contact-privacy-syncing"].map(name => ({
     name, route: "contacts",
     description: ({ "contact-details": "A saved contact card reached from the contact list by its keyboard-accessible Details action.", "contact-details-search": "Saved-contact search offers separate Message and Details actions; Details opens the shared card.", "contact-privacy-saved": "Moments selections survive Chats Only and save with the original privacy version.", "contact-privacy-unavailable": "Missing administrator permission disables privacy edits and submission.", "contact-privacy-retry": "An uncertain privacy save locks edits and retries only the same inspected intent.", "contact-privacy-syncing": "One accepted PATCH waits through pending canonical GETs before showing saved settings, without another mutation." })[name],
@@ -956,6 +988,11 @@ export const scenes = [
         }
         if (name === "contact-privacy-retry") {
           await expect(dialog.getByRole("alert")).toBeVisible();
+          await dialog.getByRole("button", { name: "Close", exact: true }).click();
+          const details = page.getByRole("button", { name: "Details for Mei Chen", exact: true });
+          await details.focus();
+          await details.press("Enter");
+          await expect(hideMine).toBeChecked();
           await expect(hideMine).toBeDisabled();
           await expect(dialog.getByRole("button", { name: "Save privacy", exact: true })).toBeDisabled();
           await dialog.getByRole("button", { name: "Check status", exact: true }).click();

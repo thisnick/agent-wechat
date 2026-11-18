@@ -1546,6 +1546,16 @@ privacy: NativeContactPrivacySettings,
  * Account/contact-bound version required when saving a change.
  */
 version: string, };
+export type NativeContactPrivacySnapshotQuery = {
+/**
+ * One to 200 exact contact IDs, at most 512 bytes per ID.
+ */
+ids: Array<string>, };
+export type NativeContactPrivacySnapshots = {
+/**
+ * Snapshots keyed by contact ID. Missing, unsupported, pending and unresolved contacts are omitted.
+ */
+snapshots: { [key in string]?: NativeContactPrivacy }, };
 export type NativeContactUpdate = {
 /**
  * Desired settings; unrelated contact flags are preserved.

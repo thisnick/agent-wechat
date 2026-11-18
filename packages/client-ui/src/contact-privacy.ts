@@ -79,7 +79,7 @@ export function contactDetailActions(
   const client = connection.session.client;
   return {
     readPrivacy: async (id, signal) =>
-      client.contactPrivacy(account, id, signal),
+      connection.session.contactPrivacy.read(account, id, signal),
     submit: (change) => {
       switch (change.action) {
         case "send":

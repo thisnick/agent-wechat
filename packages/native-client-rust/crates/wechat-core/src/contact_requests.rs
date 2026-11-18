@@ -3,6 +3,7 @@ use super::*;
 use crate::CatalogQuery;
 use anyhow::ensure;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use std::collections::{BTreeMap, BTreeSet};
 use wechat_profile::{ContactRequestMessage, ContactRequestProjection, StagedContactRequest};
 use wechat_protocol::{AcceptContactRequest, ContactRequestTarget, ContactRpc, SendContactRequest};
 
@@ -211,6 +212,43 @@ impl Core {
         )?)
     }
 
+    /// Read up to 200 canonical privacy snapshots with one pending-operation scan.
+    /// Unavailable contacts are omitted so unrelated contacts still load.
+    pub fn contact_privacy_snapshots(&self, account: &str, ids: &[String]) -> Result<Value> {
+        ensure!(
+            (1..=200).contains(&ids.len())
+                && ids.iter().all(|id| !id.is_empty()
+                    && id.len() <= 512
+                    && !id.chars().any(char::is_control)),
+            "invalid_request"
+        );
+        let mut snapshots = BTreeMap::new();
+        let reader = self.profile_reader_owned(account)?;
+        let own = self
+            .profile_username(account)?
+            .context("profile_identity_unavailable")?;
+        // A truncated guard scan cannot establish that any requested snapshot is settled.
+        if !self.store.contact_privacy_guard_overflow(account, None)? {
+            let pending = self.pending_contact_privacy_targets(account, &reader)?;
+            for id in ids.iter().collect::<BTreeSet<_>>() {
+                if pending.contains(id) || !self.contact_privacy_resolved(account, id)? {
+                    continue;
+                }
+                let contact = match reader.contact(id) {
+                    Ok(contact) => contact,
+                    Err(wechat_profile::ProfileError::NotCached) => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                if ordinary_privacy_contact(&contact, &own).is_ok() {
+                    if let Ok(snapshot) = canonical_privacy(account, id, &contact) {
+                        snapshots.insert(id, snapshot);
+                    }
+                }
+            }
+        }
+        Ok(json!({"snapshots": snapshots}))
+    }
+
     /// Update an existing contact once, retaining its original intent and reply.
     pub async fn update_contact(
         self: &Arc<Self>,
@@ -261,6 +299,21 @@ impl Core {
             .contact_for_request(username)?
             .map(|contact| contact.username)
             .unwrap_or_else(|| username.into());
+        ensure!(
+            !self
+                .pending_contact_privacy_targets(account, &reader)?
+                .contains(&canonical),
+            "contact_privacy_pending"
+        );
+        Ok(())
+    }
+
+    fn pending_contact_privacy_targets(
+        &self,
+        account: &str,
+        reader: &wechat_profile::ProfileReader,
+    ) -> Result<BTreeSet<String>> {
+        let mut targets = BTreeSet::new();
         for record in self.store.pending_contact_relationships(account)? {
             if record.operation.state != "succeeded" {
                 continue;
@@ -281,10 +334,10 @@ impl Core {
                     .contact_for_request(target)?
                     .map(|contact| contact.username)
                     .unwrap_or_else(|| target.into());
-                ensure!(target != canonical, "contact_privacy_pending");
+                targets.insert(target);
             }
         }
-        Ok(())
+        Ok(targets)
     }
 
     fn ensure_contact_privacy_guard_capacity(
@@ -976,6 +1029,12 @@ impl Core {
                     op.result["code"] = json!("contact_privacy_partial");
                     if let ContactMutation::UpdatePrivacy { username, .. } = &attempt.action {
                         self.mark_partial_contact_privacy_pending(account, username, id)?;
+                        self.store.append_event_once(
+                            account,
+                            &format!("contact-mutation-event:{id}"),
+                            "contact.updated",
+                            &json!({"operationId":id,"action":"update_privacy","contactId":username}),
+                        )?;
                     }
                 }
                 op.updated_at = now();

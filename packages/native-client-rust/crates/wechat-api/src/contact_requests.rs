@@ -14,6 +14,10 @@ pub(super) fn routes() -> Router<App> {
         )
         .api_route("/v1/accounts/{a}/contacts/{id}/privacy", get(privacy))
         .api_route(
+            "/v1/accounts/{a}/contact-privacy/snapshots",
+            post(privacy_snapshots),
+        )
+        .api_route(
             "/v1/accounts/{a}/contacts/{id}",
             axum::routing::delete(remove).patch(update_contact),
         )
@@ -161,6 +165,21 @@ async fn privacy(
         .read(&a.clone(), move |core| core.contact_privacy(&a, &id))
         .await?;
     checked::<contracts::NativeContactPrivacy>(value)
+}
+async fn privacy_snapshots(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path(a): Path<String>,
+    Json(input): Json<contracts::NativeContactPrivacySnapshotQuery>,
+) -> ApiResult<Json<Value>> {
+    c.require(Some(&a), "admin")?;
+    let value = app
+        .core
+        .read(&a.clone(), move |core| {
+            core.contact_privacy_snapshots(&a, &input.ids)
+        })
+        .await?;
+    checked::<contracts::NativeContactPrivacySnapshots>(value)
 }
 async fn update_contact(
     State(app): State<App>,
@@ -313,14 +332,25 @@ mod tests {
             Core::new(store, None).unwrap(),
             "0123456789abcdef0123456789abcdef",
         );
-        let request = Request::builder()
-            .uri("/v1/accounts/one/contacts/peer/privacy")
-            .header("authorization", format!("Bearer {read}"))
-            .body(Body::empty())
-            .unwrap();
-        assert_eq!(
-            app.oneshot(request).await.unwrap().status(),
-            StatusCode::FORBIDDEN
-        );
+        for (method, path, body) in [
+            ("GET", "contacts/peer/privacy", Body::empty()),
+            (
+                "POST",
+                "contact-privacy/snapshots",
+                Body::from(r#"{"ids":["peer"]}"#),
+            ),
+        ] {
+            let request = Request::builder()
+                .method(method)
+                .uri(format!("/v1/accounts/one/{path}"))
+                .header("authorization", format!("Bearer {read}"))
+                .header("content-type", "application/json")
+                .body(body)
+                .unwrap();
+            assert_eq!(
+                app.clone().oneshot(request).await.unwrap().status(),
+                StatusCode::FORBIDDEN
+            );
+        }
     }
 }

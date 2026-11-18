@@ -132,6 +132,7 @@ Both privacy reads and edits require `admin` for the selected account. Paths are
 
 | Method and path | Purpose |
 | --- | --- |
+| `POST contact-privacy/snapshots` | Read versioned saved privacy for up to 200 exact IDs with `{ "ids": [...] }`. Returns `snapshots` by ID, omitting unavailable contacts. |
 | `GET contacts/CONTACT_ID/privacy` | Read current settings and their `version` |
 | `PATCH contacts/CONTACT_ID` | Update with `privacy` and `expectedVersion`; requires `Idempotency-Key` |
 
