@@ -214,7 +214,7 @@ impl Core {
             }
         }
     }
-    async fn drain_push_sync(
+    pub(super) async fn drain_push_sync(
         self: &Arc<Self>,
         account: &str,
         mut connection: Box<dyn crate::upstream::PushConnection>,
@@ -223,12 +223,14 @@ impl Core {
         trigger: &str,
     ) -> Result<Box<dyn crate::upstream::PushConnection>> {
         for _ in 0..8 {
+            let replay = self.lock_sync_replay(account).await?;
             let guard = self.lock_account(account).await?;
             let core = self.clone();
             let owned = account.to_owned();
             let active = fence.clone();
             let trigger = trigger.to_owned();
             let (next, continuation) = blocking(move || {
+                let _replay = replay;
                 let mut permit = crate::account_network::AccountNetworkPermit {
                     guard: Some(guard),
                     runtime: tokio::runtime::Handle::current(),
@@ -244,7 +246,19 @@ impl Core {
                 })?;
                 core.save_push_state(&owned, &state, &expected, &active)?;
                 let continuation = batch.continuation;
-                core.commit_sync_batch(&owned, batch, "longlink", &trigger)?;
+                let replay_fence = core.session_fence(&owned)?;
+                core.commit_sync_batch_with_yield(
+                    &owned,
+                    batch,
+                    "longlink",
+                    &trigger,
+                    Some(&mut || {
+                        permit.transfer(&core, &owned, || Ok(()))?;
+                        // A long link also needs validation by the current daemon
+                        // owner after a yield, even if its credentials still match.
+                        core.push_state(&owned, &replay_fence).map(|_| ())
+                    }),
+                )?;
                 Ok((connection, continuation))
             })
             .await?;
@@ -257,12 +271,25 @@ impl Core {
         // fallback/reconnect resumes from the already durable received cursor.
         bail!("Native push sync page limit")
     }
+    #[cfg(test)]
     pub(crate) fn commit_sync_batch(
         self: &Arc<Self>,
         account: &str,
         batch: SyncBatch,
         transport: &str,
         trigger: &str,
+    ) -> Result<Value> {
+        self.commit_sync_batch_with_yield(account, batch, transport, trigger, None)
+    }
+
+    /// Journal the whole response and received cursor before applying it in chunks.
+    pub(super) fn commit_sync_batch_with_yield(
+        self: &Arc<Self>,
+        account: &str,
+        batch: SyncBatch,
+        transport: &str,
+        trigger: &str,
+        yield_writer: Option<&mut dyn FnMut() -> Result<()>>,
     ) -> Result<Value> {
         let origin = if self.store.runtime(account, "history-caught-up")?.is_some() {
             "live"
@@ -283,14 +310,17 @@ impl Core {
 
             crate::calls::notifications::after_sync_staged(self, account, &id, &batch, origin);
         }
-        let projection = self.project_pending_with_media(account, true)?;
+        let continuation = batch.continuation;
+        let command_count = batch.commands.len();
+        drop(batch);
+        let projection = self.project_pending_with_yield(account, true, yield_writer)?;
         let _ = self.schedule_sticker_reconciliation(account);
-        if !batch.continuation {
+        if !continuation {
             self.store.put_runtime(account, "history-caught-up", b"1")?;
         }
-        self.store.append_event(account,"sync.received",&json!({"batchId":id,"commandCount":batch.commands.len(),"profileProjection":"pending","continuation":batch.continuation,"transport":transport,"trigger":trigger}))?;
+        self.store.append_event(account,"sync.received",&json!({"batchId":id,"commandCount":command_count,"profileProjection":"pending","continuation":continuation,"transport":transport,"trigger":trigger}))?;
         Ok(
-            json!({"batchId":id,"commandCount":batch.commands.len(),"continuation":batch.continuation,"projection":projection,"profileProjection":if self.store.pending_sync_count(account)?==0{"complete"}else{"pending"},"checkpointProjection":if self.store.pending_cursor_projection(account)?{"pending"}else{"complete"}}),
+            json!({"batchId":id,"commandCount":command_count,"continuation":continuation,"projection":projection,"profileProjection":if self.store.pending_sync_count(account)?==0{"complete"}else{"pending"},"checkpointProjection":if self.store.pending_cursor_projection(account)?{"pending"}else{"complete"}}),
         )
     }
 }
