@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 2.7.0
+
+### Minor Changes
+
+- [#562](https://github.com/thisnick/agent-wechat/pull/562) [`8208b47`](https://github.com/thisnick/agent-wechat/commit/8208b474e2794561f74dafd9d58088c120adedb0) Thanks [@thisnick](https://github.com/thisnick)! - Add account-bound contact discovery and friend request history, sending, acceptance, local history deletion and contact removal through the Rust libraries, HTTP API and CLI. Add optional private-owner OpenClaw contact tools and unified contact, group and message search in the client UI.
+
 ## 2.6.0
 
 ### Minor Changes

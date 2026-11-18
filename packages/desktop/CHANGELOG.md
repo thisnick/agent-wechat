@@ -1,5 +1,12 @@
 # @agent-wechat/desktop
 
+## 2.7.0
+
+### Patch Changes
+
+- Updated dependencies [[`cc1f5f1`](https://github.com/thisnick/agent-wechat/commit/cc1f5f1b51e04547cb4e2652ee9189fd3432c998), [`6de620e`](https://github.com/thisnick/agent-wechat/commit/6de620ee73cc3fad4d2e974f8cb448e4facbe509), [`8208b47`](https://github.com/thisnick/agent-wechat/commit/8208b474e2794561f74dafd9d58088c120adedb0)]:
+  - @agent-wechat/client-ui@0.5.0
+
 ## 2.6.0
 
 ### Minor Changes
