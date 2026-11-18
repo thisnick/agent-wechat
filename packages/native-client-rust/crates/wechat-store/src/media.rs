@@ -87,7 +87,7 @@ pub(crate) fn read_job(db: &Connection, id: &str) -> Result<MediaJobRecord> {
         updated_at: row.11,
     })
 }
-fn read_asset(db: &Connection, id: &str) -> Result<MediaAssetRecord> {
+pub(crate) fn read_asset(db: &Connection, id: &str) -> Result<MediaAssetRecord> {
     // Metadata and authorization checks must not materialize attachment BLOBs.
     let row = db.query_row(
         "SELECT id,message_id,variant,kind,metadata_json,plan FROM media_assets WHERE id=?1",
@@ -466,8 +466,10 @@ impl Store {
     /// temporary archives after membership changes. This is not a pack catalog.
     pub fn completed_sticker_acquisitions(&self, account: &str, pack: &str) -> Result<Vec<String>> {
         self.control(account,|db| {
-            let mut query=db.prepare("SELECT id FROM media_jobs WHERE kind='sticker_acquire' AND state='available' AND json_extract(data_json,'$.packId')=?1 ORDER BY updated_at DESC LIMIT 5")?;
-            let rows=query.query_map([pack],|row|row.get(0))?;
+            // Retention keeps these plans and empties older ones: see
+            // `retention::reused_acquisition_ids`.
+            let mut query=db.prepare("SELECT id FROM media_jobs WHERE kind='sticker_acquire' AND state='available' AND json_extract(data_json,'$.packId')=?1 ORDER BY updated_at DESC,id DESC LIMIT ?2")?;
+            let rows=query.query_map(params![pack,crate::retention::REUSED_ACQUISITIONS],|row|row.get(0))?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)
         })
     }
@@ -559,7 +561,7 @@ impl Store {
             };
             anyhow::ensure!(family.is_empty() || matches!(family.as_str(),"asset"|"job"),"invalid_media_repair_cursor");
             anyhow::ensure!(id.len()<=255 && !id.chars().any(char::is_control),"invalid_media_repair_cursor");
-            let mut q=db.prepare("SELECT family,id FROM (SELECT 'asset' AS family,id FROM media_assets WHERE kind IN ('image','file','video','voice') AND json_extract(metadata_json,'$.state')='available' AND coalesce(json_extract(metadata_json,'$.officialWriteback'),'') NOT IN ('complete','not_applicable') UNION ALL SELECT 'job' AS family,id FROM media_jobs WHERE kind IN ('sticker_saved','sticker_pack','sticker_send','sticker_acquire') AND json_extract(data_json,'$.serverAcceptance')='accepted' AND coalesce(json_extract(data_json,'$.profileWriteback'),'')!='complete' UNION ALL SELECT 'job' AS family,id FROM media_jobs j WHERE j.kind='send' AND (j.state='accepted' OR json_extract(j.data_json,'$.serverMessageId') IS NOT NULL OR EXISTS(SELECT 1 FROM json_each(j.data_json,'$.result.chunks') c WHERE json_extract(c.value,'$.state')='accepted')) AND coalesce(json_extract(j.data_json,'$.result.officialMediaWriteback'),'') NOT IN ('complete','not_applicable')) ORDER BY CASE WHEN family>?2 OR (family=?2 AND id>?3) THEN 0 ELSE 1 END,family,id LIMIT ?1")?;
+            let mut q=db.prepare("SELECT family,id FROM (SELECT 'asset' AS family,id FROM media_assets WHERE kind IN ('image','file','video','voice') AND json_extract(metadata_json,'$.state')='available' AND coalesce(json_extract(metadata_json,'$.officialWriteback'),'') NOT IN ('complete','not_applicable') UNION ALL SELECT 'job' AS family,id FROM media_jobs WHERE kind IN ('sticker_saved','sticker_pack','sticker_send','sticker_acquire') AND length(payload)>0 AND json_extract(data_json,'$.serverAcceptance')='accepted' AND coalesce(json_extract(data_json,'$.profileWriteback'),'')!='complete' UNION ALL SELECT 'job' AS family,id FROM media_jobs j WHERE j.kind='send' AND (j.state='accepted' OR json_extract(j.data_json,'$.serverMessageId') IS NOT NULL OR EXISTS(SELECT 1 FROM json_each(j.data_json,'$.result.chunks') c WHERE json_extract(c.value,'$.state')='accepted')) AND coalesce(json_extract(j.data_json,'$.result.officialMediaWriteback'),'') NOT IN ('complete','not_applicable')) ORDER BY CASE WHEN family>?2 OR (family=?2 AND id>?3) THEN 0 ELSE 1 END,family,id LIMIT ?1")?;
             let rows=q.query_map(params![limit,family,id],|r|Ok((r.get(0)?,r.get(1)?)))?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)
         })
@@ -1122,7 +1124,7 @@ impl Store {
         self.control(account, |db| {
             let tx = db.transaction()?;
             let expired = {
-                let mut query = tx.prepare("SELECT a.id,a.payload_file,a.metadata_json FROM media_assets a WHERE json_extract(a.metadata_json,'$.preparationExpiresAt')<=?1 AND json_extract(a.metadata_json,'$.state')='available' AND NOT EXISTS(SELECT 1 FROM media_jobs j WHERE json_extract(j.data_json,'$.preparationId')=json_extract(a.metadata_json,'$.jobId') AND (j.state IN ('queued','running') OR (j.state='needs_review' AND coalesce(j.error_code,'')!='review_expired') OR j.retryable=1 OR (j.kind IN ('sticker_saved','sticker_acquire') AND json_extract(j.data_json,'$.serverAcceptance')='accepted' AND coalesce(json_extract(j.data_json,'$.profileWriteback'),'')!='complete'))) LIMIT ?2")?;
+                let mut query = tx.prepare("SELECT a.id,a.payload_file,a.metadata_json FROM media_assets a WHERE json_extract(a.metadata_json,'$.preparationExpiresAt')<=?1 AND json_extract(a.metadata_json,'$.state')='available' AND NOT EXISTS(SELECT 1 FROM media_jobs j WHERE json_extract(j.data_json,'$.preparationId')=json_extract(a.metadata_json,'$.jobId') AND (j.state IN ('queued','running') OR (j.state='needs_review' AND coalesce(j.error_code,'')!='review_expired') OR j.retryable=1 OR (j.kind IN ('sticker_saved','sticker_acquire') AND length(j.payload)>0 AND json_extract(j.data_json,'$.serverAcceptance')='accepted' AND coalesce(json_extract(j.data_json,'$.profileWriteback'),'')!='complete'))) LIMIT ?2")?;
                 let rows = query.query_map(params![now,limit], |r| Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,String>(2)?)))?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()?
             };

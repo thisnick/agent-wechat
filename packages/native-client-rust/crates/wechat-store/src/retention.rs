@@ -13,7 +13,7 @@
 //! | Text sends (`outbox`) | unfinished; accepted but not yet written to the profile; for a day | state, server ID and key | 90 days; key retired |
 //! | Media sends | unfinished or awaiting profile writeback; for a day, and until their upload is released | public job record | 90 days; key retired |
 //! | Downloads | always; they hold no payload | - | kept: the key comes from the attachment, so retiring it would block downloading it again |
-//! | Sticker jobs | always: finished plans are reopened when a pack is added again | - | kept |
+//! | Sticker jobs (pack, saved, send, acquisition) | unfinished or retryable; accepted but not yet written to the profile; for a day; a finished acquisition among the newest [`REUSED_ACQUISITIONS`] of its pack | public job record | kept |
 //! | Group and contact changes, recalls | unfinished, awaiting a profile write or contact sync; for a day | operation record and key | 365 days; key retired |
 //! | Sync, metadata and media writeback operations | unfinished | - | 30 days after finishing; ID retired |
 //! | Calls | active | session and action IDs | kept: calls are rare and IDs guard against reuse |
@@ -31,6 +31,13 @@
 //! ID in `retired_keys`. Reusing a retired key is refused with
 //! `idempotency_key_expired` and reading a retired ID returns
 //! `operation_expired`; neither starts new work.
+//!
+//! The store cannot open sealed plans. The core shrinks two kinds in place,
+//! one compare-and-swap row update at a time (see [`Store::voice_plans_after`]
+//! and [`Store::reusable_sticker_acquisitions_after`]): a voice asset plan
+//! drops the encoded audio once the official profile returns the same bytes,
+//! and a finished acquisition the next pack add may reuse keeps only the
+//! pack, item IDs, captions and archive locator.
 //!
 //! Runtime rows have no timestamp. Once a day maintenance inserts a
 //! `retention-day:` marker with the next row ID, so a receipt with a lower row
@@ -59,6 +66,14 @@ const RAW_DAYS: i64 = 7;
 const SEND_RECEIPT_DAYS: i64 = 90;
 const MUTATION_RECEIPT_DAYS: i64 = 365;
 const MARK_DAYS: i64 = 400;
+/// Finished acquisitions per pack whose plans a later pack add may reopen to
+/// reuse an owned archive, newest first. Older ones are never read.
+pub const REUSED_ACQUISITIONS: i64 = 5;
+/// IDs of finished acquisitions among the newest [`REUSED_ACQUISITIONS`] of
+/// their pack, in the order `completed_sticker_acquisitions` reads them.
+pub(crate) fn reused_acquisition_ids() -> String {
+    format!("SELECT id FROM (SELECT id,ROW_NUMBER() OVER (PARTITION BY json_extract(data_json,'$.packId') ORDER BY updated_at DESC,id DESC) AS n FROM media_jobs WHERE kind='sticker_acquire' AND state='available') WHERE n<={REUSED_ACQUISITIONS}")
+}
 /// Row changes per step outside the runtime scan.
 const STEP_ROWS: i64 = 50;
 /// Runtime rows examined per step.
@@ -335,14 +350,34 @@ fn compact(tx: &Transaction, now: i64, budget: &mut i64) -> Result<usize> {
     );
     // The same finished tests that release uploads, once a send's upload is
     // gone: the plan is the only record of every upload it used, and uploads
-    // are released before this runs. Sticker jobs keep their plans: finished
-    // acquisitions and packs are reopened when a pack is added again.
+    // are released before this runs.
     compacted += take(
         budget,
         tx.execute(
             "UPDATE media_jobs SET payload=x'' WHERE id IN (SELECT id FROM media_jobs WHERE length(payload)>0 AND retryable=0 AND updated_at<=?1 AND (
                 (kind='send' AND (state IN ('failed','cancelled') OR (state='needs_review' AND coalesce(error_code,'')='review_expired') OR (state='accepted' AND coalesce(json_extract(data_json,'$.result.profileProjection'),'') IN ('complete','not_applicable') AND coalesce(json_extract(data_json,'$.result.officialMediaWriteback'),'') IN ('complete','not_applicable'))) AND NOT EXISTS(SELECT 1 FROM media_sources s WHERE s.id=json_extract(media_jobs.data_json,'$.sourceId')))
             ) LIMIT ?2)",
+            params![before, (*budget).max(0)],
+        )?,
+    );
+    // A finished sticker job's plan is read again only by local writeback
+    // repair, while it was accepted but not yet written to the profile, and,
+    // for an acquisition, by a later pack add that reuses one of the newest
+    // owned archives of that pack. A finished acquisition of a pack that was
+    // not added needs no writeback, and a failed one without an owned archive
+    // cannot be repaired: repair never starts a transfer. The row's update
+    // time is kept: it orders the newest acquisitions.
+    compacted += take(
+        budget,
+        tx.execute(
+            &format!("UPDATE media_jobs SET payload=x'' WHERE id IN (SELECT id FROM media_jobs WHERE length(payload)>0 AND retryable=0 AND updated_at<=?1
+                AND kind IN ('sticker_pack','sticker_saved','sticker_send','sticker_acquire')
+                AND state IN ('available','failed','cancelled','expired','unsupported')
+                AND NOT (coalesce(json_extract(data_json,'$.serverAcceptance'),'')='accepted' AND coalesce(json_extract(data_json,'$.profileWriteback'),'')!='complete'
+                    AND NOT (kind='sticker_acquire' AND state='available' AND json_extract(data_json,'$.profileWriteback')='not_applicable')
+                    AND NOT (kind='sticker_acquire' AND state!='available' AND NOT EXISTS(SELECT 1 FROM media_assets a WHERE a.id=media_jobs.id||'_archive' AND json_extract(a.metadata_json,'$.state')='available')))
+                AND NOT (kind='sticker_acquire' AND state='available' AND id IN ({}))
+            LIMIT ?2)", reused_acquisition_ids()),
             params![before, (*budget).max(0)],
         )?,
     );
@@ -701,6 +736,92 @@ impl Store {
             step.more = budget <= 0 || full;
             tx.commit()?;
             Ok(step)
+        })
+    }
+    /// Voice asset plans of at least `min_bytes`, after `after` in ID order.
+    /// The core opens each one and rewrites it without encoded audio that the
+    /// official profile already holds. Reads only.
+    pub fn voice_plans_after(
+        &self,
+        account: &str,
+        after: &str,
+        min_bytes: usize,
+        limit: usize,
+    ) -> Result<Vec<MediaAssetRecord>> {
+        self.control(account, |db| {
+            ids(
+                db,
+                "SELECT id FROM media_assets WHERE kind='voice' AND message_id IS NOT NULL AND length(plan)>=?1 AND id>?2 ORDER BY id LIMIT ?3",
+                params![min_bytes as i64, after, limit as i64],
+            )?
+            .iter()
+            .map(|id| crate::media::read_asset(db, id))
+            .collect()
+        })
+    }
+    /// Finished acquisitions, at least a day old, among the newest
+    /// [`REUSED_ACQUISITIONS`] of their pack and not awaiting a profile write,
+    /// after `after` in ID order. A later pack add reopens these plans; the
+    /// core rewrites each one to what that reuse reads. Reads only.
+    pub fn reusable_sticker_acquisitions_after(
+        &self,
+        account: &str,
+        now: i64,
+        after: &str,
+        limit: usize,
+    ) -> Result<Vec<MediaJobRecord>> {
+        self.control(account, |db| {
+            ids(
+                db,
+                &format!("SELECT id FROM media_jobs WHERE kind='sticker_acquire' AND state='available' AND retryable=0 AND length(payload)>0 AND updated_at<=?1 AND coalesce(json_extract(data_json,'$.profileWriteback'),'') IN ('complete','not_applicable') AND id>?2 AND id IN ({}) ORDER BY id LIMIT ?3", reused_acquisition_ids()),
+                params![cutoff(now, WHOLE_DAYS), after, limit as i64],
+            )?
+            .iter()
+            .map(|id| crate::media::read_job(db, id))
+            .collect()
+        })
+    }
+    /// Replace an asset's sealed plan if it is still `expected`. One row
+    /// update: a crash leaves the old plan or the new one. Returns whether it
+    /// was replaced. A read snapshot changes nothing.
+    pub fn replace_media_asset_plan(
+        &self,
+        account: &str,
+        id: &str,
+        expected: &[u8],
+        plan: &[u8],
+    ) -> Result<bool> {
+        anyhow::ensure!(!plan.is_empty(), "invalid media plan");
+        if self.is_read_snapshot() {
+            return Ok(false);
+        }
+        self.control(account, |db| {
+            Ok(db.execute(
+                "UPDATE media_assets SET plan=?3 WHERE id=?1 AND plan=?2",
+                params![id, expected, plan],
+            )? == 1)
+        })
+    }
+    /// Replace a job's sealed plan if it is still `expected`, keeping its
+    /// state, update time and events: the job itself does not change. One row
+    /// update. Returns whether it was replaced. A read snapshot changes
+    /// nothing.
+    pub fn replace_media_job_payload(
+        &self,
+        account: &str,
+        id: &str,
+        expected: &[u8],
+        payload: &[u8],
+    ) -> Result<bool> {
+        anyhow::ensure!(!payload.is_empty(), "invalid media job payload");
+        if self.is_read_snapshot() {
+            return Ok(false);
+        }
+        self.control(account, |db| {
+            Ok(db.execute(
+                "UPDATE media_jobs SET payload=?3 WHERE id=?1 AND payload=?2",
+                params![id, expected, payload],
+            )? == 1)
         })
     }
     /// Whether a key in this family was retired.
@@ -1440,6 +1561,432 @@ mod tests {
             error(store.create_send("a", "done", "peer", "hash", b"text", "client")),
             "idempotency_key_expired"
         );
+    }
+
+    /// A sticker job in a given state, last updated `days` ago.
+    fn sticker_job(
+        store: &Store,
+        id: &str,
+        kind: &str,
+        data: serde_json::Value,
+        state: &str,
+        days: i64,
+    ) {
+        store
+            .create_media_job(
+                "a",
+                id,
+                &format!("sticker:{id}"),
+                &"0".repeat(64),
+                kind,
+                &data,
+                b"sealed plan",
+            )
+            .unwrap();
+        sql(store, |db| {
+            db.execute(
+                "UPDATE media_jobs SET state=?2,retryable=0,updated_at=?3 WHERE id=?1",
+                params![id, state, cutoff(unix_seconds(), days)],
+            )?;
+            Ok(())
+        });
+    }
+    fn has_plan(store: &Store, id: &str) -> bool {
+        !store.media_job("a", id).unwrap().payload.is_empty()
+    }
+
+    #[test]
+    fn finished_sticker_jobs_keep_plans_only_while_repair_or_reuse_reads_them() {
+        let (_temp, store) = fixture();
+        let acquired = |profile: &str| json!({"packId":"pack","serverAcceptance":"accepted","profileWriteback":profile});
+        // Seven finished acquisitions of one pack, oldest first. A later pack
+        // add reads only the newest five.
+        for n in 0..7 {
+            sticker_job(
+                &store,
+                &format!("acquired-{n}"),
+                "sticker_acquire",
+                acquired(if n % 2 == 0 {
+                    "complete"
+                } else {
+                    "not_applicable"
+                }),
+                "available",
+                20 - n,
+            );
+        }
+        // Older than the newest five, but its profile write failed: local
+        // repair still reads its plan.
+        sticker_job(
+            &store,
+            "acquired-blocked",
+            "sticker_acquire",
+            acquired("blocked"),
+            "available",
+            25,
+        );
+        sticker_job(
+            &store,
+            "other-pack",
+            "sticker_acquire",
+            json!({"packId":"other","serverAcceptance":"accepted","profileWriteback":"complete"}),
+            "available",
+            30,
+        );
+        // Awaiting a profile write: local repair reads the plan.
+        sticker_job(
+            &store,
+            "promoting",
+            "sticker_acquire",
+            json!({"packId":"third","serverAcceptance":"accepted","profileWriteback":"pending"}),
+            "available",
+            30,
+        );
+        // Failed after acceptance with its archive owned: repair can finish
+        // it from those bytes. Without an archive it never can.
+        sticker_job(
+            &store,
+            "failed-accepted",
+            "sticker_acquire",
+            acquired("not_applicable"),
+            "failed",
+            30,
+        );
+        store
+            .put_media_asset(
+                "a",
+                &MediaAssetRecord {
+                    id: "failed-accepted_archive".into(),
+                    message_id: None,
+                    variant: "original".into(),
+                    kind: "file".into(),
+                    metadata: json!({"state":"available","jobId":"failed-accepted"}),
+                    plan: b"sealed".to_vec(),
+                    payload: Some(b"archive".to_vec()),
+                },
+            )
+            .unwrap();
+        sticker_job(
+            &store,
+            "failed-no-archive",
+            "sticker_acquire",
+            acquired("not_applicable"),
+            "failed",
+            30,
+        );
+        sticker_job(
+            &store,
+            "pack-pending",
+            "sticker_pack",
+            json!({"serverAcceptance":"accepted","profileWriteback":"pending"}),
+            "failed",
+            30,
+        );
+        // Never accepted, or finished and written.
+        sticker_job(
+            &store,
+            "failed-early",
+            "sticker_acquire",
+            json!({"packId":"pack","serverAcceptance":"pending"}),
+            "failed",
+            30,
+        );
+        sticker_job(
+            &store,
+            "rejected",
+            "sticker_pack",
+            json!({"serverAcceptance":"rejected","profileWriteback":"pending"}),
+            "failed",
+            30,
+        );
+        sticker_job(
+            &store,
+            "pack-done",
+            "sticker_pack",
+            json!({"serverAcceptance":"accepted","profileWriteback":"complete"}),
+            "available",
+            30,
+        );
+        sticker_job(
+            &store,
+            "saved-done",
+            "sticker_saved",
+            json!({"serverAcceptance":"accepted","profileWriteback":"complete"}),
+            "available",
+            30,
+        );
+        sticker_job(
+            &store,
+            "send-done",
+            "sticker_send",
+            json!({"serverAcceptance":"accepted","profileWriteback":"complete"}),
+            "available",
+            30,
+        );
+        // Unfinished, retryable or too recent.
+        sticker_job(&store, "running", "sticker_pack", json!({}), "running", 30);
+        sticker_job(
+            &store,
+            "recent",
+            "sticker_pack",
+            json!({"serverAcceptance":"accepted","profileWriteback":"complete"}),
+            "available",
+            0,
+        );
+        sticker_job(
+            &store,
+            "retryable",
+            "sticker_acquire",
+            json!({"packId":"pack","serverAcceptance":"pending"}),
+            "failed",
+            30,
+        );
+        sticker_job(
+            &store,
+            "preparation",
+            "sticker_prepare",
+            json!({}),
+            "available",
+            30,
+        );
+        sql(&store, |db| {
+            db.execute("UPDATE media_jobs SET retryable=1 WHERE id='retryable'", [])?;
+            Ok(())
+        });
+        let reused = store.completed_sticker_acquisitions("a", "pack").unwrap();
+        let before = sql(&store, |db| {
+            Ok(db.query_row(
+                "SELECT group_concat(id||updated_at) FROM media_jobs ORDER BY id",
+                [],
+                |r| r.get::<_, String>(0),
+            )?)
+        });
+        let now = unix_seconds();
+        settle(&store, now);
+        for id in [
+            "acquired-2",
+            "acquired-3",
+            "acquired-4",
+            "acquired-5",
+            "acquired-6",
+            "other-pack",
+            "promoting",
+            "acquired-blocked",
+            "failed-accepted",
+            "pack-pending",
+            "running",
+            "recent",
+            "retryable",
+            "preparation",
+        ] {
+            assert!(has_plan(&store, id), "{id} lost its plan");
+        }
+        for id in [
+            "acquired-0",
+            "acquired-1",
+            "failed-no-archive",
+            "failed-early",
+            "rejected",
+            "pack-done",
+            "saved-done",
+            "send-done",
+        ] {
+            assert!(!has_plan(&store, id), "{id} kept its plan");
+        }
+        // Reuse reads the same acquisitions, and no update time moved.
+        assert_eq!(
+            store.completed_sticker_acquisitions("a", "pack").unwrap(),
+            reused
+        );
+        assert_eq!(
+            reused,
+            [
+                "acquired-6",
+                "acquired-5",
+                "acquired-4",
+                "acquired-3",
+                "acquired-2"
+            ]
+        );
+        let after = sql(&store, |db| {
+            Ok(db.query_row(
+                "SELECT group_concat(id||updated_at) FROM media_jobs ORDER BY id",
+                [],
+                |r| r.get::<_, String>(0),
+            )?)
+        });
+        assert_eq!(before, after);
+        // Emptied plans leave local repair; kept ones stay in it.
+        let mut repair = store.media_writeback_candidates("a", 101).unwrap();
+        repair.retain(|(family, _)| family == "job");
+        let repair = repair.into_iter().map(|(_, id)| id).collect::<Vec<_>>();
+        assert!(repair.contains(&"promoting".to_string()));
+        assert!(repair.contains(&"failed-accepted".to_string()));
+        assert!(!repair.contains(&"acquired-1".to_string()));
+        assert!(!repair.contains(&"failed-no-archive".to_string()));
+        // The core rewrites only the newest acquisitions that finished at least a day ago.
+        let rewrite = store
+            .reusable_sticker_acquisitions_after("a", now, "", 50)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rewrite,
+            [
+                "acquired-2",
+                "acquired-3",
+                "acquired-4",
+                "acquired-5",
+                "acquired-6",
+                "other-pack"
+            ]
+        );
+        assert_eq!(
+            store
+                .reusable_sticker_acquisitions_after("a", now, "acquired-4", 2)
+                .unwrap()
+                .into_iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            ["acquired-5", "acquired-6"]
+        );
+        // An emptied job stays as its record; its key is never retired.
+        settle(&store, now + 92 * DAY);
+        let kept = store.media_job_by_key("a", "sticker:pack-done").unwrap();
+        assert_eq!(
+            (kept.id.as_str(), kept.state.as_str()),
+            ("pack-done", "available")
+        );
+        assert!(!store
+            .is_retired_key("a", MEDIA_KEY, "sticker:pack-done")
+            .unwrap());
+        assert!(has_plan(&store, "acquired-6"));
+    }
+
+    #[test]
+    fn an_emptied_acquisition_releases_its_archive() {
+        let (_temp, store) = fixture();
+        let now = unix_seconds();
+        for (id, packs) in [("kept", "first"), ("emptied", "second")] {
+            sticker_job(
+                &store,
+                id,
+                "sticker_acquire",
+                json!({"packId":packs,"preparationId":id,"serverAcceptance":"accepted","profileWriteback":"not_applicable"}),
+                "available",
+                30,
+            );
+            store
+                .put_media_asset(
+                    "a",
+                    &MediaAssetRecord {
+                        id: format!("{id}_archive"),
+                        message_id: None,
+                        variant: "original".into(),
+                        kind: "file".into(),
+                        metadata: json!({"state":"available","jobId":id,"preparationExpiresAt":now - DAY}),
+                        plan: b"sealed".to_vec(),
+                        payload: Some(b"archive".to_vec()),
+                    },
+                )
+                .unwrap();
+        }
+        sql(&store, |db| {
+            db.execute("UPDATE media_jobs SET payload=x'' WHERE id='emptied'", [])?;
+            Ok(())
+        });
+        assert_eq!(
+            store
+                .expire_sticker_preparation_assets("a", now, 10)
+                .unwrap(),
+            1
+        );
+        let state = |id: &str| store.media_asset("a", id).unwrap().metadata["state"].clone();
+        assert_eq!(state("kept_archive"), "available");
+        assert_eq!(state("emptied_archive"), "expired");
+    }
+
+    #[test]
+    fn plan_replacement_is_compare_and_swap_and_keeps_the_job_unchanged() {
+        let (temp, store) = fixture();
+        let store = Arc::new(store);
+        sticker_job(
+            &store,
+            "job",
+            "sticker_acquire",
+            json!({"packId":"pack"}),
+            "available",
+            3,
+        );
+        store
+            .put_media_asset(
+                "a",
+                &MediaAssetRecord {
+                    id: "voice".into(),
+                    message_id: Some("message".into()),
+                    variant: "encoded".into(),
+                    kind: "voice".into(),
+                    metadata: json!({"state":"pending"}),
+                    plan: vec![1; 2048],
+                    payload: None,
+                },
+            )
+            .unwrap();
+        let events = |store: &Store| {
+            store
+                .control("a", |db| {
+                    Ok(db.query_row("SELECT count(*) FROM events", [], |r| r.get::<_, i64>(0))?)
+                })
+                .unwrap()
+        };
+        let job = store.media_job("a", "job").unwrap();
+        let seen = events(&store);
+        // A stale read changes nothing.
+        assert!(!store
+            .replace_media_job_payload("a", "job", b"stale", b"small")
+            .unwrap());
+        assert!(!store
+            .replace_media_asset_plan("a", "voice", b"stale", b"small")
+            .unwrap());
+        assert!(store
+            .replace_media_job_payload("a", "job", b"sealed plan", b"small")
+            .unwrap());
+        assert!(store
+            .replace_media_asset_plan("a", "voice", &[1; 2048], b"small")
+            .unwrap());
+        let replaced = store.media_job("a", "job").unwrap();
+        assert_eq!(replaced.payload, b"small");
+        assert_eq!(
+            (replaced.state, replaced.updated_at),
+            (job.state, job.updated_at)
+        );
+        assert_eq!(events(&store), seen);
+        assert_eq!(store.media_asset("a", "voice").unwrap().plan, b"small");
+        assert!(store
+            .replace_media_job_payload("a", "job", b"small", b"")
+            .is_err());
+        // Only voice plans of at least the given size are listed.
+        assert!(store
+            .voice_plans_after("a", "", 1024, 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(store.voice_plans_after("a", "", 4, 10).unwrap().len(), 1);
+        assert!(store
+            .voice_plans_after("a", "voice", 4, 10)
+            .unwrap()
+            .is_empty());
+        // A read snapshot never writes.
+        let snapshot = store.read_snapshot("a").unwrap();
+        assert!(!snapshot
+            .replace_media_job_payload("a", "job", b"small", b"other")
+            .unwrap());
+        assert!(!snapshot
+            .replace_media_asset_plan("a", "voice", b"small", b"other")
+            .unwrap());
+        drop(snapshot);
+        assert_eq!(store.media_job("a", "job").unwrap().payload, b"small");
+        drop(temp);
     }
 
     #[test]

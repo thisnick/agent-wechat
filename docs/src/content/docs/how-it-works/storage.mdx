@@ -41,6 +41,8 @@ If you delete an attachment's file, fetching that attachment returns `media_not_
 | --- | --- | --- |
 | Received message batches | waiting or blocked, or among the newest 256 | only the batch ID is kept, for 30 days |
 | Text and media sends | unfinished, or not yet in the profile, plus a day | a short receipt, for 90 days |
+| Sticker jobs (packs, Saved stickers, sends, pack downloads) | unfinished, or not yet in the profile, plus a day | a short receipt; the newest five downloads of each pack keep what adding the pack again needs to reuse the file |
+| Voice note audio | until the profile holds the same audio | read from the profile |
 | Group and contact changes, recalls | unfinished, or not yet in the profile, plus a day | a short receipt, for 365 days |
 | Duplicate checks for messages and events | 30 days | removed |
 | Raw WeChat replies kept for troubleshooting | 7 days | removed |

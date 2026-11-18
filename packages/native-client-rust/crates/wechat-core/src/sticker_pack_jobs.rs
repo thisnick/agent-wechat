@@ -18,13 +18,15 @@ enum PackIntent {
 struct PackJob {
     intent: PackIntent,
     fence: MediaAuthorizationFence,
+    #[serde(with = "super::plan_compaction::plan_bytes::list")]
     reads: Vec<Vec<u8>>,
+    #[serde(default, with = "super::plan_compaction::plan_bytes::option")]
     reply: Option<Vec<u8>>,
     submitted: bool,
     accepted: bool,
     #[serde(default)]
     grant_submitted: bool,
-    #[serde(default)]
+    #[serde(default, with = "super::plan_compaction::plan_bytes::option")]
     grant_reply: Option<Vec<u8>>,
     #[serde(default)]
     grant_accepted: bool,

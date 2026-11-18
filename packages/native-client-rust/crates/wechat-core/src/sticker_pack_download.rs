@@ -4,16 +4,51 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use wechat_profile::StickerPackCacheKind as Cache;
 use wechat_protocol::sticker_packs as wire;
 
+/// What finishing an acquisition reads from the pack's detail and captions.
+#[derive(Clone, Serialize, Deserialize)]
+pub(super) struct PackContents {
+    /// Item IDs in service order; the archive is checked against them.
+    pub(super) items: Vec<String>,
+    /// Captions by item, written to the profile when the pack is added.
+    pub(super) captions: Vec<wire::StickerPackCaption>,
+}
 #[derive(Serialize, Deserialize)]
-struct Acquisition {
-    pack: String,
-    item: Option<String>,
-    fence: MediaAuthorizationFence,
-    submitted: bool,
-    reply: Option<Vec<u8>>,
-    detail: Option<wire::StickerPackDetail>,
-    captions: Option<wire::StickerPackCaptions>,
-    locator: Option<MediaDescriptor>,
+pub(super) struct Acquisition {
+    pub(super) pack: String,
+    pub(super) item: Option<String>,
+    pub(super) fence: MediaAuthorizationFence,
+    pub(super) submitted: bool,
+    /// The acquisition reply, kept until the acquisition finishes.
+    #[serde(default, with = "super::plan_compaction::plan_bytes::option")]
+    pub(super) reply: Option<Vec<u8>>,
+    /// Plans written by earlier versions keep the decoded detail and captions
+    /// in place of `contents`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) detail: Option<wire::StickerPackDetail>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) captions: Option<wire::StickerPackCaptions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) contents: Option<PackContents>,
+    pub(super) locator: Option<MediaDescriptor>,
+}
+impl Acquisition {
+    fn contents(&self) -> Result<PackContents> {
+        if let Some(contents) = &self.contents {
+            return Ok(contents.clone());
+        }
+        let detail = self
+            .detail
+            .as_ref()
+            .context("sticker_metadata_incomplete")?;
+        Ok(PackContents {
+            items: detail.items.iter().map(|item| item.id.clone()).collect(),
+            captions: self
+                .captions
+                .iter()
+                .flat_map(|captions| captions.items.clone())
+                .collect(),
+        })
+    }
 }
 pub(super) fn pack_asset_id(pack: &str, item: &str, role: &str) -> String {
     format!(
@@ -61,6 +96,7 @@ impl Core {
             reply: None,
             detail: None,
             captions: None,
+            contents: None,
             locator: None,
         };
         let payload = self.vault.seal(
@@ -143,8 +179,10 @@ impl Core {
                         ctx.sticker_pack_captions_raw(&plan.pack)
                     })
                 })?;
-                plan.detail = Some(detail);
-                plan.captions = Some(wire::decode_sticker_pack_captions(&captions)?);
+                plan.contents = Some(PackContents {
+                    items: detail.items.iter().map(|item| item.id.clone()).collect(),
+                    captions: wire::decode_sticker_pack_captions(&captions)?.items,
+                });
                 self.phase_media(account, id, "submitting")?;
                 plan.submitted = true;
                 self.save_acquisition(account, id, &plan)?;
@@ -197,14 +235,7 @@ impl Core {
             )?;
             downloaded.bytes
         };
-        let ids = plan
-            .detail
-            .as_ref()
-            .context("sticker_metadata_incomplete")?
-            .items
-            .iter()
-            .map(|item| item.id.clone())
-            .collect::<Vec<_>>();
+        let ids = plan.contents()?.items;
         let archive = permit.transfer(self, account, || {
             wechat_media::decode_sticker_archive(&bytes, &plan.pack, &ids)
         })?;
@@ -213,7 +244,7 @@ impl Core {
         self.finish_verified_pack_content(account, id, &plan, archive)
     }
     #[allow(clippy::too_many_arguments)]
-    fn store_pack_bytes(
+    pub(super) fn store_pack_bytes(
         &self,
         account: &str,
         job: &str,
@@ -306,15 +337,7 @@ impl Core {
         plan: &Acquisition,
         bytes: &[u8],
     ) -> Result<()> {
-        let detail = plan
-            .detail
-            .as_ref()
-            .context("sticker_metadata_incomplete")?;
-        let ids = detail
-            .items
-            .iter()
-            .map(|item| item.id.clone())
-            .collect::<Vec<_>>();
+        let ids = plan.contents()?.items;
         let archive = wechat_media::decode_sticker_archive(bytes, &plan.pack, &ids)?;
         self.finish_verified_pack_content(account, job, plan, archive)
     }
@@ -379,9 +402,9 @@ impl Core {
                 &location, &keys, &plan.pack, &rows, &options,
             )?;
             let captions = plan
+                .contents()?
                 .captions
                 .iter()
-                .flat_map(|r| &r.items)
                 .flat_map(|r| {
                     r.captions.iter().map(|(language, caption)| {
                         wechat_profile::StickerPackCaptionRecord {
@@ -553,6 +576,40 @@ impl Core {
             .bytes;
         self.finish_pack_content(account, id, &plan, &bytes)?;
         Ok(true)
+    }
+    /// Reduce a finished acquisition's plan to what a later pack add reads:
+    /// the pack, selected item, item IDs, captions and archive locator. The
+    /// reply and the decoded detail are dropped. Returns whether the plan was
+    /// rewritten; one already reduced is left as it is.
+    pub(super) fn compact_acquisition(&self, account: &str, row: &MediaJobRecord) -> Result<bool> {
+        ensure!(
+            row.kind == "sticker_acquire" && row.state == "available",
+            "invalid_sticker_consumer"
+        );
+        let mut plan: Acquisition = serde_json::from_slice(&self.vault.open_record(
+            account,
+            &format!("media-job:{}", row.id),
+            &row.payload,
+        )?)?;
+        if plan.locator.is_none()
+            || (plan.contents.is_some()
+                && plan.reply.is_none()
+                && plan.detail.is_none()
+                && plan.captions.is_none())
+        {
+            return Ok(false);
+        }
+        plan.contents = Some(plan.contents()?);
+        plan.reply = None;
+        plan.detail = None;
+        plan.captions = None;
+        let sealed = self.vault.seal(
+            account,
+            &format!("media-job:{}", row.id),
+            &serde_json::to_vec(&plan)?,
+        )?;
+        self.store
+            .replace_media_job_payload(account, &row.id, &row.payload, &sealed)
     }
     pub(super) fn promote_owned_sticker_pack(&self, account: &str, pack: &str) -> Result<()> {
         for id in self.store.completed_sticker_acquisitions(account, pack)? {
