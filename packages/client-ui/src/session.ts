@@ -395,7 +395,7 @@ export class HubSession {
   }
   async clearLocalCache(account = this.value.account): Promise<void> {
     if (!account) return;
-    if (account === this.value.account) this.contactPrivacy.reset(account);
+    if (account === this.value.account) this.contactPrivacy.invalidateAccount(account);
     this.histories.clear(account);
     this.restored.clear();
     await this.cache?.clearAccount(account);
@@ -1401,7 +1401,7 @@ export class HubSession {
     const contactsMayHaveChanged = (event.kind === "metadata.changed" && event.data.kind === "contacts") ||
       (event.kind === "projection.blocked" && event.data.stream === "contact");
     if (contactsMayHaveChanged && !this.contactPrivacy.denied(account)) {
-      this.contactPrivacy.reset(account);
+      this.contactPrivacy.invalidateAccount(account);
       this.warmContactPrivacy(account);
     }
     if (event.kind === "account.settings_updated")
@@ -1475,7 +1475,7 @@ export class HubSession {
     // Push hints and control diagnostics carry no conversation content.
   }
   private async recover(account: string, generation: number): Promise<void> {
-    this.contactPrivacy.reset(account);
+    this.contactPrivacy.invalidateAccount(account);
     const boundary = await this.refresh(account, generation);
     if (!this.current(account, generation)) return;
     this.histories.clear(account);

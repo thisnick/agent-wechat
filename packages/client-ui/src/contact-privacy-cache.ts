@@ -4,6 +4,7 @@ import { NativeApiError, type NativeContactPrivacy, type NativeWeChatClient } fr
 export class ContactPrivacyCache {
   private account: string | null = null;
   private lifetime = new AbortController();
+  private session = Symbol();
   private entries = new Map<string, NativeContactPrivacy>();
   private reads = new Map<string, symbol>();
   private queued = new Set<string>();
@@ -37,17 +38,28 @@ export class ContactPrivacyCache {
   }
 
   reset(account: string | null, denial?: NativeApiError) {
+    this.session = Symbol();
+    this.account = account;
+    this.denial = denial;
+    this.prefetchUnavailable = !!denial;
+    this.clearEntries();
+  }
+
+  /** Invalidate snapshots within the active session so the dialog can retry its read. */
+  invalidateAccount(account: string) {
+    if (account !== this.account || this.denial) return;
+    this.clearEntries();
+  }
+
+  private clearEntries() {
     this.lifetime.abort();
     this.lifetime = new AbortController();
     clearTimeout(this.timer);
     this.timer = undefined;
-    this.account = account;
     this.entries.clear();
     this.reads.clear();
     this.queued.clear();
     this.warming = false;
-    this.denial = denial;
-    this.prefetchUnavailable = !!denial;
     this.notify();
   }
 
@@ -120,6 +132,7 @@ export class ContactPrivacyCache {
 
   async read(account: string, id: string, signal: AbortSignal): Promise<NativeContactPrivacy> {
     const lifetime = this.lifetime.signal;
+    const session = this.session;
     if (account !== this.account) throw new DOMException("Account changed", "AbortError");
     if (this.denial) throw this.denial;
     const scopedSignal = AbortSignal.any([signal, lifetime]);
@@ -141,6 +154,9 @@ export class ContactPrivacyCache {
       if (this.reads.get(id) === read) {
         this.reads.delete(id);
         if (!scopedSignal.aborted && error instanceof NativeApiError && [401, 403].includes(error.status)) this.checkAccess(account, error);
+      }
+      if (lifetime.aborted && !signal.aborted && this.session === session) {
+        throw new NativeApiError(409, "contact_privacy_pending");
       }
       throw error;
     }

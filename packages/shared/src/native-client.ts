@@ -195,11 +195,11 @@ export class NativeWeChatClient {
   sendContactRequest(accountId: string, input: NativeContactRequestSend, key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.contactMutation(accountId, "contact-requests", "POST", input, key, "send_request", signal); }
   /** Accept the inspected version of an incoming request. */
   acceptContactRequest(accountId: string, requestId: string, input: NativeContactRequestAccept | string, key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.contactMutation(accountId, `contact-requests/${id(requestId)}/accept`, "POST", typeof input === "string" ? { expectedVersion: input } : input, key, "accept_request", signal); }
-  /** Read existing relationship privacy; requires the account's admin scope. */
   /** Read saved privacy for up to 200 exact contacts with account admin access. */
   contactPrivacySnapshots(accountId: string, ids: string[], signal?: AbortSignal): Promise<NativeContactPrivacySnapshots> {
     return this.request(`v1/accounts/${id(accountId)}/contact-privacy/snapshots`, { method: "POST", body: JSON.stringify({ ids }), signal });
   }
+  /** Read existing relationship privacy with account admin access. */
   contactPrivacy(accountId: string, username: string, signal?: AbortSignal): Promise<NativeContactPrivacy> { return this.request(`v1/accounts/${id(accountId)}/contacts/${id(username)}/privacy`, { signal }); }
   /** Save privacy once against the inspected version; retain the original key after uncertainty. */
   updateContact(accountId: string, username: string, input: NativeContactUpdate, key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.contactMutation(accountId, `contacts/${id(username)}`, "PATCH", input, key, "update_privacy", signal); }

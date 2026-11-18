@@ -275,3 +275,39 @@ test("closing a cold card allows the next catalog to warm the same contact", asy
   assert.equal(cache.denied("one"), true);
   assert.equal(cache.get("one", "peer"), undefined);
 });
+
+
+for (const sameSession of [true, false]) {
+  test(sameSession ? "an open privacy read retries after a contact catalog refresh"
+    : "an open privacy read stops after a session change even if the account ID is reused", async () => {
+    let notifyStarted;
+    const started = new Promise(resolve => { notifyStarted = resolve; });
+    let calls = 0;
+    const fresh = { privacy, version: "fresh" };
+    const cache = new ContactPrivacyCache({
+      contactPrivacy: async (_account, _id, signal) => {
+        if (++calls > 1) return fresh;
+        return new Promise((_, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+          notifyStarted();
+        });
+      },
+    });
+    cache.reset("one");
+    const open = new AbortController();
+    const result = readContactPrivacyWithPendingRetry(
+      signal => cache.read("one", "peer", signal), open.signal, { wait: async () => {} },
+    );
+    await started;
+    if (sameSession) {
+      cache.invalidateAccount("one");
+      assert.equal(await result, fresh);
+      assert.equal(calls, 2);
+    } else {
+      cache.reset("one");
+      await assert.rejects(result, { name: "AbortError" });
+      assert.equal(calls, 1);
+      assert.equal(cache.get("one", "peer"), undefined);
+    }
+  });
+}
