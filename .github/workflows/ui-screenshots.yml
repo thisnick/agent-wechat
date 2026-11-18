@@ -16,6 +16,8 @@ on:
       - 'pnpm-lock.yaml'
       - '.node-version'
       - '.github/workflows/ui-screenshots.yml'
+      - '.github/actions/apt-install/**'
+      - 'scripts/ci/apt-reuse.py'
   push:
     branches: [main]
     paths:
@@ -26,6 +28,8 @@ on:
       - 'pnpm-lock.yaml'
       - '.node-version'
       - '.github/workflows/ui-screenshots.yml'
+      - '.github/actions/apt-install/**'
+      - 'scripts/ci/apt-reuse.py'
 
 permissions:
   contents: read
@@ -71,7 +75,9 @@ jobs:
           key: ui-screenshots-${{ steps.rust.outputs.cachekey }}
       # The fonts decide how text renders, so every run installs the same ones.
       - name: Install build tools and fonts
-        run: sudo apt-get update && sudo apt-get install -y cmake fonts-noto-cjk fonts-noto-color-emoji
+        uses: ./.github/actions/apt-install
+        with:
+          packages: cmake fonts-noto-cjk fonts-noto-color-emoji
       - run: pnpm install --frozen-lockfile
       - name: Build the simulator
         run: cargo build --profile test --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-simulator

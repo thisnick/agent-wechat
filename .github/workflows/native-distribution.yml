@@ -15,6 +15,7 @@ on:
       - 'deploy/native/**'
       - '.github/workflows/native-*'
       - '.github/workflows/desktop.yml'
+      - '.github/actions/apt-install/**'
       - '.github/workflows/windows-signing.yml'
       - '.github/workflows/release.yml'
       - 'package.json'
@@ -43,6 +44,8 @@ on:
       - '.github/workflows/native-distribution.yml'
       - '.github/workflows/native-portable.yml'
       - '.github/workflows/desktop.yml'
+      - '.github/actions/apt-install/**'
+      - 'scripts/ci/apt-reuse.py'
   schedule:
     - cron: '41 10 * * 0'
 permissions:
@@ -119,6 +122,7 @@ jobs:
               - 'packages/cli/**'
               - 'scripts/ci/**'
               - '.github/workflows/desktop.yml'
+              - '.github/actions/apt-install/**'
               - '.github/workflows/windows-signing.yml'
               - '.github/workflows/native-distribution.yml'
               - 'rust-toolchain.toml'

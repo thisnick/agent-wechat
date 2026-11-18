@@ -22,6 +22,8 @@ on:
       - 'pnpm-lock.yaml'
       - 'scripts/ci/cache-key*.py'
       - '.github/workflows/native-client.yml'
+      - '.github/actions/apt-install/**'
+      - 'scripts/ci/apt-reuse.py'
   # PR runs only read the Rust cache, so main fills it. rust-cache stores
   # dependencies, not workspace crates, so main needs a run only when the
   # dependency set, compiler or this workflow changes. The weekly run renews
@@ -37,6 +39,8 @@ on:
       - '.cargo/config*'
       - 'scripts/ci/cache-key*.py'
       - '.github/workflows/native-client.yml'
+      - '.github/actions/apt-install/**'
+      - 'scripts/ci/apt-reuse.py'
   schedule:
     - cron: '23 10 * * 0'
 
@@ -104,7 +108,9 @@ jobs:
           # limit and evicted the others. PRs read what main saved.
           save-if: ${{ github.event_name != 'pull_request' }}
       - name: Install native build tools
-        run: sudo apt-get update && sudo apt-get install -y cmake
+        uses: ./.github/actions/apt-install
+        with:
+          packages: cmake
       - if: matrix.suite == 'lint'
         run: cargo fmt --all --check
       - if: matrix.suite == 'lint'

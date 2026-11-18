@@ -39,7 +39,9 @@ jobs:
 
       # Preview images for translated pages need CJK glyphs.
       - name: Install fonts
-        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
+        uses: ./.github/actions/apt-install
+        with:
+          packages: fonts-noto-cjk
 
       - name: Build docs
         run: pnpm --filter @agent-wechat/docs build
