@@ -67,6 +67,68 @@ test("account-wide contact tools require a live trusted private owner, and are o
   assert.equal(registered[0][0].contextVersion, 2);
   assert.equal(registered[0][1].optional, true);
 });
+// OpenClaw's Claude CLI tool bridge supplies the owner bit, session key and
+// invocation authority, but no memory audience.
+const cliBridge = (extra: Record<string, unknown> = {}) =>
+  fixture({
+    memoryAudience: undefined,
+    assertMemoryAudienceCurrent: undefined,
+    agentId: "main",
+    sessionKey: "agent:main:agent-wechat:direct:wxid_owner",
+    ...extra,
+  });
+test("without a host memory audience, only the owner's per-peer direct chat gets the tools", async () => {
+  for (const sessionKey of [
+    "agent:main:direct:wxid_owner",
+    "agent:main:agent-wechat:direct:wxid_owner",
+    "agent:main:agent-wechat:default:direct:wxid_owner",
+    "agent:main:whatsapp:direct:+15550100",
+  ])
+    assert.equal(cliBridge({ sessionKey }).tools.length, 2, sessionKey);
+  for (const sessionKey of [
+    undefined,
+    "",
+    "agent:main:main",
+    "agent:main:agent-wechat:group:1@chatroom",
+    "agent:main:slack:channel:c1",
+    "agent:main:telegram:direct:1:thread:9",
+    "agent:main:cron:job",
+    "agent:main:subagent:child",
+    "agent:main:explicit:check",
+    "agent:other:agent-wechat:direct:wxid_owner",
+    "agent:main:agent-wechat:direct:",
+    "agent:main::direct:wxid_owner",
+    "main:agent-wechat:direct:wxid_owner",
+  ])
+    assert.equal(cliBridge({ sessionKey }).tools.length, 0, String(sessionKey));
+  for (const extra of [
+    { senderIsOwner: false },
+    { senderIsOwner: undefined },
+    { assertInvocationCurrent: undefined },
+    { agentId: undefined },
+    // An audience the host did resolve decides, even in a direct chat.
+    { memoryAudience: { kind: "conversation" } },
+    { memoryAudience: { kind: "conversation" }, assertMemoryAudienceCurrent() {} },
+    // A half-supplied audience is not the CLI bridge shape.
+    { assertMemoryAudienceCurrent() {} },
+  ])
+    assert.equal(cliBridge(extra).tools.length, 0, JSON.stringify(extra));
+  const f = cliBridge();
+  await f.run({ action: "list" });
+  assert.equal(f.calls.length, 1);
+});
+test("the direct-chat fallback is rechecked across awaits like the audience", async () => {
+  const f = cliBridge();
+  f.after(() => {
+    f.context.sessionKey = "agent:main:agent-wechat:group:1@chatroom";
+  });
+  await assert.rejects(f.run({ action: "list" }), /owner/);
+  const g = cliBridge();
+  g.after(() => {
+    g.context.memoryAudience = { kind: "conversation" };
+  });
+  await assert.rejects(g.run({ action: "list" }), /owner/);
+});
 test("contact tool rejects account spoofing, unrelated fields, malformed filters and uncertain-operation mismatches", async () => {
   const f = fixture();
   for (const input of [

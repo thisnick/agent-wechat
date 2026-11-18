@@ -4,16 +4,45 @@ import { ensureNativeHost } from "./native-host.ts";
 import { resolveWeChatAccount } from "./types.ts";
 import { nativeConfigurationKey } from "./native-secrets.ts";
 const names = ["wechat_contacts", "wechat_contact_request"];
-/** Account-wide contact tools require live owner authority and a trusted private audience. */
+/**
+ * Whether a host session key names one person's own chat with the agent:
+ * `agent:<agentId>:[<channel>:[<account>:]]direct:<peer>`, the keys OpenClaw
+ * builds for the per-peer DM scopes. Group, channel, thread, cron, sub-agent and
+ * shared `main` keys never match.
+ */
+export function isDirectChatSessionKey(sessionKey: unknown, agentId: unknown): boolean {
+  if (typeof sessionKey !== "string" || typeof agentId !== "string" || !agentId) return false;
+  const parts = sessionKey.split(":");
+  const rest = parts.slice(2);
+  return (
+    parts[0] === "agent" &&
+    parts[1] === agentId.toLowerCase() &&
+    rest.length >= 2 &&
+    rest.length <= 4 &&
+    rest[rest.length - 2] === "direct" &&
+    rest.every((part) => part.length > 0)
+  );
+}
+/** Account-wide contact tools require live owner authority in the owner's private chat. */
 export function createNativeContactTools(
   context: OpenClawPluginToolContext,
   dependencies: { host?: typeof ensureNativeHost } = {}
 ): ChannelAgentTool[] {
+  // A host-resolved memory audience decides privacy when the host supplies one.
+  const audienceOwner = () =>
+    context.memoryAudience?.kind === "owner-private" &&
+    typeof context.assertMemoryAudienceCurrent === "function";
+  // OpenClaw's Claude CLI tool bridge passes the owner bit and session key but no
+  // memory audience. Without one, accept only the per-peer direct chat session
+  // that OpenClaw itself would grant owner-private memory for.
+  const directChatOwner = () =>
+    context.memoryAudience === undefined &&
+    context.assertMemoryAudienceCurrent === undefined &&
+    isDirectChatSessionKey(context.sessionKey, context.agentId);
   const privateOwner = () =>
     context.senderIsOwner === true &&
-    context.memoryAudience?.kind === "owner-private" &&
-    typeof context.assertMemoryAudienceCurrent === "function" &&
-    typeof context.assertInvocationCurrent === "function";
+    typeof context.assertInvocationCurrent === "function" &&
+    (audienceOwner() || directChatOwner());
   if (!privateOwner()) return [];
   const currentConfig = () =>
     context.getRuntimeConfig?.() ?? context.runtimeConfig ?? context.config;
@@ -174,7 +203,7 @@ export function createNativeContactTools(
         signal?.throwIfAborted();
         if (!privateOwner()) throw Error("A private OpenClaw owner session is required");
         context.assertInvocationCurrent!();
-        context.assertMemoryAudienceCurrent!();
+        context.assertMemoryAudienceCurrent?.();
         const current = resolveWeChatAccount(currentConfig() as Record<string, unknown>);
         if (
           !current?.enabled ||

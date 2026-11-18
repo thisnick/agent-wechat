@@ -36,7 +36,14 @@ The optional `wechat_contacts` and `wechat_contact_request` tools work across th
 { "tools": { "alsoAllow": ["wechat_contacts", "wechat_contact_request"] } }
 ```
 
-Both require OpenClaw's trusted owner identity and a current **private owner session**. Shared conversations and hosts missing those checks cannot use them. The model cannot select another account or supply an owner flag.
+Both require OpenClaw's trusted owner identity and a current **private owner session**: the owner's own one-to-one chat with the agent. They don't appear in groups, channels, scheduled runs or other people's chats. The model cannot select another account or supply an owner flag.
+
+| How the agent runs | Where the tools appear |
+| --- | --- |
+| OpenClaw's built-in agent runtime | Chats OpenClaw marks as owner-private |
+| A CLI backend such as Claude CLI, which passes no memory partition to tools | The owner's direct chat, when `session.dmScope` gives each person their own session (`per-peer`, `per-channel-peer` or `per-account-channel-peer`) |
+
+With the default `session.dmScope: "main"`, every direct chat shares one session, so CLI-backed agents don't get these tools.
 
 `wechat_contacts` supports `list`, `get`, local `find`, exact-ID `lookup`, server `search` and `remove`. `wechat_contact_request` supports `list`, `get`, `send`, `accept`, local-history `delete` and operation `status`. Sending uses a discovery `recipientRef`; accepting and deleting require the inspected `expectedVersion`. Mutations require a stable `idempotencyKey`. After uncertainty, inspect the original operation instead of sending again.
 
