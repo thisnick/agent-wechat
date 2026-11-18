@@ -12,7 +12,6 @@ pub(super) fn routes() -> Router<App> {
             "/v1/accounts/{a}/contact-requests/{id}/accept",
             post(accept),
         )
-        .api_route("/v1/accounts/{a}/contacts/{id}/privacy", get(privacy))
         .api_route(
             "/v1/accounts/{a}/contacts/{id}",
             axum::routing::delete(remove).patch(update_contact),
@@ -149,18 +148,6 @@ fn privacy_settings(
         hide_my_posts: input.hide_my_posts,
         hide_their_posts: input.hide_their_posts,
     }
-}
-async fn privacy(
-    State(app): State<App>,
-    Extension(c): Extension<Claims>,
-    Path((a, id)): Path<(String, String)>,
-) -> ApiResult<Json<Value>> {
-    c.require(Some(&a), "read")?;
-    let value = app
-        .core
-        .read(&a.clone(), move |core| core.contact_privacy(&a, &id))
-        .await?;
-    checked::<contracts::NativeContactPrivacy>(value)
 }
 async fn update_contact(
     State(app): State<App>,
@@ -314,7 +301,7 @@ mod tests {
             Core::new(store, None).unwrap(),
             "0123456789abcdef0123456789abcdef",
         );
-        for path in ["contacts", "contacts/peer", "contacts/peer/privacy"] {
+        for path in ["contacts", "contacts/peer"] {
             for (account, expected) in [("one", "profile_keys_missing"), ("two", "forbidden")] {
                 let request = Request::builder()
                     .uri(format!("/v1/accounts/{account}/{path}"))

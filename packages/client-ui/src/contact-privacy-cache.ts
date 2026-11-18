@@ -1,11 +1,12 @@
-import { NativeApiError, type NativeContact, type NativeContactPrivacy, type NativeWeChatClient } from "@agent-wechat/shared";
+import { NativeApiError, type NativeContact, type NativeWeChatClient } from "@agent-wechat/shared";
+import type { ContactPrivacySnapshot } from "./contact-privacy.ts";
 
 /** Relationship settings for the active account. Never written to browser storage. */
 export class ContactPrivacyCache {
   private account: string | null = null;
   private lifetime = new AbortController();
   private session = Symbol();
-  private entries = new Map<string, NativeContactPrivacy>();
+  private entries = new Map<string, ContactPrivacySnapshot>();
   private reads = new Map<string, symbol>();
   private listeners = new Set<() => void>();
   private denial?: NativeApiError;
@@ -82,7 +83,7 @@ export class ContactPrivacyCache {
     };
   }
 
-  async read(account: string, id: string, signal: AbortSignal): Promise<NativeContactPrivacy | undefined> {
+  async read(account: string, id: string, signal: AbortSignal): Promise<ContactPrivacySnapshot | undefined> {
     const lifetime = this.lifetime.signal;
     const session = this.session;
     if (account !== this.account) throw new DOMException("Account changed", "AbortError");
@@ -123,7 +124,7 @@ export class ContactPrivacyCache {
   }
 }
 
-function snapshotFromContact(contact: NativeContact): NativeContactPrivacy | undefined {
+function snapshotFromContact(contact: NativeContact): ContactPrivacySnapshot | undefined {
   if (!contact.privacy || !contact.privacyVersion) return undefined;
   return { privacy: contact.privacy, version: contact.privacyVersion };
 }

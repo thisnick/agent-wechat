@@ -414,11 +414,6 @@ enum ContactCommand {
         #[command(flatten)]
         options: MutationOptions,
     },
-    /// Read an existing contact's relationship privacy.
-    Privacy {
-        #[command(subcommand)]
-        command: ContactPrivacyCommand,
-    },
     /// Remove this account's contact relationship while preserving chat history.
     Remove {
         /// Exact existing ordinary contact ID.
@@ -448,15 +443,6 @@ struct ContactPrivacyOptions {
     /// Whether to hide this contact's posts (true or false).
     #[arg(long, action = clap::ArgAction::Set)]
     hide_their_posts: Option<bool>,
-}
-
-#[derive(Subcommand)]
-enum ContactPrivacyCommand {
-    /// Read the contact's saved relationship privacy and current version.
-    Get {
-        /// Exact existing contact ID.
-        id: String,
-    },
 }
 
 #[derive(Subcommand)]
@@ -1911,10 +1897,6 @@ async fn run(cli: Cli) -> Result<()> {
             command: Some(ContactCommand::Requests { command }),
             ..
         } => contact_requests_cli::requests(&r, &settings, command).await?,
-        Command::Contacts {
-            command: Some(ContactCommand::Privacy { command }),
-            ..
-        } => contact_requests_cli::privacy(&r, &settings, command).await?,
         Command::Contacts {
             command:
                 Some(ContactCommand::Set {

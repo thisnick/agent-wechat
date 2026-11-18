@@ -1823,24 +1823,6 @@
         ],
         "type": "object"
       },
-      "NativeContactPrivacy": {
-        "description": "Current relationship privacy read from the supported official profile.",
-        "properties": {
-          "privacy": {
-            "$ref": "#/components/schemas/NativeContactPrivacySettings",
-            "description": "Current settings for this account's relationship."
-          },
-          "version": {
-            "description": "Account/contact-bound version required when saving a change.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "privacy",
-          "version"
-        ],
-        "type": "object"
-      },
       "NativeContactPrivacySettings": {
         "additionalProperties": false,
         "description": "Relationship privacy selected by the account owner.",
@@ -2195,7 +2177,7 @@
         "description": "Update supported contact settings after inspecting their current version.",
         "properties": {
           "expectedVersion": {
-            "description": "Version returned by the privacy read on this account.",
+            "description": "Version from the contact's `privacyVersion` on this account.",
             "type": "string"
           },
           "privacy": {
@@ -6633,65 +6615,6 @@
         "x-agent-wechat-sdk-response": [
           {
             "$ref": "#/components/schemas/NativeOperation"
-          }
-        ]
-      }
-    },
-    "/v1/accounts/{a}/contacts/{id}/privacy": {
-      "get": {
-        "operationId": "contactPrivacy",
-        "parameters": [
-          {
-            "description": "Account ID or alias.",
-            "in": "path",
-            "name": "a",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "Contact ID.",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/NativeContactPrivacy"
-                }
-              }
-            },
-            "description": "Success."
-          },
-          "4XX": {
-            "$ref": "#/components/responses/Error"
-          },
-          "5XX": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "security": [
-          {
-            "bearer": [
-              "read"
-            ]
-          }
-        ],
-        "summary": "Read current relationship privacy from the official profile.",
-        "tags": [
-          "contacts"
-        ],
-        "x-agent-wechat-sdk-response": [
-          {
-            "$ref": "#/components/schemas/NativeContactPrivacy"
           }
         ]
       }

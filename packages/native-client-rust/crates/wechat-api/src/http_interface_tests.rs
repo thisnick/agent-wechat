@@ -95,7 +95,6 @@ payloads! {
     "ContactMutationKeyQuery" => crate::contact_requests::ContactMutationKeyQuery,
     "NativeContactSearchRequest" => crate::contracts::NativeContactSearchRequest,
     "NativeContactSearch" => crate::contracts::NativeContactSearch,
-    "NativeContactPrivacy" => crate::contracts::NativeContactPrivacy,
     "NativeContactPrivacySettings" => crate::contracts::NativeContactPrivacySettings,
     "NativeContactUpdate" => crate::contracts::NativeContactUpdate,
     "NativeContactRequestAccept" => crate::contracts::NativeContactRequestAccept,

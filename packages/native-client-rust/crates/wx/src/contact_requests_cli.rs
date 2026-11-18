@@ -109,18 +109,6 @@ fn privacy_value(options: ContactPrivacyOptions) -> Option<Value> {
     })
 }
 
-pub async fn privacy(
-    r: &Remote,
-    _config: &settings::File,
-    command: ContactPrivacyCommand,
-) -> Result<Value> {
-    match command {
-        ContactPrivacyCommand::Get { id } => {
-            r.get(&r.path(&format!("contacts/{}/privacy", encode(&id)))?)
-                .await
-        }
-    }
-}
 fn checked_privacy(value: &Value) -> Result<Value> {
     let mut privacy = serde_json::Map::new();
     for name in ["chatsOnly", "hideMyPosts", "hideTheirPosts"] {
@@ -238,15 +226,18 @@ pub async fn set_contact(
     let body = if let Some(body) = intent.get("resolvedBody") {
         checked_update_body(body)?
     } else {
-        let snapshot = r.get(&r.path(&format!("{request_path}/privacy"))?).await?;
-        let mut merged = checked_privacy(&snapshot["privacy"])?;
+        let contact = r.get(&r.path(&request_path)?).await?;
+        if contact["privacyPending"].as_bool().unwrap_or(false) {
+            bail!("contact_privacy_pending: wait for the earlier change to settle");
+        }
+        let mut merged = checked_privacy(&contact["privacy"])?;
         for (name, value) in caller_input
             .as_object()
             .context("invalid contact update input")?
         {
             merged[name] = value.clone();
         }
-        let version = snapshot["version"]
+        let version = contact["privacyVersion"]
             .as_str()
             .filter(|value| !value.is_empty())
             .context("missing contact privacy version")?;
@@ -309,7 +300,7 @@ mod tests {
     }
     #[test]
     fn parser_accepts_partial_edits_but_requires_a_valued_boolean_and_nonempty_set() {
-        assert!(parse(&["privacy", "get", "peer"]).is_ok());
+        assert!(parse(&["privacy", "get", "peer"]).is_err());
         assert!(parse(&["set", "peer", "--chats-only", "false"]).is_ok());
         assert!(parse(&[
             "set",
@@ -472,17 +463,17 @@ mod tests {
                         saved_intent,
                     })
                     .unwrap();
-                let (status, value) = if method == "GET" && path.ends_with("/privacy") {
+                let (status, value) = if method == "GET" && path.contains("/contacts/") {
                     server_gets.fetch_add(1, Ordering::SeqCst);
                     if server_patches.load(Ordering::SeqCst) == 0 {
                         (
                             "200 OK",
-                            json!({"privacy":{"chatsOnly":false,"hideMyPosts":true,"hideTheirPosts":false},"version":"v1"}),
+                            json!({"id":"peer value","privacy":{"chatsOnly":false,"hideMyPosts":true,"hideTheirPosts":false},"privacyVersion":"v1"}),
                         )
                     } else {
                         (
                             "200 OK",
-                            json!({"privacy":{"chatsOnly":false,"hideMyPosts":false,"hideTheirPosts":true},"version":"v2"}),
+                            json!({"id":"peer value","privacy":{"chatsOnly":false,"hideMyPosts":false,"hideTheirPosts":true},"privacyVersion":"v2"}),
                         )
                     }
                 } else if is_patch {
@@ -531,7 +522,6 @@ mod tests {
     async fn dispatch(remote: &Remote, config: &settings::File, args: &[&str]) -> Result<Value> {
         match parse(args).unwrap() {
             ContactCommand::Requests { command } => requests(remote, config, command).await,
-            ContactCommand::Privacy { command } => privacy(remote, config, command).await,
             ContactCommand::Set {
                 id,
                 privacy,
@@ -560,21 +550,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let config = config(temp.path());
         let mut mock = mock_daemon(temp.path().into(), false, false).await;
-        let read = dispatch(&mock.remote, &config, &["privacy", "get", "peer value"])
-            .await
-            .unwrap();
-        assert_eq!(read["version"], "v1");
-        let get = mock.captured.recv().await.unwrap();
-        assert_eq!(get.method, "GET");
-        assert_eq!(
-            get.path,
-            "/v1/accounts/test-account/contacts/peer%20value/privacy"
-        );
-        assert!(get.key.is_none());
-        assert!(get.body.is_none());
         let result = dispatch(&mock.remote, &config, &edit_args()).await.unwrap();
         let get = mock.captured.recv().await.unwrap();
         assert_eq!(get.method, "GET");
+        assert_eq!(get.path, "/v1/accounts/test-account/contacts/peer%20value");
+        assert!(get.key.is_none());
+        assert!(get.body.is_none());
         let patch = mock.captured.recv().await.unwrap();
         assert_eq!(patch.method, "PATCH");
         assert_eq!(

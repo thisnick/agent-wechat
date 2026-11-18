@@ -199,9 +199,6 @@ wx contacts members remove --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse t
 wx contacts members remove --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
 wx contacts members remove <ID> | position 1, required | Group ID from wx groups list
 wx contacts members remove <MEMBERS> | position 2, required, repeatable | Member IDs to remove; give one or more
-wx contacts privacy | - | Read an existing contact's relationship privacy
-wx contacts privacy get | - | Read the contact's saved relationship privacy and current version
-wx contacts privacy get <ID> | position 1, required | Exact existing contact ID
 wx contacts refresh | - | Refresh one entry from WeChat
 wx contacts refresh --detach | switch | Return as soon as the work is queued instead of waiting for it
 wx contacts refresh --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends

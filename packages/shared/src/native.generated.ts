@@ -1549,22 +1549,13 @@ hideMyPosts: boolean,
  * Hide this person's Moments posts from this account.
  */
 hideTheirPosts: boolean, };
-export type NativeContactPrivacy = {
-/**
- * Current settings for this account's relationship.
- */
-privacy: NativeContactPrivacySettings,
-/**
- * Account/contact-bound version required when saving a change.
- */
-version: string, };
 export type NativeContactUpdate = {
 /**
  * Desired settings; unrelated contact flags are preserved.
  */
 privacy: NativeContactPrivacySettings,
 /**
- * Version returned by the privacy read on this account.
+ * Version from the contact's `privacyVersion` on this account.
  */
 expectedVersion: string, };
 export type NativeContactRequestAccept = {

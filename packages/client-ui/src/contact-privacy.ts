@@ -1,13 +1,13 @@
 import {
   NativeApiError,
   type NativeOperation,
-  type NativeContactPrivacy,
   type NativeContactPrivacySettings,
 } from "@agent-wechat/shared";
 import type { Connection } from "./connection.ts";
 
 export type ContactPrivacy = NativeContactPrivacySettings;
-export type ContactPrivacySnapshot = NativeContactPrivacy;
+/** Settings and the account-bound version read from a contact's `privacy` and `privacyVersion`. */
+export type ContactPrivacySnapshot = { privacy: ContactPrivacy; version: string };
 export const defaultContactPrivacy = (): ContactPrivacy => ({
   chatsOnly: false,
   hideMyPosts: false,

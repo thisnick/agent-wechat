@@ -80,7 +80,7 @@ request NativeContactRequestVersion.expectedVersion | string, required | Current
 request NativeContactSearchRequest | object, rejects unknown fields | Live WeChat contact discovery input. Email and broad nickname search are not supported.
 request NativeContactSearchRequest.query | string, required | Exact WeChat ID query. Phone lookup has not been verified.
 request NativeContactUpdate | object, rejects unknown fields | Update supported contact settings after inspecting their current version.
-request NativeContactUpdate.expectedVersion | string, required | Version returned by the privacy read on this account.
+request NativeContactUpdate.expectedVersion | string, required | Version from the contact's `privacyVersion` on this account.
 request NativeContactUpdate.privacy | object, required, rejects unknown fields | Desired settings; unrelated contact flags are preserved.
 request NativeContactUpdate.privacy.chatsOnly | boolean, required | Restrict this relationship to chats.
 request NativeContactUpdate.privacy.hideMyPosts | boolean, required | Hide this account's Moments posts from this person.
@@ -435,12 +435,6 @@ response NativeContactPage.items[]<NativeTombstone>.id | string, required | ID o
 response NativeContactPage.items[]<NativeTombstone>.version | string, required | Fingerprint of the saved profile data in which the resource is missing, the same value as `sourceGeneration` on the page.
 response NativeContactPage.nextCursor | string, required, nullable | Pass it as `cursor` with the same query to get the next page. Null on the last page.
 response NativeContactPage.sourceGeneration | string, required | Fingerprint of the saved profile data the page was read from. It changes when the profile files change.
-response NativeContactPrivacy | object | Current relationship privacy read from the supported official profile.
-response NativeContactPrivacy.privacy | object, required | Current settings for this account's relationship.
-response NativeContactPrivacy.privacy.chatsOnly | boolean, required | Restrict this relationship to chats.
-response NativeContactPrivacy.privacy.hideMyPosts | boolean, required | Hide this account's Moments posts from this person.
-response NativeContactPrivacy.privacy.hideTheirPosts | boolean, required | Hide this person's Moments posts from this account.
-response NativeContactPrivacy.version | string, required | Account/contact-bound version required when saving a change.
 response NativeContactRequest | object | One per-peer canonical request conversation with a current action/version.
 response NativeContactRequest.actionable | boolean, required | Whether the current incoming request can be accepted locally.
 response NativeContactRequest.attention | boolean, required | Incoming request needing attention in navigation badges.
@@ -1240,7 +1234,6 @@ route GET /v1/accounts/{a}/contact-requests | scope read, query NativeContactReq
 route GET /v1/accounts/{a}/contact-requests/{id} | scope read, response NativeContactRequest, sdk response NativeContactRequest | Read a request conversation and its current version.
 route GET /v1/accounts/{a}/contacts | scope read, query PageQuery, response NativeContactPage, sdk response NativePage<NativeContact> | List contacts and their relationship privacy when available.
 route GET /v1/accounts/{a}/contacts/{id} | scope read, response NativeContact, sdk response NativeContact | Show one contact and its relationship privacy when available.
-route GET /v1/accounts/{a}/contacts/{id}/privacy | scope read, response NativeContactPrivacy, sdk response NativeContactPrivacy | Read current relationship privacy from the official profile.
 route GET /v1/accounts/{a}/custom-stickers | scope media, response CustomStickerList, sdk response CustomStickerList | Read ordered Saved membership from the official profile without a network refresh.
 route GET /v1/accounts/{a}/custom-stickers/{id} | scope media, response CustomSticker, sdk response CustomSticker | Read one Saved sticker by its stable identity.
 route GET /v1/accounts/{a}/event-log | scope read, query EventQuery, response untyped or sse NativeEvent, sdk response NativeEvent | Read events after a cursor as a JSON page. With Accept: text/event-stream it streams them instead.
