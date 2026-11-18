@@ -1,51 +1,104 @@
 import type { ChannelAgentTool } from "openclaw/plugin-sdk/channel-contract";
-import type { OpenClawPluginApi, OpenClawPluginToolContext } from "openclaw/plugin-sdk/core";
+import type {
+  OpenClawPluginApi,
+  OpenClawPluginToolContext,
+  PluginRuntime,
+} from "openclaw/plugin-sdk/core";
 import { ensureNativeHost } from "./native-host.ts";
 import { resolveWeChatAccount } from "./types.ts";
 import { nativeConfigurationKey } from "./native-secrets.ts";
 const names = ["wechat_contacts", "wechat_contact_request"];
+type SessionReader = Pick<PluginRuntime["agent"]["session"], "resolveStorePath"> &
+  Partial<Pick<PluginRuntime["agent"]["session"], "getSessionEntry" | "getSessionEntryAsync">>;
+type StoredSession = Awaited<ReturnType<PluginRuntime["agent"]["session"]["getSessionEntryAsync"]>>;
 /**
- * Whether a host session key names one person's own chat with the agent:
- * `agent:<agentId>:[<channel>:[<account>:]]direct:<peer>`, the keys OpenClaw
- * builds for the per-peer DM scopes. Group, channel, thread, cron, sub-agent and
- * shared `main` keys never match.
+ * The owner's own chat, judged from the stored session as OpenClaw judges an
+ * owner-private memory audience (a root `direct` session of this incarnation),
+ * plus an external delivery route whose peer is the requester. Cron and `main`
+ * sessions route nowhere external; a session shared with someone else routes to
+ * them, not to the owner.
  */
-export function isDirectChatSessionKey(sessionKey: unknown, agentId: unknown): boolean {
-  if (typeof sessionKey !== "string" || typeof agentId !== "string" || !agentId) return false;
-  const parts = sessionKey.split(":");
-  const rest = parts.slice(2);
+function isOwnerChatSession(entry: StoredSession, context: OpenClawPluginToolContext): boolean {
+  const sender = context.requesterSenderId;
+  const route = entry?.delivery?.kind === "external" ? entry.delivery.context : undefined;
   return (
-    parts[0] === "agent" &&
-    parts[1] === agentId.toLowerCase() &&
-    rest.length >= 2 &&
-    rest.length <= 4 &&
-    rest[rest.length - 2] === "direct" &&
-    rest.every((part) => part.length > 0)
+    !!entry &&
+    !!sender &&
+    // Per-person DM scopes key the session by its peer; the shared `main` scope
+    // puts everyone's direct chats in one session and never matches.
+    !!context.sessionKey?.endsWith(`:direct:${sender.toLowerCase()}`) &&
+    entry.sessionId === context.sessionId &&
+    entry.chatType === "direct" &&
+    entry.spawnedBy === undefined &&
+    !!route?.channel &&
+    route.threadId === undefined &&
+    [sender, `${route.channel}:${sender}`, ...(route.channel === "agent-wechat" ? [`wechat:${sender}`] : [])].includes(
+      route.to ?? ""
+    )
   );
 }
 /** Account-wide contact tools require live owner authority in the owner's private chat. */
 export function createNativeContactTools(
   context: OpenClawPluginToolContext,
-  dependencies: { host?: typeof ensureNativeHost } = {}
+  dependencies: { host?: typeof ensureNativeHost; sessions?: SessionReader } = {}
 ): ChannelAgentTool[] {
-  // A host-resolved memory audience decides privacy when the host supplies one.
+  const currentConfig = () =>
+    context.getRuntimeConfig?.() ?? context.runtimeConfig ?? context.config;
+  const ownerAuthority = () =>
+    context.senderIsOwner === true && typeof context.assertInvocationCurrent === "function";
+  // A memory audience that OpenClaw resolves decides privacy whenever it is supplied.
   const audienceOwner = () =>
     context.memoryAudience?.kind === "owner-private" &&
     typeof context.assertMemoryAudienceCurrent === "function";
-  // OpenClaw's Claude CLI tool bridge passes the owner bit and session key but no
-  // memory audience. Without one, accept only the per-peer direct chat session
-  // that OpenClaw itself would grant owner-private memory for.
-  const directChatOwner = () =>
+  // OpenClaw's Claude CLI tool bridge passes the owner bit, session and requester
+  // but no memory audience. Without one, check the stored session ourselves.
+  const noAudience = () =>
     context.memoryAudience === undefined &&
     context.assertMemoryAudienceCurrent === undefined &&
-    isDirectChatSessionKey(context.sessionKey, context.agentId);
-  const privateOwner = () =>
-    context.senderIsOwner === true &&
-    typeof context.assertInvocationCurrent === "function" &&
-    (audienceOwner() || directChatOwner());
-  if (!privateOwner()) return [];
-  const currentConfig = () =>
-    context.getRuntimeConfig?.() ?? context.runtimeConfig ?? context.config;
+    !!context.agentId &&
+    !!context.sessionKey &&
+    !!context.sessionId;
+  const sessionQuery = () => {
+    const sessions = dependencies.sessions!;
+    const agentId = context.agentId!;
+    const cfg = currentConfig() as { session?: { store?: string } } | undefined;
+    return {
+      agentId,
+      storePath: sessions.resolveStorePath(cfg?.session?.store, { agentId }),
+      sessionKey: context.sessionKey!,
+      readConsistency: "latest" as const,
+    };
+  };
+  const readSessionNow = (): StoredSession => {
+    try {
+      return dependencies.sessions?.getSessionEntry?.(sessionQuery());
+    } catch {
+      return undefined;
+    }
+  };
+  const viaAudience = audienceOwner();
+  // The synchronous read only decides whether the model sees the tools; every call
+  // rereads the session before its effect and before its result is released.
+  if (
+    !ownerAuthority() ||
+    !(viaAudience || (noAudience() && isOwnerChatSession(readSessionNow(), context)))
+  )
+    return [];
+  const privateOwner = () => ownerAuthority() && (viaAudience ? audienceOwner() : noAudience());
+  const ownerSessionCurrent = async () => {
+    if (viaAudience) return;
+    const sessions = dependencies.sessions;
+    let entry: StoredSession;
+    try {
+      entry = sessions?.getSessionEntryAsync
+        ? await sessions.getSessionEntryAsync(sessionQuery())
+        : readSessionNow();
+    } catch {
+      entry = undefined;
+    }
+    if (!isOwnerChatSession(entry, context))
+      throw Error("A private OpenClaw owner session is required");
+  };
   const selected = resolveWeChatAccount(currentConfig() as Record<string, unknown>);
   if (
     !selected?.enabled ||
@@ -218,6 +271,8 @@ export function createNativeContactTools(
       const native = guard();
       const { client } = await (dependencies.host ?? ensureNativeHost)(native);
       guard();
+      await ownerSessionCurrent();
+      guard();
       const id = args.id as string,
         key = args.idempotencyKey as string;
       let result: unknown;
@@ -305,6 +360,8 @@ export function createNativeContactTools(
           }
         }
       guard();
+      await ownerSessionCurrent();
+      guard();
       const details = { accountId, result };
       return { content: [{ type: "text" as const, text: JSON.stringify(details) }], details };
     },
@@ -312,7 +369,10 @@ export function createNativeContactTools(
 }
 export function registerNativeContactTools(api: OpenClawPluginApi): void {
   api.registerTool(
-    { contextVersion: 2, create: (context) => createNativeContactTools(context) },
+    {
+      contextVersion: 2,
+      create: (context) => createNativeContactTools(context, { sessions: api.runtime?.agent?.session }),
+    },
     { names, optional: true }
   );
 }

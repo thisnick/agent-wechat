@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createNativeContactTools, registerNativeContactTools } from "./native-contact-tool.ts";
-function fixture(extra: Record<string, unknown> = {}) {
+function fixture(extra: Record<string, unknown> = {}, deps: Record<string, unknown> = {}) {
   const cfg: any = {
     channels: {
       "agent-wechat": {
@@ -26,6 +26,7 @@ function fixture(extra: Record<string, unknown> = {}) {
   };
   let after = () => {};
   const tools = createNativeContactTools(context, {
+    ...deps,
     host: async () =>
       ({
         client: {
@@ -67,67 +68,104 @@ test("account-wide contact tools require a live trusted private owner, and are o
   assert.equal(registered[0][0].contextVersion, 2);
   assert.equal(registered[0][1].optional, true);
 });
-// OpenClaw's Claude CLI tool bridge supplies the owner bit, session key and
-// invocation authority, but no memory audience.
-const cliBridge = (extra: Record<string, unknown> = {}) =>
-  fixture({
+// OpenClaw's Claude CLI tool bridge supplies the owner bit, session, requester and
+// invocation authority, but no memory audience. The stored session decides.
+const ownerChat = {
+  sessionId: "s1",
+  chatType: "direct",
+  delivery: {
+    kind: "external",
+    context: { channel: "agent-wechat", to: "wechat:wxid_owner", accountId: "default" },
+  },
+};
+function cliBridge(extra: Record<string, unknown> = {}, stored: any = ownerChat) {
+  const store = { entry: stored, reads: 0 };
+  const sessions = {
+    resolveStorePath: () => "/private/store",
+    getSessionEntry: () => store.entry,
+    getSessionEntryAsync: async () => {
+      store.reads += 1;
+      return store.entry;
+    },
+  };
+  const f = fixture({
     memoryAudience: undefined,
     assertMemoryAudienceCurrent: undefined,
     agentId: "main",
     sessionKey: "agent:main:agent-wechat:direct:wxid_owner",
+    sessionId: "s1",
+    requesterSenderId: "wxid_owner",
     ...extra,
-  });
-test("without a host memory audience, only the owner's per-peer direct chat gets the tools", async () => {
-  for (const sessionKey of [
-    "agent:main:direct:wxid_owner",
-    "agent:main:agent-wechat:direct:wxid_owner",
-    "agent:main:agent-wechat:default:direct:wxid_owner",
-    "agent:main:whatsapp:direct:+15550100",
-  ])
-    assert.equal(cliBridge({ sessionKey }).tools.length, 2, sessionKey);
-  for (const sessionKey of [
-    undefined,
-    "",
-    "agent:main:main",
-    "agent:main:agent-wechat:group:1@chatroom",
-    "agent:main:slack:channel:c1",
-    "agent:main:telegram:direct:1:thread:9",
-    "agent:main:cron:job",
-    "agent:main:subagent:child",
-    "agent:main:explicit:check",
-    "agent:other:agent-wechat:direct:wxid_owner",
-    "agent:main:agent-wechat:direct:",
-    "agent:main::direct:wxid_owner",
-    "main:agent-wechat:direct:wxid_owner",
-  ])
-    assert.equal(cliBridge({ sessionKey }).tools.length, 0, String(sessionKey));
+  }, { sessions });
+  return Object.assign(f, { store });
+}
+const withRoute = (context: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({
+  ...ownerChat,
+  ...extra,
+  delivery: { kind: "external", context },
+});
+test("without a host memory audience, only the owner's own stored direct chat gets the tools", async () => {
+  assert.equal(cliBridge().tools.length, 2);
+  assert.equal(
+    cliBridge(
+      { requesterSenderId: "+15550100", sessionKey: "agent:main:whatsapp:direct:+15550100" },
+      withRoute({ channel: "whatsapp", to: "+15550100" })
+    ).tools.length,
+    2
+  );
+  for (const [label, stored] of [
+    ["no stored session", null],
+    ["group", { ...ownerChat, chatType: "group" }],
+    ["cron (no external route)", { ...ownerChat, delivery: { kind: "none" } }],
+    ["main (internal route)", { ...ownerChat, delivery: { kind: "internal" } }],
+    ["spawned sub-agent", { ...ownerChat, spawnedBy: "agent:main:main" }],
+    ["reset session", { ...ownerChat, sessionId: "s0" }],
+    ["someone else's chat", withRoute({ channel: "agent-wechat", to: "wechat:wxid_alice" })],
+    ["group route", withRoute({ channel: "agent-wechat", to: "channel:1@chatroom" })],
+    ["thread", withRoute({ channel: "agent-wechat", to: "wechat:wxid_owner", threadId: "9" })],
+  ] as const)
+    assert.equal(cliBridge({}, stored).tools.length, 0, label);
   for (const extra of [
     { senderIsOwner: false },
     { senderIsOwner: undefined },
     { assertInvocationCurrent: undefined },
+    { requesterSenderId: undefined },
+    // The shared `main` DM scope, or a session keyed by another person.
+    { sessionKey: "agent:main:main" },
+    { sessionKey: "agent:main:agent-wechat:direct:wxid_alice" },
+    { sessionKey: "agent:main:agent-wechat:group:wxid_owner" },
+    { sessionId: undefined },
     { agentId: undefined },
-    // An audience the host did resolve decides, even in a direct chat.
+    // An audience the host did resolve decides, even in the owner's direct chat.
     { memoryAudience: { kind: "conversation" } },
     { memoryAudience: { kind: "conversation" }, assertMemoryAudienceCurrent() {} },
     // A half-supplied audience is not the CLI bridge shape.
     { assertMemoryAudienceCurrent() {} },
   ])
     assert.equal(cliBridge(extra).tools.length, 0, JSON.stringify(extra));
+  // Without a session reader the plugin cannot check, so it offers nothing.
+  assert.equal(fixture({ memoryAudience: undefined, assertMemoryAudienceCurrent: undefined, agentId: "main", sessionKey: "k", sessionId: "s1", requesterSenderId: "wxid_owner" }).tools.length, 0);
   const f = cliBridge();
   await f.run({ action: "list" });
   assert.equal(f.calls.length, 1);
+  assert.equal(f.store.reads, 2, "rereads before the effect and before release");
 });
-test("the direct-chat fallback is rechecked across awaits like the audience", async () => {
-  const f = cliBridge();
-  f.after(() => {
-    f.context.sessionKey = "agent:main:agent-wechat:group:1@chatroom";
+test("the stored-session check is rerun before the effect and before release", async () => {
+  const reset = cliBridge();
+  reset.store.entry = { ...ownerChat, sessionId: "s2" };
+  await assert.rejects(reset.run({ action: "list" }), /owner/);
+  assert.equal(reset.calls.length, 0);
+  const rebound = cliBridge();
+  rebound.after(() => {
+    rebound.store.entry = withRoute({ channel: "agent-wechat", to: "wechat:wxid_alice" });
   });
-  await assert.rejects(f.run({ action: "list" }), /owner/);
-  const g = cliBridge();
-  g.after(() => {
-    g.context.memoryAudience = { kind: "conversation" };
+  await assert.rejects(rebound.run({ action: "list" }), /owner/);
+  assert.equal(rebound.calls.length, 1);
+  const audience = cliBridge();
+  audience.after(() => {
+    audience.context.memoryAudience = { kind: "conversation" };
   });
-  await assert.rejects(g.run({ action: "list" }), /owner/);
+  await assert.rejects(audience.run({ action: "list" }), /owner/);
 });
 test("contact tool rejects account spoofing, unrelated fields, malformed filters and uncertain-operation mismatches", async () => {
   const f = fixture();
