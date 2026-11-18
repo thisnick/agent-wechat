@@ -112,7 +112,7 @@ export function createNativeContactTools(
   const viaAudience = audienceOwner();
   if (!ownerAuthority() || !(viaAudience || (noAudience() && readOwnerChatNow()))) return [];
   const privateOwner = () => ownerAuthority() && (viaAudience ? audienceOwner() : noAudience());
-  const ownerSessionCurrent = async (afterEffect: boolean) => {
+  const ownerSessionCurrent = async (afterChange: boolean) => {
     if (viaAudience) return;
     const sessions = dependencies.sessions;
     let entry: StoredSession;
@@ -122,14 +122,14 @@ export function createNativeContactTools(
         : sessions?.getSessionEntry?.(sessionQuery());
     } catch {
       throw Error(
-        afterEffect
+        afterChange
           ? "Could not reread the OpenClaw session before returning; a change may already have been made. Check it with status and the same idempotency key."
           : "Could not read the OpenClaw session to confirm the private owner chat"
       );
     }
     if (!ownerChat(entry))
       throw Error(
-        afterEffect
+        afterChange
           ? "A private OpenClaw owner session is required to return this result; a change may already have been made. Check it with status and the same idempotency key."
           : "A private OpenClaw owner session is required"
       );
@@ -394,7 +394,9 @@ export function createNativeContactTools(
           }
         }
       guard();
-      await ownerSessionCurrent(true);
+      // Only a mutation (an action that takes an idempotency key) may have changed
+      // something by now; a read just fails with the plain owner-session error.
+      await ownerSessionCurrent((required[action] ?? []).includes("idempotencyKey"));
       guard();
       const details = { accountId, result };
       return { content: [{ type: "text" as const, text: JSON.stringify(details) }], details };

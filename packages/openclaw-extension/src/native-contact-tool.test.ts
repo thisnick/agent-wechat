@@ -89,14 +89,21 @@ function cliBridge(
     dmScope: "per-channel-peer",
   })
 ) {
-  const store = { entry: stored, reads: 0, failReads: false };
+  const store = {
+    entry: stored,
+    reads: 0,
+    failReads: false,
+    // From this asynchronous read on, return `laterEntry` instead.
+    changeAtRead: Infinity,
+    laterEntry: undefined as any,
+  };
   const sessions = {
     resolveStorePath: () => "/private/store",
     getSessionEntry: () => store.entry,
     getSessionEntryAsync: async () => {
       store.reads += 1;
       if (store.failReads) throw Error("store busy");
-      return store.entry;
+      return store.reads >= store.changeAtRead ? store.laterEntry : store.entry;
     },
   };
   const routing = { resolveAgentRoute: resolve };
@@ -186,8 +193,27 @@ test("the stored-session check is rerun before the effect and before release", a
   rebound.after(() => {
     rebound.store.entry = withRoute({ channel: "agent-wechat", to: "wechat:wxid_alice" });
   });
-  await assert.rejects(rebound.run({ action: "list" }), /may already have been made.*same idempotency key/);
+  // A read that loses the owner chat after its call just reports the owner error...
+  await assert.rejects(rebound.run({ action: "list" }), (error: Error) =>
+    /owner session is required$/.test(error.message)
+  );
   assert.equal(rebound.calls.length, 1);
+  const readFails = cliBridge();
+  readFails.after(() => {
+    readFails.store.failReads = true;
+  });
+  await assert.rejects(readFails.run({ action: "list" }), (error: Error) =>
+    /^Could not read the OpenClaw session/.test(error.message)
+  );
+  // ...while a mutation says the change may have happened and how to check it.
+  const sent = cliBridge();
+  sent.store.changeAtRead = 3; // the reread before the result is released
+  sent.store.laterEntry = withRoute({ channel: "agent-wechat", to: "wechat:wxid_alice" });
+  await assert.rejects(
+    sent.run({ action: "send", recipientRef: "opaque", message: "hello", idempotencyKey: "same-key" }),
+    /may already have been made.*same idempotency key/
+  );
+  assert.equal(sent.calls.length, 1);
   const audience = cliBridge();
   audience.after(() => {
     audience.context.memoryAudience = { kind: "conversation" };
