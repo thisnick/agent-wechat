@@ -4,8 +4,11 @@
 //   pnpm interfaces                  regenerate the listings whose sources changed
 //   pnpm interfaces cli http         regenerate only the named listings
 //   pnpm interfaces --all            regenerate every listing
-//   pnpm interfaces --check [...]    compare instead of writing (CI runs --check --all)
+//   pnpm interfaces --check [...]    compare instead of writing
 //   pnpm interfaces --list           show each listing and whether its sources changed
+//   pnpm interfaces --affected [...] print the names a run would check, one per line
+//   --no-cargo-tests                 leave out the listings that are cargo tests (cli, storage,
+//                                    websocket, http); CI checks those in the Native client job
 //
 // "Changed" means changed since the merge base with origin/main (override with
 // INTERFACES_BASE), including uncommitted and untracked files. Needs cargo with the
@@ -45,8 +48,8 @@ export const steps = [
     commands: check => [['pnpm', ['turbo', 'run', 'build', '--filter=@agent-wechat/agent-wechat', '--output-logs=errors-only']],
       ['node', ['packages/openclaw-extension/scripts/interface-listing.mjs', ...(check ? ['--check'] : [])]]] },
 ];
-// A change to the runner or generators themselves can affect every listing.
-const everything = ['scripts/interfaces/', 'package.json'];
+// A change to the runner, the generators or the CI job that runs them can affect every listing.
+const everything = ['scripts/interfaces/', 'package.json', '.github/workflows/interfaces.yml'];
 
 const git = args => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).split('\n').filter(Boolean);
 
@@ -62,6 +65,18 @@ export function changedFiles(base = process.env.INTERFACES_BASE ?? 'origin/main'
 
 export const affects = (step, files) => files.some(file => [...step.sources, ...everything].some(path => file === path || file.startsWith(path)));
 
+/**
+ * The listings a run checks: the named ones; every listing when `files` is `null` (`--all`, or the
+ * merge base is unknown); otherwise those whose sources changed. `--no-cargo-tests` leaves out the
+ * listings that are cargo tests: CI's Native client test job already builds and runs them.
+ */
+export function select(argv, files) {
+  const named = argv.filter(arg => !arg.startsWith('--'));
+  const chosen = named.length ? steps.filter(step => named.includes(step.name))
+    : files === null ? steps : steps.filter(step => affects(step, files));
+  return argv.includes('--no-cargo-tests') ? chosen.filter(step => !step.test) : chosen;
+}
+
 function main(argv) {
   const check = argv.includes('--check');
   const named = argv.filter(arg => !arg.startsWith('--'));
@@ -75,14 +90,18 @@ function main(argv) {
     for (const step of steps) console.log(`${step.name.padEnd(10)} ${step.label.padEnd(30)} ${files === null ? '' : affects(step, files) ? 'changed' : 'unchanged'}`);
     return 0;
   }
-  const selected = named.length ? steps.filter(step => named.includes(step.name))
-    : files === null ? steps : steps.filter(step => affects(step, files));
+  const selected = select(argv, files);
+  if (argv.includes('--affected')) {
+    for (const step of selected) console.log(step.name);
+    return 0;
+  }
   if (!argv.includes('--all') && !named.length && files === null) console.log('Could not find the merge base with origin/main; running every listing.');
   if (!selected.length) {
     console.log('No interface sources changed since the merge base with origin/main. Nothing to run (use --all to run everything).');
     return 0;
   }
-  const skipped = steps.filter(step => !selected.includes(step));
+  const considered = argv.includes('--no-cargo-tests') ? steps.filter(step => !step.test) : steps;
+  const skipped = considered.filter(step => !selected.includes(step));
   if (skipped.length && !named.length) console.log(`Skipping unchanged listings: ${skipped.map(step => step.name).join(', ')}.`);
   const started = process.hrtime.bigint();
   const results = [];

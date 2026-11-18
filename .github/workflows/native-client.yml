@@ -21,6 +21,11 @@ on:
       - '.node-version'
       - 'pnpm-lock.yaml'
       - 'scripts/ci/cache-key*.py'
+      # The test job checks these listings (see "Check Rust interface listings"), so a hand edit
+      # to one of them runs it too.
+      - 'interfaces/cli/**'
+      - 'interfaces/storage/**'
+      - 'interfaces/http/**'
       - '.github/workflows/native-client.yml'
   # PR runs only read the Rust cache, so main fills it. rust-cache stores
   # dependencies, not workspace crates, so main needs a run only when the
@@ -160,6 +165,18 @@ jobs:
             packages+=(--exclude wechat-simulator)
           fi
           cargo build --workspace "${packages[@]}" --all-targets --profile test --locked
+      # The wx CLI, storage, HTTP API and calls WebSocket listings under interfaces/ are these cargo
+      # tests (`steps` in scripts/interfaces/index.mjs); the Interfaces workflow leaves them to this
+      # job. Running them first makes a stale listing fail here, by name, rather than partway through
+      # the full test run. Same packages and targets as the build above, so nothing recompiles.
+      - name: Check Rust interface listings
+        if: matrix.suite == 'test'
+        run: |
+          packages=()
+          if [ "$SIMULATOR_CHECKS" != true ]; then
+            packages+=(--exclude wechat-simulator)
+          fi
+          cargo test --workspace "${packages[@]}" --lib --bins --locked -- cli_help::interface_tests schema_interface_tests calls_interface http_interface
       - if: matrix.suite == 'test'
         run: |
           packages=()
