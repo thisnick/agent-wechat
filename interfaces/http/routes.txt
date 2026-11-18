@@ -56,6 +56,8 @@ request MoveCustomStickerRequest.position | object, required, rejects unknown fi
 request MoveCustomStickerRequest.position.afterId | string, nullable | Place immediately after this identity; null places the item first.
 request NativeAccountRemovalRequest | object, rejects unknown fields | Request to remove a signed-out account.
 request NativeAccountRemovalRequest.confirmAccountId | string, required | Must repeat the account ID from the URL, to confirm the removal.
+request NativeContactPrivacySnapshotQuery | object, rejects unknown fields | Exact contacts to read from the local profile in one request.
+request NativeContactPrivacySnapshotQuery.ids | array of string, required | One to 200 exact contact IDs, at most 512 bytes per ID.
 request NativeContactRequestAccept | object, rejects unknown fields | Accept the inspected request with optional initial relationship privacy.
 request NativeContactRequestAccept.expectedVersion | string, required | Current request version returned by get/list.
 request NativeContactRequestAccept.privacy | object, nullable, rejects unknown fields | Initial relationship privacy; omission keeps the supported default.
@@ -429,6 +431,8 @@ response NativeContactPrivacy.privacy.chatsOnly | boolean, required | Restrict t
 response NativeContactPrivacy.privacy.hideMyPosts | boolean, required | Hide this account's Moments posts from this person.
 response NativeContactPrivacy.privacy.hideTheirPosts | boolean, required | Hide this person's Moments posts from this account.
 response NativeContactPrivacy.version | string, required | Account/contact-bound version required when saving a change.
+response NativeContactPrivacySnapshots | object | Canonical saved privacy snapshots from a single profile read view.
+response NativeContactPrivacySnapshots.snapshots | object, required | Snapshots keyed by contact ID. Missing, unsupported, pending and unresolved contacts are omitted.
 response NativeContactRequest | object | One per-peer canonical request conversation with a current action/version.
 response NativeContactRequest.actionable | boolean, required | Whether the current incoming request can be accepted locally.
 response NativeContactRequest.attention | boolean, required | Incoming request needing attention in navigation badges.
@@ -1279,6 +1283,7 @@ route POST /v1/accounts/{a}/auth/logout-local | scope login, response untyped | 
 route POST /v1/accounts/{a}/avatars/{id}/refresh | scope media and read, request RefreshAvatarRequest (optional), response untyped, status 202, sdk response NativeOperation | Ask WeChat for the latest avatar of one contact, with optional group context for an OpenIM member. Poll the returned operation.
 route POST /v1/accounts/{a}/connect | scope login, response untyped, status 202, sdk response NativeOperation | Connect the signed-in account to WeChat. Poll the returned operation.
 route POST /v1/accounts/{a}/consumers/{consumer}/ack | scope read, request EventAckRequest, response untyped | Record how far a named consumer has read the event stream. It never marks messages read.
+route POST /v1/accounts/{a}/contact-privacy/snapshots | scope admin, request NativeContactPrivacySnapshotQuery, response NativeContactPrivacySnapshots, sdk response NativeContactPrivacySnapshots | Read saved privacy snapshots for a batch of exact contacts.
 route POST /v1/accounts/{a}/contact-requests | scope admin, idempotency key required, request NativeContactRequestSend, response NativeOperation, status 202, sdk response NativeOperation | Send one friend request with an account-bound discovery reference.
 route POST /v1/accounts/{a}/contact-requests/{id}/accept | scope admin, idempotency key required, request NativeContactRequestAccept, response NativeOperation, status 202, sdk response NativeOperation | Accept the exact inspected incoming request.
 route POST /v1/accounts/{a}/contact-sync | scope read, response untyped, status 202, sdk response NativeOperation | Start syncing the contact catalog from WeChat. Poll the returned operation.

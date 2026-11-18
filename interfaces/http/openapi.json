@@ -1840,6 +1840,39 @@
         ],
         "type": "object"
       },
+      "NativeContactPrivacySnapshotQuery": {
+        "additionalProperties": false,
+        "description": "Exact contacts to read from the local profile in one request.",
+        "properties": {
+          "ids": {
+            "description": "One to 200 exact contact IDs, at most 512 bytes per ID.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "ids"
+        ],
+        "type": "object"
+      },
+      "NativeContactPrivacySnapshots": {
+        "description": "Canonical saved privacy snapshots from a single profile read view.",
+        "properties": {
+          "snapshots": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/NativeContactPrivacy"
+            },
+            "description": "Snapshots keyed by contact ID. Missing, unsupported, pending and unresolved contacts are omitted.",
+            "type": "object"
+          }
+        },
+        "required": [
+          "snapshots"
+        ],
+        "type": "object"
+      },
       "NativeContactRequest": {
         "description": "One per-peer canonical request conversation with a current action/version.",
         "properties": {
@@ -5894,6 +5927,66 @@
         "x-agent-wechat-sdk-response": [
           {
             "$ref": "#/components/schemas/NativeOperation"
+          }
+        ]
+      }
+    },
+    "/v1/accounts/{a}/contact-privacy/snapshots": {
+      "post": {
+        "operationId": "contactPrivacySnapshots",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NativeContactPrivacySnapshotQuery"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeContactPrivacySnapshots"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "admin"
+            ]
+          }
+        ],
+        "summary": "Read saved privacy snapshots for a batch of exact contacts.",
+        "tags": [
+          "contacts"
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/NativeContactPrivacySnapshots"
           }
         ]
       }
