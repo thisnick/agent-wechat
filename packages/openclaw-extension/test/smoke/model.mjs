@@ -33,12 +33,11 @@ async function exercise(name, conversationAccess, readPolicy, dmScope = 'main') 
       if (url.pathname === '/v1/accounts/a/events/stream') { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.write(': fixture\n\n'); streams.add(res); req.once('close', () => streams.delete(res)); return; }
       const lookup = /^\/v1\/accounts\/a\/messages\/([^/]+)$/.exec(url.pathname);
       if (lookup) {
-        const custody = JSON.parse(await readFile(join(temporary, 'probe-consumer', createHash('sha256').update('fixture\0a').digest('hex') + '.json'), 'utf8'));
-        const message = custody.items[decodeURIComponent(lookup[1])]?.message;
+        const message = JSON.parse(await readFile(join(temporary, 'daemon-messages.json'), 'utf8'))[decodeURIComponent(lookup[1])];
         if (message) return json(message);
       }
       let raw = ''; for await (const chunk of req) { raw += chunk; assert.ok(raw.length < 4 * 1024 * 1024); }
-      if (url.pathname === '/v1/accounts/a/threads/u1/read-state') { const body = JSON.parse(raw); assert.deepEqual(body, {expectedVersion:'1'}); const custody=JSON.parse(await readFile(join(temporary,'probe-consumer',createHash('sha256').update('fixture\0a').digest('hex')+'.json'),'utf8')); const triggers=Object.values(custody.items).filter(item=>item.readPending).map(item=>item.message.id); reads.push(triggers); return json({}); }
+      if (url.pathname === '/v1/accounts/a/threads/u1/read-state') { const body = JSON.parse(raw); assert.deepEqual(body, {expectedVersion:'1'}); const custody=JSON.parse(await readFile(join(temporary,'probe-consumer',createHash('sha256').update('fixture\0a').digest('hex')+'.json'),'utf8')); const triggers=Object.values(custody.reads).flatMap(read=>read.messages.map(message=>message.id)); reads.push(triggers); return json({}); }
       if (url.pathname === '/v1/accounts/a/sends') return json({ id: 'synthetic-send', state: 'accepted' });
       if (url.pathname === '/model/v1/chat/completions') {
         assert.equal(req.headers.authorization, 'Bearer synthetic-model-key');
@@ -83,13 +82,14 @@ async function exercise(name, conversationAccess, readPolicy, dmScope = 'main') 
     const hooks = (await readFile(join(temporary, 'hooks.jsonl'), 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line));
     assert.ok(requests.some(request => JSON.stringify(request.messages).includes('wechat-native:a:single') && JSON.stringify(request.messages).includes('native-model-single-exact-input')));
     const inbound = readPolicy === undefined || readPolicy === 'on_inbound';
-    assert.equal(items.get('gap').readPending, undefined);
+    // The deferred gap was taken in but never handled, so it is still queued and never read.
+    assert.equal(items.get('gap').open, 'received');
     assert.ok(!reads.flat().includes('gap'));
+    assert.deepEqual(result.pendingReads, []);
     if (inbound) {
       for (const id of ['single', 'blocking', 'queued-a', 'queued-b', 'command']) {
         assert.equal(items.get(id).runId, undefined);
         assert.equal(items.get(id).handoffUnconfirmed, false);
-        assert.equal(items.get(id).readPending, false);
         assert.ok(reads.flat().includes(id));
       }
       assert.ok(!requests.some(request => JSON.stringify(request.messages.at(-1)).includes('wechat-native:a:command')),
@@ -108,7 +108,7 @@ async function exercise(name, conversationAccess, readPolicy, dmScope = 'main') 
         assert.ok(hooks.some(hook => hook.kind === 'model_call_started' && hook.event.runId === single.runId && hook.event.sessionId === input.event.sessionId));
       }
     }
-    if (!inbound) { assert.equal(items.get('command').readPending, undefined); assert.ok(!reads.flat().includes('command')); }
+    if (!inbound) assert.ok(!reads.flat().includes('command'));
     // The released dispatch path can serialize concurrent inputs even in
     // collect mode. Check what actually reached it rather than assuming merge.
     const merged = hooks.some(hook => hook.kind === 'llm_input' && hook.event.prompt.includes('native-model-queued-alpha') && hook.event.prompt.includes('native-model-queued-beta'));

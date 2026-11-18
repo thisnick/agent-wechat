@@ -68,7 +68,7 @@ in [Agent tools](/openclaw/tools/#calling).
 <Aside title="Good to know">
 - **Everything is off by default.** With no `dmPolicy` or `groupPolicy`, the agent answers nobody.
 - **The agent replies as you.** Replies go out from your WeChat account, and OpenClaw marks the chat read once it has handled the message. See [read receipts](/openclaw/read-receipts/).
-- **`consumerStateDir`** keeps track of which messages OpenClaw has already handled. Put it somewhere that survives restarts.
+- **`consumerStateDir`** records where OpenClaw is in the message stream and which replies are in progress. It holds no message text, apart from a one-time backup made when it converts an earlier release's file. Put it somewhere that survives restarts.
 - **If your config has a `plugins.allow` list,** add `agent-wechat` to it.
 - The token can come from any OpenClaw secret provider, not only the environment. See [Configuration](/reference/configuration/#openclaw).
 </Aside>

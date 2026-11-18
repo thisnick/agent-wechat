@@ -1,7 +1,7 @@
 ---
 title: OpenClaw 快速接入
 description: 将微信配置为 OpenClaw 通道，使智能体能够自动查阅会话并回复。
-sourceHash: 6c41442fce11
+sourceHash: "13de3768e65a"
 ---
 
 import { Aside, Steps } from '@astrojs/starlight/components';
@@ -67,7 +67,7 @@ import chat from '../../../../assets/wechat-chat.svg';
 <Aside title="使用提示">
 - **默认不响应任何消息。** 若未配置 `dmPolicy` 或 `groupPolicy`，智能体将对所有来信保持沉默。
 - **智能体代表你本人回复。** 所有外发消息均直接从你的微信账号发出，且 OpenClaw 处理完成后会自动将该会话标记为已读。详见[已读回执](/openclaw/read-receipts/)。
-- **`consumerStateDir`** 用于持久化记录 OpenClaw 已处理过的消息进度位点。请指定一个在重启后依然保留的持久化目录。
+- **`consumerStateDir`** 用于记录 OpenClaw 在消息流中的处理位置，以及哪些回复仍在进行中。它不保存消息正文，唯一例外是转换早期版本文件时生成的一次性备份。请指定一个在重启后依然保留的目录。
 - **若配置文件中启用了 `plugins.allow` 白名单，** 请将 `agent-wechat` 添加到该列表中。
 - 令牌可通过 OpenClaw 支持的任意 Secret Provider 获取，不局限于环境变量。参见[配置选项](/reference/configuration/#openclaw)。
 </Aside>

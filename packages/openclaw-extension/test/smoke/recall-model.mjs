@@ -24,7 +24,7 @@ const modelHeld = new Promise(resolve => { releaseModel = resolve; });
 const contentHeld = new Promise(resolve => { releaseContent = resolve; });
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const message = (id, body, extra = {}) => ({ id, accountId: 'a', threadId: 'wxid_fixture', serverId: String(9000 + messages.size), senderId: 'wxid_fixture', type: 1,
-  direction: 'incoming', body, createdAt: '2026-10-21T12:00:00Z', version: 'v1', media: [],
+  direction: 'incoming', body, createdAt: new Date().toISOString(), version: 'v1', media: [],
   mentions: { state: 'unknown', userIds: [], self: null, all: null, source: null }, ...extra });
 messages.set('msg_foreign', message('msg_foreign', 'Another thread', { direction: 'outgoing', senderId: 'self', threadId: 'other-peer', serverId: '99' }));
 const emit = (kind, data) => {
@@ -133,7 +133,12 @@ async function waitFor(predicate, label, timeout = 30000) {
 }
 const custodyPath = join(temporary, 'consumer', createHash('sha256').update('fixture\0a').digest('hex') + '.json');
 const custody = async () => JSON.parse(await readFile(custodyPath, 'utf8'));
-const item = async id => { try { return (await custody()).items[id]; } catch { return undefined; } };
+// Only unfinished work is stored, by identity; finished messages leave no record.
+const item = async id => { try { return (await custody()).open[id]; } catch { return undefined; } };
+const replacementRequests = () => requests.filter(request => {
+  const user = [...request.messages].reverse().find(value => value.role === 'user' && !(typeof value.content === 'string' && value.content.startsWith('OpenClaw runtime context:')));
+  return JSON.stringify(user).includes('runtime-recall-replacement');
+});
 try {
   await mkdir(join(temporary, 'plugin/dist'), { recursive: true }); await mkdir(join(temporary, 'workspace'));
   for (const file of ['package.json', 'openclaw.plugin.json']) await copyFile(join(root, 'packages/openclaw-extension', file), join(temporary, 'plugin', file));
@@ -150,8 +155,8 @@ try {
   child = spawn(process.execPath, [join(sdk, 'openclaw.mjs'), 'gateway', 'run'], { env: { PATH: process.env.PATH, HOME: temporary, TMPDIR: temporary, OPENCLAW_STATE_DIR: join(temporary, 'state'), OPENCLAW_CONFIG_PATH: configPath, AGENT_WECHAT_TOKEN: token, NO_COLOR: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
   for (const stream of [child.stdout, child.stderr]) stream.on('data', chunk => { log = (log + chunk.toString()).slice(-131072); });
   await waitFor(() => streams.size > 0, 'actual channel SSE connection');
-  commit(message('tool-trigger', 'runtime-recall-tool-input: recall the exact synthetic own message'));
-  await waitFor(async () => (await item('tool-trigger'))?.state === 'completed', 'registered recall tool turn');
+  const toolCursor = commit(message('tool-trigger', 'runtime-recall-tool-input: recall the exact synthetic own message'));
+  await waitFor(async () => acknowledgements.includes(toolCursor) && modelStep === 6 && !(await item('tool-trigger')), 'registered recall tool turn');
   assert.equal(modelStep, 6); assert.equal(posts.length, 2); assert.equal(nativeRecalls, 1); assert.equal(posts[0].key, posts[1].key);
   const completedSends = sends.length; assert.ok(completedSends >= 1 && completedSends <= 2); assert.equal(messages.get('msg_own').body, '[Message recalled]');
 
@@ -160,23 +165,20 @@ try {
   const recalledCursor = recall(blocked);
   await waitFor(() => acknowledgements.includes(recalledCursor), 'recall ACK while provider is blocked');
   const blockedCustody = await item(blocked.id);
-  assert.equal(blockedCustody.message.body, '[Message recalled]'); assert.equal(blockedCustody.dispatchManifest, undefined);
-  assert.equal(blockedCustody.invalidatedByRecall, true); assert.equal(blockedCustody.readPending, false);
+  assert.equal(blockedCustody.dispatchManifest, undefined); assert.equal(blockedCustody.invalidatedByRecall, true);
+  assert.deepEqual((await custody()).reads, {});
   const replacement = { ...blocked, serverId: '18446744073709551610', body: 'runtime-recall-replacement' };
   const replacementCursor = commit(replacement);
   await waitFor(() => acknowledgements.includes(replacementCursor), 'replacement ACK while old provider is blocked');
-  assert.equal((await item(blocked.id)).message.serverId, replacement.serverId);
+  assert.equal((await item(blocked.id)).serverId, replacement.serverId);
   releaseModel();
-  await waitFor(async () => (await item(blocked.id))?.state === 'completed', 'fresh exact source occupant dispatch');
-  const replacementRequests = () => requests.filter(request => {
-    const user = [...request.messages].reverse().find(value => value.role === 'user' && !(typeof value.content === 'string' && value.content.startsWith('OpenClaw runtime context:')));
-    return JSON.stringify(user).includes('runtime-recall-replacement');
-  });
+  await waitFor(async () => sends.some(send => send.text === 'Fresh replacement delivered') && !(await item(blocked.id)), 'fresh exact source occupant dispatch');
   assert.equal(replacementRequests().length, 1, 'The actual host must admit one new exact source occupant');
   assert.equal(sends.length, completedSends + 1); assert.equal(sends.at(-1).text, 'Fresh replacement delivered');
   assert.ok(!sends.some(send => send.text === 'Late reply must be suppressed'));
-  const duplicateCursor = commit({ ...replacement });
-  await waitFor(() => acknowledgements.includes(duplicateCursor), 'same-target duplicate ACK'); await sleep(200);
+  // The daemon commits each message once; a reconnect resumes after the cursor without replaying it.
+  const acknowledgedBefore = acknowledgements.length; for (const stream of streams) stream.destroy();
+  await waitFor(() => streams.size > 0 && acknowledgements.length > acknowledgedBefore, 'stream reconnect after the cursor'); await sleep(200);
   assert.equal(replacementRequests().length, 1); const afterReplacementSends = sends.length;
 
   const media = message('media-race', null, { type: 3 }); commit(media);
@@ -184,24 +186,25 @@ try {
   await waitFor(() => acknowledgements.includes(mediaCursor), 'recall ACK while media is blocked');
   const beforeMedia = requests.length; releaseContent(); await sleep(300);
   assert.equal(requests.length, beforeMedia, 'Late recalled media must not start a model');
-  assert.equal((await item(media.id)).message.body, '[Message recalled]'); assert.equal((await item(media.id)).dispatchManifest, undefined);
+  assert.equal(await item(media.id), undefined);
 
   const late = message('late-original', 'Late original must not be delivered', { serverId: '18446744073709551613' });
   recall(late, false); const lateCursor = commit(late);
   await waitFor(() => acknowledgements.includes(lateCursor), 'out-of-order original custody'); await sleep(200);
-  assert.equal((await item(late.id)).state, 'ignored'); assert.equal((await item(late.id)).message.body, '[Message recalled]');
+  assert.equal(await item(late.id), undefined);
   assert.equal(requests.length, beforeMedia); assert.equal(sends.length, afterReplacementSends);
   const reused = message('reused-id', 'New exact occupant must remain', { direction: 'outgoing', senderId: 'self', serverId: '18446744073709551612' });
-  const reuseCursor = commit(reused); await waitFor(() => acknowledgements.includes(reuseCursor), 'new occupant custody');
+  const reuseCursor = commit(reused); await waitFor(() => acknowledgements.includes(reuseCursor), 'outgoing commit ACK');
+  // A recall naming a stale target under the same source ID is acknowledged and leaves no work behind.
+  // Preserving a queued new occupant is covered by the unit tests, since outgoing messages are never queued.
   const old = { ...reused, serverId: '18446744073709551611' }; const oldCursor = recall(old);
-  await waitFor(() => acknowledgements.includes(oldCursor), 'recycled-ID recall ACK');
-  assert.equal((await item(reused.id)).message.serverId, reused.serverId);
-  assert.equal((await item(reused.id)).message.body, reused.body);
+  await waitFor(() => acknowledgements.includes(oldCursor), 'stale-target recall ACK');
+  assert.equal(await item(reused.id), undefined); assert.deepEqual(Object.keys((await custody()).open), []);
   const persisted = await readFile(custodyPath, 'utf8');
   assert.ok(!persisted.includes('runtime-recall-blocked-original')); assert.ok(!persisted.includes('Late original must not be delivered'));
   console.log(JSON.stringify({ gatewayVersion: '2026.11.4', actualRegisteredRecallTool: true, actualSendReceiptReachedProvider: true, exactServerIdPreserved: true, sameTargetStableKey: true,
     recallPostAttempts: posts.length, nativeRecallAttempts: nativeRecalls, foreignThreadRejected: true, sseRecallWhileModelBlocked: true,
-    lateReplySuppressed: true, freshSourceOccupantDispatchedOnce: true, sseRecallWhileMediaBlocked: true, lateMediaSuppressed: true, outOfOrderRecallSuppressed: true, recycledIdRecallAckPreservesCurrent: true }));
+    lateReplySuppressed: true, freshSourceOccupantDispatchedOnce: true, sseRecallWhileMediaBlocked: true, lateMediaSuppressed: true, outOfOrderRecallSuppressed: true, staleTargetRecallAcknowledged: true, noRepeatAfterReconnect: true }));
 } finally {
   releaseModel(); releaseContent();
   if (child && child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await Promise.race([once(child, 'exit'), sleep(5000)]); if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await once(child, 'exit'); } }

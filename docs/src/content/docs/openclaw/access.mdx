@@ -14,7 +14,7 @@ flowchart LR
   GC --> MC["@mentioned?<br/>requireMention"]
   DC -- yes --> A[Agent replies]
   MC -- yes --> A
-  MC -- no --> C[Kept as context]
+  MC -- no --> C[Context for the next mention]
 ```
 
 A message that fails a check is ignored and stays unread.
@@ -35,7 +35,7 @@ A message that fails a check is ignored and stays unread.
 | `allowlist` | Senders in `groupAllowFrom`, or in `allowFrom` if that's empty |
 | `open` | Any group member |
 
-In groups, the agent only replies when someone **@mentions** you. Messages without a mention are kept, and the next mention includes them as context.
+In groups, the agent only replies when someone **@mentions** you. The next mention includes the messages since the agent's last reply in that group as context, read from the chat's history.
 
 Override any of this per group in `groups`, keyed by group ID, with `"*"` for all groups:
 
@@ -54,10 +54,22 @@ Override any of this per group in `groups`, keyed by group ID, with `"*"` for al
 
 Here the agent answers Alice and Bob directly. In the family group it answers Alice and Bob without needing a mention. In the project group it answers only Carol, when she mentions you. Every other group is ignored.
 
+## Messages that arrive while OpenClaw is off
+
+When the Gateway starts again, the agent catches up on what it missed:
+
+| Missed message | What happens |
+| --- | --- |
+| Sent in the last 24 hours | Answered, if it passes the checks above |
+| More than 100 of those | Only the newest 100 are answered |
+| Older than 24 hours | Skipped |
+
+Only messages that pass the checks above count toward the 100, including any that were waiting when the Gateway stopped. Group messages without a mention still appear as context for the next mention. Skipped messages are noted in the Gateway log.
+
 <Aside title="Good to know">
 - **Find IDs** with `wx contacts find NAME` for people and `wx chats find NAME` for groups (group IDs end in `@chatroom`). Your own ID is the `senderId` on messages you sent.
 - **A mention means a real WeChat @mention** of your account or everyone in the group. The daemon reads WeChat's mention metadata; typing "@yourname" as plain text doesn't count. See [sending and receiving mentions](/use/groups/#mention-group-members).
-- **Group context:** `messages.groupChat.historyLimit` sets how many unmentioned messages are kept per group (default 50, maximum 200, 0 turns it off). Images in that context are downloaded only when a mention triggers a reply.
+- **Group context:** `messages.groupChat.historyLimit` sets how many earlier messages a mention can include (default 50, maximum 200, 0 turns it off). It includes only messages from people the agent may answer, never your own. Images in that context are downloaded only when a mention triggers a reply.
 - **Recalled messages** are removed from the context, even if they were never answered.
 - **Media is checked after the sender.** Attachments from ignored messages are never downloaded or transcribed.
 </Aside>

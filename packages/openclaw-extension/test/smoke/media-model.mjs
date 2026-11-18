@@ -46,10 +46,14 @@ async function exercise(name, conversationAccess, readPolicy, dmScope = 'main') 
       if (url.pathname === '/v1/accounts/a/threads') return json({ items: [{ id: threadId, readStateVersion: '1' }], nextCursor: null, sourceGeneration: 'fixture', coverage: {} });
       if (url.pathname === '/v1/accounts/a/events') return json({ items: [], nextCursor: '0' });
       if (url.pathname === '/v1/accounts/a/events/stream') { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.write(': fixture\n\n'); streams.add(res); req.once('close', () => streams.delete(res)); return; }
+      if (url.pathname === `/v1/accounts/a/threads/${encodeURIComponent(threadId)}/messages`) {
+        // Group context for a mention is read from the chat's saved messages, newest first.
+        const saved = Object.values(JSON.parse(await readFile(join(temporary, 'daemon-messages.json'), 'utf8'))).filter(message => message.threadId === threadId);
+        return json({ items: saved.reverse(), nextCursor: null, sourceGeneration: 'fixture', coverage: {} });
+      }
       const lookup = /^\/v1\/accounts\/a\/messages\/([^/]+)$/.exec(url.pathname);
       if (lookup) {
-        const custody = JSON.parse(await readFile(join(temporary, 'probe-consumer', createHash('sha256').update('fixture\0a').digest('hex') + '.json'), 'utf8'));
-        const message = custody.items[decodeURIComponent(lookup[1])]?.message;
+        const message = JSON.parse(await readFile(join(temporary, 'daemon-messages.json'), 'utf8'))[decodeURIComponent(lookup[1])];
         if (message) return json(message);
       }
       const media = /^\/v1\/accounts\/a\/messages\/([^/]+)\/media$/.exec(url.pathname);
@@ -58,7 +62,7 @@ async function exercise(name, conversationAccess, readPolicy, dmScope = 'main') 
       if (content) { const value = assets.get(content[1]); res.setHeader('content-type', value.asset.contentType); res.end(content[1] === 'corrupt-image' ? Buffer.from('wrong') : value.bytes); return; }
       let raw = ''; for await (const chunk of req) { raw += chunk; assert.ok(raw.length < 4 * 1024 * 1024); }
       if (url.pathname.endsWith('/media-transfers')) return json({ id: 'pending-job', state: 'queued' });
-      if (url.pathname === `/v1/accounts/a/threads/${encodeURIComponent(threadId)}/read-state`) { const body = JSON.parse(raw); assert.deepEqual(body, {expectedVersion:'1'}); const custody=JSON.parse(await readFile(join(temporary,'probe-consumer',createHash('sha256').update('fixture\0a').digest('hex')+'.json'),'utf8')); const triggers=Object.values(custody.items).filter(item=>item.readPending).map(item=>item.message.id); reads.push(triggers); if (triggers.includes('file') && reads.filter(ids => ids.includes('file')).length === 1) { res.statusCode = 503; return json({error:{code:'fixture_lost_response'}}); } return json({}); }
+      if (url.pathname === `/v1/accounts/a/threads/${encodeURIComponent(threadId)}/read-state`) { const body = JSON.parse(raw); assert.deepEqual(body, {expectedVersion:'1'}); const custody=JSON.parse(await readFile(join(temporary,'probe-consumer',createHash('sha256').update('fixture\0a').digest('hex')+'.json'),'utf8')); const triggers=Object.values(custody.reads).flatMap(read=>read.messages.map(message=>message.id)); reads.push(triggers); if (triggers.includes('file') && reads.filter(ids => ids.includes('file')).length === 1) { res.statusCode = 503; return json({error:{code:'fixture_lost_response'}}); } return json({}); }
       if (url.pathname === '/v1/accounts/a/sends') return json({ id: 'synthetic-send', state: 'accepted' });
       if (url.pathname === '/model/v1/chat/completions') {
         assert.equal(req.headers.authorization, 'Bearer synthetic-model-key');

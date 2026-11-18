@@ -184,17 +184,23 @@ merging it to publish the stable release. Stable builds use npm's
 ## Upgrade compatibility
 
 Every release must accept the consumer state an earlier release left on disk.
-The baseline is 1.0.0-beta.13: a release may not stop loading or dispatching a
-consumer file written by it. Two tests hold this contract:
+The baseline is 1.0.0-beta.13: a release may not stop loading a consumer file
+written by it, and the group context that file buffered must still reach the
+next mention. Two tests hold this contract:
 
 - `packages/native-client-rust/crates/wechat-core/src/native_compat_tests.rs`
   pins the daemon's message JSON in
-  `crates/wechat-core/tests/fixtures/native-compat/messages.json`. Consumers save
-  this JSON when a message arrives and compare it with a fresh read before
-  dispatching, so any change to it (including an added field) is an upgrade risk.
+  `crates/wechat-core/tests/fixtures/native-compat/messages.json`. Consumer
+  files before schema version 2 saved this JSON when a message arrived; current
+  consumers store only message identities and read messages fresh, but the
+  pinned JSON is what the compatibility test dispatches against.
 - `packages/openclaw-extension/src/native-consumer-compat.test.ts` loads the
-  frozen `test/fixtures/native-compat/consumer-state-1.0.0-beta.13.json` and
-  dispatches its buffered group messages against the pinned daemon JSON.
+  frozen `test/fixtures/native-compat/consumer-state-1.0.0-beta.13.json`, checks
+  its migration, and dispatches a mention whose group context is read from the
+  pinned daemon JSON. It also converts the frozen
+  `consumer-state-2.7.0.json`, written by the last schema version 1 writer
+  (2.4.2 through 2.7.0), and checks the cursor, queued work, interrupted turn,
+  pending reads, group context and backup.
 
 To change the message JSON on purpose, regenerate the pinned file with
 `UPDATE_NATIVE_COMPAT_FIXTURES=1 cargo +1.93.1 test -p wechat-core native_compat`
