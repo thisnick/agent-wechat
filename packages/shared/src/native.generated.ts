@@ -1372,7 +1372,19 @@ alias: string | null,
  * Relationship evidence: `friend` when membership is established, `non_contact` when
  * known flags do not establish membership, or `unknown` when flags are unavailable.
  */
-relation: string, classification?: PeerClassification, };
+relation: string, classification?: PeerClassification,
+/**
+ * Current relationship settings, when available for this friend.
+ */
+privacy?: NativeContactPrivacySettings,
+/**
+ * Version to supply when editing the current relationship settings.
+ */
+privacyVersion?: string,
+/**
+ * True while an accepted relationship edit is awaiting contact sync.
+ */
+privacyPending?: boolean, };
 export type NativeGroup = {
 /**
  * Group ID, ending with `@chatroom`. It is the same as `roomId`.
@@ -1546,16 +1558,6 @@ privacy: NativeContactPrivacySettings,
  * Account/contact-bound version required when saving a change.
  */
 version: string, };
-export type NativeContactPrivacySnapshotQuery = {
-/**
- * One to 200 exact contact IDs, at most 512 bytes per ID.
- */
-ids: Array<string>, };
-export type NativeContactPrivacySnapshots = {
-/**
- * Snapshots keyed by contact ID. Missing, unsupported, pending and unresolved contacts are omitted.
- */
-snapshots: { [key in string]?: NativeContactPrivacy }, };
 export type NativeContactUpdate = {
 /**
  * Desired settings; unrelated contact flags are preserved.

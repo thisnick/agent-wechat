@@ -12,7 +12,7 @@ import {
 } from "@agent-wechat/shared";
 import type { Connection } from "./connection.ts";
 import { t, formatLocale } from "./i18n.ts";
-import { readableError } from "./session.ts";
+import { pause, readableError } from "./session.ts";
 import { HubAvatar } from "./avatars.tsx";
 import { Icon } from "./ui.tsx";
 
@@ -615,7 +615,11 @@ export function ContactDetailDialog({
     [connection, account],
   );
   const lookupAbort = useRef<AbortController | null>(null);
-  useEffect(() => () => lookupAbort.current?.abort(), [connection, account]);
+  const refreshAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => {
+    lookupAbort.current?.abort();
+    refreshAbort.current?.abort();
+  }, [connection, account]);
   const request = "request" in selection ? selection.request : null;
   const discovery = "discovery" in selection ? selection.discovery : null;
   const contact = "contact" in selection ? selection.contact : null;
@@ -628,6 +632,7 @@ export function ContactDetailDialog({
     : savedContact?.relation === "non_contact" ? t("contactsUi.notFriendsYet")
     : null;
   const name =
+    savedContact?.displayName ??
     contact?.displayName ??
     removal?.displayName ??
     request?.displayName ??
@@ -680,7 +685,8 @@ export function ContactDetailDialog({
     && !sameContactPrivacy(draft.value, savedPrivacy.privacy));
   const [privacyLoading, setPrivacyLoading] = useState(false),
     [privacyReadError, setPrivacyError] = useState("");
-  const privacyError = privacyDenied ? t("contactsUi.privacyPermission") : privacyReadError;
+  const privacyError = privacyDenied ? t("contactsUi.privacyReadPermission") : privacyReadError;
+  const [contactRefreshing, setContactRefreshing] = useState(false);
   const [privacyRevision, setPrivacyRevision] = useState(0);
   const [privacyWaiting, setPrivacyWaiting] = useState(false);
   const [busy, setBusy] = useState(false),
@@ -727,9 +733,9 @@ export function ContactDetailDialog({
     return () => dialog.close();
   }, []);
   useEffect(() => {
-    setPrivacyError("");
+    if (!contactRefreshing) setPrivacyError("");
     setPrivacyWaiting(false);
-    if (!friendId || savedPrivacy || privacyDenied) {
+    if (!friendId || savedPrivacy || privacyDenied || contactRefreshing) {
       setPrivacyLoading(false);
       return;
     }
@@ -762,7 +768,7 @@ export function ContactDetailDialog({
         if (!abort.signal.aborted)
           setPrivacyError(
             e instanceof NativeApiError && e.status === 403
-              ? t("contactsUi.privacyPermission")
+              ? t("contactsUi.privacyReadPermission")
               : t("contactsUi.privacyReadFailed"),
           );
       })
@@ -776,10 +782,45 @@ export function ContactDetailDialog({
       unsubscribe();
       abort.abort();
     };
-  }, [actions, savedPrivacy, friendId, privacyDenied, privacyRevision, connection, account]);
+  }, [actions, savedPrivacy, friendId, privacyDenied, privacyRevision, contactRefreshing, connection, account]);
   function refreshPrivacy() {
     if (friendId) privacyCache.invalidate(account, friendId);
     setPrivacyRevision((n) => n + 1);
+  }
+  async function refreshContact() {
+    if (!friendId || refreshAbort.current) return;
+    const session = connection.session;
+    const abort = new AbortController();
+    refreshAbort.current = abort;
+    const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(125_000)]);
+    const unsubscribe = session.subscribe(() => {
+      const current = session.snapshot();
+      if (current.account !== account || current.signInRequired === account) abort.abort();
+    });
+    setContactRefreshing(true);
+    setError("");
+    try {
+      let operation = await session.client.refreshContact(account, friendId, signal);
+      while (["queued", "running"].includes(operation.state)) {
+        await pause(700, signal);
+        signal.throwIfAborted();
+        operation = await session.client.operation(account, operation.id, signal);
+      }
+      signal.throwIfAborted();
+      if (operation.state !== "succeeded" || !operation.result
+        || typeof operation.result !== "object" || !("recordCount" in operation.result)
+        || operation.result.recordCount !== 1) {
+        throw Error(t("contactsUi.contactRefreshFailed"));
+      }
+      refreshPrivacy();
+      void session.refreshConversations(account, true).catch(() => {});
+    } catch {
+      if (!abort.signal.aborted) setError(t("contactsUi.contactRefreshFailed"));
+    } finally {
+      unsubscribe();
+      if (refreshAbort.current === abort) refreshAbort.current = null;
+      if (!abort.signal.aborted) setContactRefreshing(false);
+    }
   }
   const save = (value: ContactChange) => {
     connection.cache.writeState(account, receiptId, value);
@@ -1060,10 +1101,10 @@ export function ContactDetailDialog({
           {friendId && privacyError && !privacyDenied && (
             <button
               className="omni-action"
-              disabled={busy || privacyLoading || (!!receipt && !ended)}
-              onClick={refreshPrivacy}
+              disabled={busy || privacyLoading || contactRefreshing || (!!receipt && !ended)}
+              onClick={() => void refreshContact()}
             >
-              {t("contactsUi.refreshPrivacy")}
+              {t(contactRefreshing ? "contactsUi.refreshingContact" : "contactsUi.refreshPrivacy")}
             </button>
           )}
         </section>

@@ -1,22 +1,18 @@
-import { NativeApiError, type NativeContactPrivacy, type NativeWeChatClient } from "@agent-wechat/shared";
+import { NativeApiError, type NativeContact, type NativeContactPrivacy, type NativeWeChatClient } from "@agent-wechat/shared";
 
-/** Admin-only snapshots for the active account. Never written to browser storage. */
+/** Relationship settings for the active account. Never written to browser storage. */
 export class ContactPrivacyCache {
   private account: string | null = null;
   private lifetime = new AbortController();
   private session = Symbol();
   private entries = new Map<string, NativeContactPrivacy>();
   private reads = new Map<string, symbol>();
-  private queued = new Set<string>();
   private listeners = new Set<() => void>();
-  private timer?: ReturnType<typeof setTimeout>;
-  private warming = false;
-  private prefetchUnavailable = false;
   private denial?: NativeApiError;
 
-  private client: Pick<NativeWeChatClient, "contactPrivacy" | "contactPrivacySnapshots">;
+  private client: Pick<NativeWeChatClient, "contact">;
 
-  constructor(client: Pick<NativeWeChatClient, "contactPrivacy" | "contactPrivacySnapshots">) {
+  constructor(client: Pick<NativeWeChatClient, "contact">) {
     this.client = client;
   }
 
@@ -41,7 +37,6 @@ export class ContactPrivacyCache {
     this.session = Symbol();
     this.account = account;
     this.denial = denial;
-    this.prefetchUnavailable = !!denial;
     this.clearEntries();
   }
 
@@ -54,80 +49,37 @@ export class ContactPrivacyCache {
   private clearEntries() {
     this.lifetime.abort();
     this.lifetime = new AbortController();
-    clearTimeout(this.timer);
-    this.timer = undefined;
     this.entries.clear();
     this.reads.clear();
-    this.queued.clear();
-    this.warming = false;
     this.notify();
   }
 
   invalidate(account: string, id: string) {
     if (account !== this.account) return;
-    this.reads.delete(id);
-    this.queued.delete(id);
+    this.reads.set(id, Symbol());
     if (this.entries.delete(id)) this.notify();
   }
 
-  warm(account: string, ids: Iterable<string>) {
-    if (account !== this.account || this.prefetchUnavailable) return;
-    for (const id of ids) {
-      if (!this.reads.has(id)) this.queued.add(id);
-    }
-    if (!this.warming && !this.timer && this.queued.size) {
-      this.timer = setTimeout(() => {
-        this.timer = undefined;
-        void this.prefetch(account);
-      }, 50);
-    }
-  }
-
-  private checkAccess(account: string, error: unknown) {
-    if (!(error instanceof NativeApiError)) return;
-    if (error.status === 401 || error.status === 403) {
-      this.reset(account, error);
-    } else if (error.status === 404 || error.status === 405) {
-      this.prefetchUnavailable = true;
-      this.queued.clear();
-    }
-  }
-
-  private async prefetch(account: string) {
-    const signal = this.lifetime.signal;
-    this.warming = true;
-    try {
-      while (this.queued.size && !signal.aborted) {
-        const ids = [...this.queued].slice(0, 200);
-        const read = Symbol();
-        for (const id of ids) {
-          this.queued.delete(id);
-          this.reads.set(id, read);
-        }
-        try {
-          const { snapshots } = await this.client.contactPrivacySnapshots(account, ids, signal);
-          if (signal.aborted) return;
-          for (const id of ids) {
-            if (this.reads.get(id) === read && Object.hasOwn(snapshots, id)) {
-              this.entries.set(id, snapshots[id]!);
-            }
-          }
-          this.notify();
-        } catch (error) {
-          if (signal.aborted) return;
-          for (const id of ids) {
-            if (this.reads.get(id) === read) this.reads.delete(id);
-          }
-          this.checkAccess(account, error);
-          return;
+  /** Accept an inventory only if it predates no point read or invalidation of that contact. */
+  captureCatalog(account: string) {
+    const lifetime = this.lifetime.signal;
+    const reads = new Map(this.reads);
+    return (contacts: NativeContact[]) => {
+      if (lifetime.aborted || account !== this.account || this.denial) return;
+      let changed = false;
+      for (const contact of contacts) {
+        if (this.reads.get(contact.id) !== reads.get(contact.id)) continue;
+        const snapshot = snapshotFromContact(contact);
+        if (snapshot) {
+          if (this.entries.get(contact.id)?.version === snapshot.version) continue;
+          this.entries.set(contact.id, snapshot);
+          changed = true;
+        } else if (this.entries.delete(contact.id)) {
+          changed = true;
         }
       }
-    } finally {
-      if (!signal.aborted) {
-        this.warming = false;
-        this.warm(account, []);
-      }
-    }
+      if (changed) this.notify();
+    };
   }
 
   async read(account: string, id: string, signal: AbortSignal): Promise<NativeContactPrivacy> {
@@ -137,23 +89,29 @@ export class ContactPrivacyCache {
     if (this.denial) throw this.denial;
     const scopedSignal = AbortSignal.any([signal, lifetime]);
     const read = Symbol();
-    this.queued.delete(id);
     this.reads.set(id, read);
     try {
-      const snapshot = await this.client.contactPrivacy(account, id, scopedSignal);
+      const contact = await this.client.contact(account, id, scopedSignal);
+      const snapshot = snapshotFromContact(contact);
       scopedSignal.throwIfAborted();
       if (this.reads.get(id) !== read) {
         const current = this.get(account, id);
         if (current) return current;
         throw new NativeApiError(409, "contact_privacy_pending");
       }
+      if (!snapshot) {
+        throw contact.privacyPending
+          ? new NativeApiError(409, "contact_privacy_pending")
+          : new NativeApiError(409, "contact_privacy_unresolved");
+      }
+      this.reads.set(id, Symbol());
       this.entries.set(id, snapshot);
       this.notify();
       return snapshot;
     } catch (error) {
       if (this.reads.get(id) === read) {
-        this.reads.delete(id);
-        if (!scopedSignal.aborted && error instanceof NativeApiError && [401, 403].includes(error.status)) this.checkAccess(account, error);
+        this.reads.set(id, Symbol());
+        if (!scopedSignal.aborted && error instanceof NativeApiError && [401, 403].includes(error.status)) this.reset(account, error);
       }
       if (lifetime.aborted && !signal.aborted && this.session === session) {
         throw new NativeApiError(409, "contact_privacy_pending");
@@ -161,4 +119,9 @@ export class ContactPrivacyCache {
       throw error;
     }
   }
+}
+
+function snapshotFromContact(contact: NativeContact): NativeContactPrivacy | undefined {
+  if (!contact.privacy || !contact.privacyVersion) return undefined;
+  return { privacy: contact.privacy, version: contact.privacyVersion };
 }

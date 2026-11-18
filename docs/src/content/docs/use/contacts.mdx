@@ -128,12 +128,14 @@ For a new request or acceptance, the same optional flags select initial privacy.
 
 ### Privacy API and Rust
 
-Both privacy reads and edits require `admin` for the selected account. Paths are relative to `/v1/accounts/ACCOUNT_ID/`:
+Privacy reads and refreshes require `read`. Edits require `admin` for the selected account. Paths are relative to `/v1/accounts/ACCOUNT_ID/`.
 
 | Method and path | Purpose |
 | --- | --- |
-| `POST contact-privacy/snapshots` | Read versioned saved privacy for up to 200 exact IDs with `{ "ids": [...] }`. Returns `snapshots` by ID, omitting unavailable contacts. |
-| `GET contacts/CONTACT_ID/privacy` | Read current settings and their `version` |
+| `GET contacts` | List contacts with `privacy` and `privacyVersion` where available. |
+| `GET contacts/CONTACT_ID` | Read a contact with its current relationship settings. |
+| `POST contacts/CONTACT_ID/refresh` | Refresh contact details and privacy together. Poll the returned operation, then read the contact. |
+| `GET contacts/CONTACT_ID/privacy` | Read just the settings and their `version` through the existing privacy route. |
 | `PATCH contacts/CONTACT_ID` | Update with `privacy` and `expectedVersion`; requires `Idempotency-Key` |
 
 The PATCH currently accepts a complete privacy value:

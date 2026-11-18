@@ -94,9 +94,7 @@ const requestSceneRows = [
   { id: "fr_scene_casey", peerId: "sim_casey", displayName: "Casey Morgan", direction: "incoming", message: "Hello, we met at the book club.", updatedAt: 1700000800, version: "scene-incoming-v1", isContact: false, actionable: true, attention: true, state: "request_received", history: [{ serverId: "123", message: "Hello, we met at the book club.", createdAt: 1700000800, direction: "incoming" }] },
   { id: "fr_scene_jordan", peerId: "sim_jordan", displayName: "Jordan Lee", direction: "outgoing", message: "Let's keep in touch.", updatedAt: 1700000700, version: "scene-outgoing-v1", isContact: false, actionable: false, attention: false, state: "request_sent", history: [{ serverId: "0", message: "Let's keep in touch.", createdAt: 1700000700, direction: "outgoing" }] },
 ];
-const privacyWarmResponse = new WeakMap();
 async function prepareContactScenes({ page }) {
-  await page.route("**/v1/accounts/*/contact-privacy/snapshots", route => route.fulfill({ json: { snapshots: {} } }));
   await page.route("**/v1/accounts/*/contact-requests*", route => route.request().method() === "GET" ? route.fulfill({ json: { items: requestSceneRows, nextCursor: null, pendingIncomingCount: 1, sourceGeneration: "scene", coverage: {}, asOfEventCursor: "0" } }) : route.continue());
   await page.route("**/v1/accounts/*/search/contacts", route => route.fulfill({ json: { displayName: "avery.example", recipientRef: "scene-only-reference", expiresAt: 1700001400, source: "wechat", request: null, contactId: null } }));
 }
@@ -855,7 +853,7 @@ export const scenes = [
         const path = new URL(request.url()).pathname;
         if (path.endsWith("/contact-requests") && request.method() === "POST") submits++;
         if (path.endsWith("/search/contacts")) lookups++;
-        if (path.endsWith("/privacy")) privacyReads++;
+        if (request.method() === "GET" && /\/contacts\/[^/]+$/.test(path)) privacyReads++;
       });
       await page.getByRole("complementary", { name: "Conversation details" }).getByRole("button", { name: "Details", exact: true }).click();
       const card = page.getByRole("dialog", { name: "Contact details" });
@@ -884,20 +882,23 @@ export const scenes = [
     viewports: ["desktop", "compact"], setup: standardWorld, target: () => ({ account: ACCOUNT.id }),
     prepare: async ({ page }) => {
       await prepareContactScenes({ page });
-      privacyWarmResponse.set(page, page.waitForResponse(response => response.url().endsWith("/contact-privacy/snapshots")));
-      await page.route("**/v1/accounts/*/contact-privacy/snapshots", route => {
-        const ids = route.request().postDataJSON().ids;
-        if (!ids.includes("sim_mei")) throw Error("The batch must include the saved friend");
-        return route.fulfill({ json: { snapshots: { sim_mei: { privacy: { chatsOnly: false, hideMyPosts: false, hideTheirPosts: true }, version: "warm-snapshot" } } } });
+      await page.route(/\/v1\/accounts\/[^/]+\/contacts\?/, async route => {
+        const response = await route.fetch();
+        const payload = await response.json();
+        for (const item of payload.items ?? []) {
+          if (item.id === "sim_mei") {
+            item.privacy = { chatsOnly: false, hideMyPosts: false, hideTheirPosts: true };
+            item.privacyVersion = "catalog-version";
+          }
+        }
+        return route.fulfill({ response, json: payload });
       });
     },
     ready: async ({ page, expect }) => { await expect(row(page, "Mei Chen")).toBeVisible(); },
     actions: async ({ page, expect }) => {
       let points = 0;
-      await page.route("**/v1/accounts/*/contacts/sim_mei/privacy", route => { points++; return route.abort(); });
+      await page.route("**/v1/accounts/*/contacts/sim_mei", route => { points++; return route.abort(); });
       const trigger = page.getByRole("button", { name: "Details for Mei Chen", exact: true });
-      // The warm request begins shortly after the catalog arrives.
-      await (await privacyWarmResponse.get(page)).finished();
       const dialog = page.getByRole("dialog", { name: "Contact details" });
       for (let i = 0; i < 2; i++) {
         await trigger.focus();
@@ -908,9 +909,9 @@ export const scenes = [
       expect(points).toBe(0);
     },
   },
-  ...["contact-details", "contact-details-search", "contact-privacy-saved", "contact-privacy-unavailable", "contact-privacy-retry", "contact-privacy-syncing"].map(name => ({
+  ...["contact-details", "contact-details-search", "contact-privacy-saved", "contact-privacy-unavailable", "contact-privacy-refresh", "contact-privacy-retry", "contact-privacy-syncing"].map(name => ({
     name, route: "contacts",
-    description: ({ "contact-details": "A saved contact card reached from the contact list by its keyboard-accessible Details action.", "contact-details-search": "Saved-contact search offers separate Message and Details actions; Details opens the shared card.", "contact-privacy-saved": "Moments selections survive Chats Only and save with the original privacy version.", "contact-privacy-unavailable": "Missing administrator permission disables privacy edits and submission.", "contact-privacy-retry": "An uncertain privacy save locks edits and retries only the same inspected intent.", "contact-privacy-syncing": "One accepted PATCH waits through pending canonical GETs before showing saved settings, without another mutation." })[name],
+    description: ({ "contact-details": "A saved contact card reached from the contact list by its keyboard-accessible Details action.", "contact-details-search": "Saved-contact search offers separate Message and Details actions; Details opens the shared card.", "contact-privacy-saved": "Moments selections survive Chats Only and save with the original privacy version.", "contact-privacy-unavailable": "Unresolved privacy leaves the contact available and offers a contact refresh.", "contact-privacy-refresh": "Refreshing a contact updates the displayed name and privacy together.", "contact-privacy-retry": "An uncertain privacy save locks edits and retries only the same inspected intent.", "contact-privacy-syncing": "One accepted PATCH waits through pending canonical GETs before showing saved settings, without another mutation." })[name],
     viewports: name === "contact-privacy-retry" ? ["desktop"] : ["desktop", "compact"],
     setup: standardWorld, target: () => ({ account: ACCOUNT.id }),
     prepare: async ({ page }) => {
@@ -918,16 +919,42 @@ export const scenes = [
       let privacy = { chatsOnly: false, hideMyPosts: false, hideTheirPosts: true };
       const attempts = [];
       let readbackReads = 0;
-      await page.route("**/v1/accounts/*/contacts/sim_mei/privacy", async route => {
-        if (route.request().method() !== "GET") throw Error("Privacy reads must use GET");
-        if (name === "contact-privacy-unavailable") return route.fulfill({ status: 403, json: { error: { code: "forbidden" } } });
-        if (name === "contact-privacy-syncing" && attempts.length) {
-          if (++readbackReads === 1) return route.fulfill({ status: 409, json: { error: { code: "contact_privacy_pending" } } });
-          await new Promise(resolve => setTimeout(resolve, 600));
+      let refreshed = false;
+      const canRefresh = name === "contact-privacy-refresh";
+      await page.route("**/v1/accounts/*/contacts/sim_mei/refresh", route => {
+        if (!canRefresh || route.request().method() !== "POST") throw Error("Unexpected contact refresh");
+        return route.fulfill({ status: 202, json: { id: "scene-contact-refresh", accountId: ACCOUNT.id, kind: "metadata", state: "running", createdAt: FIXED_TIME, updatedAt: FIXED_TIME } });
+      });
+      await page.route("**/v1/accounts/*/operations/scene-contact-refresh", route => {
+        refreshed = true;
+        return route.fulfill({ json: { id: "scene-contact-refresh", accountId: ACCOUNT.id, kind: "metadata", state: "succeeded", result: { recordCount: 1 }, createdAt: FIXED_TIME, updatedAt: FIXED_TIME } });
+      });
+      await page.route(/\/v1\/accounts\/[^/]+\/contacts\?/, async route => {
+        const response = await route.fetch();
+        const payload = await response.json();
+        for (const item of payload.items ?? []) {
+          if (item.id === "sim_mei") {
+            delete item.privacy;
+            delete item.privacyVersion;
+            if (refreshed) {
+              item.displayName = "Mei Chen (updated)";
+              item.privacy = privacy;
+              item.privacyVersion = "scene-privacy-v1";
+            }
+          }
         }
-        return route.fulfill({ json: { privacy, version: attempts.length ? "scene-privacy-v2" : "scene-privacy-v1" } });
+        return route.fulfill({ response, json: payload });
       });
       await page.route("**/v1/accounts/*/contacts/sim_mei", async route => {
+        if (route.request().method() === "GET") {
+          const contact = { id: "sim_mei", username: "sim_mei", relation: "friend" };
+          if (name === "contact-privacy-unavailable" || (canRefresh && !refreshed)) return route.fulfill({ json: contact });
+          if (name === "contact-privacy-syncing" && attempts.length) {
+            if (++readbackReads === 1) return route.fulfill({ json: { ...contact, privacyPending: true } });
+            await new Promise(resolve => setTimeout(resolve, 600));
+          }
+          return route.fulfill({ json: { ...contact, privacy, privacyVersion: attempts.length ? "scene-privacy-v2" : "scene-privacy-v1" } });
+        }
         if (route.request().method() !== "PATCH") throw Error("Contact changes must use PATCH");
         if (name === "contact-privacy-unavailable") throw Error("Unavailable privacy must not submit a contact change");
         const body = route.request().postDataJSON();
@@ -960,11 +987,15 @@ export const scenes = [
       await expect(dialog).toBeVisible();
       await expect(dialog.getByRole("button", { name: "Message", exact: true })).toBeVisible();
       if (name === "contact-privacy-unavailable") {
-        await expect(dialog.getByRole("alert")).toContainText("Administrator access is required");
+        await expect(dialog.getByRole("alert")).toContainText("Privacy settings are unavailable");
         await expect(dialog.getByRole("radio", { name: "Full access", exact: true })).toHaveCount(0);
         await expect(dialog.getByRole("button", { name: "Save privacy", exact: true })).toHaveCount(0);
         await expect(dialog.getByRole("button", { name: "Remove contact", exact: true })).toHaveCount(0);
         return;
+      }
+      if (name === "contact-privacy-refresh") {
+        await dialog.getByRole("button", { name: "Refresh contact", exact: true }).click();
+        await expect(dialog.getByText("Mei Chen (updated)", { exact: true })).toBeVisible();
       }
       const hideMine = dialog.getByRole("switch", { name: "Hide My Posts", exact: true });
       await expect(dialog.getByRole("switch", { name: "Hide Their Posts", exact: true })).toBeChecked();
@@ -1018,7 +1049,7 @@ export const scenes = [
       let accepted = false;
       const selected = { chatsOnly: true, hideMyPosts: true, hideTheirPosts: false };
       await page.route("**/v1/accounts/*/contact-requests?*", route => route.fulfill({ json: { items: requestSceneRows.map(r => r.id === "fr_scene_casey" && accepted ? { ...r, isContact: true, actionable: false, version: "scene-accepted-v2" } : r), nextCursor: null, pendingIncomingCount: accepted ? 0 : 1 } }));
-      await page.route("**/v1/accounts/*/contacts/sim_casey/privacy", route => route.fulfill({ json: { privacy: selected, version: "scene-privacy-v1" } }));
+      await page.route("**/v1/accounts/*/contacts/sim_casey", route => route.fulfill({ json: { privacy: selected, privacyVersion: "scene-privacy-v1" } }));
       await page.route("**/v1/accounts/*/contact-requests/fr_scene_casey/accept", route => {
         const body = route.request().postDataJSON();
         if (body.expectedVersion !== "scene-incoming-v1" || JSON.stringify(body.privacy) !== JSON.stringify({ chatsOnly: true, hideMyPosts: true, hideTheirPosts: false })) throw Error("Acceptance omitted the chosen privacy or current version");
@@ -1046,7 +1077,7 @@ export const scenes = [
     viewports: ["desktop"], setup: standardWorld, target: () => ({ account: ACCOUNT.id, thread: "sim_mei" }),
     prepare: async ({ page }) => {
       await prepareContactScenes({ page });
-      await page.route("**/v1/accounts/*/contacts/sim_mei/privacy", route => route.fulfill({ json: { privacy: { chatsOnly: false, hideMyPosts: false, hideTheirPosts: true }, version: "scene-privacy-v1" } }));
+      await page.route("**/v1/accounts/*/contacts/sim_mei", route => route.fulfill({ json: { privacy: { chatsOnly: false, hideMyPosts: false, hideTheirPosts: true }, privacyVersion: "scene-privacy-v1" } }));
     },
     ready: async ({ page, expect }) => { await expect(page.getByRole("complementary", { name: "Conversation details" })).toBeVisible(); },
     actions: async ({ page, expect }) => {
@@ -1064,11 +1095,11 @@ export const scenes = [
     viewports: ["desktop", "compact"], setup: standardWorld, target: () => ({ account: ACCOUNT.id }),
     prepare: async ({ page }) => {
       await prepareContactScenes({ page });
-      await page.route("**/v1/accounts/*/contacts/sim_mei/privacy", route => route.fulfill({ json: { privacy: { chatsOnly: false, hideMyPosts: false, hideTheirPosts: false }, version: "scene-privacy-v1" } }));
+      await page.route("**/v1/accounts/*/contacts/sim_mei", route => route.fulfill({ json: { privacy: { chatsOnly: false, hideMyPosts: false, hideTheirPosts: false }, privacyVersion: "scene-privacy-v1" } }));
       await page.route("**/v1/accounts/*/contact-mutations/by-idempotency-key?*", route => route.fulfill({ status: 404, json: { error: { code: "not_found" } } }));
       const attempts = [];
       await page.route("**/v1/accounts/*/contacts/sim_mei", route => {
-        if (route.request().method() !== "DELETE") return route.continue();
+        if (route.request().method() !== "DELETE") return route.fallback();
         attempts.push({ key: route.request().headers()["idempotency-key"], body: route.request().postData() });
         if (attempts.length === 1) return route.abort("failed");
         if (attempts.length !== 2 || JSON.stringify(attempts[0]) !== JSON.stringify(attempts[1])) throw Error("Remove contact retry changed the original intent");

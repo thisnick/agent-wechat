@@ -284,6 +284,18 @@ pub struct NativeContact {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub classification: Option<wechat_core::PeerClassification>,
+    /// Current relationship settings, when available for this friend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub privacy: Option<NativeContactPrivacySettings>,
+    /// Version to supply when editing the current relationship settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub privacy_version: Option<String>,
+    /// True while an accepted relationship edit is awaiting contact sync.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub privacy_pending: Option<bool>,
 }
 /// A group chat saved in the account's profile.
 #[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
@@ -775,8 +787,6 @@ pub fn typescript() -> String {
         NativeContactSearch::decl(),
         NativeContactPrivacySettings::decl(),
         NativeContactPrivacy::decl(),
-        NativeContactPrivacySnapshotQuery::decl(),
-        NativeContactPrivacySnapshots::decl(),
         NativeContactUpdate::decl(),
         NativeContactRequestAccept::decl(),
         NativeContactRequestSend::decl(),
@@ -1150,20 +1160,6 @@ pub struct NativeContactPrivacy {
     pub privacy: NativeContactPrivacySettings,
     /// Account/contact-bound version required when saving a change.
     pub version: String,
-}
-/// Exact contacts to read from the local profile in one request.
-#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct NativeContactPrivacySnapshotQuery {
-    /// One to 200 exact contact IDs, at most 512 bytes per ID.
-    pub ids: Vec<String>,
-}
-/// Canonical saved privacy snapshots from a single profile read view.
-#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct NativeContactPrivacySnapshots {
-    /// Snapshots keyed by contact ID. Missing, unsupported, pending and unresolved contacts are omitted.
-    pub snapshots: std::collections::BTreeMap<String, NativeContactPrivacy>,
 }
 /// Update supported contact settings after inspecting their current version.
 #[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]

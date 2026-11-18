@@ -234,48 +234,54 @@ test("pending privacy readback has both a deadline and a finite GET budget", asy
 });
 
 
-test("an invalidated batch cannot repopulate privacy after a contact update or account switch", async () => {
-  const snapshot = version => ({ privacy, version });
-  let complete, start;
-  const requestStarted = new Promise(resolve => { start = resolve; });
-  const cache = new ContactPrivacyCache({
-    contactPrivacySnapshots: () => new Promise(resolve => { complete = resolve; start(); }),
-    contactPrivacy: async () => snapshot("current"),
-  });
+const pointContact = version => ({ id: "peer", privacy, privacyVersion: version });
+
+test("an invalidated inventory cannot overwrite privacy after a contact update or account switch", async () => {
+  const cache = new ContactPrivacyCache({ contact: async () => pointContact("current") });
   cache.reset("first");
-  cache.warm("first", ["peer"]);
-  await requestStarted;
+  const applyInventory = cache.captureCatalog("first");
   cache.invalidate("first", "peer");
   await cache.read("first", "peer", new AbortController().signal);
-  complete({ snapshots: { peer: snapshot("stale") } });
-  await Promise.resolve();
+  applyInventory([pointContact("stale")]);
   assert.equal(cache.get("first", "peer").version, "current");
-  cache.reset("second");
+  const beforeSwitch = cache.captureCatalog("first");
+  cache.reset("first");
+  beforeSwitch([pointContact("prior-login")]);
   assert.equal(cache.get("first", "peer"), undefined);
-  assert.equal(cache.get("second", "peer"), undefined);
 });
 
-test("closing a cold card allows the next catalog to warm the same contact", async () => {
+test("the live inventory warms a closed contact, and a newer inventory clears unavailable settings", async () => {
   const cache = new ContactPrivacyCache({
-    contactPrivacy: (_account, _id, signal) => new Promise((_, reject) => {
+    contact: (_account, _id, signal) => new Promise((_, reject) => {
       signal.addEventListener("abort", () => reject(signal.reason), { once: true });
     }),
-    contactPrivacySnapshots: async () => ({ snapshots: { peer: { privacy, version: "warm" } } }),
   });
   cache.reset("one");
   const dialog = new AbortController();
   const point = cache.read("one", "peer", dialog.signal);
   dialog.abort();
   await assert.rejects(point, { name: "AbortError" });
-  const warmed = new Promise(resolve => cache.subscribe(resolve));
-  cache.warm("one", ["peer"]);
-  await warmed;
+  cache.captureCatalog("one")([pointContact("warm")]);
   assert.equal(cache.get("one", "peer").version, "warm");
+  cache.captureCatalog("one")([{ id: "peer", privacyPending: true }]);
+  assert.equal(cache.get("one", "peer"), undefined);
   cache.reset("one", new NativeApiError(401, "unauthorized"));
+  cache.captureCatalog("one")([pointContact("forbidden")]);
   assert.equal(cache.denied("one"), true);
   assert.equal(cache.get("one", "peer"), undefined);
 });
 
+test("contact details distinguish pending privacy from unavailable privacy", async () => {
+  for (const pending of [true, false]) {
+    const cache = new ContactPrivacyCache({
+      contact: async () => ({ id: "peer", privacyPending: pending }),
+    });
+    cache.reset("one");
+    await assert.rejects(cache.read("one", "peer", new AbortController().signal), {
+      code: pending ? "contact_privacy_pending" : "contact_privacy_unresolved",
+    });
+  }
+});
 
 for (const sameSession of [true, false]) {
   test(sameSession ? "an open privacy read retries after a contact catalog refresh"
@@ -283,9 +289,9 @@ for (const sameSession of [true, false]) {
     let notifyStarted;
     const started = new Promise(resolve => { notifyStarted = resolve; });
     let calls = 0;
-    const fresh = { privacy, version: "fresh" };
+    const fresh = pointContact("fresh");
     const cache = new ContactPrivacyCache({
-      contactPrivacy: async (_account, _id, signal) => {
+      contact: async (_account, _id, signal) => {
         if (++calls > 1) return fresh;
         return new Promise((_, reject) => {
           signal.addEventListener("abort", () => reject(signal.reason), { once: true });
@@ -301,7 +307,7 @@ for (const sameSession of [true, false]) {
     await started;
     if (sameSession) {
       cache.invalidateAccount("one");
-      assert.equal(await result, fresh);
+      assert.deepEqual(await result, { privacy, version: "fresh" });
       assert.equal(calls, 2);
     } else {
       cache.reset("one");

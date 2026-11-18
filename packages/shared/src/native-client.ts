@@ -3,7 +3,7 @@ import type { NativeCallWebSocketFactory, NativeCallsClientOptions } from "./nat
 export * from "./native-calls.ts";
 
 /** Native v1 HTTP transport. This does not start a daemon or use the legacy API. */
-import type { NativeContactSearch, NativeContactRequestPage, NativeContactRequest, NativeContactRequestSend, NativeContactRequestAccept, NativeContactPrivacy, NativeContactPrivacySnapshots, NativeContactUpdate, TextMentions } from "./native.generated.js";
+import type { NativeContactSearch, NativeContactRequestPage, NativeContactRequest, NativeContactRequestSend, NativeContactRequestAccept, NativeContactPrivacy, NativeContactUpdate, TextMentions } from "./native.generated.js";
 export type NativeTextSendOptions = { quote?: QuoteSendReference; mentions?: TextMentions };
 export type NativeTextMentionOptions = NativeTextSendOptions & { mentions: TextMentions };
 import type { AccountSettings, NativeAccountRemoval, NativeUploadRelease, OfficialProfileRequest, OfficialProfileSelection, LoginRequest, QrRefresh, NativeTombstone, NativeMessage, QuoteSendReference, NativeThread, NativeContact, NativeGroup, NativeGroupMember, NativePage, NativeOperation, NativeSendIntent, ShareSendRequest, NativeEvent, NativeIdentity, NativeStatus, MediaAsset, MediaJob, NativeMediaJobRetryRequest, MediaTransferRequest, MediaSendRequest, OwnedMediaSource } from "./native.generated.js";
@@ -195,11 +195,7 @@ export class NativeWeChatClient {
   sendContactRequest(accountId: string, input: NativeContactRequestSend, key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.contactMutation(accountId, "contact-requests", "POST", input, key, "send_request", signal); }
   /** Accept the inspected version of an incoming request. */
   acceptContactRequest(accountId: string, requestId: string, input: NativeContactRequestAccept | string, key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.contactMutation(accountId, `contact-requests/${id(requestId)}/accept`, "POST", typeof input === "string" ? { expectedVersion: input } : input, key, "accept_request", signal); }
-  /** Read saved privacy for up to 200 exact contacts with account admin access. */
-  contactPrivacySnapshots(accountId: string, ids: string[], signal?: AbortSignal): Promise<NativeContactPrivacySnapshots> {
-    return this.request(`v1/accounts/${id(accountId)}/contact-privacy/snapshots`, { method: "POST", body: JSON.stringify({ ids }), signal });
-  }
-  /** Read existing relationship privacy with account admin access. */
+  /** Read relationship privacy through the existing dedicated read route. */
   contactPrivacy(accountId: string, username: string, signal?: AbortSignal): Promise<NativeContactPrivacy> { return this.request(`v1/accounts/${id(accountId)}/contacts/${id(username)}/privacy`, { signal }); }
   /** Save privacy once against the inspected version; retain the original key after uncertainty. */
   updateContact(accountId: string, username: string, input: NativeContactUpdate, key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.contactMutation(accountId, `contacts/${id(username)}`, "PATCH", input, key, "update_privacy", signal); }
@@ -234,7 +230,7 @@ export class NativeWeChatClient {
   groupMutationByKey(accountId: string, key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.request(`v1/accounts/${id(accountId)}/group-mutations/by-idempotency-key?${new URLSearchParams({ key })}`, { signal }); }
   refreshAvatar(accountId: string, username: string, options: { roomId?: string } = {}): Promise<NativeOperation> { return this.request(`v1/accounts/${id(accountId)}/avatars/${id(username)}/refresh`, { method: "POST", body: JSON.stringify(options) }); }
   async avatar(accountId: string, username: string, signal?: AbortSignal): Promise<{ bytes: Uint8Array; contentType: string; etag: string | null }> { const response = await this.response(`v1/accounts/${id(accountId)}/avatars/${id(username)}`, { signal }); const type = response.headers.get("content-type") ?? ""; if (!type.startsWith("image/")) { await response.body?.cancel(); throw new Error("Cached avatar is not an image"); } return { bytes: await this.readBounded(response, 16 * 1024 * 1024), contentType: type, etag: response.headers.get("etag") }; }
-  refreshContact(accountId: string, username: string): Promise<NativeOperation> { return this.request(`v1/accounts/${id(accountId)}/contacts/${id(username)}/refresh`, { method: "POST", body: "{}" }); }
+  refreshContact(accountId: string, username: string, signal?: AbortSignal): Promise<NativeOperation> { return this.request(`v1/accounts/${id(accountId)}/contacts/${id(username)}/refresh`, { method: "POST", body: "{}", signal }); }
   refreshGroup(accountId: string, roomId: string): Promise<NativeOperation> { return this.request(`v1/accounts/${id(accountId)}/groups/${id(roomId)}/refresh`, { method: "POST", body: "{}" }); }
   refreshGroupMembers(accountId: string, roomId: string): Promise<NativeOperation> { return this.request(`v1/accounts/${id(accountId)}/groups/${id(roomId)}/members/refresh`, { method: "POST", body: "{}" }); }
   syncContacts(accountId: string): Promise<NativeOperation> { return this.request(`v1/accounts/${id(accountId)}/contact-sync`, { method: "POST", body: "{}" }); }

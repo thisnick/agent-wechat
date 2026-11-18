@@ -3,7 +3,7 @@ use super::*;
 use crate::CatalogQuery;
 use anyhow::ensure;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use wechat_profile::{ContactRequestMessage, ContactRequestProjection, StagedContactRequest};
 use wechat_protocol::{AcceptContactRequest, ContactRequestTarget, ContactRpc, SendContactRequest};
 
@@ -212,41 +212,43 @@ impl Core {
         )?)
     }
 
-    /// Read up to 200 canonical privacy snapshots with one pending-operation scan.
-    /// Unavailable contacts are omitted so unrelated contacts still load.
-    pub fn contact_privacy_snapshots(&self, account: &str, ids: &[String]) -> Result<Value> {
-        ensure!(
-            (1..=200).contains(&ids.len())
-                && ids.iter().all(|id| !id.is_empty()
-                    && id.len() <= 512
-                    && !id.chars().any(char::is_control)),
-            "invalid_request"
-        );
-        let mut snapshots = BTreeMap::new();
-        let reader = self.profile_reader_owned(account)?;
-        let own = self
-            .profile_username(account)?
-            .context("profile_identity_unavailable")?;
-        // A truncated guard scan cannot establish that any requested snapshot is settled.
-        if !self.store.contact_privacy_guard_overflow(account, None)? {
-            let pending = self.pending_contact_privacy_targets(account, &reader)?;
-            for id in ids.iter().collect::<BTreeSet<_>>() {
-                if pending.contains(id) || !self.contact_privacy_resolved(account, id)? {
-                    continue;
-                }
-                let contact = match reader.contact(id) {
-                    Ok(contact) => contact,
-                    Err(wechat_profile::ProfileError::NotCached) => continue,
-                    Err(error) => return Err(error.into()),
-                };
-                if ordinary_privacy_contact(&contact, &own).is_ok() {
-                    if let Ok(snapshot) = canonical_privacy(account, id, &contact) {
-                        snapshots.insert(id, snapshot);
-                    }
-                }
+    pub(crate) fn add_contact_privacy(
+        &self,
+        account: &str,
+        own: Option<&str>,
+        reader: &wechat_profile::ProfileReader,
+        contacts: &mut [Value],
+    ) -> Result<()> {
+        let Some(own) = own else { return Ok(()) };
+        if !contacts
+            .iter()
+            .any(|contact| contact["relation"] == "friend")
+        {
+            return Ok(());
+        }
+        let overflow = self.store.contact_privacy_guard_overflow(account, None)?;
+        let pending = self.pending_contact_privacy_targets(account, reader)?;
+        for item in contacts
+            .iter_mut()
+            .filter(|item| item["relation"] == "friend")
+        {
+            let id = item["id"].as_str().context("resource identity missing")?;
+            let contact = reader.contact(id)?;
+            if ordinary_privacy_contact(&contact, own).is_err()
+                || !self.contact_privacy_resolved(account, id)?
+            {
+                continue;
+            }
+            if overflow || pending.contains(id) {
+                item["privacyPending"] = json!(true);
+                continue;
+            }
+            if let Ok(snapshot) = canonical_privacy(account, id, &contact) {
+                item["privacy"] = serde_json::to_value(snapshot.privacy)?;
+                item["privacyVersion"] = json!(snapshot.version);
             }
         }
-        Ok(json!({"snapshots": snapshots}))
+        Ok(())
     }
 
     /// Update an existing contact once, retaining its original intent and reply.

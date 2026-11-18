@@ -311,6 +311,7 @@ export class HubSession {
   private catalogFlight: {
     account: string;
     generation: number;
+    request: number;
     promise: Promise<void>;
   } | null = null;
   private stream?: AbortController;
@@ -1106,19 +1107,15 @@ export class HubSession {
       this.interactionReads.delete(key);
     }
   }
-  private warmContactPrivacy(account: string) {
-    const own = this.value.accounts.find(item => item.id === account)?.ownUsername;
-    this.contactPrivacy.warm(account, this.value.contacts.filter(contact =>
-      contact.relation === "friend" && contact.id !== own && contact.id !== "filehelper",
-    ).map(contact => contact.id));
-  }
   private loadCatalog(account: string, generation: number): Promise<void> {
     if (
       this.catalogFlight?.account === account &&
-      this.catalogFlight.generation === generation
+      this.catalogFlight.generation === generation &&
+      this.catalogFlight.request === this.detailsRequest
     )
       return this.catalogFlight.promise;
     const request = ++this.detailsRequest;
+    const applyPrivacy = this.contactPrivacy.captureCatalog(account);
     const promise = (async () => {
       const [contacts, capabilities, accounts] = await Promise.all([
         inventory((cursor) =>
@@ -1140,16 +1137,16 @@ export class HubSession {
         );
         if (!this.current(account, generation)) return;
         this.publish({
-          contacts: contacts.items,
+          contacts: contacts.items.map(({ privacy, privacyVersion, privacyPending, ...contact }) => contact),
           capabilities,
         });
-        this.warmContactPrivacy(account);
+        applyPrivacy(contacts.items);
         this.persist();
       }
     })().finally(() => {
       if (this.catalogFlight?.promise === promise) this.catalogFlight = null;
     });
-    this.catalogFlight = { account, generation, promise };
+    this.catalogFlight = { account, generation, request, promise };
     return promise;
   }
   async refresh(
@@ -1394,15 +1391,12 @@ export class HubSession {
     if ((event.kind === "contact.updated" || event.kind === "contacts.updated") && typeof event.data.contactId === "string") {
       const id = event.data.contactId;
       this.contactPrivacy.invalidate(account, id);
-      if (this.value.contacts.some(contact => contact.id === id && contact.relation === "friend")) {
-        this.contactPrivacy.warm(account, [id]);
-      }
     }
     const contactsMayHaveChanged = (event.kind === "metadata.changed" && event.data.kind === "contacts") ||
       (event.kind === "projection.blocked" && event.data.stream === "contact");
     if (contactsMayHaveChanged && !this.contactPrivacy.denied(account)) {
       this.contactPrivacy.invalidateAccount(account);
-      this.warmContactPrivacy(account);
+      this.detailsRequest++;
     }
     if (event.kind === "account.settings_updated")
       for (const listener of this.settingsListeners) listener(account);
@@ -1465,7 +1459,7 @@ export class HubSession {
           this.publish({ error: readableError(error) });
       });
     } else if (
-      event.kind === "contacts.updated" ||
+      ["contact.updated", "contacts.updated"].includes(event.kind) ||
       (event.kind === "metadata.changed" && event.data.kind !== "avatar")
     ) {
       await this.refreshConversations(account, true);
