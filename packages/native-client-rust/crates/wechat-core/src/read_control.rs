@@ -174,6 +174,35 @@ fn parse_thread_control(
 }
 
 impl Core {
+    /// Whether an entry control (opcode 2) is complete once its unread clear
+    /// was evaluated, and why: `excluded_session_entry` for a built-in peer
+    /// the official entry worker ignores, `ordinary_session_entry` for a group
+    /// or unclassified peer whose clear was applied or found no session.
+    pub(super) fn entry_read_completes(
+        &self,
+        account: &str,
+        read: &RemoteThreadRead,
+        receipt: &str,
+    ) -> Result<Option<&'static str>> {
+        let marker = format!("{}:{receipt}", PartialThreadRead::Entry.marker_prefix());
+        let Some(value) = self.store.runtime(account, &marker)? else {
+            return Ok(None);
+        };
+        let outcome: Value = serde_json::from_slice(&value)?;
+        let outcome = outcome["outcome"].as_str().unwrap_or_default();
+        Ok(match super::sync_projection::peer_kind(&read.thread) {
+            "excluded"
+                if super::sync_projection::ENTRY_EXCLUDED_PEERS.contains(&read.thread.as_str())
+                    && outcome == "excluded_peer" =>
+            {
+                Some("excluded_session_entry")
+            }
+            "group" | "ordinary" if matches!(outcome, "applied" | "missing_session") => {
+                Some("ordinary_session_entry")
+            }
+            _ => None,
+        })
+    }
     /// Apply the supported read component once, even while the complete entry/exit
     /// control remains blocked. Evaluated no-ops are durable too: a later local
     /// session change must not make an older blocked control apply anew.

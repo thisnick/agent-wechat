@@ -421,10 +421,7 @@ impl Store {
                 "INSERT INTO events VALUES(?1,?2,?3,?4)",
                 params![seq, kind, serde_json::to_string(data)?, now],
             )?;
-            tx.execute(
-                "DELETE FROM events WHERE sequence < ?1",
-                [seq.saturating_sub(10_000)],
-            )?;
+            crate::trim_events(&tx)?;
             tx.commit()?;
             Ok(Event {
                 cursor: seq.to_string(),
@@ -458,7 +455,7 @@ impl Store {
             let changed=tx.execute("INSERT INTO operations VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET state=excluded.state,result_json=excluded.result_json,updated_at=excluded.updated_at WHERE operations.state NOT IN ('cancelled','succeeded','failed','expired','rejected','needs_login','needs_review') OR operations.state=excluded.state",params![op.id,op.kind,op.state,serde_json::to_string(&op.result)?,op.created_at,op.updated_at])?;
             if changed==1 {
                 tx.execute("INSERT INTO events(kind,data_json,created_at)VALUES('operation.updated',?1,?2)",params![serde_json::to_string(&serde_json::json!({"id":op.id,"state":op.state,"kind":op.kind}))?,op.updated_at])?;
-                let seq=tx.last_insert_rowid();tx.execute("DELETE FROM events WHERE sequence<=?1",[seq.saturating_sub(10_000)])?;
+                crate::trim_events(&tx)?;
             }
             tx.commit()?;Ok(())
         })
@@ -551,11 +548,7 @@ impl Store {
                     chrono::Utc::now().to_rfc3339()
                 ],
             )?;
-            let seq = tx.last_insert_rowid();
-            tx.execute(
-                "DELETE FROM events WHERE sequence<=?1",
-                [seq.saturating_sub(10_000)],
-            )?;
+            crate::trim_events(&tx)?;
             tx.commit()?;
             Ok((intent, true))
         })
@@ -597,7 +590,7 @@ impl Store {
             tx.execute("UPDATE outbox SET state=?2,server_id=COALESCE(?3,server_id),error_code=?4 WHERE id=?1 AND state!='cancelled'",params![id,state,server_id,error])?;
             let intent=read_send(&tx,account,id)?;
             tx.execute("INSERT INTO events(kind,data_json,created_at)VALUES('send.updated',?1,?2)",params![serde_json::to_string(&intent)?,chrono::Utc::now().to_rfc3339()])?;
-            let seq=tx.last_insert_rowid();tx.execute("DELETE FROM events WHERE sequence<=?1",[seq.saturating_sub(10_000)])?;
+            crate::trim_events(&tx)?;
             tx.commit()?;Ok(intent)
         })
     }
@@ -770,10 +763,7 @@ impl Store {
                 "INSERT INTO runtime VALUES(?1,?2)",
                 params![receipt, seq.to_string().as_bytes()],
             )?;
-            tx.execute(
-                "DELETE FROM events WHERE sequence < ?1",
-                [seq.saturating_sub(10_000)],
-            )?;
+            crate::trim_events(&tx)?;
             tx.commit()?;
             Ok(Some(Event {
                 cursor: seq.to_string(),

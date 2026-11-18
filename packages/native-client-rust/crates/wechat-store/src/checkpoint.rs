@@ -139,8 +139,7 @@ impl Store {
             else { tx.execute("INSERT INTO runtime VALUES('cursor-projection-needed',?1)ON CONFLICT(key)DO UPDATE SET value=excluded.value", [b"1".as_slice()])?; }
             tx.execute("INSERT INTO events(kind,data_json,created_at)VALUES('sync.committed',?1,?2)", params![serde_json::to_string(&serde_json::json!({"profileCheckpoint":"complete","currentReceivedCheckpoint":current}))?,chrono::Utc::now().to_rfc3339()])?;
             // Match the common event retention window in the same transaction.
-            let sequence=tx.last_insert_rowid();
-            tx.execute("DELETE FROM events WHERE sequence < ?1",[sequence.saturating_sub(10_000)])?;
+            crate::trim_events(&tx)?;
             tx.commit()?;
             Ok(true)
         })

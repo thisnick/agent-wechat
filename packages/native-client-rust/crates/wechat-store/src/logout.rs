@@ -14,10 +14,7 @@ fn event(tx: &rusqlite::Transaction<'_>, kind: &str, value: &Value) -> Result<()
             chrono::Utc::now().to_rfc3339()
         ],
     )?;
-    tx.execute(
-        "DELETE FROM events WHERE sequence < ?1",
-        [sequence.saturating_sub(10_000)],
-    )?;
+    crate::trim_events(tx)?;
     Ok(())
 }
 

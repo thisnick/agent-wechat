@@ -32,12 +32,25 @@ pub use outgoing_recall::*;
 pub use pagination::*;
 pub use recalls::*;
 pub use retention::{
-    aged_runtime, key_digest, RetentionStep, RuntimeRetention, StorageCount, StorageUsage,
-    READ_NOTIFICATION, RECENT_MESSAGE_BATCHES, REVIEW_DAYS, REVIEW_LIMIT,
+    aged_runtime, key_digest, BlockedControlCount, RetentionStep, RuntimeRetention, StorageCount,
+    StorageUsage, IDLE_ASSET_DAYS, READ_NOTIFICATION, RECENT_MESSAGE_BATCHES, REVIEW_DAYS,
+    REVIEW_LIMIT,
 };
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 pub use settings::AccountSettings;
+/// Events the log keeps, newest first.
+pub const EVENT_LIMIT: i64 = 10_000;
+/// Keep the newest [`EVENT_LIMIT`] events by row count. Merged progress events
+/// leave gaps in sequence numbers, so trimming by sequence distance would
+/// keep fewer rows than the limit. A reader whose cursor is older than the
+/// oldest kept event gets `event_cursor_expired`.
+pub(crate) fn trim_events(db: &Connection) -> rusqlite::Result<usize> {
+    db.execute(
+        "DELETE FROM events WHERE sequence<(SELECT sequence FROM events ORDER BY sequence DESC LIMIT 1 OFFSET ?1)",
+        [EVENT_LIMIT - 1],
+    )
+}
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File},

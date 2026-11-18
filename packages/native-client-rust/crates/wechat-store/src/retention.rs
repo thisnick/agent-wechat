@@ -21,6 +21,7 @@
 //! | Raw replies and call diagnostics in `runtime` | 7 days, for offline investigation | - | after 7 days |
 //! | Metadata receipts in `runtime` | while their request is pending | - | once it finishes |
 //! | Pagination views | until they expire | - | once expired |
+//! | Message attachment rows never downloaded (`pending` or `expired`), except voice | for [`IDLE_ASSET_DAYS`], while a job or queued automatic download names them, or once they hold bytes | - | ID retired; reading the message's media recreates the row |
 //!
 //! Uncertain (`needs_review`) records expire after [`REVIEW_DAYS`] or once
 //! more than [`REVIEW_LIMIT`] newer ones exist in the same family. Expiry keeps
@@ -74,6 +75,9 @@ pub const REUSED_ACQUISITIONS: i64 = 5;
 pub(crate) fn reused_acquisition_ids() -> String {
     format!("SELECT id FROM (SELECT id,ROW_NUMBER() OVER (PARTITION BY json_extract(data_json,'$.packId') ORDER BY updated_at DESC,id DESC) AS n FROM media_jobs WHERE kind='sticker_acquire' AND state='available') WHERE n<={REUSED_ACQUISITIONS}")
 }
+/// Days a never-downloaded message attachment row is kept. Reading the
+/// message's media recreates it with the same ID.
+pub const IDLE_ASSET_DAYS: i64 = 7;
 /// Row changes per step outside the runtime scan.
 const STEP_ROWS: i64 = 50;
 /// Runtime rows examined per step.
@@ -91,6 +95,8 @@ pub(crate) const GROUP_KEY: &str = "group-key";
 pub(crate) const CONTACT_KEY: &str = "contact-key";
 pub(crate) const RECALL_KEY: &str = "recall-key";
 pub(crate) const OPERATION_ID: &str = "operation";
+/// Removed never-downloaded attachment rows.
+pub(crate) const MEDIA_ASSET_ID: &str = "media-asset";
 /// Read notifications are submitted once per server boundary.
 pub const READ_NOTIFICATION: &str = "read-notification";
 /// Operation kinds with no idempotency key or dependent table. Logins are
@@ -111,6 +117,8 @@ pub struct RetentionStep {
     pub retired: usize,
     /// Runtime receipts and expired pagination views removed.
     pub runtime_removed: usize,
+    /// Never-downloaded message attachment rows removed.
+    pub idle_assets: usize,
     /// Pass back as `runtime_after` to continue the runtime scan.
     #[serde(skip)]
     pub runtime_after: i64,
@@ -123,6 +131,7 @@ impl RetentionStep {
         self.expired_reviews += other.expired_reviews;
         self.compacted += other.compacted;
         self.retired += other.retired;
+        self.idle_assets += other.idle_assets;
         self.runtime_removed += other.runtime_removed;
     }
 }
@@ -146,7 +155,29 @@ pub struct StorageUsage {
     pub runtime_families: Vec<StorageCount>,
     /// Records retention keeps whole until they finish or expire.
     pub unresolved: BTreeMap<String, i64>,
+    /// Status and system controls (AddMsg types 51 and 10002) that keep sync
+    /// batches blocked, by form. Batches blocked by another kind of command,
+    /// or last retried before these records existed, aren't listed.
+    pub blocked_controls: Vec<BlockedControlCount>,
     pub retired_keys: i64,
+}
+/// Commands of one form that keep sync batches blocked. Labels only: never a
+/// peer's identity or the control's contents.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockedControlCount {
+    /// AddMsg type, such as 51 (status) or 10002 (system).
+    pub message_type: Option<i64>,
+    /// Status operation IDs, as a JSON array.
+    pub operation_ids: Option<String>,
+    /// System message kind, such as `dynacfg`.
+    pub system_kind: Option<String>,
+    /// `group`, `excluded`, `classified` or `ordinary`.
+    pub peer_kind: Option<String>,
+    /// Why the command is blocked.
+    pub reason: Option<String>,
+    pub commands: i64,
+    pub batches: i64,
 }
 
 /// The first 16 bytes of SHA-256 over the family and value.
@@ -216,11 +247,7 @@ fn operation_event(tx: &Connection, id: &str, kind: &str, state: &str, now: &str
             now
         ],
     )?;
-    let seq = tx.last_insert_rowid();
-    tx.execute(
-        "DELETE FROM events WHERE sequence<=?1",
-        [seq.saturating_sub(10_000)],
-    )?;
+    crate::trim_events(tx)?;
     Ok(())
 }
 fn ids(tx: &Connection, sql: &str, args: impl rusqlite::Params) -> Result<Vec<String>> {
@@ -545,8 +572,11 @@ pub enum RuntimeRetention {
 /// or shortly after. A key naming an unfinished sync batch is always kept.
 pub fn aged_runtime(key: &str) -> RuntimeRetention {
     // Per-command projection receipts and their phase markers.
-    const COMMAND: [&str; 9] = [
+    const COMMAND: [&str; 11] = [
         "projected:",
+        "blocked-control:",
+        // The newest job.updated event of a job, for merging progress.
+        "job-event:",
         "apply-origin:",
         "contact-fields:projected:",
         "contact-mute:projected:",
@@ -620,6 +650,27 @@ pub fn aged_runtime(key: &str) -> RuntimeRetention {
     } else {
         RuntimeRetention::Keep
     }
+}
+
+/// Remove message attachment rows that were never downloaded: no bytes here
+/// or in the profile, no job or queued automatic download naming them,
+/// unchanged for [`IDLE_ASSET_DAYS`]. Voice rows stay: their plan can hold the
+/// only owned copy of a note's audio, from a sync batch that has since aged
+/// out.
+/// Their IDs are retired, so reading one returns `operation_expired` until
+/// listing the message's media recreates it.
+fn remove_idle_assets(tx: &Transaction, now: i64, budget: &mut i64) -> Result<usize> {
+    let mut removed = 0;
+    for id in ids(
+        tx,
+        "SELECT id FROM media_assets a WHERE message_id IS NOT NULL AND kind!='voice' AND payload IS NULL AND payload_file IS NULL AND profile_key IS NULL AND json_extract(metadata_json,'$.state') IN ('pending','expired') AND updated_at<=?1 AND NOT EXISTS(SELECT 1 FROM media_jobs j WHERE json_extract(j.data_json,'$.assetId')=a.id) AND NOT EXISTS(SELECT 1 FROM runtime r WHERE r.key IN ('received-media:'||a.id,'received-voice:'||a.id)) LIMIT ?2",
+        params![cutoff(now, IDLE_ASSET_DAYS), (*budget).max(0)],
+    )? {
+        retire(tx, MEDIA_ASSET_ID, &id, now)?;
+        tx.execute("DELETE FROM media_assets WHERE id=?1", [&id])?;
+        removed += take(budget, 1);
+    }
+    Ok(removed)
 }
 
 /// Remove metadata receipts whose request finished, and expired pagination
@@ -729,6 +780,7 @@ impl Store {
             };
             step.compacted = compact(&tx, now, &mut budget)?;
             step.retired = retire_receipts(&tx, now, &mut budget)?;
+            step.idle_assets = remove_idle_assets(&tx, now, &mut budget)?;
             let finished = remove_finished(&tx, now, &mut budget)?;
             let (removed, last, full) = age_runtime(&tx, now, runtime_after)?;
             step.runtime_removed = removed + finished;
@@ -779,6 +831,48 @@ impl Store {
             .iter()
             .map(|id| crate::media::read_job(db, id))
             .collect()
+        })
+    }
+    /// Blocked message batches outside the newest [`RECENT_MESSAGE_BATCHES`]
+    /// (the window recall evidence and the voice fallback read), after
+    /// `after` in ID order, with their sealed payloads. The core opens each
+    /// and keeps only the commands that are not yet applied. Reads only.
+    pub fn old_blocked_batches_after(
+        &self,
+        account: &str,
+        after: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        self.control(account, |db| {
+            let mut query = db.prepare(
+                "SELECT id,payload FROM apply_intents WHERE state='blocked' AND stream='message' AND length(payload)>0 AND id>?1 AND id NOT IN (SELECT id FROM apply_intents WHERE stream='message' ORDER BY created_at DESC,id DESC LIMIT ?2) ORDER BY id LIMIT ?3",
+            )?;
+            let rows = query.query_map(
+                params![after, RECENT_MESSAGE_BATCHES, limit as i64],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+    }
+    /// Replace a blocked batch's sealed payload if the batch is still blocked
+    /// and its payload is still `expected`. One row update. Returns whether
+    /// it was replaced. A read snapshot changes nothing.
+    pub fn replace_blocked_batch_payload(
+        &self,
+        account: &str,
+        id: &str,
+        expected: &[u8],
+        payload: &[u8],
+    ) -> Result<bool> {
+        anyhow::ensure!(!payload.is_empty(), "invalid sync batch payload");
+        if self.is_read_snapshot() {
+            return Ok(false);
+        }
+        self.control(account, |db| {
+            Ok(db.execute(
+                "UPDATE apply_intents SET payload=?3 WHERE id=?1 AND state='blocked' AND payload=?2",
+                params![id, expected, payload],
+            )? == 1)
         })
     }
     /// Replace an asset's sealed plan if it is still `expected`. One row
@@ -891,7 +985,25 @@ impl Store {
             ] {
                 unresolved.insert(name.to_owned(), db.query_row(sql, [], |r| r.get(0))?);
             }
+            let blocked_controls = {
+                let mut query = db.prepare(
+                    "SELECT json_extract(CAST(r.value AS TEXT),'$.messageType'),json_extract(CAST(r.value AS TEXT),'$.operationIds'),json_extract(CAST(r.value AS TEXT),'$.systemKind'),json_extract(CAST(r.value AS TEXT),'$.peerKind'),json_extract(CAST(r.value AS TEXT),'$.reason'),count(*),count(DISTINCT a.id) FROM apply_intents a JOIN runtime r ON r.key>'blocked-control:projected:'||a.id||':' AND r.key<'blocked-control:projected:'||a.id||';' WHERE a.state='blocked' AND json_valid(CAST(r.value AS TEXT)) GROUP BY 1,2,3,4,5 ORDER BY 6 DESC LIMIT 50",
+                )?;
+                let rows = query.query_map([], |r| {
+                    Ok(BlockedControlCount {
+                        message_type: r.get(0)?,
+                        operation_ids: r.get(1)?,
+                        system_kind: r.get(2)?,
+                        peer_kind: r.get(3)?,
+                        reason: r.get(4)?,
+                        commands: r.get(5)?,
+                        batches: r.get(6)?,
+                    })
+                })?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
             Ok(StorageUsage {
+                blocked_controls,
                 file_bytes: pragma("page_count")? * page,
                 free_bytes: pragma("freelist_count")? * page,
                 tables,
@@ -2039,6 +2151,93 @@ mod tests {
         assert!(!store
             .is_retired_key("a", MEDIA_KEY, "download:asset-1")
             .unwrap());
+    }
+
+    #[test]
+    fn never_downloaded_attachment_rows_are_removed_after_a_week() {
+        let (_temp, store) = fixture();
+        let asset = |id: &str, message: Option<&str>, state: &str, days: i64| {
+            store
+                .put_media_asset(
+                    "a",
+                    &MediaAssetRecord {
+                        id: id.into(),
+                        message_id: message.map(Into::into),
+                        variant: "thumbnail".into(),
+                        kind: "image".into(),
+                        metadata: json!({"id":id,"state":state}),
+                        plan: b"sealed plan".to_vec(),
+                        payload: None,
+                    },
+                )
+                .unwrap();
+            sql(&store, |db| {
+                db.execute(
+                    "UPDATE media_assets SET updated_at=?2 WHERE id=?1",
+                    params![id, cutoff(unix_seconds(), days)],
+                )?;
+                Ok(())
+            });
+        };
+        asset("pending", Some("msg-1"), "pending", 8);
+        asset("expired", Some("msg-2"), "expired", 8);
+        asset("recent", Some("msg-3"), "pending", 2);
+        asset("downloading", Some("msg-4"), "pending", 8);
+        asset("unbound", None, "pending", 8);
+        asset("in-profile", Some("msg-5"), "available", 8);
+        asset("queued", Some("msg-6"), "pending", 8);
+        store
+            .put_runtime("a", "received-media:queued", b"{}")
+            .unwrap();
+        asset("voice", Some("msg-7"), "pending", 8);
+        sql(&store, |db| {
+            db.execute("UPDATE media_assets SET kind='voice' WHERE id='voice'", [])?;
+            Ok(())
+        });
+        sql(&store, |db| {
+            db.execute(
+                "UPDATE media_assets SET profile_key='message' WHERE id='in-profile'",
+                [],
+            )?;
+            Ok(())
+        });
+        store
+            .create_media_job(
+                "a",
+                "job",
+                "download:downloading",
+                &"0".repeat(64),
+                "download",
+                &json!({"assetId":"downloading"}),
+                b"",
+            )
+            .unwrap();
+        let step = settle(&store, unix_seconds());
+        assert_eq!(step.idle_assets, 2);
+        for id in ["pending", "expired"] {
+            assert_eq!(error(store.media_asset("a", id)), "operation_expired");
+        }
+        for id in [
+            "recent",
+            "downloading",
+            "unbound",
+            "in-profile",
+            "queued",
+            "voice",
+        ] {
+            assert!(store.media_asset("a", id).is_ok(), "{id} was removed");
+        }
+        // Listing the message's media again recreates the same ID.
+        asset("pending", Some("msg-1"), "pending", 0);
+        assert_eq!(
+            store.media_asset("a", "pending").unwrap().metadata["state"],
+            "pending"
+        );
+        // An ID that never existed is still just missing.
+        assert_ne!(
+            error(store.media_asset("a", "unknown")),
+            "operation_expired"
+        );
     }
 
     #[test]

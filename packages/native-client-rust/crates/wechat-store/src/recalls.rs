@@ -224,7 +224,7 @@ impl Store {
                 if let Some(id)=message_id {data["messageId"]=json!(id);}
                 if let Some(time)=occurred {data["recalledAt"]=json!(time);}
                 tx.execute("INSERT INTO events VALUES(?1,'message.recalled',?2,?3)",params![seq,serde_json::to_string(&data)?,now])?;
-                tx.execute("DELETE FROM events WHERE sequence<?1",[seq.saturating_sub(10_000)])?;
+                crate::trim_events(&tx)?;
             }
             crate::outgoing_recall::confirm_recall_in_transaction(&tx, account, thread, server)?;
             tx.commit()?;

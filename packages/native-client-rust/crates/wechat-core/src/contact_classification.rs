@@ -2,7 +2,13 @@ use sha2::{Digest, Sha256};
 
 // Shipped classifier constants; membership is exact and case sensitive.
 pub(super) fn deleted_contact_local_type(username: &str) -> i64 {
-    let classified = if username.is_empty() || username == "weixin" {
+    3 + i64::from(classified_account(username))
+}
+/// The Linux 4.1.13.26 client's account classifier (`0x7393820`). Contact
+/// removal stores its result in `local_type`; session entry (status opcode 2)
+/// prepares a session only for peers it classifies.
+pub(super) fn classified_account(username: &str) -> bool {
+    if username.is_empty() || username == "weixin" {
         false
     } else if username.starts_with("gh_") {
         let digest: [u8; 32] = Sha256::digest(username.as_bytes()).into();
@@ -12,8 +18,7 @@ pub(super) fn deleted_contact_local_type(username: &str) -> i64 {
     } else {
         let digest: [u8; 32] = Sha256::digest(username.as_bytes()).into();
         CLASSIFIED_ACCOUNTS.binary_search(&digest).is_ok()
-    };
-    3 + i64::from(classified)
+    }
 }
 
 static CLASSIFIED_ACCOUNTS: [[u8; 32]; 2772] = [
