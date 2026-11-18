@@ -275,13 +275,11 @@ pub async fn set_contact(
                 "only a friend's privacy and remark can be changed",
             ));
         }
-        if contact["privacyPending"].as_bool().unwrap_or(false)
-            || contact["remarkPending"].as_bool().unwrap_or(false)
-        {
+        if contact["privacyPending"].as_bool().unwrap_or(false) {
             return Err(outcome::failure(
                 9,
                 "contact_privacy_pending",
-                "an earlier change to this contact is still settling; try again shortly",
+                "an earlier privacy change is still settling; try again shortly",
             ));
         }
         let Some(version) = contact["privacyVersion"]

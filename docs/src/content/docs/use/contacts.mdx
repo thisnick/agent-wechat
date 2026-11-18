@@ -161,6 +161,6 @@ The PATCH takes either a complete privacy value or a remark, not both:
 { "remark": "Monster", "expectedVersion": "PRIVACY_VERSION_FROM_CONTACT" }
 ```
 
-A `null` remark clears it. Other contact fields remain unchanged. The version changes when the privacy or the remark changes; a stale version returns `stale_contact_privacy`, so read the contact again before deciding on another edit. When a friend has no `privacy` or `privacyVersion`, `privacyUnavailable` says why: `contact_privacy_unresolved` means refresh the contact first, and `ordinary_contact_required` means this kind of contact can't be edited. The returned operation distinguishes server acceptance from confirmation in the saved contact.
+A `null` remark clears it. Other contact fields remain unchanged. A stale version returns `stale_contact_privacy`; read the contact again before deciding on another edit. When a friend has no `privacy` or `privacyVersion`, `privacyUnavailable` says why: `contact_privacy_unresolved` means refresh the contact first, and `ordinary_contact_required` means this kind of contact can't be edited. The returned operation distinguishes server acceptance from confirmation in the saved contact.
 
 The Rust protocol crate provides `ContactPrivacySettings`, `contact_remark_request`, request builders and correlated reply decoding. The core crate provides `ContactUpdate` and `update_contact`, coordinating idempotency, account ownership and saved-contact confirmation. In OpenClaw, private owner sessions can see available settings through `wechat_contacts` list, find, and get.

@@ -391,10 +391,10 @@ response NativeContact.privacy.hideMyPosts | boolean, required | Hide this accou
 response NativeContact.privacy.hideTheirPosts | boolean, required | Hide this person's Moments posts from this account.
 response NativeContact.privacyPending | boolean, nullable | True while an accepted relationship edit is awaiting contact sync.
 response NativeContact.privacyUnavailable | string, nullable | Why a friend has no `privacy` or `privacyVersion`, so it can't be edited yet: `contact_privacy_unresolved` (refresh the contact), `ordinary_contact_required` (not supported for this contact), `profile_identity_unavailable` or `contact_flags_unresolved`.
-response NativeContact.privacyVersion | string, nullable | Version to send as `expectedVersion` when changing this contact's privacy or remark. It changes whenever either of them changes.
+response NativeContact.privacyVersion | string, nullable | Version to send as `expectedVersion` when changing this contact's privacy or remark. It changes when the privacy or the relationship changes.
 response NativeContact.relation | string, required | Relationship evidence: `friend` when membership is established, `non_contact` when known flags do not establish membership, or `unknown` when flags are unavailable.
 response NativeContact.remark | string, required, nullable | Your private name for the contact. Null when none is saved.
-response NativeContact.remarkPending | boolean, nullable | True while an accepted remark change is waiting for WeChat's saved value.
+response NativeContact.remarkPending | boolean, nullable | True while the remark is being fetched from WeChat after it changed, from this account or another device. Edits are still accepted meanwhile.
 response NativeContact.username | string, required | The contact's WeChat username.
 response NativeContactPage | object | One page of a list. `items` holds the resources, `nextCursor` continues the list, and the other fields describe the saved data the list was read from.
 response NativeContactPage.asOfEventCursor | string, required, nullable | Event cursor that was current when the list was first read. Resume the event stream from it to catch changes made after the read.
@@ -429,10 +429,10 @@ response NativeContactPage.items[]<NativeContact>.privacy.hideMyPosts | boolean,
 response NativeContactPage.items[]<NativeContact>.privacy.hideTheirPosts | boolean, required | Hide this person's Moments posts from this account.
 response NativeContactPage.items[]<NativeContact>.privacyPending | boolean, nullable | True while an accepted relationship edit is awaiting contact sync.
 response NativeContactPage.items[]<NativeContact>.privacyUnavailable | string, nullable | Why a friend has no `privacy` or `privacyVersion`, so it can't be edited yet: `contact_privacy_unresolved` (refresh the contact), `ordinary_contact_required` (not supported for this contact), `profile_identity_unavailable` or `contact_flags_unresolved`.
-response NativeContactPage.items[]<NativeContact>.privacyVersion | string, nullable | Version to send as `expectedVersion` when changing this contact's privacy or remark. It changes whenever either of them changes.
+response NativeContactPage.items[]<NativeContact>.privacyVersion | string, nullable | Version to send as `expectedVersion` when changing this contact's privacy or remark. It changes when the privacy or the relationship changes.
 response NativeContactPage.items[]<NativeContact>.relation | string, required | Relationship evidence: `friend` when membership is established, `non_contact` when known flags do not establish membership, or `unknown` when flags are unavailable.
 response NativeContactPage.items[]<NativeContact>.remark | string, required, nullable | Your private name for the contact. Null when none is saved.
-response NativeContactPage.items[]<NativeContact>.remarkPending | boolean, nullable | True while an accepted remark change is waiting for WeChat's saved value.
+response NativeContactPage.items[]<NativeContact>.remarkPending | boolean, nullable | True while the remark is being fetched from WeChat after it changed, from this account or another device. Edits are still accepted meanwhile.
 response NativeContactPage.items[]<NativeContact>.username | string, required | The contact's WeChat username.
 response NativeContactPage.items[]<NativeTombstone> | object | Stands in for a resource that was in the list when it was first read but is no longer in the saved profile. It keeps the resource's place in the list.
 response NativeContactPage.items[]<NativeTombstone>.deleted | boolean, required | Always true, marking the resource as removed.

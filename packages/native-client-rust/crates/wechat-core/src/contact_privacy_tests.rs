@@ -1158,11 +1158,9 @@ fn remark_write_copies_a_fresh_record_and_saves_wechats_value_after_acceptance()
     // The saved remark comes from WeChat via a queued exact lookup, not optimistically.
     assert_eq!(core.store.contact_remark_refreshes("one").unwrap().len(), 1);
     assert!(core.remark_refresh_pending("one", "peer").unwrap());
-    // Until that lookup lands, further edits to the contact wait.
-    assert_eq!(
-        core.contact_privacy("one", "peer").unwrap_err().to_string(),
-        "contact_privacy_pending"
-    );
+    // The pending lookup doesn't hold up other edits; privacy stays readable
+    // with the same version.
+    assert!(core.contact_privacy("one", "peer").is_ok());
 }
 
 fn save_remark(core: &Core, remark: &str) {
@@ -1258,11 +1256,12 @@ fn queued_remark_and_privacy_edits_block_each_other_on_one_contact() {
 }
 
 #[test]
-fn contact_version_changes_with_the_saved_remark() {
+fn contact_version_ignores_the_saved_remark() {
+    // A remark lookup landing must not make a queued privacy edit stale.
     let (_temp, core) = super::super::groups::tests::fixture();
     let before = core.contact_privacy("one", "peer").unwrap()["version"].clone();
     save_remark(&core, "Saved");
-    assert_ne!(
+    assert_eq!(
         core.contact_privacy("one", "peer").unwrap()["version"],
         before
     );

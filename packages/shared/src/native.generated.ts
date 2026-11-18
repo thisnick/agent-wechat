@@ -1379,7 +1379,7 @@ relation: string, classification?: PeerClassification,
 privacy?: NativeContactPrivacySettings,
 /**
  * Version to send as `expectedVersion` when changing this contact's privacy
- * or remark. It changes whenever either of them changes.
+ * or remark. It changes when the privacy or the relationship changes.
  */
 privacyVersion?: string,
 /**
@@ -1387,7 +1387,8 @@ privacyVersion?: string,
  */
 privacyPending?: boolean,
 /**
- * True while an accepted remark change is waiting for WeChat's saved value.
+ * True while the remark is being fetched from WeChat after it changed, from
+ * this account or another device. Edits are still accepted meanwhile.
  */
 remarkPending?: boolean,
 /**

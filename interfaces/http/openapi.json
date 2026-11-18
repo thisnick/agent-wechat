@@ -1755,7 +1755,7 @@
             ]
           },
           "privacyVersion": {
-            "description": "Version to send as `expectedVersion` when changing this contact's privacy\nor remark. It changes whenever either of them changes.",
+            "description": "Version to send as `expectedVersion` when changing this contact's privacy\nor remark. It changes when the privacy or the relationship changes.",
             "type": [
               "string",
               "null"
@@ -1773,7 +1773,7 @@
             ]
           },
           "remarkPending": {
-            "description": "True while an accepted remark change is waiting for WeChat's saved value.",
+            "description": "True while the remark is being fetched from WeChat after it changed, from\nthis account or another device. Edits are still accepted meanwhile.",
             "type": [
               "boolean",
               "null"

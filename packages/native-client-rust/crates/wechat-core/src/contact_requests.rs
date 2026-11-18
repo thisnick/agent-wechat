@@ -198,15 +198,14 @@ fn canonical_privacy(
         _ => bail!("contact_flags_unresolved"),
     };
     let member = flag(contact);
-    // The version covers every editable setting, so an edit based on a stale
-    // view of the privacy or the remark is rejected.
+    // The version covers the flags and membership. A remark write copies
+    // WeChat's current record, so it does not depend on the saved remark.
     let version = digest(&serde_json::to_vec(&(
-        "contact-version-v2",
+        "contact-privacy-v1",
         account,
         username,
         flags,
         member,
-        contact.remark.as_deref(),
     ))?);
     Ok(ContactPrivacySnapshot {
         privacy: ContactPrivacySettings::from_contact_flags(flags),
@@ -349,12 +348,6 @@ impl Core {
             "contact_privacy_unresolved"
         );
         self.ensure_no_pending_contact_privacy(account, username)?;
-        // An accepted remark changes the version once its lookup lands; wait for
-        // it rather than admit an edit that would go stale before submission.
-        ensure!(
-            !self.remark_refresh_pending(account, username)?,
-            "contact_privacy_pending"
-        );
         let contact = self.profile_reader_owned(account)?.contact(username)?;
         let snapshot = canonical_privacy(account, username, &contact)?;
         ensure!(
@@ -859,6 +852,8 @@ impl Core {
             } => {
                 self.current_contact_privacy(account, username, Some(expected_version))?;
                 self.ensure_no_active_contact_privacy(account, username, None)?;
+                // Don't contact WeChat for an account that is signed out or stopped.
+                self.authorized_contact_admission(account)?;
                 // The write copies the whole record, flags included, so it is
                 // built from WeChat's current copy rather than the saved row.
                 let reply = self
@@ -886,22 +881,7 @@ impl Core {
             }
         };
         self.write_options(account, "contact-admission")?;
-        let cipher = self
-            .store
-            .runtime(account, "account-state")?
-            .context("auth_required")?;
-        let epoch = self.store.runtime(account, "logout-epoch")?;
-        ensure!(
-            self.store
-                .saved_login_authorization_current(account, &cipher, epoch.as_deref())?
-                && self.store.runtime(account, "desired")?.as_deref() == Some(b"connected")
-                && self
-                    .store
-                    .runtime(account, "validated-generation")?
-                    .as_deref()
-                    == Some(self.ownership_generation.as_bytes()),
-            "auth_required"
-        );
+        let (cipher, epoch) = self.authorized_contact_admission(account)?;
         let stamp = now();
         let op = Operation {
             id: uuid::Uuid::new_v4().to_string(),
@@ -937,6 +917,27 @@ impl Core {
                 &serde_json::to_vec(&Receipts::default())?,
             )?,
         )
+    }
+    /// The account's saved login and connection must be current before a
+    /// mutation is admitted; returns the authorization cipher and logout epoch.
+    fn authorized_contact_admission(&self, account: &str) -> Result<(Vec<u8>, Option<Vec<u8>>)> {
+        let cipher = self
+            .store
+            .runtime(account, "account-state")?
+            .context("auth_required")?;
+        let epoch = self.store.runtime(account, "logout-epoch")?;
+        ensure!(
+            self.store
+                .saved_login_authorization_current(account, &cipher, epoch.as_deref())?
+                && self.store.runtime(account, "desired")?.as_deref() == Some(b"connected")
+                && self
+                    .store
+                    .runtime(account, "validated-generation")?
+                    .as_deref()
+                    == Some(self.ownership_generation.as_bytes()),
+            "auth_required"
+        );
+        Ok((cipher, epoch))
     }
     fn load_contact_attempt(
         &self,
