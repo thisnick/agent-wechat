@@ -425,3 +425,34 @@ fn new_job_plans_write_byte_fields_as_text_and_read_earlier_arrays() {
         array.len()
     );
 }
+
+#[test]
+fn a_removed_never_downloaded_row_comes_back_when_the_message_is_listed() {
+    let (dir, core, upstream) = counting_core();
+    let (_, assets) = storage_tests::profile_voice(&core);
+    let message = assets[0].message_id.clone().unwrap();
+    let old = (chrono::Utc::now() - chrono::Duration::days(8)).to_rfc3339();
+    control(&dir)
+        .execute(
+            "UPDATE media_assets SET updated_at=?1",
+            rusqlite::params![old],
+        )
+        .unwrap();
+    let retention = core.maintain_media_storage("one").unwrap()["retention"].clone();
+    assert_eq!(retention["idleAssets"], 2, "{retention}");
+    for asset in &assets {
+        assert_eq!(
+            core.media_asset("one", &asset.id).unwrap_err().to_string(),
+            "operation_expired"
+        );
+    }
+    let again = core.media_assets("one", &message).unwrap();
+    assert_eq!(
+        again.iter().map(|a| a.id.clone()).collect::<Vec<_>>(),
+        assets.iter().map(|a| a.id.clone()).collect::<Vec<_>>()
+    );
+    for asset in &again {
+        assert_eq!(core.media_asset("one", &asset.id).unwrap().state, "pending");
+    }
+    assert_eq!(upstream.voice_transfers.load(Ordering::SeqCst), 0);
+}

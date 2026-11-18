@@ -21,6 +21,7 @@
 //! | Raw replies and call diagnostics in `runtime` | 7 days, for offline investigation | - | after 7 days |
 //! | Metadata receipts in `runtime` | while their request is pending | - | once it finishes |
 //! | Pagination views | until they expire | - | once expired |
+//! | Message attachment rows never downloaded (`pending` or `expired`) | for [`IDLE_ASSET_DAYS`], while a job names them, or once they hold bytes | - | ID retired; reading the message's media recreates the row |
 //!
 //! Uncertain (`needs_review`) records expire after [`REVIEW_DAYS`] or once
 //! more than [`REVIEW_LIMIT`] newer ones exist in the same family. Expiry keeps
@@ -74,6 +75,9 @@ pub const REUSED_ACQUISITIONS: i64 = 5;
 pub(crate) fn reused_acquisition_ids() -> String {
     format!("SELECT id FROM (SELECT id,ROW_NUMBER() OVER (PARTITION BY json_extract(data_json,'$.packId') ORDER BY updated_at DESC,id DESC) AS n FROM media_jobs WHERE kind='sticker_acquire' AND state='available') WHERE n<={REUSED_ACQUISITIONS}")
 }
+/// Days a never-downloaded message attachment row is kept. Reading the
+/// message's media recreates it with the same ID.
+pub const IDLE_ASSET_DAYS: i64 = 7;
 /// Row changes per step outside the runtime scan.
 const STEP_ROWS: i64 = 50;
 /// Runtime rows examined per step.
@@ -91,6 +95,8 @@ pub(crate) const GROUP_KEY: &str = "group-key";
 pub(crate) const CONTACT_KEY: &str = "contact-key";
 pub(crate) const RECALL_KEY: &str = "recall-key";
 pub(crate) const OPERATION_ID: &str = "operation";
+/// Removed never-downloaded attachment rows.
+pub(crate) const MEDIA_ASSET_ID: &str = "media-asset";
 /// Read notifications are submitted once per server boundary.
 pub const READ_NOTIFICATION: &str = "read-notification";
 /// Operation kinds with no idempotency key or dependent table. Logins are
@@ -111,6 +117,8 @@ pub struct RetentionStep {
     pub retired: usize,
     /// Runtime receipts and expired pagination views removed.
     pub runtime_removed: usize,
+    /// Never-downloaded message attachment rows removed.
+    pub idle_assets: usize,
     /// Pass back as `runtime_after` to continue the runtime scan.
     #[serde(skip)]
     pub runtime_after: i64,
@@ -123,6 +131,7 @@ impl RetentionStep {
         self.expired_reviews += other.expired_reviews;
         self.compacted += other.compacted;
         self.retired += other.retired;
+        self.idle_assets += other.idle_assets;
         self.runtime_removed += other.runtime_removed;
     }
 }
@@ -644,6 +653,24 @@ pub fn aged_runtime(key: &str) -> RuntimeRetention {
     }
 }
 
+/// Remove message attachment rows that were never downloaded: no bytes here
+/// or in the profile, no job naming them, unchanged for [`IDLE_ASSET_DAYS`].
+/// Their IDs are retired, so reading one returns `operation_expired` until
+/// listing the message's media recreates it.
+fn remove_idle_assets(tx: &Transaction, now: i64, budget: &mut i64) -> Result<usize> {
+    let mut removed = 0;
+    for id in ids(
+        tx,
+        "SELECT id FROM media_assets a WHERE message_id IS NOT NULL AND payload IS NULL AND payload_file IS NULL AND profile_key IS NULL AND json_extract(metadata_json,'$.state') IN ('pending','expired') AND updated_at<=?1 AND NOT EXISTS(SELECT 1 FROM media_jobs j WHERE json_extract(j.data_json,'$.assetId')=a.id) LIMIT ?2",
+        params![cutoff(now, IDLE_ASSET_DAYS), (*budget).max(0)],
+    )? {
+        retire(tx, MEDIA_ASSET_ID, &id, now)?;
+        tx.execute("DELETE FROM media_assets WHERE id=?1", [&id])?;
+        removed += take(budget, 1);
+    }
+    Ok(removed)
+}
+
 /// Remove metadata receipts whose request finished, and expired pagination
 /// views. Neither is read again.
 fn remove_finished(tx: &Transaction, now: i64, budget: &mut i64) -> Result<usize> {
@@ -751,6 +778,7 @@ impl Store {
             };
             step.compacted = compact(&tx, now, &mut budget)?;
             step.retired = retire_receipts(&tx, now, &mut budget)?;
+            step.idle_assets = remove_idle_assets(&tx, now, &mut budget)?;
             let finished = remove_finished(&tx, now, &mut budget)?;
             let (removed, last, full) = age_runtime(&tx, now, runtime_after)?;
             step.runtime_removed = removed + finished;
@@ -2121,6 +2149,77 @@ mod tests {
         assert!(!store
             .is_retired_key("a", MEDIA_KEY, "download:asset-1")
             .unwrap());
+    }
+
+    #[test]
+    fn never_downloaded_attachment_rows_are_removed_after_a_week() {
+        let (_temp, store) = fixture();
+        let asset = |id: &str, message: Option<&str>, state: &str, days: i64| {
+            store
+                .put_media_asset(
+                    "a",
+                    &MediaAssetRecord {
+                        id: id.into(),
+                        message_id: message.map(Into::into),
+                        variant: "thumbnail".into(),
+                        kind: "image".into(),
+                        metadata: json!({"id":id,"state":state}),
+                        plan: b"sealed plan".to_vec(),
+                        payload: None,
+                    },
+                )
+                .unwrap();
+            sql(&store, |db| {
+                db.execute(
+                    "UPDATE media_assets SET updated_at=?2 WHERE id=?1",
+                    params![id, cutoff(unix_seconds(), days)],
+                )?;
+                Ok(())
+            });
+        };
+        asset("pending", Some("msg-1"), "pending", 8);
+        asset("expired", Some("msg-2"), "expired", 8);
+        asset("recent", Some("msg-3"), "pending", 2);
+        asset("downloading", Some("msg-4"), "pending", 8);
+        asset("unbound", None, "pending", 8);
+        asset("in-profile", Some("msg-5"), "available", 8);
+        sql(&store, |db| {
+            db.execute(
+                "UPDATE media_assets SET profile_key='message' WHERE id='in-profile'",
+                [],
+            )?;
+            Ok(())
+        });
+        store
+            .create_media_job(
+                "a",
+                "job",
+                "download:downloading",
+                &"0".repeat(64),
+                "download",
+                &json!({"assetId":"downloading"}),
+                b"",
+            )
+            .unwrap();
+        let step = settle(&store, unix_seconds());
+        assert_eq!(step.idle_assets, 2);
+        for id in ["pending", "expired"] {
+            assert_eq!(error(store.media_asset("a", id)), "operation_expired");
+        }
+        for id in ["recent", "downloading", "unbound", "in-profile"] {
+            assert!(store.media_asset("a", id).is_ok(), "{id} was removed");
+        }
+        // Listing the message's media again recreates the same ID.
+        asset("pending", Some("msg-1"), "pending", 0);
+        assert_eq!(
+            store.media_asset("a", "pending").unwrap().metadata["state"],
+            "pending"
+        );
+        // An ID that never existed is still just missing.
+        assert_ne!(
+            error(store.media_asset("a", "unknown")),
+            "operation_expired"
+        );
     }
 
     #[test]

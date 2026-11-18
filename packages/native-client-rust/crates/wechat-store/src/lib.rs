@@ -33,7 +33,8 @@ pub use pagination::*;
 pub use recalls::*;
 pub use retention::{
     aged_runtime, key_digest, BlockedControlCount, RetentionStep, RuntimeRetention, StorageCount,
-    StorageUsage, READ_NOTIFICATION, RECENT_MESSAGE_BATCHES, REVIEW_DAYS, REVIEW_LIMIT,
+    StorageUsage, IDLE_ASSET_DAYS, READ_NOTIFICATION, RECENT_MESSAGE_BATCHES, REVIEW_DAYS,
+    REVIEW_LIMIT,
 };
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};

@@ -734,7 +734,14 @@ impl Store {
         })
     }
     pub fn media_asset(&self, account: &str, id: &str) -> Result<MediaAssetRecord> {
-        self.control(account, |db| read_asset(db, id))
+        self.control(account, |db| {
+            crate::retention::expired_if_missing(
+                db,
+                crate::retention::MEDIA_ASSET_ID,
+                id,
+                read_asset(db, id),
+            )
+        })
     }
     /// Fetch cached bytes only for content reads or local writeback repair.
     /// `payload` is `None` when this store keeps no copy, which includes an
