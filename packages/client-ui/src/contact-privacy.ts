@@ -6,8 +6,21 @@ import {
 import type { Connection } from "./connection.ts";
 
 export type ContactPrivacy = NativeContactPrivacySettings;
-/** Settings and the account-bound version read from a contact's `privacy` and `privacyVersion`. */
-export type ContactPrivacySnapshot = { privacy: ContactPrivacy; version: string };
+/**
+ * Settings and the account-bound version read from a contact's `privacy` and `privacyVersion`,
+ * with the remark read alongside them. The version also guards remark edits.
+ */
+export type ContactPrivacySnapshot = {
+  privacy: ContactPrivacy;
+  version: string;
+  remark: string | null;
+  remarkPending: boolean;
+};
+/** The daemon's limit for a remark, in UTF-8 bytes after trimming. */
+export const MAX_CONTACT_REMARK_BYTES = 256;
+/** WeChat confirms a saved remark through a separate lookup that no event announces. */
+export const REMARK_POLL_MS = 2_000;
+export const REMARK_POLL_LIMIT = 30;
 export const defaultContactPrivacy = (): ContactPrivacy => ({
   chatsOnly: false,
   hideMyPosts: false,
@@ -42,6 +55,12 @@ export type ContactChange = { key: string; operation?: NativeOperation } & (
       contactId: string;
       input: { privacy: ContactPrivacy; expectedVersion: string };
     }
+  | {
+      action: "remark";
+      contactId: string;
+      /** `null` clears the remark. */
+      input: { remark: string | null; expectedVersion: string };
+    }
 );
 /** Older pending receipts predate frozen targets and privacy choices. Keep their wire inputs unchanged. */
 export function restoreContactChange(
@@ -65,6 +84,7 @@ export const contactChangeActions = {
   delete: "delete_request",
   remove: "remove_contact",
   privacy: "update_privacy",
+  remark: "update_remark",
 } as const;
 /** The dialog keeps frozen inputs here so an inspected retry cannot change its intent. */
 export interface ContactDetailActions {
@@ -101,6 +121,7 @@ export function contactDetailActions(
         case "remove":
           return client.removeContact(account, change.contactId, change.key);
         case "privacy":
+        case "remark":
           return client.updateContact(
             account,
             change.contactId,

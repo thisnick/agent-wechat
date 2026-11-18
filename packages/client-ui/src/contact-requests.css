@@ -199,6 +199,27 @@
   gap: 12px;
   margin-bottom: 20px;
 }
+.contact-remark {
+  display: block;
+  margin: 0 0 18px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.contact-remark input {
+  display: block;
+  width: 100%;
+  margin: 8px 0 6px;
+  padding: 9px 10px;
+  font: inherit;
+  font-size: 14px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.contact-remark small[role="alert"] {
+  color: var(--danger, #c62828);
+}
 .contact-request-dialog textarea {
   display: block;
   width: 100%;

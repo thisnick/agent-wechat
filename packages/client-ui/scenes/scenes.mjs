@@ -1042,6 +1042,63 @@ export const scenes = [
     },
   })),
   {
+    name: "contact-remark-saved", route: "contacts",
+    description: "A remark saves with the inspected version, shows while WeChat confirms it, then names the contact above their nickname and WeChat ID.",
+    viewports: ["desktop", "compact"], setup: standardWorld, target: () => ({ account: ACCOUNT.id }),
+    prepare: async ({ page }) => {
+      await prepareContactScenes({ page });
+      const privacy = { chatsOnly: false, hideMyPosts: false, hideTheirPosts: false };
+      let remark = null, savedAt = 0;
+      // WeChat's lookup confirms the saved remark shortly after the PATCH; list and point reads agree.
+      const state = () => {
+        const pending = !!savedAt && Date.now() - savedAt < 1_500;
+        return { remark: pending ? null : remark, remarkPending: pending };
+      };
+      await page.route(/\/v1\/accounts\/[^/]+\/contacts\?/, async route => {
+        const response = await route.fetch();
+        const payload = await response.json();
+        for (const item of payload.items ?? []) {
+          if (item.id !== "sim_mei") continue;
+          const current = state();
+          Object.assign(item, { nickname: "Mei Chen", alias: "mei.chen", privacy, privacyVersion: "scene-privacy-v1", ...current });
+          if (current.remark) item.displayName = current.remark;
+        }
+        return route.fulfill({ response, json: payload });
+      });
+      await page.route("**/v1/accounts/*/contacts/sim_mei", route => {
+        const contact = { id: "sim_mei", username: "sim_mei", relation: "friend", nickname: "Mei Chen", alias: "mei.chen", privacy, privacyVersion: "scene-privacy-v1" };
+        if (route.request().method() === "GET") return route.fulfill({ json: { ...contact, ...state() } });
+        if (route.request().method() !== "PATCH" || savedAt) throw Error("A remark saves once with PATCH");
+        const body = route.request().postDataJSON();
+        if (JSON.stringify(body) !== JSON.stringify({ remark: "Mei (book club)", expectedVersion: "scene-privacy-v1" })) throw Error("Remark submission lost the trimmed remark or source version");
+        savedAt = Date.now();
+        remark = body.remark;
+        return route.fulfill({ status: 202, json: { id: "scene-remark", accountId: ACCOUNT.id, kind: "contact_mutation", state: "succeeded", result: { action: "update_remark", remark }, createdAt: FIXED_TIME, updatedAt: FIXED_TIME } });
+      });
+    },
+    ready: async ({ page, expect }) => { await expect(row(page, "Mei Chen")).toBeVisible(); },
+    actions: async ({ page, expect }) => {
+      const details = page.getByRole("button", { name: "Details for Mei Chen", exact: true });
+      await details.focus();
+      await details.press("Enter");
+      const dialog = page.getByRole("dialog", { name: "Contact details" });
+      const field = dialog.getByRole("textbox", { name: "Remark" });
+      await expect(field).toHaveValue("");
+      await expect(dialog.getByText("WeChat ID: mei.chen", { exact: true })).toBeVisible();
+      await field.fill("  Mei (book club) ");
+      await expect(dialog.getByRole("switch", { name: "Hide My Posts", exact: true })).toBeDisabled();
+      await expect(dialog.getByRole("button", { name: "Message", exact: true })).toHaveCount(0);
+      await dialog.getByRole("button", { name: "Save remark", exact: true }).click();
+      await expect(dialog.locator(".contact-change-status")).toContainText("Waiting for WeChat to confirm it");
+      await expect(field).toHaveValue("Mei (book club)");
+      await expect(dialog.locator(".contact-change-status")).toHaveText("Remark saved", { timeout: 10_000 });
+      await expect(dialog.getByRole("heading", { name: "Mei (book club)", exact: true })).toBeVisible();
+      await expect(dialog.getByText("Nickname: Mei Chen", { exact: true })).toBeVisible();
+      await expect(dialog.getByRole("button", { name: "Save remark", exact: true })).toHaveCount(0);
+      await expect(dialog.getByRole("button", { name: "Message", exact: true })).toBeVisible();
+    },
+  },
+  {
     name: "friend-request-privacy-accept", route: "friend-requests",
     description: "Acceptance submits the selected privacy settings together with the exact request version.",
     viewports: ["desktop", "compact"], setup: standardWorld, target: () => ({ account: ACCOUNT.id }),

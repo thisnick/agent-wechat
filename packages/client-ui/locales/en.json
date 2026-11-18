@@ -966,6 +966,18 @@
     "moreActions": "More contact actions",
     "cancel": "Cancel",
     "privacyReadFailed": "We couldn’t read privacy settings for this person.",
-    "discoveryRejected": "WeChat couldn’t look up this query. Try an exact WeChat ID."
+    "discoveryRejected": "WeChat couldn’t look up this query. Try an exact WeChat ID.",
+    "nicknameValue": "Nickname: {{name}}",
+    "wechatIdValue": "WeChat ID: {{id}}",
+    "remark": "Remark",
+    "remarkPlaceholder": "Add a remark",
+    "remarkHint": "Only you see this name. It replaces their nickname in your chats.",
+    "remarkTooLong": "This remark is too long.",
+    "saveRemark": "Save remark",
+    "clearRemark": "Clear remark",
+    "remarkSaved": "Remark saved",
+    "remarkWaiting": "Remark saved. Waiting for WeChat to confirm it…",
+    "remarkReadbackUnavailable": "Remark saved. WeChat hasn’t confirmed it yet. Refresh the contact later to see it.",
+    "remarkPermission": "Administrator access is required to change remarks."
   }
 }

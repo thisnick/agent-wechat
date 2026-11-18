@@ -72,7 +72,7 @@ export class ContactPrivacyCache {
         if (this.reads.get(contact.id) !== reads.get(contact.id)) continue;
         const snapshot = snapshotFromContact(contact);
         if (snapshot) {
-          if (this.entries.get(contact.id)?.version === snapshot.version) continue;
+          if (sameSnapshot(this.entries.get(contact.id), snapshot)) continue;
           this.entries.set(contact.id, snapshot);
           changed = true;
         } else if (this.entries.delete(contact.id)) {
@@ -126,5 +126,15 @@ export class ContactPrivacyCache {
 
 function snapshotFromContact(contact: NativeContact): ContactPrivacySnapshot | undefined {
   if (!contact.privacy || !contact.privacyVersion) return undefined;
-  return { privacy: contact.privacy, version: contact.privacyVersion };
+  return {
+    privacy: contact.privacy,
+    version: contact.privacyVersion,
+    remark: contact.remark ?? null,
+    remarkPending: contact.remarkPending === true,
+  };
+}
+
+/** The version excludes the remark, so a remark change alone must still replace the entry. */
+function sameSnapshot(a: ContactPrivacySnapshot | undefined, b: ContactPrivacySnapshot) {
+  return !!a && a.version === b.version && a.remark === b.remark && a.remarkPending === b.remarkPending;
 }

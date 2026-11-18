@@ -56,6 +56,12 @@ test("the card adapter keeps privacy with the send and acceptance, and versions 
     input: { privacy, expectedVersion: "privacy-v1" },
   });
   await actions.submit({
+    key: "remark-key",
+    action: "remark",
+    contactId: "peer",
+    input: { remark: null, expectedVersion: "privacy-v1" },
+  });
+  await actions.submit({
     key: "delete-key",
     action: "delete",
     requestId: "request",
@@ -82,6 +88,13 @@ test("the card adapter keeps privacy with the send and acceptance, and versions 
       "peer",
       { privacy, expectedVersion: "privacy-v1" },
       "privacy-key",
+    ],
+    [
+      "updateContact",
+      "account",
+      "peer",
+      { remark: null, expectedVersion: "privacy-v1" },
+      "remark-key",
     ],
     ["deleteContactRequest", "account", "request", "request-v2", "delete-key"],
   ]);
@@ -274,6 +287,25 @@ test("the live inventory warms a closed contact, and a newer inventory clears un
   assert.equal(cache.get("one", "peer"), undefined);
 });
 
+test("a remark change replaces the snapshot even though the privacy version is unchanged", async () => {
+  let point = { ...pointContact("v1"), remark: "Old", remarkPending: true };
+  const cache = new ContactPrivacyCache({ contact: async () => point });
+  cache.reset("one");
+  let notified = 0;
+  cache.subscribe(() => notified++);
+  assert.deepEqual(await cache.read("one", "peer", new AbortController().signal),
+    { privacy, version: "v1", remark: "Old", remarkPending: true });
+  point = { ...pointContact("v1"), remark: "New" };
+  await cache.read("one", "peer", new AbortController().signal);
+  assert.deepEqual(cache.get("one", "peer"), { privacy, version: "v1", remark: "New", remarkPending: false });
+  const before = notified;
+  cache.captureCatalog("one")([{ ...pointContact("v1"), remark: "New" }]);
+  assert.equal(notified, before, "an identical catalog row is not a change");
+  cache.captureCatalog("one")([{ ...pointContact("v1"), remark: null }]);
+  assert.equal(cache.get("one", "peer").remark, null);
+  assert.equal(notified, before + 1);
+});
+
 test("missing contact privacy stays blank and pending privacy is retried", async () => {
   for (const pending of [undefined, true]) {
     const cache = new ContactPrivacyCache({
@@ -314,7 +346,7 @@ for (const sameSession of [true, false]) {
     await started;
     if (sameSession) {
       cache.invalidateAccount("one");
-      assert.deepEqual(await result, { privacy, version: "fresh" });
+      assert.deepEqual(await result, { privacy, version: "fresh", remark: null, remarkPending: false });
       assert.equal(calls, 2);
     } else {
       cache.reset("one");
