@@ -575,9 +575,11 @@ pub enum RuntimeRetention {
 /// or shortly after. A key naming an unfinished sync batch is always kept.
 pub fn aged_runtime(key: &str) -> RuntimeRetention {
     // Per-command projection receipts and their phase markers.
-    const COMMAND: [&str; 10] = [
+    const COMMAND: [&str; 11] = [
         "projected:",
         "blocked-control:",
+        // The newest job.updated event of a job, for merging progress.
+        "job-event:",
         "apply-origin:",
         "contact-fields:projected:",
         "contact-mute:projected:",

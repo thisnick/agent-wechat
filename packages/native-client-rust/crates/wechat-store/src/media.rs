@@ -113,7 +113,7 @@ pub(crate) fn read_asset(db: &Connection, id: &str) -> Result<MediaAssetRecord> 
         payload: None,
     })
 }
-fn media_event(tx: &Connection, kind: &str, data: &Value) -> Result<()> {
+fn media_event(tx: &Connection, kind: &str, data: &Value) -> Result<i64> {
     let seq: i64 = tx.query_row("SELECT COALESCE(MAX(sequence),0)+1 FROM events", [], |r| {
         r.get(0)
     })?;
@@ -129,6 +129,58 @@ fn media_event(tx: &Connection, kind: &str, data: &Value) -> Result<()> {
     tx.execute(
         "DELETE FROM events WHERE sequence < ?1",
         [seq.saturating_sub(10_000)],
+    )?;
+    Ok(seq)
+}
+/// Fields of a `job.updated` event that only report transfer progress.
+const PROGRESS_FIELDS: [&str; 3] = ["completedBytes", "totalBytes", "updatedAt"];
+/// Record a `job.updated` event. When the job's previous one differs only in
+/// [`PROGRESS_FIELDS`], it is deleted after the new one is inserted, so the
+/// event log keeps one progress event per job state instead of one per
+/// chunk. Sequence numbers are never reused, state changes are never
+/// merged, and the oldest event is never deleted (that would make a cursor
+/// just before it look expired).
+fn job_updated_event(tx: &Connection, job: &str, data: &Value) -> Result<()> {
+    let key = format!("job-event:{job}");
+    let previous: Option<i64> = tx
+        .query_row(
+            "SELECT CAST(CAST(value AS TEXT) AS INTEGER) FROM runtime WHERE key=?1",
+            [&key],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let seq = media_event(tx, "job.updated", data)?;
+    if let Some(previous) = previous {
+        let row: Option<(String, String)> = tx
+            .query_row(
+                "SELECT kind,data_json FROM events WHERE sequence=?1 AND sequence>(SELECT MIN(sequence) FROM events)",
+                [previous],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let progress_only = |old: &Value| {
+            let strip = |value: &Value| {
+                let mut value = value.clone();
+                if let Some(object) = value.as_object_mut() {
+                    for field in PROGRESS_FIELDS {
+                        object.remove(field);
+                    }
+                }
+                value
+            };
+            strip(old) == strip(data)
+        };
+        if let Some((kind, raw)) = row {
+            if kind == "job.updated"
+                && serde_json::from_str::<Value>(&raw).is_ok_and(|old| progress_only(&old))
+            {
+                tx.execute("DELETE FROM events WHERE sequence=?1", [previous])?;
+            }
+        }
+    }
+    tx.execute(
+        "INSERT INTO runtime(key,value)VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![key, seq.to_string().into_bytes()],
     )?;
     Ok(())
 }
@@ -184,7 +236,7 @@ pub(crate) fn job_event(tx: &Connection, account: &str, row: &MediaJobRecord) ->
         }
     }
     let data = json!({"id":row.id,"jobId":row.id,"accountId":account,"kind":row.kind,"state":row.state,"phase":row.phase,"attempts":row.attempts,"cancelRequested":row.cancel_requested,"retryable":row.retryable,"reason":row.error_code,"assetId":row.data["assetId"],"sourceId":row.data["sourceId"],"threadId":row.data["threadId"],"serverMessageId":row.data["serverMessageId"],"completedBytes":row.data["completedBytes"],"totalBytes":row.data["totalBytes"],"result":row.data["result"],"createdAt":row.created_at,"updatedAt":row.updated_at});
-    media_event(tx, "job.updated", &data)?;
+    job_updated_event(tx, &row.id, &data)?;
     if row.kind == "send"
         && matches!(
             row.state.as_str(),
@@ -1162,6 +1214,99 @@ mod tests {
         s.create_account("test").unwrap();
         (t, s)
     }
+    #[test]
+    fn progress_updates_replace_the_previous_progress_event_without_reusing_sequences() {
+        let (_dir, s) = setup();
+        // An unrelated first event, so the job's events are never the oldest.
+        s.append_event_once("test", "first", "account.push", &json!({}))
+            .unwrap();
+        let (mut row, _) = s
+            .create_media_job(
+                "test",
+                "job",
+                "download:asset",
+                &"0".repeat(64),
+                "download",
+                &json!({"assetId":"asset","completedBytes":0}),
+                b"",
+            )
+            .unwrap();
+        let mut seen = 0;
+        let mut save = |row: &mut MediaJobRecord, change: &dyn Fn(&mut MediaJobRecord)| {
+            change(row);
+            *row = s.save_media_job("test", row).unwrap();
+            let events = s.events("test", 0, 200).unwrap();
+            let newest: i64 = events.last().unwrap().cursor.parse().unwrap();
+            assert!(newest > seen, "sequence reused");
+            seen = newest;
+            events
+                .into_iter()
+                .filter(|event| event.kind == "job.updated")
+                .map(|event| {
+                    (
+                        event.data["state"].clone(),
+                        event.data["completedBytes"].clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        save(&mut row, &|row| row.state = "running".into());
+        let running_cursor = s
+            .events("test", 0, 200)
+            .unwrap()
+            .last()
+            .unwrap()
+            .cursor
+            .parse::<i64>()
+            .unwrap();
+        for bytes in [10, 20, 30] {
+            save(&mut row, &|row| row.data["completedBytes"] = bytes.into());
+        }
+        let events = save(&mut row, &|row| row.state = "available".into());
+        // One event per state: progress replaced its predecessor, including
+        // the running transition, whose state the newest progress repeats.
+        assert_eq!(
+            events,
+            vec![
+                (json!("queued"), json!(0)),
+                (json!("running"), json!(30)),
+                (json!("available"), json!(30)),
+            ]
+        );
+        // A reader whose cursor is the deleted running event still gets the
+        // newer progress event and the completion.
+        let later = s.events("test", running_cursor, 200).unwrap();
+        assert_eq!(
+            later
+                .iter()
+                .map(|event| event.data["state"].clone())
+                .collect::<Vec<_>>(),
+            vec![json!("running"), json!("available")]
+        );
+    }
+
+    #[test]
+    fn the_oldest_event_is_never_merged_away() {
+        let (_dir, s) = setup();
+        let (mut row, _) = s
+            .create_media_job(
+                "test",
+                "job",
+                "download:asset",
+                &"0".repeat(64),
+                "download",
+                &json!({"assetId":"asset","completedBytes":0}),
+                b"",
+            )
+            .unwrap();
+        let first: i64 = s.events("test", 0, 10).unwrap()[0].cursor.parse().unwrap();
+        row.data["completedBytes"] = 5.into();
+        s.save_media_job("test", &row).unwrap();
+        // Deleting the first event would make a cursor just before it expire.
+        assert!(s.events("test", first - 1, 10).is_ok());
+        assert_eq!(s.events("test", 0, 10).unwrap().len(), 2);
+    }
+
     #[test]
     fn compaction_returns_space_once_embedded_payloads_have_moved_to_files() {
         let (dir, s) = setup();
