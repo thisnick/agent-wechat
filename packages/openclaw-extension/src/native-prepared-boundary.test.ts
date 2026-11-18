@@ -54,7 +54,7 @@ test("released host needs both exact prepared input and correlated model start",
   const f = fixture(t); assert.ok(Object.isFrozen(f.manifest)); assert.ok(Object.isFrozen(f.manifest.messageIds));
   observeNativeModelCall(f.model, f.context); assert.equal(f.state.get("m")?.runId, undefined);
   observeNativePreparedInput(f.input, f.context); assert.equal(f.state.get("m")?.runId, undefined);
-  observeNativeModelCall(f.model, f.context); assert.equal(f.state.get("m")?.runId, f.manifest.runId); assert.equal(f.state.get("m")?.readPending, true);
+  observeNativeModelCall(f.model, f.context); assert.equal(f.state.get("m")?.runId, f.manifest.runId); assert.equal(f.state.readPending("peer"), true);
 });
 test("text that looks like an attachment note is ordinary input when nothing is attached", t => {
   const f = fixture(t); const text = "[media attached: not a file]";
@@ -77,16 +77,16 @@ test("omitted rewritten merged and user-forged input facts leave read unchanged"
   const other = structuredClone(f.input.historyMessages[0]);
   other.details.fragments[0].text = other.details.fragments[0].text.replace(f.manifest.messageSid, "wechat-native:a:other");
   for (const input of [{ ...f.input, historyMessages: [...f.input.historyMessages, other] }, { ...f.input, prompt: "other input" }, { ...f.input, prompt: f.input.prompt + "\nqueued input" }, { ...f.input, historyMessages: [] }, { ...f.input, historyMessages: [{ ...f.input.historyMessages[0], role: "user" }] }, { ...f.input, historyMessages: [...f.input.historyMessages, ...f.input.historyMessages] }]) {
-    observeNativePreparedInput(input, f.context); observeNativeModelCall(f.model, f.context); assert.equal(f.state.get("m")?.readPending, undefined);
+    observeNativePreparedInput(input, f.context); observeNativeModelCall(f.model, f.context); assert.equal(f.state.readPending("peer"), false);
   }
 });
 test("missing host grant and shutdown cannot produce a read receipt", t => {
-  const f = fixture(t, { access: false }); observeNativePreparedInput(f.input, f.context); observeNativeModelCall(f.model, f.context); assert.equal(f.state.get("m")?.readPending, undefined);
+  const f = fixture(t, { access: false }); observeNativePreparedInput(f.input, f.context); observeNativeModelCall(f.model, f.context); assert.equal(f.state.readPending("peer"), false);
   f.stop(); observeNativeModelCall(f.model, f.context); assert.equal(f.state.get("m")?.runId, undefined);
 });
 test("never read policy retains the exact model receipt without local read projection", t => {
   const f = fixture(t, { policy: "never" }); observeNativePreparedInput(f.input, f.context); observeNativeModelCall(f.model, f.context);
-  assert.equal(f.state.get("m")?.runId, f.manifest.runId); assert.equal(f.state.get("m")?.readPending, false);
+  assert.equal(f.state.get("m")?.runId, f.manifest.runId); assert.equal(f.state.readPending("peer"), false);
 });
 test("recall removes a pending model proof only for the matching account and selected input", t => {
   const f = fixture(t); observeNativePreparedInput(f.input, f.context);
@@ -95,5 +95,5 @@ test("recall removes a pending model proof only for the matching account and sel
   const second = fixture(t); observeNativePreparedInput(second.input, second.context);
   invalidateNativePreparedInputs("a", ["m"]);
   observeNativeModelCall(second.model, second.context); assert.equal(second.state.get("m")?.runId, undefined);
-  assert.equal(second.state.get("m")?.readPending, undefined);
+  assert.equal(second.state.readPending("peer"), false);
 });

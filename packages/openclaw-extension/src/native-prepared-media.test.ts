@@ -46,10 +46,11 @@ test("image count and model start alone cannot mark media read", t => {
   for (const change of [{ messages: [] }, { messages: [{ ...f.end.messages[0], content: [{ type: "text", text: f.end.messages[0].content[0].text }] }] },
     { messages: [{ ...f.end.messages[0], idempotencyKey: "older-identical-source" }] },
     { messages: [{ ...f.end.messages[0], content: [f.end.messages[0].content[0], { type: "image", mimeType: "image/png", data: Buffer.from("wrong").toString("base64") }] }] }]) {
-    observeNativeAgentEnd({ ...f.end, ...change }, f.ctx); assert.equal(f.state.get("m")?.readPending, undefined);
+    observeNativeAgentEnd({ ...f.end, ...change }, f.ctx); assert.equal(f.state.readPending(f.message.threadId), false);
   }
-  observeNativeAgentEnd(f.end, f.ctx); assert.equal(f.state.get("m")?.readPending, true); assert.equal(f.receipts(), 1);
-  f.state.update("m", { readPending: false }); observeNativeAgentEnd(f.end, f.ctx); assert.equal(f.receipts(), 1); assert.equal(f.state.get("m")?.readPending, false);
+  observeNativeAgentEnd(f.end, f.ctx); assert.equal(f.state.readPending(f.message.threadId), true); assert.equal(f.receipts(), 1);
+  for (const read of f.state.pendingReads()) f.state.clearRead(read.threadId, read.token);
+  observeNativeAgentEnd(f.end, f.ctx); assert.equal(f.receipts(), 1); assert.equal(f.state.readPending(f.message.threadId), false);
 });
 test("omitted image and mismatched run/session/provider snapshots remain unread", t => {
   const f = fixture(t); observeNativePreparedInput({ ...f.input, imagesCount: 0 }, f.ctx); observeNativeModelCall(f.model, f.ctx); observeNativeAgentEnd(f.end, f.ctx); assert.equal(f.receipts(), 0);
@@ -58,7 +59,7 @@ test("omitted image and mismatched run/session/provider snapshots remain unread"
 });
 test("available file reference requires the exact frozen body and source turn", t => {
   const f = fixture(t, "file"); f.start(); observeNativeAgentEnd({ ...f.end, messages: [{ ...f.end.messages[0], content: "[File unavailable]" }] }, f.ctx); assert.equal(f.receipts(), 0);
-  observeNativeAgentEnd(f.end, f.ctx); assert.equal(f.state.get("m")?.readPending, true);
+  observeNativeAgentEnd(f.end, f.ctx); assert.equal(f.state.readPending(f.message.threadId), true);
 });
 test("unknown video additions cannot replace an exact supplied reference", t => {
   const f = fixture(t, "video"); observeNativePreparedInput({ ...f.input, prompt: f.input.prompt + "\n[unproven description]" }, f.ctx); observeNativeModelCall(f.model, f.ctx); observeNativeAgentEnd(f.end, f.ctx); assert.equal(f.receipts(), 0);
@@ -66,12 +67,13 @@ test("unknown video additions cannot replace an exact supplied reference", t => 
 });
 test("receipt survives reopen while later provider failure does not undo handoff", t => {
   const f = fixture(t); f.start(); observeNativeAgentEnd({ ...f.end, success: false }, f.ctx);
-  const restored = new NativeConsumerState(f.directory, "server", "a"); assert.equal(restored.get("m")?.runId, f.manifest.runId); assert.equal(restored.get("m")?.readPending, true);
+  // The turn itself is not resumed after a restart, but its read receipt is still sent.
+  const restored = new NativeConsumerState(f.directory, "server", "a"); assert.deepEqual(restored.heldOnOpen, ["m"]); assert.equal(restored.readPending(f.message.threadId), true);
 });
 test("failed durable media receipt cannot expose an in-memory read mutation", t => {
   const f = fixture(t); f.start(); chmodSync(f.directory, 0o755);
-  assert.throws(() => observeNativeAgentEnd(f.end, f.ctx), /private/); assert.equal(f.state.get("m")?.readPending, undefined);
-  chmodSync(f.directory, 0o700); const restored = new NativeConsumerState(f.directory, "server", "a"); assert.equal(restored.get("m")?.state, "needs_review"); assert.equal(restored.get("m")?.runId, undefined);
+  assert.throws(() => observeNativeAgentEnd(f.end, f.ctx), /private/); assert.equal(f.state.readPending(f.message.threadId), false);
+  chmodSync(f.directory, 0o700); const restored = new NativeConsumerState(f.directory, "server", "a"); assert.deepEqual(restored.heldOnOpen, ["m"]); assert.equal(restored.readPending(f.message.threadId), false);
 });
 
 

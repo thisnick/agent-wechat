@@ -7,6 +7,7 @@ import { NativeConsumerState } from "../../src/native-consumer-state.ts";
 import { ensureNativeHost } from "../../src/native-host.ts";
 import { resolveWeChatAccount } from "../../src/types.ts";
 import { prepareNativeAttachment } from "../../src/native-media.ts";
+import { observeTurns, savedMessages } from "./native-probe-state.ts";
 import type { NativeMessage } from "@agent-wechat/shared";
 
 export default { ...base, register(api: any) {
@@ -19,22 +20,25 @@ export default { ...base, register(api: any) {
       const { client } = await ensureNativeHost(account.native!);
       const consumerDirectory = join(directory, "probe-consumer");
       let state = new NativeConsumerState(consumerDirectory, "fixture", "a"); let sequence = 0;
+      const turns = observeTurns(() => state); turns.watch(state); const save = savedMessages(directory); const messages: NativeMessage[] = [];
       const contexts: any[] = [], outcomes: Record<string, string> = {};
       const core = { ...api.runtime, channel: { ...api.runtime.channel, reply: { ...api.runtime.channel.reply,
         finalizeInboundContext: (ctx: any) => { contexts.push(structuredClone(ctx)); return api.runtime.channel.reply.finalizeInboundContext(ctx); } } } };
       const scenarios = JSON.parse(readFileSync(join(directory, "scenarios.json"), "utf8"));
       for (const { id, type, threadId = "room@chatroom", mention = false, body = null, appMessageType, quote, link } of scenarios) {
-        const message: NativeMessage = { id, accountId: "a", threadId, senderId: "u1", serverId: String(9000 + sequence), type, body, appMessageType, quote, link,
+        const message: NativeMessage = save({ id, accountId: "a", threadId, senderId: "u1", serverId: String(9000 + sequence), type, body, appMessageType, quote, link,
           direction: "incoming", createdAt: new Date().toISOString(), version: "v1", media: [],
-          mentions: { state: "known", userIds: mention ? ["self"] : [], self: mention, all: false, source: "msgsource.atuserlist" } };
+          mentions: { state: "known", userIds: mention ? ["self"] : [], self: mention, all: false, source: "msgsource.atuserlist" } });
+        messages.push(message);
         state.accept(String(++sequence), message, "live");
         outcomes[id] = await dispatchNativeMessage({ client, state, account, message, cfg, core,
           prepareAttachment: params => prepareNativeAttachment({ ...params, waitMs: 0 }) });
-        // Restart before the activating mention; buffered context must survive.
-        state = new NativeConsumerState(consumerDirectory, "fixture", "a");
+        // Restart before the activating mention; context is read back from the saved messages.
+        state = turns.watch(new NativeConsumerState(consumerDirectory, "fixture", "a"));
         await projectNativeRead(client, "a", state);
       }
-      writeFileSync(join(directory, "result.json"), JSON.stringify({ outcomes, contexts, items: state.items() }));
+      writeFileSync(join(directory, "result.json"), JSON.stringify({ outcomes, contexts, pendingReads: turns.pendingReads(),
+        items: messages.map(message => { const turn = turns.item(message.id); return { message, dispatchManifest: turn.manifest, runId: turn.runId, open: turn.open }; }) }));
     } catch (error) { writeFileSync(join(directory, "result.json"), JSON.stringify({ error: String(error) })); }
   }, 1000); }, stop: async () => {} });
 } };

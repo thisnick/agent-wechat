@@ -7,6 +7,7 @@ import { prepareNativeAttachment } from "../../src/native-media.ts";
 import { NativeConsumerState } from "../../src/native-consumer-state.ts";
 import { ensureNativeHost } from "../../src/native-host.ts";
 import { resolveWeChatAccount } from "../../src/types.ts";
+import { observeTurns, savedMessages } from "./native-probe-state.ts";
 import type { NativeMessage } from "@agent-wechat/shared";
 export default { ...base, register(api: any) {
   base.register(api);
@@ -19,11 +20,12 @@ export default { ...base, register(api: any) {
       const { client } = await ensureNativeHost(account.native!);
       const consumerDirectory = join(directory, "probe-consumer");
       let state = new NativeConsumerState(consumerDirectory, "fixture", "a"), sequence = 0;
+      const turns = observeTurns(() => state); turns.watch(state); const save = savedMessages(directory);
       const outcomes: Record<string, string> = {};
       const core = api.runtime;
       const scenarios = JSON.parse(readFileSync(join(directory, "scenarios.json"), "utf8"));
       for (const { id, type, threadId = "u1", appMessageType, body = null, link } of scenarios) {
-        const message: NativeMessage = { id, accountId: "a", threadId, senderId: "u1", serverId: String(9000 + sequence), type, body, appMessageType, link, direction: "incoming", createdAt: new Date().toISOString(), version: "v1", media: [], mentions: threadId.endsWith("@chatroom") ? { state: "known", userIds: ["self"], self: true, all: false, source: "msgsource.atuserlist" } : { state: "unknown", userIds: [], self: null, all: null, source: null } };
+        const message: NativeMessage = save({ id, accountId: "a", threadId, senderId: "u1", serverId: String(9000 + sequence), type, body, appMessageType, link, direction: "incoming", createdAt: new Date().toISOString(), version: "v1", media: [], mentions: threadId.endsWith("@chatroom") ? { state: "known", userIds: ["self"], self: true, all: false, source: "msgsource.atuserlist" } : { state: "unknown", userIds: [], self: null, all: null, source: null } });
         state.accept(String(++sequence), message, "live");
         outcomes[id] = await dispatchNativeMessage({ client, state, account, message, cfg, core,
           prepareAttachment: params => prepareNativeAttachment({ ...params, waitMs: 0 }) });
@@ -31,14 +33,14 @@ export default { ...base, register(api: any) {
         if (id === "file") {
           // Reopen a committed handoff before projecting its read. A lost read
           // response retains the same exact IDs for another store reopen/retry.
-          state = new NativeConsumerState(consumerDirectory, "fixture", "a");
+          state = turns.watch(new NativeConsumerState(consumerDirectory, "fixture", "a"));
           try { await projectNativeRead(client, "a", state); } catch { /* intentional lost response */ }
-          state = new NativeConsumerState(consumerDirectory, "fixture", "a");
+          state = turns.watch(new NativeConsumerState(consumerDirectory, "fixture", "a"));
           outcomes["duplicate-file"] = await dispatchNativeMessage({ client, state, account, message, cfg, core });
         }
         await projectNativeRead(client, "a", state);
       }
-      writeFileSync(join(directory, "result.json"), JSON.stringify({ outcomes, items: state.items().map(item => ({ id: item.message.id, state: item.state, runId: item.runId, readPending: item.readPending, handoffUnconfirmed: item.handoffUnconfirmed, manifest: item.dispatchManifest })) }));
+      writeFileSync(join(directory, "result.json"), JSON.stringify({ outcomes, items: scenarios.map(({ id }: { id: string }) => turns.item(id)), pendingReads: turns.pendingReads() }));
     } catch (error) { writeFileSync(join(directory, "result.json"), JSON.stringify({ error: String(error) })); }
   }, 1000); }, stop: async () => {} });
 } };

@@ -6,6 +6,7 @@ import { dispatchNativeMessage, projectNativeRead } from "../../src/native-monit
 import { NativeConsumerState } from "../../src/native-consumer-state.ts";
 import { ensureNativeHost } from "../../src/native-host.ts";
 import { resolveWeChatAccount } from "../../src/types.ts";
+import { observeTurns, savedMessages } from "./native-probe-state.ts";
 import type { NativeMessage } from "@agent-wechat/shared";
 
 export default { ...base, register(api: any) {
@@ -23,8 +24,9 @@ export default { ...base, register(api: any) {
         const account = resolveWeChatAccount(cfg)!;
         const { client } = await ensureNativeHost(account.native!);
         const state = new NativeConsumerState(join(directory, "probe-consumer"), "fixture", "a");
+        const turns = observeTurns(() => state); turns.watch(state); const save = savedMessages(directory);
         let sequence = 0;
-        const message = (id: string, body: string): NativeMessage => ({ id, body, accountId: "a", threadId: "u1", senderId: "u1", serverId: String(9000 + sequence), type: 1,
+        const message = (id: string, body: string): NativeMessage => save({ id, body, accountId: "a", threadId: "u1", senderId: "u1", serverId: String(9000 + sequence), type: 1,
           direction: "incoming", createdAt: new Date().toISOString(), version: "1", media: [], mentions: { state: "unknown", userIds: [], self: null, all: null, source: null } });
         const dispatch = (id: string, body: string) => {
           const input = message(id, body); state.accept(String(++sequence), input, "live");
@@ -45,8 +47,8 @@ export default { ...base, register(api: any) {
         await projectNativeRead(client, "a", state);
         await dispatch("command", "/help");
         await projectNativeRead(client, "a", state);
-        writeFileSync(join(directory, "result.json"), JSON.stringify({ items: state.items().map(item => ({ id: item.message.id, state: item.state,
-          runId: item.runId, readPending: item.readPending, handoffUnconfirmed: item.handoffUnconfirmed, manifest: item.dispatchManifest })) }));
+        writeFileSync(join(directory, "result.json"), JSON.stringify({ items: ["single", "gap", "blocking", "queued-a", "queued-b", "command"].map(turns.item),
+          pendingReads: turns.pendingReads() }));
       } catch (error) { writeFileSync(join(directory, "result.json"), JSON.stringify({ error: String(error) })); }
     }, 1000);
   }, stop: async () => {} });

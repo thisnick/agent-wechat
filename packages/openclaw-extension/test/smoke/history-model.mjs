@@ -17,7 +17,7 @@ const { build } = createRequire(join(root, 'packages/openclaw-extension/package.
 const sdk = await realpath(join(root, 'packages/openclaw-extension/node_modules/openclaw'));
 assert.equal(JSON.parse(await readFile(join(sdk, 'package.json'), 'utf8')).version, '2026.11.4');
 const temporary = await mkdtemp(join(tmpdir(), 'native-history-model-'));
-const requests = [], queries = [], reads = [], transfers = [], lookups = [], streams = new Set(); let child, fixtureError, log = '', modelStep = 0, loginStarts = 0, loginQrReads = 0, quoteRequests = 0;
+const requests = [], queries = [], reads = [], transfers = [], lookups = [], streams = new Set(); let child, fixtureError, log = '', modelStep = 0, loginStarts = 0, loginQrReads = 0, quoteRequests = 0, contextReads = 0;
 const token = 'synthetic-native-token-'.repeat(3), assets = new Map();
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 for (const [id, file, kind, mime] of [['image-a','native-model.png','image','image/png'], ['image-b','native-model-large.png','image','image/png'], ['dm-image','native-model.png','image','image/png'], ['image-file','native-model.png','file','image/png'], ['video','native-model.mp4','video','video/mp4'], ['voice',null,'voice','audio/wav'], ['file',null,'file','text/plain'], ['pending-image','native-model.png','image','image/png'], ['history-image','native-model.png','image','image/png'], ['history-file',null,'file','text/plain']]) {
@@ -100,6 +100,12 @@ const upstream = createServer(async (req, res) => {
     if (url.pathname === '/v1/accounts/a/threads') return json({ items: ['room@chatroom','u1'].map(id => ({ id, readStateVersion: '1' })), nextCursor: null, coverage: {} });
     if (url.pathname === '/v1/accounts/a/events') return json({ items: [], nextCursor: '0' });
     if (url.pathname === '/v1/accounts/a/events/stream') { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.write(': fixture\n\n'); streams.add(res); req.once('close', () => streams.delete(res)); return; }
+    if (url.pathname === '/v1/accounts/a/threads/room%40chatroom/messages' && !url.searchParams.has('query')) {
+      // Group context for a mention is read from the chat's saved messages, newest first.
+      contextReads++;
+      const saved = Object.values(JSON.parse(await readFile(join(temporary, 'daemon-messages.json'), 'utf8'))).filter(message => message.threadId === 'room@chatroom');
+      return json({ items: saved.reverse(), nextCursor: null, sourceGeneration: 'fixture', coverage: {} });
+    }
     if (url.pathname === '/v1/accounts/a/threads/room%40chatroom/messages') {
       assert.equal(url.searchParams.get('query'), 'earlier-project-note'); queries.push(Object.fromEntries(url.searchParams));
       const id = url.searchParams.has('cursor') ? 'older-page-2' : 'stored-before-buffer';
@@ -111,8 +117,7 @@ const upstream = createServer(async (req, res) => {
     if (lookup) { lookups.push(lookup[1]); return json({id:lookup[1],accountId:'a',threadId:lookup[1]==='foreign-image'?'private-peer':'room@chatroom',senderId:'u1',direction:'incoming',type:lookup[1]==='history-file'?49:3,body:'<private transport XML>',version:'v1',media:[]}); }
     const current = /^\/v1\/accounts\/a\/messages\/([^/]+)$/.exec(url.pathname);
     if (current) {
-      const custody = JSON.parse(await readFile(join(temporary, 'probe-consumer', createHash('sha256').update('fixture\0a').digest('hex') + '.json'), 'utf8'));
-      const message = custody.items[decodeURIComponent(current[1])]?.message;
+      const message = JSON.parse(await readFile(join(temporary, 'daemon-messages.json'), 'utf8'))[decodeURIComponent(current[1])];
       if (message) return json(message);
     }
     const quoteLookup = /^\/v1\/accounts\/a\/messages\/([^/]+)\/quote$/.exec(url.pathname);
@@ -232,7 +237,7 @@ try {
     }
   }
   const mediaTool=requests[0].tools.find(tool=>tool.function.name==='wechat_media');assert.ok(mediaTool);assert.equal(mediaTool.function.parameters.properties.threadId,undefined);assert.ok(!JSON.stringify(requests.map(request=>request.tools)).includes('wechat_chats'));
-  assert.ok(!JSON.stringify(requests).includes('private transport XML'));assert.equal(result.items.find(item=>item.message.id==='image-a').message.mentions.self,false);assert.equal(result.items.find(item=>item.message.id==='image-a').readPending,undefined);
+  assert.ok(!JSON.stringify(requests).includes('private transport XML'));assert.equal(result.items.find(item=>item.message.id==='image-a').message.mentions.self,false);assert.deepEqual(result.pendingReads,[]);assert.ok(contextReads>=1);
   console.log(JSON.stringify({gatewayVersion:'2026.11.4',groupContextSurvivedRestart:true,groupOriginalAttachmentPaths:6,groupVisionImages:1,fileWithImageExtensionNotHydrated:true,latestPreparedImageHashVerified:true,directImagePathAndVision:true,realSearchToolCalls:queries.length,searchPaginationReachedProvider:true,currentThreadOnly:true,foreignAttachmentRejectedBeforeAccess:true,downloadedImageHashReachedProvider:true,cachedFilePathReachedProvider:true,attachmentTransferRequests:transfers.length,conversationAccess:false,quotedTextReachedProvider:true,quotedImageHashReachedProvider:true,jpegTrailerReachedProvider:true,wxgfSourceAndStillPreviewBound:true,embeddedQuoteTextAndImageWithoutOriginal:true,forwardedBundleReachedProvider:true,ordinaryLinkCardReachedProvider:true,embeddedQuotesOnly:true,quoteRequests,loginStatusStartWait:true,loginQrHashReachedProvider:true,loginStarts,reads:reads.length}));
 } finally {
   if(child&&child.exitCode===null&&child.signalCode===null){child.kill('SIGTERM');await Promise.race([once(child,'exit'),sleep(5000)]);if(child.exitCode===null)child.kill('SIGKILL');}
