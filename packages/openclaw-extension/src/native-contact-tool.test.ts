@@ -25,10 +25,11 @@ function fixture(extra: Record<string, unknown> = {}, deps: Record<string, unkno
     ...extra,
   };
   let after = () => {};
+  const hostStarts = { count: 0 };
   const tools = createNativeContactTools(context, {
     ...deps,
     host: async () =>
-      ({
+      (hostStarts.count++, {
         client: {
           contactRequests: async (...args: unknown[]) => {
             calls.push(["requests", ...args]);
@@ -48,6 +49,7 @@ function fixture(extra: Record<string, unknown> = {}, deps: Record<string, unkno
     context,
     cfg,
     calls,
+    hostStarts,
     after: (fn: () => void) => {
       after = fn;
     },
@@ -78,16 +80,26 @@ const ownerChat = {
     context: { channel: "agent-wechat", to: "wechat:wxid_owner", accountId: "default" },
   },
 };
-function cliBridge(extra: Record<string, unknown> = {}, stored: any = ownerChat) {
-  const store = { entry: stored, reads: 0 };
+function cliBridge(
+  extra: Record<string, unknown> = {},
+  stored: any = ownerChat,
+  resolve: (input: any) => any = (input) => ({
+    agentId: "main",
+    sessionKey: `agent:main:${input.channel}:direct:${String(input.peer.id).toLowerCase()}`,
+    dmScope: "per-channel-peer",
+  })
+) {
+  const store = { entry: stored, reads: 0, failReads: false };
   const sessions = {
     resolveStorePath: () => "/private/store",
     getSessionEntry: () => store.entry,
     getSessionEntryAsync: async () => {
       store.reads += 1;
+      if (store.failReads) throw Error("store busy");
       return store.entry;
     },
   };
+  const routing = { resolveAgentRoute: resolve };
   const f = fixture({
     memoryAudience: undefined,
     assertMemoryAudienceCurrent: undefined,
@@ -96,7 +108,7 @@ function cliBridge(extra: Record<string, unknown> = {}, stored: any = ownerChat)
     sessionId: "s1",
     requesterSenderId: "wxid_owner",
     ...extra,
-  }, { sessions });
+  }, { sessions, routing });
   return Object.assign(f, { store });
 }
 const withRoute = (context: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({
@@ -123,8 +135,18 @@ test("without a host memory audience, only the owner's own stored direct chat ge
     ["someone else's chat", withRoute({ channel: "agent-wechat", to: "wechat:wxid_alice" })],
     ["group route", withRoute({ channel: "agent-wechat", to: "channel:1@chatroom" })],
     ["thread", withRoute({ channel: "agent-wechat", to: "wechat:wxid_owner", threadId: "9" })],
+    ["another WeChat account", withRoute({ channel: "agent-wechat", to: "wechat:wxid_owner", accountId: "b" })],
   ] as const)
     assert.equal(cliBridge({}, stored).tools.length, 0, label);
+  const routedTo = (route: any) => () => route;
+  for (const [label, resolve] of [
+    ["shared main DM scope", routedTo({ agentId: "main", sessionKey: "agent:main:agent-wechat:direct:wxid_owner", dmScope: "main" })],
+    ["routed to another agent", routedTo({ agentId: "groups", sessionKey: "agent:main:agent-wechat:direct:wxid_owner", dmScope: "per-channel-peer" })],
+    ["routed to another session", routedTo({ agentId: "main", sessionKey: "agent:main:direct:linked-owner", dmScope: "per-peer" })],
+    ["no route", routedTo(undefined)],
+    ["router failure", () => { throw Error("routing"); }],
+  ] as const)
+    assert.equal(cliBridge({}, ownerChat, resolve as any).tools.length, 0, label);
   for (const extra of [
     { senderIsOwner: false },
     { senderIsOwner: undefined },
@@ -148,18 +170,23 @@ test("without a host memory audience, only the owner's own stored direct chat ge
   const f = cliBridge();
   await f.run({ action: "list" });
   assert.equal(f.calls.length, 1);
-  assert.equal(f.store.reads, 2, "rereads before the effect and before release");
+  assert.equal(f.store.reads, 3, "rereads before the host, before the effect and before release");
 });
 test("the stored-session check is rerun before the effect and before release", async () => {
   const reset = cliBridge();
   reset.store.entry = { ...ownerChat, sessionId: "s2" };
   await assert.rejects(reset.run({ action: "list" }), /owner/);
   assert.equal(reset.calls.length, 0);
+  assert.equal(reset.hostStarts.count, 0, "refused before the native host starts");
+  const busy = cliBridge();
+  busy.store.failReads = true;
+  await assert.rejects(busy.run({ action: "list" }), /Could not read the OpenClaw session/);
+  assert.equal(busy.hostStarts.count, 0);
   const rebound = cliBridge();
   rebound.after(() => {
     rebound.store.entry = withRoute({ channel: "agent-wechat", to: "wechat:wxid_alice" });
   });
-  await assert.rejects(rebound.run({ action: "list" }), /owner/);
+  await assert.rejects(rebound.run({ action: "list" }), /may already have been made.*same idempotency key/);
   assert.equal(rebound.calls.length, 1);
   const audience = cliBridge();
   audience.after(() => {
