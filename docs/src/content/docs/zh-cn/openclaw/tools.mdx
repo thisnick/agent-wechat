@@ -1,7 +1,7 @@
 ---
 title: 智能体工具
 description: OpenClaw 智能体可调用的微信工具，以及如何授权访问所有会话。
-sourceHash: "f8d680ef65c6"
+sourceHash: "d608c4b1e3a6"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -32,7 +32,7 @@ import { Aside } from '@astrojs/starlight/components';
 { "tools": { "alsoAllow": ["wechat_contacts", "wechat_contact_request"] } }
 ```
 
-这两个工具都要求 OpenClaw 的可信所有者身份，以及当前的**私人所有者会话**。共享会话和缺少这些检查的宿主无法使用它们。模型无法选择其他账号，也无法自行提供所有者标记。
+这两个工具都要求 OpenClaw 的可信所有者身份，以及当前的**私人所有者会话**，即所有者本人与该智能体之间的单聊。它们不会出现在群聊、定时运行、子智能体或其他人的会话中。模型无法选择其他账号，也无法自行提供所有者标记。OpenClaw 内置的智能体运行时会自行标记所有者私聊。Claude CLI 等 CLI 后端不会把这一信息传给工具，因此插件会检查已保存的会话：必须是一对一私聊、仍然有效，且回复发往所有者。
 
 `wechat_contacts` 支持 `list`、`get`、本地 `find`、精确 ID 的 `lookup`、服务器 `search` 和 `remove`。`wechat_contact_request` 支持 `list`、`get`、`send`、`accept`、删除本地记录的 `delete` 以及操作的 `status`。发送时使用搜索得到的 `recipientRef`；通过和删除时需要已检查的 `expectedVersion`。修改操作需要稳定的 `idempotencyKey`。出现不确定结果后，请查询原始操作，而不是再次发送。
 
@@ -40,7 +40,7 @@ import { Aside } from '@astrojs/starlight/components';
 
 ## 语音通话 \{#calling}
 
-可选的 `wechat_call` 工具支持查询通话状态、向允许的联系人发起单聊语音呼叫、发起或加入配置好的语音会议、邀请允许的联系人，或挂断当前插件拥有的通话。使用该工具需要单独配置通话权限与授权的管理员所有者；单凭文字消息收发权限无法使用。
+可选的 `wechat_call` 工具支持查询通话状态、向允许的联系人发起单聊语音呼叫、发起或加入配置好的语音会议、邀请允许的联系人，或挂断当前插件拥有的通话。使用该工具需要单独的通话权限和已授权的所有者；仅有文字消息收发权限无法使用。
 关于工具授权、凭据配置与对话模型设置，请参考[配置语音通话](../calling/)。
 
 语音通话与智能体工具访问属于不同的独立配置项。将 `wechat_call` 添加到所选智能体的 `tools.alsoAllow` 中，或在需要所有智能体都具备该工具时添加到全局 `tools.alsoAllow` 中。请保留现有已配置的条目：
@@ -83,9 +83,9 @@ import { Aside } from '@astrojs/starlight/components';
 
 1. 调用 `{"action":"status"}` 检查配置的微信账号在线状态。
 2. 调用 `{"action":"start"}` 获取并展示登录二维码。使用手机微信扫码并确认登录。
-3. 调用 `{"action":"wait","timeoutMs":30000}` 等待登录完成。结果将包含任务 ID、状态和 `connected` 标记。
+3. 调用 `{"action":"wait","timeoutMs":30000}` 等待登录完成。结果将包含操作 ID、状态和 `connected` 标记。
 
-重复调用 `start` 将持续跟随当前登录流。若要强制重新扫码，传入 `force: true` 将使用新二维码而非沿用信任。`disconnect` 保持本地信任凭据断开网络；`logout` 彻底登出；`forget` 配合 `confirm: true` 抹除本地身份验证凭证但保留聊天历史。该工具需要令牌具备 `login` [权限范围](/reference/tokens/)。
+重复调用 `start` 将持续跟随当前登录流。若要强制重新扫码，传入 `force: true` 将使用新二维码而非沿用信任。`disconnect` 断开连接但保留已保存的信任；`logout` 退出登录；`forget` 配合 `confirm: true` 删除本地身份验证凭证，但保留聊天历史。该工具需要令牌具备 `login` [权限范围](/reference/tokens/)。
 
 ## 仅限所有者查询的群组信息 \{#group-information-for-the-owner}
 
@@ -99,7 +99,7 @@ import { Aside } from '@astrojs/starlight/components';
 
 ## 跨会话全局检索工具 \{#reading-all-chats}
 
-系统还提供了 5 个可选的全局工具，能够检索当前微信账号下的 **所有** 历史会话。默认情况下处于禁用状态，除非你显式授权给特定智能体：
+系统还提供了 5 个可选的全局工具，可跨越当前微信账号下的 **所有** 会话使用。默认处于关闭状态，除非你显式授权给某个智能体：
 
 | 全局工具名称 | 功能描述 |
 | --- | --- |
@@ -124,14 +124,15 @@ import { Aside } from '@astrojs/starlight/components';
 ```
 
 <Aside type="caution" title="全局存档工具拥有最高数据权限">
-获得全局存档工具的智能体能够查阅你整个微信账号的所有聊天内容（无论对话者是谁，包括群聊里的所有人）。请务必仅授权给只有你本人对话的私有智能体。`profile: "full"`、`"*"` 以及 `group:plugins` 同样会默认放行这些工具，请在无需暴露隐私的群聊机器人中显式配置 `deny`。
+获得全局存档工具的智能体能够查阅你整个微信账号的所有聊天内容（无论对话者是谁，包括群聊里的所有人）。请务必仅授权给只有你本人对话的私有智能体。`profile: "full"`、`"*"` 以及 `group:plugins` 同样会授予这些工具，因此请为不应拥有它们的智能体显式配置 `deny`。
 </Aside>
 
 <Aside title="使用提示">
 - **搜索全部基于本地。** 仅检索已保存在本地 Profile 中的记录，绝不向微信发起全量旧历史同步。
-- **文件下载需要时间。** 若资源尚未缓存，`wechat_media` 会启动后台下载并返回 `pending`；稍后再次调用即可获取成品文件。已缓存的文件在微信服务器端文件过期后依旧有效。
-- **上述所有工具均不会将会话标为已读，** 也不会推动接收游标。
-- **消息发送与撤回** 使用确定性的幂等键，网络重试绝不会重复发送。存疑的执行结果将返回 `needs_review`，绝不盲目重发。
-- 在 OpenClaw 精简工具模式下，历史记录、搜索与消息查询可通过 `tool_search` 发现。`wechat_media` 保持直接可调用状态，以便图像能够直接作为图片送入大模型多模态视窗。
+- **文件下载需要时间。** 若资源尚未缓存，`wechat_media` 会启动后台下载并返回 `pending`；稍后再次调用即可取得下载结果。已缓存的媒体在微信的副本过期后仍然可用。
+- **上述所有工具均不会将会话标为已读，** 也不会推进入站游标。
+- **消息发送与撤回** 使用稳定的幂等键，因此响应丢失后的重试绝不会重复发送。结果不确定时将返回 `needs_review`，而不会被自动重试。
+- 在 OpenClaw 精简工具模式下，历史记录、搜索与消息查询可通过 `tool_search` 发现。`wechat_media` 保持直接可调用状态，以便图像能够以图片形式送入大模型。
 - 工具必须搭配对应的 [令牌权限](/reference/tokens/)：查询需 `read`，下载需 `media`，分享卡片和撤回需 `send`。
+- **使用 CLI 后端的联系人工具** 需要每个人各自拥有独立的私聊会话（`session.dmScope` 设为 `per-peer`、`per-channel-peer` 或 `per-account-channel-peer`）。使用默认值 `main` 时，所有私聊共享同一会话，插件无法判断该会话是否只属于你。
 </Aside>
