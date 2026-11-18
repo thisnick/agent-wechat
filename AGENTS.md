@@ -31,6 +31,9 @@ Native routes/contracts live in `packages/native-client-rust/crates/wechat-api/`
 
 ## Public interfaces
 
+- Design HTTP APIs around resources. Default to `/v1/accounts/{account}/{resource}` for an account's collection and `/v1/accounts/{account}/{resource}/{id}` for an item. Use standard methods for reads, creation, partial updates and removal.
+- Return a resource's related fields in its collection and detail representations where practical. Keep cache and upstream fetching behind the API, and refresh related fields together. Avoid parallel roots and operation-specific read routes such as `/contact-privacy/snapshots` for fields that belong to `/contacts`. Add a separate resource or action route when it has a distinct lifecycle or no clear standard method.
+
 `interfaces/` lists every public interface, generated from the code: `wx` commands and flags, the published crates' APIs, the OpenClaw tools and configuration, the HTTP API routes and payloads, the calls WebSocket messages, the UI's URLs, and the SQL schema of the account and registry stores. See `interfaces/README.md`.
 
 - **Every PR must run `pnpm interfaces`** before it is opened and before each later push, and commit whatever it changes under `interfaces/`. By default it runs only the listings whose sources changed; name listings (`pnpm interfaces http ui`) or pass `--all` to choose. The submitter generates the listings: CI only regenerates them to compare, fails when the committed files differ, and never commits them.

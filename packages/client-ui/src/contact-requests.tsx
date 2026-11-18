@@ -1,5 +1,5 @@
 import { Command } from "cmdk";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
   NativeApiError,
   isNativeTombstone,
@@ -12,7 +12,7 @@ import {
 } from "@agent-wechat/shared";
 import type { Connection } from "./connection.ts";
 import { t, formatLocale } from "./i18n.ts";
-import { readableError } from "./session.ts";
+import { pause, readableError } from "./session.ts";
 import { HubAvatar } from "./avatars.tsx";
 import { Icon } from "./ui.tsx";
 
@@ -25,7 +25,6 @@ import {
   sameContactPrivacy,
   type ContactChange,
   type ContactPrivacy,
-  type ContactPrivacySnapshot,
 } from "./contact-privacy.ts";
 export type RequestSelection =
   | { request: NativeContactRequest }
@@ -616,7 +615,11 @@ export function ContactDetailDialog({
     [connection, account],
   );
   const lookupAbort = useRef<AbortController | null>(null);
-  useEffect(() => () => lookupAbort.current?.abort(), [connection, account]);
+  const refreshAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => {
+    lookupAbort.current?.abort();
+    refreshAbort.current?.abort();
+  }, [connection, account]);
   const request = "request" in selection ? selection.request : null;
   const discovery = "discovery" in selection ? selection.discovery : null;
   const contact = "contact" in selection ? selection.contact : null;
@@ -629,6 +632,7 @@ export function ContactDetailDialog({
     : savedContact?.relation === "non_contact" ? t("contactsUi.notFriendsYet")
     : null;
   const name =
+    savedContact?.displayName ??
     contact?.displayName ??
     removal?.displayName ??
     request?.displayName ??
@@ -658,7 +662,7 @@ export function ContactDetailDialog({
   const [greeting, setGreeting] = useState(() =>
     receipt?.action === "send" ? receipt.input.message : "",
   );
-  const [privacy, setPrivacy] = useState<ContactPrivacy>(() =>
+  const [initialPrivacy, setInitialPrivacy] = useState<ContactPrivacy>(() =>
     receipt?.action === "send"
       ? (receipt.input.privacy ?? defaultContactPrivacy())
       : receipt?.action === "accept"
@@ -667,10 +671,22 @@ export function ContactDetailDialog({
           ? receipt.input.privacy
           : defaultContactPrivacy(),
   );
-  const [savedPrivacy, setSavedPrivacy] =
-    useState<ContactPrivacySnapshot | null>(null);
+  const privacyCache = connection.session.contactPrivacy;
+  const savedPrivacy = useSyncExternalStore(privacyCache.subscribe, () => privacyCache.get(account, friendId));
+  const privacyDenied = useSyncExternalStore(privacyCache.subscribe, () => privacyCache.denied(account));
+  const [draft, setDraft] = useState<{ value: ContactPrivacy; version: string } | null>(null);
+  const pendingPrivacy = receipt?.action === "privacy" && receipt.operation?.state !== "succeeded"
+    ? receipt.input.privacy
+    : undefined;
+  const privacy = friendId
+    ? draft?.value ?? pendingPrivacy ?? savedPrivacy?.privacy ?? (receipt?.action === "privacy" ? receipt.input.privacy : initialPrivacy)
+    : initialPrivacy;
+  const privacyConflict = !!(draft && savedPrivacy && draft.version !== savedPrivacy.version
+    && !sameContactPrivacy(draft.value, savedPrivacy.privacy));
   const [privacyLoading, setPrivacyLoading] = useState(false),
-    [privacyError, setPrivacyError] = useState("");
+    [privacyReadError, setPrivacyError] = useState("");
+  const privacyError = privacyDenied ? t("contactsUi.privacyReadPermission") : privacyReadError;
+  const [contactRefreshing, setContactRefreshing] = useState(false);
   const [privacyRevision, setPrivacyRevision] = useState(0);
   const [privacyWaiting, setPrivacyWaiting] = useState(false);
   const [busy, setBusy] = useState(false),
@@ -717,10 +733,12 @@ export function ContactDetailDialog({
     return () => dialog.close();
   }, []);
   useEffect(() => {
-    setSavedPrivacy(null);
-    setPrivacyError("");
+    if (!contactRefreshing) setPrivacyError("");
     setPrivacyWaiting(false);
-    if (!friendId) return;
+    if (!friendId || savedPrivacy || privacyDenied || contactRefreshing) {
+      setPrivacyLoading(false);
+      return;
+    }
     const abort = new AbortController();
     setPrivacyLoading(true);
     const current = () => {
@@ -746,18 +764,11 @@ export function ContactDetailDialog({
         },
       },
     )
-      .then((value) => {
-        if (!abort.signal.aborted) {
-          setSavedPrivacy(value);
-          if (!(receipt?.action === "privacy" && !privacySucceeded))
-            setPrivacy(value.privacy);
-        }
-      })
       .catch((e) => {
         if (!abort.signal.aborted)
           setPrivacyError(
             e instanceof NativeApiError && e.status === 403
-              ? t("contactsUi.privacyPermission")
+              ? t("contactsUi.privacyReadPermission")
               : t("contactsUi.privacyReadFailed"),
           );
       })
@@ -771,7 +782,46 @@ export function ContactDetailDialog({
       unsubscribe();
       abort.abort();
     };
-  }, [actions, friendId, privacyRevision, connection, account]);
+  }, [actions, savedPrivacy, friendId, privacyDenied, privacyRevision, contactRefreshing, connection, account]);
+  function refreshPrivacy() {
+    if (friendId) privacyCache.invalidate(account, friendId);
+    setPrivacyRevision((n) => n + 1);
+  }
+  async function refreshContact() {
+    if (!friendId || refreshAbort.current) return;
+    const session = connection.session;
+    const abort = new AbortController();
+    refreshAbort.current = abort;
+    const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(125_000)]);
+    const unsubscribe = session.subscribe(() => {
+      const current = session.snapshot();
+      if (current.account !== account || current.signInRequired === account) abort.abort();
+    });
+    setContactRefreshing(true);
+    setError("");
+    try {
+      let operation = await session.client.refreshContact(account, friendId, signal);
+      while (["queued", "running"].includes(operation.state)) {
+        await pause(700, signal);
+        signal.throwIfAborted();
+        operation = await session.client.operation(account, operation.id, signal);
+      }
+      signal.throwIfAborted();
+      if (operation.state !== "succeeded" || !operation.result
+        || typeof operation.result !== "object" || !("recordCount" in operation.result)
+        || operation.result.recordCount !== 1) {
+        throw Error(t("contactsUi.contactRefreshFailed"));
+      }
+      refreshPrivacy();
+      void session.refreshConversations(account, true).catch(() => {});
+    } catch {
+      if (!abort.signal.aborted) setError(t("contactsUi.contactRefreshFailed"));
+    } finally {
+      unsubscribe();
+      if (refreshAbort.current === abort) refreshAbort.current = null;
+      if (!abort.signal.aborted) setContactRefreshing(false);
+    }
+  }
   const save = (value: ContactChange) => {
     connection.cache.writeState(account, receiptId, value);
     setReceipt(value);
@@ -785,9 +835,12 @@ export function ContactDetailDialog({
     )
       changed();
     if (pending.action === "privacy" && operation.state === "succeeded") {
-      setSavedPrivacy(null);
+      setDraft(null);
       setPrivacyLoading(true);
-      setPrivacyRevision((n) => n + 1);
+      refreshPrivacy();
+    } else if (pending.action === "privacy" && operation.result && typeof operation.result === "object"
+      && "partial" in operation.result && operation.result.partial === true) {
+      refreshPrivacy();
     }
   };
   async function submit(pending: ContactChange) {
@@ -818,7 +871,7 @@ export function ContactDetailDialog({
         connection.cache.writeState(account, receiptId, null);
         setReceipt(undefined);
         changed();
-        if (pending.action === "privacy") setPrivacyRevision((n) => n + 1);
+        if (pending.action === "privacy") refreshPrivacy();
       }
     } finally {
       setBusy(false);
@@ -865,7 +918,9 @@ export function ContactDetailDialog({
       friendId &&
       savedPrivacy &&
       !privacyError &&
-      !privacyLoading
+      !privacyConflict &&
+      !privacyLoading &&
+      !contactRefreshing
     )
       pending = {
         key,
@@ -944,9 +999,9 @@ export function ContactDetailDialog({
     ? t("contactsUi.removeContact")
     : t("contactsUi.contactDetails");
   const privacyDirty = !!savedPrivacy && !sameContactPrivacy(privacy, savedPrivacy.privacy);
-  const showPrivacy =
-    !removal &&
-    (!!friendId || !!discovery?.recipientRef || !!request?.actionable);
+  const showPrivacy = !removal && (friendId
+    ? !!(savedPrivacy || draft || privacyLoading || privacyError)
+    : !!(discovery?.recipientRef || request?.actionable));
   return (
     <dialog
       ref={ref}
@@ -964,7 +1019,10 @@ export function ContactDetailDialog({
           <summary aria-label={t("contactsUi.moreActions")}><Icon name="more" /></summary>
           <div className="contact-more-menu">
             {request && !receipt && <button disabled={busy} onClick={() => { if (window.confirm(t("contactsUi.deleteExplanation"))) void change("delete"); }}>{t("contactsUi.deleteLocal")}</button>}
-            {friendId && remove && savedPrivacy && !privacyLoading && !privacyError && !permissionDenied && <button disabled={locked} onClick={() => remove({ id: friendId, displayName: name })}>{t("contactsUi.removeContact")}</button>}
+            {friendId && !privacyDenied && <button disabled={locked || contactRefreshing} onClick={() => void refreshContact()}>
+              {t(contactRefreshing ? "contactsUi.refreshingContact" : "contactsUi.refreshPrivacy")}
+            </button>}
+            {friendId && remove && !privacyDenied && !permissionDenied && <button disabled={locked || contactRefreshing} onClick={() => remove({ id: friendId, displayName: name })}>{t("contactsUi.removeContact")}</button>}
           </div>
         </details>}
         <button onClick={close} aria-label={t("contactsUi.close")}>
@@ -1023,32 +1081,26 @@ export function ContactDetailDialog({
               <p>{t("contactsUi.privacyUnavailable")}</p>
             </div>
           )}
-          {(!friendId || savedPrivacy || receipt?.action === "privacy") && (
+          {privacyConflict && <p role="alert">{t("contactsUi.privacyConflict")}</p>}
+          {(!friendId || (!privacyDenied && (savedPrivacy || draft || receipt?.action === "privacy"))) && (
             <PrivacyFields
               value={privacy}
               disabled={
                 locked ||
                 permissionDenied ||
                 (!!friendId &&
-                  (!savedPrivacy || privacyLoading || !!privacyError))
+                  (!savedPrivacy || privacyLoading || contactRefreshing || !!privacyError || privacyConflict))
               }
               change={(value) => {
                 if (editableReceipt) {
                   connection.cache.writeState(account, receiptId, null);
                   setReceipt(undefined);
                 }
-                setPrivacy(value);
+                if (friendId && savedPrivacy) {
+                  setDraft(sameContactPrivacy(value, savedPrivacy.privacy) ? null : { value, version: savedPrivacy.version });
+                } else setInitialPrivacy(value);
               }}
             />
-          )}
-          {friendId && privacyError && (
-            <button
-              className="omni-action"
-              disabled={busy || privacyLoading || (!!receipt && !ended)}
-              onClick={() => setPrivacyRevision((n) => n + 1)}
-            >
-              {t("contactsUi.refreshPrivacy")}
-            </button>
           )}
         </section>
       )}
@@ -1081,7 +1133,7 @@ export function ContactDetailDialog({
       )}
       {error && <p role="alert">{error}</p>}
       <div className="contact-request-actions">
-        {friendId && privacyDirty && !locked && savedPrivacy && <button onClick={() => setPrivacy(savedPrivacy.privacy)}>{t("contactsUi.cancel")}</button>}
+        {friendId && privacyDirty && !locked && savedPrivacy && <button onClick={() => { setDraft(null); setError(""); }}>{t("contactsUi.cancel")}</button>}
         {(friendId || contact?.id) && open && !privacyDirty && (
           <button
             onClick={() => {
@@ -1117,6 +1169,8 @@ export function ContactDetailDialog({
               !savedPrivacy ||
               privacyLoading ||
               !!privacyError ||
+              contactRefreshing ||
+              privacyConflict ||
               sameContactPrivacy(privacy, savedPrivacy.privacy)
             }
             onClick={() => void change("privacy")}

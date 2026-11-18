@@ -134,6 +134,14 @@ impl Core {
         } else {
             self.classify_peers(std::slice::from_mut(&mut item), &reader)?;
         }
+        if kind == "contacts" {
+            self.add_contact_privacy(
+                account,
+                own.as_deref(),
+                &reader,
+                std::slice::from_mut(&mut item),
+            )?;
+        }
         Ok(item)
     }
     /// Caller holds the account writer or a request-owned profile/control snapshot.
@@ -292,6 +300,14 @@ impl Core {
             self.classify_peers(
                 page["items"].as_array_mut().context("invalid page")?,
                 &reader,
+            )?;
+        }
+        if kind == "contacts" {
+            self.add_contact_privacy(
+                account,
+                own.as_deref(),
+                &reader,
+                page["items"].as_array_mut().context("invalid page")?,
             )?;
         }
         Ok(page)

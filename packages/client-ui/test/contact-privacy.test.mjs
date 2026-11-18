@@ -1,3 +1,4 @@
+import { ContactPrivacyCache } from "../src/contact-privacy-cache.ts";
 import { NativeApiError } from "@agent-wechat/shared";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -27,7 +28,10 @@ test("the card adapter keeps privacy with the send and acceptance, and versions 
       },
     ]),
   );
-  const actions = contactDetailActions({ session: { client } }, "account");
+  const actions = contactDetailActions({ session: {
+    client,
+    contactPrivacy: { read: client.contactPrivacy },
+  } }, "account");
   const signal = new AbortController().signal;
   await actions.readPrivacy("peer", signal);
   await actions.submit({
@@ -228,3 +232,95 @@ test("pending privacy readback has both a deadline and a finite GET budget", asy
   );
   assert.equal(reads, 8);
 });
+
+
+const pointContact = version => ({ id: "peer", privacy, privacyVersion: version });
+
+test("an invalidated inventory cannot overwrite privacy after a contact update or account switch", async () => {
+  const cache = new ContactPrivacyCache({ contact: async () => pointContact("current") });
+  cache.reset("first");
+  const applyInventory = cache.captureCatalog("first");
+  cache.invalidate("first", "peer");
+  await cache.read("first", "peer", new AbortController().signal);
+  applyInventory([pointContact("stale")]);
+  assert.equal(cache.get("first", "peer").version, "current");
+  const beforeSwitch = cache.captureCatalog("first");
+  cache.reset("first");
+  beforeSwitch([pointContact("prior-login")]);
+  assert.equal(cache.get("first", "peer"), undefined);
+});
+
+test("the live inventory warms a closed contact, and a newer inventory clears unavailable settings", async () => {
+  const cache = new ContactPrivacyCache({
+    contact: (_account, _id, signal) => new Promise((_, reject) => {
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    }),
+  });
+  cache.reset("one");
+  const dialog = new AbortController();
+  const point = cache.read("one", "peer", dialog.signal);
+  dialog.abort();
+  await assert.rejects(point, { name: "AbortError" });
+  cache.captureCatalog("one")([pointContact("warm")]);
+  assert.equal(cache.get("one", "peer").version, "warm");
+  cache.captureCatalog("one")([{ id: "peer", privacyPending: true }]);
+  assert.equal(cache.get("one", "peer"), undefined);
+  cache.reset("one", new NativeApiError(401, "unauthorized"));
+  cache.captureCatalog("one")([pointContact("forbidden")]);
+  assert.equal(cache.denied("one"), true);
+  assert.equal(cache.get("one", "peer"), undefined);
+});
+
+test("missing contact privacy stays blank and pending privacy is retried", async () => {
+  let legacyReads = 0;
+  for (const pending of [undefined, true]) {
+    const cache = new ContactPrivacyCache({
+      contact: async () => ({ id: "peer", relation: "friend", privacyPending: pending }),
+      contactPrivacy: async () => { legacyReads++; },
+    });
+    cache.reset("one");
+    const read = cache.read("one", "peer", new AbortController().signal);
+    if (pending) {
+      await assert.rejects(read, { code: "contact_privacy_pending" });
+    } else {
+      assert.equal(await read, undefined);
+      assert.equal(cache.get("one", "peer"), undefined);
+    }
+  }
+  assert.equal(legacyReads, 0);
+});
+
+for (const sameSession of [true, false]) {
+  test(sameSession ? "an open privacy read retries after a contact catalog refresh"
+    : "an open privacy read stops after a session change even if the account ID is reused", async () => {
+    let notifyStarted;
+    const started = new Promise(resolve => { notifyStarted = resolve; });
+    let calls = 0;
+    const fresh = pointContact("fresh");
+    const cache = new ContactPrivacyCache({
+      contact: async (_account, _id, signal) => {
+        if (++calls > 1) return fresh;
+        return new Promise((_, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+          notifyStarted();
+        });
+      },
+    });
+    cache.reset("one");
+    const open = new AbortController();
+    const result = readContactPrivacyWithPendingRetry(
+      signal => cache.read("one", "peer", signal), open.signal, { wait: async () => {} },
+    );
+    await started;
+    if (sameSession) {
+      cache.invalidateAccount("one");
+      assert.deepEqual(await result, { privacy, version: "fresh" });
+      assert.equal(calls, 2);
+    } else {
+      cache.reset("one");
+      await assert.rejects(result, { name: "AbortError" });
+      assert.equal(calls, 1);
+      assert.equal(cache.get("one", "peer"), undefined);
+    }
+  });
+}

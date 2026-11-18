@@ -155,7 +155,7 @@ async fn privacy(
     Extension(c): Extension<Claims>,
     Path((a, id)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    c.require(Some(&a), "admin")?;
+    c.require(Some(&a), "read")?;
     let value = app
         .core
         .read(&a.clone(), move |core| core.contact_privacy(&a, &id))
@@ -295,10 +295,11 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn privacy_read_requires_admin_on_the_selected_account() {
+    async fn privacy_reads_accept_read_scope_only_on_the_selected_account() {
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(&temp.path().join("data")).unwrap());
         store.create_account("one").unwrap();
+        store.create_account("two").unwrap();
         let read = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         store
             .issue_token(
@@ -313,14 +314,20 @@ mod tests {
             Core::new(store, None).unwrap(),
             "0123456789abcdef0123456789abcdef",
         );
-        let request = Request::builder()
-            .uri("/v1/accounts/one/contacts/peer/privacy")
-            .header("authorization", format!("Bearer {read}"))
-            .body(Body::empty())
-            .unwrap();
-        assert_eq!(
-            app.oneshot(request).await.unwrap().status(),
-            StatusCode::FORBIDDEN
-        );
+        for path in ["contacts", "contacts/peer", "contacts/peer/privacy"] {
+            for (account, expected) in [("one", "profile_keys_missing"), ("two", "forbidden")] {
+                let request = Request::builder()
+                    .uri(format!("/v1/accounts/{account}/{path}"))
+                    .header("authorization", format!("Bearer {read}"))
+                    .body(Body::empty())
+                    .unwrap();
+                let response = app.clone().oneshot(request).await.unwrap();
+                let body = axum::body::to_bytes(response.into_body(), 4096)
+                    .await
+                    .unwrap();
+                let value: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(value["error"]["code"], expected, "{account}/{path}");
+            }
+        }
     }
 }

@@ -384,6 +384,12 @@ response NativeContact.classification.openIm.wordings[].text | string, required 
 response NativeContact.displayName | string, required, nullable | Name to show: the remark if set, else the nickname, else the username.
 response NativeContact.id | string, required | Contact ID. It is the same as `username`.
 response NativeContact.nickname | string, required, nullable | The name the contact chose for themselves. Null when none is saved.
+response NativeContact.privacy | object, nullable | Current relationship settings, when available for this friend.
+response NativeContact.privacy.chatsOnly | boolean, required | Restrict this relationship to chats.
+response NativeContact.privacy.hideMyPosts | boolean, required | Hide this account's Moments posts from this person.
+response NativeContact.privacy.hideTheirPosts | boolean, required | Hide this person's Moments posts from this account.
+response NativeContact.privacyPending | boolean, nullable | True while an accepted relationship edit is awaiting contact sync.
+response NativeContact.privacyVersion | string, nullable | Version to supply when editing the current relationship settings.
 response NativeContact.relation | string, required | Relationship evidence: `friend` when membership is established, `non_contact` when known flags do not establish membership, or `unknown` when flags are unavailable.
 response NativeContact.remark | string, required, nullable | Your private name for the contact. Null when none is saved.
 response NativeContact.username | string, required | The contact's WeChat username.
@@ -414,6 +420,12 @@ response NativeContactPage.items[]<NativeContact>.classification.openIm.wordings
 response NativeContactPage.items[]<NativeContact>.displayName | string, required, nullable | Name to show: the remark if set, else the nickname, else the username.
 response NativeContactPage.items[]<NativeContact>.id | string, required | Contact ID. It is the same as `username`.
 response NativeContactPage.items[]<NativeContact>.nickname | string, required, nullable | The name the contact chose for themselves. Null when none is saved.
+response NativeContactPage.items[]<NativeContact>.privacy | object, nullable | Current relationship settings, when available for this friend.
+response NativeContactPage.items[]<NativeContact>.privacy.chatsOnly | boolean, required | Restrict this relationship to chats.
+response NativeContactPage.items[]<NativeContact>.privacy.hideMyPosts | boolean, required | Hide this account's Moments posts from this person.
+response NativeContactPage.items[]<NativeContact>.privacy.hideTheirPosts | boolean, required | Hide this person's Moments posts from this account.
+response NativeContactPage.items[]<NativeContact>.privacyPending | boolean, nullable | True while an accepted relationship edit is awaiting contact sync.
+response NativeContactPage.items[]<NativeContact>.privacyVersion | string, nullable | Version to supply when editing the current relationship settings.
 response NativeContactPage.items[]<NativeContact>.relation | string, required | Relationship evidence: `friend` when membership is established, `non_contact` when known flags do not establish membership, or `unknown` when flags are unavailable.
 response NativeContactPage.items[]<NativeContact>.remark | string, required, nullable | Your private name for the contact. Null when none is saved.
 response NativeContactPage.items[]<NativeContact>.username | string, required | The contact's WeChat username.
@@ -1226,9 +1238,9 @@ route GET /v1/accounts/{a}/capabilities | scope read, response untyped | List wh
 route GET /v1/accounts/{a}/contact-mutations/by-idempotency-key | scope admin, query ContactMutationKeyQuery, response NativeOperation, sdk response NativeOperation | Inspect a contact operation using its original idempotency key.
 route GET /v1/accounts/{a}/contact-requests | scope read, query NativeContactRequestQuery, response NativeContactRequestPage, sdk response NativeContactRequestPage | List saved incoming and outgoing request conversations.
 route GET /v1/accounts/{a}/contact-requests/{id} | scope read, response NativeContactRequest, sdk response NativeContactRequest | Read a request conversation and its current version.
-route GET /v1/accounts/{a}/contacts | scope read, query PageQuery, response NativeContactPage, sdk response NativePage<NativeContact> | List the saved contacts.
-route GET /v1/accounts/{a}/contacts/{id} | scope read, response NativeContact, sdk response NativeContact | Show one saved contact.
-route GET /v1/accounts/{a}/contacts/{id}/privacy | scope admin, response NativeContactPrivacy, sdk response NativeContactPrivacy | Read current relationship privacy from the official profile.
+route GET /v1/accounts/{a}/contacts | scope read, query PageQuery, response NativeContactPage, sdk response NativePage<NativeContact> | List contacts and their relationship privacy when available.
+route GET /v1/accounts/{a}/contacts/{id} | scope read, response NativeContact, sdk response NativeContact | Show one contact and its relationship privacy when available.
+route GET /v1/accounts/{a}/contacts/{id}/privacy | scope read, response NativeContactPrivacy, sdk response NativeContactPrivacy | Read current relationship privacy from the official profile.
 route GET /v1/accounts/{a}/custom-stickers | scope media, response CustomStickerList, sdk response CustomStickerList | Read ordered Saved membership from the official profile without a network refresh.
 route GET /v1/accounts/{a}/custom-stickers/{id} | scope media, response CustomSticker, sdk response CustomSticker | Read one Saved sticker by its stable identity.
 route GET /v1/accounts/{a}/event-log | scope read, query EventQuery, response untyped or sse NativeEvent, sdk response NativeEvent | Read events after a cursor as a JSON page. With Accept: text/event-stream it streams them instead.
@@ -1283,7 +1295,7 @@ route POST /v1/accounts/{a}/contact-requests | scope admin, idempotency key requ
 route POST /v1/accounts/{a}/contact-requests/{id}/accept | scope admin, idempotency key required, request NativeContactRequestAccept, response NativeOperation, status 202, sdk response NativeOperation | Accept the exact inspected incoming request.
 route POST /v1/accounts/{a}/contact-sync | scope read, response untyped, status 202, sdk response NativeOperation | Start syncing the contact catalog from WeChat. Poll the returned operation.
 route POST /v1/accounts/{a}/contacts/lookup | scope read, request ContactLookupRequest, response untyped | Look up one or two contacts by ID live on WeChat, without saving the result.
-route POST /v1/accounts/{a}/contacts/{id}/refresh | scope read, response untyped, status 202, sdk response NativeOperation | Ask WeChat for the latest details of one contact. Poll the returned operation.
+route POST /v1/accounts/{a}/contacts/{id}/refresh | scope read, response untyped, status 202, sdk response NativeOperation | Ask WeChat for the latest contact details and privacy. Poll the returned operation.
 route POST /v1/accounts/{a}/custom-stickers | scope send, idempotency key required, request AddCustomStickerRequest, response MediaJob, status 202, sdk request AddCustomStickerRequest, sdk response MediaJob | Save a prepared or received sticker asynchronously without sending a message.
 route POST /v1/accounts/{a}/disconnect | scope login, response untyped | Close the connection to WeChat but keep the saved login trust.
 route POST /v1/accounts/{a}/forget-credentials | scope login, idempotency key required, request NativeForgetRequest, response untyped, status 202, sdk response NativeOperation | Delete the saved login credentials of the account. The body must confirm.

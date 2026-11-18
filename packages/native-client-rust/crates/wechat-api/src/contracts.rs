@@ -284,6 +284,18 @@ pub struct NativeContact {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub classification: Option<wechat_core::PeerClassification>,
+    /// Current relationship settings, when available for this friend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub privacy: Option<NativeContactPrivacySettings>,
+    /// Version to supply when editing the current relationship settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub privacy_version: Option<String>,
+    /// True while an accepted relationship edit is awaiting contact sync.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub privacy_pending: Option<bool>,
 }
 /// A group chat saved in the account's profile.
 #[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]

@@ -113,6 +113,35 @@ fn contact_privacy_optional_fields_preserve_existing_idempotency_inputs() {
 }
 
 #[test]
+fn contact_details_and_pages_share_the_point_privacy_version() {
+    let (_temp, core) = super::super::groups::tests::fixture();
+    let peer = core.contact_privacy("one", "peer").unwrap();
+    let versioned = || core.catalog_item("one", "contacts", "peer").unwrap();
+    let page = core
+        .catalog_page("one", "contacts", None, &crate::CatalogQuery::default())
+        .unwrap();
+    let listed = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == "peer")
+        .unwrap();
+    assert_eq!(listed["privacy"], peer["privacy"]);
+    assert_eq!(listed["privacyVersion"], peer["version"]);
+    assert_eq!(versioned()["privacyVersion"], peer["version"]);
+
+    core.mark_partial_contact_privacy_pending("one", "peer", "test")
+        .unwrap();
+    assert!(versioned().get("privacy").is_none());
+    assert!(versioned().get("privacyVersion").is_none());
+    assert!(core
+        .catalog_item("one", "contacts", "other")
+        .unwrap()
+        .get("privacy")
+        .is_some());
+}
+
+#[test]
 fn contact_privacy_version_binds_account_peer_full_flags_and_membership() {
     let (_temp, core) = super::super::groups::tests::fixture();
     let first = core.contact_privacy("one", "peer").unwrap();

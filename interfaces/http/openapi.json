@@ -1729,6 +1729,31 @@
               "null"
             ]
           },
+          "privacy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NativeContactPrivacySettings"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Current relationship settings, when available for this friend."
+          },
+          "privacyPending": {
+            "description": "True while an accepted relationship edit is awaiting contact sync.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "privacyVersion": {
+            "description": "Version to supply when editing the current relationship settings.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "relation": {
             "description": "Relationship evidence: `friend` when membership is established, `non_contact` when\nknown flags do not establish membership, or `unknown` when flags are unavailable.",
             "type": "string"
@@ -6342,7 +6367,7 @@
             ]
           }
         ],
-        "summary": "List the saved contacts.",
+        "summary": "List contacts and their relationship privacy when available.",
         "tags": [
           "contacts"
         ],
@@ -6523,7 +6548,7 @@
             ]
           }
         ],
-        "summary": "Show one saved contact.",
+        "summary": "Show one contact and its relationship privacy when available.",
         "tags": [
           "contacts"
         ],
@@ -6656,7 +6681,7 @@
         "security": [
           {
             "bearer": [
-              "admin"
+              "read"
             ]
           }
         ],
@@ -6718,7 +6743,7 @@
             ]
           }
         ],
-        "summary": "Ask WeChat for the latest details of one contact. Poll the returned operation.",
+        "summary": "Ask WeChat for the latest contact details and privacy. Poll the returned operation.",
         "tags": [
           "contacts"
         ],

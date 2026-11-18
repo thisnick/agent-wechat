@@ -1,7 +1,7 @@
 ---
 title: 联系人
 description: 查找用户、发送和通过好友申请，以及管理已保存的联系人。
-sourceHash: "a8e20aa1b3b3"
+sourceHash: "933c7b6aa5f6"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -128,11 +128,14 @@ wx contacts set CONTACT_ID --chats-only true \
 
 ### 隐私 API 与 Rust \{#privacy-api-and-rust}
 
-读取和修改隐私设置都需要所选账号的 `admin` 权限。路径相对于 `/v1/accounts/ACCOUNT_ID/`：
+读取隐私设置和刷新联系人需要 `read` 权限；修改隐私设置需要所选账号的 `admin` 权限。路径相对于 `/v1/accounts/ACCOUNT_ID/`：
 
 | 方法和路径 | 用途 |
 | --- | --- |
-| `GET contacts/CONTACT_ID/privacy` | 读取当前设置及其 `version` |
+| `GET contacts` | 列出联系人，并在可用时返回 `privacy` 和 `privacyVersion`。 |
+| `GET contacts/CONTACT_ID` | 读取联系人及其当前的关系设置。 |
+| `POST contacts/CONTACT_ID/refresh` | 同时刷新联系人详情和隐私设置。轮询返回的操作，然后再读取该联系人。 |
+| `GET contacts/CONTACT_ID/privacy` | 通过现有的隐私路由，仅读取设置及其 `version`。 |
 | `PATCH contacts/CONTACT_ID` | 使用 `privacy` 和 `expectedVersion` 更新；需要 `Idempotency-Key` |
 
 目前 PATCH 接受完整的隐私设置值：
@@ -146,4 +149,4 @@ wx contacts set CONTACT_ID --chats-only true \
 
 其他联系人字段保持不变。版本过期会返回 `stale_contact_privacy`；在决定是否再次修改前，请先查看当前设置。已保存状态未确定时会返回 `contact_privacy_unresolved`。返回的操作会区分服务器已接受与已保存联系人中已确认这两种状态。
 
-Rust 协议 crate 提供 `ContactPrivacySettings`、请求构建器以及与请求匹配的响应解码。核心 crate 提供 `ContactUpdate`、`contact_privacy` 和 `update_contact`，负责协调幂等性、账号归属和已保存联系人的确认。隐私设置不会授予守护进程或 OpenClaw 的权限。
+Rust 协议 crate 提供 `ContactPrivacySettings`、请求构建器以及关联的响应解码。核心 crate 提供 `ContactUpdate`、`contact_privacy` 和 `update_contact`，负责协调幂等性、账号归属和已保存联系人的确认。在 OpenClaw 中，私有的所有者会话可以通过 `wechat_contacts` 的 list、find 和 get 查看可用的设置。
