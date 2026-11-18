@@ -54,27 +54,50 @@ type NativeDispatchParams = {
   prepareAttachment?: typeof prepareNativeAttachment;
   onDelivered?: () => void;
   signal?: AbortSignal;
+  /** The queued item's revision when the caller read it; defaults to the current one. */
+  revision?: string;
 };
 class NativeInputInvalidated extends Error {}
 
 export { NATIVE_CATCH_UP_LIMIT, NATIVE_CATCH_UP_WINDOW_MS };
 type NativeIntakeOptions = {
   now?: number;
-  /** Catch-up only: false for a message that cannot start a turn, so it is not queued or counted. */
-  answerable?: (message: NativeMessage) => boolean;
+  /** False for a message that cannot start a turn, so it is not queued or counted. */
+  answerable?: (message: NativeMessage) => boolean | Promise<boolean>;
 };
+/** A message of a kind that can start a turn. */
+function nativeTriggerEligible(message: NativeMessage): boolean {
+  return message.direction === "incoming" && !!message.senderId && [1, 3, 34, 43, 47, 48, 49].includes(message.type)
+    && !(message.type === 49 && message.appMessageType === 74) && !(message.type === 1 && !message.body)
+    && !(message.type === 48 && (!message.location || !message.body));
+}
+/** The admission decision dispatch makes for a message under the current sender, group and mention policy. */
+async function resolveNativeAdmission(message: NativeMessage, params: { account: ResolvedWeChatAccount; cfg: any; core: any }) {
+  const { account, cfg, core } = params;
+  const isGroup = message.threadId.endsWith("@chatroom");
+  const wasMentioned = nativeWasMentioned(message);
+  const policy = resolveWeChatPolicyContext({ account, cfg, chatId: message.threadId });
+  const allowTextCommands = core.channel.commands.shouldHandleTextCommands({ cfg, surface: "agent-wechat" });
+  const commandBody = normalizeWeChatCommandBody(message.type === 1 ? message.body ?? "" : "", { isGroup, wasMentioned });
+  const hasControlCommand = allowTextCommands && core.channel.commands.isControlCommandMessage(commandBody, cfg);
+  const resolve = core.channel.inbound?.ingress?.resolveStable ?? resolveStableChannelMessageIngress;
+  const readStoreAllowFrom = async () => core.channel.pairing.readAllowFromStore({ channel: "agent-wechat", accountId: account.accountId, env: process.env }).catch(() => []);
+  const senderAdmission = (senderId: string) => resolveWeChatIngress({ resolve, cfg, accountId: account.accountId,
+    policy, isGroup, chatId: message.threadId, senderId, readStoreAllowFrom });
+  const ingress = await resolveWeChatIngress({ resolve, cfg, accountId: account.accountId, policy, isGroup, chatId: message.threadId,
+    senderId: message.senderId ?? undefined, readStoreAllowFrom, command: { allowTextCommands, hasControlCommand }, mention: { wasMentioned, allowTextCommands } });
+  // A direct command from an unauthorized sender still gets its denial reply.
+  const unauthorizedDirectCommand = !isGroup && ingress.ingress.reasonCode === "control_command_unauthorized";
+  return { isGroup, wasMentioned, policy, allowTextCommands, commandBody, hasControlCommand, senderAdmission, ingress, unauthorizedDirectCommand,
+    admitted: ingress.ingress.admission === "dispatch" || unauthorizedDirectCommand };
+}
 /**
- * Whether a message could start a turn under the current mention policy: a
- * direct message, a mention, a command, or any message in a group that does
- * not require a mention. Sender policy is checked later, at dispatch.
+ * Whether a message would start a turn under the current policy: the same
+ * sender, group, mention and command checks dispatch applies. Used to queue
+ * and count only messages the bot would answer.
  */
-export function nativeMayAnswer(message: NativeMessage, params: { account: ResolvedWeChatAccount; cfg: any; core: any }): boolean {
-  if (!message.threadId.endsWith("@chatroom")) return true;
-  const policy = resolveWeChatPolicyContext({ account: params.account, cfg: params.cfg, chatId: message.threadId });
-  if (!policy.groupEnabled) return false;
-  if (!policy.requireMention || nativeWasMentioned(message)) return true;
-  return params.core.channel.commands.shouldHandleTextCommands({ cfg: params.cfg, surface: "agent-wechat" })
-    && params.core.channel.commands.isControlCommandMessage(normalizeWeChatCommandBody(message.type === 1 ? message.body ?? "" : "", { isGroup: true, wasMentioned: false }), params.cfg);
+export async function nativeMayAnswer(message: NativeMessage, params: { account: ResolvedWeChatAccount; cfg: any; core: any }): Promise<boolean> {
+  return nativeTriggerEligible(message) && (await resolveNativeAdmission(message, params)).admitted;
 }
 function withinWindow(time: string | null | undefined, now: number): boolean {
   const at = time ? Date.parse(time) : Number.NaN;
@@ -101,7 +124,7 @@ export async function acceptNativeEvent(client: NativeWeChatClient, accountId: s
   if (!withinWindow(event.createdAt, now)) { state.skipped.old++; state.advance(event.cursor); return undefined; }
   const message = await client.message(accountId, event.data.messageId);
   if (message.id !== event.data.messageId || message.accountId !== accountId || message.threadId !== event.data.threadId) throw Error("Native committed message identity mismatch");
-  if (message.direction !== "incoming" || options.answerable?.(message) === false) { state.advance(event.cursor); return message; }
+  if (message.direction !== "incoming" || (options.answerable && !(await options.answerable(message)))) { state.advance(event.cursor); return message; }
   if (!withinWindow(message.createdAt, now)) { state.skipped.old++; state.advance(event.cursor); return message; }
   const replaced = state.accept(event.cursor, message, origin);
   if (replaced) invalidateNativePreparedInputs(accountId, [message.id]);
@@ -179,7 +202,7 @@ export async function readNativeGroupHistory(params: { client: NativeWeChatClien
   return history.reverse();
 }
 export async function dispatchNativeMessage(params: NativeDispatchParams): Promise<"ignored" | "completed" | "needs_review" | "pending"> {
-  const revision = params.state.get(params.message.id)?.revision;
+  const revision = params.revision ?? params.state.get(params.message.id)?.revision;
   try { return await dispatchNativeMessageInput(params, revision); }
   catch (error) {
     const item = params.state.get(params.message.id);
@@ -204,26 +227,10 @@ async function dispatchNativeMessageInput(params: NativeDispatchParams, revision
   if (custody.origin !== "live" || message.direction !== "incoming" || ![1,3,34,43,47,48,49].includes(message.type) || (message.type === 1 && !message.body) || (message.type === 48 && (!message.location || !message.body)) || !message.senderId) {
     state.finish(message.id, revision); return "ignored";
   }
-  const isGroup = message.threadId.endsWith("@chatroom");
-  const wasMentioned = nativeWasMentioned(message);
-  const policy = resolveWeChatPolicyContext({ account, cfg, chatId: message.threadId });
-  const allowTextCommands = core.channel.commands.shouldHandleTextCommands({ cfg, surface: "agent-wechat" });
-  const commandBody = normalizeWeChatCommandBody(message.type === 1 ? message.body ?? "" : "", { isGroup, wasMentioned });
-  const hasControlCommand = allowTextCommands && core.channel.commands.isControlCommandMessage(commandBody, cfg);
-  const resolve = core.channel.inbound?.ingress?.resolveStable ?? resolveStableChannelMessageIngress;
-  const senderAdmission = (senderId: string) => resolveWeChatIngress({ resolve, cfg, accountId: account.accountId,
-    policy, isGroup, chatId: message.threadId, senderId,
-    readStoreAllowFrom: async () => core.channel.pairing.readAllowFromStore({ channel: "agent-wechat", accountId: account.accountId, env: process.env }).catch(() => []) });
-  const ingress = await resolveWeChatIngress({
-    resolve,
-    cfg, accountId: account.accountId, policy, isGroup, chatId: message.threadId, senderId: message.senderId,
-    readStoreAllowFrom: async () => core.channel.pairing.readAllowFromStore({ channel: "agent-wechat", accountId: account.accountId, env: process.env }).catch(() => []),
-    command: { allowTextCommands, hasControlCommand },
-    mention: { wasMentioned, allowTextCommands },
-  });
-  const unauthorizedDirectCommand = !isGroup && ingress.ingress.reasonCode === "control_command_unauthorized";
+  const admission = await resolveNativeAdmission(message, { account, cfg, core });
+  const { isGroup, wasMentioned, policy, allowTextCommands, commandBody, hasControlCommand, senderAdmission, ingress } = admission;
   // An unmentioned group message stays in the profile and can be read as context for a later mention.
-  if (ingress.ingress.admission !== "dispatch" && !unauthorizedDirectCommand) { state.finish(message.id, revision); return "ignored"; }
+  if (!admission.admitted) { state.finish(message.id, revision); return "ignored"; }
   let preparedMedia;
   const allowQuotedMessage = async (original: Pick<NativeMessage, "senderId" | "direction">) => original.direction === "outgoing"
     || !!original.senderId && (await senderAdmission(original.senderId)).ingress.admission === "dispatch";
@@ -368,13 +375,20 @@ export async function resumeFromCatchUpWindow(client: NativeWeChatClient, accoun
  * only the newest {@link NATIVE_CATCH_UP_LIMIT} stay queued.
  */
 export async function synchronizeNativeEvents(client: NativeWeChatClient, accountId: string, state: NativeConsumerState,
-  options: NativeIntakeOptions & { onResume?: (from: string, to: string) => void } = {}): Promise<void> {
+  options: NativeIntakeOptions & { onResume?: (from: string, to: string) => void;
+    /** At startup, messages already queued count toward the limit together with those caught up. */
+    includeQueued?: boolean } = {}): Promise<void> {
   const resume = async () => {
     const from = state.cursor, to = await resumeFromCatchUpWindow(client, accountId, state, options);
     if (to) options.onResume?.(from, to);
   };
-  const queued: Array<{ id: string; revision: string }> = [];
+  const queued = options.includeQueued ? state.items().filter(item => item.state === "received")
+    .sort((a, b) => BigInt(a.cursor) < BigInt(b.cursor) ? -1 : BigInt(a.cursor) > BigInt(b.cursor) ? 1 : 0)
+    .map(item => ({ id: item.id, revision: item.revision })) : [];
+  // Trimmed before each acknowledgement, so a crash cannot leave more than the limit queued.
+  const trim = () => { state.skipped.limit += state.dropQueued(queued.splice(0, Math.max(0, queued.length - NATIVE_CATCH_UP_LIMIT))); };
   try {
+    trim();
     // A new consumer does not replay the daemon's whole event history.
     if (state.cursor === "0") await resume();
     for (let index = 0; index < 100; index++) {
@@ -389,16 +403,12 @@ export async function synchronizeNativeEvents(client: NativeWeChatClient, accoun
         if (item?.cursor === event.cursor) queued.push({ id: item.id, revision: item.revision });
       }
       if (state.cursor === before) throw Error("Native recovery event cursor did not advance");
-      state.commit();
+      trim(); state.commit();
       await client.ack(accountId, "openclaw", state.cursor);
       if (page.items.length < 200) return;
     }
     throw Error("Native recovery backlog remains; no model input was dispatched");
-  } finally {
-    for (const { id, revision } of queued.slice(0, Math.max(0, queued.length - NATIVE_CATCH_UP_LIMIT))) {
-      if (state.get(id)?.state === "received" && state.finish(id, revision)) state.skipped.limit++;
-    }
-  }
+  } finally { trim(); }
 }
 /** Read recovery is independent of incoming SSE traffic and model execution. */
 export function startNativeReadPump(task: () => Promise<void>, failed: () => void, intervalMs = 5000): () => void {
@@ -428,6 +438,13 @@ export async function startNativeMonitor(opts: WeChatMonitorOptions): Promise<vo
   };
   let backoff = 250;
   let readTask: Promise<void> | undefined;
+  const readFailures = new Map<string, number>();
+  // Only messages the bot would answer are queued, live and while catching up.
+  const answerable = (message: NativeMessage) => {
+    const cfg = core.config.current();
+    return nativeMayAnswer(message, { account: resolveWeChatAccount(cfg as Record<string, unknown>, opts.account.accountId) ?? opts.account, cfg, core });
+  };
+  let startup = true;
   const flushRead = () => {
     if (native.readPolicy === "never") return Promise.resolve();
     return readTask ??= projectNativeRead(host.client, native.accountId, state).finally(() => { readTask = undefined; });
@@ -443,17 +460,30 @@ export async function startNativeMonitor(opts: WeChatMonitorOptions): Promise<vo
       let message: NativeMessage;
       try { message = await host.client.message(native.accountId, item.id); }
       catch (error) {
-        if (!(error instanceof NativeApiError && error.status === 404)) throw error;
-        state.finish(item.id, item.revision); continue;
+        // An unreachable daemon ends the pass; the message stays queued for the next one.
+        if (!(error instanceof NativeApiError) && (error instanceof TypeError || (error as Error)?.name === "TimeoutError" || (error as Error)?.name === "AbortError")) throw error;
+        // One message the daemon cannot return must not hold up the rest of the queue.
+        const failures = (readFailures.get(item.id) ?? 0) + 1; readFailures.set(item.id, failures);
+        if (error instanceof NativeApiError && error.status !== 404 && error.retryable && failures < 3) continue;
+        readFailures.delete(item.id); state.finish(item.id, item.revision);
+        if (!(error instanceof NativeApiError && error.status === 404)) warn(`WeChat message ${item.id} could not be read from the daemon and was not answered`);
+        continue;
       }
+      readFailures.delete(item.id);
+      if (state.get(item.id)?.revision !== item.revision) continue;
       if (message.accountId !== native.accountId || message.threadId !== item.threadId || (message.serverId ?? null) !== item.serverId) {
         state.finish(item.id, item.revision); warn(`WeChat message ${item.id} changed before it was handled and was not answered`); continue;
       }
-      const outcome = await dispatchNativeMessage({ client: host.client, state, account, message, cfg, core,
+      // Work queued before a long stop follows the same 24-hour rule as messages caught up.
+      if (message.createdAt && Date.parse(message.createdAt) < Date.now() - NATIVE_CATCH_UP_WINDOW_MS) {
+        if (state.finish(item.id, item.revision)) state.skipped.old++; continue;
+      }
+      const outcome = await dispatchNativeMessage({ client: host.client, state, account, message, cfg, core, revision: item.revision,
         signal: opts.abortSignal, onDelivered: () => opts.setStatus({ accountId: account.accountId, lastOutboundAt: Date.now() }) });
       // Never retried: resending could reply twice. Logged once, not kept as a status warning.
       if (outcome === "needs_review") warn(`WeChat message ${item.id} was not retried: its model dispatch or reply could not be confirmed`);
     }
+    reportSkipped();
     try { await flushRead(); }
     catch { opts.log?.error?.("Native read projection is pending; thread read receipt retained for retry"); }
     const handoffUnconfirmed = native.readPolicy === "on_model_dispatch" && state.items().some(value => value.handoffUnconfirmed);
@@ -468,7 +498,8 @@ export async function startNativeMonitor(opts: WeChatMonitorOptions): Promise<vo
     processAgain = true;
     if (processing || opts.abortSignal.aborted || !intakeReady) return;
     processing = (async () => {
-      do { processAgain = false; await process(); } while (processAgain && !opts.abortSignal.aborted);
+      // Catching up holds back new passes, so work is not started before the catch-up limit applies.
+      do { processAgain = false; await process(); } while (processAgain && intakeReady && !opts.abortSignal.aborted);
     })().catch(() => opts.log?.error?.("Native input processing was interrupted; durable custody was retained"))
       .finally(() => { processing = undefined; });
   };
@@ -484,21 +515,18 @@ export async function startNativeMonitor(opts: WeChatMonitorOptions): Promise<vo
     try {
       // A prior ACK failure must not leave durable received items idle while an
       // otherwise quiet SSE connection waits for another message.
-      if (state.cursor !== "0") await host.client.ack(native.accountId, "openclaw", state.cursor);
+      if (state.cursor !== "0") { state.commit(); await host.client.ack(native.accountId, "openclaw", state.cursor); }
       // Drain durable events before resuming stored input, then keep intake
       // independent of slow media/model work so a recall can invalidate it.
       intakeReady = false;
-      await synchronizeNativeEvents(host.client, native.accountId, state, {
-        answerable: message => {
-          const cfg = core.config.current();
-          return nativeMayAnswer(message, { account: resolveWeChatAccount(cfg as Record<string, unknown>, opts.account.accountId) ?? opts.account, cfg, core });
-        },
+      await synchronizeNativeEvents(host.client, native.accountId, state, { answerable, includeQueued: startup,
         onResume: (from, to) => warn(`WeChat event position ${from === "0" ? "was new" : `${from} had expired`}; resumed at ${to}, the start of the last 24 hours`) });
+      startup = false;
       reportSkipped();
       intakeReady = true;
       scheduleProcess();
       for await (const event of host.client.watch(native.accountId, state.cursor, opts.abortSignal)) {
-        const message = await acceptNativeEvent(host.client, native.accountId, state, event);
+        const message = await acceptNativeEvent(host.client, native.accountId, state, event, { answerable });
         reportSkipped();
         if (message?.direction === "incoming" && event.data.origin === "live" && !nativeRecallInfo(message)) opts.setStatus({ accountId: opts.account.accountId, lastInboundAt: Date.now() });
         state.commit();

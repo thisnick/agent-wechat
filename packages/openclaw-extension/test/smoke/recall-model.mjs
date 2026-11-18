@@ -194,16 +194,17 @@ try {
   assert.equal(await item(late.id), undefined);
   assert.equal(requests.length, beforeMedia); assert.equal(sends.length, afterReplacementSends);
   const reused = message('reused-id', 'New exact occupant must remain', { direction: 'outgoing', senderId: 'self', serverId: '18446744073709551612' });
-  const reuseCursor = commit(reused); await waitFor(() => acknowledgements.includes(reuseCursor), 'new occupant custody');
+  const reuseCursor = commit(reused); await waitFor(() => acknowledgements.includes(reuseCursor), 'outgoing commit ACK');
+  // A recall naming a stale target under the same source ID is acknowledged and leaves no work behind.
+  // Preserving a queued new occupant is covered by the unit tests, since outgoing messages are never queued.
   const old = { ...reused, serverId: '18446744073709551611' }; const oldCursor = recall(old);
-  await waitFor(() => acknowledgements.includes(oldCursor), 'recycled-ID recall ACK');
-  // Outgoing messages are never queued, and a recall naming the old target changes nothing else.
+  await waitFor(() => acknowledgements.includes(oldCursor), 'stale-target recall ACK');
   assert.equal(await item(reused.id), undefined); assert.deepEqual(Object.keys((await custody()).open), []);
   const persisted = await readFile(custodyPath, 'utf8');
   assert.ok(!persisted.includes('runtime-recall-blocked-original')); assert.ok(!persisted.includes('Late original must not be delivered'));
   console.log(JSON.stringify({ gatewayVersion: '2026.11.4', actualRegisteredRecallTool: true, actualSendReceiptReachedProvider: true, exactServerIdPreserved: true, sameTargetStableKey: true,
     recallPostAttempts: posts.length, nativeRecallAttempts: nativeRecalls, foreignThreadRejected: true, sseRecallWhileModelBlocked: true,
-    lateReplySuppressed: true, freshSourceOccupantDispatchedOnce: true, sseRecallWhileMediaBlocked: true, lateMediaSuppressed: true, outOfOrderRecallSuppressed: true, recycledIdRecallAckPreservesCurrent: true }));
+    lateReplySuppressed: true, freshSourceOccupantDispatchedOnce: true, sseRecallWhileMediaBlocked: true, lateMediaSuppressed: true, outOfOrderRecallSuppressed: true, staleTargetRecallAcknowledged: true, noRepeatAfterReconnect: true }));
 } finally {
   releaseModel(); releaseContent();
   if (child && child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await Promise.race([once(child, 'exit'), sleep(5000)]); if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await once(child, 'exit'); } }

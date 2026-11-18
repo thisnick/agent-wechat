@@ -762,15 +762,56 @@ test("resuming never moves before the stored cursor and leaves a cursor already 
   assert.equal(await resumeFromCatchUpWindow(value.client, "a", value.state, { now: value.now }), undefined);
   value.state.advance("35"); assert.equal(await resumeFromCatchUpWindow(value.client, "a", value.state, { now: value.now }), undefined); assert.equal(value.state.cursor, "35");
 });
-test("catch-up counts direct messages, mentions, commands and groups without a mention requirement", t => {
+test("catch-up counts only what dispatch would answer: sender policy, group settings, mentions and commands", async t => {
   const value = fixture(t, { group: true }); const params = { account: value.account, cfg: value.cfg, core: value.core };
   value.core.channel.commands.shouldHandleTextCommands = () => true; value.core.channel.commands.isControlCommandMessage = (body: string) => body.trim() === "/status";
-  assert.equal(nativeMayAnswer(value.message, params), false);
-  assert.equal(nativeMayAnswer({ ...value.message, threadId: "u" }, params), true);
-  assert.equal(nativeMayAnswer({ ...value.message, mentions: { state: "known", userIds: [], self: true, all: null, source: "msgsource.atuserlist" } }, params), true);
-  assert.equal(nativeMayAnswer({ ...value.message, body: "/status" }, params), true);
-  const cfg = structuredClone(value.cfg); cfg.channels["agent-wechat"].groups = { "r@chatroom": { requireMention: false } };
-  assert.equal(nativeMayAnswer(value.message, { ...params, cfg, account: resolveWeChatAccount(cfg)! }), true);
-  cfg.channels["agent-wechat"].groups = { "r@chatroom": { enabled: false, requireMention: false } };
-  assert.equal(nativeMayAnswer(value.message, { ...params, cfg, account: resolveWeChatAccount(cfg)! }), false);
+  // A resolver with OpenClaw's inputs: sender allowlists, blocked routes, the mention gate and command facts.
+  value.core.channel.inbound.ingress.resolveStable = async (input: any) => {
+    const list = input.conversation.kind === "direct" ? input.allowFrom : input.groupAllowFrom;
+    const allowed = list.includes("*") || list.includes(input.subject.stableId);
+    const gated = input.policy.activation?.requireMention && !input.mentionFacts?.wasMentioned && !input.command?.hasControlCommand;
+    return { ingress: { admission: !allowed || input.route?.some((route: any) => !route.allowed) ? "drop" : gated ? "skip" : "dispatch", reasonCode: "fixture" }, commandAccess: {}, activationAccess: {} };
+  };
+  const mentioned = { state: "known" as const, userIds: [], self: true, all: null, source: "msgsource.atuserlist" };
+  assert.equal(await nativeMayAnswer(value.message, params), false);
+  assert.equal(await nativeMayAnswer({ ...value.message, threadId: "u" }, params), true);
+  assert.equal(await nativeMayAnswer({ ...value.message, mentions: mentioned }, params), true);
+  assert.equal(await nativeMayAnswer({ ...value.message, body: "/status" }, params), true);
+  assert.equal(await nativeMayAnswer({ ...value.message, threadId: "u", direction: "outgoing" }, params), false);
+  assert.equal(await nativeMayAnswer({ ...value.message, threadId: "u", type: 49, appMessageType: 74 }, params), false);
+  const cfg = structuredClone(value.cfg); const section = cfg.channels["agent-wechat"];
+  section.groups = { "r@chatroom": { requireMention: false } };
+  assert.equal(await nativeMayAnswer(value.message, { ...params, cfg, account: resolveWeChatAccount(cfg)! }), true);
+  section.groups = { "r@chatroom": { enabled: false, requireMention: false } };
+  assert.equal(await nativeMayAnswer(value.message, { ...params, cfg, account: resolveWeChatAccount(cfg)! }), false);
+  // With an allowlist, other senders' direct messages do not take the catch-up slots.
+  Object.assign(section, { groups: {}, dmPolicy: "allowlist", allowFrom: ["wxid_boss"] });
+  const allowlisted = { ...params, cfg, account: resolveWeChatAccount(cfg)! };
+  assert.equal(await nativeMayAnswer({ ...value.message, threadId: "wxid_boss", senderId: "wxid_boss" }, allowlisted), true);
+  assert.equal(await nativeMayAnswer({ ...value.message, threadId: "wxid_other", senderId: "wxid_other" }, allowlisted), false);
+});
+test("the catch-up limit holds at every acknowledgement and counts work already queued at startup", async t => {
+  const value = fixture(t); const now = Date.now(), createdAt = new Date(now - 60000).toISOString();
+  for (let i = 0; i < 59; i++) value.add(String(2 + i), { ...value.message, id: `stored${i}`, serverId: String(100 + i), createdAt });
+  const events: Array<ReturnType<typeof commitEvent>> = [];
+  for (let i = 0; i < 250; i++) { value.store.set(`new${i}`, { ...value.message, id: `new${i}`, serverId: String(1000 + i), createdAt }); events.push(commitEvent(String(100 + i), `new${i}`, now - 60000)); }
+  const persisted: number[] = [];
+  Object.assign(value.client, journal(events), { ack: async () => {
+    // A crash here must not leave more than the limit queued.
+    persisted.push(new NativeConsumerState(dirname(value.state.file), "s", "a").items().length);
+    if (persisted.length === 1) throw Error("simulated stop after the first page");
+  } });
+  await assert.rejects(synchronizeNativeEvents(value.client, "a", value.state, { now, includeQueued: true }), /simulated stop/);
+  assert.deepEqual(persisted, [NATIVE_CATCH_UP_LIMIT]);
+  const reopened = new NativeConsumerState(dirname(value.state.file), "s", "a");
+  assert.deepEqual(reopened.items().map(item => item.id), Array.from({ length: 100 }, (_, i) => `new${100 + i}`));
+  await synchronizeNativeEvents(value.client, "a", reopened, { now });
+  assert.equal(reopened.items().length, 150); assert.equal(reopened.items().at(-1)?.id, "new249");
+});
+test("a late-delivered mention sent before the group boundary keeps that boundary as the stopping point", t => {
+  const value = fixture(t, { group: true });
+  value.state.beginDispatch("m1", { messageIds: ["m1"], assets: [] } as any, { boundary: { createdAt: "2026-10-20T12:00:00Z" } });
+  const late = value.add("2", { ...value.message, id: "late", serverId: "2", createdAt: "2026-10-20T11:00:00Z" });
+  value.state.beginDispatch(late.id, { messageIds: [late.id], assets: [] } as any, { boundary: { createdAt: late.createdAt } });
+  assert.deepEqual(value.state.groupBoundary("r@chatroom"), { cursor: "2", messageId: "m1", createdAt: "2026-10-20T12:00:00Z" });
 });

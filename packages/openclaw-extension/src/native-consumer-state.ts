@@ -227,6 +227,12 @@ export class NativeConsumerState {
     this.mutate(() => Object.assign(this.value.open[messageId], update));
     return true;
   }
+  /** Drop queued messages in one write, skipping any another occupant or a started turn now holds. */
+  dropQueued(entries: ReadonlyArray<{ id: string; revision: string }>): number {
+    const dropped = entries.filter(({ id, revision }) => this.value.open[id]?.revision === revision && this.value.open[id].state === "received");
+    if (dropped.length) this.mutate(() => { for (const { id } of dropped) delete this.value.open[id]; });
+    return dropped.length;
+  }
   /** Remove a message that needs no more work. Ignored when another occupant now holds the ID. */
   finish(messageId: string, revision?: string): boolean {
     const item = this.value.open[messageId];
@@ -247,9 +253,11 @@ export class NativeConsumerState {
       Object.assign(item, { state: "dispatching", dispatchManifest, invalidatedByRecall: false, ...(inputServerIds.length ? { inputServerIds } : {}) });
       const prior = this.value.boundaries[item.threadId];
       if (options.boundary && (!prior || BigInt(item.cursor) > BigInt(prior.cursor))) {
+        const createdAt = typeof options.boundary.createdAt === "string" ? options.boundary.createdAt : undefined;
+        // A late-delivered mention sent before the boundary message keeps that message as the stopping point.
+        const earlier = !!prior?.createdAt && !!createdAt && Date.parse(createdAt) < Date.parse(prior.createdAt);
         delete this.value.boundaries[item.threadId];
-        this.value.boundaries[item.threadId] = { cursor: item.cursor, messageId,
-          ...(typeof options.boundary.createdAt === "string" ? { createdAt: options.boundary.createdAt } : {}) };
+        this.value.boundaries[item.threadId] = earlier ? { ...prior!, cursor: item.cursor } : { cursor: item.cursor, messageId, ...(createdAt ? { createdAt } : {}) };
         const threads = Object.keys(this.value.boundaries);
         for (const thread of threads.slice(0, Math.max(0, threads.length - BOUNDARY_LIMIT))) delete this.value.boundaries[thread];
       }
@@ -389,8 +397,8 @@ function migrateVersion1(parsed: any, held: string[], skipped: NativeConsumerSta
       revision: typeof item.revision === "string" && item.revision && item.revision.length <= 64 ? item.revision : randomUUID(), state: "received" };
   }
   for (const [id, item] of items) {
-    // A turn recorded as dispatching was interrupted; it is reported and not repeated.
-    if (item.state === "dispatching") held.push(id);
+    // A turn in progress when the earlier release stopped is reported and not repeated.
+    if (item.state === "dispatching" || item.state === "handed_off") held.push(id);
     if (item.readPending === true) {
       const read = state.reads[item.message.threadId] ??= { token: randomUUID(), messages: [] };
       read.messages = [...read.messages, { id, serverId: serverId(item.message.serverId) }].slice(-READ_MESSAGE_LIMIT);

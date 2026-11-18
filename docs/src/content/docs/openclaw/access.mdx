@@ -64,7 +64,7 @@ When the Gateway starts again, the agent catches up on what it missed:
 | More than 100 of those | Only the newest 100 are answered |
 | Older than 24 hours | Skipped |
 
-Only messages the agent would answer count toward the 100: direct messages, mentions, and messages in groups that don't need a mention. Other group messages still appear as context for the next mention. Skipped messages are noted in the Gateway log.
+Only messages that pass the checks above count toward the 100, including any that were waiting when the Gateway stopped. Group messages without a mention still appear as context for the next mention. Skipped messages are noted in the Gateway log.
 
 <Aside title="Good to know">
 - **Find IDs** with `wx contacts find NAME` for people and `wx chats find NAME` for groups (group IDs end in `@chatroom`). Your own ID is the `senderId` on messages you sent.
