@@ -110,6 +110,26 @@ impl Core {
         Ok(settled)
     }
 
+    /// Whether a remark change for this contact is waiting for its lookup.
+    pub(super) fn remark_refresh_pending(&self, account: &str, contact: &str) -> Result<bool> {
+        Ok(self.store.runtime(account, &key(contact))?.is_some())
+    }
+    /// One read of every pending remark lookup, for annotating a page of contacts.
+    pub(super) fn remark_refresh_pending_set(
+        &self,
+        account: &str,
+    ) -> Result<std::collections::HashSet<String>> {
+        Ok(self
+            .store
+            .contact_remark_refresh_keys(account)?
+            .into_iter()
+            .collect())
+    }
+    /// The queue key for a contact, to test membership in `remark_refresh_pending_set`.
+    pub(super) fn remark_refresh_key(contact: &str) -> String {
+        key(contact)
+    }
+
     /// Remove a queued lookup unless a newer change re-queued it meanwhile.
     fn clear_remark_refresh(&self, account: &str, key: &str, source: &str) -> Result<()> {
         if let Some(sealed) = self.store.runtime(account, key)? {

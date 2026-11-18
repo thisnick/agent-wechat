@@ -163,7 +163,8 @@ async fn update_contact(
             &a,
             &id,
             wechat_core::ContactUpdate {
-                privacy: privacy_settings(input.privacy),
+                privacy: input.privacy.map(privacy_settings),
+                remark: input.remark,
                 expected_version: input.expected_version,
             },
             idempotency_key(&headers)?,

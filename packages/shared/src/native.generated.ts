@@ -1378,13 +1378,25 @@ relation: string, classification?: PeerClassification,
  */
 privacy?: NativeContactPrivacySettings,
 /**
- * Version to supply when editing the current relationship settings.
+ * Version to send as `expectedVersion` when changing this contact's privacy
+ * or remark. It changes whenever either of them changes.
  */
 privacyVersion?: string,
 /**
  * True while an accepted relationship edit is awaiting contact sync.
  */
-privacyPending?: boolean, };
+privacyPending?: boolean,
+/**
+ * True while an accepted remark change is waiting for WeChat's saved value.
+ */
+remarkPending?: boolean,
+/**
+ * Why a friend has no `privacy` or `privacyVersion`, so it can't be edited yet:
+ * `contact_privacy_unresolved` (refresh the contact),
+ * `ordinary_contact_required` (not supported for this contact),
+ * `profile_identity_unavailable` or `contact_flags_unresolved`.
+ */
+privacyUnavailable?: string, };
 export type NativeGroup = {
 /**
  * Group ID, ending with `@chatroom`. It is the same as `roomId`.
@@ -1551,9 +1563,15 @@ hideMyPosts: boolean,
 hideTheirPosts: boolean, };
 export type NativeContactUpdate = {
 /**
- * Desired settings; unrelated contact flags are preserved.
+ * Desired relationship settings; unrelated contact flags are preserved.
+ * Send either `privacy` or `remark` in one request.
  */
-privacy: NativeContactPrivacySettings,
+privacy?: NativeContactPrivacySettings,
+/**
+ * New personal remark: a string sets it, `null` clears it, and omitting
+ * it keeps the current remark. Outer whitespace is removed.
+ */
+remark?: string | null,
 /**
  * Version from the contact's `privacyVersion` on this account.
  */

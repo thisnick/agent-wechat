@@ -195,8 +195,8 @@ export class NativeWeChatClient {
   sendContactRequest(accountId: string, input: NativeContactRequestSend, key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.contactMutation(accountId, "contact-requests", "POST", input, key, "send_request", signal); }
   /** Accept the inspected version of an incoming request. */
   acceptContactRequest(accountId: string, requestId: string, input: NativeContactRequestAccept | string, key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.contactMutation(accountId, `contact-requests/${id(requestId)}/accept`, "POST", typeof input === "string" ? { expectedVersion: input } : input, key, "accept_request", signal); }
-  /** Save privacy once against the inspected version; retain the original key after uncertainty. */
-  updateContact(accountId: string, username: string, input: NativeContactUpdate, key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.contactMutation(accountId, `contacts/${id(username)}`, "PATCH", input, key, "update_privacy", signal); }
+  /** Save privacy or the remark once against the inspected version; retain the original key after uncertainty. */
+  updateContact(accountId: string, username: string, input: NativeContactUpdate, key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.contactMutation(accountId, `contacts/${id(username)}`, "PATCH", input, key, input.remark !== undefined ? "update_remark" : "update_privacy", signal); }
   /** Delete this account's local request history; no server rejection or cancellation. */
   deleteContactRequest(accountId: string, requestId: string, expectedVersion: string, key: string, signal?: AbortSignal): Promise<NativeOperation> { return this.contactMutation(accountId, `contact-requests/${id(requestId)}`, "DELETE", { expectedVersion }, key, "delete_request", signal); }
   /** Remove this account's contact relationship while preserving chat history. */

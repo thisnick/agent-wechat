@@ -14,7 +14,6 @@ test("the card adapter keeps privacy with the send and acceptance, and versions 
   const calls = [];
   const client = Object.fromEntries(
     [
-      "contactPrivacy",
       "updateContact",
       "sendContactRequest",
       "acceptContactRequest",
@@ -28,10 +27,14 @@ test("the card adapter keeps privacy with the send and acceptance, and versions 
       },
     ]),
   );
-  const actions = contactDetailActions({ session: {
-    client,
-    contactPrivacy: { read: client.contactPrivacy },
-  } }, "account");
+  // The card reads privacy through the session's contact-backed cache.
+  const contactPrivacy = {
+    read: async (...args) => {
+      calls.push(["contactPrivacy.read", ...args]);
+      return {};
+    },
+  };
+  const actions = contactDetailActions({ session: { client, contactPrivacy } }, "account");
   const signal = new AbortController().signal;
   await actions.readPrivacy("peer", signal);
   await actions.submit({
@@ -59,7 +62,7 @@ test("the card adapter keeps privacy with the send and acceptance, and versions 
     version: "request-v2",
   });
   assert.deepEqual(calls, [
-    ["contactPrivacy", "account", "peer", signal],
+    ["contactPrivacy.read", "account", "peer", signal],
     [
       "sendContactRequest",
       "account",
@@ -272,11 +275,9 @@ test("the live inventory warms a closed contact, and a newer inventory clears un
 });
 
 test("missing contact privacy stays blank and pending privacy is retried", async () => {
-  let legacyReads = 0;
   for (const pending of [undefined, true]) {
     const cache = new ContactPrivacyCache({
       contact: async () => ({ id: "peer", relation: "friend", privacyPending: pending }),
-      contactPrivacy: async () => { legacyReads++; },
     });
     cache.reset("one");
     const read = cache.read("one", "peer", new AbortController().signal);
@@ -287,7 +288,6 @@ test("missing contact privacy stays blank and pending privacy is retried", async
       assert.equal(cache.get("one", "peer"), undefined);
     }
   }
-  assert.equal(legacyReads, 0);
 });
 
 for (const sameSession of [true, false]) {

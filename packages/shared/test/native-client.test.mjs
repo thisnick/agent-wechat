@@ -671,6 +671,21 @@ test('contact privacy updates and request selections preserve initial request se
   assert.deepEqual(calls[3].body,{expectedVersion:'old-version'});
   assert.deepEqual(calls.map(c=>c.key),['privacy-key','send-key','accept-key','old-key']);
 });
+test('remark updates use the contact PATCH and expect a remark operation', async () => {
+  const calls=[];
+  const client=new NativeWeChatClient({...options,fetch:async(url,init)=>{
+    calls.push({path:new URL(url).pathname,method:init.method,body:JSON.parse(init.body),key:init.headers.get('Idempotency-Key')});
+    return Response.json({id:'op',accountId:'a',kind:'contact_mutation',state:'queued',result:{action:'update_remark'}});
+  }});
+  await client.updateContact('a','peer',{remark:'Monster',expectedVersion:'v'},'remark-key');
+  await client.updateContact('a','peer',{remark:null,expectedVersion:'v'},'clear-key');
+  assert.deepEqual(calls.map(c=>[c.method,c.path,c.body,c.key]),[
+    ['PATCH','/v1/accounts/a/contacts/peer',{remark:'Monster',expectedVersion:'v'},'remark-key'],
+    ['PATCH','/v1/accounts/a/contacts/peer',{remark:null,expectedVersion:'v'},'clear-key'],
+  ]);
+  // A privacy update must not accept a remark operation.
+  await assert.rejects(client.updateContact('a','peer',{privacy:{chatsOnly:false,hideMyPosts:false,hideTheirPosts:false},expectedVersion:'v'},'privacy-key'),/identity is invalid/);
+});
 test('privacy mutations reject foreign operations and never retry a lost reply', async () => {
   const input={privacy:{chatsOnly:false,hideMyPosts:true,hideTheirPosts:false},expectedVersion:'v'};
   for(const response of [{accountId:'other',kind:'contact_mutation',action:'update_privacy'}, {accountId:'a',kind:'group_mutation',action:'update_privacy'}, {accountId:'a',kind:'contact_mutation',action:'remove_contact'}]){

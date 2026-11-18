@@ -1747,8 +1747,15 @@
               "null"
             ]
           },
+          "privacyUnavailable": {
+            "description": "Why a friend has no `privacy` or `privacyVersion`, so it can't be edited yet:\n`contact_privacy_unresolved` (refresh the contact),\n`ordinary_contact_required` (not supported for this contact),\n`profile_identity_unavailable` or `contact_flags_unresolved`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "privacyVersion": {
-            "description": "Version to supply when editing the current relationship settings.",
+            "description": "Version to send as `expectedVersion` when changing this contact's privacy\nor remark. It changes whenever either of them changes.",
             "type": [
               "string",
               "null"
@@ -1762,6 +1769,13 @@
             "description": "Your private name for the contact. Null when none is saved.",
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "remarkPending": {
+            "description": "True while an accepted remark change is waiting for WeChat's saved value.",
+            "type": [
+              "boolean",
               "null"
             ]
           },
@@ -2181,12 +2195,25 @@
             "type": "string"
           },
           "privacy": {
-            "$ref": "#/components/schemas/NativeContactPrivacySettings",
-            "description": "Desired settings; unrelated contact flags are preserved."
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NativeContactPrivacySettings"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Desired relationship settings; unrelated contact flags are preserved.\nSend either `privacy` or `remark` in one request."
+          },
+          "remark": {
+            "description": "New personal remark: a string sets it, `null` clears it, and omitting\nit keeps the current remark. Outer whitespace is removed.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
-          "privacy",
           "expectedVersion"
         ],
         "type": "object"
@@ -6608,7 +6635,7 @@
             ]
           }
         ],
-        "summary": "Change relationship privacy against the inspected version.",
+        "summary": "Change relationship privacy or the remark against the inspected version.",
         "tags": [
           "contacts"
         ],

@@ -404,13 +404,15 @@ enum ContactCommand {
         #[command(subcommand)]
         command: ContactRequestCommand,
     },
-    /// Change supplied contact privacy settings; keep omitted settings.
-    #[command(group(clap::ArgGroup::new("privacy_settings").args(["chats_only", "hide_my_posts", "hide_their_posts"]).required(true).multiple(true)))]
+    /// Change a contact's privacy settings or remark; keep omitted settings.
+    #[command(group(clap::ArgGroup::new("contact_change").args(["chats_only", "hide_my_posts", "hide_their_posts", "remark", "clear_remark"]).required(true).multiple(true)))]
     Set {
         /// Exact existing contact ID.
         id: String,
         #[command(flatten)]
         privacy: ContactPrivacyOptions,
+        #[command(flatten)]
+        remark: ContactRemarkOptions,
         #[command(flatten)]
         options: MutationOptions,
     },
@@ -430,6 +432,16 @@ enum ContactCommand {
         #[arg(required = true, num_args = 1..=2)]
         ids: Vec<String>,
     },
+}
+
+#[derive(Args, Clone, Default)]
+struct ContactRemarkOptions {
+    /// Set your private name for this contact; outer spaces are removed. Change privacy in a separate command.
+    #[arg(long, conflicts_with_all = ["clear_remark", "chats_only", "hide_my_posts", "hide_their_posts"])]
+    remark: Option<String>,
+    /// Clear your private name for this contact.
+    #[arg(long, conflicts_with_all = ["chats_only", "hide_my_posts", "hide_their_posts"])]
+    clear_remark: bool,
 }
 
 #[derive(Args, Clone, Copy, Default)]
@@ -1902,10 +1914,11 @@ async fn run(cli: Cli) -> Result<()> {
                 Some(ContactCommand::Set {
                     id,
                     privacy,
+                    remark,
                     options,
                 }),
             ..
-        } => contact_requests_cli::set_contact(&r, &settings, id, privacy, options).await?,
+        } => contact_requests_cli::set_contact(&r, &settings, id, privacy, remark, options).await?,
         Command::Contacts {
             command: Some(ContactCommand::Remove { id, options }),
             ..
