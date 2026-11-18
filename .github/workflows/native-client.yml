@@ -22,12 +22,31 @@ on:
       - 'pnpm-lock.yaml'
       - 'scripts/ci/cache-key*.py'
       - '.github/workflows/native-client.yml'
+  # PR runs only read the Rust cache, so main fills it. rust-cache stores
+  # dependencies, not workspace crates, so main needs a run only when the
+  # dependency set, compiler or this workflow changes. The weekly run renews
+  # entries that GitHub deletes after seven days without a read.
+  push:
+    branches: [main]
+    paths:
+      - 'packages/native-client-rust/Cargo.lock'
+      - 'packages/native-client-rust/Cargo.toml'
+      - 'packages/native-client-rust/crates/*/Cargo.toml'
+      - 'packages/native-client-rust/**/.cargo/config*'
+      - 'rust-toolchain.toml'
+      - '.cargo/config*'
+      - 'scripts/ci/cache-key*.py'
+      - '.github/workflows/native-client.yml'
+  schedule:
+    - cron: '23 10 * * 0'
 
 permissions:
   contents: read
 
 concurrency:
-  group: native-client-${{ github.ref }}
+  # A release calls this workflow on main too; keep its run apart from the
+  # cache-filling run that the same push can start.
+  group: native-client-${{ github.ref }}-${{ toJSON(inputs.simulator_checks) }}
   cancel-in-progress: true
 
 env:
@@ -37,13 +56,18 @@ env:
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
   FFMPEG_RELEASE: b6.1.1
+  # Only a release caller passes simulator_checks: false. Pull requests and the
+  # main-branch runs that fill the cache have no inputs and run every check.
+  SIMULATOR_CHECKS: ${{ toJSON(inputs.simulator_checks) != 'false' }}
 
 jobs:
   native:
     strategy:
       fail-fast: false
       matrix:
-        runner: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["ubuntu-24.04","ubuntu-24.04-arm"]') }}
+        # Releases add ARM64; main-branch runs fill the cache PRs read, so they
+        # use the PR matrix.
+        runner: ${{ fromJSON(toJSON(inputs.simulator_checks) == 'false' && '["ubuntu-24.04","ubuntu-24.04-arm"]' || '["ubuntu-24.04"]') }}
         suite: [lint, test]
         exclude:
           - runner: ubuntu-24.04-arm
@@ -74,7 +98,11 @@ jobs:
           # The automatic hash includes unused preinstalled toolchains, which
           # differ across runner images. Key the compiler we actually select.
           add-rust-environment-hash-key: false
-          key: native-${{ matrix.runner }}-${{ matrix.suite }}-${{ steps.rust.outputs.cachekey }}-opt${{ env.CARGO_PROFILE_DEV_OPT_LEVEL }}-debug${{ env.CARGO_PROFILE_DEV_DEBUG }}-${{ env.CARGO_PROFILE_TEST_DEBUG }}-${{ steps.cache-key.outputs.rust }}
+          # A release skips the simulator and so builds a different set.
+          key: native-${{ matrix.runner }}-${{ matrix.suite }}-${{ steps.rust.outputs.cachekey }}-opt${{ env.CARGO_PROFILE_DEV_OPT_LEVEL }}-debug${{ env.CARGO_PROFILE_DEV_DEBUG }}-${{ env.CARGO_PROFILE_TEST_DEBUG }}-sim${{ env.SIMULATOR_CHECKS }}-${{ steps.cache-key.outputs.rust }}
+          # Each PR saving its own copy filled the repository's 10 GB cache
+          # limit and evicted the others. PRs read what main saved.
+          save-if: ${{ github.event_name != 'pull_request' }}
       - name: Install native build tools
         run: sudo apt-get update && sudo apt-get install -y cmake
       - if: matrix.suite == 'lint'
@@ -82,7 +110,7 @@ jobs:
       - if: matrix.suite == 'lint'
         run: |
           packages=()
-          if [ '${{ github.event_name == 'pull_request' || inputs.simulator_checks }}' != true ]; then
+          if [ "$SIMULATOR_CHECKS" != true ]; then
             packages+=(--exclude wechat-simulator)
           fi
           cargo clippy --workspace "${packages[@]}" --all-targets --locked -- -D warnings
@@ -118,19 +146,30 @@ jobs:
           "$RUNNER_TEMP/native-ffmpeg/bin/ffmpeg" -version
           "$RUNNER_TEMP/native-ffmpeg/bin/ffprobe" -version
           echo "$RUNNER_TEMP/native-ffmpeg/bin" >> "$GITHUB_PATH"
+      # Cargo chooses dependency features once per command. A command limited
+      # to one package (-p), or one that builds no tests or examples, leaves out
+      # features the rest of the workspace and its dev-dependencies turn on, so
+      # it recompiled crates such as tokio, hyper, axum and every workspace
+      # crate. Build every binary, example and test here in one command; the
+      # tests and smoke checks below reuse these outputs from target/debug.
+      - name: Build workspace binaries, examples and tests
+        if: matrix.suite == 'test'
+        run: |
+          packages=()
+          if [ "$SIMULATOR_CHECKS" != true ]; then
+            packages+=(--exclude wechat-simulator)
+          fi
+          cargo build --workspace "${packages[@]}" --all-targets --profile test --locked
       - if: matrix.suite == 'test'
         run: |
           packages=()
-          if [ '${{ github.event_name == 'pull_request' || inputs.simulator_checks }}' != true ]; then
+          if [ "$SIMULATOR_CHECKS" != true ]; then
             packages+=(--exclude wechat-simulator)
           fi
           cargo test --workspace "${packages[@]}" --locked
       # Workspace default-feature tests above already cover the native codec and
       # audio libraries. Keep the virtual-device and portable-target checks here
       # instead of scheduling another Linux runner for the same unit tests.
-      - name: Build isolated audio probe
-        if: matrix.suite == 'test' && runner.arch == 'X64'
-        run: cargo build --locked -p wechat-audio --example isolated_loopback
       - name: Exercise generated audio through an isolated sound server
         if: matrix.suite == 'test' && runner.arch == 'X64'
         run: bash crates/wechat-audio/tests/pulse-loopback.sh target/debug/examples/isolated_loopback
@@ -138,41 +177,33 @@ jobs:
         if: matrix.suite == 'test' && runner.arch == 'X64'
         run: cargo check --locked -p wechat-calls --no-default-features --target wasm32-unknown-unknown
       - if: matrix.suite == 'test'
-        run: |
-          if [ '${{ github.event_name == 'pull_request' || inputs.simulator_checks }}' = true ]; then
-            cargo build --workspace --profile test --locked
-          else
-            cargo build --profile test --locked -p wx-native --bin wx
-          fi
-      - if: matrix.suite == 'test'
         uses: actions/setup-node@v7
         with:
           node-version-file: .node-version
       - name: Exercise the real hub through the local upstream simulator
-        if: matrix.suite == 'test' && (github.event_name == 'pull_request' || inputs.simulator_checks)
+        if: matrix.suite == 'test' && env.SIMULATOR_CHECKS == 'true'
         run: node ../../scripts/smoke/simulator.mjs
       - if: matrix.suite == 'test' && runner.arch == 'X64'
+        env:
+          NATIVE_CONTRACTS_GENERATOR: ${{ github.workspace }}/packages/native-client-rust/target/debug/examples/generate_contracts
         run: bash ../../scripts/generate-types.sh --check
       - if: matrix.suite == 'test'
         run: python3 scripts/smoke.py target/debug/wx
-      - if: matrix.suite == 'test' && (github.event_name == 'pull_request' || inputs.simulator_checks) && (runner.arch == 'X64' || github.event_name != 'pull_request')
+      - if: matrix.suite == 'test' && env.SIMULATOR_CHECKS == 'true' && (runner.arch == 'X64' || github.event_name != 'pull_request')
         uses: pnpm/action-setup@v6
       - name: Install browser-client test dependencies
-        if: matrix.suite == 'test' && (github.event_name == 'pull_request' || inputs.simulator_checks) && (runner.arch == 'X64' || github.event_name != 'pull_request')
+        if: matrix.suite == 'test' && env.SIMULATOR_CHECKS == 'true' && (runner.arch == 'X64' || github.event_name != 'pull_request')
         working-directory: .
         run: pnpm install --frozen-lockfile --filter @agent-wechat/client-ui... --filter @agent-wechat/agent-wechat...
       - name: Exercise the connected session and UI launcher with synthetic accounts
-        if: matrix.suite == 'test' && (github.event_name == 'pull_request' || inputs.simulator_checks) && (runner.arch == 'X64' || github.event_name != 'pull_request')
+        if: matrix.suite == 'test' && env.SIMULATOR_CHECKS == 'true' && (runner.arch == 'X64' || github.event_name != 'pull_request')
         working-directory: .
         run: pnpm client:smoke
-      - name: Build the account-free calling API fixture
-        if: matrix.suite == 'test' && (github.event_name == 'pull_request' || inputs.simulator_checks) && (runner.arch == 'X64' || github.event_name != 'pull_request')
-        run: cargo build --locked --profile test -p wechat-simulator --bin wx-calls-fixture
       - name: Exercise calling through the real API, SDK, CLI and fake voice provider
-        if: matrix.suite == 'test' && (github.event_name == 'pull_request' || inputs.simulator_checks) && (runner.arch == 'X64' || github.event_name != 'pull_request')
+        if: matrix.suite == 'test' && env.SIMULATOR_CHECKS == 'true' && (runner.arch == 'X64' || github.event_name != 'pull_request')
         working-directory: .
         run: node --experimental-strip-types scripts/smoke/calls-api.mjs
 
       - name: Exercise interactive conference CLI with isolated generated audio
-        if: matrix.suite == 'test' && runner.arch == 'X64' && (github.event_name == 'pull_request' || inputs.simulator_checks)
+        if: matrix.suite == 'test' && runner.arch == 'X64' && env.SIMULATOR_CHECKS == 'true'
         run: bash scripts/cli-conference-smoke.sh target/debug/wx target/debug/wx-calls-fixture

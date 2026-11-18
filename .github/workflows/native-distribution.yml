@@ -24,6 +24,27 @@ on:
       - 'turbo.json'
       - '.cargo/config*'
       - '.dockerignore'
+  # PR runs only read the Rust and Docker caches, so main fills them when the
+  # dependencies, compiler, Dockerfile or these workflows change. The weekly
+  # run renews entries that GitHub deletes after seven days without a read.
+  push:
+    branches: [main]
+    paths:
+      - 'packages/native-client-rust/Cargo.lock'
+      - 'packages/native-client-rust/Cargo.toml'
+      - 'packages/native-client-rust/crates/*/Cargo.toml'
+      - 'packages/native-client-rust/**/.cargo/config*'
+      - 'packages/desktop/src-tauri/Cargo.lock'
+      - 'packages/desktop/src-tauri/Cargo.toml'
+      - 'rust-toolchain.toml'
+      - '.cargo/config*'
+      - 'deploy/native/Dockerfile'
+      - 'scripts/ci/cache-key*.py'
+      - '.github/workflows/native-distribution.yml'
+      - '.github/workflows/native-portable.yml'
+      - '.github/workflows/desktop.yml'
+  schedule:
+    - cron: '41 10 * * 0'
 permissions:
   contents: read
 concurrency:
@@ -35,13 +56,17 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+    # Main-branch runs exist to fill the caches, so they build everything that
+    # has one and skip the OpenClaw smoke tests.
     outputs:
-      native: ${{ steps.filter.outputs.native }}
-      openclaw: ${{ steps.filter.outputs.openclaw }}
-      desktop: ${{ steps.filter.outputs.desktop }}
+      native: ${{ github.event_name != 'pull_request' || steps.filter.outputs.native == 'true' }}
+      openclaw: ${{ github.event_name == 'pull_request' && steps.filter.outputs.openclaw == 'true' }}
+      desktop: ${{ github.event_name != 'pull_request' || steps.filter.outputs.desktop == 'true' }}
     steps:
       - uses: actions/checkout@v7
+        if: github.event_name == 'pull_request'
       - uses: dorny/paths-filter@v4
+        if: github.event_name == 'pull_request'
         id: filter
         with:
           filters: |
@@ -181,11 +206,12 @@ jobs:
           tags: native-release-builder:ci
           labels: org.opencontainers.image.revision=${{ github.sha }}
           # Export this solve directly: the later runtime solve must not replace
-          # the executable target's cache records on a fresh builder.
+          # the executable target's cache records on a fresh builder. Only main
+          # exports it (2m12s per run); PRs read main's copy.
           cache-from: |
             type=gha,scope=native-linux-artifact-${{ runner.arch }}
             type=gha,scope=native-linux-${{ runner.arch }}
-          cache-to: type=gha,mode=max,scope=native-linux-artifact-${{ runner.arch }}
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=gha,mode=max,scope=native-linux-artifact-{0}', runner.arch) || '' }}
       - run: bash scripts/release/build.sh
         env:
           NATIVE_RELEASE_BUILDER_IMAGE: native-release-builder:ci
@@ -210,10 +236,12 @@ jobs:
           platforms: ${{ matrix.platform }}
           load: true
           tags: agent-wechat-native:ci
+          # No export: the builder layers come from the artifact scope above, and
+          # the runtime layer takes about 20 seconds. The native-linux scope
+          # belongs to release builds.
           cache-from: |
             type=gha,scope=native-linux-artifact-${{ runner.arch }}
             type=gha,scope=native-linux-${{ runner.arch }}
-          cache-to: type=gha,mode=max,scope=native-linux-${{ runner.arch }}
       - name: Check image identity without touching account data
         run: docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges agent-wechat-native:ci --json version
       - run: python3 scripts/smoke/container.py agent-wechat-native:ci
@@ -236,6 +264,8 @@ jobs:
     uses: ./.github/workflows/native-portable.yml
     with:
       windows_simulator: true
+      # Main-branch runs fill the caches PRs read; releases add Windows ARM64.
+      windows_arm64: false
 
   desktop:
     needs: [changes, package, portable]
