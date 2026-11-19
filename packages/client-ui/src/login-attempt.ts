@@ -165,3 +165,32 @@ export async function openWhenFree(
     await wait(delayMs, signal);
   }
 }
+
+/**
+ * Resolves once the hub reports the account signed in, checking every
+ * `intervalMs`. A sign-in screen waiting for a choice uses it to notice a
+ * sign-in made elsewhere (another window, `wx auth login`, an attempt already
+ * running) instead of offering to sign in an account that is signed in. A
+ * failed check is tried again; aborting `signal` rejects with its reason.
+ */
+export async function waitForSignIn(options: {
+  signedIn: () => Promise<boolean>;
+  signal: AbortSignal;
+  intervalMs?: number;
+  wait?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
+}): Promise<void> {
+  const { signedIn, signal, intervalMs = 3000 } = options;
+  const wait =
+    options.wait ??
+    ((milliseconds: number) => new Promise<void>((done) => setTimeout(done, milliseconds)));
+  for (;;) {
+    await wait(intervalMs, signal);
+    signal.throwIfAborted();
+    try {
+      if (await signedIn()) return;
+    } catch {
+      /* Keep waiting: the next check may reach the hub. */
+    }
+    signal.throwIfAborted();
+  }
+}

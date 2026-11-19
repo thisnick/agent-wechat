@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { NativeApiError } from "@agent-wechat/shared";
-import { LoginAttempt, openWhenFree } from "../src/login-attempt.ts";
+import { LoginAttempt, openWhenFree, waitForSignIn } from "../src/login-attempt.ts";
 
 function storage(value = null) {
   return {
@@ -328,4 +328,41 @@ test("resuming picks up a running sign-in and never submits one", async () => {
   client.operation = async () => operation("failed");
   assert.equal(await new LoginAttempt(client, "a", ended).resume(), null);
   assert.equal(ended.read(), null);
+});
+
+test("a waiting sign-in screen notices a sign-in made elsewhere", async () => {
+  const answers = [false, "error", false, true];
+  const waits = [];
+  await waitForSignIn({
+    signal: new AbortController().signal,
+    intervalMs: 3000,
+    wait: async (milliseconds) => waits.push(milliseconds),
+    signedIn: async () => {
+      const answer = answers.shift();
+      if (answer === "error") throw new Error("hub unavailable");
+      return answer;
+    },
+  });
+  // A failed check is tried again rather than ending the wait.
+  assert.deepEqual(waits, [3000, 3000, 3000, 3000]);
+  assert.equal(answers.length, 0);
+});
+
+test("leaving a waiting sign-in screen stops its checks", async () => {
+  const controller = new AbortController();
+  let checks = 0;
+  await assert.rejects(
+    waitForSignIn({
+      signal: controller.signal,
+      wait: async () => {
+        if (checks === 1) controller.abort();
+      },
+      signedIn: async () => {
+        checks++;
+        return false;
+      },
+    }),
+    (error) => error.name === "AbortError",
+  );
+  assert.equal(checks, 1);
 });

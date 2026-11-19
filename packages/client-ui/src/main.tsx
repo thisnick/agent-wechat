@@ -76,7 +76,7 @@ import {
   type ViewRoute,
 } from "./routes.ts";
 import { conversationAvailable } from "./route-targets.ts";
-import { openWhenFree, type LoginStrategyChoice, type OpenedLogin } from "./login-attempt.ts";
+import { openWhenFree, waitForSignIn, type LoginStrategyChoice, type OpenedLogin } from "./login-attempt.ts";
 import { RouteMessage } from "./route-message.tsx";
 import { MessageActions } from "./message-actions.tsx";
 import { ReplyContext } from "./reply-context.ts";
@@ -704,6 +704,10 @@ function Login({
     const controller = new AbortController();
     let url = "";
     const login = connection.loginAttempt(account);
+    const accountSignedIn = async () =>
+      (await connection.session.accounts()).some(
+        (item) => item.id === account && item.authenticated === true,
+      );
     void (async () => {
       try {
         setError("");
@@ -716,7 +720,18 @@ function Login({
         // already running (for example, after a reload); never start one.
         const resumed = started ? null : await login.resume();
         if (!started && !resumed) {
-          if (!controller.signal.aborted) setIdle(true);
+          if (controller.signal.aborted) return;
+          setIdle(true);
+          // The account may be signed in elsewhere meanwhile; open the chats
+          // then, rather than offering a sign-in it no longer needs.
+          await waitForSignIn({
+            signal: controller.signal,
+            wait: pause,
+            signedIn: accountSignedIn,
+          });
+          if (controller.signal.aborted) return;
+          connection.clearLogout(account);
+          await signedIn();
           return;
         }
         // A busy account (for example, still running the first sync after a
@@ -728,10 +743,7 @@ function Login({
               signal: controller.signal,
               wait: pause,
               waiting: () => setAccountBusy(true),
-              signedIn: async () =>
-                (await connection.session.accounts()).some(
-                  (item) => item.id === account && item.authenticated === true,
-                ),
+              signedIn: accountSignedIn,
             });
         if (controller.signal.aborted) {
           if (opened.operation)
