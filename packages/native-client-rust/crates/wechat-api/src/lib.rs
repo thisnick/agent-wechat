@@ -1124,6 +1124,20 @@ struct EventQuery {
     after: Option<String>,
     /// Events per JSON page. Defaults to 100. The stream ignores it.
     limit: Option<usize>,
+    /// True to start at the end of the log instead of a cursor: a JSON page holds the most recent
+    /// events, oldest first, and its `nextCursor` is the newest event's cursor; the stream sends
+    /// only events added after it connects, unless a `Last-Event-ID` header resumes it. Cannot be
+    /// combined with `after`.
+    #[serde(default)]
+    newest: bool,
+}
+impl EventQuery {
+    fn checked(&self) -> ApiResult<()> {
+        if self.newest && self.after.is_some() {
+            return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_request"));
+        }
+        Ok(())
+    }
 }
 fn decimal(value: Option<&str>) -> ApiResult<i64> {
     let v = value.unwrap_or("0");
@@ -1151,8 +1165,14 @@ async fn events(
         return stream(State(app), Extension(c), Path(a), headers, Query(q)).await;
     }
     c.require(Some(&a), "read")?;
+    q.checked()?;
     let after = decimal(q.after.as_deref())?;
-    let items = app.core.store.events(&a, after, q.limit.unwrap_or(100))?;
+    let limit = q.limit.unwrap_or(100);
+    let items = if q.newest {
+        app.core.store.newest_events(&a, limit)?
+    } else {
+        app.core.store.events(&a, after, limit)?
+    };
     Ok(Json(
         json!({"items":items,"nextCursor":items.last().map(|v|v.cursor.clone()).unwrap_or_else(||after.to_string())}),
     ).into_response())
@@ -1165,8 +1185,18 @@ async fn stream(
     Query(q): Query<EventQuery>,
 ) -> ApiResult<Response> {
     c.require(Some(&a), "read")?;
+    q.checked()?;
     let last = headers.get("last-event-id").and_then(|v| v.to_str().ok());
-    let mut after = decimal(q.after.as_deref().or(last))?;
+    // A reconnecting EventSource sends Last-Event-ID, which outranks `newest`.
+    let mut after = match q.after.as_deref().or(last) {
+        None if q.newest => app
+            .core
+            .store
+            .event_boundary(&a)?
+            .parse()
+            .context("event boundary unreadable")?,
+        cursor => decimal(cursor)?,
+    };
     app.core.store.events(&a, after, 1)?;
     let events = async_stream::stream! {
         yield Ok::<_,std::convert::Infallible>(Event::default().comment("connected"));
@@ -1594,6 +1624,63 @@ mod tests {
             .unwrap();
         assert_eq!(frame.into_data().unwrap().as_ref(), b": connected\n\n");
         assert!(core.store.events("one", 0, 10).unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn newest_events_start_at_the_end_of_the_log() {
+        let (_temp, core, app) = setup();
+        let get = |path: &'static str| call(app.clone(), "GET", path, Some(OWNER), None);
+        let empty = get("/v1/accounts/one/events?newest=true&limit=1").await;
+        assert_eq!(empty.0, StatusCode::OK);
+        assert_eq!(empty.1, json!({"items":[],"nextCursor":"0"}));
+        for n in 1..=3 {
+            core.store
+                .append_event("one", "account.push", &json!({"n":n}))
+                .unwrap();
+        }
+        let (status, page) = get("/v1/accounts/one/events?newest=true&limit=2").await;
+        assert_eq!(status, StatusCode::OK);
+        let cursors: Vec<_> = page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["cursor"].as_str().unwrap())
+            .collect();
+        assert_eq!(cursors, ["2", "3"]);
+        assert_eq!(page["nextCursor"], "3");
+        for path in [
+            "/v1/accounts/one/events?newest=true&after=0",
+            "/v1/accounts/one/events/stream?newest=true&after=0",
+        ] {
+            assert_eq!(get(path).await.0, StatusCode::BAD_REQUEST, "{path}");
+        }
+        // The stream skips events that existed when it connected.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/accounts/one/events/stream?newest=true")
+                    .header("authorization", format!("Bearer {OWNER}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        core.store
+            .append_event("one", "account.push", &json!({"n":4}))
+            .unwrap();
+        let mut body = response.into_body();
+        let mut text = String::new();
+        while !(text.contains("id: ") && text.ends_with("\n\n")) {
+            let frame = tokio::time::timeout(Duration::from_secs(5), body.frame())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            text.push_str(std::str::from_utf8(&frame.into_data().unwrap()).unwrap());
+        }
+        assert!(text.contains("id: 4\n"), "{text}");
+        assert!(!text.contains("id: 3\n"), "{text}");
     }
     #[tokio::test]
     async fn media_lookup_batch_requires_media_scope_and_rejects_unbounded_inputs() {

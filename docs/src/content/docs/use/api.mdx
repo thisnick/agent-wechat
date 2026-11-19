@@ -250,6 +250,8 @@ curl -N -H "Authorization: Bearer $TOKEN" "$WX/accounts/$ACCOUNT/events/stream"
 
 A server-sent event stream. A new message arrives as a `message.committed` event; fetch it with `GET /messages/{messageId}`. To resume after a disconnect, reconnect with `?after=CURSOR` (or the standard `Last-Event-ID` header) and the daemon replays what you missed. `POST /consumers/{name}/ack` with `{"cursor": "..."}` records how far you've processed.
 
+Without a cursor, the stream starts at the oldest event the daemon keeps. Add `?newest=true` to get only events added after you connect. `GET /events?newest=true` returns the most recent events, and its `nextCursor` is the newest event's cursor. The daemon keeps the newest 10,000 events of each account; an older cursor returns `410 event_cursor_expired`.
+
 The stream sends an immediate heartbeat comment, followed by periodic keepalives.
 Heartbeat comments contain no message and do not advance the event cursor.
 
