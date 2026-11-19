@@ -22,7 +22,7 @@
 //! | Metadata receipts in `runtime` | while their request is pending | - | once it finishes |
 //! | Pagination views | until they expire | - | once expired |
 //! | Message attachment rows never downloaded (`pending` or `expired`), except voice | for [`IDLE_ASSET_DAYS`], while a job or queued automatic download names them, or once they hold bytes | - | ID retired; reading the message's media recreates the row |
-//! | Sticker catalog previews (`sticker_preview_*`) | until their one-day preparation window ends, while a queued or running download names them, or while they hold bytes | - | ID retired; the catalog lists a new ID each day |
+//! | Sticker catalog previews (`sticker_preview_*`) | until their one-day preparation window ends, while a queued or running download names them, or while they hold bytes | - | removed without retiring the ID: the catalog lists a new ID each day and never an earlier one, so a retired ID would only grow `retired_keys` |
 //!
 //! Uncertain (`needs_review`) records expire after [`REVIEW_DAYS`] or once
 //! more than [`REVIEW_LIMIT`] newer ones exist in the same family. Expiry keeps
@@ -96,7 +96,7 @@ pub(crate) const GROUP_KEY: &str = "group-key";
 pub(crate) const CONTACT_KEY: &str = "contact-key";
 pub(crate) const RECALL_KEY: &str = "recall-key";
 pub(crate) const OPERATION_ID: &str = "operation";
-/// Removed never-downloaded attachment rows and expired sticker previews.
+/// Removed never-downloaded attachment rows.
 pub(crate) const MEDIA_ASSET_ID: &str = "media-asset";
 /// Read notifications are submitted once per server boundary.
 pub const READ_NOTIFICATION: &str = "read-notification";
@@ -683,16 +683,16 @@ fn remove_idle_assets(tx: &Transaction, now: i64, budget: &mut i64) -> Result<us
 /// an expired preview already fails. A preview waits while a queued or running
 /// download names it, or while it still holds bytes:
 /// [`Store::expire_sticker_preparation_assets`] releases those first.
-/// Their IDs are retired, so reading one returns `operation_expired`.
+/// Their IDs aren't retired: nothing can reuse them, so a retired key would
+/// only add a row for good. Reading one returns `not_found`.
 fn remove_expired_previews(tx: &Transaction, now: i64, budget: &mut i64) -> Result<usize> {
     let mut removed = 0;
     for id in ids(
         tx,
         // `_` is a LIKE wildcard; '`' is the byte after '_', ending the range.
-        "SELECT id FROM media_assets a WHERE id>='sticker_preview_' AND id<'sticker_preview`' AND message_id IS NULL AND payload IS NULL AND payload_file IS NULL AND profile_key IS NULL AND json_extract(metadata_json,'$.preparationExpiresAt')<=?1 AND NOT EXISTS(SELECT 1 FROM media_jobs j WHERE json_extract(j.data_json,'$.assetId')=a.id AND j.state IN ('queued','running')) LIMIT ?2",
+        "SELECT id FROM media_assets a WHERE id>='sticker_preview_' AND id<'sticker_preview`' AND message_id IS NULL AND payload IS NULL AND payload_file IS NULL AND profile_key IS NULL AND json_extract(metadata_json,'$.preparationExpiresAt')<=?1 AND NOT EXISTS(SELECT 1 FROM media_jobs j WHERE j.state IN ('queued','running') AND json_extract(j.data_json,'$.assetId')=a.id) LIMIT ?2",
         params![now, (*budget).max(0)],
     )? {
-        retire(tx, MEDIA_ASSET_ID, &id, now)?;
         tx.execute("DELETE FROM media_assets WHERE id=?1", [&id])?;
         removed += take(budget, 1);
     }
@@ -2333,8 +2333,9 @@ mod tests {
         assert_eq!(step.expired_previews, 2);
         assert_eq!(step.idle_assets, 0);
         for id in ["sticker_preview_listed", "sticker_preview_released"] {
-            assert_eq!(error(store.media_asset("a", id)), "operation_expired");
+            assert!(error(store.media_asset("a", id)).contains("no rows"));
         }
+        assert_eq!(store.storage_usage("a").unwrap().retired_keys, 0);
         for id in [
             "sticker_preview_current",
             "sticker_preview_downloading",
@@ -2350,10 +2351,7 @@ mod tests {
         job.state = "failed".into();
         store.save_media_job("a", &job).unwrap();
         assert_eq!(settle(&store, now).expired_previews, 1);
-        assert_eq!(
-            error(store.media_asset("a", "sticker_preview_downloading")),
-            "operation_expired"
-        );
+        assert!(error(store.media_asset("a", "sticker_preview_downloading")).contains("no rows"));
         assert_eq!(store.media_job("a", "job").unwrap().state, "failed");
         // Once the window passes, the current preview goes too.
         assert_eq!(settle(&store, now + 60).expired_previews, 1);

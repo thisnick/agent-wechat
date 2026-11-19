@@ -1,5 +1,7 @@
-//! Explicit status-notification forms with no local profile effect.
-//! Every other opcode and payload remains an unresolved projection obligation.
+//! Type-51 status controls the official client applies with no local effect:
+//! those whose every op lacks a registered handler, and the recorded empty
+//! opcode-11 forms. A control with any other registered op stays an
+//! unresolved projection obligation.
 use anyhow::{ensure, Context, Result};
 use wechat_protocol::wire::AddMessage;
 
