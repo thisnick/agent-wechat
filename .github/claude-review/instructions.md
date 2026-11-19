@@ -187,9 +187,11 @@ Check any change that touches these invariants (all from `AGENTS.md`):
   credential generations and logout fences stay intact.
 - Projection journals are durable. A command the build can't apply is skipped
   as handled only after its supported parts are applied, with its raw bytes
-  kept sealed (`SKIPPED_BLOCKERS`, an owner decision of 2026-11-19); a command
-  waiting on other local work keeps its batch blocked and the official
-  projected cursor doesn't move past it.
+  kept sealed (`SKIPPED_BLOCKERS`, an owner decision of 2026-11-19). A command
+  whose follow-up is local work (group refresh, sticker reconciliation, an
+  exact contact lookup) is acknowledged at once and finished in the
+  background; only a few cases, such as an unsupported deletion of an existing
+  contact or a recall form the build doesn't accept, still hold the cursor.
 - One writer per official profile. Official schemas are checked before writes,
   an unknown official layout is never migrated automatically, unknown official
   files are preserved, and FTS databases are never deleted as a repair.

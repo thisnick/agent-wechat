@@ -34,12 +34,13 @@ struct ProjectionBlocked {
 /// support and unreadable control metadata. Since 2026-11-19 the owner treats these as
 /// handled instead of holding the batch and the official profile's saved sync
 /// position: `apply_sync_command_with_media` applies every supported part
-/// first, then skips the rest. Blockers that something later resolves still
-/// hold: a group refresh, sticker reconciliation, a superseded pin, and
-/// contact fields with unresolved version ordering, which a newer known
-/// update or a remark lookup settles and which keep notifications suppressed
-/// meanwhile. Deleting an existing contact through an unsupported path also
-/// holds: skipping it would leave a deleted contact in the profile for good.
+/// first, then skips the rest. Updates that wait on other local work don't
+/// hold their batch either: a group update, a sticker control, a superseded
+/// pin and contact fields with unresolved or unreadable controls are
+/// acknowledged at once, and the group refresh, sticker reconciliation or an
+/// exact contact lookup finishes them in the background. Deleting an existing
+/// contact through an unsupported path still holds: skipping it would leave a
+/// deleted contact in the profile for good.
 /// So does a recall (`revokemsg`) in a form this build doesn't accept:
 /// skipping it would leave the recalled message visible.
 const SKIPPED_BLOCKERS: [&str; 3] = [
@@ -571,11 +572,13 @@ impl Core {
                 return Ok(());
             }
             if crate::sticker_control::supported_sticker_control(&message, &state.own_username) {
+                // Acknowledged now; the reconciliation job scheduled after
+                // each sync reads the retained marker and refreshes stickers
+                // in the background instead of holding this batch.
                 self.retain_control_raw(account, command, receipt)?;
                 self.retain_sticker_refresh(account, receipt)?;
-                let mut pending = message_blocker(&message);
-                pending.reason = "sticker_reconciliation_pending";
-                return Err(pending.into());
+                self.store.put_runtime(account, receipt, b"1")?;
+                return Ok(());
             }
             if let Some(recall) = crate::recalls::incoming_recall(&message, &state.own_username)? {
                 self.retain_control_raw(account, command, receipt)?;
@@ -699,10 +702,14 @@ impl Core {
             if self.store.runtime(account, &fields_applied)?.is_none() {
                 self.invalidate_contact_pinning(account, &contact, receipt)?;
                 if self.contact_pin_superseded(account, &contact, receipt)? {
-                    let mut blocked = command_blocker(command);
-                    blocked.classification = "contact_update";
-                    blocked.reason = "contact_pin_projection_superseded";
-                    return Err(blocked.into());
+                    // A newer revision of this contact exists, so this
+                    // record's values may be stale. Don't apply them or hold
+                    // the batch: acknowledge it and look the contact up in
+                    // the background for its current state.
+                    self.retain_control_raw(account, command, receipt)?;
+                    self.queue_remark_refresh(account, &contact.username, receipt)?;
+                    self.store.put_runtime(account, receipt, b"1")?;
+                    return Ok(());
                 }
                 self.invalidate_contact_privacy(account, &contact, receipt)?;
             }
@@ -711,9 +718,23 @@ impl Core {
             {
                 self.invalidate_contact_notifications(account, &contact, receipt)?;
             }
+            let controlled = match wechat_protocol::controlled_contact_fields(&contact.raw) {
+                Ok(controlled) => controlled,
+                Err(_) => {
+                    // Controls this build can't read (an unknown field ID or
+                    // a malformed list) leave it unknown which fields they
+                    // cover, so none of this record is applied. Its uncertain
+                    // state stays marked above; an exact lookup supplies the
+                    // contact's current values in the background instead of
+                    // holding the batch.
+                    self.retain_control_raw(account, command, receipt)?;
+                    self.queue_remark_refresh(account, &contact.username, receipt)?;
+                    self.store.put_runtime(account, receipt, b"1")?;
+                    return Ok(());
+                }
+            };
             let mute = super::metadata::contact_mute_patch(&contact)?;
             let pin = super::metadata::contact_pin_patch(&contact)?;
-            let controlled = wechat_protocol::controlled_contact_fields(&contact.raw)?;
             let wire = wechat_protocol::protobuf::decode(&contact.raw)?;
             let partial_mask = match wechat_protocol::protobuf::optional(&wire, 7)? {
                 Some(wechat_protocol::protobuf::Value::Varint(n)) => *n != u64::from(u32::MAX),
@@ -830,8 +851,12 @@ impl Core {
                 }
                 self.store.put_runtime(account, &fields_applied, b"1")?;
             }
-            let pending = contact.username.ends_with("@chatroom")
-                && self.queue_incoming_group(account, &contact, receipt, origin)?;
+            // A queued group refresh writes the group's details by itself
+            // when it succeeds (`refresh_incoming_groups`); this command
+            // doesn't wait for it, and a refresh that gave up doesn't hold it.
+            if contact.username.ends_with("@chatroom") {
+                self.queue_incoming_group(account, &contact, receipt, origin)?;
+            }
             let known_partial_mask = match wechat_protocol::protobuf::optional(&wire, 7)? {
                 Some(wechat_protocol::protobuf::Value::Varint(0x200)) => {
                     mute.is_some() && self.store.runtime(account, &mute_applied)?.is_some()
@@ -848,23 +873,14 @@ impl Core {
                 _ => false,
             };
             let unresolved_mask = partial_mask && !known_partial_mask;
-            if !pending
-                && !unresolved_mask
-                && super::contact_remarks::remark_only_controls(&controlled)
-            {
-                // Its other fields are saved above. The controlled remark copy is
-                // not applied (its version ordering is unmapped); an exact lookup
-                // supplies the current remark instead of holding this batch.
+            if !controlled.is_empty() || unresolved_mask {
+                // Its other fields are saved above. Fields with unmapped
+                // version ordering, or an unresolved partial mask, aren't
+                // applied; an exact lookup supplies their current values in
+                // the background instead of holding this batch. Uncertain
+                // notification and pin state stays marked unresolved until a
+                // newer known update, such as that lookup, settles it.
                 self.queue_remark_refresh(account, &contact.username, receipt)?;
-            } else if pending || !controlled.is_empty() || unresolved_mask {
-                let mut blocked = command_blocker(command);
-                blocked.classification = "contact_update";
-                blocked.reason = if pending {
-                    "group_metadata_refresh_pending"
-                } else {
-                    "contact_update_control_unresolved"
-                };
-                return Err(blocked.into());
             }
             self.store.put_runtime(account, receipt, b"1")?;
             return Ok(());
@@ -2419,6 +2435,51 @@ mod encrypted_roundtrip {
             .runtime("one", "skipped-control:projected:skip-fixture:9")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn sticker_controls_are_acknowledged_and_reconciled_in_the_background() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&temporary.path().join("data")).unwrap());
+        store.create_account("one").unwrap();
+        let core = Core::new(store.clone(), None).unwrap();
+        core.configure_profile_format_key(&[9; 16]).unwrap();
+        core.install_login_state("one", &state(), None).unwrap();
+        core.ensure_managed_profile("one", &state()).unwrap();
+        let control = add(
+            10002,
+            "weixin",
+            "synthetic_self",
+            b"<sysmsg type='EmojiBackup'><EmojiBackup><OpCode>3</OpCode><DeviceID>00000000000000000000000000000000</DeviceID></EmojiBackup></sysmsg>",
+            800,
+            100,
+        );
+        core.apply_sync_command("one", &control, "projected:sticker-fixture:0", "live")
+            .unwrap();
+        // Acknowledged at once, with the reconciliation marker still queued.
+        assert!(store
+            .runtime("one", "projected:sticker-fixture:0")
+            .unwrap()
+            .is_some());
+        let markers = store.runtime_prefix("one", "sticker-refresh:", 10).unwrap();
+        assert_eq!(markers.len(), 1);
+        assert_eq!(markers[0].1, b"projected:sticker-fixture:0");
+        // When reconciliation finishes it clears the marker; the receipt stays.
+        let refresh = crate::sticker_control::StickerRefresh {
+            key: markers[0].0.clone(),
+            value: markers[0].1.clone(),
+            receipt: Some("projected:sticker-fixture:0".into()),
+        };
+        core.finish_sticker_controls("one", std::slice::from_ref(&refresh), None)
+            .unwrap();
+        assert!(store
+            .runtime_prefix("one", "sticker-refresh:", 10)
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .runtime("one", "projected:sticker-fixture:0")
+            .unwrap()
+            .is_some());
     }
 
     #[tokio::test]
