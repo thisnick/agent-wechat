@@ -93,7 +93,6 @@ export const contactChangeActions = {
 } as const;
 /** The dialog keeps frozen inputs here so an inspected retry cannot change its intent. */
 export interface ContactDetailActions {
-  readPrivacy(id: string, signal: AbortSignal): Promise<ContactPrivacySnapshot | undefined>;
   submit(change: ContactChange): Promise<NativeOperation>;
 }
 /** Translate card actions to the typed SDK without changing frozen intent inputs. */
@@ -103,8 +102,6 @@ export function contactDetailActions(
 ): ContactDetailActions {
   const client = connection.session.client;
   return {
-    readPrivacy: async (id, signal) =>
-      connection.session.contactPrivacy.read(account, id, signal),
     submit: (change) => {
       switch (change.action) {
         case "send":
@@ -139,15 +136,15 @@ export function contactDetailActions(
 }
 
 /** Read-only reconciliation for a canonical snapshot still waiting on contact sync. */
-export async function readContactPrivacyWithPendingRetry(
-  read: (signal: AbortSignal) => Promise<ContactPrivacySnapshot | undefined>,
+export async function readContactPrivacyWithPendingRetry<T = ContactPrivacySnapshot | undefined>(
+  read: (signal: AbortSignal) => Promise<T>,
   signal: AbortSignal,
   options: {
     timeoutMs?: number;
     pending?: () => void;
     wait?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
   } = {},
-): Promise<ContactPrivacySnapshot | undefined> {
+): Promise<T> {
   const deadline = new AbortController();
   const active = AbortSignal.any([signal, deadline.signal]);
   const timer = setTimeout(() => deadline.abort(), options.timeoutMs ?? 10_000);

@@ -20,7 +20,7 @@ import { t } from "./i18n.ts";
 import { messageSummary } from "./thread-preview.ts";
 import { canReply } from "./reply.ts";
 import { quotedText, quoteTargetMatches } from "./quote-preview.ts";
-import { ContactPrivacyCache } from "./contact-privacy-cache.ts";
+import { ContactQueries } from "./contact-queries.ts";
 import { StickerJobError } from "./sticker-jobs.ts";
 
 export type Account = {
@@ -239,7 +239,7 @@ export async function inventory<T>(
 
 /** Each account activation and thread selection fences every late response. */
 export class HubSession {
-  readonly contactPrivacy: ContactPrivacyCache;
+  readonly contactQueries: ContactQueries;
   private value = initial();
   private listeners = new Set<() => void>();
   private eventListeners = new Set<(event: NativeEvent, account: string) => void>();
@@ -346,7 +346,7 @@ export class HubSession {
     initialAccounts?: Account[],
   ) {
     this.client = client;
-    this.contactPrivacy = new ContactPrivacyCache(client);
+    this.contactQueries = new ContactQueries(client);
     this.receipts = receipts;
     this.cache = cache;
     this.now = now;
@@ -396,7 +396,7 @@ export class HubSession {
   }
   async clearLocalCache(account = this.value.account): Promise<void> {
     if (!account) return;
-    if (account === this.value.account) this.contactPrivacy.invalidateAccount(account);
+    if (account === this.value.account) this.contactQueries.invalidateAccount(account);
     this.histories.clear(account);
     this.restored.clear();
     await this.cache?.clearAccount(account);
@@ -463,7 +463,7 @@ export class HubSession {
     this.threadGeneration++;
     this.stream?.abort();
     this.historyRequest?.abort();
-    this.contactPrivacy.reset(null);
+    this.contactQueries.reset(null);
     this.publish(initial());
     this.stopped = true;
     this.mediaListeners.clear();
@@ -503,7 +503,7 @@ export class HubSession {
     this.replayReady = false;
     this.restored.clear();
     this.cursor = "0";
-    this.contactPrivacy.reset(null);
+    this.contactQueries.reset(null);
     this.publish({
       ...initial(),
       accounts: this.value.accounts.map((item) =>
@@ -539,7 +539,7 @@ export class HubSession {
     this.historyValidatedAt = undefined;
     this.stream?.abort();
     const generation = ++this.generation;
-    this.contactPrivacy.reset(account);
+    this.contactQueries.reset(account);
     this.threadGeneration++;
     this.catalogRequest++;
     this.cursor = "0";
@@ -1115,7 +1115,7 @@ export class HubSession {
     )
       return this.catalogFlight.promise;
     const request = ++this.detailsRequest;
-    const applyPrivacy = this.contactPrivacy.captureCatalog(account);
+    const applyPrivacy = this.contactQueries.captureCatalog(account);
     const promise = (async () => {
       const [contacts, capabilities, accounts] = await Promise.all([
         inventory((cursor) =>
@@ -1390,12 +1390,12 @@ export class HubSession {
     }
     if ((event.kind === "contact.updated" || event.kind === "contacts.updated") && typeof event.data.contactId === "string") {
       const id = event.data.contactId;
-      this.contactPrivacy.invalidate(account, id);
+      this.contactQueries.invalidate(account, id);
     }
     const contactsMayHaveChanged = (event.kind === "metadata.changed" && event.data.kind === "contacts") ||
       (event.kind === "projection.blocked" && event.data.stream === "contact");
-    if (contactsMayHaveChanged && !this.contactPrivacy.denied(account)) {
-      this.contactPrivacy.invalidateAccount(account);
+    if (contactsMayHaveChanged && !this.contactQueries.denied(account)) {
+      this.contactQueries.invalidateAccount(account);
       this.detailsRequest++;
     }
     if (event.kind === "account.settings_updated")
@@ -1469,7 +1469,7 @@ export class HubSession {
     // Push hints and control diagnostics carry no conversation content.
   }
   private async recover(account: string, generation: number): Promise<void> {
-    this.contactPrivacy.invalidateAccount(account);
+    this.contactQueries.invalidateAccount(account);
     const boundary = await this.refresh(account, generation);
     if (!this.current(account, generation)) return;
     this.histories.clear(account);
@@ -1560,7 +1560,7 @@ export class HubSession {
           return;
         }
         if (error instanceof NativeApiError && [401, 403].includes(error.status)) {
-          this.contactPrivacy.reset(account, error);
+          this.contactQueries.reset(account, error);
         }
         this.publish({
           connected: false,
