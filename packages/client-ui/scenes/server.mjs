@@ -23,7 +23,8 @@ function freePort() {
   });
 }
 
-export async function startUiServer() {
+/** `cachePrefix` names Vite's dependency cache, so the scenes and the journeys can run at the same time. */
+export async function startUiServer({ cachePrefix = ".vite-scenes" } = {}) {
   /** The stack the scene in progress runs against. */
   let current = null;
   let origin = "";
@@ -88,7 +89,7 @@ export async function startUiServer() {
   };
   const server = await createServer({
     root: packageDir,
-    cacheDir: join(packageDir, `node_modules/.vite-scenes-${process.env.TEST_WORKER_INDEX ?? "local"}`),
+    cacheDir: join(packageDir, `node_modules/${cachePrefix}-${process.env.TEST_WORKER_INDEX ?? "local"}`),
     configFile: false,
     logLevel: "warn",
     clearScreen: false,

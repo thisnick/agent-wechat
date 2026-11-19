@@ -71,6 +71,6 @@ export function playwright(config, args, env = process.env) {
 
 /** "3m 07s" for a duration in milliseconds. */
 export function elapsed(ms) {
-  const seconds = ms / 1000;
-  return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
+  const seconds = Math.round(ms / 1000);
+  return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
 }

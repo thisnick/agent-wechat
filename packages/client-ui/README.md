@@ -494,10 +494,11 @@ hub address). The tests fail when a route has no scene.
 ## Videos of the UI
 
 `journeys/` holds short scripted walkthroughs that are recorded as videos for review:
-one `<name>.journey.mjs` per video. Only the `reply-in-chat` example is kept as a
-starting point; a journey written for a pull request is deleted once its video is posted. A journey runs against a fresh simulator hub like
-a scene, but keeps animations, shows the pointer and a label for every action, and
-can make the simulator act while recording, for example deliver a message.
+one `<name>.journey.mjs` per video. A journey runs against a fresh simulator hub
+like a scene, but keeps animations, shows the pointer and a label for every action,
+and can make the simulator act while recording, for example deliver a message. Only
+the `reply-in-chat` example is kept as a starting point; a journey written for a pull
+request is deleted once its video is posted.
 
 1. Copy `journeys/reply-in-chat.journey.mjs` to `journeys/<name>.journey.mjs` and edit it.
 2. Record it:
@@ -515,11 +516,13 @@ can make the simulator act while recording, for example deliver a message.
 
 3. Look at the `-frames.png` contact sheet, twelve evenly spaced frames stamped with
    their time, to check the video shows what it should without playing it.
-4. Commit the journey. On a pull request, `.github/workflows/ui-videos.yml` records
-   every journey the PR adds or changes and posts them in one comment: the GIF plays
-   inline and links to the MP4. Add the `ui-videos` label to record every journey.
+4. Commit the journey. On a pull request, the screenshot job in
+   `.github/workflows/ui-screenshots.yml` records every journey the PR adds or
+   changes after the scenes, with the simulator it already built, and the UI videos
+   job posts them in one comment: the GIF plays inline and links to the MP4.
 5. Once the comment shows the video, delete the journey file in a new commit. Journeys
-   made for one pull request are not kept; the comment keeps working without the file.
+   made for one pull request are not kept; the comment keeps the video, and later
+   recordings in the same pull request are added to it.
 
 A journey exports these fields:
 
@@ -529,6 +532,7 @@ A journey exports these fields:
 | `viewport` | `desktop` (default), `narrow` or `compact`, as for scenes |
 | `setup(sim)` | Seeds the simulator with the seeder from `scenes/seed.mjs`; `standardWorld` from `scenes/scenes.mjs` gives the usual chats |
 | `route`, `target(world)` | The route the page opens and its parameters |
+| `prepare({ page, world })` | Optional: sets up the page before it opens, for example request routes |
 | `ready({ page, expect })` | Waits for the first frame worth showing; recording starts after it |
 | `run({ page, expect, sim, world, video })` | The recorded walkthrough |
 
@@ -550,10 +554,13 @@ and `ffprobe` on `PATH`. Set `WX_DEV_BINARY` to reuse a built `wx-dev`.
 >   is shrunk to stay under 5 MB, because GitHub may not display larger images inline.
 > - GitHub plays inline video only from files uploaded in its web editor, so the
 >   comment shows the GIF; the MP4 link downloads the file.
+> - A journey that fails in CI doesn't fail the screenshots: the comment names it,
+>   and the run keeps its Playwright report as the `ui-videos-report` artifact.
 > - Videos are published only for branches of this repository. A fork's pull
 >   request keeps them in the workflow run's `ui-videos` artifact. Each PR's files
->   stay under `refs/ui-videos/pr-<number>`, which plain clones don't fetch; delete
->   old ones with `git push origin --delete refs/ui-videos/pr-<number>`.
+>   stay under `refs/ui-videos/pr-<number>`, a Git ref that is not a branch, so plain
+>   clones don't fetch it; delete old ones with
+>   `git push origin --delete refs/ui-videos/pr-<number>`.
 
 ## Verification
 

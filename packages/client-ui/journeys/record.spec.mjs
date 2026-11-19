@@ -31,7 +31,8 @@ const journeys = [];
 for (const file of files) {
   const name = file.slice(0, -".journey.mjs".length);
   if (selected.length && !selected.includes(name)) continue;
-  journeys.push({ name, ...(await import(pathToFileURL(join(here, file)).href)).default });
+  // The file name is the journey's name, whatever the module exports.
+  journeys.push({ ...(await import(pathToFileURL(join(here, file)).href)).default, name });
 }
 const unknown = selected.filter((name) => !files.includes(`${name}.journey.mjs`));
 if (unknown.length) throw new Error(`No journey named ${unknown.join(", ")} in ${here}`);
@@ -39,7 +40,7 @@ if (unknown.length) throw new Error(`No journey named ${unknown.join(", ")} in $
 const test = base.extend({
   ui: [
     async ({}, use) => {
-      const server = await startUiServer();
+      const server = await startUiServer({ cachePrefix: ".vite-journeys" });
       await use(server);
       await server.close();
     },
@@ -129,8 +130,9 @@ for (const journey of journeys) {
       const video = join(rawDir, `${journey.name}.webm`);
       const metadata = join(rawDir, `${journey.name}.json`);
       await rm(metadata, { force: true });
-      const started = Date.now();
       await page.screencast.start({ path: video, size: viewports[viewport] });
+      // Chapter times count from the first recorded frame.
+      const started = Date.now();
       const narration = narrator(page, started);
       try {
         // Smaller action labels on phone widths, where a long locator would run off the edge.

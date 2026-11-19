@@ -60,7 +60,7 @@ Make a video of the client UI only when the user asks for one, or when the task 
 
 1. Copy `packages/client-ui/journeys/reply-in-chat.journey.mjs` to `journeys/<name>.journey.mjs` and script the use case: what to seed, which screen to open, the clicks and typing, and any simulator events. "Videos of the UI" in `packages/client-ui/README.md` lists the fields and helpers.
 2. Record it with `pnpm --filter @agent-wechat/client-ui videos <name>`. Check the `-frames.png` contact sheet to confirm it shows the use case, and fix the journey until it does. Give the user the MP4 if your environment can send files.
-3. Commit and push the journey. `ui-videos.yml` records it on the PR's code and posts it in a PR comment.
+3. Commit and push the journey. The UI screenshots workflow records it after the scenes, reusing its simulator build, and posts it in a PR comment.
 4. Once the comment shows the video, delete the journey file in a new commit. Journeys are not kept in the repository unless the user asks; the comment keeps working without the file. To refresh the video after later changes, add the journey back the same way.
 
 ## Documentation site

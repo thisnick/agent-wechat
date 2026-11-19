@@ -5,31 +5,48 @@
 // comment shows each journey's animated GIF (an image GitHub displays inline) linked
 // to the MP4. The files are committed under refs/ui-videos/pr-<number>: a ref
 // outside refs/heads, so it is no branch and plain clones don't fetch it. Each
-// publish replaces the ref with one parentless commit, and the comment links the
-// files by that commit's SHA.
+// publish adds a commit on top of the previous one that keeps the videos of earlier
+// runs (a journey deleted before merge keeps its video), so every link an earlier
+// comment used stays valid.
 //
-// ui-videos.yml runs this with actions/github-script for pull requests from
-// branches of this repository only. The recording job ran the PR's code, so the
-// downloaded files are treated as data: only the expected names, sizes and file
-// types are published, and only as files and one comment.
+// ui-screenshots.yml runs this with actions/github-script, for pull requests from
+// branches of this repository only. Their authors can already push to it, and the
+// workflow and this script come from the pull request itself, so the checks below
+// keep malformed recordings out of the comment rather than defend against the PR.
+// The files are published only as files and one comment.
 import { lstat, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 export const MARKER = '<!-- agent-wechat-ui-videos -->';
 export const REF_PREFIX = 'ui-videos/pr-';
 const NAME = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+const SHA = /^[0-9a-f]{40}$/;
 const MAX_JOURNEYS = 20;
-const MAX_TOTAL = 90 * 1024 * 1024;
-/** Each published file: its manifest key, name suffix, size limit and leading bytes. */
-const KINDS = [
-  { key: 'preview', suffix: '.gif', limit: 10 * 1024 * 1024, valid: bytes => ['GIF87a', 'GIF89a'].includes(bytes.subarray(0, 6).toString('latin1')) },
+const MAX_UPLOAD = 90 * 1024 * 1024;
+/** GitHub's image proxy may refuse larger images; a bigger preview is left out and only the MP4 linked. */
+export const PREVIEW_LIMIT = 5 * 1024 * 1024;
+/** The widest a preview is drawn in the comment. */
+const PREVIEW_WIDTH = 720;
+const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+/** Each published file: its key, name suffix, size limit and leading bytes. An optional file over its limit is left out. */
+export const KINDS = [
+  { key: 'preview', suffix: '.gif', limit: PREVIEW_LIMIT, optional: true, valid: bytes => ['GIF87a', 'GIF89a'].includes(bytes.subarray(0, 6).toString('latin1')) },
   { key: 'mp4', suffix: '.mp4', limit: 50 * 1024 * 1024, valid: bytes => bytes.subarray(4, 8).toString('latin1') === 'ftyp' },
-  { key: 'frames', suffix: '-frames.png', limit: 10 * 1024 * 1024, valid: bytes => bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) },
+  { key: 'frames', suffix: '-frames.png', limit: 10 * 1024 * 1024, valid: bytes => bytes.subarray(0, 8).equals(PNG) },
 ];
 
-/** One line of plain text: no HTML, no line breaks, at most `limit` characters. */
+/**
+ * One line of plain text: no HTML, code spans or line breaks, at most about `limit`
+ * characters. A word joiner after `@` and `#` keeps a journey's text from notifying a
+ * GitHub user or linking an issue.
+ */
 export function plain(text, limit = 300) {
-  return String(text ?? '').replace(/[<>`\r\n\t]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, limit);
+  return String(text ?? '')
+    .replace(/[<>`\r\n\t]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, limit)
+    .replace(/([@#])(?=[\w-])/g, '$1⁠');
 }
 
 /** "0:07" for seconds. */
@@ -38,103 +55,194 @@ export function clock(seconds) {
   return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`;
 }
 
-/** The journeys in a manifest written by packages/client-ui/scripts/videos.mjs, checked and reduced to what the comment uses. */
+const filesFor = name => Object.fromEntries(KINDS.map(kind => [kind.key, `${name}${kind.suffix}`]));
+const number = (value, fallback = 0) => (Number.isFinite(value) && value >= 0 ? value : fallback);
+
+/** The fields every entry has, from the recorder's manifest or a published one. */
+function entry(raw, names) {
+  if (typeof raw?.name !== 'string' || !NAME.test(raw.name) || names.has(raw.name)) throw new Error('Invalid journey name');
+  names.add(raw.name);
+  const chapters = Array.isArray(raw.chapters) ? raw.chapters.slice(0, 20) : [];
+  return {
+    name: raw.name,
+    description: plain(raw.description),
+    viewport: plain(raw.viewport, 20),
+    seconds: number(raw.seconds),
+    chapters: chapters.map(chapter => ({ title: plain(chapter?.title, 80), at: number(chapter?.at ?? Number(chapter?.atMs) / 1000) })),
+    width: Math.min(PREVIEW_WIDTH, Math.round(number(raw.width ?? raw.files?.preview?.width, PREVIEW_WIDTH)) || PREVIEW_WIDTH),
+  };
+}
+
+/** The journeys a run recorded, from the manifest packages/client-ui/scripts/videos.mjs writes. Empty when every journey failed. */
 export function readManifest(value) {
-  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_JOURNEYS) throw new Error('Invalid video manifest');
+  if (!Array.isArray(value) || value.length > MAX_JOURNEYS) throw new Error('Invalid video manifest');
   const names = new Set();
-  return value.map(entry => {
-    if (typeof entry?.name !== 'string' || !NAME.test(entry.name) || names.has(entry.name)) throw new Error('Invalid journey name');
-    names.add(entry.name);
-    const files = {};
-    for (const kind of KINDS) {
-      const expected = `${entry.name}${kind.suffix}`;
-      if (entry.files?.[kind.key]?.name !== expected) throw new Error(`Unexpected ${kind.key} file for ${entry.name}`);
-      files[kind.key] = expected;
-    }
-    const chapters = Array.isArray(entry.chapters) ? entry.chapters.slice(0, 20) : [];
-    return {
-      name: entry.name,
-      description: plain(entry.description),
-      viewport: plain(entry.viewport, 20),
-      seconds: Number.isFinite(entry.seconds) && entry.seconds >= 0 ? entry.seconds : 0,
-      chapters: chapters.map(chapter => ({ title: plain(chapter?.title, 80), at: (Number(chapter?.atMs) || 0) / 1000 })),
-      files,
-    };
+  return value.map(raw => {
+    const journey = entry(raw, names);
+    for (const kind of KINDS)
+      if (raw.files?.[kind.key]?.name !== `${journey.name}${kind.suffix}`) throw new Error(`Unexpected ${kind.key} file for ${journey.name}`);
+    return { ...journey, files: filesFor(journey.name) };
   });
 }
 
-/** Reads one file and checks its size and type before it may be published. */
+/** The journeys an earlier publish listed in its manifest.json, with the commit and run that recorded each. */
+export function readPublished(value, runPrefix) {
+  if (!Array.isArray(value) || value.length > MAX_JOURNEYS) throw new Error('Invalid published manifest');
+  const names = new Set();
+  return value.map(raw => {
+    const journey = entry(raw, names);
+    const run = String(raw.run ?? '');
+    if (!SHA.test(raw.commit ?? '') || !run.startsWith(runPrefix) || !/^\d+$/.test(run.slice(runPrefix.length)))
+      throw new Error(`Invalid recording details for ${journey.name}`);
+    const files = filesFor(journey.name);
+    if (raw.files?.preview === null) files.preview = null;
+    return { ...journey, commit: raw.commit, run, files };
+  });
+}
+
+/** Reads one file and checks its size and type. Resolves to null for an optional file over its limit. */
 export async function readMedia(dir, name, kind) {
   const path = join(dir, name);
   const stat = await lstat(path);
-  if (!stat.isFile() || stat.size === 0 || stat.size > kind.limit) throw new Error(`Invalid size for ${name}`);
+  if (!stat.isFile() || stat.size === 0) throw new Error(`Invalid file ${name}`);
+  if (stat.size > kind.limit) {
+    if (kind.optional) return null;
+    throw new Error(`${name} is too large`);
+  }
   const bytes = await readFile(path);
   if (!kind.valid(bytes)) throw new Error(`${name} is not the expected file type`);
   return bytes;
 }
 
-/** The comment body. `url(file)` gives a published file's address. */
-export function commentBody({ journeys, headSha, runUrl, url }) {
-  const sections = journeys.map(journey => {
-    const chapters = journey.chapters.length
-      ? `\n${journey.chapters.map(chapter => `\`${clock(chapter.at)}\` ${chapter.title}`).join(' · ')}\n`
-      : '';
-    return `#### ${journey.name}\n\n${journey.description} (${journey.viewport}, ${clock(journey.seconds)})\n${chapters}\n`
-      + `<a href="${url(journey.files.mp4)}"><img src="${url(journey.files.preview)}" alt="${journey.name}" width="720"></a>\n\n`
-      + `[MP4](${url(journey.files.mp4)}) · [Frames](${url(journey.files.frames)})\n`;
-  });
-  return `${MARKER}\n### UI videos\n\n`
-    + `Recorded from \`packages/client-ui/journeys/\` against the synthetic simulator hub at commit \`${headSha.slice(0, 7)}\` `
-    + `([workflow run](${runUrl})). Each preview links to its MP4, which downloads. `
-    + 'Delete the journey files before merging; the videos here stay.\n\n'
-    + `${sections.join('\n')}`;
+/** The recorder's manifest in `dir`, or no journeys when the run produced none. */
+async function recordedIn(dir) {
+  if (!dir) return [];
+  const path = join(dir, 'manifest.json');
+  const stat = await lstat(path).catch(error => (error.code === 'ENOENT' ? null : Promise.reject(error)));
+  if (!stat) return [];
+  if (!stat.isFile() || stat.size > 200000) throw new Error('Invalid video manifest file');
+  return readManifest(JSON.parse(await readFile(path, 'utf8')));
 }
 
-export async function publish({ github, context, core, dir }) {
+/** The commit, files and journeys the PR's ref holds from earlier publishes. */
+async function published({ github, context, core, ref, runPrefix }) {
+  let commitSha;
+  try {
+    commitSha = (await github.rest.git.getRef({ ...context.repo, ref })).data.object.sha;
+  } catch (error) {
+    if (error.status === 404) return { commit: null, files: new Map(), journeys: [] };
+    throw error;
+  }
+  const { data: commit } = await github.rest.git.getCommit({ ...context.repo, commit_sha: commitSha });
+  const { data: tree } = await github.rest.git.getTree({ ...context.repo, tree_sha: commit.tree.sha });
+  const files = new Map(tree.tree.filter(item => item.type === 'blob').map(item => [item.path, item.sha]));
+  let journeys = [];
+  if (files.has('manifest.json')) {
+    try {
+      const { data: blob } = await github.rest.git.getBlob({ ...context.repo, file_sha: files.get('manifest.json') });
+      journeys = readPublished(JSON.parse(Buffer.from(blob.content, 'base64').toString('utf8')), runPrefix);
+    } catch (error) {
+      core.warning(`Not keeping earlier videos: ${error.message}`);
+    }
+  }
+  return { commit: commitSha, files, journeys };
+}
+
+/** The comment body. `url(file)` gives a published file's address. */
+export function commentBody({ journeys, failed = [], headSha, base, runUrl, url }) {
+  const lines = [
+    MARKER,
+    '### UI videos',
+    '',
+    `Journeys from \`packages/client-ui/journeys/\`, recorded against the synthetic simulator hub, each on its commit merged with \`${plain(base, 100)}\`. `
+      + 'Each preview links to its MP4, which downloads. Delete the journey files before merging; the videos here stay.',
+    '',
+  ];
+  if (failed.length) lines.push(`> **Not recorded at \`${headSha.slice(0, 7)}\`:** ${failed.join(', ')}. See the [workflow run](${runUrl}).`, '');
+  for (const journey of journeys) {
+    lines.push(`#### ${journey.name}`, '', `${journey.description} (${journey.viewport}, ${clock(journey.seconds)}, recorded at [\`${journey.commit.slice(0, 7)}\`](${journey.run}))`);
+    if (journey.chapters.length) lines.push('', journey.chapters.map(chapter => `\`${clock(chapter.at)}\` ${chapter.title}`).join(' · '));
+    lines.push('', journey.files.preview
+      ? `<a href="${url(journey.files.mp4)}"><img src="${url(journey.files.preview)}" alt="${journey.name}" width="${journey.width}"></a>`
+      : '_The preview is too large to show here; download the MP4._');
+    lines.push('', `[MP4](${url(journey.files.mp4)}) · [Frames](${url(journey.files.frames)})`, '');
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+/**
+ * Publishes what `dir` holds and updates the comment. `requested` names the journeys
+ * the run tried to record; any of them missing from `dir` is reported as not recorded.
+ */
+export async function publish({ github, context, core, dir, requested }) {
   const pr = context.payload.pull_request;
   const repository = `${context.repo.owner}/${context.repo.repo}`;
   if (pr?.head?.repo?.full_name !== repository) return core.info('Not a branch of this repository; nothing published.');
   const { data: current } = await github.rest.pulls.get({ ...context.repo, pull_number: pr.number });
   if (current.state !== 'open' || current.head.sha !== pr.head.sha) return core.info('The pull request moved on; a newer run publishes.');
+  const names = String(requested ?? '').split(/\s+/).filter(Boolean);
+  if (names.some(name => !NAME.test(name))) throw new Error('Invalid journey names requested');
 
-  const manifestPath = join(dir, 'manifest.json');
-  const manifestStat = await lstat(manifestPath);
-  if (!manifestStat.isFile() || manifestStat.size > 200000) throw new Error('Invalid video manifest file');
-  const journeys = readManifest(JSON.parse(await readFile(manifestPath, 'utf8')));
+  const runPrefix = `${context.serverUrl}/${repository}/actions/runs/`;
+  const runUrl = `${runPrefix}${context.runId}`;
+  const ref = `${REF_PREFIX}${pr.number}`;
+  const recorded = await recordedIn(dir);
+  const failed = names.filter(name => !recorded.some(journey => journey.name === name));
+  if (!recorded.length && !failed.length) return core.info('Nothing was recorded.');
+  const earlier = await published({ github, context, core, ref, runPrefix });
 
+  // New recordings replace earlier ones of the same name; the rest are kept.
   const tree = [];
-  let total = 0;
-  for (const journey of journeys) {
+  let uploaded = 0;
+  for (const journey of recorded) {
+    journey.commit = pr.head.sha;
+    journey.run = runUrl;
     for (const kind of KINDS) {
-      const name = journey.files[kind.key];
-      const bytes = await readMedia(dir, name, kind);
-      total += bytes.length;
-      if (total > MAX_TOTAL) throw new Error('The videos are too large to publish');
+      const bytes = await readMedia(dir, journey.files[kind.key], kind);
+      if (!bytes) {
+        core.warning(`${journey.files[kind.key]} is over ${kind.limit} bytes; linking only the MP4.`);
+        journey.files[kind.key] = null;
+        continue;
+      }
+      uploaded += bytes.length;
+      if (uploaded > MAX_UPLOAD) throw new Error('The videos are too large to publish');
       const { data: blob } = await github.rest.git.createBlob({ ...context.repo, content: bytes.toString('base64'), encoding: 'base64' });
-      tree.push({ path: name, mode: '100644', type: 'blob', sha: blob.sha });
+      tree.push({ path: journey.files[kind.key], mode: '100644', type: 'blob', sha: blob.sha });
     }
   }
-  const { data: createdTree } = await github.rest.git.createTree({ ...context.repo, tree });
-  const { data: commit } = await github.rest.git.createCommit({
-    ...context.repo,
-    message: `UI videos for #${pr.number} at ${pr.head.sha}`,
-    tree: createdTree.sha,
-    parents: [],
-  });
-  const ref = `${REF_PREFIX}${pr.number}`;
-  try {
-    await github.rest.git.updateRef({ ...context.repo, ref, sha: commit.sha, force: true });
-  } catch (error) {
-    if (error.status !== 404 && error.status !== 422) throw error;
-    await github.rest.git.createRef({ ...context.repo, ref: `refs/${ref}`, sha: commit.sha });
+  const fresh = new Map(recorded.map(journey => [journey.name, journey]));
+  const kept = earlier.journeys.filter(journey =>
+    !fresh.has(journey.name) && earlier.files.has(journey.files.mp4) && earlier.files.has(journey.files.frames));
+  for (const journey of kept) {
+    if (journey.files.preview && !earlier.files.has(journey.files.preview)) journey.files.preview = null;
+    for (const name of Object.values(journey.files))
+      if (name) tree.push({ path: name, mode: '100644', type: 'blob', sha: earlier.files.get(name) });
+  }
+  const order = earlier.journeys.map(journey => journey.name);
+  const journeys = [...kept, ...recorded]
+    .sort((a, b) => (order.includes(a.name) ? order.indexOf(a.name) : order.length) - (order.includes(b.name) ? order.indexOf(b.name) : order.length))
+    .slice(0, MAX_JOURNEYS);
+
+  let commitSha = earlier.commit;
+  if (recorded.length) {
+    tree.push({ path: 'manifest.json', mode: '100644', type: 'blob', content: `${JSON.stringify(journeys, null, 2)}\n` });
+    const { data: createdTree } = await github.rest.git.createTree({ ...context.repo, tree });
+    const { data: commit } = await github.rest.git.createCommit({
+      ...context.repo,
+      message: `UI videos for #${pr.number} at ${pr.head.sha}`,
+      tree: createdTree.sha,
+      parents: earlier.commit ? [earlier.commit] : [],
+    });
+    if (earlier.commit) await github.rest.git.updateRef({ ...context.repo, ref, sha: commit.sha });
+    else await github.rest.git.createRef({ ...context.repo, ref: `refs/${ref}`, sha: commit.sha });
+    commitSha = commit.sha;
+    core.info(`Published ${recorded.length} video(s) to refs/${ref} at ${commit.sha}.`);
   }
 
-  const raw = `https://raw.githubusercontent.com/${repository}/${commit.sha}`;
-  const runUrl = `${context.serverUrl}/${repository}/actions/runs/${context.runId}`;
-  const body = commentBody({ journeys, headSha: pr.head.sha, runUrl, url: file => `${raw}/${file}` });
+  const raw = `https://raw.githubusercontent.com/${repository}/${commitSha}`;
+  const body = commentBody({ journeys: commitSha ? journeys : [], failed, headSha: pr.head.sha, base: pr.base.ref, runUrl, url: file => `${raw}/${file}` });
   const comments = await github.paginate(github.rest.issues.listComments, { ...context.repo, issue_number: pr.number, per_page: 100 });
   const existing = comments.find(c => c.user?.login === 'github-actions[bot]' && c.user?.type === 'Bot' && c.body?.startsWith(MARKER));
   if (existing) await github.rest.issues.updateComment({ ...context.repo, comment_id: existing.id, body });
   else await github.rest.issues.createComment({ ...context.repo, issue_number: pr.number, body });
-  core.info(`Published ${journeys.length} journey video(s) to refs/${ref} at ${commit.sha}.`);
 }
