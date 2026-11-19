@@ -1,7 +1,6 @@
 //! Type-51 status controls the official client applies with no local effect:
-//! those whose every op lacks a registered handler, and the recorded empty
-//! opcode-11 forms. A control with any other registered op stays an
-//! unresolved projection obligation.
+//! controls whose every op lacks a registered handler and the recorded
+//! deleteMessages and empty HandOffMaster forms.
 use anyhow::{ensure, Context, Result};
 use wechat_protocol::wire::AddMessage;
 
@@ -15,6 +14,7 @@ const MAX_OPERATIONS: usize = 64;
 pub(super) enum NoLocalEffectStatus {
     EmptyHandOffMaster,
     EmptyHandOffMasterList,
+    DeleteMessagesWithoutHandler,
     /// Every op names an ID without a registered handler, in document order.
     UnregisteredOperations(Vec<u32>),
 }
@@ -23,6 +23,7 @@ impl NoLocalEffectStatus {
     pub(super) fn operation_ids(&self) -> Vec<u32> {
         match self {
             Self::EmptyHandOffMaster | Self::EmptyHandOffMasterList => vec![11],
+            Self::DeleteMessagesWithoutHandler => vec![9],
             Self::UnregisteredOperations(ids) => ids.clone(),
         }
     }
@@ -31,6 +32,7 @@ impl NoLocalEffectStatus {
         match self {
             Self::EmptyHandOffMaster => "empty_handoff_master",
             Self::EmptyHandOffMasterList => "empty_handoff_master_list",
+            Self::DeleteMessagesWithoutHandler => "delete_messages_without_handler",
             Self::UnregisteredOperations(_) => "unregistered_operation",
         }
     }
@@ -90,8 +92,8 @@ fn unregistered_operations(document: &roxmltree::Document<'_>) -> Result<Vec<u32
 
 /// Classify a type-51 control the official client applies without a local
 /// effect: one whose every op lacks a registered handler (see
-/// [`unregistered_operations`]), or one of the recorded empty opcode-11
-/// `HandOffMaster` forms.
+/// [`unregistered_operations`]) or one of the recorded opcode-9 and
+/// opcode-11 forms.
 ///
 /// Linux x64 4.1.13.26 dispatches opcode 11/HandOffMaster to its handoff-list
 /// consumer. Empty args have no work entries. The observed empty-list form
@@ -150,7 +152,7 @@ pub(super) fn parse_no_local_effect_status(
         ensure!(
             ordinary(op, "op")
                 && op.attributes().len() == 1
-                && op.attribute("id") == Some("11")
+                && matches!(op.attribute("id"), Some("9" | "11"))
                 && op
                     .attributes()
                     .all(|attribute| attribute.namespace().is_none())
@@ -173,6 +175,18 @@ pub(super) fn parse_no_local_effect_status(
         ensure!(children.len() == 2, "unsupported_status_control");
         let name = field_text(field("name")?)?;
         let arg = field("arg")?;
+        if op.attribute("id") == Some("9") {
+            // Opcode 9 has a handler. This exact name falls through its two
+            // service branches without using the argument.
+            ensure!(
+                message.to != own_username
+                    && !message.to.ends_with("@chatroom")
+                    && name == "deleteMessages"
+                    && field_text(arg)? == "0",
+                "unsupported_status_control"
+            );
+            return Ok(NoLocalEffectStatus::DeleteMessagesWithoutHandler);
+        }
         ensure!(
             message.to == own_username && name == "HandOffMaster",
             "unsupported_status_control"
@@ -375,6 +389,31 @@ mod tests {
 
     const EMPTY: &str = r#"<msg><op id="11"><name>HandOffMaster</name><arg/></op></msg>"#;
     const EMPTY_LIST: &str = r#"<msg><op id="11"><name>HandOffMaster</name><arg><handofflist availablecount="1000" devicevirtualid="synthetic-device" networkstatus="wifi" opcode="4" seq="7"/></arg></op></msg>"#;
+
+    #[test]
+    fn only_recorded_delete_messages_form_completes() {
+        let xml = "<msg><op id='9'><name>deleteMessages</name><arg>0</arg></op></msg>";
+        assert_eq!(
+            parse_no_local_effect_status(&message_to(xml, "peer"), "self"),
+            Some(NoLocalEffectStatus::DeleteMessagesWithoutHandler)
+        );
+        for recipient in ["self", "room@chatroom"] {
+            assert!(parse_no_local_effect_status(&message_to(xml, recipient), "self").is_none());
+        }
+        let mut incoming = message_to(xml, "peer");
+        incoming.outgoing = false;
+        assert!(parse_no_local_effect_status(&incoming, "self").is_none());
+        for changed in [
+            xml.replace("deleteMessages", "DeleteMessages"),
+            xml.replace("deleteMessages", "MomentsTimelineStatus"),
+            xml.replace("deleteMessages", "VoiceMsgStatus"),
+            xml.replace("<arg>0", "<arg>1"),
+            xml.replace("<arg>0</arg>", "<arg><zero/></arg>"),
+            xml.replace("</msg>", "<op id='23'/></msg>"),
+        ] {
+            assert!(parse_no_local_effect_status(&message_to(&changed, "peer"), "self").is_none());
+        }
+    }
     const PACKAGES: &str = r#"<msg><op id="23"><name>packagesUpdated</name><arg><![CDATA[{"op":"newPackage","packageId":1}]]></arg></op></msg>"#;
 
     #[test]

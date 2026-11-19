@@ -1625,6 +1625,9 @@ mod encrypted_roundtrip {
             add(10002, "weixin", "synthetic_self", br#"<sysmsg type="ClientCheckGetExtInfo"><ClientCheckGetExtInfo><ReportContext>private-check</ReportContext><Basic>1</Basic><Cellular>0</Cellular></ClientCheckGetExtInfo></sysmsg>"#, 905, 100),
             add(10002, "synthetic_self", "synthetic_self", br#"<appmsg appid="" sdkver="0"><type>35</type><msgcontent>private-card</msgcontent></appmsg>"#, 906, 100),
             add(10002, "synthetic_self", "room@chatroom", br#"<sysmsg type="mmchatroombarannouncememt"><mmchatroombarannouncememt><content>private-bar</content><xmlcontent>private-xml</xmlcontent><announcement_id>123</announcement_id></mmchatroombarannouncememt></sysmsg>"#, 907, 100),
+            add(10002, "weixin", "synthetic_self", br#"<sysmsg type="WeChatOut"><WeChatOut><TabRD>0</TabRD><TabWording/><ActivityInfo><Title/><Desc/></ActivityInfo><IsNeedPush>1</IsNeedPush></WeChatOut></sysmsg>"#, 908, 100),
+            add(10002, "weixin", "synthetic_self", br#"<sysmsg type="UpdateWxaUsageListNotify"><UpdateWxaUsageListNotify><Type>1</Type><DeleteCount>0</DeleteCount><DeleteList><DeleteAppInfo><UserName/><AppID/><AppType>0</AppType></DeleteAppInfo></DeleteList></UpdateWxaUsageListNotify></sysmsg>"#, 909, 100),
+            add(51, "synthetic_self", "peer", br#"<msg><op id="9"><name>deleteMessages</name><arg>0</arg></op></msg>"#, 910, 100),
         ];
         let batch = wechat_protocol::wire::SyncBatch {
             code: 0,
@@ -1661,7 +1664,7 @@ mod encrypted_roundtrip {
         store.append_event_once("one", &format!("control-observed:{receipt}"), "account.control_observed", &json!({"control":{"commandId":5,"messageType":51,"operationIds":[11]},"projection":"blocked"})).unwrap();
         assert!(store.pending_cursor_projection("one").unwrap());
         let result = core.recover_projection("one").unwrap();
-        assert_eq!(result["projectedCommands"], 8);
+        assert_eq!(result["projectedCommands"], 11);
         assert_eq!(result["pendingCommands"], 0);
         assert_eq!(store.pending_sync_count("one").unwrap(), 0);
         assert!(!store.pending_cursor_projection("one").unwrap());
@@ -1726,13 +1729,26 @@ mod encrypted_roundtrip {
                     && event.data["projection"] == "no_local_effect"
             })
             .collect();
-        assert_eq!(observed.len(), 8);
+        assert_eq!(observed.len(), 11);
         assert_eq!(observed[0].data["operationIds"], json!([11]));
         assert_eq!(
             observed[0].data["classification"],
             "empty_handoff_master_list"
         );
         assert_eq!(observed[1].data["operationIds"], json!([23]));
+        assert_eq!(
+            observed[8].data["classification"],
+            "wechat_out_without_handler"
+        );
+        assert_eq!(
+            observed[9].data["classification"],
+            "update_wxa_usage_list_without_handler"
+        );
+        assert_eq!(
+            observed[10].data["classification"],
+            "delete_messages_without_handler"
+        );
+        assert_eq!(observed[10].data["operationIds"], json!([9]));
         for event in observed {
             let value = event.data.to_string();
             assert!(
