@@ -89,7 +89,11 @@ export class LoginAttempt {
     } catch (error) {
       // A busy account refuses the submission outright: the hub checks the key
       // first and admits nothing, so the next attempt may use a fresh one.
-      if (accountBusy(error)) this.storage.write(null);
+      // Clear only this attempt's own entry: another window may have saved an
+      // accepted operation for the same account meanwhile.
+      const current = this.storage.read();
+      if (accountBusy(error) && current?.key === pending.key && !current.operationId)
+        this.storage.write(null);
       throw error;
     }
     this.storage.write({ ...pending, operationId: operation.id });

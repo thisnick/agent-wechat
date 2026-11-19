@@ -209,6 +209,19 @@ test("a sign-in refused by a busy account clears its key instead of replaying it
   assert.equal(saved.read().strategy, "qr");
 });
 
+test("a busy refusal keeps another window's accepted sign-in", async () => {
+  const saved = storage();
+  const client = {
+    login: async () => {
+      // Another window's request was accepted while this one was in flight.
+      saved.write({ key: "other-window", operationId: "login-9", strategy: "auto" });
+      throw busy();
+    },
+  };
+  await assert.rejects(new LoginAttempt(client, "a", saved).open("auto"), /operation_in_progress/);
+  assert.deepEqual(saved.read(), { key: "other-window", operationId: "login-9", strategy: "auto" });
+});
+
 test("a busy account is retried until it accepts the sign-in", async () => {
   let refusals = 2;
   const waits = [];
