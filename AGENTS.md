@@ -41,6 +41,7 @@ Native routes/contracts live in `packages/native-client-rust/crates/wechat-api/`
 - Change the account or registry schema only through a new migration and schema version. Never edit an existing migration.
 - In the PR description, name the interface changes and anything the review comment flags as breaking.
 - UI changes are reviewed visually: CI uploads every scene to Argos, and the owner approves the changes there. Add or update a scene in `packages/client-ui/scenes/` when you add or change a screen. Never approve Argos changes yourself.
+- When asked for a video of the UI, add or update a journey in `packages/client-ui/journeys/` and record it with `pnpm --filter @agent-wechat/client-ui videos <name>` (see "Videos of the UI" in `packages/client-ui/README.md`). Check the `-frames.png` contact sheet before sharing it, and give the user the MP4 if your environment can send files. Committing the journey makes CI post the video on the PR.
 - A PR that changes `interfaces/` needs the owner's `interfaces-approved` label. Never add that label yourself, and never merge while the Interface approval check is pending or failing.
 
 ## Pull request review

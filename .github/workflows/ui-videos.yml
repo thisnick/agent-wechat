@@ -1,0 +1,150 @@
+name: UI videos
+
+# Records the UI journeys in packages/client-ui/journeys that a pull request adds or
+# changes, or every journey once the PR has the `ui-videos` label, and shows them in
+# one PR comment: an animated preview GitHub displays inline, linked to the MP4.
+#
+# The record job runs the PR's code with read-only permissions and keeps the files
+# as an artifact. The publish job runs only for branches of this repository: it
+# commits the files under refs/ui-videos/pr-<number>, a ref outside refs/heads that
+# plain clones don't fetch, and updates the comment (scripts/ci/ui-videos-comment.mjs).
+# A fork's PR keeps the videos in the artifact. Record locally with
+# `pnpm --filter @agent-wechat/client-ui videos`.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  # Adding any other label must not cancel a recording in progress.
+  group: ui-videos-${{ github.ref }}-${{ github.event.action == 'labeled' && github.event.label.name != 'ui-videos' && github.run_id || 'record' }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+jobs:
+  plan:
+    name: Choose journeys
+    if: github.event.action != 'labeled' || github.event.label.name == 'ui-videos'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      record: ${{ steps.plan.outputs.record }}
+      journeys: ${{ steps.plan.outputs.journeys }}
+    steps:
+      - id: plan
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const { data: labels } = await github.rest.issues.listLabelsOnIssue({ ...context.repo, issue_number: pr.number });
+            if (labels.some(label => label.name === 'ui-videos')) {
+              core.setOutput('record', 'true');
+              core.setOutput('journeys', '');
+              return core.info('The ui-videos label is set: recording every journey.');
+            }
+            const journey = /^packages\/client-ui\/journeys\/([a-z0-9]+(?:-[a-z0-9]+)*)\.journey\.mjs$/;
+            const files = await github.paginate(github.rest.pulls.listFiles, { ...context.repo, pull_number: pr.number, per_page: 100 });
+            const names = files.filter(file => file.status !== 'removed').map(file => journey.exec(file.filename)?.[1]).filter(Boolean);
+            core.setOutput('record', names.length ? 'true' : 'false');
+            core.setOutput('journeys', names.join(' '));
+            core.info(names.length ? `Recording ${names.join(', ')}.` : 'No journey changed; nothing to record.');
+
+  record:
+    name: Record journeys
+    needs: plan
+    if: needs.plan.outputs.record == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        id: rust
+        with:
+          toolchain: 1.93.1
+      # Restores the simulator build that UI screenshots saves; never saves its own.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/native-client-rust -> target
+          add-rust-environment-hash-key: false
+          shared-key: ui-screenshots-${{ steps.rust.outputs.cachekey }}
+          save-if: false
+      - name: Install build tools, FFmpeg and fonts
+        uses: ./.github/actions/apt-install
+        with:
+          packages: cmake ffmpeg fonts-noto-cjk fonts-noto-color-emoji
+      - run: pnpm install --frozen-lockfile
+      - name: Build the simulator
+        run: cargo build --profile test --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-simulator
+      - name: Install Chromium
+        working-directory: packages/client-ui
+        run: npx playwright install --with-deps chromium
+      - name: Build the SDK the UI uses
+        run: pnpm --filter @agent-wechat/shared build
+      - name: Record the journeys
+        # The plan job allows only lowercase words joined by hyphens, so splitting is safe.
+        run: pnpm --filter @agent-wechat/client-ui videos $JOURNEYS
+        env:
+          JOURNEYS: ${{ needs.plan.outputs.journeys }}
+          WX_DEV_BINARY: ${{ github.workspace }}/packages/native-client-rust/target/debug/wx-dev
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ui-videos
+          path: packages/client-ui/.videos/out
+          if-no-files-found: error
+          retention-days: 30
+      - name: Keep the Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ui-videos-report
+          path: |
+            packages/client-ui/.videos/report
+            packages/client-ui/.videos/results
+            packages/client-ui/.videos/raw
+          if-no-files-found: ignore
+          retention-days: 7
+
+  publish:
+    name: Post videos
+    needs: record
+    # A fork's token cannot write, and publishing stores files in this repository.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/ci
+      - uses: actions/download-artifact@v8
+        with:
+          name: ui-videos
+          path: ${{ runner.temp }}/ui-videos
+      - name: Publish the videos and update the PR comment
+        uses: actions/github-script@v8
+        env:
+          VIDEOS_DIR: ${{ runner.temp }}/ui-videos
+        with:
+          script: |
+            const { publish } = await import(`${process.env.GITHUB_WORKSPACE}/scripts/ci/ui-videos-comment.mjs`);
+            await publish({ github, context, core, dir: process.env.VIDEOS_DIR });

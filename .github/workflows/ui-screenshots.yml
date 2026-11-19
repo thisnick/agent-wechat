@@ -72,7 +72,8 @@ jobs:
           # The automatic hash includes unused preinstalled toolchains, which
           # differ across runner images. Key the compiler we actually select.
           add-rust-environment-hash-key: false
-          key: ui-screenshots-${{ steps.rust.outputs.cachekey }}
+          # Shared rather than per job: UI videos (ui-videos.yml) restores this build.
+          shared-key: ui-screenshots-${{ steps.rust.outputs.cachekey }}
       # The fonts decide how text renders, so every run installs the same ones.
       - name: Install build tools and fonts
         uses: ./.github/actions/apt-install

@@ -491,6 +491,67 @@ scene, add it to `scenes/scenes.mjs` and run `scenes:list`. Wait for what the sc
 needs by role and text, never by sleeping, and mask what is random (the QR code, the
 hub address). The tests fail when a route has no scene.
 
+## Videos of the UI
+
+`journeys/` holds short scripted walkthroughs that are recorded as videos for review:
+one `<name>.journey.mjs` per video. A journey runs against a fresh simulator hub like
+a scene, but keeps animations, shows the pointer and a label for every action, and
+can make the simulator act while recording, for example deliver a message.
+
+1. Copy `journeys/reply-in-chat.journey.mjs` to `journeys/<name>.journey.mjs` and edit it.
+2. Record it:
+
+   ```sh
+   pnpm --filter @agent-wechat/client-ui videos <name>    # no name records every journey
+   ```
+
+   ```text
+   reply-in-chat (14.8s): Mei's new message arrives in an open chat and the account replies to it.
+     video   …/packages/client-ui/.videos/out/reply-in-chat.mp4 (0.5 MB)
+     preview …/packages/client-ui/.videos/out/reply-in-chat.gif (3.1 MB, 960px at 10 fps)
+     frames  …/packages/client-ui/.videos/out/reply-in-chat-frames.png
+   ```
+
+3. Look at the `-frames.png` contact sheet, twelve evenly spaced frames stamped with
+   their time, to check the video shows what it should without playing it.
+4. Commit the journey. On a pull request, `.github/workflows/ui-videos.yml` records
+   every journey the PR adds or changes and posts them in one comment: the GIF plays
+   inline and links to the MP4. Add the `ui-videos` label to record every journey.
+
+A journey exports these fields:
+
+| Field | Purpose |
+| --- | --- |
+| `description` | One sentence, shown in the PR comment |
+| `viewport` | `desktop` (default), `narrow` or `compact`, as for scenes |
+| `setup(sim)` | Seeds the simulator with the seeder from `scenes/seed.mjs`; `standardWorld` from `scenes/scenes.mjs` gives the usual chats |
+| `route`, `target(world)` | The route the page opens and its parameters |
+| `ready({ page, expect })` | Waits for the first frame worth showing; recording starts after it |
+| `run({ page, expect, sim, world, video })` | The recorded walkthrough |
+
+In `run`, `video.chapter(title, description)` shows a title card,
+`video.caption(text)` a subtitle (`null` removes it), `video.type(locator, text)`
+types one key at a time and `video.pause(ms)` holds a finished state for viewers.
+Wait for the UI with `expect` first; a pause is never for synchronisation.
+
+The first run builds the simulator and the SDK, like the scenes, and needs `ffmpeg`
+and `ffprobe` on `PATH`. Set `WX_DEV_BINARY` to reuse a built `wx-dev`.
+
+> **Good to know**
+>
+> - Messages the account sends get the hub's real date, while the simulator stamps
+>   its own messages with its fixed 2023 clock. A sent message therefore sorts after
+>   everything the simulator delivers, below a date divider: have the simulator speak
+>   first, then reply.
+> - Recording runs in real time. Keep a journey under about 30 seconds: the preview
+>   is shrunk to stay under 5 MB, because GitHub may not display larger images inline.
+> - GitHub plays inline video only from files uploaded in its web editor, so the
+>   comment shows the GIF; the MP4 link downloads the file.
+> - Videos are published only for branches of this repository. A fork's pull
+>   request keeps them in the workflow run's `ui-videos` artifact. Each PR's files
+>   stay under `refs/ui-videos/pr-<number>`, which plain clones don't fetch; delete
+>   old ones with `git push origin --delete refs/ui-videos/pr-<number>`.
+
 ## Verification
 
 ```sh

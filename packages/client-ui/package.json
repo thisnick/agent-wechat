@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.mjs",
     "scenes": "node scripts/scenes.mjs",
-    "scenes:list": "node scripts/scene-listing.mjs"
+    "scenes:list": "node scripts/scene-listing.mjs",
+    "videos": "node scripts/videos.mjs"
   },
   "dependencies": {
     "@agent-wechat/shared": "workspace:*",

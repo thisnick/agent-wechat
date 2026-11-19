@@ -1,2 +1,4 @@
 # Output of `pnpm scenes`: results, the HTML report and the screenshots kept for debugging.
 .scenes/
+# Output of `pnpm videos`: raw recordings, encoded videos, previews and contact sheets.
+.videos/
