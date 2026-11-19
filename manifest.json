@@ -1,0 +1,26 @@
+[
+  {
+    "name": "reply-in-chat",
+    "description": "Mei's new message arrives in an open chat and the account replies to it.",
+    "viewport": "desktop",
+    "seconds": 14.9,
+    "chapters": [
+      {
+        "title": "A message arrives",
+        "at": 0.715
+      },
+      {
+        "title": "Reply",
+        "at": 4.519
+      }
+    ],
+    "width": 720,
+    "files": {
+      "preview": "reply-in-chat.gif",
+      "mp4": "reply-in-chat.mp4",
+      "frames": "reply-in-chat-frames.png"
+    },
+    "commit": "88140251a0610d6dce4a92569a9da48f1f073e4b",
+    "run": "https://github.com/thisnick/agent-wechat/actions/runs/44462029884"
+  }
+]
