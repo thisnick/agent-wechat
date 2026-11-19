@@ -2501,6 +2501,38 @@ mod encrypted_roundtrip {
             .runtime("one", "skipped-control:projected:earlier-blocked:1")
             .unwrap()
             .is_some());
+        // More than one page (100) of blocked batches all finish.
+        for index in 0..150 {
+            let id = format!("earlier-page-{index:03}");
+            let unknown = wechat_protocol::wire::SyncBatch {
+                commands: vec![SyncCommand {
+                    id: 9999,
+                    payload: vec![8, 1],
+                }],
+                ..batch.clone()
+            };
+            store
+                .stage_sync(
+                    "one",
+                    &id,
+                    &core
+                        .vault
+                        .seal(
+                            "one",
+                            &format!("apply:{id}"),
+                            &serde_json::to_vec(&unknown).unwrap(),
+                        )
+                        .unwrap(),
+                    &core
+                        .vault
+                        .seal("one", "received-cursor", &unknown.cursor)
+                        .unwrap(),
+                )
+                .unwrap();
+            store.block_sync("one", &id).unwrap();
+        }
+        core.retry_blocked_projection("one").await;
+        assert_eq!(store.pending_sync_count("one").unwrap(), 0);
         // Only the pending message committed; the applied one wasn't
         // applied again.
         assert_eq!(
