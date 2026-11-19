@@ -75,15 +75,23 @@ export class LoginAttempt {
       : { key: crypto.randomUUID(), strategy };
     // Save before submission: a lost response must retry the same admission key.
     this.storage.write(pending);
-    const operation = await this.client.login(
-      this.account,
-      {
-        strategy: pending.strategy,
-        timeoutSeconds: 900,
-        qrRefresh: { mode: "auto", maxRefreshes: 3 },
-      },
-      pending.key,
-    );
+    let operation: NativeOperation;
+    try {
+      operation = await this.client.login(
+        this.account,
+        {
+          strategy: pending.strategy,
+          timeoutSeconds: 900,
+          qrRefresh: { mode: "auto", maxRefreshes: 3 },
+        },
+        pending.key,
+      );
+    } catch (error) {
+      // A busy account refuses the submission outright: the hub checks the key
+      // first and admits nothing, so the next attempt may use a fresh one.
+      if (accountBusy(error)) this.storage.write(null);
+      throw error;
+    }
     this.storage.write({ ...pending, operationId: operation.id });
     this.strategy = pending.strategy;
     return operation;
@@ -91,5 +99,56 @@ export class LoginAttempt {
   complete(operationId: string): void {
     if (this.storage.read()?.operationId === operationId)
       this.storage.write(null);
+  }
+}
+
+/** The hub refused a sign-in because other work holds the account. */
+export function accountBusy(error: unknown): boolean {
+  return error instanceof NativeApiError && error.code === "operation_in_progress";
+}
+
+/** How {@link openWhenFree} ended. */
+export type OpenedLogin =
+  | { operation: NativeOperation; alreadySignedIn?: undefined }
+  | { operation?: undefined; alreadySignedIn: true };
+
+/**
+ * Starts or resumes a sign-in, waiting out a busy account. The hub refuses a
+ * new sign-in with `operation_in_progress` while other work holds the account,
+ * such as the first sync for a few seconds after a sign-in succeeds. After each
+ * refusal this checks whether the account is already signed in, and otherwise
+ * waits `delayMs` and tries again. The refusal is passed on after `attempts`.
+ */
+export async function openWhenFree(
+  login: LoginAttempt,
+  strategy: LoginStrategyChoice,
+  options: {
+    /** True when the hub already reports the account as signed in. */
+    signedIn: () => Promise<boolean>;
+    /** Called before each wait, so the screen can say it is waiting. */
+    waiting?: () => void;
+    signal?: AbortSignal;
+    attempts?: number;
+    delayMs?: number;
+    /** Waits between attempts; it should return early once `signal` aborts. */
+    wait?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
+  },
+): Promise<OpenedLogin> {
+  const { signedIn, waiting, attempts = 30, delayMs = 2000 } = options;
+  const signal = options.signal ?? new AbortController().signal;
+  const wait =
+    options.wait ??
+    ((milliseconds: number) => new Promise<void>((done) => setTimeout(done, milliseconds)));
+  for (let refusal = 1; ; refusal++) {
+    signal.throwIfAborted();
+    try {
+      return { operation: await login.open(strategy) };
+    } catch (error) {
+      if (!accountBusy(error) || refusal >= attempts) throw error;
+    }
+    if (await signedIn()) return { alreadySignedIn: true };
+    signal.throwIfAborted();
+    waiting?.();
+    await wait(delayMs, signal);
   }
 }

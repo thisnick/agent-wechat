@@ -316,6 +316,7 @@
   },
   "main": {
     "acceptedLoadingMessage": "Accepted · loading message…",
+    "accountBusyTryingAgain": "This account is still finishing other work. Trying again in a moment…",
     "accountNotOnHub": "That account isn't on this hub.",
     "accounts": "Accounts",
     "addWechatAccount": "Add WeChat account",

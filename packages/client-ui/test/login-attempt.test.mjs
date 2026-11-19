@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { NativeApiError } from "@agent-wechat/shared";
-import { LoginAttempt } from "../src/login-attempt.ts";
+import { LoginAttempt, openWhenFree } from "../src/login-attempt.ts";
 
 function storage(value = null) {
   return {
@@ -186,4 +186,114 @@ test("finishing an older attempt cannot erase the newer saved operation", () => 
   assert.equal(saved.read().operationId, "login-2");
   login.complete("login-2");
   assert.equal(saved.read(), null);
+});
+
+const busy = () => new NativeApiError(409, "operation_in_progress");
+const noWait = async () => {};
+
+test("a sign-in refused by a busy account clears its key instead of replaying it", async () => {
+  const saved = storage();
+  const keys = [];
+  const client = {
+    login: async (_account, _options, key) => {
+      keys.push(key);
+      if (keys.length === 1) throw busy();
+      return operation();
+    },
+  };
+  await assert.rejects(new LoginAttempt(client, "a", saved).open("auto"), /operation_in_progress/);
+  // The hub admitted nothing, so the next attempt may change its options.
+  assert.equal(saved.read(), null);
+  await new LoginAttempt(client, "a", saved).open("qr");
+  assert.notEqual(keys[1], keys[0]);
+  assert.equal(saved.read().strategy, "qr");
+});
+
+test("a busy account is retried until it accepts the sign-in", async () => {
+  let refusals = 2;
+  const waits = [];
+  let waiting = 0;
+  const client = {
+    login: async () => {
+      if (refusals-- > 0) throw busy();
+      return operation("starting");
+    },
+  };
+  const opened = await openWhenFree(new LoginAttempt(client, "a", storage()), "auto", {
+    signedIn: async () => false,
+    waiting: () => waiting++,
+    wait: async (milliseconds) => waits.push(milliseconds),
+    delayMs: 1500,
+  });
+  assert.equal(opened.operation.state, "starting");
+  assert.equal(opened.alreadySignedIn, undefined);
+  assert.deepEqual(waits, [1500, 1500]);
+  assert.equal(waiting, 2);
+});
+
+test("a busy account that is already signed in opens without another sign-in", async () => {
+  let submissions = 0;
+  const client = {
+    login: async () => {
+      submissions++;
+      throw busy();
+    },
+  };
+  const opened = await openWhenFree(new LoginAttempt(client, "a", storage()), "auto", {
+    signedIn: async () => true,
+    wait: () => assert.fail("a signed-in account must not wait"),
+  });
+  assert.deepEqual(opened, { alreadySignedIn: true });
+  assert.equal(submissions, 1);
+});
+
+test("a sign-in passes on a busy refusal after its attempts and other errors at once", async () => {
+  let submissions = 0;
+  const client = {
+    login: async () => {
+      submissions++;
+      throw busy();
+    },
+  };
+  await assert.rejects(
+    openWhenFree(new LoginAttempt(client, "a", storage()), "auto", {
+      signedIn: async () => false,
+      wait: noWait,
+      attempts: 3,
+    }),
+    /operation_in_progress/,
+  );
+  assert.equal(submissions, 3);
+  client.login = async () => {
+    submissions++;
+    throw new NativeApiError(409, "auth_required");
+  };
+  await assert.rejects(
+    openWhenFree(new LoginAttempt(client, "a", storage()), "auto", {
+      signedIn: () => assert.fail("only a busy refusal checks the account"),
+      wait: noWait,
+    }),
+    /auth_required/,
+  );
+  assert.equal(submissions, 4);
+});
+
+test("leaving the sign-in screen stops the retries", async () => {
+  const controller = new AbortController();
+  let submissions = 0;
+  const client = {
+    login: async () => {
+      submissions++;
+      throw busy();
+    },
+  };
+  await assert.rejects(
+    openWhenFree(new LoginAttempt(client, "a", storage()), "auto", {
+      signal: controller.signal,
+      signedIn: async () => false,
+      wait: async () => controller.abort(),
+    }),
+    (error) => error.name === "AbortError",
+  );
+  assert.equal(submissions, 1);
 });

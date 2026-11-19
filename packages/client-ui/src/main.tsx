@@ -76,7 +76,7 @@ import {
   type ViewRoute,
 } from "./routes.ts";
 import { conversationAvailable } from "./route-targets.ts";
-import type { LoginStrategyChoice } from "./login-attempt.ts";
+import { openWhenFree, type LoginStrategyChoice } from "./login-attempt.ts";
 import { RouteMessage } from "./route-message.tsx";
 import { MessageActions } from "./message-actions.tsx";
 import { ReplyContext } from "./reply-context.ts";
@@ -680,6 +680,8 @@ function Login({
     // keeps its own strategy, and an `auto` attempt may or may not show a QR.
     [used, setUsed] = useState<LoginStrategyChoice>("auto"),
     [qrShown, setQrShown] = useState(false),
+    // The hub said the account is busy; the attempt is retried shortly.
+    [accountBusy, setAccountBusy] = useState(false),
     [clock, setClock] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const operationId = useRef<string | null>(null);
@@ -693,12 +695,32 @@ function Login({
         setOperation(null);
         setQr("");
         setQrShown(false);
-        const op = await login.open(strategy);
-        setUsed(login.strategy);
+        setAccountBusy(false);
+        // A busy account (for example, still running the first sync after a
+        // sign-in that just succeeded) refuses a new sign-in for a few seconds.
+        // Open the chats if it is already signed in; otherwise wait and retry.
+        const opened = await openWhenFree(login, strategy, {
+          signal: controller.signal,
+          wait: pause,
+          waiting: () => setAccountBusy(true),
+          signedIn: async () =>
+            (await connection.session.accounts()).some(
+              (item) => item.id === account && item.authenticated === true,
+            ),
+        });
         if (controller.signal.aborted) {
-          await connection.session.client.cancelOperation(account, op.id);
+          if (opened.operation)
+            await connection.session.client.cancelOperation(account, opened.operation.id);
           return;
         }
+        setAccountBusy(false);
+        if (opened.alreadySignedIn) {
+          connection.clearLogout(account);
+          await signedIn();
+          return;
+        }
+        const op = opened.operation;
+        setUsed(login.strategy);
         operationId.current = op.id;
         let generation = 0;
         while (!controller.signal.aborted) {
@@ -829,7 +851,9 @@ function Login({
             : t("main.signWechat")}
         </h1>
         <p>
-          {connection.simulator
+          {accountBusy && !error
+            ? t("main.accountBusyTryingAgain")
+            : connection.simulator
             ? t("main.simulatorQrOnlyCannotSign")
             : state === "awaiting_approval"
             ? t("main.openWechatPhoneConfirmSign")
