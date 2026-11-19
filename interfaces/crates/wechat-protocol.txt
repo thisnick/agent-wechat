@@ -17,7 +17,7 @@ const wechat_protocol::media::MAX_LARGE_FILE_BYTES | usize | MISSING DOC
 const wechat_protocol::media::MAX_LINK_THUMBNAIL_BYTES | usize | MISSING DOC
 const wechat_protocol::media::MAX_NATIVE_UPLOAD_BYTES | usize | MISSING DOC
 const wechat_protocol::media::MAX_VIDEO_DOWNLOAD_BYTES | usize | Incoming video plaintext limit, matching the ordinary-file download and automatic-download ceiling. Every such transfer stays bound to the advertised length and MD5. Outgoing preparation keeps the separate `wechat_media::MAX_VIDEO_SOURCE_BYTES` source limit.
-const wechat_protocol::media::STICKER_HOSTS | &[&str] | Exact Tencent CDN hosts for received sticker downloads. `vweixinf.tc.qq.com` also requires the numeric path checked by `validate_sticker_url`.
+const wechat_protocol::media::STICKER_HOSTS | &[&str] | Exact Tencent CDN hosts for received sticker downloads. Use `validate_sticker_url` to check the full URL, including the required numeric path for `vweixinf.tc.qq.com`.
 const wechat_protocol::media_send::VOICE_UPLOAD_CHUNK_BYTES | usize | Encoded SILK bytes carried by one `uploadvoice` request. A short-link request travels in one MMTLS record of at most 65,519 plaintext bytes, including the route, packet header and envelope, so a 60-second note (about 126-131 KB from the bundled 16 kbit/s profile) cannot use one request. 32 KiB matches the `downloadvoice` range size and leaves room for that overhead.
 const wechat_protocol::mmtls::VERSION | u16 | MISSING DOC
 const wechat_protocol::quote_send::MAX_QUOTE_CONTENT_BYTES | usize | MISSING DOC

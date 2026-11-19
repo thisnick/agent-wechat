@@ -32,7 +32,8 @@ pub(super) fn public_ip(ip: IpAddr) -> bool {
 const VWEIXINF_STICKER_HOST: &str = "vweixinf.tc.qq.com";
 
 /// Exact Tencent CDN hosts for received sticker downloads.
-/// `vweixinf.tc.qq.com` also requires the numeric path checked by `validate_sticker_url`.
+/// Use `validate_sticker_url` to check the full URL, including the required numeric path for
+/// `vweixinf.tc.qq.com`.
 pub const STICKER_HOSTS: &[&str] = &[
     "snsvideo.c2c.wechat.com",
     "wxapp.tc.qq.com",
