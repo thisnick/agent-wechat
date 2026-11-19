@@ -102,6 +102,17 @@ export function seeder(stack) {
     /** Moves the simulator clock, which stamps every message created afterwards. */
     advance: (seconds) => stack.control({ op: "advance", seconds }),
     /**
+     * Signs an account out on the hub only and keeps its saved sign-in, as
+     * `wx auth logout --local` does. The next `auto` sign-in tries the saved one.
+     */
+    signOutLocally: (account = ACCOUNT) => client.logoutLocal(account.id),
+    /**
+     * Makes the simulator refuse the account's saved sign-ins with a synthetic
+     * service `code`; `null` clears it. QR sign-ins still work.
+     */
+    refuseSavedLogin: (account, code) =>
+      stack.control({ op: "saved_login_fault", account: account.id, code }),
+    /**
      * A message from a contact; `self` makes it a message from the account itself. In a
      * group, `sender` names the contact who speaks.
      */

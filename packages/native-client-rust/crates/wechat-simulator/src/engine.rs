@@ -75,6 +75,7 @@ impl Engine {
         CREATE TABLE IF NOT EXISTS contact_notifications(account TEXT NOT NULL, username TEXT NOT NULL, muted INTEGER NOT NULL, PRIMARY KEY(account,username));
         CREATE TABLE IF NOT EXISTS thread_pins(account TEXT NOT NULL, username TEXT NOT NULL, pinned INTEGER NOT NULL, PRIMARY KEY(account,username));
         CREATE TABLE IF NOT EXISTS group_faults(account TEXT PRIMARY KEY, fault TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS saved_login_faults(account TEXT PRIMARY KEY, code INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS contact_settings(account TEXT NOT NULL, username TEXT NOT NULL, remark TEXT NOT NULL DEFAULT '', privacy INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(account,username));
         INSERT OR IGNORE INTO groups(account,room,name,members) SELECT account,room,name,members FROM group_creations;")?;
         // Upgrade only synthetic fixture snapshots from the earlier UI preview.
@@ -233,6 +234,18 @@ impl Engine {
                 ensure!(computer_name.len() <= 100, "invalid_computer_name");
                 device.validate()?;
                 seed(&mut db, &account)?;
+                if saved {
+                    let refusal = db
+                        .query_row(
+                            "SELECT code FROM saved_login_faults WHERE account=?1",
+                            [&account],
+                            |r| r.get::<_, i32>(0),
+                        )
+                        .optional()?;
+                    if let Some(code) = refusal {
+                        return Err(SavedLoginRefused(code).into());
+                    }
+                }
                 Ok(serde_json::to_value(start_login(
                     &mut db,
                     &account,
@@ -573,6 +586,18 @@ impl Engine {
                     notify(&tx, &account, 1)?;
                 }
                 tx.commit()?;
+            }
+            Control::SavedLoginFault { account, code } => {
+                seed(&mut db, &account)?;
+                match code {
+                    Some(code) => db.execute(
+                        "INSERT OR REPLACE INTO saved_login_faults VALUES(?1,?2)",
+                        params![account, code],
+                    )?,
+                    None => {
+                        db.execute("DELETE FROM saved_login_faults WHERE account=?1", [account])?
+                    }
+                };
             }
             Control::SendFault { account, fault } => {
                 seed(&mut db, &account)?;
@@ -1264,6 +1289,42 @@ mod tests {
             p::scalar(&p::decode(&contact.raw).unwrap(), 8).unwrap(),
             2049
         );
+    }
+
+    #[test]
+    fn saved_login_fault_refuses_only_saved_sign_ins_until_cleared() {
+        let scratch = wechat_platform::private_tempdir("simulator-saved-login-").unwrap();
+        let engine = Engine::open(&scratch.path().join("remote.sqlite")).unwrap();
+        let start = |saved| {
+            engine.request(Request::StartLogin {
+                account: "personal".into(),
+                device: device(),
+                computer_name: "Synthetic computer".into(),
+                saved,
+            })
+        };
+        engine
+            .control(Control::SavedLoginFault {
+                account: "personal".into(),
+                code: Some(-999),
+            })
+            .unwrap();
+        let error = start(true).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<SavedLoginRefused>(),
+            Some(&SavedLoginRefused(-999))
+        );
+        assert_eq!(error.to_string(), SAVED_LOGIN_REFUSED);
+        // A QR sign-in still issues a challenge with a code to scan.
+        let qr = start(false).unwrap();
+        assert!(!qr["qr_png"].as_array().unwrap().is_empty());
+        engine
+            .control(Control::SavedLoginFault {
+                account: "personal".into(),
+                code: None,
+            })
+            .unwrap();
+        assert!(start(true).is_ok());
     }
 
     #[test]

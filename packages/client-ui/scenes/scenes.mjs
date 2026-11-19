@@ -122,23 +122,19 @@ export const scenes = [
     description: "Sign-in screen after the saved sign-in failed, offering Try again and a QR code for the same account.",
     viewports: ["desktop", "narrow"],
     setup: async (sim) => {
+      // An account that signed in before, signed out on the hub only, whose
+      // saved sign-in the simulator now refuses with a synthetic code.
       await sim.addAccount(SPARE);
+      await sim.signIn(SPARE);
+      await sim.signOutLocally(SPARE);
+      await sim.refuseSavedLogin(SPARE, -999);
       return {};
     },
     target: () => ({ account: SPARE.id }),
-    prepare: async ({ page }) => {
-      // The simulator's saved sign-in does not fail this way, so answer the
-      // hub's login boundary with the failure from a refused saved sign-in.
-      const at = "2026-01-01T00:00:00Z";
-      const op = (state, result) => ({ id: "scene-login", accountId: SPARE.id, kind: "login", state, result, createdAt: at, updatedAt: at });
-      await page.route(`**/v1/accounts/${SPARE.id}/auth/login`, (route) => route.fulfill({ json: op("starting", {}) }));
-      await page.route(`**/v1/accounts/${SPARE.id}/operations/scene-login`, (route) =>
-        route.fulfill({ json: op("failed", { code: "login_failed", service: "saved_device_login", serviceCode: -100, retryable: false }) }));
-    },
     ready: async ({ page, expect }) => {
       await expect(page.getByRole("heading", { name: "Sign-in could not finish" })).toBeVisible();
       await expect(page.getByRole("button", { name: "Sign in with a QR code instead" })).toBeVisible();
-      await expect(page.getByText("Details: login_failed · saved_device_login · -100")).toBeVisible();
+      await expect(page.getByText("Details: login_failed · saved_device_login · -999")).toBeVisible();
     },
   },
   {

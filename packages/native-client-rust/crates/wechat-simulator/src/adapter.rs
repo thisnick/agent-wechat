@@ -72,6 +72,20 @@ impl SimulatorUpstream {
                 )
                 .into());
             }
+            // Report a scripted saved-device refusal the way the native client
+            // does, so the hub handles it as it would WeChat's.
+            if code == SAVED_LOGIN_REFUSED {
+                if let Some(service_code) = value["serviceCode"]
+                    .as_i64()
+                    .and_then(|c| i32::try_from(c).ok())
+                {
+                    return Err(wechat_protocol::ServiceRejected::new(
+                        wechat_protocol::Service::SavedDeviceLogin,
+                        service_code,
+                    )
+                    .into());
+                }
+            }
             bail!("simulator_request_failed: {code}");
         }
         Ok(serde_json::from_slice(&bytes)?)
