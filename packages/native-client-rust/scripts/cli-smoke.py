@@ -66,11 +66,19 @@ with tempfile.TemporaryDirectory(prefix="native-cli-smoke-") as temporary:
         checkpoint=root/"cursor.json"
         watcher=subprocess.Popen(base+["events","watch","--cursor-file",str(checkpoint)],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
         try:
-            time.sleep(.3); run("accounts","disconnect")
+            # Without --after the watch starts at the newest event and writes the
+            # cursor file once the daemon accepts that cursor.
             deadline=time.monotonic()+5
             while not checkpoint.exists() and time.monotonic()<deadline: time.sleep(.05)
-            assert checkpoint.exists(),"actual daemon events were not emitted/checkpointed"
+            assert checkpoint.exists(),"event watch did not connect"
+            start=int(json.loads(checkpoint.read_text())["cursor"])
+            run("accounts","disconnect")
+            head=int(run("events","list","--limit","1")["nextCursor"])
+            assert head>start,"disconnect emitted no events"
+            deadline=time.monotonic()+5
+            while int(json.loads(checkpoint.read_text())["cursor"])<head and time.monotonic()<deadline: time.sleep(.05)
             saved=json.loads(checkpoint.read_text()); assert saved["accountId"]=="a" and saved["progress"]=="emission"
+            assert int(saved["cursor"])>=head,"actual daemon events were not emitted/checkpointed"
             watcher.send_signal(signal.SIGINT); output,error=watcher.communicate(timeout=5)
             assert watcher.returncode==130,(output,error,watcher.returncode)
             frames=[json.loads(line) for line in output.splitlines()]
