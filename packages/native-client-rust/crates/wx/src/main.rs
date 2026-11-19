@@ -404,20 +404,17 @@ enum ContactCommand {
         #[command(subcommand)]
         command: ContactRequestCommand,
     },
-    /// Change supplied contact privacy settings; keep omitted settings.
-    #[command(group(clap::ArgGroup::new("privacy_settings").args(["chats_only", "hide_my_posts", "hide_their_posts"]).required(true).multiple(true)))]
+    /// Change a contact's privacy settings or remark; keep omitted settings.
+    #[command(group(clap::ArgGroup::new("contact_change").args(["chats_only", "hide_my_posts", "hide_their_posts", "remark", "clear_remark"]).required(true).multiple(true)))]
     Set {
         /// Exact existing contact ID.
         id: String,
         #[command(flatten)]
         privacy: ContactPrivacyOptions,
         #[command(flatten)]
+        remark: ContactRemarkOptions,
+        #[command(flatten)]
         options: MutationOptions,
-    },
-    /// Read an existing contact's relationship privacy.
-    Privacy {
-        #[command(subcommand)]
-        command: ContactPrivacyCommand,
     },
     /// Remove this account's contact relationship while preserving chat history.
     Remove {
@@ -437,6 +434,16 @@ enum ContactCommand {
     },
 }
 
+#[derive(Args, Clone, Default)]
+struct ContactRemarkOptions {
+    /// Set your private name for this contact; outer spaces are removed. Change privacy in a separate command.
+    #[arg(long, conflicts_with_all = ["clear_remark", "chats_only", "hide_my_posts", "hide_their_posts"])]
+    remark: Option<String>,
+    /// Clear your private name for this contact.
+    #[arg(long, conflicts_with_all = ["chats_only", "hide_my_posts", "hide_their_posts"])]
+    clear_remark: bool,
+}
+
 #[derive(Args, Clone, Copy, Default)]
 struct ContactPrivacyOptions {
     /// Whether to restrict this relationship to chats (true or false).
@@ -448,15 +455,6 @@ struct ContactPrivacyOptions {
     /// Whether to hide this contact's posts (true or false).
     #[arg(long, action = clap::ArgAction::Set)]
     hide_their_posts: Option<bool>,
-}
-
-#[derive(Subcommand)]
-enum ContactPrivacyCommand {
-    /// Read the contact's saved relationship privacy and current version.
-    Get {
-        /// Exact existing contact ID.
-        id: String,
-    },
 }
 
 #[derive(Subcommand)]
@@ -1912,18 +1910,15 @@ async fn run(cli: Cli) -> Result<()> {
             ..
         } => contact_requests_cli::requests(&r, &settings, command).await?,
         Command::Contacts {
-            command: Some(ContactCommand::Privacy { command }),
-            ..
-        } => contact_requests_cli::privacy(&r, &settings, command).await?,
-        Command::Contacts {
             command:
                 Some(ContactCommand::Set {
                     id,
                     privacy,
+                    remark,
                     options,
                 }),
             ..
-        } => contact_requests_cli::set_contact(&r, &settings, id, privacy, options).await?,
+        } => contact_requests_cli::set_contact(&r, &settings, id, privacy, remark, options).await?,
         Command::Contacts {
             command: Some(ContactCommand::Remove { id, options }),
             ..

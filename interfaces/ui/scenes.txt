@@ -17,9 +17,10 @@ scene contact-details-sidebar | route /{server}/{account}/chats/{thread}/info, v
 scene contact-privacy-cached | route /{server}/{account}/contacts, viewports desktop+compact | Contact details reopen with prefetched canonical privacy and no per-contact lookup.
 scene contact-privacy-refresh | route /{server}/{account}/contacts, viewports desktop+compact | Refreshing a contact updates the displayed name and privacy together.
 scene contact-privacy-retry | route /{server}/{account}/contacts, viewports desktop | An uncertain privacy save locks edits and retries only the same inspected intent.
-scene contact-privacy-saved | route /{server}/{account}/contacts, viewports desktop+compact | Moments selections survive Chats Only and save with the original privacy version.
+scene contact-privacy-saved | route /{server}/{account}/contacts, viewports desktop+compact | Moments selections survive Chats Only and save through the simulator with the original privacy version, without a status banner.
 scene contact-privacy-syncing | route /{server}/{account}/contacts, viewports desktop+compact | One accepted PATCH waits through pending canonical GETs before showing saved settings, without another mutation.
 scene contact-privacy-unavailable | route /{server}/{account}/contacts, viewports desktop+compact | A contact card omits privacy controls when the hub has no settings.
+scene contact-remark-saved | route /{server}/{account}/contacts, viewports desktop+compact | A remark saves through the simulator with the inspected version, shows while WeChat confirms it, then names the contact above their nickname and WeChat ID.
 scene contact-request-retry | route /{server}/{account}/contacts, viewports desktop | A lost submission response keeps the original key and greeting until an inspected retry completes.
 scene contact-search-other-people | route /{server}/{account}/contacts, viewports desktop+compact | Empty search shows saved contacts; typing adds a separate Other people section with clear source/membership labels and a separate WeChat discovery result.
 scene contact-search-saved-only | route /{server}/{account}/contacts, viewports desktop+compact | Empty search shows saved contacts; typing adds a separate Other people section with clear source/membership labels and a separate WeChat discovery result.

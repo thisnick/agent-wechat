@@ -103,19 +103,32 @@ WeChat-ID discovery is verified. The official client advertises phone lookup, bu
 </Aside>
 
 
+## Rename a contact
+
+Your private name for a contact (WeChat calls it a remark) is shown instead of the name they chose, as `displayName`.
+
+In the app, open the friend's contact card and type in **Remark**. It saves when you stop typing or leave the field, and the heading shows **Saving…**, then **Syncing with WeChat…**, then **Saved**. Empty the field to clear it. From the CLI:
+
+```bash
+wx contacts set CONTACT_ID --remark "Monster"
+wx contacts set CONTACT_ID --clear-remark
+```
+
+`wx --json contacts get CONTACT_ID` shows `remark` and `displayName`. The new name appears a few seconds after WeChat accepts it; until then the contact has `remarkPending: true`. Change privacy and the name in separate commands.
+
 ## Privacy
 
-Use the contact card to choose Chats Only, Hide My Posts and Hide Their Posts. Open it from a contact's Details button, a search result, or a friend request. Initial settings are submitted with Send request or Accept. For an existing friend, choose Save privacy. Remove contact requires confirmation and preserves chat history.
+Use the contact card to choose Chats Only, Hide My Posts and Hide Their Posts. Open it from a contact's Details button, a search result, or a friend request. Initial settings are submitted with Send request or Accept. For an existing friend, changes save on their own; the Privacy heading shows when a change is saving, saved or needs a retry. Remove contact requires confirmation and preserves chat history.
 
 ### Change privacy from the CLI
 
 Read the current settings:
 
 ```bash
-wx --json contacts privacy get CONTACT_ID
+wx --json contacts get CONTACT_ID
 ```
 
-The response contains `privacy` and its `version`. Change only the options you specify:
+The response contains `privacy` and `privacyVersion`. Change only the options you specify:
 
 ```bash
 wx contacts set CONTACT_ID --chats-only true \
@@ -128,25 +141,28 @@ For a new request or acceptance, the same optional flags select initial privacy.
 
 ### Privacy API and Rust
 
-Privacy reads and refreshes require `read`. Edits require `admin` for the selected account. Paths are relative to `/v1/accounts/ACCOUNT_ID/`.
+Reading and refreshing contacts require `read`. Edits require `admin` for the selected account. Paths are relative to `/v1/accounts/ACCOUNT_ID/`.
 
 | Method and path | Purpose |
 | --- | --- |
 | `GET contacts` | List contacts with `privacy` and `privacyVersion` where available. |
-| `GET contacts/CONTACT_ID` | Read a contact with its current relationship settings. |
+| `GET contacts/CONTACT_ID` | Read a contact with `remark`, `privacy` and `privacyVersion`. `privacyPending` or `remarkPending` is `true` while an earlier change is still settling. |
 | `POST contacts/CONTACT_ID/refresh` | Refresh contact details and privacy together. Poll the returned operation, then read the contact. |
-| `GET contacts/CONTACT_ID/privacy` | Read just the settings and their `version` through the existing privacy route. |
-| `PATCH contacts/CONTACT_ID` | Update with `privacy` and `expectedVersion`; requires `Idempotency-Key` |
+| `PATCH contacts/CONTACT_ID` | Update `privacy` or `remark` with `expectedVersion` (the contact's `privacyVersion`); requires `Idempotency-Key` |
 
-The PATCH currently accepts a complete privacy value:
+The PATCH takes either a complete privacy value or a remark, not both:
 
 ```json
 {
   "privacy": { "chatsOnly": true, "hideMyPosts": false, "hideTheirPosts": false },
-  "expectedVersion": "VERSION_FROM_PRIVACY_READ"
+  "expectedVersion": "PRIVACY_VERSION_FROM_CONTACT"
 }
 ```
 
-Other contact fields remain unchanged. A stale version returns `stale_contact_privacy`; inspect the current settings before deciding on another edit. An unresolved saved state returns `contact_privacy_unresolved`. The returned operation distinguishes server acceptance from confirmation in the saved contact.
+```json
+{ "remark": "Monster", "expectedVersion": "PRIVACY_VERSION_FROM_CONTACT" }
+```
 
-The Rust protocol crate provides `ContactPrivacySettings`, request builders and correlated reply decoding. The core crate provides `ContactUpdate`, `contact_privacy` and `update_contact`, coordinating idempotency, account ownership and saved-contact confirmation. In OpenClaw, private owner sessions can see available settings through `wechat_contacts` list, find, and get.
+A `null` remark clears it. Other contact fields remain unchanged. A stale version returns `stale_contact_privacy`; read the contact again before deciding on another edit. When a friend has no `privacy` or `privacyVersion`, `privacyUnavailable` says why: `contact_privacy_unresolved` means refresh the contact first, and `ordinary_contact_required` means this kind of contact can't be edited. The returned operation distinguishes server acceptance from confirmation in the saved contact.
+
+The Rust protocol crate provides `ContactPrivacySettings`, `contact_remark_request`, request builders and correlated reply decoding. The core crate provides `ContactUpdate` and `update_contact`, coordinating idempotency, account ownership and saved-contact confirmation. In OpenClaw, private owner sessions can see available settings through `wechat_contacts` list, find, and get.

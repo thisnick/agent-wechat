@@ -288,7 +288,8 @@ pub struct NativeContact {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub privacy: Option<NativeContactPrivacySettings>,
-    /// Version to supply when editing the current relationship settings.
+    /// Version to send as `expectedVersion` when changing this contact's privacy
+    /// or remark. It changes when the privacy or the relationship changes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub privacy_version: Option<String>,
@@ -296,6 +297,18 @@ pub struct NativeContact {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub privacy_pending: Option<bool>,
+    /// True while the remark is being fetched from WeChat after it changed, from
+    /// this account or another device. Edits are still accepted meanwhile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub remark_pending: Option<bool>,
+    /// Why a friend has no `privacy` or `privacyVersion`, so it can't be edited yet:
+    /// `contact_privacy_unresolved` (refresh the contact),
+    /// `ordinary_contact_required` (not supported for this contact),
+    /// `profile_identity_unavailable` or `contact_flags_unresolved`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub privacy_unavailable: Option<String>,
 }
 /// A group chat saved in the account's profile.
 #[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
@@ -786,7 +799,6 @@ pub fn typescript() -> String {
         NativeContactSearchRequest::decl(),
         NativeContactSearch::decl(),
         NativeContactPrivacySettings::decl(),
-        NativeContactPrivacy::decl(),
         NativeContactUpdate::decl(),
         NativeContactRequestAccept::decl(),
         NativeContactRequestSend::decl(),
@@ -1152,23 +1164,35 @@ pub struct NativeContactPrivacySettings {
     /// Hide this person's Moments posts from this account.
     pub hide_their_posts: bool,
 }
-/// Current relationship privacy read from the supported official profile.
-#[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct NativeContactPrivacy {
-    /// Current settings for this account's relationship.
-    pub privacy: NativeContactPrivacySettings,
-    /// Account/contact-bound version required when saving a change.
-    pub version: String,
-}
 /// Update supported contact settings after inspecting their current version.
 #[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeContactUpdate {
-    /// Desired settings; unrelated contact flags are preserved.
-    pub privacy: NativeContactPrivacySettings,
-    /// Version returned by the privacy read on this account.
+    /// Desired relationship settings; unrelated contact flags are preserved.
+    /// Send either `privacy` or `remark` in one request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub privacy: Option<NativeContactPrivacySettings>,
+    /// New personal remark: a string sets it, `null` clears it, and omitting
+    /// it keeps the current remark. Outer whitespace is removed.
+    #[serde(
+        default,
+        deserialize_with = "present_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(optional, type = "string | null")]
+    #[schemars(with = "Option<String>")]
+    pub remark: Option<Option<String>>,
+    /// Version from the contact's `privacyVersion` on this account.
     pub expected_version: String,
+}
+/// Keep an explicit `null` (clear) distinct from an omitted field (unchanged).
+fn present_value<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 /// Accept the inspected request with optional initial relationship privacy.
 #[derive(Serialize, Deserialize, TS, schemars::JsonSchema)]

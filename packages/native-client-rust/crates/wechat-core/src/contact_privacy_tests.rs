@@ -1068,3 +1068,255 @@ fn contact_lists_default_to_friends_and_bind_filters_before_pagination() {
         )
         .is_err());
 }
+
+/// A complete synthetic `ModContact` for "peer" as an exact lookup returns it.
+fn full_peer_record(remark: &str) -> Vec<u8> {
+    p::message(&[
+        p::bytes(1, &p::bytes(1, b"peer")),
+        p::bytes(2, &p::bytes(1, b"Peer")),
+        p::bytes(3, &p::bytes(1, b"P")),
+        p::bytes(4, &p::bytes(1, b"peer")),
+        p::uint(5, 0),
+        p::bytes(6, &p::buffer(b"")),
+        p::uint(7, u64::from(u32::MAX)),
+        p::uint(8, 1),
+        p::uint(9, 0),
+        p::bytes(10, &p::bytes(1, remark.as_bytes())),
+        p::bytes(11, &p::bytes(1, b"")),
+        p::bytes(12, &p::bytes(1, b"")),
+        p::uint(13, 0),
+        p::uint(14, 0),
+    ])
+    .unwrap()
+}
+struct PeerLookup(&'static str);
+impl crate::upstream::Upstream for PeerLookup {
+    fn kind(&self) -> crate::upstream::UpstreamKind {
+        crate::upstream::UpstreamKind::Native
+    }
+    fn lookup_contacts_raw(&self, _: &mut AccountState, ids: &[String]) -> Result<Vec<u8>> {
+        assert_eq!(ids, ["peer"]);
+        p::message(&[
+            p::bytes(1, &p::int32(1, 0)),
+            p::uint(2, 1),
+            p::bytes(3, &full_peer_record(self.0)),
+            p::uint(4, 0),
+        ])
+    }
+}
+fn with_lookup(core: &mut Arc<Core>, current: &'static str) {
+    Arc::get_mut(&mut Arc::get_mut(core).unwrap().shared)
+        .unwrap()
+        .upstream = Arc::new(PeerLookup(current));
+}
+fn remark_update(core: &Core, remark: Option<&str>) -> ContactMutation {
+    ContactMutation::UpdateRemark {
+        username: "peer".into(),
+        remark: remark.map(str::to_owned),
+        expected_version: core.contact_privacy("one", "peer").unwrap()["version"]
+            .as_str()
+            .unwrap()
+            .into(),
+    }
+}
+/// An accepted operation-log reply for one command.
+fn accepted_oplog() -> Vec<u8> {
+    p::message(&[
+        p::uint(1, 0),
+        p::bytes(2, &p::message(&[p::uint(1, 1), p::uint(2, 0)]).unwrap()),
+    ])
+    .unwrap()
+}
+
+#[test]
+fn remark_write_copies_a_fresh_record_and_saves_wechats_value_after_acceptance() {
+    let (_temp, mut core) = super::super::groups::tests::fixture();
+    with_lookup(&mut core, "Old name");
+    let (op, created) = core
+        .admit_contact("one", remark_update(&core, Some("新名字")), "remark-key")
+        .unwrap();
+    assert!(created);
+    let (attempt, _) = core
+        .load_contact_attempt(&core.store.contact_mutation("one", &op.id).unwrap())
+        .unwrap();
+    let rpc = attempt.rpc.as_ref().expect("a changed remark is submitted");
+    assert_eq!(
+        (rpc.cgi, rpc.path.as_str()),
+        (681, "/cgi-bin/micromsg-bin/oplog")
+    );
+    receive_reply_and_finish(&core, &op, Some(accepted_oplog()));
+    let done = core
+        .store
+        .contact_mutation("one", &op.id)
+        .unwrap()
+        .operation;
+    assert_eq!(done.state, "succeeded");
+    assert_eq!(done.result["remoteOutcome"], "accepted");
+    assert_eq!(done.result["profileProjection"], "awaiting_contact_refresh");
+    assert_eq!(done.result["remark"], "新名字");
+    assert_eq!(done.result["changed"], true);
+    // The saved remark comes from WeChat via a queued exact lookup, not optimistically.
+    assert_eq!(core.store.contact_remark_refreshes("one").unwrap().len(), 1);
+    assert!(core.remark_refresh_pending("one", "peer").unwrap());
+    // The pending lookup doesn't hold up other edits; privacy stays readable
+    // with the same version.
+    assert!(core.contact_privacy("one", "peer").is_ok());
+}
+
+fn save_remark(core: &Core, remark: &str) {
+    let (location, keys) = core.profile_location_keys("one").unwrap();
+    wechat_profile::apply_contact_patch(
+        &location,
+        &keys,
+        &ContactProjection {
+            username: "peer".into(),
+            fields: [("remark".into(), SqlValue::Text(remark.into()))]
+                .into_iter()
+                .collect(),
+        },
+        &core.write_options("one", "remark-test").unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn remark_write_is_a_noop_when_wechat_already_has_that_remark() {
+    for saved_is_current in [true, false] {
+        let (_temp, mut core) = super::super::groups::tests::fixture();
+        with_lookup(&mut core, "Same");
+        if saved_is_current {
+            save_remark(&core, "Same");
+        }
+        let (op, _) = core
+            .admit_contact("one", remark_update(&core, Some("Same")), "same-key")
+            .unwrap();
+        let (attempt, _) = core
+            .load_contact_attempt(&core.store.contact_mutation("one", &op.id).unwrap())
+            .unwrap();
+        assert!(attempt.rpc.is_none(), "nothing is submitted to WeChat");
+        receive_and_finish(&core, &op);
+        let done = core
+            .store
+            .contact_mutation("one", &op.id)
+            .unwrap()
+            .operation;
+        assert_eq!(done.result["remoteOutcome"], "not_applicable");
+        assert_eq!(done.result["changed"], false);
+        // A saved row that is behind WeChat still gets the exact lookup.
+        let queued = core.store.contact_remark_refreshes("one").unwrap().len();
+        assert_eq!(queued, usize::from(!saved_is_current));
+        assert_eq!(
+            done.result["profileProjection"],
+            if saved_is_current {
+                "complete"
+            } else {
+                "awaiting_contact_refresh"
+            }
+        );
+    }
+}
+
+#[test]
+fn queued_remark_and_privacy_edits_block_each_other_on_one_contact() {
+    // A remark write carries the whole record, flags included.
+    let (_temp, mut core) = super::super::groups::tests::fixture();
+    with_lookup(&mut core, "Old name");
+    core.admit_contact("one", remark_update(&core, Some("New")), "remark-first")
+        .unwrap();
+    let privacy = update(
+        &core,
+        ContactPrivacySettings {
+            hide_my_posts: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        core.admit_contact("one", privacy, "privacy-second")
+            .unwrap_err()
+            .to_string(),
+        "contact_privacy_pending"
+    );
+
+    let (_temp, mut core) = super::super::groups::tests::fixture();
+    with_lookup(&mut core, "Old name");
+    let privacy = update(
+        &core,
+        ContactPrivacySettings {
+            hide_my_posts: true,
+            ..Default::default()
+        },
+    );
+    core.admit_contact("one", privacy, "privacy-first").unwrap();
+    assert_eq!(
+        core.admit_contact("one", remark_update(&core, Some("New")), "remark-second")
+            .unwrap_err()
+            .to_string(),
+        "contact_privacy_pending"
+    );
+}
+
+#[test]
+fn contact_version_ignores_the_saved_remark() {
+    // A remark lookup landing must not make a queued privacy edit stale.
+    let (_temp, core) = super::super::groups::tests::fixture();
+    let before = core.contact_privacy("one", "peer").unwrap()["version"].clone();
+    save_remark(&core, "Saved");
+    assert_eq!(
+        core.contact_privacy("one", "peer").unwrap()["version"],
+        before
+    );
+}
+
+#[tokio::test]
+async fn contact_updates_take_privacy_or_a_remark_and_validate_the_remark() {
+    let (_temp, core) = super::super::groups::tests::fixture();
+    let version = core.contact_privacy("one", "peer").unwrap()["version"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let cases = [
+        (
+            ContactUpdate {
+                privacy: Some(ContactPrivacySettings::default()),
+                remark: Some(Some("x".into())),
+                expected_version: version.clone(),
+            },
+            "one_contact_change_per_request",
+        ),
+        (
+            ContactUpdate {
+                privacy: None,
+                remark: None,
+                expected_version: version.clone(),
+            },
+            "no_contact_change",
+        ),
+        (
+            ContactUpdate {
+                privacy: None,
+                remark: Some(Some(
+                    "x".repeat(wechat_protocol::MAX_CONTACT_REMARK_BYTES + 1),
+                )),
+                expected_version: version.clone(),
+            },
+            "invalid_contact_input",
+        ),
+        (
+            ContactUpdate {
+                privacy: None,
+                remark: Some(Some("line\nbreak".into())),
+                expected_version: version,
+            },
+            "invalid_contact_input",
+        ),
+    ];
+    for (update, code) in cases {
+        assert_eq!(
+            core.update_contact("one", "peer", update, "k")
+                .await
+                .unwrap_err()
+                .to_string(),
+            code
+        );
+    }
+}

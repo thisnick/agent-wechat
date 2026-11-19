@@ -120,6 +120,16 @@ impl Upstream for SimulatorUpstream {
             request: request.clone(),
         })
     }
+    fn contact_rpc_raw(
+        &self,
+        state: &mut AccountState,
+        request: &wechat_protocol::ContactRpc,
+    ) -> Result<Vec<u8>> {
+        self.rpc(&Request::ContactMutation {
+            session: self.session(state)?,
+            request: request.clone(),
+        })
+    }
     fn group_detail_raw(&self, state: &mut AccountState, room: &str) -> Result<Vec<u8>> {
         self.rpc(&Request::GroupDetail {
             session: self.session(state)?,

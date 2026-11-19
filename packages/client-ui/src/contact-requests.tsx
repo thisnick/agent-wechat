@@ -1,5 +1,5 @@
 import { Command } from "cmdk";
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import {
   NativeApiError,
   isNativeTombstone,
@@ -15,6 +15,7 @@ import { t, formatLocale } from "./i18n.ts";
 import { pause, readableError } from "./session.ts";
 import { HubAvatar } from "./avatars.tsx";
 import { Icon } from "./ui.tsx";
+import { ComposerHelp } from "./composer-help.tsx";
 
 import {
   contactDetailActions,
@@ -23,6 +24,12 @@ import {
   restoreContactChange,
   defaultContactPrivacy,
   sameContactPrivacy,
+  MAX_CONTACT_REMARK_BYTES,
+  REMARK_POLL_LIMIT,
+  REMARK_POLL_MS,
+  PRIVACY_AUTOSAVE_MS,
+  REMARK_AUTOSAVE_MS,
+  SAVED_FLASH_MS,
   type ContactChange,
   type ContactPrivacy,
 } from "./contact-privacy.ts";
@@ -539,18 +546,75 @@ export function OmniSearch({
     </Command.Dialog>
   );
 }
+type SaveState = "saving" | "syncing" | "unsynced" | "saved" | "failed" | "uncertain";
+/** A field's autosave state, shown at the end of its heading. */
+function SaveStatus({
+  state,
+  retry,
+  check,
+  retryOriginal,
+  busy,
+}: {
+  state: SaveState | null;
+  retry?: () => void;
+  check: () => void;
+  retryOriginal?: () => void;
+  busy: boolean;
+}) {
+  return (
+    <span className={`contact-save-status${state ? ` contact-save-${state}` : ""}`} role="status">
+      {state && (
+        <>
+          {state === "saving" || state === "syncing" ? (
+            <span className="contact-save-spinner" aria-hidden="true" />
+          ) : (
+            <Icon name={state === "saved" ? "check" : state === "unsynced" ? "info" : "alert"} />
+          )}
+          {t(
+            ({
+              saving: "contactsUi.saving",
+              syncing: "contactsUi.syncing",
+              unsynced: "contactsUi.notSynced",
+              saved: "contactsUi.savedField",
+              failed: "contactsUi.notSaved",
+              uncertain: "contactsUi.notConfirmed",
+            } as const)[state],
+          )}
+          {state === "failed" && retry && (
+            <button type="button" onClick={retry}>{t("contactsUi.retry")}</button>
+          )}
+          {state === "uncertain" && (
+            <button type="button" disabled={busy} onClick={check}>{t("contactsUi.check")}</button>
+          )}
+          {state === "uncertain" && retryOriginal && (
+            <button type="button" disabled={busy} onClick={retryOriginal}>{t("contactsUi.retry")}</button>
+          )}
+        </>
+      )}
+    </span>
+  );
+}
 function PrivacyFields({
   value,
   disabled,
   change,
+  hint,
+  status,
 }: {
   value: ContactPrivacy;
   disabled: boolean;
   change: (value: ContactPrivacy) => void;
+  hint: ReactNode;
+  status?: ReactNode;
 }) {
   return (
-    <fieldset className="contact-privacy-fields" disabled={disabled}>
-      <legend>{t("contactsUi.privacy")}</legend>
+    <fieldset className="contact-privacy-fields" disabled={disabled} aria-label={t("contactsUi.privacy")}>
+      {/* Controls in the first legend stay usable while the fieldset is disabled. */}
+      <legend>
+        {t("contactsUi.privacy")}
+        <ComposerHelp label={t("contactsUi.aboutPrivacy")} icon="info" className="contact-hint">{hint}</ComposerHelp>
+        {status}
+      </legend>
       <div className="contact-access-options">
         {[false, true].map((chatsOnly) => (
           <label key={String(chatsOnly)}>
@@ -631,13 +695,15 @@ export function ContactDetailDialog({
     : request ? requestLabel(request)
     : savedContact?.relation === "non_contact" ? t("contactsUi.notFriendsYet")
     : null;
-  const name =
-    savedContact?.displayName ??
-    contact?.displayName ??
-    removal?.displayName ??
-    request?.displayName ??
-    discovery?.displayName ??
-    "";
+  const privacyCache = connection.session.contactPrivacy;
+  const savedPrivacy = useSyncExternalStore(privacyCache.subscribe, () => privacyCache.get(account, friendId));
+  const privacyDenied = useSyncExternalStore(privacyCache.subscribe, () => privacyCache.denied(account));
+  // Contact events (our own saves emit one) drop the cached snapshot and reload it.
+  // Keep rendering the last one meanwhile so the card doesn't collapse and regrow;
+  // saving still waits for the fresh version in `savedPrivacy`.
+  const lastPrivacy = useRef(savedPrivacy);
+  if (savedPrivacy) lastPrivacy.current = savedPrivacy;
+  const shownPrivacy = privacyDenied ? undefined : savedPrivacy ?? lastPrivacy.current;
   const peer = contact?.id ?? friendId ?? removal?.id ?? request?.peerId;
   const [receiptId] = useState(
     () =>
@@ -671,20 +737,69 @@ export function ContactDetailDialog({
           ? receipt.input.privacy
           : defaultContactPrivacy(),
   );
-  const privacyCache = connection.session.contactPrivacy;
-  const savedPrivacy = useSyncExternalStore(privacyCache.subscribe, () => privacyCache.get(account, friendId));
-  const privacyDenied = useSyncExternalStore(privacyCache.subscribe, () => privacyCache.denied(account));
-  const [draft, setDraft] = useState<{ value: ContactPrivacy; version: string } | null>(null);
-  const pendingPrivacy = receipt?.action === "privacy" && receipt.operation?.state !== "succeeded"
-    ? receipt.input.privacy
-    : undefined;
-  const privacy = friendId
-    ? draft?.value ?? pendingPrivacy ?? savedPrivacy?.privacy ?? (receipt?.action === "privacy" ? receipt.input.privacy : initialPrivacy)
-    : initialPrivacy;
-  const privacyConflict = !!(draft && savedPrivacy && draft.version !== savedPrivacy.version
-    && !sameContactPrivacy(draft.value, savedPrivacy.privacy));
   const [privacyLoading, setPrivacyLoading] = useState(false),
     [privacyReadError, setPrivacyError] = useState("");
+  // Friend edits save on their own, one change per request. A pending privacy edit
+  // keeps only the keys the person changed, applied over the latest saved or
+  // submitted settings, so it never reverts a change made on another device.
+  const [privacyEdits, setPrivacyEdits] = useState<Partial<ContactPrivacy>>({});
+  const privacyReceipt = receipt?.action === "privacy" ? receipt : undefined;
+  // A submitted change shows until its saved settings are read back.
+  const privacySubmitted = privacyReceipt
+    && (privacyReceipt.operation?.state !== "succeeded" || !savedPrivacy || privacyLoading)
+    ? privacyReceipt.input.privacy
+    : undefined;
+  const privacyBase = privacySubmitted ?? shownPrivacy?.privacy ?? initialPrivacy;
+  const privacy = friendId ? { ...privacyBase, ...privacyEdits } : initialPrivacy;
+  const privacyEdited = !!friendId && !sameContactPrivacy(privacy, privacyBase);
+  const [remarkDraft, setRemarkDraft] = useState<string | null>(null);
+  // Leaving the field saves at once instead of waiting for the typing pause.
+  const [remarkFlush, setRemarkFlush] = useState(false);
+  const remarkInput = useRef<HTMLInputElement>(null);
+  // The last accepted remark, shown until a read newer than its save confirms it.
+  const [confirmingRemark, setConfirmingRemark] = useState<{ value: string | null; over: object | null } | null>(null);
+  const remarkReceipt = receipt?.action === "remark" ? receipt : undefined;
+  const remarkSubmitted = remarkReceipt && remarkReceipt.operation?.state !== "succeeded"
+    ? remarkReceipt.input.remark ?? ""
+    : undefined;
+  const remarkConfirming = !!confirmingRemark
+    && (!savedPrivacy || savedPrivacy === confirmingRemark.over || savedPrivacy.remarkPending);
+  const remarkBase = remarkSubmitted
+    ?? (remarkConfirming ? confirmingRemark?.value ?? "" : undefined)
+    ?? (shownPrivacy ? shownPrivacy.remark : savedContact?.remark)
+    ?? "";
+  const remarkValue = remarkDraft ?? remarkBase;
+  const remarkEdited = remarkDraft !== null && remarkDraft.trim() !== remarkBase;
+  const remarkTooLong = new TextEncoder().encode(remarkValue.trim()).length > MAX_CONTACT_REMARK_BYTES;
+  const remarkPolls = useRef(0);
+  const remarkFieldId = useId();
+  // A failed poll changes no snapshot, so it bumps this to schedule the next one.
+  const [remarkPollFailures, setRemarkPollFailures] = useState(0);
+  // A field's failure shows beside its heading and pauses its autosave until the
+  // field is edited again or retried.
+  const [fieldError, setFieldError] = useState<{ field: "privacy" | "remark"; message: string; retry: boolean } | null>(null);
+  const [savedFlash, setSavedFlash] = useState<{ privacy: boolean; remark: boolean }>({ privacy: false, remark: false });
+  // Edits confirmed in this card; only these say "Saved".
+  const savedHere = useRef(new Set<string>());
+  const staleRetries = useRef(0);
+  // A point read is newer than the catalog row. Name the contact by an accepted
+  // remark, or by the nickname after a clear the catalog hasn't caught up with.
+  const liveRemark = !friendId ? undefined
+    : remarkConfirming ? confirmingRemark?.value ?? null
+    : shownPrivacy && !shownPrivacy.remarkPending ? shownPrivacy.remark
+    : undefined;
+  const shownRemark = liveRemark !== undefined ? liveRemark : savedContact?.remark;
+  const remarkName = liveRemark
+    || (liveRemark === null && savedContact?.remark ? savedContact.nickname : null)
+    || undefined;
+  const name =
+    remarkName ??
+    savedContact?.displayName ??
+    contact?.displayName ??
+    removal?.displayName ??
+    request?.displayName ??
+    discovery?.displayName ??
+    "";
   const privacyError = privacyDenied ? t("contactsUi.privacyReadPermission") : privacyReadError;
   const [contactRefreshing, setContactRefreshing] = useState(false);
   const [privacyRevision, setPrivacyRevision] = useState(0);
@@ -721,12 +836,23 @@ export function ContactDetailDialog({
     );
   const privacySucceeded =
     receipt?.action === "privacy" && receipt.operation?.state === "succeeded";
+  const contactEditSucceeded =
+    privacySucceeded || (receipt?.action === "remark" && receipt.operation?.state === "succeeded");
   const completedFriendAction =
     !!friendId &&
     receipt?.operation?.state === "succeeded" &&
     ["accept", "delete"].includes(receipt.action);
-  const editableReceipt = privacySucceeded || completedFriendAction;
+  const editableReceipt = contactEditSucceeded || completedFriendAction;
   const locked = busy || (!!receipt && !editableReceipt);
+  const editReceipt = receipt?.action === "privacy" || receipt?.action === "remark";
+  const operationRunning = !!receipt?.operation && ["queued", "running"].includes(receipt.operation.state);
+  // A lost response or needs_review: only Check (or Retry) may continue it.
+  const uncertainEdit = editReceipt && !busy && !operationRunning && !contactEditSucceeded;
+  const editingLocked = permissionDenied || contactRefreshing || !!privacyError || uncertainEdit
+    || (!shownPrivacy && !editReceipt);
+  const savingField = editReceipt && (busy || operationRunning)
+    ? (receipt!.action as "privacy" | "remark")
+    : null;
   useEffect(() => {
     const dialog = ref.current!;
     dialog.showModal();
@@ -764,6 +890,9 @@ export function ContactDetailDialog({
         },
       },
     )
+      .then((snapshot) => {
+        if (!abort.signal.aborted && !snapshot) lastPrivacy.current = undefined;
+      })
       .catch((e) => {
         if (!abort.signal.aborted)
           setPrivacyError(
@@ -783,6 +912,46 @@ export function ContactDetailDialog({
       abort.abort();
     };
   }, [actions, savedPrivacy, friendId, privacyDenied, privacyRevision, contactRefreshing, connection, account]);
+  useEffect(() => {
+    if (!friendId || !(savedPrivacy?.remarkPending || remarkConfirming) || contactRefreshing
+      || remarkPolls.current >= REMARK_POLL_LIMIT) return;
+    const abort = new AbortController();
+    const timer = setTimeout(() => {
+      remarkPolls.current++;
+      void actions.readPrivacy(friendId, abort.signal).catch(() => {
+        if (!abort.signal.aborted) setRemarkPollFailures((n) => n + 1);
+      });
+    }, REMARK_POLL_MS);
+    return () => {
+      clearTimeout(timer);
+      abort.abort();
+    };
+  }, [actions, friendId, savedPrivacy, remarkConfirming, remarkPollFailures, contactRefreshing]);
+  // Drop edits that the saved or submitted settings now already have.
+  useEffect(() => {
+    setPrivacyEdits((edits) => {
+      const kept = Object.fromEntries(Object.entries(edits).filter(
+        ([key, value]) => privacyBase[key as keyof ContactPrivacy] !== value,
+      ));
+      return Object.keys(kept).length === Object.keys(edits).length ? edits : kept;
+    });
+  }, [privacyBase.chatsOnly, privacyBase.hideMyPosts, privacyBase.hideTheirPosts]);
+  useEffect(() => {
+    if (privacyReceipt?.operation?.state === "succeeded" && savedPrivacy && !privacyLoading
+      && savedHere.current.delete(privacyReceipt.key))
+      setSavedFlash((flash) => ({ ...flash, privacy: true }));
+  }, [privacyReceipt, savedPrivacy, privacyLoading]);
+  useEffect(() => {
+    if (confirmingRemark && !remarkConfirming) {
+      setConfirmingRemark(null);
+      setSavedFlash((flash) => ({ ...flash, remark: true }));
+    }
+  }, [confirmingRemark, remarkConfirming]);
+  useEffect(() => {
+    if (!savedFlash.privacy && !savedFlash.remark) return;
+    const timer = setTimeout(() => setSavedFlash({ privacy: false, remark: false }), SAVED_FLASH_MS);
+    return () => clearTimeout(timer);
+  }, [savedFlash]);
   function refreshPrivacy() {
     if (friendId) privacyCache.invalidate(account, friendId);
     setPrivacyRevision((n) => n + 1);
@@ -835,31 +1004,56 @@ export function ContactDetailDialog({
     )
       changed();
     if (pending.action === "privacy" && operation.state === "succeeded") {
-      setDraft(null);
+      staleRetries.current = 0;
+      savedHere.current.add(pending.key);
       setPrivacyLoading(true);
       refreshPrivacy();
-    } else if (pending.action === "privacy" && operation.result && typeof operation.result === "object"
-      && "partial" in operation.result && operation.result.partial === true) {
-      refreshPrivacy();
+    } else if (pending.action === "remark" && operation.state === "succeeded") {
+      staleRetries.current = 0;
+      const submitted = pending.input.remark;
+      // Re-read quietly until WeChat confirms; keep what is still being typed.
+      setConfirmingRemark({ value: submitted, over: savedPrivacy ?? null });
+      remarkPolls.current = 0;
+      setRemarkDraft((draft) => draft !== null && draft.trim() === (submitted ?? "")
+        && document.activeElement !== remarkInput.current ? null : draft);
+    } else if ((pending.action === "privacy" || pending.action === "remark")
+      && (operation.state === "failed" || operation.state === "cancelled")) {
+      connection.cache.writeState(account, receiptId, null);
+      setReceipt(undefined);
+      keepEdit(pending);
+      setFieldError({ field: pending.action, message: t("contactsUi.saveFailedDetail"), retry: true });
+      if (pending.action === "privacy") refreshPrivacy();
     }
   };
+  /** Put a change that didn't save back into the pending edits, so it shows and can be retried. */
+  function keepEdit(pending: ContactChange) {
+    if (pending.action !== "privacy") return;
+    const before = savedPrivacy?.privacy;
+    const wanted = pending.input.privacy;
+    const changedKeys = (Object.keys(wanted) as (keyof ContactPrivacy)[]).filter((key) => before?.[key] !== wanted[key]);
+    setPrivacyEdits((edits) => ({
+      ...Object.fromEntries(changedKeys.map((key) => [key, wanted[key]])),
+      ...edits,
+    }));
+  }
   async function submit(pending: ContactChange) {
     if (busy) return;
     setBusy(true);
     setError("");
     setRetryOriginal(false);
+    if (pending.action === "privacy" || pending.action === "remark") setFieldError(null);
     try {
       await connection.cache.flush();
       finished(pending, await actions.submit(pending));
     } catch (e) {
-      setError(readableError(e));
-      if (
-        e instanceof NativeApiError &&
-        e.status === 403 &&
-        ["send", "accept", "privacy"].includes(pending.action)
-      ) {
+      const edit = pending.action === "privacy" || pending.action === "remark";
+      // Friend edits report beside their field, not at the bottom of the card.
+      if (!edit) setError(readableError(e));
+      const permission = e instanceof NativeApiError && e.status === 403
+        && ["send", "accept", "privacy", "remark"].includes(pending.action);
+      if (permission) {
         setPermissionDenied(true);
-        setError(t("contactsUi.privacyPermission"));
+        if (!edit) setError(t("contactsUi.privacyPermission"));
       }
       if (
         e instanceof NativeApiError &&
@@ -871,7 +1065,21 @@ export function ContactDetailDialog({
         connection.cache.writeState(account, receiptId, null);
         setReceipt(undefined);
         changed();
-        if (pending.action === "privacy") refreshPrivacy();
+        if (pending.action === "privacy" || pending.action === "remark") {
+          refreshPrivacy();
+          keepEdit(pending);
+          // A newer version or a queued edit: save again once the contact reloads.
+          const retryLater = ["stale_contact_privacy", "contact_privacy_pending"].includes(e.code ?? "")
+            && staleRetries.current++ < 2;
+          if (!retryLater)
+            setFieldError({
+              field: pending.action,
+              message: permission
+                ? t(pending.action === "remark" ? "contactsUi.remarkPermission" : "contactsUi.privacyPermission")
+                : readableError(e),
+              retry: !permission,
+            });
+        }
       }
     } finally {
       setBusy(false);
@@ -881,7 +1089,7 @@ export function ContactDetailDialog({
     if (
       locked ||
       (receipt && !editableReceipt) ||
-      (permissionDenied && ["send", "accept", "privacy"].includes(action))
+      (permissionDenied && ["send", "accept", "privacy", "remark"].includes(action))
     )
       return;
     const key = crypto.randomUUID();
@@ -917,8 +1125,8 @@ export function ContactDetailDialog({
       action === "privacy" &&
       friendId &&
       savedPrivacy &&
+      privacyEdited &&
       !privacyError &&
-      !privacyConflict &&
       !privacyLoading &&
       !contactRefreshing
     )
@@ -931,14 +1139,37 @@ export function ContactDetailDialog({
           expectedVersion: savedPrivacy.version,
         },
       };
+    else if (
+      action === "remark" &&
+      friendId &&
+      savedPrivacy &&
+      remarkEdited &&
+      !remarkTooLong &&
+      !privacyError &&
+      !privacyLoading &&
+      !contactRefreshing
+    )
+      pending = {
+        key,
+        action,
+        contactId: friendId,
+        input: {
+          remark: remarkDraft!.trim() || null,
+          expectedVersion: savedPrivacy.version,
+        },
+      };
     else return;
     save(pending);
+    if (pending.action === "privacy") setPrivacyEdits({});
+    if (pending.action === "remark") setRemarkFlush(false);
+    if (pending.action === "privacy" || pending.action === "remark") setFieldError(null);
     await submit(pending);
   }
   async function check() {
     if (!receipt || busy) return;
     setBusy(true);
     setError("");
+    setFieldError(null);
     setRetryOriginal(false);
     try {
       const client = connection.session.client;
@@ -955,7 +1186,9 @@ export function ContactDetailDialog({
         throw Error(t("contactsUi.operationMismatch"));
       finished(receipt, operation);
     } catch (e) {
-      setError(readableError(e));
+      if (receipt.action === "privacy" || receipt.action === "remark")
+        setFieldError({ field: receipt.action, message: readableError(e), retry: false });
+      else setError(readableError(e));
       if (!receipt.operation && e instanceof NativeApiError && e.status === 404)
         setRetryOriginal(true);
     } finally {
@@ -967,18 +1200,63 @@ export function ContactDetailDialog({
     const timer = setTimeout(() => void check(), 800);
     return () => clearTimeout(timer);
   }, [receipt, ended, busy]);
+  // Autosave: privacy first, then the remark once typing pauses or the field is left.
+  const autosaveReady = !!friendId && !removal && !busy && !uncertainEdit && !operationRunning
+    && !!savedPrivacy && !privacyLoading && !contactRefreshing && !privacyError
+    && !permissionDenied && !privacyDenied;
+  const privacyQueued = privacyEdited && fieldError?.field !== "privacy";
+  const remarkQueued = remarkEdited && !remarkTooLong && fieldError?.field !== "remark";
+  useEffect(() => {
+    if (!autosaveReady || (!privacyQueued && !remarkQueued)) return;
+    const timer = setTimeout(
+      () => void change(privacyQueued ? "privacy" : "remark"),
+      privacyQueued ? PRIVACY_AUTOSAVE_MS : remarkFlush ? 0 : REMARK_AUTOSAVE_MS,
+    );
+    return () => clearTimeout(timer);
+  }, [autosaveReady, privacyQueued, remarkQueued, privacyEdits, remarkDraft, remarkFlush, savedPrivacy]);
+  function fieldStatus(field: "privacy" | "remark"): SaveState | null {
+    if (receipt?.action === field && uncertainEdit) return "uncertain";
+    if (savingField === field) return "saving";
+    if (field === "privacy" && privacyReceipt?.operation?.state === "succeeded"
+      && (privacyLoading || !savedPrivacy) && !privacyError)
+      return "saving";
+    if (fieldError?.field === field) return "failed";
+    if (field === "remark" && remarkConfirming)
+      return remarkPolls.current < REMARK_POLL_LIMIT ? "syncing" : "unsynced";
+    // Confirmed this render: say so now rather than one render later, when the flash starts.
+    if (field === "remark" && confirmingRemark) return "saved";
+    if (field === "privacy" && privacyReceipt?.operation?.state === "succeeded" && savedPrivacy
+      && !privacyLoading && savedHere.current.has(privacyReceipt.key))
+      return "saved";
+    return savedFlash[field] ? "saved" : null;
+  }
+  function fieldDetail(field: "privacy" | "remark") {
+    if (fieldError?.field === field) return fieldError.message;
+    if (receipt?.action === field && uncertainEdit) return t("contactsUi.saveUncertainDetail");
+    return null;
+  }
+  function statusFor(field: "privacy" | "remark") {
+    return (
+      <SaveStatus
+        state={fieldStatus(field)}
+        retry={fieldError?.field === field && fieldError.retry ? () => setFieldError(null) : undefined}
+        check={() => void check()}
+        retryOriginal={retryOriginal && receipt ? () => void submit(receipt) : undefined}
+        busy={busy}
+      />
+    );
+  }
+  /** Closing the card saves a remark still waiting for its typing pause. */
+  function closeCard() {
+    if (autosaveReady && remarkQueued && !privacyQueued) void change("remark");
+    close();
+  }
   const statusText =
     !receipt?.operation || receipt.operation.state === "needs_review"
       ? t("contactsUi.checkBeforeRetry")
       : receipt.operation.state === "succeeded"
-        ? receipt.action === "privacy"
-          ? t(
-              privacyLoading
-                ? "contactsUi.privacyWaiting"
-                : savedPrivacy && !privacyError
-                  ? "contactsUi.privacySaved"
-                  : "contactsUi.privacyReadbackUnavailable",
-            )
+        ? receipt.action === "privacy" || receipt.action === "remark"
+          ? ""
           : t(
               (
                 {
@@ -986,7 +1264,6 @@ export function ContactDetailDialog({
                   accept: "contactsUi.accepted",
                   delete: "contactsUi.historyDeleted",
                   remove: "contactsUi.contactRemoved",
-                  privacy: "contactsUi.privacySaved",
                 } as const
               )[receipt.action],
             )
@@ -998,9 +1275,8 @@ export function ContactDetailDialog({
   const title = removal
     ? t("contactsUi.removeContact")
     : t("contactsUi.contactDetails");
-  const privacyDirty = !!savedPrivacy && !sameContactPrivacy(privacy, savedPrivacy.privacy);
   const showPrivacy = !removal && (friendId
-    ? !!(savedPrivacy || draft || privacyLoading || privacyError)
+    ? !!(shownPrivacy || privacyReceipt || privacyEdited || privacyLoading || privacyError)
     : !!(discovery?.recipientRef || request?.actionable));
   return (
     <dialog
@@ -1009,7 +1285,7 @@ export function ContactDetailDialog({
       aria-label={title}
       onCancel={(e) => {
         e.preventDefault();
-        close();
+        closeCard();
       }}
       onClose={close}
     >
@@ -1025,7 +1301,7 @@ export function ContactDetailDialog({
             {friendId && remove && !privacyDenied && !permissionDenied && <button disabled={locked || contactRefreshing} onClick={() => remove({ id: friendId, displayName: name })}>{t("contactsUi.removeContact")}</button>}
           </div>
         </details>}
-        <button onClick={close} aria-label={t("contactsUi.close")}>
+        <button onClick={closeCard} aria-label={t("contactsUi.close")}>
           <Icon name="close" />
         </button>
       </div>
@@ -1038,6 +1314,10 @@ export function ContactDetailDialog({
         />
         <div>
           <h3>{name}</h3>
+          {shownRemark && savedContact?.nickname && savedContact.nickname !== shownRemark && (
+            <p>{t("contactsUi.nicknameValue", { name: savedContact.nickname })}</p>
+          )}
+          {savedContact?.alias && <p>{t("contactsUi.wechatIdValue", { id: savedContact.alias })}</p>}
           {relationshipLabel && <p>{relationshipLabel}</p>}
         </div>
       </div>
@@ -1057,16 +1337,42 @@ export function ContactDetailDialog({
           />
         </label>
       )}
+      {friendId && !removal && !privacyDenied && (shownPrivacy || editReceipt || remarkDraft !== null) && (
+        <div className="contact-remark">
+          <div className="contact-field-heading">
+            <label htmlFor={remarkFieldId}>{t("contactsUi.remark")}</label>
+            <ComposerHelp label={t("contactsUi.aboutRemarks")} icon="info" className="contact-hint">
+              {t("contactsUi.remarkHint")}
+            </ComposerHelp>
+            {statusFor("remark")}
+          </div>
+          <input
+            ref={remarkInput}
+            id={remarkFieldId}
+            value={remarkValue}
+            placeholder={t("contactsUi.remarkPlaceholder")}
+            disabled={editingLocked}
+            aria-invalid={remarkTooLong || fieldError?.field === "remark" || undefined}
+            onChange={(e) => {
+              setRemarkDraft(e.target.value);
+              setRemarkFlush(false);
+              if (fieldError?.field === "remark" && fieldError.retry) setFieldError(null);
+            }}
+            onBlur={() => {
+              if (remarkEdited) setRemarkFlush(true);
+              else if (remarkDraft !== null && !remarkSubmitted) setRemarkDraft(null);
+            }}
+          />
+          {(remarkTooLong || fieldDetail("remark")) && (
+            <small className="contact-field-problem" role="alert">
+              {remarkTooLong ? t("contactsUi.remarkTooLong") : fieldDetail("remark")}
+            </small>
+          )}
+        </div>
+      )}
       {showPrivacy && (
         <section className="contact-detail-privacy">
-          <p>
-            {t(
-              friendId
-                ? "contactsUi.privacyForContact"
-                : "contactsUi.privacyBeforeRequest",
-            )}
-          </p>
-          {privacyLoading && !privacySucceeded && (
+          {privacyLoading && !shownPrivacy && !privacyReceipt && (
             <p role="status">
               {t(
                 privacyWaiting
@@ -1081,26 +1387,27 @@ export function ContactDetailDialog({
               <p>{t("contactsUi.privacyUnavailable")}</p>
             </div>
           )}
-          {privacyConflict && <p role="alert">{t("contactsUi.privacyConflict")}</p>}
-          {(!friendId || (!privacyDenied && (savedPrivacy || draft || receipt?.action === "privacy"))) && (
+          {(!friendId || (!privacyDenied && (shownPrivacy || privacyReceipt || privacyEdited))) && (
             <PrivacyFields
+              hint={t(friendId ? "contactsUi.privacyForContact" : "contactsUi.privacyBeforeRequest")}
+              status={friendId ? statusFor("privacy") : null}
               value={privacy}
-              disabled={
-                locked ||
-                permissionDenied ||
-                (!!friendId &&
-                  (!savedPrivacy || privacyLoading || contactRefreshing || !!privacyError || privacyConflict))
-              }
+              disabled={friendId ? editingLocked : locked || permissionDenied}
               change={(value) => {
-                if (editableReceipt) {
-                  connection.cache.writeState(account, receiptId, null);
-                  setReceipt(undefined);
+                if (!friendId) {
+                  setInitialPrivacy(value);
+                  return;
                 }
-                if (friendId && savedPrivacy) {
-                  setDraft(sameContactPrivacy(value, savedPrivacy.privacy) ? null : { value, version: savedPrivacy.version });
-                } else setInitialPrivacy(value);
+                const keys = Object.keys(value) as (keyof ContactPrivacy)[];
+                setPrivacyEdits(Object.fromEntries(
+                  keys.filter((key) => value[key] !== privacyBase[key]).map((key) => [key, value[key]]),
+                ));
+                if (fieldError?.field === "privacy" && fieldError.retry) setFieldError(null);
               }}
             />
+          )}
+          {friendId && fieldDetail("privacy") && (
+            <small className="contact-field-problem" role="alert">{fieldDetail("privacy")}</small>
           )}
         </section>
       )}
@@ -1126,18 +1433,17 @@ export function ContactDetailDialog({
       {request?.direction === "outgoing" && !friendId && (
         <p>{t("contactsUi.sentExplanation")}</p>
       )}
-      {receipt && (
+      {receipt && !editReceipt && (
         <p role="status" className="contact-change-status">
           {statusText}
         </p>
       )}
       {error && <p role="alert">{error}</p>}
       <div className="contact-request-actions">
-        {friendId && privacyDirty && !locked && savedPrivacy && <button onClick={() => { setDraft(null); setError(""); }}>{t("contactsUi.cancel")}</button>}
-        {(friendId || contact?.id) && open && !privacyDirty && (
+        {(friendId || contact?.id) && open && (
           <button
             onClick={() => {
-              close();
+              closeCard();
               open(friendId ?? contact!.id);
             }}
           >
@@ -1150,32 +1456,14 @@ export function ContactDetailDialog({
             {t("contactsUi.addContact")}
           </button>
         )}
-        {receipt && retryOriginal && (
+        {receipt && !editReceipt && retryOriginal && (
           <button disabled={busy} onClick={() => void submit(receipt)}>
             {t("contactsUi.retryOriginal")}
           </button>
         )}
-        {receipt && !privacySucceeded && (
+        {receipt && !editReceipt && (
           <button disabled={busy} onClick={() => void check()}>
             {t("contactsUi.checkStatus")}
-          </button>
-        )}
-        {friendId && privacyDirty && (
-          <button
-            className="contact-primary-action"
-            disabled={
-              locked ||
-              permissionDenied ||
-              !savedPrivacy ||
-              privacyLoading ||
-              !!privacyError ||
-              contactRefreshing ||
-              privacyConflict ||
-              sameContactPrivacy(privacy, savedPrivacy.privacy)
-            }
-            onClick={() => void change("privacy")}
-          >
-            {t("contactsUi.savePrivacy")}
           </button>
         )}
         {!receipt &&

@@ -19,6 +19,11 @@ fn label(username: &str) -> &str {
 }
 pub(super) fn contact(db: &Connection, account: &str, username: &str) -> Result<Vec<u8>> {
     let group = username.ends_with("@chatroom");
+    let (remark, privacy) = if group {
+        (String::new(), 0)
+    } else {
+        super::contacts::settings(db, account, username)?
+    };
     let pinned: bool = db
         .query_row(
             "SELECT pinned FROM thread_pins WHERE account=?1 AND username=?2",
@@ -45,7 +50,7 @@ pub(super) fn contact(db: &Connection, account: &str, username: &str) -> Result<
                     )
                     .optional()?
                     .unwrap_or(false);
-                1 | if muted { 0x200 } else { 0 }
+                1 | if muted { 0x200 } else { 0 } | privacy
             }) | if pinned { 0x800 } else { 0 },
         ),
         p::uint(82, u64::MAX),
@@ -65,9 +70,10 @@ pub(super) fn contact(db: &Connection, account: &str, username: &str) -> Result<
     } else {
         label(username).into()
     };
-    for n in [3, 4, 10, 11, 12] {
+    for n in [3, 4, 11, 12] {
         fields.push(p::bytes(n, &p::bytes(1, b"")));
     }
+    fields.push(p::bytes(10, &p::bytes(1, remark.as_bytes())));
     for n in [5, 9, 13, 14] {
         fields.push(p::uint(n, 0));
     }
@@ -264,7 +270,8 @@ pub(super) fn mutate(db: &mut Connection, session: &Session, rpc: &GroupRpc) -> 
                     let flag = p::scalar(&payload, 8)?;
                     let group = room.ends_with("@chatroom");
                     ensure!(
-                        flag & !(0x200 | 0x800) == if group { 2 } else { 1 },
+                        flag & !(0x200 | 0x800 | super::contacts::PRIVACY_MASKS)
+                            == if group { 2 } else { 1 },
                         "invalid_simulator_contact_flags"
                     );
                     if group

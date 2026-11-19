@@ -14,6 +14,8 @@ const INITIAL_TIME: u32 = 1_700_000_000;
 const PAGE_SIZE: usize = 32;
 const SERVER_ID_BASE: u64 = 9_007_199_254_740_993;
 
+#[path = "contact_engine.rs"]
+mod contacts;
 #[path = "group_engine.rs"]
 mod groups;
 #[path = "media_engine.rs"]
@@ -73,6 +75,7 @@ impl Engine {
         CREATE TABLE IF NOT EXISTS contact_notifications(account TEXT NOT NULL, username TEXT NOT NULL, muted INTEGER NOT NULL, PRIMARY KEY(account,username));
         CREATE TABLE IF NOT EXISTS thread_pins(account TEXT NOT NULL, username TEXT NOT NULL, pinned INTEGER NOT NULL, PRIMARY KEY(account,username));
         CREATE TABLE IF NOT EXISTS group_faults(account TEXT PRIMARY KEY, fault TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS contact_settings(account TEXT NOT NULL, username TEXT NOT NULL, remark TEXT NOT NULL DEFAULT '', privacy INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(account,username));
         INSERT OR IGNORE INTO groups(account,room,name,members) SELECT account,room,name,members FROM group_creations;")?;
         // Upgrade only synthetic fixture snapshots from the earlier UI preview.
         // Existing messages, group identities and membership stay intact.
@@ -143,6 +146,9 @@ impl Engine {
         match request {
             Request::GroupMutation { session, request } => Ok(serde_json::to_value(
                 groups::mutate(&mut db, &session, &request)?,
+            )?),
+            Request::ContactMutation { session, request } => Ok(serde_json::to_value(
+                contacts::mutate(&mut db, &session, &request)?,
             )?),
             Request::GroupDetail { session, room } => {
                 Ok(serde_json::to_value(groups::detail(&db, &session, &room)?)?)
@@ -1526,5 +1532,92 @@ mod tests {
                 cursor: vec![]
             })
             .is_err());
+    }
+
+    #[test]
+    fn contact_remark_and_privacy_edits_are_served_by_lookups_and_sync() {
+        let scratch = wechat_platform::private_tempdir("simulator-contact-edit-").unwrap();
+        let engine = Engine::open(&scratch.path().join("remote.sqlite")).unwrap();
+        let session = login(&engine, "personal");
+        let mutate = |request: &wechat_protocol::ContactRpc| {
+            engine
+                .request(Request::ContactMutation {
+                    session: session.clone(),
+                    request: request.clone(),
+                })
+                .map(|reply| serde_json::from_value::<Vec<u8>>(reply).unwrap())
+        };
+        let remark = |raw: &[u8]| {
+            let fields = p::decode(raw).unwrap();
+            let remark = p::decode(p::data(&fields, 10).unwrap()).unwrap();
+            String::from_utf8(p::data(&remark, 1).unwrap().to_vec()).unwrap()
+        };
+        let before = refreshed_contact(&engine, &session, "sim_mei");
+        assert_eq!(remark(&before.raw), "");
+        let rpc = wechat_protocol::contact_remark_request(&before, "Mei (book club)").unwrap();
+        let reply = mutate(&rpc).unwrap();
+        let decoded = wechat_protocol::decode_group_mutation(
+            &wechat_protocol::GroupRpc {
+                cgi: rpc.cgi,
+                path: rpc.path.clone(),
+                body: rpc.body.clone(),
+                opcode: Some(2),
+            },
+            &reply,
+            &[],
+        )
+        .unwrap();
+        assert!(decoded.accepted);
+        assert_eq!(
+            remark(&refreshed_contact(&engine, &session, "sim_mei").raw),
+            "Mei (book club)"
+        );
+
+        let state = authorization("personal", session.generation, device()).unwrap();
+        let head = engine.snapshot().unwrap()["accounts"][0]["head"]
+            .as_u64()
+            .unwrap();
+        let wanted = wechat_protocol::ContactPrivacySettings {
+            chats_only: false,
+            hide_my_posts: true,
+            hide_their_posts: true,
+        };
+        let rpc = wechat_protocol::contact_privacy_request(
+            &state,
+            "sim_mei",
+            &Default::default(),
+            &wanted,
+        )
+        .unwrap();
+        let reply =
+            wechat_protocol::decode_contact_privacy_reply(&rpc, &mutate(&rpc).unwrap()).unwrap();
+        assert!(reply.accepted && reply.item_codes == [0, 0]);
+        let after = refreshed_contact(&engine, &session, "sim_mei");
+        let fields = p::decode(&after.raw).unwrap();
+        assert_eq!(p::scalar(&fields, 8).unwrap(), 1 | 0x100 | 0x10000);
+        assert_eq!(remark(&after.raw), "Mei (book club)");
+        // The change arrives as one full contact update through sync.
+        let synced = engine
+            .request(Request::Sync {
+                session: session.clone(),
+                cursor: encode_cursor(head).unwrap(),
+            })
+            .unwrap();
+        assert_eq!(synced["commands"].as_array().unwrap().len(), 1);
+
+        // A remark write copied from a stale record no longer matches the flags.
+        let stale = wechat_protocol::contact_remark_request(&before, "Stale").unwrap();
+        assert!(mutate(&stale).is_err());
+        let cleared = wechat_protocol::contact_remark_request(&after, "").unwrap();
+        mutate(&cleared).unwrap();
+        assert_eq!(
+            remark(&refreshed_contact(&engine, &session, "sim_mei").raw),
+            ""
+        );
+        let group_like = wechat_protocol::contact_remark_request(
+            &refreshed_contact(&engine, &session, "filehelper"),
+            "No",
+        );
+        assert!(group_like.map_or(true, |rpc| mutate(&rpc).is_err()));
     }
 }

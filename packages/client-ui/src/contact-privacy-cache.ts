@@ -1,11 +1,12 @@
-import { NativeApiError, type NativeContact, type NativeContactPrivacy, type NativeWeChatClient } from "@agent-wechat/shared";
+import { NativeApiError, type NativeContact, type NativeWeChatClient } from "@agent-wechat/shared";
+import type { ContactPrivacySnapshot } from "./contact-privacy.ts";
 
 /** Relationship settings for the active account. Never written to browser storage. */
 export class ContactPrivacyCache {
   private account: string | null = null;
   private lifetime = new AbortController();
   private session = Symbol();
-  private entries = new Map<string, NativeContactPrivacy>();
+  private entries = new Map<string, ContactPrivacySnapshot>();
   private reads = new Map<string, symbol>();
   private listeners = new Set<() => void>();
   private denial?: NativeApiError;
@@ -71,7 +72,7 @@ export class ContactPrivacyCache {
         if (this.reads.get(contact.id) !== reads.get(contact.id)) continue;
         const snapshot = snapshotFromContact(contact);
         if (snapshot) {
-          if (this.entries.get(contact.id)?.version === snapshot.version) continue;
+          if (sameSnapshot(this.entries.get(contact.id), snapshot)) continue;
           this.entries.set(contact.id, snapshot);
           changed = true;
         } else if (this.entries.delete(contact.id)) {
@@ -82,7 +83,7 @@ export class ContactPrivacyCache {
     };
   }
 
-  async read(account: string, id: string, signal: AbortSignal): Promise<NativeContactPrivacy | undefined> {
+  async read(account: string, id: string, signal: AbortSignal): Promise<ContactPrivacySnapshot | undefined> {
     const lifetime = this.lifetime.signal;
     const session = this.session;
     if (account !== this.account) throw new DOMException("Account changed", "AbortError");
@@ -123,7 +124,17 @@ export class ContactPrivacyCache {
   }
 }
 
-function snapshotFromContact(contact: NativeContact): NativeContactPrivacy | undefined {
+function snapshotFromContact(contact: NativeContact): ContactPrivacySnapshot | undefined {
   if (!contact.privacy || !contact.privacyVersion) return undefined;
-  return { privacy: contact.privacy, version: contact.privacyVersion };
+  return {
+    privacy: contact.privacy,
+    version: contact.privacyVersion,
+    remark: contact.remark ?? null,
+    remarkPending: contact.remarkPending === true,
+  };
+}
+
+/** The version excludes the remark, so a remark change alone must still replace the entry. */
+function sameSnapshot(a: ContactPrivacySnapshot | undefined, b: ContactPrivacySnapshot) {
+  return !!a && a.version === b.version && a.remark === b.remark && a.remarkPending === b.remarkPending;
 }

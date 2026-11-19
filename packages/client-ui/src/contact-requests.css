@@ -199,6 +199,105 @@
   gap: 12px;
   margin-bottom: 20px;
 }
+.contact-remark {
+  display: block;
+  margin: 0 0 18px;
+  font-size: 13px;
+  color: var(--muted);
+}
+/* The remark heading matches the Privacy legend. */
+.contact-field-heading label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.contact-field-heading,
+.contact-privacy-fields legend {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+/* Autosave state sits at the end of its field's heading. */
+.contact-save-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  min-height: 22px;
+  font-size: 12px;
+  font-weight: normal;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.contact-save-status .icon {
+  width: 13px;
+  height: 13px;
+}
+.contact-save-saved .icon {
+  color: var(--accent, #2f7d4f);
+}
+.contact-save-failed,
+.contact-save-uncertain {
+  color: var(--danger, #b42318);
+}
+.contact-save-status button {
+  border: 0;
+  background: transparent;
+  padding: 2px 4px;
+  font: inherit;
+  font-weight: 600;
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.contact-save-spinner {
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: contact-save-spin 0.8s linear infinite;
+}
+@keyframes contact-save-spin {
+  to { transform: rotate(360deg); }
+}
+.contact-field-problem {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--danger, #b42318);
+}
+.contact-privacy-fields legend {
+  width: 100%;
+}
+.contact-hint > .icon-btn {
+  width: 22px;
+  height: 22px;
+}
+.contact-hint > .icon-btn .icon {
+  width: 14px;
+  height: 14px;
+}
+/* Open below and to the right, inside the scrolling dialog. */
+.contact-hint .composer-help-content {
+  top: calc(100% + 4px);
+  bottom: auto;
+  left: 0;
+  right: auto;
+  font-weight: normal;
+}
+.contact-remark input {
+  display: block;
+  width: 100%;
+  margin: 6px 0 6px;
+  padding: 9px 10px;
+  font: inherit;
+  font-size: 14px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
 .contact-request-dialog textarea {
   display: block;
   width: 100%;

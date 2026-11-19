@@ -80,6 +80,21 @@ pub trait Upstream: Send + Sync {
             }
         )
     }
+    /// Contact edits (privacy, remark, removal, friend requests) as raw service replies.
+    fn contact_rpc_raw(
+        &self,
+        _state: &mut AccountState,
+        _request: &wechat_protocol::ContactRpc,
+    ) -> Result<Vec<u8>> {
+        bail!(
+            "{}",
+            if self.kind() == UpstreamKind::Simulator {
+                "unsupported_simulator_operation"
+            } else {
+                "account_runtime_required"
+            }
+        )
+    }
     fn group_detail_raw(&self, _state: &mut AccountState, _room: &str) -> Result<Vec<u8>> {
         bail!(
             "{}",

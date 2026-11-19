@@ -1,19 +1,23 @@
 import { useId, useState, type ReactNode } from "react";
 import { Icon } from "./ui.tsx";
 
-/** Optional composer guidance is available by pointer, touch or keyboard. */
+/** Optional guidance (composer, contact card) is available by pointer, touch or keyboard. */
 export function ComposerHelp({
   label,
+  icon = "help",
+  className,
   children,
 }: {
   label: string;
+  icon?: "help" | "info";
+  className?: string;
   children: ReactNode;
 }) {
   const id = useId();
   const [open, setOpen] = useState(false);
   return (
     <span
-      className="composer-help"
+      className={className ? `composer-help ${className}` : "composer-help"}
       onMouseEnter={() => setOpen(true)}
       onMouseLeave={() => setOpen(false)}
     >
@@ -27,12 +31,14 @@ export function ComposerHelp({
         onClick={() => setOpen(true)}
         onKeyDown={(event) => {
           if (event.key === "Escape") {
+            // Inside a modal dialog, Escape closes only the open hint first.
+            if (open) event.preventDefault();
             setOpen(false);
             event.stopPropagation();
           }
         }}
       >
-        <Icon name="help" />
+        <Icon name={icon} />
       </button>
       {open && (
         <span id={id} className="composer-help-content" role="tooltip">

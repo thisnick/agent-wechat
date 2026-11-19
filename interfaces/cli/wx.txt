@@ -199,9 +199,6 @@ wx contacts members remove --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse t
 wx contacts members remove --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
 wx contacts members remove <ID> | position 1, required | Group ID from wx groups list
 wx contacts members remove <MEMBERS> | position 2, required, repeatable | Member IDs to remove; give one or more
-wx contacts privacy | - | Read an existing contact's relationship privacy
-wx contacts privacy get | - | Read the contact's saved relationship privacy and current version
-wx contacts privacy get <ID> | position 1, required | Exact existing contact ID
 wx contacts refresh | - | Refresh one entry from WeChat
 wx contacts refresh --detach | switch | Return as soon as the work is queued instead of waiting for it
 wx contacts refresh --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
@@ -246,12 +243,14 @@ wx contacts requests send --wait | takes <WAIT>, default 30 | Seconds to wait fo
 wx contacts requests send <RECIPIENT_REF> | position 1, required | Exact recipientRef from discovery on this account
 wx contacts search | - | Discover a person on WeChat by WeChat ID. Phone lookup is unverified
 wx contacts search <QUERY> | position 1, required | Discovery query, distinct from local contacts find
-wx contacts set | - | Change supplied contact privacy settings; keep omitted settings
+wx contacts set | - | Change a contact's privacy settings or remark; keep omitted settings
 wx contacts set --chats-only | takes <CHATS_ONLY>, values true|false | Whether to restrict this relationship to chats (true or false)
+wx contacts set --clear-remark | switch | Clear your private name for this contact
 wx contacts set --detach | switch | Return as soon as the work is queued instead of waiting for it
 wx contacts set --hide-my-posts | takes <HIDE_MY_POSTS>, values true|false | Whether to hide your posts from this contact (true or false)
 wx contacts set --hide-their-posts | takes <HIDE_THEIR_POSTS>, values true|false | Whether to hide this contact's posts (true or false)
 wx contacts set --idempotency-key | takes <IDEMPOTENCY_KEY> | Reuse this key when retrying so the daemon applies the request only once
+wx contacts set --remark | takes <REMARK> | Set your private name for this contact; outer spaces are removed. Change privacy in a separate command
 wx contacts set --wait | takes <WAIT>, default 30 | Seconds to wait for completion; the work keeps running after the wait ends
 wx contacts set <ID> | position 1, required | Exact existing contact ID
 wx contacts sync | - | Refresh the catalog from WeChat

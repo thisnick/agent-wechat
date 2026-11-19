@@ -5,7 +5,7 @@ mod contact_privacy_state;
 #[path = "contact_requests.rs"]
 pub(crate) mod contact_requests;
 pub use contact_requests::{ContactMutation, ContactRequestQuery, ContactUpdate};
-pub use wechat_protocol::ContactPrivacySettings;
+pub use wechat_protocol::{ContactPrivacySettings, MAX_CONTACT_REMARK_BYTES};
 #[path = "checkpoint.rs"]
 mod checkpoint;
 #[path = "contact_remarks.rs"]
@@ -164,6 +164,8 @@ pub struct CoreShared {
     pub(crate) cancels: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
     pub(crate) workers: Mutex<std::collections::BTreeSet<String>>,
     pub(crate) push_health: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
+    /// Wakes an account loop before its next scheduled tick (up to 30 seconds away).
+    pub(crate) account_wakers: Mutex<BTreeMap<String, Arc<tokio::sync::Notify>>>,
     pub(crate) official_profiles: AsyncMutex<()>,
     pub stopping: AtomicBool,
     pub(crate) read_pools: Mutex<BTreeMap<String, Arc<crate::read_view::ReadPool>>>,
@@ -377,6 +379,7 @@ impl Core {
                 sticker_metadata: Default::default(),
                 native_accounts: Mutex::new(BTreeMap::new()),
                 long_links: Mutex::new(BTreeMap::new()),
+                account_wakers: Mutex::new(BTreeMap::new()),
 
                 call_epochs: Mutex::new(BTreeMap::new()),
                 upstream,
@@ -2344,10 +2347,14 @@ impl Core {
             self.start_push_worker(&account.id)?;
             self.start_received_media_worker(&account.id);
             let core = self.clone();
+            let waker = self.account_waker(&account.id);
             tokio::spawn(async move {
                 let mut delay = 1;
                 loop {
-                    tokio::time::sleep(Duration::from_secs(delay)).await;
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(delay)) => {}
+                        _ = waker.notified() => {}
+                    }
                     if core.stopping.load(Ordering::SeqCst)
                         || core.store.account(&account.id).is_err()
                     {
@@ -2394,6 +2401,18 @@ impl Core {
             });
         }
         Ok(())
+    }
+    /// The account loop's wake signal. A wake while a tick runs is kept, so the
+    /// next tick follows right after it.
+    pub(crate) fn account_waker(&self, account: &str) -> Arc<tokio::sync::Notify> {
+        self.account_wakers
+            .lock()
+            .map(|mut wakers| wakers.entry(account.to_owned()).or_default().clone())
+            .unwrap_or_default()
+    }
+    /// Run the account's next tick now instead of at its scheduled interval.
+    pub(crate) fn wake_account(&self, account: &str) {
+        self.account_waker(account).notify_one();
     }
     async fn tick(self: &Arc<Self>, account: &str) -> Result<u64> {
         self.session_request(account, "polling", |fence| {

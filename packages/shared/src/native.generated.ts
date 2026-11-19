@@ -1378,13 +1378,26 @@ relation: string, classification?: PeerClassification,
  */
 privacy?: NativeContactPrivacySettings,
 /**
- * Version to supply when editing the current relationship settings.
+ * Version to send as `expectedVersion` when changing this contact's privacy
+ * or remark. It changes when the privacy or the relationship changes.
  */
 privacyVersion?: string,
 /**
  * True while an accepted relationship edit is awaiting contact sync.
  */
-privacyPending?: boolean, };
+privacyPending?: boolean,
+/**
+ * True while the remark is being fetched from WeChat after it changed, from
+ * this account or another device. Edits are still accepted meanwhile.
+ */
+remarkPending?: boolean,
+/**
+ * Why a friend has no `privacy` or `privacyVersion`, so it can't be edited yet:
+ * `contact_privacy_unresolved` (refresh the contact),
+ * `ordinary_contact_required` (not supported for this contact),
+ * `profile_identity_unavailable` or `contact_flags_unresolved`.
+ */
+privacyUnavailable?: string, };
 export type NativeGroup = {
 /**
  * Group ID, ending with `@chatroom`. It is the same as `roomId`.
@@ -1549,22 +1562,19 @@ hideMyPosts: boolean,
  * Hide this person's Moments posts from this account.
  */
 hideTheirPosts: boolean, };
-export type NativeContactPrivacy = {
-/**
- * Current settings for this account's relationship.
- */
-privacy: NativeContactPrivacySettings,
-/**
- * Account/contact-bound version required when saving a change.
- */
-version: string, };
 export type NativeContactUpdate = {
 /**
- * Desired settings; unrelated contact flags are preserved.
+ * Desired relationship settings; unrelated contact flags are preserved.
+ * Send either `privacy` or `remark` in one request.
  */
-privacy: NativeContactPrivacySettings,
+privacy?: NativeContactPrivacySettings,
 /**
- * Version returned by the privacy read on this account.
+ * New personal remark: a string sets it, `null` clears it, and omitting
+ * it keeps the current remark. Outer whitespace is removed.
+ */
+remark?: string | null,
+/**
+ * Version from the contact's `privacyVersion` on this account.
  */
 expectedVersion: string, };
 export type NativeContactRequestAccept = {

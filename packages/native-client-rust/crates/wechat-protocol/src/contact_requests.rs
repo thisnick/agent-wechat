@@ -177,6 +177,65 @@ pub fn remove_contact_request(username: &str) -> Result<ContactRpc> {
         body: p::bytes(1, &p::message(&[p::uint(1, 1), p::bytes(2, &item)])?),
     })
 }
+/// Longest personal remark accepted for submission, in UTF-8 bytes.
+pub const MAX_CONTACT_REMARK_BYTES: usize = 256;
+/// Build the official personal-remark write for an existing ordinary contact:
+/// operation-log opcode 2 carrying the contact's complete current `ModContact`
+/// with only the remark (field 10) replaced and its phonetic fields (11, 12)
+/// sent empty. Every other field, including the flags, is copied byte for byte,
+/// so `record` must come from a fresh exact lookup. An empty remark clears it.
+pub fn contact_remark_request(record: &ContactRecord, remark: &str) -> Result<ContactRpc> {
+    ordinary_identity(&record.username)?;
+    ensure!(!record.username.contains('@'), "ordinary_contact_required");
+    bounded(remark, MAX_CONTACT_REMARK_BYTES, true)?;
+    ensure!(remark.trim() == remark, "invalid_contact_input");
+    ensure!(
+        wire::decode_contact_record(&record.raw)?.username == record.username,
+        "contact_identity_mismatch"
+    );
+    let fields = p::decode(&record.raw)?;
+    for number in 1..=14 {
+        ensure!(
+            p::optional(&fields, number)?.is_some(),
+            "contact_snapshot_incomplete"
+        );
+    }
+    ensure!(
+        p::scalar(&fields, 7)? == u64::from(u32::MAX)
+            && !controlled_contact_fields(&record.raw)?.contains(&8),
+        "contact_flags_unresolved"
+    );
+    let mut payload = Vec::new();
+    let mut at = 0;
+    while at < record.raw.len() {
+        let start = at;
+        let tag = p::read_varint(&record.raw, &mut at)?;
+        match tag & 7 {
+            0 => {
+                p::read_varint(&record.raw, &mut at)?;
+            }
+            1 => at += 8,
+            2 => {
+                let length = usize::try_from(p::read_varint(&record.raw, &mut at)?)?;
+                at += length;
+            }
+            5 => at += 4,
+            _ => bail!("invalid_contact_snapshot"),
+        }
+        ensure!(at <= record.raw.len(), "invalid_contact_snapshot");
+        match tag >> 3 {
+            10 => payload.extend(p::bytes(10, &p::bytes(1, remark.as_bytes()))),
+            11 | 12 => payload.extend(p::bytes((tag >> 3) as u32, &p::bytes(1, b""))),
+            _ => payload.extend_from_slice(&record.raw[start..at]),
+        }
+    }
+    let item = p::message(&[p::uint(1, 2), p::bytes(2, &p::buffer(&payload))])?;
+    Ok(ContactRpc {
+        cgi: 681,
+        path: "/cgi-bin/micromsg-bin/oplog".into(),
+        body: p::bytes(1, &p::message(&[p::uint(1, 1), p::bytes(2, &item)])?),
+    })
+}
 /// Decode one verification reply; rejection is a verified submission, never a retry hint.
 pub fn decode_contact_request(reply: &[u8]) -> Result<ContactRequestReply> {
     let service_code = p::base_code(&p::decode(reply)?)?;
@@ -462,5 +521,125 @@ mod tests {
         altered.content =
             br#"<!DOCTYPE msg [<!ENTITY x SYSTEM "file:///etc/passwd">]><msg/>"#.to_vec();
         assert!(decode_friend_message(&altered, "self").is_err());
+    }
+}
+
+#[cfg(test)]
+mod remark_tests {
+    use super::*;
+
+    /// A fresh synthetic `ModContact` with required fields 1-14, full flag mask,
+    /// an unrelated field and a remark-controlling field 89.
+    fn record(remark: &str) -> ContactRecord {
+        let mut fields = vec![p::bytes(1, &p::bytes(1, b"peer"))];
+        fields.push(p::bytes(2, &p::bytes(1, b"Peer")));
+        fields.push(p::bytes(3, &p::bytes(1, b"P")));
+        fields.push(p::bytes(4, &p::bytes(1, b"peer")));
+        fields.push(p::uint(5, 0));
+        fields.push(p::bytes(6, &p::buffer(b"")));
+        fields.push(p::uint(7, u64::from(u32::MAX)));
+        fields.push(p::uint(8, 0x803));
+        fields.push(p::uint(9, 0));
+        fields.push(p::bytes(10, &p::bytes(1, remark.as_bytes())));
+        fields.push(p::bytes(11, &p::bytes(1, b"old")));
+        fields.push(p::bytes(12, &p::bytes(1, b"old")));
+        fields.push(p::uint(13, 0));
+        fields.push(p::uint(14, 0));
+        fields.push(p::bytes(123, b"preserve unknown"));
+        let control = p::message(&[
+            p::uint(1, 1),
+            p::uint(2, 12),
+            p::uint(3, 3),
+            p::bytes(4, &p::uint(1, 10)),
+            p::bytes(4, &p::uint(1, 11)),
+            p::bytes(4, &p::uint(1, 12)),
+        ])
+        .unwrap();
+        fields.push(p::bytes(
+            89,
+            &p::message(&[p::uint(1, 1), p::bytes(2, &control)]).unwrap(),
+        ));
+        let raw = p::message(&fields).unwrap();
+        wire::decode_contact_record(&raw).unwrap()
+    }
+    fn payload(rpc: &ContactRpc) -> Vec<p::Field> {
+        let outer = p::decode(&rpc.body).unwrap();
+        let list = p::decode(p::data(&outer, 1).unwrap()).unwrap();
+        assert_eq!(p::scalar(&list, 1).unwrap(), 1);
+        let item = p::decode(p::data(&list, 2).unwrap()).unwrap();
+        assert_eq!(p::scalar(&item, 1).unwrap(), 2, "operation-log opcode 2");
+        let buffer = p::decode(p::data(&item, 2).unwrap()).unwrap();
+        p::decode(p::data(&buffer, 2).unwrap()).unwrap()
+    }
+    fn text(fields: &[p::Field], n: u32) -> Vec<u8> {
+        let nested = p::decode(p::data(fields, n).unwrap()).unwrap();
+        p::optional_data(&nested, 1)
+            .unwrap()
+            .unwrap_or_default()
+            .to_vec()
+    }
+
+    #[test]
+    fn remark_write_replaces_only_remark_fields_and_copies_the_rest() {
+        let old = record("Old name");
+        let rpc = contact_remark_request(&old, "新名字").unwrap();
+        assert_eq!(rpc.cgi, 681);
+        assert_eq!(rpc.path, "/cgi-bin/micromsg-bin/oplog");
+        let fields = payload(&rpc);
+        assert_eq!(text(&fields, 10), "新名字".as_bytes());
+        assert!(text(&fields, 11).is_empty());
+        assert!(text(&fields, 12).is_empty());
+        let before = p::decode(&old.raw).unwrap();
+        for n in [1, 2, 3, 4, 6, 89, 123] {
+            assert_eq!(
+                p::optional_data(&fields, n).unwrap(),
+                p::optional_data(&before, n).unwrap(),
+                "field {n} must be copied unchanged"
+            );
+        }
+        for n in [5, 7, 8, 9, 13, 14] {
+            assert_eq!(
+                p::scalar(&fields, n).unwrap(),
+                p::scalar(&before, n).unwrap(),
+                "field {n} must be copied unchanged"
+            );
+        }
+        let numbers = |f: &[p::Field]| f.iter().map(|f| f.number).collect::<Vec<_>>();
+        assert_eq!(
+            numbers(&fields),
+            numbers(&before),
+            "field order is preserved"
+        );
+    }
+
+    #[test]
+    fn an_empty_remark_clears_it() {
+        let fields = payload(&contact_remark_request(&record("Old name"), "").unwrap());
+        assert!(text(&fields, 10).is_empty());
+    }
+
+    #[test]
+    fn remark_writes_reject_unsupported_targets_and_input() {
+        let ok = record("x");
+        for bad in [
+            " padded",
+            "line\nbreak",
+            &"x".repeat(MAX_CONTACT_REMARK_BYTES + 1),
+        ] {
+            assert!(contact_remark_request(&ok, bad).is_err(), "{bad:?}");
+        }
+        let mut group = ok.clone();
+        group.username = "room@chatroom".into();
+        assert!(contact_remark_request(&group, "x").is_err());
+        // A partial record is not a complete snapshot to copy.
+        let partial = wire::decode_contact_record(
+            &p::message(&[
+                p::bytes(1, &p::bytes(1, b"peer")),
+                p::uint(7, u64::from(u32::MAX)),
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(contact_remark_request(&partial, "x").is_err());
     }
 }

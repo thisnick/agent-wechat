@@ -648,7 +648,7 @@ test('pack reads stay separate from membership, acquisition and sticker sending'
   assert.throws(()=>client.stickerPacks('a',{membership:'added',cursor:'catalog-only'}),/cursor/);
 });
 
-test('contact privacy uses an independent versioned resource and preserves initial request selections', async () => {
+test('contact privacy updates and request selections preserve initial request selections', async () => {
   const privacy={chatsOnly:true,hideMyPosts:false,hideTheirPosts:true};
   const calls=[];
   const client=new NativeWeChatClient({...options,fetch:async(url,init)=>{
@@ -656,22 +656,35 @@ test('contact privacy uses an independent versioned resource and preserves initi
     const method=init.method??'GET';
     const body=init.body?JSON.parse(init.body):null;
     calls.push({path,method,body,key:init.headers.get('Idempotency-Key')});
-    if(method==='GET')return Response.json({privacy,version:'current'});
     const action=method==='PATCH'?'update_privacy':path.endsWith('/accept')?'accept_request':'send_request';
     return Response.json({id:'op',accountId:'a',kind:'contact_mutation',state:'queued',result:{action}});
   }});
-  assert.deepEqual(await client.contactPrivacy('a','peer/exact'),{privacy,version:'current'});
   await client.updateContact('a','peer/exact',{privacy,expectedVersion:'current'},'privacy-key');
   await client.sendContactRequest('a',{recipientRef:'opaque',message:'Hello',privacy},'send-key');
   await client.acceptContactRequest('a','request',{expectedVersion:'request-version',privacy},'accept-key');
   await client.acceptContactRequest('a','request','old-version','old-key');
-  assert.deepEqual(calls.map(c=>c.method),['GET','PATCH','POST','POST','POST']);
-  assert.equal(calls[0].path,'/v1/accounts/a/contacts/peer%2Fexact/privacy');
-  assert.deepEqual(calls[1].body,{privacy,expectedVersion:'current'});
-  assert.deepEqual(calls[2].body,{recipientRef:'opaque',message:'Hello',privacy});
-  assert.deepEqual(calls[3].body,{expectedVersion:'request-version',privacy});
-  assert.deepEqual(calls[4].body,{expectedVersion:'old-version'});
-  assert.deepEqual(calls.map(c=>c.key),[null,'privacy-key','send-key','accept-key','old-key']);
+  assert.deepEqual(calls.map(c=>c.method),['PATCH','POST','POST','POST']);
+  assert.equal(calls[0].path,'/v1/accounts/a/contacts/peer%2Fexact');
+  assert.deepEqual(calls[0].body,{privacy,expectedVersion:'current'});
+  assert.deepEqual(calls[1].body,{recipientRef:'opaque',message:'Hello',privacy});
+  assert.deepEqual(calls[2].body,{expectedVersion:'request-version',privacy});
+  assert.deepEqual(calls[3].body,{expectedVersion:'old-version'});
+  assert.deepEqual(calls.map(c=>c.key),['privacy-key','send-key','accept-key','old-key']);
+});
+test('remark updates use the contact PATCH and expect a remark operation', async () => {
+  const calls=[];
+  const client=new NativeWeChatClient({...options,fetch:async(url,init)=>{
+    calls.push({path:new URL(url).pathname,method:init.method,body:JSON.parse(init.body),key:init.headers.get('Idempotency-Key')});
+    return Response.json({id:'op',accountId:'a',kind:'contact_mutation',state:'queued',result:{action:'update_remark'}});
+  }});
+  await client.updateContact('a','peer',{remark:'Monster',expectedVersion:'v'},'remark-key');
+  await client.updateContact('a','peer',{remark:null,expectedVersion:'v'},'clear-key');
+  assert.deepEqual(calls.map(c=>[c.method,c.path,c.body,c.key]),[
+    ['PATCH','/v1/accounts/a/contacts/peer',{remark:'Monster',expectedVersion:'v'},'remark-key'],
+    ['PATCH','/v1/accounts/a/contacts/peer',{remark:null,expectedVersion:'v'},'clear-key'],
+  ]);
+  // A privacy update must not accept a remark operation.
+  await assert.rejects(client.updateContact('a','peer',{privacy:{chatsOnly:false,hideMyPosts:false,hideTheirPosts:false},expectedVersion:'v'},'privacy-key'),/identity is invalid/);
 });
 test('privacy mutations reject foreign operations and never retry a lost reply', async () => {
   const input={privacy:{chatsOnly:false,hideMyPosts:true,hideTheirPosts:false},expectedVersion:'v'};

@@ -89,6 +89,10 @@ pub enum Request {
         session: Session,
         request: wechat_protocol::GroupRpc,
     },
+    ContactMutation {
+        session: Session,
+        request: wechat_protocol::ContactRpc,
+    },
     GroupDetail {
         session: Session,
         room: String,
