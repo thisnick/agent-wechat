@@ -1075,51 +1075,24 @@ impl Store {
                 rows.collect::<rusqlite::Result<Vec<_>>>()?
             };
             let skipped_controls = {
-                let mut forms: BTreeMap<String, (SkippedControlCount, std::collections::BTreeSet<String>)> =
-                    BTreeMap::new();
+                // Receipts end in ":{index}", so trimming digits leaves the batch.
                 let mut query = db.prepare(
-                    "SELECT key,CAST(value AS TEXT) FROM runtime WHERE key>='skipped-control:' AND key<'skipped-control;'",
+                    "SELECT json_extract(v,'$.commandId'),json_extract(v,'$.messageType'),json_extract(v,'$.classification'),CASE WHEN json_array_length(json_extract(v,'$.operationIds'))>0 THEN json_extract(v,'$.operationIds') END,json_extract(v,'$.systemKind'),json_extract(v,'$.peerKind'),json_extract(v,'$.reason'),count(*),count(DISTINCT rtrim(key,'0123456789')) FROM (SELECT key,CAST(value AS TEXT) AS v FROM runtime WHERE key>='skipped-control:' AND key<'skipped-control;') WHERE json_valid(v) GROUP BY 1,2,3,4,5,6,7 ORDER BY 8 DESC LIMIT 50",
                 )?;
-                let rows = query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-                for row in rows {
-                    let (key, value) = row?;
-                    let Ok(label) = serde_json::from_str::<serde_json::Value>(&value) else {
-                        continue;
-                    };
-                    let text = |name: &str| label[name].as_str().map(str::to_owned);
-                    let form = SkippedControlCount {
-                        command_id: label["commandId"].as_i64(),
-                        message_type: label["messageType"].as_i64(),
-                        classification: text("classification"),
-                        operation_ids: label
-                            .get("operationIds")
-                            .filter(|ids| ids.as_array().is_some_and(|ids| !ids.is_empty()))
-                            .map(|ids| ids.to_string()),
-                        system_kind: text("systemKind"),
-                        peer_kind: text("peerKind"),
-                        reason: text("reason"),
-                        ..Default::default()
-                    };
-                    let batch = key
-                        .strip_prefix("skipped-control:")
-                        .and_then(|receipt| receipt.rsplit_once(':'))
-                        .map_or(key.clone(), |(batch, _)| batch.to_owned());
-                    let entry = forms
-                        .entry(serde_json::to_string(&form)?)
-                        .or_insert_with(|| (form, Default::default()));
-                    entry.0.commands += 1;
-                    entry.1.insert(batch);
-                }
-                let mut counts: Vec<_> = forms
-                    .into_values()
-                    .map(|(mut form, batches)| {
-                        form.batches = batches.len() as i64;
-                        form
+                let rows = query.query_map([], |r| {
+                    Ok(SkippedControlCount {
+                        command_id: r.get(0)?,
+                        message_type: r.get(1)?,
+                        classification: r.get(2)?,
+                        operation_ids: r.get(3)?,
+                        system_kind: r.get(4)?,
+                        peer_kind: r.get(5)?,
+                        reason: r.get(6)?,
+                        commands: r.get(7)?,
+                        batches: r.get(8)?,
                     })
-                    .collect();
-                counts.sort_by(|a, b| b.commands.cmp(&a.commands));
-                counts.truncate(50);
-                counts
+                })?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
             };
             Ok(StorageUsage {
                 blocked_controls,
