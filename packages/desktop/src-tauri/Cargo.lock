@@ -21,7 +21,7 @@ dependencies = [
 
 [[package]]
 name = "agent-wechat-desktop"
-version = "2.7.1"
+version = "2.8.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5864,7 +5864,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-platform"
-version = "2.7.1"
+version = "2.8.0"
 dependencies = [
  "libc",
  "tempfile",

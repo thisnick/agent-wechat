@@ -1,5 +1,16 @@
 # @agent-wechat/desktop
 
+## 2.8.0
+
+### Patch Changes
+
+- [#558](https://github.com/thisnick/agent-wechat/pull/558) [`75bd2a4`](https://github.com/thisnick/agent-wechat/commit/75bd2a485105f74af8e1386e4290e9aa05f23481) Thanks [@Schatt3n](https://github.com/Schatt3n)! - Let message and contact reads use the account lock between chunks of incoming message replay. Interrupted replay resumes from the saved batch, and the profile checkpoint still waits for pending work to finish.
+
+  A received recall hides the original message during catch-up. The recall event is sent when its command is replayed.
+
+- Updated dependencies [[`2b26e58`](https://github.com/thisnick/agent-wechat/commit/2b26e582f77af1f95fd3868bf449f5c4acaffd85), [`24ce64b`](https://github.com/thisnick/agent-wechat/commit/24ce64b39f00b681084fea8a949741480ec07054), [`eabe990`](https://github.com/thisnick/agent-wechat/commit/eabe990b84a677d7c2faab7aa6aac30a710b8ec9)]:
+  - @agent-wechat/client-ui@0.6.0
+
 ## 2.7.1
 
 ## 2.7.0

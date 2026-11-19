@@ -1,5 +1,20 @@
 # @agent-wechat/client-ui
 
+## 0.6.0
+
+### Minor Changes
+
+- [#602](https://github.com/thisnick/agent-wechat/pull/602) [`2b26e58`](https://github.com/thisnick/agent-wechat/commit/2b26e582f77af1f95fd3868bf449f5c4acaffd85) Thanks [@thisnick](https://github.com/thisnick)! - Contact cards show and edit your remark for a friend. The card names the contact by the remark, with their nickname and WeChat ID below it. Friend edits now save on their own: privacy right after a change, the remark once you stop typing or leave the field. Several changes in a row save one after another without Save buttons. Each field shows its own state beside its heading (saving, syncing with WeChat, saved, not saved with Retry, or not confirmed with Check) instead of a banner at the bottom of the card. The remark and privacy explanations open from info buttons. Editing needs account administrator access.
+
+### Patch Changes
+
+- [#607](https://github.com/thisnick/agent-wechat/pull/607) [`24ce64b`](https://github.com/thisnick/agent-wechat/commit/24ce64b39f00b681084fea8a949741480ec07054) Thanks [@thisnick](https://github.com/thisnick)! - The contact card keeps contact data and remark and privacy saves in TanStack Query. Behavior is unchanged: a reloading contact stays on screen, edits save one after another, and a save whose outcome is unknown is checked before it is retried.
+
+- [#598](https://github.com/thisnick/agent-wechat/pull/598) [`eabe990`](https://github.com/thisnick/agent-wechat/commit/eabe990b84a677d7c2faab7aa6aac30a710b8ec9) Thanks [@thisnick](https://github.com/thisnick)! - Read relationship privacy with contact details and lists using account read access. Open contact cards using those settings, refresh details and privacy together, and preserve unsaved changes when a newer saved version arrives. Privacy edits still require account administrator access.
+
+- Updated dependencies [[`eabe990`](https://github.com/thisnick/agent-wechat/commit/eabe990b84a677d7c2faab7aa6aac30a710b8ec9)]:
+  - @agent-wechat/shared@2.2.0
+
 ## 0.5.0
 
 ### Minor Changes
