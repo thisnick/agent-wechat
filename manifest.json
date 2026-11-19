@@ -1,0 +1,30 @@
+[
+  {
+    "name": "sign-in-waits-for-busy-account",
+    "description": "After a sign-out the app waits for you to sign in; a sign-in refused because the account is busy waits, then opens the chats.",
+    "viewport": "desktop",
+    "seconds": 17.7,
+    "chapters": [
+      {
+        "title": "Signed out",
+        "at": 0.71
+      },
+      {
+        "title": "Sign in",
+        "at": 5.459
+      },
+      {
+        "title": "The account finishes signing in",
+        "at": 10.679
+      }
+    ],
+    "width": 720,
+    "files": {
+      "preview": "sign-in-waits-for-busy-account.gif",
+      "mp4": "sign-in-waits-for-busy-account.mp4",
+      "frames": "sign-in-waits-for-busy-account-frames.png"
+    },
+    "commit": "97908e4a4760c2b737118125ad979d6309122928",
+    "run": "https://github.com/thisnick/agent-wechat/actions/runs/44592366828"
+  }
+]
