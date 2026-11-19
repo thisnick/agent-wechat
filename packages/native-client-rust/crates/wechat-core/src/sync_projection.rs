@@ -540,6 +540,25 @@ impl Core {
         blocked.reason = reason;
         self.skip_unsupported_command(account, command, receipt, origin, &blocked)
     }
+    /// Whether a business-account record has the contact type (0 to 4) the
+    /// business writer requires, from the record or the saved contact row.
+    fn business_contact_type_known(
+        &self,
+        account: &str,
+        username: &str,
+        patch: &ContactProjection,
+    ) -> Result<bool> {
+        let local_type = match patch.fields.get("local_type") {
+            Some(SqlValue::Integer(value)) => value.parse::<i64>().ok(),
+            Some(_) => None,
+            None => match self.profile_reader(account)?.contact(username) {
+                Ok(saved) => saved.local_type,
+                Err(wechat_profile::ProfileError::NotCached) => None,
+                Err(error) => return Err(error.into()),
+            },
+        };
+        Ok(matches!(local_type, Some(0..=4)))
+    }
     fn apply_sync_command_once(
         &self,
         account: &str,
@@ -770,6 +789,21 @@ impl Core {
             };
             if self.store.runtime(account, &fields_applied)?.is_none() {
                 let patch = self.upstream.contact_patch(&contact)?;
+                // The business-account writer needs a contact type of 0 to 4
+                // (from this record, else the saved row). Without one it
+                // refuses on every retry, so skip the record, with its raw
+                // bytes kept, before anything of it is written. The verify
+                // bit it also needs is the one that made this a business
+                // record. Any other refusal still blocks.
+                if crate::business_contacts::business_contact_patch(&contact)?.is_some()
+                    && !self.business_contact_type_known(account, &contact.username, &patch)?
+                {
+                    let mut blocked = command_blocker(command);
+                    blocked.classification = "contact_update";
+                    blocked.reason = "business_contact_unwritable";
+                    return self
+                        .skip_unsupported_command(account, command, receipt, origin, &blocked);
+                }
                 let pin_phase = self.store.runtime(account, &pin_applied)?;
                 let mut applied_pin = pin.is_some() && pin_phase.is_some();
                 let mut pin_changed = pin.is_some() && pin_phase.as_deref() == Some(b"changed");
@@ -800,26 +834,9 @@ impl Core {
                 }
                 if let Some(business) = crate::business_contacts::business_contact_patch(&contact)?
                 {
-                    match wechat_profile::apply_contact_business_patch(
+                    wechat_profile::apply_contact_business_patch(
                         &location, &keys, &patch, &business, &options,
-                    ) {
-                        Ok(_) => {}
-                        // The business-account writer refuses this record:
-                        // the record and the profile row don't meet its
-                        // conditions (contact type 0 to 4 with the business
-                        // verify bit, one consistent identity). Every retry
-                        // fails the same way, so skip it with its raw bytes
-                        // kept.
-                        Err(wechat_profile::ProfileError::InvalidMetadata) => {
-                            let mut blocked = command_blocker(command);
-                            blocked.classification = "contact_update";
-                            blocked.reason = "business_contact_unwritable";
-                            return self.skip_unsupported_command(
-                                account, command, receipt, origin, &blocked,
-                            );
-                        }
-                        Err(error) => return Err(error.into()),
-                    }
+                    )?;
                 } else {
                     wechat_profile::apply_contact_patch(&location, &keys, &patch, &options)?;
                 }
@@ -2583,6 +2600,32 @@ mod encrypted_roundtrip {
                 .open_record("one", key, &store.runtime("one", key).unwrap().unwrap())
                 .unwrap(),
             command.payload
+        );
+        // With a full flag the record carries contact type 1, and the business
+        // writer saves it normally.
+        let complete = SyncCommand {
+            id: 2,
+            payload: p::message(&[
+                p::bytes(1, &p::bytes(1, b"gh_synthetic_business")),
+                p::uint(7, u64::from(u32::MAX)),
+                p::uint(8, 3),
+                p::uint(24, 8),
+            ])
+            .unwrap(),
+        };
+        core.apply_sync_command("one", &complete, "projected:biz-fixture:1", "live")
+            .unwrap();
+        assert!(store
+            .runtime("one", "skipped-control:projected:biz-fixture:1")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            core.profile_reader("one")
+                .unwrap()
+                .contact("gh_synthetic_business")
+                .unwrap()
+                .local_type,
+            Some(1)
         );
     }
 
