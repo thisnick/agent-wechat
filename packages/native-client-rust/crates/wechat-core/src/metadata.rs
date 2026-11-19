@@ -1933,6 +1933,17 @@ mod tests {
             .unwrap()
             .is_some());
         assert!(core.remark_refresh_pending("one", "peer").unwrap());
+        // It stays findable as not applied, with its raw bytes kept.
+        assert!(core
+            .store
+            .runtime("one", "skipped-control:pin-interrupted")
+            .unwrap()
+            .is_some());
+        assert!(core
+            .store
+            .runtime("one", "sync-control:pin-interrupted")
+            .unwrap()
+            .is_some());
         assert_eq!(
             core.group_revision("one", "peer").unwrap().as_deref(),
             Some(b"pin-new-unknown".as_slice())

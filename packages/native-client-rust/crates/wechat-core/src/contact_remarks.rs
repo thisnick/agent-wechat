@@ -11,6 +11,9 @@ use super::*;
 /// Retry delays grow from 30 seconds to an hour; a refresh is dropped after this
 /// many failed attempts. A later change or a manual refresh queues it again.
 const MAX_ATTEMPTS: u8 = 8;
+/// Lookups sent per pass, so a backlog acknowledged at once (for example
+/// after a startup replay) is spread over several ticks.
+const LOOKUPS_PER_PASS: usize = 10;
 
 #[derive(Serialize, Deserialize)]
 struct RemarkRefresh {
@@ -70,7 +73,11 @@ impl Core {
         }
         let now = chrono::Utc::now().timestamp();
         let mut settled = 0;
+        let mut sent = 0;
         for (key, sealed) in self.store.contact_remark_refreshes(account)? {
+            if sent >= LOOKUPS_PER_PASS {
+                break;
+            }
             let mut job: RemarkRefresh =
                 serde_json::from_slice(&self.vault.open_record(account, &key, &sealed)?)?;
             if job.epoch != self.store.runtime(account, "logout-epoch")? {
@@ -82,6 +89,7 @@ impl Core {
                 continue;
             }
             let source = job.source.clone();
+            sent += 1;
             match self.refresh_contact_snapshot(account, &job.contact) {
                 Ok(true) => {
                     self.clear_remark_refresh(account, &key, &source)?;

@@ -499,7 +499,7 @@ impl Core {
         }) {
             return self.skip_unsupported_command(account, command, receipt, origin, blocked);
         }
-        if unreadable_profile_metadata(&error) {
+        if unreadable_profile_metadata(&error) && !self.is_recall(account, command) {
             // The profile row this command updates holds encoded data this
             // build can't parse, so every retry fails the same way.
             let blocked = ProjectionBlocked {
@@ -547,6 +547,39 @@ impl Core {
             .clear_runtime(account, &format!("blocked-control:{receipt}"))?;
         self.store.put_runtime(account, receipt, b"1")?;
         Ok(())
+    }
+    /// Whether this command is a recall. A recall is never skipped: that would
+    /// leave the recalled message visible.
+    fn is_recall(&self, account: &str, command: &SyncCommand) -> bool {
+        command.id == 5
+            && self.account_state(account).is_ok_and(|state| {
+                wechat_protocol::wire::decode_add_message(&command.payload, &state.own_username)
+                    .is_ok_and(|message| {
+                        message_blocker(&message).system_kind == Some("revokemsg")
+                            || !matches!(
+                                crate::recalls::incoming_recall(&message, &state.own_username),
+                                Ok(None)
+                            )
+                    })
+            })
+    }
+    /// Acknowledge a contact record without applying it and look the contact
+    /// up in the background for its current state. Its raw bytes and a skip
+    /// label are kept, like any command this build doesn't apply.
+    fn acknowledge_contact_with_lookup(
+        &self,
+        account: &str,
+        command: &SyncCommand,
+        receipt: &str,
+        origin: &str,
+        username: &str,
+        reason: &'static str,
+    ) -> Result<()> {
+        self.queue_remark_refresh(account, username, receipt)?;
+        let mut blocked = command_blocker(command);
+        blocked.classification = "contact_update";
+        blocked.reason = reason;
+        self.skip_unsupported_command(account, command, receipt, origin, &blocked)
     }
     fn apply_sync_command_once(
         &self,
@@ -730,10 +763,14 @@ impl Core {
                     // record's values may be stale. Don't apply them or hold
                     // the batch: acknowledge it and look the contact up in
                     // the background for its current state.
-                    self.retain_control_raw(account, command, receipt)?;
-                    self.queue_remark_refresh(account, &contact.username, receipt)?;
-                    self.store.put_runtime(account, receipt, b"1")?;
-                    return Ok(());
+                    return self.acknowledge_contact_with_lookup(
+                        account,
+                        command,
+                        receipt,
+                        origin,
+                        &contact.username,
+                        "contact_pin_projection_superseded",
+                    );
                 }
                 self.invalidate_contact_privacy(account, &contact, receipt)?;
             }
@@ -750,11 +787,18 @@ impl Core {
                     // cover, so none of this record is applied. Its uncertain
                     // state stays marked above; an exact lookup supplies the
                     // contact's current values in the background instead of
-                    // holding the batch.
-                    self.retain_control_raw(account, command, receipt)?;
-                    self.queue_remark_refresh(account, &contact.username, receipt)?;
-                    self.store.put_runtime(account, receipt, b"1")?;
-                    return Ok(());
+                    // holding the batch. A group still gets its refresh.
+                    if contact.username.ends_with("@chatroom") {
+                        self.queue_incoming_group(account, &contact, receipt, origin)?;
+                    }
+                    return self.acknowledge_contact_with_lookup(
+                        account,
+                        command,
+                        receipt,
+                        origin,
+                        &contact.username,
+                        "contact_update_control_unreadable",
+                    );
                 }
             };
             let mute = super::metadata::contact_mute_patch(&contact)?;
