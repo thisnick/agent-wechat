@@ -48,6 +48,7 @@ If you delete an attachment's file, fetching that attachment returns `media_not_
 | Duplicate checks for messages and events | 30 days | removed |
 | Raw WeChat replies kept for troubleshooting | 7 days | removed |
 | Attachments never downloaded, except voice notes | 7 days, or while a download is queued | removed; listing the message's media again brings them back |
+| Sticker store previews (pack icons, covers and sticker thumbnails) | a day, or while a download is running | removed; browsing the store again lists new ones |
 
 A request with an unknown outcome (`needs_review`) keeps its full record for 7 days, or until 100 newer ones pile up. After that, sends and media jobs stay `needs_review`, and group and contact changes and recalls become `expired` with the code `review_expired`. Either way it can no longer be repaired automatically. See [Sends and recovery](/how-it-works/sends/#how-long-a-key-works).
 

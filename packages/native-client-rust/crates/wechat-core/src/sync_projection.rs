@@ -588,7 +588,7 @@ impl Core {
                     account,
                     &format!("control-no-local-effect:{receipt}"),
                     "account.control_observed",
-                    &json!({"commandId":5,"messageType":51,"operationIds":[control.operation_id()],"classification":control.classification(),"projection":"no_local_effect","policy":"linux_4_1_13_26","origin":origin}),
+                    &json!({"commandId":5,"messageType":51,"operationIds":control.operation_ids(),"classification":control.classification(),"projection":"no_local_effect","policy":"linux_4_1_13_26","origin":origin}),
                 )?;
                 self.store.put_runtime(account, receipt, b"1")?;
                 return Ok(());
@@ -1770,7 +1770,7 @@ mod encrypted_roundtrip {
     }
 
     #[test]
-    fn known_status_controls_do_not_complete_unknown_controls_or_starve_later_messages() {
+    fn known_status_controls_do_not_complete_unknown_or_mixed_controls_or_starve_later_messages() {
         let temporary = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(&temporary.path().join("data")).unwrap());
         store.create_account("one").unwrap();
@@ -1789,7 +1789,11 @@ mod encrypted_roundtrip {
                 add(51, "synthetic_self", "synthetic_self", br#"<msg><op id="11"><name>HandOffMaster</name><arg><handofflist availablecount="1000" devicevirtualid="synthetic-device" networkstatus="wifi" opcode="4" seq="7"><handoffitem/></handofflist></arg></op></msg>"#, 902, 100),
                 add(51, "synthetic_self", "synthetic_self", br#"<msg><op id="11"><name>HandOffMaster</name><arg><handofflist availablecount="1000" devicevirtualid="synthetic-device" networkstatus="wifi" opcode="5" seq="7"/></arg></op></msg>"#, 908, 100),
                 add(51, "synthetic_self", "synthetic_self", br#"<msg><op id="11"><name>HandOffMaster</name><arg><handofflist availablecount="1000" devicevirtualid="synthetic-device" networkstatus="wifi" opcode="4" seq="7" currenthandoffcount="0"/></arg></op></msg>"#, 909, 100),
+                // No handler for 23, whatever its contents.
                 add(51, "synthetic_self", "peer", br#"<msg><op id="23"><name>packagesUpdated</name><arg>{"op":"update","packageId":1}</arg></op></msg>"#, 903, 100),
+                // Opcode 5 has a handler, so its unregistered sibling doesn't
+                // complete the control.
+                add(51, "synthetic_self", "peer", br#"<msg><op id="24"/><op id="5"/></msg>"#, 911, 100),
                 add(10002, "peer", "synthetic_self", br#"<sysmsg type="dynacfg"/>"#, 904, 100),
                 add(10002, "peer", "synthetic_self", br#"<sysmsg type="functionmsg"><private>sensitive-function-data</private></sysmsg>"#, 906, 100),
                 add(10002, "peer", "synthetic_self", b"\xff\xfe", 907, 100),
@@ -1802,7 +1806,7 @@ mod encrypted_roundtrip {
         let result = core
             .commit_sync_batch("one", batch.clone(), "fixture", "fixture")
             .unwrap();
-        assert_eq!(result["projection"]["projectedCommands"], 4);
+        assert_eq!(result["projection"]["projectedCommands"], 5);
         assert_eq!(result["projection"]["pendingCommands"], 8);
         assert_eq!(store.pending_sync_count("one").unwrap(), 1);
         assert!(store.pending_cursor_projection("one").unwrap());
@@ -1845,7 +1849,7 @@ mod encrypted_roundtrip {
                 .filter(|event| event.kind == "account.control_observed"
                     && event.data["projection"] == "no_local_effect")
                 .count(),
-            3
+            4
         );
         assert!(!events.iter().any(|event| event.kind == "sync.committed"));
         assert!(!serde_json::to_string(&events)
