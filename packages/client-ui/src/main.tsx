@@ -979,8 +979,11 @@ function Login({
             className="continue-button"
             onClick={() => {
               // Retrying a sign-in that ran (even a resumed one) starts a new
-              // one. An error before any attempt only checks again.
-              if (operation) setStarted(true);
+              // one the same way. An error before any attempt only checks again.
+              if (operation) {
+                setStrategy(used);
+                setStarted(true);
+              }
               setAttempt((a) => a + 1);
             }}
           >
