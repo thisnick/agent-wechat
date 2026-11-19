@@ -935,12 +935,15 @@ impl Core {
             };
             let unresolved_mask = partial_mask && !known_partial_mask;
             if !controlled.is_empty() || unresolved_mask {
-                // Its other fields are saved above. Fields with unmapped
-                // version ordering, or an unresolved partial mask, aren't
-                // applied; an exact lookup supplies their current values in
-                // the background instead of holding this batch. Uncertain
-                // notification and pin state stays marked unresolved until a
-                // newer known update, such as that lookup, settles it.
+                // Its other fields are saved above. Controlled fields, or an
+                // unresolved partial mask, aren't applied: the official client
+                // orders them against a stored field version agent-wechat
+                // doesn't map yet. An exact lookup refreshes the record in the
+                // background (a controlled remark included) instead of holding
+                // this batch; a controlled flag keeps its saved value.
+                // Uncertain notification and pin state stays marked
+                // unresolved, keeping notifications suppressed, until a newer
+                // known update settles it.
                 self.queue_remark_refresh(account, &contact.username, receipt)?;
             }
             self.store.put_runtime(account, receipt, b"1")?;

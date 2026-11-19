@@ -300,26 +300,31 @@ pub(crate) fn contact_patch(record: &ContactRecord) -> Result<ContactProjection>
         fields: out,
     })
 }
-/// A contact record without its field controls (field 89), for applying an
-/// exact lookup reply as the service's current value.
-fn without_field_controls(record: &ContactRecord) -> Result<ContactRecord> {
-    let mut raw = Vec::new();
-    for field in p::decode(&record.raw)? {
-        if field.number == 89 {
+/// Personal remark fields that WeChat versions with field controls (field 89).
+pub(crate) const REMARK_FIELDS: [(u32, &str); 3] = [
+    (10, "remark"),
+    (11, "remark_pin_yin_initial"),
+    (12, "remark_quan_pin"),
+];
+/// The controlled remark fields of a contact record, as `contact_patch` would
+/// write them without the control. Only an exact lookup reply may supply these:
+/// it is the service's current value, so no version ordering is needed. Pushed
+/// updates queue such a lookup instead (see `contact_remarks`).
+pub(crate) fn controlled_remark_fields(record: &ContactRecord) -> Result<RawFields> {
+    let controlled = wechat_protocol::controlled_contact_fields(&record.raw)?;
+    let fields = p::decode(&record.raw)?;
+    let mut out = RawFields::new();
+    for (n, name) in REMARK_FIELDS {
+        if !controlled.contains(&n) {
             continue;
         }
-        let tag = |wire: u64| p::varint((u64::from(field.number) << 3) | wire);
-        raw.extend(match &field.value {
-            p::Value::Varint(value) => p::uint(field.number, *value),
-            p::Value::Bytes(bytes) => p::bytes(field.number, bytes),
-            p::Value::Fixed64(bytes) => [tag(1), bytes.to_vec()].concat(),
-            p::Value::Fixed32(bytes) => [tag(5), bytes.to_vec()].concat(),
-        });
+        if let Some(v) = p::optional_data(&fields, n)? {
+            let f = p::decode(v)?;
+            let text = std::str::from_utf8(p::optional_data(&f, 1)?.unwrap_or_default())?;
+            out.insert(name.into(), SqlValue::Text(text.to_string()));
+        }
     }
-    Ok(ContactRecord {
-        raw,
-        ..record.clone()
-    })
+    Ok(out)
 }
 fn contact_catalog_result(
     count: usize,
@@ -574,16 +579,6 @@ impl Core {
         let mut count = 0;
         let mut rejected_slots = 0;
         let mut apply = |record: &ContactRecord, exact_lookup: bool| -> Result<()> {
-            // An exact lookup reply is the service's current value, so no
-            // version ordering is needed: drop its field controls and apply
-            // every field, including a controlled remark or flag.
-            let current;
-            let record = if exact_lookup {
-                current = without_field_controls(record)?;
-                &current
-            } else {
-                record
-            };
             self.invalidate_contact_pinning(account, record, id)?;
             ensure!(
                 !self.contact_pin_superseded(account, record, id)?,
@@ -591,7 +586,10 @@ impl Core {
             );
             self.invalidate_contact_privacy(account, record, id)?;
             self.invalidate_contact_notifications(account, record, id)?;
-            let patch = self.upstream.contact_patch(record)?;
+            let mut patch = self.upstream.contact_patch(record)?;
+            if exact_lookup {
+                patch.fields.extend(controlled_remark_fields(record)?);
+            }
             let pin = contact_pin_patch(record)?;
             // Inspect the previous flag and update ordering before a full flag
             // replacement can erase evidence that pin state transitioned.
@@ -2165,7 +2163,7 @@ mod tests {
         assert_eq!(direct_muted(&core), false);
     }
     #[test]
-    fn a_background_lookup_applies_a_controlled_flag_and_settles_the_mute() {
+    fn a_background_lookup_keeps_a_controlled_flag_and_the_mute_stays_uncertain() {
         let (_temp, mut core) = super::super::groups::tests::fixture();
         // The pushed update controls the flag (field 8), so it is acknowledged
         // without applying the mute and an exact lookup is queued.
@@ -2189,19 +2187,22 @@ mod tests {
                 ])
             }
         }
-        // The lookup reply carries the same control; as the service's current
-        // value it still applies, and the uncertain mute settles.
+        // The lookup reply carries the same control. Without the stored field
+        // versions the official client compares, its flag can't be ordered, so
+        // the saved flag is kept, as the official client does when its stored
+        // version is at least the reply's. The mute stays uncertain, which
+        // keeps notifications suppressed, and the lookup is done.
         Arc::get_mut(&mut Arc::get_mut(&mut core).unwrap().shared)
             .unwrap()
             .upstream = Arc::new(CurrentContact(controlled.payload.clone()));
         assert_eq!(core.refresh_contact_remarks("one", true).unwrap(), 1);
-        assert_eq!(direct_muted(&core), true);
+        assert!(direct_muted(&core).is_null());
         assert!(!core.remark_refresh_pending("one", "peer").unwrap());
         assert!(core
             .store
             .runtime("one", "contact-notifications-unresolved:peer")
             .unwrap()
-            .is_none());
+            .is_some());
     }
     #[test]
     fn missing_flag_baseline_is_not_overwritten_by_an_old_incomplete_mute() {
