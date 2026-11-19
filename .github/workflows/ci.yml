@@ -176,7 +176,7 @@ jobs:
           python3 scripts/ci/apt-reuse.test.py
           python3 scripts/ci/build.test.py
           python3 scripts/release/build.test.py
-          node --test scripts/ci/artifact.test.mjs scripts/ci/claude-review-comment.test.mjs scripts/smoke/media-assertions.test.mjs scripts/release/preflight.test.mjs scripts/release/merge.test.mjs
+          node --test scripts/ci/artifact.test.mjs scripts/ci/claude-review-comment.test.mjs scripts/ci/ui-videos-comment.test.mjs scripts/smoke/media-assertions.test.mjs scripts/release/preflight.test.mjs scripts/release/merge.test.mjs
           node --test scripts/release/image.test.mjs
 
   docs:

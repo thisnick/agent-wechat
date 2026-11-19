@@ -28,7 +28,7 @@ export const viewports = {
 export const FIXED_TIME = "2023-11-14T22:30:00Z";
 
 /** Signs in the account and creates the conversations most scenes show. Returns the identifiers scenes need. */
-async function standardWorld(sim) {
+export async function standardWorld(sim) {
   await sim.addAccount(ACCOUNT);
   await sim.signIn(ACCOUNT);
   await sim.warmAvatars(["sim_mei", "sim_daniel"], ["MC", "DP"]);

@@ -6,6 +6,12 @@ name: UI screenshots
 # not committed and not made in Docker. Upload uses GitHub Actions OIDC: do not set
 # ARGOS_TOKEN, which would take precedence and skip it. Run the scenes locally with
 # `pnpm --filter @agent-wechat/client-ui scenes`; nothing is uploaded outside CI.
+#
+# The same job also records the UI journeys (packages/client-ui/journeys) that a pull
+# request adds or changes, reusing its simulator build and Chromium. The videos job
+# then commits the videos under refs/ui-videos/pr-<number> and keeps one PR comment
+# that shows them (scripts/ci/ui-videos-comment.mjs). Record locally with
+# `pnpm --filter @agent-wechat/client-ui videos <name>`.
 on:
   pull_request:
     paths:
@@ -55,8 +61,25 @@ jobs:
       contents: read
       id-token: write
       pull-requests: read
+    outputs:
+      # The journeys this pull request adds or changes, and whether any was recorded.
+      journeys: ${{ steps.journeys.outputs.names }}
+      recorded: ${{ steps.recorded.outputs.any }}
     steps:
       - uses: actions/checkout@v7
+      - name: Find the journeys this pull request adds or changes
+        id: journeys
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const journey = /^packages\/client-ui\/journeys\/([a-z0-9]+(?:-[a-z0-9]+)*)\.journey\.mjs$/;
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              ...context.repo, pull_number: context.payload.pull_request.number, per_page: 100,
+            });
+            const names = files.filter(file => file.status !== 'removed').map(file => journey.exec(file.filename)?.[1]).filter(Boolean);
+            core.setOutput('names', names.join(' '));
+            core.info(names.length ? `Journeys to record: ${names.join(', ')}` : 'No journey to record.');
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
@@ -101,3 +124,76 @@ jobs:
             packages/client-ui/.scenes/results
           if-no-files-found: ignore
           retention-days: 7
+      # UI videos, only for the journeys this pull request adds or changes.
+      - name: Install FFmpeg
+        # The desktop's pinned static FFmpeg and FFprobe: checksummed downloads in
+        # seconds, where apt takes minutes. The build has no drawtext, so the contact
+        # sheets CI makes have no time stamps.
+        if: ${{ !cancelled() && steps.journeys.outputs.names != '' }}
+        run: node scripts/ci/media-runtime.mjs "$RUNNER_TEMP/media"
+      - name: Record the journeys
+        id: record
+        if: ${{ !cancelled() && steps.journeys.outputs.names != '' }}
+        # A journey that fails or hangs is reported in the PR comment instead of failing the screenshots.
+        continue-on-error: true
+        timeout-minutes: 10
+        # The step above allows only lowercase words joined by hyphens, so splitting is safe.
+        run: pnpm --filter @agent-wechat/client-ui videos $JOURNEYS
+        env:
+          JOURNEYS: ${{ steps.journeys.outputs.names }}
+          WX_DEV_BINARY: ${{ github.workspace }}/packages/native-client-rust/target/debug/wx-dev
+      - name: Check what was recorded
+        id: recorded
+        if: ${{ !cancelled() && steps.journeys.outputs.names != '' }}
+        run: if compgen -G 'packages/client-ui/.videos/out/*.mp4' > /dev/null; then echo "any=true" >> "$GITHUB_OUTPUT"; fi
+      - name: Keep the videos
+        if: ${{ !cancelled() && steps.recorded.outputs.any == 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ui-videos
+          path: packages/client-ui/.videos/out
+          include-hidden-files: true
+          retention-days: 30
+      - name: Keep the journey report
+        if: ${{ !cancelled() && steps.record.outcome == 'failure' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ui-videos-report
+          path: |
+            packages/client-ui/.videos/report
+            packages/client-ui/.videos/results
+            packages/client-ui/.videos/raw
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
+
+  videos:
+    name: UI videos
+    needs: scenes
+    # Branches of this repository only: a fork's token cannot write, and publishing
+    # stores files in this repository. A fork's videos stay in the ui-videos artifact.
+    if: ${{ !cancelled() && needs.scenes.outputs.journeys != '' && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/ci
+      - uses: actions/download-artifact@v8
+        if: needs.scenes.outputs.recorded == 'true'
+        with:
+          name: ui-videos
+          path: ${{ runner.temp }}/ui-videos
+      - name: Publish the videos and update the PR comment
+        uses: actions/github-script@v8
+        env:
+          VIDEOS_DIR: ${{ runner.temp }}/ui-videos
+          JOURNEYS: ${{ needs.scenes.outputs.journeys }}
+        with:
+          script: |
+            const { publish } = await import(`${process.env.GITHUB_WORKSPACE}/scripts/ci/ui-videos-comment.mjs`);
+            await publish({ github, context, core, dir: process.env.VIDEOS_DIR, requested: process.env.JOURNEYS });

@@ -54,6 +54,15 @@ An independent Claude reviewer posts inline comments and one summary comment, wi
 - Fill in the template's "Risk and rollback" section. Say plainly when installing the previous version would not undo the change, for example after a new migration or a changed stored format.
 - When a bug gets past review and turns up later, in a lab test, from a user or in production, add what the reviewer would have needed to know to this guide or to the review instructions.
 
+## Videos of UI changes
+
+Make a video of the client UI only when the user asks for one, or when the task is to build or fix a specific use case in the UI. A video shows the flow over time against the simulator; it does not replace the Argos scenes.
+
+1. Copy `packages/client-ui/journeys/reply-in-chat.journey.mjs` to `journeys/<name>.journey.mjs` and script the use case: what to seed, which screen to open, the clicks and typing, and any simulator events. "Videos of the UI" in `packages/client-ui/README.md` lists the fields and helpers.
+2. Record it with `pnpm --filter @agent-wechat/client-ui videos <name>`. Check the `-frames.png` contact sheet to confirm it shows the use case, and fix the journey until it does. Give the user the MP4 if your environment can send files.
+3. Commit and push the journey. The UI screenshots workflow records it after the scenes, reusing its simulator build, and posts it in a PR comment.
+4. Once the comment shows the video, delete the journey file in a new commit. Journeys are not kept in the repository unless the user asks; the comment keeps working without the file. To refresh the video after later changes, add the journey back the same way.
+
 ## Documentation site
 
 `docs/` is for people setting it up, people using it from the CLI, OpenClaw or their own code, and people who want to know how it works. When a change affects users, update the one page that owns the topic; don't append a paragraph to whichever page is nearest.
