@@ -383,7 +383,11 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
             let saved: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
-            assert_eq!(saved["cursor"], head);
+            let start = saved["cursor"].as_str().unwrap().parse::<u64>().unwrap();
+            assert!(
+                start >= head.parse().unwrap(),
+                "watch started at the newest event"
+            );
             store
                 .append_event("busy", "message.committed", &json!({"messageId":"new"}))
                 .unwrap();

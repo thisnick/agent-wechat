@@ -22,7 +22,7 @@ request CreateAccountRequest.id | string, nullable | Account ID. Omit it and the
 request EventAckRequest | object, rejects unknown fields | Request to record how far a consumer has read the events.
 request EventAckRequest.cursor | string, required | The cursor of the last event the consumer has handled, a decimal string.
 request EventQuery | object, rejects unknown fields | Options for reading the event log or stream.
-request EventQuery.after | string, nullable, default null | Return events after this cursor, a decimal string. Defaults to 0, the start.
+request EventQuery.after | string, nullable, default null | Return events after this cursor, a decimal string. Defaults to 0, which returns `event_cursor_expired` once older events have been dropped; use `newest` to start at the end.
 request EventQuery.limit | integer, nullable, min 0, format uint | Events per JSON page. Defaults to 100. The stream ignores it.
 request EventQuery.newest | boolean, default false | True to start at the end of the log instead of a cursor: a JSON page holds the most recent events, oldest first, and its `nextCursor` is the newest event's cursor; the stream sends only events added after it connects, unless a `Last-Event-ID` header resumes it. Cannot be combined with `after`.
 request GroupMutationKeyQuery | object, rejects unknown fields | Options for finding a group change by its idempotency key.

@@ -900,7 +900,7 @@
         "properties": {
           "after": {
             "default": null,
-            "description": "Return events after this cursor, a decimal string. Defaults to 0, the start.",
+            "description": "Return events after this cursor, a decimal string. Defaults to 0, which returns\n`event_cursor_expired` once older events have been dropped; use `newest` to start at the end.",
             "type": [
               "string",
               "null"

@@ -1119,7 +1119,8 @@ async fn read_state(
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct EventQuery {
-    /// Return events after this cursor, a decimal string. Defaults to 0, the start.
+    /// Return events after this cursor, a decimal string. Defaults to 0, which returns
+    /// `event_cursor_expired` once older events have been dropped; use `newest` to start at the end.
     #[serde(default)]
     after: Option<String>,
     /// Events per JSON page. Defaults to 100. The stream ignores it.
