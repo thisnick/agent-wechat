@@ -163,6 +163,9 @@ pub struct StorageUsage {
     /// batches blocked, by form. Batches blocked by another kind of command,
     /// or last retried before these records existed, aren't listed.
     pub blocked_controls: Vec<BlockedControlCount>,
+    /// Commands this build couldn't apply and skipped as handled in the last
+    /// 30 days, by form. Their raw bytes are kept.
+    pub skipped_controls: Vec<SkippedControlCount>,
     pub retired_keys: i64,
 }
 /// Commands of one form that keep sync batches blocked. Labels only: never a
@@ -179,6 +182,30 @@ pub struct BlockedControlCount {
     /// `group`, `excluded`, `classified` or `ordinary`.
     pub peer_kind: Option<String>,
     /// Why the command is blocked.
+    pub reason: Option<String>,
+    pub commands: i64,
+    pub batches: i64,
+}
+
+/// Commands of one form that were skipped as handled because this build
+/// can't apply them. Labels only: never a peer's identity or the command's
+/// contents.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SkippedControlCount {
+    /// Sync command ID, such as 5 (AddMsg) or 44.
+    pub command_id: Option<i64>,
+    /// AddMsg type, such as 51 (status) or 10002 (system).
+    pub message_type: Option<i64>,
+    /// What kind of command it was, such as `status_notification`.
+    pub classification: Option<String>,
+    /// Status operation IDs, as a JSON array.
+    pub operation_ids: Option<String>,
+    /// System message kind, such as `dynacfg`.
+    pub system_kind: Option<String>,
+    /// `group`, `excluded`, `classified` or `ordinary`.
+    pub peer_kind: Option<String>,
+    /// Why this build can't apply it.
     pub reason: Option<String>,
     pub commands: i64,
     pub batches: i64,
@@ -576,9 +603,10 @@ pub enum RuntimeRetention {
 /// or shortly after. A key naming an unfinished sync batch is always kept.
 pub fn aged_runtime(key: &str) -> RuntimeRetention {
     // Per-command projection receipts and their phase markers.
-    const COMMAND: [&str; 11] = [
+    const COMMAND: [&str; 12] = [
         "projected:",
         "blocked-control:",
+        "skipped-control:",
         // The newest job.updated event of a job, for merging progress.
         "job-event:",
         "apply-origin:",
@@ -591,11 +619,12 @@ pub fn aged_runtime(key: &str) -> RuntimeRetention {
         "friend-attention-stage:projected:",
     ];
     // Once-only event receipts for one message, command, operation or minute.
-    const EVENT: [&str; 29] = [
+    const EVENT: [&str; 30] = [
         "message:",
         "remote-thread-read:",
         "control-observed:",
         "control-no-local-effect:",
+        "control-skipped:",
         "contact:",
         "contact-pin-event:",
         "contact-pin:",
@@ -1043,8 +1072,56 @@ impl Store {
                 })?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()?
             };
+            let skipped_controls = {
+                let mut forms: BTreeMap<String, (SkippedControlCount, std::collections::BTreeSet<String>)> =
+                    BTreeMap::new();
+                let mut query = db.prepare(
+                    "SELECT key,CAST(value AS TEXT) FROM runtime WHERE key>='skipped-control:' AND key<'skipped-control;'",
+                )?;
+                let rows = query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+                for row in rows {
+                    let (key, value) = row?;
+                    let Ok(label) = serde_json::from_str::<serde_json::Value>(&value) else {
+                        continue;
+                    };
+                    let text = |name: &str| label[name].as_str().map(str::to_owned);
+                    let form = SkippedControlCount {
+                        command_id: label["commandId"].as_i64(),
+                        message_type: label["messageType"].as_i64(),
+                        classification: text("classification"),
+                        operation_ids: label
+                            .get("operationIds")
+                            .filter(|ids| ids.as_array().is_some_and(|ids| !ids.is_empty()))
+                            .map(|ids| ids.to_string()),
+                        system_kind: text("systemKind"),
+                        peer_kind: text("peerKind"),
+                        reason: text("reason"),
+                        ..Default::default()
+                    };
+                    let batch = key
+                        .strip_prefix("skipped-control:")
+                        .and_then(|receipt| receipt.rsplit_once(':'))
+                        .map_or(key.clone(), |(batch, _)| batch.to_owned());
+                    let entry = forms
+                        .entry(serde_json::to_string(&form)?)
+                        .or_insert_with(|| (form, Default::default()));
+                    entry.0.commands += 1;
+                    entry.1.insert(batch);
+                }
+                let mut counts: Vec<_> = forms
+                    .into_values()
+                    .map(|(mut form, batches)| {
+                        form.batches = batches.len() as i64;
+                        form
+                    })
+                    .collect();
+                counts.sort_by(|a, b| b.commands.cmp(&a.commands));
+                counts.truncate(50);
+                counts
+            };
             Ok(StorageUsage {
                 blocked_controls,
+                skipped_controls,
                 file_bytes: pragma("page_count")? * page,
                 free_bytes: pragma("freelist_count")? * page,
                 tables,
@@ -1140,6 +1217,58 @@ mod tests {
         assert_eq!(usage.blocked_controls.len(), 1);
         assert_eq!(usage.blocked_controls[0].message_type, Some(51));
         assert_eq!(usage.blocked_controls[0].commands, 1);
+    }
+
+    #[test]
+    fn storage_usage_summarizes_skipped_commands_by_form_without_their_contents() {
+        let (_temp, store) = fixture();
+        for (key, label) in [
+            (
+                "skipped-control:projected:b1:0",
+                r#"{"commandId":5,"messageType":51,"classification":"status_notification","operationIds":[5],"peerKind":"group","reason":"unsupported_sync_control"}"#,
+            ),
+            (
+                "skipped-control:projected:b1:3",
+                r#"{"commandId":5,"messageType":51,"classification":"status_notification","operationIds":[5],"peerKind":"group","reason":"unsupported_sync_control"}"#,
+            ),
+            (
+                "skipped-control:projected:b2:1",
+                r#"{"commandId":5,"messageType":51,"classification":"status_notification","operationIds":[5],"peerKind":"group","reason":"unsupported_sync_control"}"#,
+            ),
+            (
+                "skipped-control:projected:b2:2",
+                r#"{"commandId":44,"messageType":null,"classification":"user_info_ext","operationIds":[],"systemKind":null,"reason":"unsupported_sync_control"}"#,
+            ),
+            ("skipped-control:projected:b3:0", "not json"),
+        ] {
+            store.put_runtime("a", key, label.as_bytes()).unwrap();
+        }
+        let usage = store.storage_usage("a").unwrap();
+        assert_eq!(
+            usage.skipped_controls,
+            vec![
+                SkippedControlCount {
+                    command_id: Some(5),
+                    message_type: Some(51),
+                    classification: Some("status_notification".into()),
+                    operation_ids: Some("[5]".into()),
+                    system_kind: None,
+                    peer_kind: Some("group".into()),
+                    reason: Some("unsupported_sync_control".into()),
+                    commands: 3,
+                    batches: 2,
+                },
+                SkippedControlCount {
+                    command_id: Some(44),
+                    classification: Some("user_info_ext".into()),
+                    reason: Some("unsupported_sync_control".into()),
+                    commands: 1,
+                    batches: 1,
+                    ..Default::default()
+                },
+            ]
+        );
+        assert!(usage.blocked_controls.is_empty());
     }
 
     #[test]
@@ -2474,6 +2603,8 @@ mod tests {
             ("contact-pinning:r:u", Keep),
             ("event:message:id", Remove(RECEIPT_DAYS)),
             ("event:blocked-v2:b", Remove(RECEIPT_DAYS)),
+            ("event:control-skipped:projected:b:1", Remove(RECEIPT_DAYS)),
+            ("skipped-control:projected:b:1", Remove(RECEIPT_DAYS)),
             ("event:profile-recovery-pending", Keep),
             ("event:profile-wal-conversion:x", Keep),
             ("sync-control:projected:b:1", Keep),

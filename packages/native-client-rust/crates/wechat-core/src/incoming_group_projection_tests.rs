@@ -103,8 +103,10 @@ impl crate::upstream::Upstream for IdleHeartbeat {
 #[tokio::test]
 async fn group_refresh_projection_attempts_do_not_scale_with_unrelated_backlog() {
     for contact_stream in [false, true] {
-        // Include a backlog larger than pending_sync's 100-batch page. Unknown
-        // commands also share the source batch, so batch-level retry is caught.
+        // Include a backlog larger than pending_sync's 100-batch page. Its
+        // unknown commands were never attempted, so any batch-level retry
+        // would show in the attempt count. The source batch's unknown
+        // neighbors are skipped as handled when it is first projected.
         for backlog in [0, 128] {
             let (_temp, core) = fixture();
             for index in 0..backlog {
@@ -123,7 +125,8 @@ async fn group_refresh_projection_attempts_do_not_scale_with_unrelated_backlog()
 
             assert_eq!(attempts(&core), 1, "only the refreshed command may be attempted; backlog={backlog}, contact_stream={contact_stream}");
             assert!(core.store.runtime("one", &source).unwrap().is_some());
-            assert_eq!(core.store.pending_sync_count("one").unwrap(), backlog + 1);
+            // The source batch finishes once its refreshed command applies.
+            assert_eq!(core.store.pending_sync_count("one").unwrap(), backlog);
             assert!(core.store.pending_sync("one").unwrap().is_empty());
             assert!(core.store.pending_contact_sync("one").unwrap().is_empty());
             assert_eq!(
@@ -133,9 +136,9 @@ async fn group_refresh_projection_attempts_do_not_scale_with_unrelated_backlog()
             for index in 0..7 {
                 assert!(core
                     .store
-                    .runtime("one", &format!("projected:source:{index}"))
+                    .runtime("one", &format!("skipped-control:projected:source:{index}"))
                     .unwrap()
-                    .is_none());
+                    .is_some());
             }
             core.projection_command_attempts.store(0, Ordering::Relaxed);
             core.tick("one").await.unwrap();
@@ -169,7 +172,8 @@ async fn heartbeat_polling_retries_only_the_refreshed_source_command() {
     core.tick("one").await.unwrap();
     assert_eq!(attempts(&core), 1);
     assert!(core.store.runtime("one", &source).unwrap().is_some());
-    assert_eq!(core.store.pending_sync_count("one").unwrap(), 129);
+    // The source batch finished; the never-attempted backlog stays blocked.
+    assert_eq!(core.store.pending_sync_count("one").unwrap(), 128);
     assert!(core.store.pending_sync("one").unwrap().is_empty());
     core.projection_command_attempts.store(0, Ordering::Relaxed);
     core.tick("one").await.unwrap();

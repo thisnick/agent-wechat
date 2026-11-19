@@ -138,11 +138,13 @@ a bot-command feature. `local_send` identifies hub-originated messages, without
 identifying which connected UI or agent initiated the send. The existing
 OpenClaw dispatch gate already requires `incoming` plus `live`.
 
-`status_notification` injects currently unhandled type-51 operation 2 or 11.
-These remain staged with projection diagnostics and block publication of a
-complete official cursor. Later normal messages still commit and become
-readable. Clients should keep such diagnostics separate from the message feed;
-phone read-state synchronization for these controls is not implemented here.
+`status_notification` injects a type-51 operation 2 or 11 in a form the daemon
+has no supported effect for, and `unknown_sync` an unknown sync command. The
+daemon skips both as handled: it keeps their raw bytes, emits
+`account.control_observed` with `projection: "skipped"` and a label of their
+kind, and lets their batches finish. Later normal messages commit as usual.
+Clients should keep such diagnostics separate from the message feed; phone
+read-state synchronization for these controls is not implemented here.
 
 ## Isolation and current limits
 

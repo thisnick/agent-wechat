@@ -469,6 +469,7 @@ impl Core {
                 let _ = core
                     .guarded_storage_step(&id, |core, id| core.finish_media_storage(id))
                     .await;
+                core.retry_blocked_projection(&id).await;
                 core.guarded_plan_compaction(&id).await;
                 core.guarded_retention(&id).await;
             }
@@ -501,6 +502,24 @@ impl Core {
             }
         });
         Ok(())
+    }
+    /// Replay blocked sync batches once per start, through the same recovery
+    /// as `POST /v1/accounts/{account}/recover-projection`. A newer build may
+    /// apply, or skip as handled, commands an earlier one left blocking (see
+    /// `SKIPPED_BLOCKERS`); without this those batches, and the profile's
+    /// saved sync position, would wait for a manual recovery. Recovery takes
+    /// the sync replay and account locks itself and yields between chunks. A
+    /// signed-out account fails here and is tried again on the next start.
+    pub(crate) async fn retry_blocked_projection(self: &Arc<Self>, account: &str) {
+        if self.store.is_read_snapshot()
+            || !self
+                .store
+                .blocked_sync_count(account)
+                .is_ok_and(|blocked| blocked > 0)
+        {
+            return;
+        }
+        let _ = self.recover_projection_online(account).await;
     }
     /// One blocking storage step under the account's mutation guard. `None`
     /// when the step failed; the next start tries again.

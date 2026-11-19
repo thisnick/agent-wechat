@@ -329,7 +329,7 @@ mod tests {
             .unwrap()["peer"]
     }
     #[test]
-    fn independent_stream_updates_mute_retains_unknown_and_does_not_replay_stale_fields() {
+    fn independent_stream_updates_mute_skips_unknown_and_does_not_replay_stale_fields() {
         let (_dir, store, core, fence) = fixture();
         assert_eq!(muted(&core), Some(false));
         core.commit_contact_batch("one", batch(1, true, false))
@@ -353,8 +353,17 @@ mod tests {
         core.publish_contact_checkpoint("one", &fence).unwrap();
         assert_eq!(muted(&core), Some(false));
         assert_eq!(core.contact_cursor("one").unwrap(), cursor(2));
-        assert_eq!(core.profile_contact_cursor("one").unwrap(), cursor(1));
-        assert_eq!(store.pending_contact_sync_count("one").unwrap(), 1);
+        // The unknown command is skipped as handled, with its bytes kept
+        // sealed, so the contact cursor moves on.
+        assert_eq!(core.profile_contact_cursor("one").unwrap(), cursor(2));
+        assert_eq!(store.pending_contact_sync_count("one").unwrap(), 0);
+        assert_eq!(
+            store
+                .runtime_prefix("one", "skipped-control:", 10)
+                .unwrap()
+                .len(),
+            1
+        );
         core.commit_contact_batch("one", batch(3, true, false))
             .unwrap();
         store.retry_blocked("one").unwrap();

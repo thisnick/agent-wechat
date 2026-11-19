@@ -27,6 +27,25 @@ struct ProjectionBlocked {
     peer_kind: Option<&'static str>,
     reason: &'static str,
 }
+/// Blocker reasons for commands this build can't apply, where no later local
+/// work will change that: status and system controls with no supported effect
+/// (including session exit, opcode 5), own-account updates (commands 1, 35
+/// and 44), unknown commands, message types the profile writer doesn't
+/// support, unreadable control metadata, and deletion of an existing contact
+/// through an unsupported path. Since 2026-11-19 the owner treats these as
+/// handled instead of holding the batch and the official profile's saved sync
+/// position: `apply_sync_command_with_media` applies every supported part
+/// first, then skips the rest. Blockers that something later resolves still
+/// hold: a group refresh, sticker reconciliation, a superseded pin, and
+/// contact fields with unresolved version ordering, which a newer known
+/// update or a remark lookup settles and which keep notifications suppressed
+/// meanwhile.
+const SKIPPED_BLOCKERS: [&str; 4] = [
+    "unsupported_sync_control",
+    "unsupported_message_projection_type",
+    "invalid_sync_control_metadata",
+    "unsupported_existing_contact_deletion",
+];
 /// Peers the Linux 4.1.13.26 session-entry worker (status opcode 2) returns
 /// for before any unread clear, construction, observer or timer.
 pub(super) const ENTRY_EXCLUDED_PEERS: [&str; 13] = [
@@ -456,6 +475,61 @@ impl Core {
         #[cfg(test)]
         self.projection_command_attempts
             .fetch_add(1, Ordering::Relaxed);
+        let error =
+            match self.apply_sync_command_once(account, command, receipt, origin, download_media) {
+                Ok(()) => return Ok(()),
+                Err(error) => error,
+            };
+        match error
+            .downcast_ref::<ProjectionBlocked>()
+            .filter(|blocked| SKIPPED_BLOCKERS.contains(&blocked.reason))
+        {
+            Some(blocked) => {
+                self.skip_unsupported_command(account, command, receipt, origin, blocked)
+            }
+            None => Err(error),
+        }
+    }
+    /// Treat a command this build can't apply as handled, so its batch
+    /// finishes and the profile's saved sync position can move. Its raw bytes
+    /// stay sealed under `sync-control:` (never aged out), so a later version
+    /// could still apply it. A label of its kind, never its content, is kept
+    /// for `wx store usage` (`skippedControls`) and sent as an event.
+    fn skip_unsupported_command(
+        &self,
+        account: &str,
+        command: &SyncCommand,
+        receipt: &str,
+        origin: &str,
+        blocked: &ProjectionBlocked,
+    ) -> Result<()> {
+        self.retain_control_raw(account, command, receipt)?;
+        let label = serde_json::to_value(blocked)?;
+        self.store.append_event_once(
+            account,
+            &format!("control-skipped:{receipt}"),
+            "account.control_observed",
+            &json!({"control":label,"origin":origin,"projection":"skipped"}),
+        )?;
+        self.store.put_runtime(
+            account,
+            &format!("skipped-control:{receipt}"),
+            &serde_json::to_vec(&label)?,
+        )?;
+        // An earlier version recorded this command as blocking its batch.
+        self.store
+            .clear_runtime(account, &format!("blocked-control:{receipt}"))?;
+        self.store.put_runtime(account, receipt, b"1")?;
+        Ok(())
+    }
+    fn apply_sync_command_once(
+        &self,
+        account: &str,
+        command: &SyncCommand,
+        receipt: &str,
+        origin: &str,
+        download_media: bool,
+    ) -> Result<()> {
         if command.id == 4 {
             // Native DelContact handler 0x6228370 calls 0x786f830. Lookup
             // 0x786e260 returning no Contact jumps to 0x786fe54 without mutation.
@@ -607,23 +681,8 @@ impl Core {
                 return Ok(());
             }
             if ![1, 3, 34, 43, 47, 48, 49, 10000].contains(&message.message_type) {
-                let blocked = message_blocker(&message);
-                if matches!(message.message_type, 51 | 10002) {
-                    self.store.append_event_once(
-                        account,
-                        &format!("control-observed:{receipt}"),
-                        "account.control_observed",
-                        &json!({"control":blocked,"origin":origin,"projection":"blocked"}),
-                    )?;
-                    // The event log keeps only the newest events; this record
-                    // stays while the batch is blocked (`wx store usage`).
-                    self.store.put_runtime(
-                        account,
-                        &format!("blocked-control:{receipt}"),
-                        &serde_json::to_vec(&blocked)?,
-                    )?;
-                }
-                return Err(blocked.into());
+                // Skipped as handled; see `SKIPPED_BLOCKERS`.
+                return Err(message_blocker(&message).into());
             }
             Some(message)
         } else {
@@ -1427,7 +1486,7 @@ mod encrypted_roundtrip {
         }
     }
     #[test]
-    fn retained_locations_recover_into_encrypted_history_without_completing_tracking_controls() {
+    fn retained_locations_recover_into_encrypted_history_and_skip_tracking_controls() {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().join("data");
         let store = Arc::new(Store::open(&root).unwrap());
@@ -1501,8 +1560,14 @@ mod encrypted_roundtrip {
         store.block_sync("one", "location-upgrade").unwrap();
         let before = store.runtime("one", "projected-cursor").unwrap();
         let result = core.recover_projection("one").unwrap();
-        assert_eq!(result["projectedCommands"], 4);
-        assert_eq!(result["pendingCommands"], 2);
+        // The tracking control is skipped as handled. The malformed location
+        // can't be written and still holds the batch.
+        assert_eq!(result["projectedCommands"], 5);
+        assert_eq!(result["pendingCommands"], 1);
+        assert!(store
+            .runtime("one", "skipped-control:projected:location-upgrade:3")
+            .unwrap()
+            .is_some());
         let events = store.events("one", 0, 100).unwrap();
         let committed: Vec<_> = events
             .iter()
@@ -1786,7 +1851,7 @@ mod encrypted_roundtrip {
     }
 
     #[test]
-    fn known_status_controls_do_not_complete_unknown_or_mixed_controls_or_starve_later_messages() {
+    fn unsupported_controls_are_skipped_with_raw_bytes_kept_and_release_the_cursor() {
         let temporary = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(&temporary.path().join("data")).unwrap());
         store.create_account("one").unwrap();
@@ -1807,8 +1872,8 @@ mod encrypted_roundtrip {
                 add(51, "synthetic_self", "synthetic_self", br#"<msg><op id="11"><name>HandOffMaster</name><arg><handofflist availablecount="1000" devicevirtualid="synthetic-device" networkstatus="wifi" opcode="4" seq="7" currenthandoffcount="0"/></arg></op></msg>"#, 909, 100),
                 // No handler for 23, whatever its contents.
                 add(51, "synthetic_self", "peer", br#"<msg><op id="23"><name>packagesUpdated</name><arg>{"op":"update","packageId":1}</arg></op></msg>"#, 903, 100),
-                // Opcode 5 has a handler, so its unregistered sibling doesn't
-                // complete the control.
+                // Opcode 5 has a handler, so this isn't a no-effect control; it
+                // is skipped as handled instead.
                 add(51, "synthetic_self", "peer", br#"<msg><op id="24"/><op id="5"/></msg>"#, 911, 100),
                 add(10002, "peer", "synthetic_self", br#"<sysmsg type="dynacfg"/>"#, 904, 100),
                 add(10002, "peer", "synthetic_self", br#"<sysmsg type="functionmsg"><private>sensitive-function-data</private></sysmsg>"#, 906, 100),
@@ -1818,14 +1883,47 @@ mod encrypted_roundtrip {
             ],
             continuation: false,
         };
-        let committed_before = store.runtime("one", "projected-cursor").unwrap();
         let result = core
             .commit_sync_batch("one", batch.clone(), "fixture", "fixture")
             .unwrap();
-        assert_eq!(result["projection"]["projectedCommands"], 5);
-        assert_eq!(result["projection"]["pendingCommands"], 8);
-        assert_eq!(store.pending_sync_count("one").unwrap(), 1);
-        assert!(store.pending_cursor_projection("one").unwrap());
+        // 4 no-effect controls, 8 skipped as handled, 1 message.
+        assert_eq!(result["projection"]["projectedCommands"], 13);
+        assert_eq!(result["projection"]["pendingCommands"], 0);
+        assert_eq!(store.pending_sync_count("one").unwrap(), 0);
+        let receipts: Vec<String> = store
+            .runtime_prefix("one", "skipped-control:", 100)
+            .unwrap()
+            .into_iter()
+            .map(|(key, _)| key["skipped-control:".len()..].to_owned())
+            .collect();
+        let mut skipped: Vec<usize> = receipts
+            .iter()
+            .map(|receipt| receipt.rsplit_once(':').unwrap().1.parse().unwrap())
+            .collect();
+        skipped.sort();
+        assert_eq!(skipped, [2, 3, 4, 5, 7, 8, 9, 10]);
+        for receipt in &receipts {
+            let index: usize = receipt.rsplit_once(':').unwrap().1.parse().unwrap();
+            // The raw command stays sealed, so a later version could apply it.
+            let key = format!("sync-control:{receipt}");
+            let sealed = store.runtime("one", &key).unwrap().unwrap();
+            assert_eq!(
+                *core.vault.open_record("one", &key, &sealed).unwrap(),
+                batch.commands[index].payload
+            );
+            assert!(store.runtime("one", receipt).unwrap().is_some());
+        }
+        let usage = store.storage_usage("one").unwrap();
+        assert_eq!(
+            usage
+                .skipped_controls
+                .iter()
+                .map(|form| form.commands)
+                .sum::<i64>(),
+            8
+        );
+        assert!(usage.skipped_controls.iter().all(|form| form.batches == 1));
+        assert!(usage.blocked_controls.is_empty());
         let later = wechat_protocol::wire::SyncBatch {
             commands: vec![add(
                 1,
@@ -1844,12 +1942,7 @@ mod encrypted_roundtrip {
         assert_eq!(result["projection"]["pendingCommands"], 0);
         assert_eq!(
             core.recover_projection("one").unwrap()["pendingCommands"],
-            8
-        );
-        assert_eq!(store.pending_sync_count("one").unwrap(), 1);
-        assert_eq!(
-            store.runtime("one", "projected-cursor").unwrap(),
-            committed_before
+            0
         );
         let events = store.events("one", 0, 100).unwrap();
         assert_eq!(
@@ -1859,16 +1952,26 @@ mod encrypted_roundtrip {
                 .count(),
             2
         );
-        assert_eq!(
+        let observed = |projection: &str| {
             events
                 .iter()
-                .filter(|event| event.kind == "account.control_observed"
-                    && event.data["projection"] == "no_local_effect")
-                .count(),
-            4
-        );
-        assert!(!events.iter().any(|event| event.kind == "sync.committed"));
+                .filter(|event| {
+                    event.kind == "account.control_observed"
+                        && event.data["projection"] == projection
+                })
+                .count()
+        };
+        assert_eq!(observed("no_local_effect"), 4);
+        assert_eq!(observed("skipped"), 8);
+        assert_eq!(observed("blocked"), 0);
+        assert!(!events
+            .iter()
+            .any(|event| event.kind == "projection.blocked"));
+        // Labels only: never a control's contents.
         assert!(!serde_json::to_string(&events)
+            .unwrap()
+            .contains("sensitive-function-data"));
+        assert!(!serde_json::to_string(&usage)
             .unwrap()
             .contains("sensitive-function-data"));
     }
@@ -2064,7 +2167,7 @@ mod encrypted_roundtrip {
         );
     }
     #[test]
-    fn exit_control_partial_read_is_guarded_once_and_never_completes_the_full_control() {
+    fn exit_control_applies_its_unread_clear_once_then_is_skipped_as_handled() {
         partial_read_fixture(5, "peer", "partial-thread-exit-read", "remote_exit_read");
     }
 
@@ -2076,7 +2179,7 @@ mod encrypted_roundtrip {
     }
 
     #[test]
-    fn old_blocked_batches_keep_only_unapplied_commands_and_still_retry() {
+    fn old_blocked_batches_keep_only_unapplied_commands_and_still_finish() {
         let temporary = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(&temporary.path().join("data")).unwrap());
         store.create_account("one").unwrap();
@@ -2084,7 +2187,8 @@ mod encrypted_roundtrip {
         core.configure_profile_format_key(&[9; 16]).unwrap();
         core.install_login_state("one", &state(), None).unwrap();
         core.ensure_managed_profile("one", &state()).unwrap();
-        // Session exit always stays blocked; the other two were applied.
+        // An earlier version left session exit blocking; the other two were
+        // applied.
         let exit = add(51, "synthetic_self", "peer",
             b"<msg><op id=\"5\"><username>peer</username><name>lastMessage</name><arg><![CDATA[{\"messageSvrId\":\"9\",\"MsgCreateTime\":\"1700000000123\"}]]></arg></op></msg>",
             801, 100);
@@ -2179,19 +2283,183 @@ mod encrypted_roundtrip {
         // The newest 256 message batches stay whole for recall evidence.
         assert_eq!(payloads(&open("recent-blocked")), original);
 
-        // A retry skips the applied commands and blocks on the same one.
+        // A retry skips the applied commands and finishes the exit from the
+        // bytes the rewrite kept, keeping them sealed.
+        store
+            .put_runtime(
+                "one",
+                "blocked-control:projected:old-blocked:2",
+                br#"{"messageType":51,"operationIds":[5]}"#,
+            )
+            .unwrap();
         let result = core.recover_projection("one").unwrap();
-        assert_eq!(result["pendingCommands"], 2);
-        assert_eq!(result["projectedCommands"], 0);
-        assert_eq!(store.pending_sync("one").unwrap().len(), 0);
+        assert_eq!(result["pendingCommands"], 0);
+        assert_eq!(result["projectedCommands"], 2);
+        assert_eq!(store.pending_sync_count("one").unwrap(), 0);
+        let key = "sync-control:projected:old-blocked:2";
+        assert_eq!(
+            *core
+                .vault
+                .open_record("one", key, &store.runtime("one", key).unwrap().unwrap())
+                .unwrap(),
+            exit.payload
+        );
         assert!(store
-            .runtime("one", "projected:old-blocked:2")
+            .runtime("one", "skipped-control:projected:old-blocked:2")
             .unwrap()
-            .is_none());
+            .is_some());
+        // The earlier version's blocker record goes with it.
         assert!(store
             .runtime("one", "blocked-control:projected:old-blocked:2")
             .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn own_account_updates_unknown_commands_and_unsupported_messages_are_skipped_as_handled() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&temporary.path().join("data")).unwrap());
+        store.create_account("one").unwrap();
+        let core = Core::new(store.clone(), None).unwrap();
+        core.configure_profile_format_key(&[9; 16]).unwrap();
+        core.install_login_state("one", &state(), None).unwrap();
+        core.ensure_managed_profile("one", &state()).unwrap();
+        let commands = [
+            SyncCommand {
+                id: 1,
+                payload: b"private-profile-update".to_vec(),
+            },
+            SyncCommand {
+                id: 44,
+                payload: b"private-extended-info".to_vec(),
+            },
+            SyncCommand {
+                id: 9999,
+                payload: vec![8, 1],
+            },
+            // A contact card: the profile writer doesn't support type 42.
+            add(
+                42,
+                "peer",
+                "synthetic_self",
+                br#"<msg username="private-card-user" nickname="private-card-name"/>"#,
+                700,
+                100,
+            ),
+        ];
+        let expected = [
+            (1, "mod_user_info"),
+            (44, "user_info_ext"),
+            (9999, "unknown_native_command"),
+            (5, "unsupported_message_variant"),
+        ];
+        for (index, command) in commands.iter().enumerate() {
+            let receipt = format!("projected:skip-fixture:{index}");
+            core.apply_sync_command("one", command, &receipt, "live")
+                .unwrap();
+            assert_eq!(
+                store.runtime("one", &receipt).unwrap().as_deref(),
+                Some(&b"1"[..])
+            );
+            let label: Value = serde_json::from_slice(
+                &store
+                    .runtime("one", &format!("skipped-control:{receipt}"))
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(label["commandId"], expected[index].0);
+            assert_eq!(label["classification"], expected[index].1);
+            let key = format!("sync-control:{receipt}");
+            assert_eq!(
+                *core
+                    .vault
+                    .open_record("one", &key, &store.runtime("one", &key).unwrap().unwrap())
+                    .unwrap(),
+                command.payload
+            );
+            // Applying it again is a no-op with the same outcome.
+            core.apply_sync_command("one", command, &receipt, "live")
+                .unwrap();
+        }
+        let events = store.events("one", 0, 100).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == "account.control_observed"
+                    && event.data["projection"] == "skipped")
+                .count(),
+            4
+        );
+        assert!(!events.iter().any(|event| event.kind == "message.committed"));
+        let labels = serde_json::to_string(&store.storage_usage("one").unwrap()).unwrap();
+        for text in [serde_json::to_string(&events).unwrap(), labels] {
+            assert!(!text.contains("private"), "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_retries_batches_an_earlier_version_left_blocked() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&temporary.path().join("data")).unwrap());
+        store.create_account("one").unwrap();
+        let core = Core::new(store.clone(), None).unwrap();
+        core.configure_profile_format_key(&[9; 16]).unwrap();
+        core.install_login_state("one", &state(), None).unwrap();
+        core.ensure_managed_profile("one", &state()).unwrap();
+        // Nothing blocked: nothing to retry.
+        core.retry_blocked_projection("one").await;
+        let batch = wechat_protocol::wire::SyncBatch {
+            code: 0,
+            flags: 0,
+            cursor: p::uint(1, 0),
+            commands: vec![
+                add(1, "peer", "synthetic_self", b"already applied", 600, 100),
+                SyncCommand {
+                    id: 9999,
+                    payload: vec![8, 1],
+                },
+            ],
+            continuation: false,
+        };
+        store
+            .stage_sync(
+                "one",
+                "earlier-blocked",
+                &core
+                    .vault
+                    .seal(
+                        "one",
+                        "apply:earlier-blocked",
+                        &serde_json::to_vec(&batch).unwrap(),
+                    )
+                    .unwrap(),
+                &core
+                    .vault
+                    .seal("one", "received-cursor", &batch.cursor)
+                    .unwrap(),
+            )
+            .unwrap();
+        // An earlier version applied the message and blocked on the unknown
+        // command.
+        store
+            .put_runtime("one", "projected:earlier-blocked:0", b"1")
+            .unwrap();
+        store.block_sync("one", "earlier-blocked").unwrap();
+        assert_eq!(store.blocked_sync_count("one").unwrap(), 1);
+        core.retry_blocked_projection("one").await;
+        assert_eq!(store.blocked_sync_count("one").unwrap(), 0);
+        assert_eq!(store.pending_sync_count("one").unwrap(), 0);
+        assert!(store
+            .runtime("one", "skipped-control:projected:earlier-blocked:1")
+            .unwrap()
             .is_some());
+        // The applied message wasn't applied again.
+        assert!(!store
+            .events("one", 0, 100)
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == "message.committed"));
     }
 
     fn partial_read_fixture(
@@ -2263,26 +2531,27 @@ mod encrypted_roundtrip {
                 br#"{"outcome":"needs_review","completeControl":false}"#,
             )
             .unwrap();
-        // Entry (opcode 2) completes for an unclassified peer or group once
-        // its unread clear was applied or found no session, and for a
-        // built-in peer the entry worker ignores; exit never does.
-        let completes = |index: usize| operation == 2 && matches!(index, 0 | 2 | 3);
+        // Entry (opcode 2) completes with no further effect for an
+        // unclassified peer or group once its unread clear was applied or
+        // found no session, and for a built-in peer the entry worker ignores.
+        // Every other entry, and every exit, is skipped as handled once its
+        // unread clear was evaluated.
+        let no_further_effect = |index: usize| operation == 2 && matches!(index, 0 | 2 | 3);
         for (index, command) in commands.iter().enumerate() {
             let receipt = format!("projected:partial-read-fixture:{index}");
-            let outcome = core.apply_sync_command("one", command, &receipt, "live");
-            if completes(index) {
-                outcome.unwrap();
-                assert_eq!(
-                    store.runtime("one", &receipt).unwrap().as_deref(),
-                    Some(&b"1"[..])
-                );
-            } else {
-                let error = outcome.unwrap_err();
-                assert_eq!(
-                    projection_blocker(&error).unwrap()["operationIds"],
-                    json!([operation])
-                );
-                assert!(store.runtime("one", &receipt).unwrap().is_none());
+            core.apply_sync_command("one", command, &receipt, "live")
+                .unwrap();
+            assert_eq!(
+                store.runtime("one", &receipt).unwrap().as_deref(),
+                Some(&b"1"[..])
+            );
+            let skipped = store
+                .runtime("one", &format!("skipped-control:{receipt}"))
+                .unwrap();
+            assert_eq!(skipped.is_some(), !no_further_effect(index), "{index}");
+            if let Some(label) = skipped {
+                let label: Value = serde_json::from_slice(&label).unwrap();
+                assert_eq!(label["operationIds"], json!([operation]));
             }
             let marker = store
                 .runtime("one", &format!("{marker_prefix}:{receipt}"))
@@ -2324,8 +2593,8 @@ mod encrypted_roundtrip {
                 .unwrap(),
             1
         );
-        // Local changes after evaluation must survive recovery of this still
-        // blocked batch, including a previously missing/hidden session.
+        // Local changes after evaluation must survive recovery of this batch,
+        // including a previously missing/hidden session.
         sessions.execute("UPDATE SessionTable SET unread_count=7,last_clear_unread_timestamp=50 WHERE username=?1", [ordinary_peer]).unwrap();
         sessions.execute_batch("
             INSERT INTO SessionUnreadListTable_1(username_id,server_id,local_id,create_time)VALUES(1,10,3,96);
@@ -2359,20 +2628,13 @@ mod encrypted_roundtrip {
         drop(core);
         let core = Core::new(store.clone(), None).unwrap();
         core.configure_profile_format_key(&[9; 16]).unwrap();
-        let projected_before = store.runtime("one", "projected-cursor").unwrap();
-        // `notifymessage` stays blocked: the official client clears its unread
-        // on a separate path this writer does not reproduce.
-        let pending = if operation == 2 { 4 } else { 7 };
+        // Every command has its receipt, so recovery reapplies nothing.
         for _ in 0..2 {
             let result = core.recover_projection("one").unwrap();
-            assert_eq!(result["pendingCommands"], pending);
+            assert_eq!(result["pendingCommands"], 0);
             assert_eq!(result["projectedCommands"], 0);
         }
-        assert_eq!(store.pending_sync_count("one").unwrap(), 1);
-        assert_eq!(
-            store.runtime("one", "projected-cursor").unwrap(),
-            projected_before
-        );
+        assert_eq!(store.pending_sync_count("one").unwrap(), 0);
         assert_eq!(sessions.query_row("SELECT unread_count,last_clear_unread_timestamp FROM SessionTable WHERE username=?1", [ordinary_peer], |row| Ok((row.get::<_,i64>(0)?, row.get::<_,i64>(1)?))).unwrap(), (7, 50));
         for (peer, count) in [
             ("hidden", 4),
@@ -2417,10 +2679,10 @@ mod encrypted_roundtrip {
                 .count(),
             if operation == 2 { 1 } else { 0 }
         );
-        // What blocks the batch outlives the event log, as labels only.
+        // What was skipped outlives the event log, as labels only.
         let record: Value = serde_json::from_slice(
             &store
-                .runtime("one", "blocked-control:projected:partial-read-fixture:5")
+                .runtime("one", "skipped-control:projected:partial-read-fixture:5")
                 .unwrap()
                 .unwrap(),
         )
@@ -2429,15 +2691,16 @@ mod encrypted_roundtrip {
         assert_eq!(record["peerKind"], "classified");
         assert!(!record.to_string().contains("gh_synthetic"));
         let usage = store.storage_usage("one").unwrap();
-        let blocked: i64 = usage
-            .blocked_controls
+        let skipped: i64 = usage
+            .skipped_controls
             .iter()
             .filter(|row| row.message_type == Some(51))
             .map(|row| row.commands)
             .sum();
-        assert_eq!(blocked, pending);
+        assert_eq!(skipped, if operation == 2 { 4 } else { 7 });
+        assert!(usage.blocked_controls.is_empty());
         assert!(usage
-            .blocked_controls
+            .skipped_controls
             .iter()
             .any(|row| row.peer_kind.as_deref() == Some("classified")
                 && row.batches == 1
@@ -2449,12 +2712,13 @@ mod encrypted_roundtrip {
                 .count(),
             0
         );
+        // With nothing left blocking, recovery saves the sync position.
         assert_eq!(
             events
                 .iter()
                 .filter(|event| event.kind == "sync.committed")
                 .count(),
-            0
+            1
         );
     }
     #[test]

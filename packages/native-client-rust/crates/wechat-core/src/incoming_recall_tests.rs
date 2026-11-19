@@ -1007,7 +1007,7 @@ fn out_of_order_recall_suppresses_later_original_without_duplicate_events_or_unr
 }
 
 #[test]
-fn unsupported_controls_remain_sealed_and_block_complete_cursor_after_known_recall() {
+fn unsupported_commands_stay_sealed_and_are_skipped_after_a_known_recall() {
     let (_temporary, store, core) = fixture();
     let batch = wechat_protocol::SyncBatch {
         code: 0,
@@ -1033,17 +1033,24 @@ fn unsupported_controls_remain_sealed_and_block_complete_cursor_after_known_reca
     store
         .stage_sync("one", "recall-batch", &payload, b"received-cursor")
         .unwrap();
-    let before = store.runtime("one", "projected-cursor").unwrap();
     assert_eq!(
         core.recover_projection("one").unwrap()["pendingCommands"],
-        1
+        0
     );
-    assert_eq!(store.pending_sync_count("one").unwrap(), 1);
-    assert_eq!(store.runtime("one", "projected-cursor").unwrap(), before);
+    assert_eq!(store.pending_sync_count("one").unwrap(), 0);
+    // The unknown command is skipped as handled; its bytes stay sealed.
+    let key = "sync-control:projected:recall-batch:1";
     assert_eq!(
-        store.runtime("one", "received-cursor").unwrap().unwrap(),
-        b"received-cursor"
+        *core
+            .vault
+            .open_record("one", key, &store.runtime("one", key).unwrap().unwrap())
+            .unwrap(),
+        batch.commands[1].payload
     );
+    assert!(store
+        .runtime("one", "skipped-control:projected:recall-batch:1")
+        .unwrap()
+        .is_some());
     assert_eq!(store.media_sync_receipts("one").unwrap()[0].1, payload);
     core.recover_projection("one").unwrap();
     assert_eq!(recall_count(&store), 1);
