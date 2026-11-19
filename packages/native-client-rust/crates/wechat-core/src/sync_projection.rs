@@ -38,7 +38,9 @@ struct ProjectionBlocked {
 /// hold their batch either: a group update, a sticker control, a superseded
 /// pin and contact fields with unresolved or unreadable controls are
 /// acknowledged at once, and the group refresh, sticker reconciliation or an
-/// exact contact lookup finishes them in the background. Deleting an existing
+/// exact contact lookup finishes them in the background. A command whose
+/// profile row holds data this build can't parse is skipped too (see
+/// `unreadable_profile_metadata`). Deleting an existing
 /// contact through an unsupported path still holds: skipping it would leave a
 /// deleted contact in the profile for good.
 /// So does a recall (`revokemsg`) in a form this build doesn't accept:
@@ -48,6 +50,16 @@ const SKIPPED_BLOCKERS: [&str; 3] = [
     "unsupported_message_projection_type",
     "invalid_sync_control_metadata",
 ];
+/// Whether applying failed on official-profile data this build can't parse
+/// (`ProfileError::InvalidMetadata`), which fails the same way on every retry.
+fn unreadable_profile_metadata(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<wechat_profile::ProfileError>(),
+            Some(wechat_profile::ProfileError::InvalidMetadata)
+        )
+    })
+}
 /// Peers the Linux 4.1.13.26 session-entry worker (status opcode 2) returns
 /// for before any unread clear, construction, observer or timer.
 pub(super) const ENTRY_EXCLUDED_PEERS: [&str; 13] = [
@@ -482,14 +494,26 @@ impl Core {
                 Ok(()) => return Ok(()),
                 Err(error) => error,
             };
-        match error.downcast_ref::<ProjectionBlocked>().filter(|blocked| {
+        if let Some(blocked) = error.downcast_ref::<ProjectionBlocked>().filter(|blocked| {
             SKIPPED_BLOCKERS.contains(&blocked.reason) && blocked.system_kind != Some("revokemsg")
         }) {
-            Some(blocked) => {
-                self.skip_unsupported_command(account, command, receipt, origin, blocked)
-            }
-            None => Err(error),
+            return self.skip_unsupported_command(account, command, receipt, origin, blocked);
         }
+        if unreadable_profile_metadata(&error) {
+            // The profile row this command updates holds encoded data this
+            // build can't parse, so every retry fails the same way.
+            let blocked = ProjectionBlocked {
+                command_id: command.id,
+                message_type: None,
+                classification: "profile_row_unreadable",
+                operation_ids: vec![],
+                system_kind: None,
+                peer_kind: None,
+                reason: "profile_metadata_unreadable",
+            };
+            return self.skip_unsupported_command(account, command, receipt, origin, &blocked);
+        }
+        Err(error)
     }
     /// Treat a command this build can't apply as handled, so its batch
     /// finishes and the profile's saved sync position can move. Its raw bytes
@@ -2435,6 +2459,22 @@ mod encrypted_roundtrip {
             .runtime("one", "skipped-control:projected:skip-fixture:9")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn only_unparseable_profile_data_counts_as_unreadable() {
+        let unreadable = anyhow::Error::from(wechat_profile::ProfileError::InvalidMetadata);
+        assert!(super::unreadable_profile_metadata(&unreadable));
+        assert!(super::unreadable_profile_metadata(
+            &unreadable.context("while saving a contact")
+        ));
+        for other in [
+            anyhow::Error::from(wechat_profile::ProfileError::Database),
+            anyhow::Error::from(wechat_profile::ProfileError::NotCached),
+            anyhow::anyhow!("invalid_location_metadata"),
+        ] {
+            assert!(!super::unreadable_profile_metadata(&other));
+        }
     }
 
     #[test]
