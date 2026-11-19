@@ -2,6 +2,8 @@
 "@agent-wechat/cli": patch
 ---
 
+**Behavior change for scripts:** without `--after`, event watches and listings no longer start at cursor 0. Pass `--after 0` to keep the old behavior.
+
 `wx events watch`, `wx events --watch` and `wx messages watch` now start from the newest event when you don't pass `--after`. Before, they started at cursor 0, and on an account with more than 10,000 events, which is more than the daemon keeps, they failed immediately with `event_cursor_expired`. A cursor file still takes priority. A new cursor file is now written as soon as the watch connects, so the next run resumes from that point even if no event arrived.
 
 `wx events list` and `wx events` without `--after` now show the most recent events instead of the oldest ones.
