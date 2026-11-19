@@ -1,0 +1,26 @@
+[
+  {
+    "name": "sign-in-with-qr-after-refusal",
+    "description": "WeChat refuses an account's saved sign-in; signing in with a QR code instead keeps the same account and chats.",
+    "viewport": "desktop",
+    "seconds": 30.6,
+    "chapters": [
+      {
+        "title": "The saved sign-in is refused",
+        "at": 0.71
+      },
+      {
+        "title": "Sign in with a QR code",
+        "at": 9.456
+      }
+    ],
+    "width": 720,
+    "files": {
+      "preview": "sign-in-with-qr-after-refusal.gif",
+      "mp4": "sign-in-with-qr-after-refusal.mp4",
+      "frames": "sign-in-with-qr-after-refusal-frames.png"
+    },
+    "commit": "dc474ae850b45e28e63bfd2bc8b74e8b60a1f261",
+    "run": "https://github.com/thisnick/agent-wechat/actions/runs/44548737299"
+  }
+]
