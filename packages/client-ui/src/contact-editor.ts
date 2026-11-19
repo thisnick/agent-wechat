@@ -28,20 +28,24 @@ type EditChange = Extract<ContactChange, { action: EditField }>;
 
 /** The submission's outcome is unknown: only Check (or Retry with the same key) may continue it. */
 class EditUncertain extends Error {
-  constructor(readonly change: EditChange) {
+  readonly change: EditChange;
+  constructor(change: EditChange) {
     super("contact_edit_uncertain");
+    this.change = change;
   }
 }
 /** Another submission's outcome is still unknown; this edit waits and is not sent. */
-class EditBlocked extends Error {
+export class EditBlocked extends Error {
   constructor() {
     super("contact_edit_blocked");
   }
 }
 /** WeChat answered and the change was not applied. */
 class EditFailed extends Error {
-  constructor(readonly operation: NativeOperation) {
+  readonly operation: NativeOperation;
+  constructor(operation: NativeOperation) {
     super("contact_edit_failed");
+    this.operation = operation;
   }
 }
 
@@ -50,6 +54,33 @@ const isEdit = (change: ContactChange | null | undefined): change is EditChange 
 /** A stored submission that hasn't reached a final outcome. */
 export const unsettled = (change: ContactChange | null | undefined): change is EditChange =>
   isEdit(change) && !["succeeded", "failed", "cancelled"].includes(change.operation?.state ?? "");
+/**
+ * The one receipt slot a contact's friend edits share. A submission writes, updates
+ * or clears it only while the slot is free, settled, or already holds its own key, so
+ * an edit queued behind one whose outcome is unknown can't erase that receipt.
+ */
+export function editReceipts(
+  cache: {
+    readState<T>(account: string, id: string): T | undefined;
+    writeState(account: string, id: string, value: unknown): void;
+  },
+  account: string,
+  contactId: string,
+) {
+  const id = `contact-change:privacy:${contactId}`;
+  return {
+    /** A submission of unknown outcome left by an earlier card, if any. */
+    restore(): EditChange | null {
+      const stored = cache.readState<ContactChange>(account, id);
+      return unsettled(stored) ? stored : null;
+    },
+    write(change: EditChange, value: EditChange | null) {
+      const stored = cache.readState<ContactChange>(account, id);
+      if (unsettled(stored) && stored.key !== change.key) throw new EditBlocked();
+      cache.writeState(account, id, value);
+    },
+  };
+}
 /** The card closing or the account changing ended a read; neither is a failed save. */
 const interrupted = (error: unknown) =>
   isCancelledError(error) || (error instanceof DOMException && error.name === "AbortError");
@@ -94,7 +125,7 @@ export function useContactEditor({
   const client = connection.session.client;
   const id = friendId ?? "";
   const key = contactKey(account, id);
-  const receiptKey = `contact-change:privacy:${id}`;
+  const receipts = editReceipts(connection.cache, account, id);
   const denied = useSyncExternalStore(queries.subscribe, () => queries.denied(account));
   const [waiting, setWaiting] = useState(false);
   const read = (signal: AbortSignal) =>
@@ -147,8 +178,7 @@ export function useContactEditor({
 
   // A submission whose outcome is unknown, kept across reopening the card.
   const [uncertain, setUncertain] = useState<EditChange | null>(() => {
-    const restored = connection.cache.readState<ContactChange>(account, receiptKey);
-    return friendId && unsettled(restored) ? restored : null;
+    return friendId ? receipts.restore() : null;
   });
   const [checking, setChecking] = useState(false);
   const [retryOriginal, setRetryOriginal] = useState(false);
@@ -161,12 +191,7 @@ export function useContactEditor({
   const [recovered, setRecovered] = useState<EditField | null>(null);
 
   /** Submit once with the change's key, then follow its operation to an outcome. */
-  /** Write this submission's receipt, or clear it, only while the slot is free or ours. */
-  function writeReceipt(change: EditChange, value: EditChange | null) {
-    const stored = connection.cache.readState<ContactChange>(account, receiptKey);
-    if (unsettled(stored) && stored.key !== change.key) throw new EditBlocked();
-    connection.cache.writeState(account, receiptKey, value);
-  }
+  const writeReceipt = receipts.write;
   async function submitEdit(change: EditChange): Promise<NativeOperation> {
     // One receipt slot per contact: an edit queued behind an unsettled one waits.
     writeReceipt(change, change);
@@ -275,7 +300,9 @@ export function useContactEditor({
           input: { privacy, expectedVersion: snapshot.version },
         };
       });
-      if (operation) await readBack();
+      // WeChat accepted the change; a failed read-back is a read error, shown with
+      // the card's other read errors, not a failed save to retry.
+      if (operation) await readBack().catch(() => undefined);
     },
     onMutate: () => setFlashDone((done) => ({ ...done, privacy: false })),
     onError: (error, edits) => {
@@ -330,7 +357,8 @@ export function useContactEditor({
           throw Error(t("contactsUi.operationMismatch"));
         operation = await settle(change, operation);
       }
-      if (change.action === "privacy") await readBack();
+      // Settled: a failed read-back is a read error, not an unresolved save.
+      if (change.action === "privacy") await readBack().catch(() => undefined);
       else {
         pollBase.current = null;
         setConfirm({ value: change.input.remark, after: reads().data });

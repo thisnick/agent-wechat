@@ -18,7 +18,9 @@ export class ContactQueries {
     defaultOptions: {
       // Snapshots change only through contact events and our own edits, which
       // invalidate them; nothing refetches on focus or on a timer by default.
-      queries: { retry: false, staleTime: Infinity, refetchOnWindowFocus: false, refetchOnReconnect: false },
+      // Snapshots are kept until the session resets the account, as before: a closed
+      // card's snapshot (or one the catalog filled) is never garbage-collected.
+      queries: { retry: false, staleTime: Infinity, gcTime: Infinity, refetchOnWindowFocus: false, refetchOnReconnect: false },
       // Contact edits carry idempotency keys and recover through their receipts.
       mutations: { retry: 0 },
     },
