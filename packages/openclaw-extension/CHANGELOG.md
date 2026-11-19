@@ -1,5 +1,19 @@
 # @agent-wechat/wechat
 
+## 2.8.0
+
+### Minor Changes
+
+- [#602](https://github.com/thisnick/agent-wechat/pull/602) [`62df973`](https://github.com/thisnick/agent-wechat/commit/62df9734eb4fcfaf7b294a933b6d62eab879833a) Thanks [@thisnick](https://github.com/thisnick)! - You can now set or clear your private name for a contact (its remark): `wx contacts set CONTACT_ID --remark "Name"` or `--clear-remark`, or `PATCH contacts/CONTACT_ID` with `{"remark": "Name", "expectedVersion": "…"}` (`null` clears it). The name shows on your phone, and as the contact's `displayName`, a few seconds after WeChat accepts it; until then the contact reports `remarkPending: true`. Change privacy and the remark in separate requests. Friends whose privacy can't be edited yet report why in `privacyUnavailable`. The protocol crate adds `contact_remark_request`.
+
+- [#602](https://github.com/thisnick/agent-wechat/pull/602) [`2bc3672`](https://github.com/thisnick/agent-wechat/commit/2bc3672db6f33bdc059b9a4b8ac7cc271d2b369b) Thanks [@thisnick](https://github.com/thisnick)! - Remove the separate contact privacy read route and `wx contacts privacy get`. Read `privacy` and `privacyVersion` from the contact instead (`wx contacts get`, `GET contacts/{id}`), which now include them. Pass `privacyVersion` as `expectedVersion` when changing privacy.
+
+### Patch Changes
+
+- [#558](https://github.com/thisnick/agent-wechat/pull/558) [`75bd2a4`](https://github.com/thisnick/agent-wechat/commit/75bd2a485105f74af8e1386e4290e9aa05f23481) Thanks [@Schatt3n](https://github.com/Schatt3n)! - Let message and contact reads use the account lock between chunks of incoming message replay. Interrupted replay resumes from the saved batch, and the profile checkpoint still waits for pending work to finish.
+
+  A received recall hides the original message during catch-up. The recall event is sent when its command is replayed.
+
 ## 2.7.1
 
 ### Patch Changes

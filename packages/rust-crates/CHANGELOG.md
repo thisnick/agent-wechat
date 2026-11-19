@@ -1,5 +1,19 @@
 # @agent-wechat/rust-crates
 
+## 2.8.0
+
+### Minor Changes
+
+- [#602](https://github.com/thisnick/agent-wechat/pull/602) [`62df973`](https://github.com/thisnick/agent-wechat/commit/62df9734eb4fcfaf7b294a933b6d62eab879833a) Thanks [@thisnick](https://github.com/thisnick)! - You can now set or clear your private name for a contact (its remark): `wx contacts set CONTACT_ID --remark "Name"` or `--clear-remark`, or `PATCH contacts/CONTACT_ID` with `{"remark": "Name", "expectedVersion": "…"}` (`null` clears it). The name shows on your phone, and as the contact's `displayName`, a few seconds after WeChat accepts it; until then the contact reports `remarkPending: true`. Change privacy and the remark in separate requests. Friends whose privacy can't be edited yet report why in `privacyUnavailable`. The protocol crate adds `contact_remark_request`.
+
+- [#598](https://github.com/thisnick/agent-wechat/pull/598) [`eabe990`](https://github.com/thisnick/agent-wechat/commit/eabe990b84a677d7c2faab7aa6aac30a710b8ec9) Thanks [@thisnick](https://github.com/thisnick)! - Read relationship privacy with contact details and lists using account read access. Open contact cards using those settings, refresh details and privacy together, and preserve unsaved changes when a newer saved version arrives. Privacy edits still require account administrator access.
+
+### Patch Changes
+
+- [#602](https://github.com/thisnick/agent-wechat/pull/602) [`e6b9c42`](https://github.com/thisnick/agent-wechat/commit/e6b9c4261a95bffedcc9a412498fb322905a42ad) Thanks [@thisnick](https://github.com/thisnick)! - A remark change, from this account or another device, is now confirmed within moments instead of at the account's next scheduled sync, which could be up to 30 seconds away. Queueing the remark lookup wakes the account's worker.
+
+- [#602](https://github.com/thisnick/agent-wechat/pull/602) [`57b8e9b`](https://github.com/thisnick/agent-wechat/commit/57b8e9b0f38cd3ef32939ec71a5476e2e610941e) Thanks [@thisnick](https://github.com/thisnick)! - The simulator now accepts contact privacy and remark edits, so a simulated account can change both end to end. Contact edits go through the account's upstream, like group edits.
+
 ## 2.7.1
 
 ### Patch Changes

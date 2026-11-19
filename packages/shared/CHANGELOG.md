@@ -1,5 +1,11 @@
 # @agent-wechat/shared
 
+## 2.2.0
+
+### Minor Changes
+
+- [#598](https://github.com/thisnick/agent-wechat/pull/598) [`eabe990`](https://github.com/thisnick/agent-wechat/commit/eabe990b84a677d7c2faab7aa6aac30a710b8ec9) Thanks [@thisnick](https://github.com/thisnick)! - Read relationship privacy with contact details and lists using account read access. Open contact cards using those settings, refresh details and privacy together, and preserve unsaved changes when a newer saved version arrives. Privacy edits still require account administrator access.
+
 ## 2.1.0
 
 ### Minor Changes
