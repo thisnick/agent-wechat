@@ -1076,12 +1076,11 @@ export const scenes = [
       await expect(dialog.getByRole("button", { name: "Message", exact: true })).toBeVisible();
       await expect(privacyStatus).toHaveText("Saving…");
       await expect(field).toBeEnabled();
-      // Leaving the field saved it at once; the saved remark is trimmed.
-      await expect(remarkStatus).toHaveText("Syncing with WeChat…", { timeout: 15_000 });
+      // Leaving the field saved it at once. The daemon's lookup confirms it right
+      // after (the brief "Syncing with WeChat…" state), and the saved remark is trimmed.
+      await expect(remarkStatus).toHaveText("Saved", { timeout: 30_000 });
       await expect(field).toHaveValue("Mei (book club)");
-      // The daemon's own lookup confirms the remark on a later worker tick.
-      await expect(dialog.getByRole("heading", { name: "Mei (book club)", exact: true })).toBeVisible({ timeout: 30_000 });
-      await expect(remarkStatus).toHaveText("Saved");
+      await expect(dialog.getByRole("heading", { name: "Mei (book club)", exact: true })).toBeVisible();
       await expect(dialog.getByText("Nickname: Mei Chen", { exact: true })).toBeVisible();
       await expect(hideTheirs).toBeChecked();
       await expect(dialog.locator(".contact-change-status")).toHaveCount(0);

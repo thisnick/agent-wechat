@@ -107,7 +107,7 @@ WeChat-ID discovery is verified. The official client advertises phone lookup, bu
 
 Your private name for a contact (WeChat calls it a remark) is shown instead of the name they chose, as `displayName`.
 
-In the app, open the friend's contact card, edit **Remark** and choose **Save remark**. Empty the field to clear it. From the CLI:
+In the app, open the friend's contact card and type in **Remark**. It saves when you stop typing or leave the field, and the heading shows **Saving…**, then **Syncing with WeChat…**, then **Saved**. Empty the field to clear it. From the CLI:
 
 ```bash
 wx contacts set CONTACT_ID --remark "Monster"
@@ -118,7 +118,7 @@ wx contacts set CONTACT_ID --clear-remark
 
 ## Privacy
 
-Use the contact card to choose Chats Only, Hide My Posts and Hide Their Posts. Open it from a contact's Details button, a search result, or a friend request. Initial settings are submitted with Send request or Accept. For an existing friend, choose Save privacy. Remove contact requires confirmation and preserves chat history.
+Use the contact card to choose Chats Only, Hide My Posts and Hide Their Posts. Open it from a contact's Details button, a search result, or a friend request. Initial settings are submitted with Send request or Accept. For an existing friend, changes save on their own; the Privacy heading shows when a change is saving, saved or needs a retry. Remove contact requires confirmation and preserves chat history.
 
 ### Change privacy from the CLI
 

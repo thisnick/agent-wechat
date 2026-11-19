@@ -58,7 +58,11 @@ impl Core {
             account,
             &key,
             &self.vault.seal(account, &key, &serde_json::to_vec(&job)?)?,
-        )
+        )?;
+        // The lookup runs on the account's tick; don't leave it waiting for the
+        // next scheduled one, which can be 30 seconds away.
+        self.wake_account(account);
+        Ok(())
     }
 
     /// Run due remark lookups. Local repair passes `allow_fetch = false` and does
@@ -208,6 +212,7 @@ mod tests {
     #[test]
     fn controlled_remark_updates_queue_one_lookup_that_saves_the_current_remark() {
         let (_temp, mut core) = super::super::groups::tests::fixture();
+        let waker = core.account_waker("one");
         // Two phone edits (A -> B -> A) arrive before the lookup runs. Neither
         // pushed copy is written, the batch is not held, and one lookup is queued.
         for (receipt, remark, version) in [("edit-1", "Name B", 12), ("edit-2", "Name A", 13)] {
@@ -222,6 +227,15 @@ mod tests {
         }
         assert_eq!(saved_remark(&core), None);
         assert_eq!(queued(&core), 1);
+        // Queueing woke the account loop, so the lookup doesn't wait for the next tick.
+        let woken = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(async {
+                tokio::time::timeout(std::time::Duration::from_millis(100), waker.notified()).await
+            });
+        assert!(woken.is_ok());
 
         Arc::get_mut(&mut Arc::get_mut(&mut core).unwrap().shared)
             .unwrap()
