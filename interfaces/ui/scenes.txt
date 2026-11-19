@@ -36,8 +36,10 @@ scene friend-request-review | route /{server}/{account}/contacts/requests, viewp
 scene friend-requests | route /{server}/{account}/contacts/requests, viewports desktop+narrow+compact | Incoming and sent request history with an actionable Contacts badge.
 scene group-chat | route /{server}/{account}/chats/{thread}, viewports desktop | A group conversation where each message names its sender, ending in a photo.
 scene hub-picker | route /servers, viewports desktop+narrow | The screen for choosing which hub to connect to.
+scene login-account-busy | route /{server}/{account}/login, viewports desktop+narrow | Sign-in screen while the hub reports the account busy, waiting to try again instead of showing an error.
 scene login-qr | route /{server}/{account}/login, viewports desktop+narrow | Sign-in screen of an account that is not signed in, showing the QR code to scan.
 scene login-saved-failed | route /{server}/{account}/login, viewports desktop+narrow | Sign-in screen after the saved sign-in failed, offering Try again and a QR code for the same account.
+scene login-signed-out-waits | route /{server}/{account}/chats, viewports desktop+narrow | An account signed out while its chats were open: the sign-in screen waits for a choice instead of signing in on its own.
 scene media-viewer | route /{server}/{account}/chats/{thread}/media/{message}, viewports desktop+narrow | The photo viewer open over a conversation, on the photo Mei sent.
 scene message-highlight | route /{server}/{account}/chats/{thread}/message/{message}, viewports desktop | A conversation opened at one message, which is highlighted.
 scene new-chat | route /{server}/{account}/new-chat, viewports desktop | The dialog for starting a direct conversation from the contact list.

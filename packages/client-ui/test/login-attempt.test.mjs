@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { NativeApiError } from "@agent-wechat/shared";
-import { LoginAttempt } from "../src/login-attempt.ts";
+import { LoginAttempt, openWhenFree, waitForSignIn } from "../src/login-attempt.ts";
 
 function storage(value = null) {
   return {
@@ -186,4 +186,183 @@ test("finishing an older attempt cannot erase the newer saved operation", () => 
   assert.equal(saved.read().operationId, "login-2");
   login.complete("login-2");
   assert.equal(saved.read(), null);
+});
+
+const busy = () => new NativeApiError(409, "operation_in_progress");
+const noWait = async () => {};
+
+test("a sign-in refused by a busy account clears its key instead of replaying it", async () => {
+  const saved = storage();
+  const keys = [];
+  const client = {
+    login: async (_account, _options, key) => {
+      keys.push(key);
+      if (keys.length === 1) throw busy();
+      return operation();
+    },
+  };
+  await assert.rejects(new LoginAttempt(client, "a", saved).open("auto"), /operation_in_progress/);
+  // The hub admitted nothing, so the next attempt may change its options.
+  assert.equal(saved.read(), null);
+  await new LoginAttempt(client, "a", saved).open("qr");
+  assert.notEqual(keys[1], keys[0]);
+  assert.equal(saved.read().strategy, "qr");
+});
+
+test("a busy refusal keeps another window's accepted sign-in", async () => {
+  const saved = storage();
+  const client = {
+    login: async () => {
+      // Another window's request was accepted while this one was in flight.
+      saved.write({ key: "other-window", operationId: "login-9", strategy: "auto" });
+      throw busy();
+    },
+  };
+  await assert.rejects(new LoginAttempt(client, "a", saved).open("auto"), /operation_in_progress/);
+  assert.deepEqual(saved.read(), { key: "other-window", operationId: "login-9", strategy: "auto" });
+});
+
+test("a busy account is retried until it accepts the sign-in", async () => {
+  let refusals = 2;
+  const waits = [];
+  let waiting = 0;
+  const client = {
+    login: async () => {
+      if (refusals-- > 0) throw busy();
+      return operation("starting");
+    },
+  };
+  const opened = await openWhenFree(new LoginAttempt(client, "a", storage()), "auto", {
+    signedIn: async () => false,
+    waiting: () => waiting++,
+    wait: async (milliseconds) => waits.push(milliseconds),
+    delayMs: 1500,
+  });
+  assert.equal(opened.operation.state, "starting");
+  assert.equal(opened.alreadySignedIn, undefined);
+  assert.deepEqual(waits, [1500, 1500]);
+  assert.equal(waiting, 2);
+});
+
+test("a busy account that is already signed in opens without another sign-in", async () => {
+  let submissions = 0;
+  const client = {
+    login: async () => {
+      submissions++;
+      throw busy();
+    },
+  };
+  const opened = await openWhenFree(new LoginAttempt(client, "a", storage()), "auto", {
+    signedIn: async () => true,
+    wait: () => assert.fail("a signed-in account must not wait"),
+  });
+  assert.deepEqual(opened, { alreadySignedIn: true });
+  assert.equal(submissions, 1);
+});
+
+test("a sign-in passes on a busy refusal after its attempts and other errors at once", async () => {
+  let submissions = 0;
+  const client = {
+    login: async () => {
+      submissions++;
+      throw busy();
+    },
+  };
+  await assert.rejects(
+    openWhenFree(new LoginAttempt(client, "a", storage()), "auto", {
+      signedIn: async () => false,
+      wait: noWait,
+      attempts: 3,
+    }),
+    /operation_in_progress/,
+  );
+  assert.equal(submissions, 3);
+  client.login = async () => {
+    submissions++;
+    throw new NativeApiError(409, "auth_required");
+  };
+  await assert.rejects(
+    openWhenFree(new LoginAttempt(client, "a", storage()), "auto", {
+      signedIn: () => assert.fail("only a busy refusal checks the account"),
+      wait: noWait,
+    }),
+    /auth_required/,
+  );
+  assert.equal(submissions, 4);
+});
+
+test("leaving the sign-in screen stops the retries", async () => {
+  const controller = new AbortController();
+  let submissions = 0;
+  const client = {
+    login: async () => {
+      submissions++;
+      throw busy();
+    },
+  };
+  await assert.rejects(
+    openWhenFree(new LoginAttempt(client, "a", storage()), "auto", {
+      signal: controller.signal,
+      signedIn: async () => false,
+      wait: async () => controller.abort(),
+    }),
+    (error) => error.name === "AbortError",
+  );
+  assert.equal(submissions, 1);
+});
+
+test("resuming picks up a running sign-in and never submits one", async () => {
+  const client = {
+    login: () => assert.fail("resume must not start a sign-in"),
+    operation: async () => operation("awaiting_approval"),
+  };
+  const running = new LoginAttempt(client, "a", storage({ key: "k", operationId: "login-1", strategy: "qr" }));
+  assert.equal((await running.resume()).state, "awaiting_approval");
+  assert.equal(running.strategy, "qr");
+  assert.equal(await new LoginAttempt(client, "a", storage()).resume(), null);
+  // A lost submission stays saved for an explicit sign-in to repeat.
+  const lost = storage({ key: "k" });
+  assert.equal(await new LoginAttempt(client, "a", lost).resume(), null);
+  assert.deepEqual(lost.read(), { key: "k" });
+  const ended = storage({ key: "k", operationId: "login-1" });
+  client.operation = async () => operation("failed");
+  assert.equal(await new LoginAttempt(client, "a", ended).resume(), null);
+  assert.equal(ended.read(), null);
+});
+
+test("a waiting sign-in screen notices a sign-in made elsewhere", async () => {
+  const answers = [false, "error", false, true];
+  const waits = [];
+  await waitForSignIn({
+    signal: new AbortController().signal,
+    intervalMs: 3000,
+    wait: async (milliseconds) => waits.push(milliseconds),
+    signedIn: async () => {
+      const answer = answers.shift();
+      if (answer === "error") throw new Error("hub unavailable");
+      return answer;
+    },
+  });
+  // A failed check is tried again rather than ending the wait.
+  assert.deepEqual(waits, [3000, 3000, 3000, 3000]);
+  assert.equal(answers.length, 0);
+});
+
+test("leaving a waiting sign-in screen stops its checks", async () => {
+  const controller = new AbortController();
+  let checks = 0;
+  await assert.rejects(
+    waitForSignIn({
+      signal: controller.signal,
+      wait: async () => {
+        if (checks === 1) controller.abort();
+      },
+      signedIn: async () => {
+        checks++;
+        return false;
+      },
+    }),
+    (error) => error.name === "AbortError",
+  );
+  assert.equal(checks, 1);
 });

@@ -406,6 +406,7 @@
   },
   "main": {
     "acceptedLoadingMessage": "已接收 · 正在加载消息…",
+    "accountBusyTryingAgain": "此账号仍在完成其他工作，稍后将重试…",
     "accountNotOnHub": "该账号不在此 Hub 上。",
     "accounts": "账号",
     "addWechatAccount": "添加微信账号",
@@ -525,6 +526,7 @@
     "sign": "登录",
     "signCouldNotFinish": "无法完成登录",
     "signInFailureDetails": "详细信息：{{details}}",
+    "signInWhenReady": "此应用不会自动重新登录。准备好后，请选择登录方式。",
     "signInWithQrInstead": "改用二维码登录",
     "signNeeded": "需要登录",
     "signWechat": "登录微信",

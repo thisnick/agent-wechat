@@ -76,7 +76,7 @@ import {
   type ViewRoute,
 } from "./routes.ts";
 import { conversationAvailable } from "./route-targets.ts";
-import type { LoginStrategyChoice } from "./login-attempt.ts";
+import { openWhenFree, waitForSignIn, type LoginStrategyChoice, type OpenedLogin } from "./login-attempt.ts";
 import { RouteMessage } from "./route-message.tsx";
 import { MessageActions } from "./message-actions.tsx";
 import { ReplyContext } from "./reply-context.ts";
@@ -530,6 +530,10 @@ function Client({
           key={account.id}
           connection={connection}
           account={account.id}
+          // Only the sign-in page itself starts a sign-in: the person opened it
+          // from the account list or by adding the account. A sign-out while
+          // viewing chats keeps the chats address and waits for a choice.
+          start={intent.name === "login"}
           cancel={() => {
             setSigningIn(null);
             router.up(accountsRoute);
@@ -665,13 +669,24 @@ function Login({
   account,
   signedIn,
   cancel,
+  start,
 }: {
   connection: Connection;
   account: string;
   signedIn: () => Promise<void>;
   cancel: () => void;
+  /**
+   * True when the person chose to sign in (they opened this account's sign-in
+   * page). False when a sign-out brought the screen up: then nothing is sent
+   * until they choose to sign in, since a trusted computer can sign in without
+   * the phone and they may have signed in somewhere else on purpose.
+   */
+  start: boolean;
 }) {
-  const [operation, setOperation] = useState<NativeOperation | null>(null),
+  const [started, setStarted] = useState(start),
+    // A sign-out brought the screen up and nothing is running: wait for a choice.
+    [idle, setIdle] = useState(false),
+    [operation, setOperation] = useState<NativeOperation | null>(null),
     [qr, setQr] = useState(""),
     [error, setError] = useState(""),
     [attempt, setAttempt] = useState(0),
@@ -680,6 +695,8 @@ function Login({
     // keeps its own strategy, and an `auto` attempt may or may not show a QR.
     [used, setUsed] = useState<LoginStrategyChoice>("auto"),
     [qrShown, setQrShown] = useState(false),
+    // The hub said the account is busy; the attempt is retried shortly.
+    [accountBusy, setAccountBusy] = useState(false),
     [clock, setClock] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const operationId = useRef<string | null>(null);
@@ -687,18 +704,60 @@ function Login({
     const controller = new AbortController();
     let url = "";
     const login = connection.loginAttempt(account);
+    const accountSignedIn = async () =>
+      (await connection.session.accounts()).some(
+        (item) => item.id === account && item.authenticated === true,
+      );
     void (async () => {
       try {
         setError("");
         setOperation(null);
         setQr("");
         setQrShown(false);
-        const op = await login.open(strategy);
-        setUsed(login.strategy);
-        if (controller.signal.aborted) {
-          await connection.session.client.cancelOperation(account, op.id);
+        setAccountBusy(false);
+        setIdle(false);
+        // Until the person chooses to sign in, only pick up an attempt that is
+        // already running (for example, after a reload); never start one.
+        const resumed = started ? null : await login.resume();
+        if (!started && !resumed) {
+          if (controller.signal.aborted) return;
+          setIdle(true);
+          // The account may be signed in elsewhere meanwhile; open the chats
+          // then, rather than offering a sign-in it no longer needs.
+          await waitForSignIn({
+            signal: controller.signal,
+            wait: pause,
+            signedIn: accountSignedIn,
+          });
+          if (controller.signal.aborted) return;
+          connection.clearLogout(account);
+          await signedIn();
           return;
         }
+        // A busy account (for example, still running the first sync after a
+        // sign-in that just succeeded) refuses a new sign-in for a few seconds.
+        // Open the chats if it is already signed in; otherwise wait and retry.
+        const opened = resumed
+          ? ({ operation: resumed } as OpenedLogin)
+          : await openWhenFree(login, strategy, {
+              signal: controller.signal,
+              wait: pause,
+              waiting: () => setAccountBusy(true),
+              signedIn: accountSignedIn,
+            });
+        if (controller.signal.aborted) {
+          if (opened.operation)
+            await connection.session.client.cancelOperation(account, opened.operation.id);
+          return;
+        }
+        setAccountBusy(false);
+        if (opened.alreadySignedIn) {
+          connection.clearLogout(account);
+          await signedIn();
+          return;
+        }
+        const op = opened.operation;
+        setUsed(login.strategy);
         operationId.current = op.id;
         let generation = 0;
         while (!controller.signal.aborted) {
@@ -769,7 +828,7 @@ function Login({
           .cancelOperation(account, id)
           .catch(() => {});
     };
-  }, [account, attempt, strategy]);
+  }, [account, attempt, strategy, started]);
   const state = operation?.state;
   const terminal = [
     "failed",
@@ -818,7 +877,9 @@ function Login({
       </button>
       <div className="welcome-heading">
         <h1>
-          {state === "awaiting_approval"
+          {idle
+            ? t("main.signWechat")
+            : state === "awaiting_approval"
             ? t("main.confirmSignWechat")
             : state === "expired"
             ? t("main.qrCodeExpired")
@@ -829,7 +890,11 @@ function Login({
             : t("main.signWechat")}
         </h1>
         <p>
-          {connection.simulator
+          {idle && !error
+            ? t("main.signInWhenReady")
+            : accountBusy && !error
+            ? t("main.accountBusyTryingAgain")
+            : connection.simulator
             ? t("main.simulatorQrOnlyCannotSign")
             : state === "awaiting_approval"
             ? t("main.openWechatPhoneConfirmSign")
@@ -840,6 +905,7 @@ function Login({
             : t("main.tryingSavedWechatSign")}
         </p>
       </div>
+      {!idle && (
       <div className="account-link-card">
         {state === "awaiting_approval" ? (
           <div className="approval-symbol">
@@ -868,6 +934,7 @@ function Login({
           </p>
         )}
       </div>
+      )}
       {qr && !terminal && state !== "awaiting_approval" && (
         <p className="qr-expiry" role="status">
           {remaining === 0
@@ -885,11 +952,40 @@ function Login({
         </p>
       )}
       {error && <ErrorNotice>{error}</ErrorNotice>}
-      {terminal || error ? (
+      {idle && !error ? (
         <>
           <button
             className="continue-button"
-            onClick={() => setAttempt((a) => a + 1)}
+            onClick={() => {
+              setStrategy("auto");
+              setStarted(true);
+            }}
+          >
+            {t("main.sign")}
+          </button>
+          <button
+            className="quiet-button"
+            onClick={() => {
+              setStrategy("qr");
+              setStarted(true);
+            }}
+          >
+            {t("main.signInWithQrInstead")}
+          </button>
+        </>
+      ) : terminal || error ? (
+        <>
+          <button
+            className="continue-button"
+            onClick={() => {
+              // Retrying a sign-in that ran (even a resumed one) starts a new
+              // one the same way. An error before any attempt only checks again.
+              if (operation) {
+                setStrategy(used);
+                setStarted(true);
+              }
+              setAttempt((a) => a + 1);
+            }}
           >
             {t("main.tryAgain")}
           </button>
@@ -898,6 +994,7 @@ function Login({
               className="quiet-button"
               onClick={() => {
                 setStrategy("qr");
+                setStarted(true);
                 setAttempt((a) => a + 1);
               }}
             >

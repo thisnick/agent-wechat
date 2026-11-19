@@ -47,27 +47,36 @@ export class LoginAttempt {
     this.account = account;
     this.storage = storage;
   }
-  async open(strategy: LoginStrategyChoice = "auto"): Promise<NativeOperation> {
-    let saved = this.storage.read();
-    if (saved?.operationId) {
-      try {
-        const operation = await this.client.operation(
-          this.account,
-          saved.operationId,
-        );
-        if (operation.accountId !== this.account || operation.kind !== "login")
-          throw new Error("Invalid login operation identity");
-        if (!terminal.has(operation.state) || operation.state === "succeeded") {
-          this.strategy = saved.strategy ?? "auto";
-          return operation;
-        }
-      } catch (error) {
-        if (!(error instanceof NativeApiError) || error.status !== 404)
-          throw error;
+  /**
+   * The saved attempt, when it is still running or has just succeeded. Submits
+   * nothing, so a screen can pick up an attempt the user already started
+   * without starting a new one. An attempt that ended is forgotten.
+   */
+  async resume(): Promise<NativeOperation | null> {
+    const saved = this.storage.read();
+    if (!saved?.operationId) return null;
+    try {
+      const operation = await this.client.operation(
+        this.account,
+        saved.operationId,
+      );
+      if (operation.accountId !== this.account || operation.kind !== "login")
+        throw new Error("Invalid login operation identity");
+      if (!terminal.has(operation.state) || operation.state === "succeeded") {
+        this.strategy = saved.strategy ?? "auto";
+        return operation;
       }
-      this.storage.write(null);
-      saved = null;
+    } catch (error) {
+      if (!(error instanceof NativeApiError) || error.status !== 404)
+        throw error;
     }
+    this.storage.write(null);
+    return null;
+  }
+  async open(strategy: LoginStrategyChoice = "auto"): Promise<NativeOperation> {
+    const resumed = await this.resume();
+    if (resumed) return resumed;
+    const saved = this.storage.read();
     // A saved key without an operation is a submission whose response was
     // lost. Repeat it unchanged: the hub refuses a reused key with new options.
     const pending = saved?.key
@@ -75,15 +84,27 @@ export class LoginAttempt {
       : { key: crypto.randomUUID(), strategy };
     // Save before submission: a lost response must retry the same admission key.
     this.storage.write(pending);
-    const operation = await this.client.login(
-      this.account,
-      {
-        strategy: pending.strategy,
-        timeoutSeconds: 900,
-        qrRefresh: { mode: "auto", maxRefreshes: 3 },
-      },
-      pending.key,
-    );
+    let operation: NativeOperation;
+    try {
+      operation = await this.client.login(
+        this.account,
+        {
+          strategy: pending.strategy,
+          timeoutSeconds: 900,
+          qrRefresh: { mode: "auto", maxRefreshes: 3 },
+        },
+        pending.key,
+      );
+    } catch (error) {
+      // A busy account refuses the submission outright: the hub checks the key
+      // first and admits nothing, so the next attempt may use a fresh one.
+      // Clear only this attempt's own entry: another window may have saved an
+      // accepted operation for the same account meanwhile.
+      const current = this.storage.read();
+      if (accountBusy(error) && current?.key === pending.key && !current.operationId)
+        this.storage.write(null);
+      throw error;
+    }
     this.storage.write({ ...pending, operationId: operation.id });
     this.strategy = pending.strategy;
     return operation;
@@ -91,5 +112,85 @@ export class LoginAttempt {
   complete(operationId: string): void {
     if (this.storage.read()?.operationId === operationId)
       this.storage.write(null);
+  }
+}
+
+/** The hub refused a sign-in because other work holds the account. */
+export function accountBusy(error: unknown): boolean {
+  return error instanceof NativeApiError && error.code === "operation_in_progress";
+}
+
+/** How {@link openWhenFree} ended. */
+export type OpenedLogin =
+  | { operation: NativeOperation; alreadySignedIn?: undefined }
+  | { operation?: undefined; alreadySignedIn: true };
+
+/**
+ * Starts or resumes a sign-in, waiting out a busy account. The hub refuses a
+ * new sign-in with `operation_in_progress` while other work holds the account,
+ * such as the first sync for a few seconds after a sign-in succeeds. After each
+ * refusal this checks whether the account is already signed in, and otherwise
+ * waits `delayMs` and tries again. The refusal is passed on after `attempts`.
+ */
+export async function openWhenFree(
+  login: LoginAttempt,
+  strategy: LoginStrategyChoice,
+  options: {
+    /** True when the hub already reports the account as signed in. */
+    signedIn: () => Promise<boolean>;
+    /** Called before each wait, so the screen can say it is waiting. */
+    waiting?: () => void;
+    signal?: AbortSignal;
+    attempts?: number;
+    delayMs?: number;
+    /** Waits between attempts; it should return early once `signal` aborts. */
+    wait?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
+  },
+): Promise<OpenedLogin> {
+  const { signedIn, waiting, attempts = 30, delayMs = 2000 } = options;
+  const signal = options.signal ?? new AbortController().signal;
+  const wait =
+    options.wait ??
+    ((milliseconds: number) => new Promise<void>((done) => setTimeout(done, milliseconds)));
+  for (let refusal = 1; ; refusal++) {
+    signal.throwIfAborted();
+    try {
+      return { operation: await login.open(strategy) };
+    } catch (error) {
+      if (!accountBusy(error) || refusal >= attempts) throw error;
+    }
+    if (await signedIn()) return { alreadySignedIn: true };
+    signal.throwIfAborted();
+    waiting?.();
+    await wait(delayMs, signal);
+  }
+}
+
+/**
+ * Resolves once the hub reports the account signed in, checking every
+ * `intervalMs`. A sign-in screen waiting for a choice uses it to notice a
+ * sign-in made elsewhere (another window, `wx auth login`, an attempt already
+ * running) instead of offering to sign in an account that is signed in. A
+ * failed check is tried again; aborting `signal` rejects with its reason.
+ */
+export async function waitForSignIn(options: {
+  signedIn: () => Promise<boolean>;
+  signal: AbortSignal;
+  intervalMs?: number;
+  wait?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
+}): Promise<void> {
+  const { signedIn, signal, intervalMs = 3000 } = options;
+  const wait =
+    options.wait ??
+    ((milliseconds: number) => new Promise<void>((done) => setTimeout(done, milliseconds)));
+  for (;;) {
+    await wait(intervalMs, signal);
+    signal.throwIfAborted();
+    try {
+      if (await signedIn()) return;
+    } catch {
+      /* Keep waiting: the next check may reach the hub. */
+    }
+    signal.throwIfAborted();
   }
 }
