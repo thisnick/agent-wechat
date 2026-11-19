@@ -165,8 +165,9 @@ pub struct StorageUsage {
     /// batches no retry has reached yet. Batches waiting on local work, such
     /// as a group refresh, aren't listed.
     pub blocked_controls: Vec<BlockedControlCount>,
-    /// Commands this build couldn't apply and skipped as handled in the last
-    /// 30 days, by form. Their raw bytes are kept.
+    /// Commands this build couldn't apply and skipped as handled, by form.
+    /// The labels are kept for good, like the commands' raw bytes, so a later
+    /// version can find and apply them.
     pub skipped_controls: Vec<SkippedControlCount>,
     pub retired_keys: i64,
 }
@@ -605,10 +606,9 @@ pub enum RuntimeRetention {
 /// or shortly after. A key naming an unfinished sync batch is always kept.
 pub fn aged_runtime(key: &str) -> RuntimeRetention {
     // Per-command projection receipts and their phase markers.
-    const COMMAND: [&str; 12] = [
+    const COMMAND: [&str; 11] = [
         "projected:",
         "blocked-control:",
-        "skipped-control:",
         // The newest job.updated event of a job, for merging progress.
         "job-event:",
         "apply-origin:",
@@ -2606,7 +2606,8 @@ mod tests {
             ("event:message:id", Remove(RECEIPT_DAYS)),
             ("event:blocked-v2:b", Remove(RECEIPT_DAYS)),
             ("event:control-skipped:projected:b:1", Remove(RECEIPT_DAYS)),
-            ("skipped-control:projected:b:1", Remove(RECEIPT_DAYS)),
+            // Kept as long as the raw bytes under `sync-control:`.
+            ("skipped-control:projected:b:1", Keep),
             ("event:profile-recovery-pending", Keep),
             ("event:profile-wal-conversion:x", Keep),
             ("sync-control:projected:b:1", Keep),

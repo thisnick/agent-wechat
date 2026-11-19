@@ -40,6 +40,8 @@ struct ProjectionBlocked {
 /// update or a remark lookup settles and which keep notifications suppressed
 /// meanwhile. Deleting an existing contact through an unsupported path also
 /// holds: skipping it would leave a deleted contact in the profile for good.
+/// So does a recall (`revokemsg`) in a form this build doesn't accept:
+/// skipping it would leave the recalled message visible.
 const SKIPPED_BLOCKERS: [&str; 3] = [
     "unsupported_sync_control",
     "unsupported_message_projection_type",
@@ -479,10 +481,9 @@ impl Core {
                 Ok(()) => return Ok(()),
                 Err(error) => error,
             };
-        match error
-            .downcast_ref::<ProjectionBlocked>()
-            .filter(|blocked| SKIPPED_BLOCKERS.contains(&blocked.reason))
-        {
+        match error.downcast_ref::<ProjectionBlocked>().filter(|blocked| {
+            SKIPPED_BLOCKERS.contains(&blocked.reason) && blocked.system_kind != Some("revokemsg")
+        }) {
             Some(blocked) => {
                 self.skip_unsupported_command(account, command, receipt, origin, blocked)
             }
@@ -491,9 +492,10 @@ impl Core {
     }
     /// Treat a command this build can't apply as handled, so its batch
     /// finishes and the profile's saved sync position can move. Its raw bytes
-    /// stay sealed under `sync-control:` (never aged out), so a later version
-    /// could still apply it. A label of its kind, never its content, is kept
-    /// for `wx store usage` (`skippedControls`) and sent as an event.
+    /// stay sealed under `sync-control:{receipt}` and a label of its kind,
+    /// never its content, under `skipped-control:{receipt}`; both are kept for
+    /// good, so a later version can find and apply skipped commands. The label
+    /// also feeds `wx store usage` (`skippedControls`) and an event.
     fn skip_unsupported_command(
         &self,
         account: &str,
@@ -2395,6 +2397,28 @@ mod encrypted_roundtrip {
         for text in [serde_json::to_string(&events).unwrap(), labels] {
             assert!(!text.contains("private"), "{text}");
         }
+        // A recall in a form this build doesn't accept (here, too many nodes)
+        // still holds its batch instead of leaving the message visible.
+        let recall = format!(
+            "<sysmsg type=\"revokemsg\"><revokemsg><session>peer</session><msgid>12</msgid><newmsgid>200</newmsgid>{}</revokemsg></sysmsg>",
+            "<x/>".repeat(300)
+        );
+        let recall = add(10002, "peer", "synthetic_self", recall.as_bytes(), 701, 100);
+        let error = core
+            .apply_sync_command("one", &recall, "projected:skip-fixture:9", "live")
+            .unwrap_err();
+        assert_eq!(
+            projection_blocker(&error).unwrap()["systemKind"],
+            "revokemsg"
+        );
+        assert!(store
+            .runtime("one", "projected:skip-fixture:9")
+            .unwrap()
+            .is_none());
+        assert!(store
+            .runtime("one", "skipped-control:projected:skip-fixture:9")
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
