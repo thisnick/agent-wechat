@@ -524,6 +524,8 @@
     "show": "显示",
     "sign": "登录",
     "signCouldNotFinish": "无法完成登录",
+    "signInFailureDetails": "详细信息：{{details}}",
+    "signInWithQrInstead": "改用二维码登录",
     "signNeeded": "需要登录",
     "signWechat": "登录微信",
     "signWechatAgainSendMessages": "请重新登录微信以发送消息。",
