@@ -72,6 +72,8 @@ Representative JSON control bodies:
 {"op":"status_notification","account":"personal","operation_id":11}
 {"op":"send_fault","account":"personal","fault":"reject"}
 {"op":"send_fault","account":"personal","fault":"lost_acknowledgment"}
+{"op":"saved_login_fault","account":"personal","code":-999}
+{"op":"saved_login_fault","account":"personal","code":null}
 {"op":"advance","seconds":121}
 {"op":"revoke","account":"personal"}
 {"op":"unknown_sync","account":"personal"}
@@ -88,6 +90,14 @@ message takes none.
 The service seeds the account's contacts and initial conversation on first login.
 Each account has independent sessions, changes, notification positions and send
 receipts. `GET /state` returns a bounded scenario summary with no credentials.
+
+`saved_login_fault` makes the account's saved-device sign-ins fail with the
+given service code, reported to the hub as a saved-device refusal; `null`
+clears it, and QR sign-ins are unaffected. The hub falls back to a QR code for
+`-13` and `-2017` and ends the attempt as `login_failed` for other codes. To
+reach the saved-device path, sign the account in, then sign it out with
+`auth/logout-local`, which keeps its saved credentials. The codes are
+synthetic and say nothing about which code WeChat sends.
 
 `advance` controls upstream challenge expiry and synthetic incoming timestamps.
 Hub deadlines, worker scheduling and SSE polling still use their normal clocks.

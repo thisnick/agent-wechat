@@ -2613,6 +2613,12 @@ fn login_failure_result(error: &anyhow::Error) -> Value {
         }
     });
     let mut result = json!({"code":code,"retryable":false});
+    // Name the step and code WeChat refused, so a report of a failed sign-in
+    // shows which rejection ended it. Codes only; never the response body.
+    if let Some(failure) = wechat_protocol::ServiceRejected::find(error) {
+        result["service"] = json!(login_service_name(failure.service));
+        result["serviceCode"] = json!(failure.code);
+    }
     if let Some(
         wechat_profile::ProfileError::KeyMismatch(relative)
         | wechat_profile::ProfileError::KeyUnavailable(relative)
@@ -2631,6 +2637,20 @@ fn login_failure_result(error: &anyhow::Error) -> Value {
         }
     }
     result
+}
+/// Stable name for the sign-in step that returned a service code.
+fn login_service_name(service: wechat_protocol::Service) -> &'static str {
+    use wechat_protocol::Service;
+    match service {
+        Service::Heartbeat => "heartbeat",
+        Service::AutomaticAuthentication => "automatic_authentication",
+        Service::SavedDeviceLogin => "saved_device_login",
+        Service::QrLogin => "qr_login",
+        Service::LoginPoll => "login_poll",
+        Service::AccountAuthentication => "account_authentication",
+        Service::NativeEnvelope => "native_envelope",
+        _ => "other",
+    }
 }
 fn white_png(bytes: &[u8]) -> Result<Vec<u8>> {
     use image::{ImageFormat, ImageReader, Rgba, RgbaImage};
@@ -3062,6 +3082,34 @@ pub(crate) mod tests {
             assert!(!saved_trust_rejected(&anyhow::anyhow!("{message}")));
         }
         assert!(!auth_rejected(&rejected(Service::SavedDeviceLogin, -2017)));
+    }
+    #[test]
+    fn login_failures_report_the_refusing_step_and_code() {
+        use wechat_protocol::{Service, ServiceRejected};
+        // A saved-login refusal that does not permit QR fallback still names
+        // its step and code, so a failed sign-in report shows the cause.
+        let error = anyhow::Error::new(ServiceRejected::new(Service::SavedDeviceLogin, -100))
+            .context("saved login failed");
+        let result = login_failure_result(&error);
+        assert_eq!(result["code"], "login_failed");
+        assert_eq!(result["service"], "saved_device_login");
+        assert_eq!(result["serviceCode"], -100);
+        assert_eq!(result["retryable"], false);
+        let error = anyhow::Error::new(ServiceRejected::new(
+            Service::Heartbeat,
+            ServiceRejected::SESSION_REJECTED,
+        ));
+        let result = login_failure_result(&error);
+        assert_eq!(result["code"], "auth_required");
+        assert_eq!(result["service"], "heartbeat");
+        assert_eq!(result["serviceCode"], -13);
+        let error = anyhow::Error::new(ServiceRejected::new(Service::CdnDownload, 7));
+        assert_eq!(login_failure_result(&error)["service"], "other");
+        // Text that only looks like a rejection carries no code.
+        let result = login_failure_result(&anyhow::anyhow!("Saved-device login returned -100"));
+        assert_eq!(result["code"], "login_failed");
+        assert!(result.get("service").is_none());
+        assert!(result.get("serviceCode").is_none());
     }
     #[tokio::test]
     async fn share_intents_are_encrypted_idempotent_and_never_requeued_after_uncertain_restart() {

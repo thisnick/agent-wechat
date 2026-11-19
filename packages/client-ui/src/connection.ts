@@ -442,7 +442,10 @@ export async function connect(
               (saved.operationId === undefined ||
                 (typeof saved.operationId === "string" &&
                   saved.operationId.length > 0 &&
-                  saved.operationId.length <= 200))
+                  saved.operationId.length <= 200)) &&
+              (saved.strategy === undefined ||
+                saved.strategy === "auto" ||
+                saved.strategy === "qr")
             )
               return saved;
           } catch {

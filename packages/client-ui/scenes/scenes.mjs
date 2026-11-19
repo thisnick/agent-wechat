@@ -117,6 +117,27 @@ export const scenes = [
     mask: qr,
   },
   {
+    name: "login-saved-failed",
+    route: "login",
+    description: "Sign-in screen after the saved sign-in failed, offering Try again and a QR code for the same account.",
+    viewports: ["desktop", "narrow"],
+    setup: async (sim) => {
+      // An account that signed in before, signed out on the hub only, whose
+      // saved sign-in the simulator now refuses with a synthetic code.
+      await sim.addAccount(SPARE);
+      await sim.signIn(SPARE);
+      await sim.signOutLocally(SPARE);
+      await sim.refuseSavedLogin(SPARE, -999);
+      return {};
+    },
+    target: () => ({ account: SPARE.id }),
+    ready: async ({ page, expect }) => {
+      await expect(page.getByRole("heading", { name: "Sign-in could not finish" })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Sign in with a QR code instead" })).toBeVisible();
+      await expect(page.getByText("Details: login_failed · saved_device_login · -999")).toBeVisible();
+    },
+  },
+  {
     name: "account-list",
     route: "accounts",
     description: "The accounts on a hub: one signed in and one that still needs a QR code.",

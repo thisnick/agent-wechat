@@ -565,12 +565,17 @@ input:focus-visible {
   line-height: 1.5;
 }
 
-.qr-expiry {
+.qr-expiry,
+.login-failure-details {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.5;
   text-align: center;
   margin: 14px 0 0;
+}
+.login-failure-details {
+  margin-bottom: 14px;
+  overflow-wrap: anywhere;
 }
 .onboarding-center > .field-help {
   margin: 12px 0 0;

@@ -165,6 +165,24 @@ pub enum SendFault {
     LostAcknowledgment,
 }
 
+/// Error code the scenario service returns for a refused saved-device sign-in.
+/// Its response also carries the refusal's `serviceCode`.
+pub const SAVED_LOGIN_REFUSED: &str = "saved_device_login_refused";
+
+/// The scenario refused a saved-device sign-in with this service code, as
+/// set by [`Control::SavedLoginFault`]. The adapter turns it back into the
+/// typed saved-device refusal the native client reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SavedLoginRefused(pub i32);
+
+impl std::fmt::Display for SavedLoginRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(SAVED_LOGIN_REFUSED)
+    }
+}
+
+impl std::error::Error for SavedLoginRefused {}
+
 #[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum GroupFault {
@@ -204,6 +222,12 @@ pub enum Control {
     SendFault {
         account: String,
         fault: SendFault,
+    },
+    /// Refuses the account's saved-device sign-ins with `code` until cleared
+    /// with `null`. QR sign-ins are unaffected.
+    SavedLoginFault {
+        account: String,
+        code: Option<i32>,
     },
     Revoke {
         account: String,

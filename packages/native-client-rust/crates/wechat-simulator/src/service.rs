@@ -1,5 +1,8 @@
 use crate::{
-    contract::{Control, Request as RpcRequest, MAX_BODY, MAX_MEDIA_BODY},
+    contract::{
+        Control, Request as RpcRequest, SavedLoginRefused, MAX_BODY, MAX_MEDIA_BODY,
+        SAVED_LOGIN_REFUSED,
+    },
     engine::Engine,
 };
 use anyhow::{ensure, Result};
@@ -79,6 +82,15 @@ async fn work(
     match tokio::task::spawn_blocking(move || task(&app.engine)).await {
         Ok(Ok(value)) => Json(value).into_response(),
         result => {
+            if let Ok(Err(error)) = &result {
+                if let Some(SavedLoginRefused(code)) = error.downcast_ref::<SavedLoginRefused>() {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error":SAVED_LOGIN_REFUSED,"serviceCode":code})),
+                    )
+                        .into_response();
+                }
+            }
             let code = match result {
                 Ok(Err(error)) => error.to_string(),
                 _ => "simulator_unavailable".into(),
