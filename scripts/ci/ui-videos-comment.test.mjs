@@ -188,7 +188,7 @@ test('the first publish commits the files under a new PR ref and creates the com
   });
 });
 
-test('a later publish keeps earlier videos, builds on the earlier commit and updates the bot comment', async () => {
+test('a later publish keeps earlier videos in a fresh parentless commit and updates the bot comment', async () => {
   await inFolder([recorded('reply-in-chat')], {}, async dir => {
     const comments = [
       { id: 1, user: { login: 'someone', type: 'User' }, body: `${MARKER} copied` },
@@ -201,8 +201,9 @@ test('a later publish keeps earlier videos, builds on the earlier commit and upd
     assert.ok(paths.includes('deleted-journey.mp4') && paths.includes('reply-in-chat.mp4'));
     const stored = JSON.parse(calls(github, 'createTree')[0].tree.at(-1).content);
     assert.deepEqual(stored.map(journey => [journey.name, journey.commit]), [['deleted-journey', OLD], ['reply-in-chat', HEAD]]);
-    assert.deepEqual(calls(github, 'createCommit')[0].parents, [OLD]);
-    assert.equal(calls(github, 'updateRef')[0].ref, 'ui-videos/pr-12');
+    assert.deepEqual(calls(github, 'createCommit')[0].parents, []);
+    assert.deepEqual([calls(github, 'updateRef')[0].ref, calls(github, 'updateRef')[0].force], ['ui-videos/pr-12', true]);
+    assert.equal(paths.filter(path => path === 'reply-in-chat.mp4').length, 1, 'a superseded file is not listed twice');
     assert.deepEqual(calls(github, 'createRef'), []);
     assert.deepEqual(calls(github, 'createComment'), []);
     const [update] = calls(github, 'updateComment');
@@ -245,5 +246,17 @@ test('publish refuses a file that is not what its name says, and odd requested n
     await assert.rejects(publish({ github, context: context(), core, dir, requested: 'reply-in-chat' }), /not the expected file type/);
     assert.ok(!github.calls.some(([method]) => ['createCommit', 'createComment'].includes(method)));
     await assert.rejects(publish({ github: fakeGitHub(), context: context(), core, dir, requested: 'a;rm' }), /Invalid journey names/);
+  });
+});
+
+test('a new recording still fits when earlier videos already fill the comment', async () => {
+  const full = Array.from({ length: 20 }, (_, index) => earlier(`old-${index}`));
+  await inFolder([recorded('fresh')], {}, async dir => {
+    const github = fakeGitHub({ previous: full });
+    await publish({ github, context: context(), core, dir, requested: 'fresh' });
+    const stored = JSON.parse(calls(github, 'createTree')[0].tree.at(-1).content);
+    assert.equal(stored.length, 20);
+    assert.ok(stored.some(journey => journey.name === 'fresh'));
+    assert.ok(!stored.some(journey => journey.name === 'old-19'));
   });
 });

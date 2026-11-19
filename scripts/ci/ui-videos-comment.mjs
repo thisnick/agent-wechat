@@ -5,9 +5,11 @@
 // comment shows each journey's animated GIF (an image GitHub displays inline) linked
 // to the MP4. The files are committed under refs/ui-videos/pr-<number>: a ref
 // outside refs/heads, so it is no branch and plain clones don't fetch it. Each
-// publish adds a commit on top of the previous one that keeps the videos of earlier
-// runs (a journey deleted before merge keeps its video), so every link an earlier
-// comment used stays valid.
+// publish replaces it with one parentless commit holding the PR's current videos:
+// new recordings, plus earlier videos of journeys this run didn't record (a journey
+// deleted before merge keeps its video), reused from the previous commit without
+// uploading them again. Superseded videos are left unreachable, so the ref holds
+// only what the comment shows.
 //
 // ui-screenshots.yml runs this with actions/github-script, for pull requests from
 // branches of this repository only. Their authors can already push to it, and the
@@ -213,27 +215,33 @@ export async function publish({ github, context, core, dir, requested }) {
   const fresh = new Map(recorded.map(journey => [journey.name, journey]));
   const kept = earlier.journeys.filter(journey =>
     !fresh.has(journey.name) && earlier.files.has(journey.files.mp4) && earlier.files.has(journey.files.frames));
-  for (const journey of kept) {
+  for (const journey of kept)
     if (journey.files.preview && !earlier.files.has(journey.files.preview)) journey.files.preview = null;
-    for (const name of Object.values(journey.files))
-      if (name) tree.push({ path: name, mode: '100644', type: 'blob', sha: earlier.files.get(name) });
-  }
+  // This run's recordings always fit; earlier videos fill what room is left.
   const order = earlier.journeys.map(journey => journey.name);
-  const journeys = [...kept, ...recorded]
-    .sort((a, b) => (order.includes(a.name) ? order.indexOf(a.name) : order.length) - (order.includes(b.name) ? order.indexOf(b.name) : order.length))
-    .slice(0, MAX_JOURNEYS);
+  const rank = journey => (order.includes(journey.name) ? order.indexOf(journey.name) : order.length);
+  const journeys = [...kept.slice(0, Math.max(0, MAX_JOURNEYS - recorded.length)), ...recorded].sort((a, b) => rank(a) - rank(b));
+  const listed = new Set(journeys.flatMap(journey => Object.values(journey.files).filter(Boolean)));
 
   let commitSha = earlier.commit;
   if (recorded.length) {
+    for (const journey of journeys) {
+      if (fresh.has(journey.name)) continue;
+      for (const name of Object.values(journey.files))
+        if (name) tree.push({ path: name, mode: '100644', type: 'blob', sha: earlier.files.get(name) });
+    }
     tree.push({ path: 'manifest.json', mode: '100644', type: 'blob', content: `${JSON.stringify(journeys, null, 2)}\n` });
-    const { data: createdTree } = await github.rest.git.createTree({ ...context.repo, tree });
+    const { data: createdTree } = await github.rest.git.createTree({
+      ...context.repo,
+      tree: tree.filter(item => item.path === 'manifest.json' || listed.has(item.path)),
+    });
     const { data: commit } = await github.rest.git.createCommit({
       ...context.repo,
       message: `UI videos for #${pr.number} at ${pr.head.sha}`,
       tree: createdTree.sha,
-      parents: earlier.commit ? [earlier.commit] : [],
+      parents: [],
     });
-    if (earlier.commit) await github.rest.git.updateRef({ ...context.repo, ref, sha: commit.sha });
+    if (earlier.commit) await github.rest.git.updateRef({ ...context.repo, ref, sha: commit.sha, force: true });
     else await github.rest.git.createRef({ ...context.repo, ref: `refs/${ref}`, sha: commit.sha });
     commitSha = commit.sha;
     core.info(`Published ${recorded.length} video(s) to refs/${ref} at ${commit.sha}.`);

@@ -134,8 +134,9 @@ jobs:
       - name: Record the journeys
         id: record
         if: ${{ !cancelled() && steps.journeys.outputs.names != '' }}
-        # A journey that fails is reported in the PR comment instead of failing the screenshots.
+        # A journey that fails or hangs is reported in the PR comment instead of failing the screenshots.
         continue-on-error: true
+        timeout-minutes: 10
         # The step above allows only lowercase words joined by hyphens, so splitting is safe.
         run: pnpm --filter @agent-wechat/client-ui videos $JOURNEYS
         env:
