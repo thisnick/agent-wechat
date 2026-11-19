@@ -17,7 +17,7 @@ const wechat_protocol::media::MAX_LARGE_FILE_BYTES | usize | MISSING DOC
 const wechat_protocol::media::MAX_LINK_THUMBNAIL_BYTES | usize | MISSING DOC
 const wechat_protocol::media::MAX_NATIVE_UPLOAD_BYTES | usize | MISSING DOC
 const wechat_protocol::media::MAX_VIDEO_DOWNLOAD_BYTES | usize | Incoming video plaintext limit, matching the ordinary-file download and automatic-download ceiling. Every such transfer stays bound to the advertised length and MD5. Outgoing preparation keeps the separate `wechat_media::MAX_VIDEO_SOURCE_BYTES` source limit.
-const wechat_protocol::media::STICKER_HOSTS | &[&str] | Sticker bytes come from Tencent CDN hosts. Classic stored and pack emoji carry a `wxapp.tc.qq.com` source, while shared stickers use `snsvideo.c2c.wechat.com`; both are reachable directly, unlike the encrypted attachment channels. Any other host stays refused so a crafted message cannot turn this into an arbitrary fetch.
+const wechat_protocol::media::STICKER_HOSTS | &[&str] | Exact Tencent CDN hosts for received sticker downloads. `vweixinf.tc.qq.com` also requires the numeric path checked by `validate_sticker_url`.
 const wechat_protocol::media_send::VOICE_UPLOAD_CHUNK_BYTES | usize | Encoded SILK bytes carried by one `uploadvoice` request. A short-link request travels in one MMTLS record of at most 65,519 plaintext bytes, including the route, packet header and envelope, so a 60-second note (about 126-131 KB from the bundled 16 kbit/s profile) cannot use one request. 32 KiB matches the `downloadvoice` range size and leaves room for that overhead.
 const wechat_protocol::mmtls::VERSION | u16 | MISSING DOC
 const wechat_protocol::quote_send::MAX_QUOTE_CONTENT_BYTES | usize | MISSING DOC
@@ -1228,7 +1228,7 @@ fn wechat_protocol::media::unpack_cdn | fn(input: &[u8]) -> anyhow::Result<wecha
 fn wechat_protocol::media::validate_avatar_url | fn(value: &str) -> anyhow::Result<url::Url> | MISSING DOC
 fn wechat_protocol::media::validate_link_thumbnail_url | fn(value: &str) -> anyhow::Result<url::Url> | MISSING DOC
 fn wechat_protocol::media::validate_shared_link_url | fn(value: &str) -> anyhow::Result<url::Url> | MISSING DOC
-fn wechat_protocol::media::validate_sticker_url | fn(value: &str) -> anyhow::Result<url::Url> | MISSING DOC
+fn wechat_protocol::media::validate_sticker_url | fn(value: &str) -> anyhow::Result<url::Url> | Validates a sticker source URL before it can be used for a download.
 fn wechat_protocol::media_send::VoiceUpload::accept_reply | fn(&mut self, input: &[u8]) -> anyhow::Result<core::option::Option<wechat_protocol::media_send::MediaSendResult>> | Apply the reply for the request built last. Returns the note's result after the final range, or `None` when the next range must be sent. A rejection after an earlier range was accepted needs review, because the server already holds part of the note under this client message ID.
 fn wechat_protocol::media_send::VoiceUpload::is_final | fn(&self) -> bool | Whether the next request carries the last range and the end flag.
 fn wechat_protocol::media_send::VoiceUpload::new | fn(destination: &'a str, client_id: &'a str, created_at: u32, duration_ms: u32, encoded: &'a [u8]) -> anyhow::Result<Self> | MISSING DOC
