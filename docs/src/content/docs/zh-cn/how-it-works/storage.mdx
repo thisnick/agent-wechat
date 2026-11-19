@@ -1,7 +1,7 @@
 ---
 title: 数据存储与备份
 description: agent-wechat 的文件存放位置，以及需要备份哪些内容。
-sourceHash: "2332b58b6c04"
+sourceHash: "da2390425d86"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -84,7 +84,7 @@ tar -czf wechat-backup.tgz -C ~ .local/share/agent-wechat
 - **升级前请先备份。** 升级可能会改变数据目录的格式，旧版 `wx` 无法打开已被新版升级过的数据目录。此后，清理会永久删除 `control.sqlite` 中已完成的记录。如需回退到旧版本，请恢复你在升级前做的备份。
 - **撤回标记保存在数据目录中。** 导出 Profile 时不会包含它们。
 - **升级后首次清理可能需要一段时间。** 清理按小批进行，因此其他请求仍会继续运行。删除第一批大数据时，需要约为 `control.sqlite` 两倍大小的可用磁盘空间；空间不足时，剩余空间会稍后再回收。
-- **无法应用的命令不会阻塞同步位置。** Daemon 会跳过这些命令，并在 `control.sqlite` 中保留它们的原始字节和跳过记录，同时在 `wx store usage` 的 `skippedControls` 下列出。早期版本留下的被阻塞批次会在 Daemon 启动时重试。仍在等待其他本地工作（例如刷新群聊）的批次会计入 `syncBatchesBlocked`。
+- **无法应用的命令不会阻塞同步位置。** Daemon 会跳过这些命令，并在 `control.sqlite` 中保留它们的原始字节和跳过记录，同时在 `wx store usage` 的 `skippedControls` 下列出。早期版本留下的被阻塞批次会在 Daemon 启动时重试。需要联网跟进的群聊变更或联系人变更会立即确认，并在后台刷新。仍会阻塞的少数批次（例如 Daemon 无法应用的联系人删除）会计入 `syncBatchesBlocked`。
 - **`wx store usage` 会将数据目录升级** 到已安装版本的格式，与其他 `wx store` 命令一样。如果想保留原始文件，请在副本上运行。
 - **`consumerStateDir`** 也需要一并备份，OpenClaw 将自己的处理进度保存在其中。从早期插件版本升级后，首次启动时会把该文件转换为新格式，并在旁边保留原文件，文件名以 `.v1-backup` 结尾。该备份仍包含消息正文，不再需要回退时请将其删除。旧版插件无法读取转换后的文件；若要回退，请恢复该备份，这样旧版插件会重新处理升级后收到的消息。
 </Aside>
