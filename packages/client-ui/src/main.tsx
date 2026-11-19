@@ -76,7 +76,7 @@ import {
   type ViewRoute,
 } from "./routes.ts";
 import { conversationAvailable } from "./route-targets.ts";
-import { openWhenFree, type LoginStrategyChoice } from "./login-attempt.ts";
+import { openWhenFree, type LoginStrategyChoice, type OpenedLogin } from "./login-attempt.ts";
 import { RouteMessage } from "./route-message.tsx";
 import { MessageActions } from "./message-actions.tsx";
 import { ReplyContext } from "./reply-context.ts";
@@ -530,6 +530,10 @@ function Client({
           key={account.id}
           connection={connection}
           account={account.id}
+          // Only the sign-in page itself starts a sign-in: the person opened it
+          // from the account list or by adding the account. A sign-out while
+          // viewing chats keeps the chats address and waits for a choice.
+          start={intent.name === "login"}
           cancel={() => {
             setSigningIn(null);
             router.up(accountsRoute);
@@ -665,13 +669,24 @@ function Login({
   account,
   signedIn,
   cancel,
+  start,
 }: {
   connection: Connection;
   account: string;
   signedIn: () => Promise<void>;
   cancel: () => void;
+  /**
+   * True when the person chose to sign in (they opened this account's sign-in
+   * page). False when a sign-out brought the screen up: then nothing is sent
+   * until they choose to sign in, since a trusted computer can sign in without
+   * the phone and they may have signed in somewhere else on purpose.
+   */
+  start: boolean;
 }) {
-  const [operation, setOperation] = useState<NativeOperation | null>(null),
+  const [started, setStarted] = useState(start),
+    // A sign-out brought the screen up and nothing is running: wait for a choice.
+    [idle, setIdle] = useState(false),
+    [operation, setOperation] = useState<NativeOperation | null>(null),
     [qr, setQr] = useState(""),
     [error, setError] = useState(""),
     [attempt, setAttempt] = useState(0),
@@ -696,18 +711,28 @@ function Login({
         setQr("");
         setQrShown(false);
         setAccountBusy(false);
+        setIdle(false);
+        // Until the person chooses to sign in, only pick up an attempt that is
+        // already running (for example, after a reload); never start one.
+        const resumed = started ? null : await login.resume();
+        if (!started && !resumed) {
+          if (!controller.signal.aborted) setIdle(true);
+          return;
+        }
         // A busy account (for example, still running the first sync after a
         // sign-in that just succeeded) refuses a new sign-in for a few seconds.
         // Open the chats if it is already signed in; otherwise wait and retry.
-        const opened = await openWhenFree(login, strategy, {
-          signal: controller.signal,
-          wait: pause,
-          waiting: () => setAccountBusy(true),
-          signedIn: async () =>
-            (await connection.session.accounts()).some(
-              (item) => item.id === account && item.authenticated === true,
-            ),
-        });
+        const opened = resumed
+          ? ({ operation: resumed } as OpenedLogin)
+          : await openWhenFree(login, strategy, {
+              signal: controller.signal,
+              wait: pause,
+              waiting: () => setAccountBusy(true),
+              signedIn: async () =>
+                (await connection.session.accounts()).some(
+                  (item) => item.id === account && item.authenticated === true,
+                ),
+            });
         if (controller.signal.aborted) {
           if (opened.operation)
             await connection.session.client.cancelOperation(account, opened.operation.id);
@@ -791,7 +816,7 @@ function Login({
           .cancelOperation(account, id)
           .catch(() => {});
     };
-  }, [account, attempt, strategy]);
+  }, [account, attempt, strategy, started]);
   const state = operation?.state;
   const terminal = [
     "failed",
@@ -840,7 +865,9 @@ function Login({
       </button>
       <div className="welcome-heading">
         <h1>
-          {state === "awaiting_approval"
+          {idle
+            ? t("main.signWechat")
+            : state === "awaiting_approval"
             ? t("main.confirmSignWechat")
             : state === "expired"
             ? t("main.qrCodeExpired")
@@ -851,7 +878,9 @@ function Login({
             : t("main.signWechat")}
         </h1>
         <p>
-          {accountBusy && !error
+          {idle && !error
+            ? t("main.signInWhenReady")
+            : accountBusy && !error
             ? t("main.accountBusyTryingAgain")
             : connection.simulator
             ? t("main.simulatorQrOnlyCannotSign")
@@ -864,6 +893,7 @@ function Login({
             : t("main.tryingSavedWechatSign")}
         </p>
       </div>
+      {!idle && (
       <div className="account-link-card">
         {state === "awaiting_approval" ? (
           <div className="approval-symbol">
@@ -892,6 +922,7 @@ function Login({
           </p>
         )}
       </div>
+      )}
       {qr && !terminal && state !== "awaiting_approval" && (
         <p className="qr-expiry" role="status">
           {remaining === 0
@@ -909,7 +940,28 @@ function Login({
         </p>
       )}
       {error && <ErrorNotice>{error}</ErrorNotice>}
-      {terminal || error ? (
+      {idle && !error ? (
+        <>
+          <button
+            className="continue-button"
+            onClick={() => {
+              setStrategy("auto");
+              setStarted(true);
+            }}
+          >
+            {t("main.sign")}
+          </button>
+          <button
+            className="quiet-button"
+            onClick={() => {
+              setStrategy("qr");
+              setStarted(true);
+            }}
+          >
+            {t("main.signInWithQrInstead")}
+          </button>
+        </>
+      ) : terminal || error ? (
         <>
           <button
             className="continue-button"

@@ -310,3 +310,22 @@ test("leaving the sign-in screen stops the retries", async () => {
   );
   assert.equal(submissions, 1);
 });
+
+test("resuming picks up a running sign-in and never submits one", async () => {
+  const client = {
+    login: () => assert.fail("resume must not start a sign-in"),
+    operation: async () => operation("awaiting_approval"),
+  };
+  const running = new LoginAttempt(client, "a", storage({ key: "k", operationId: "login-1", strategy: "qr" }));
+  assert.equal((await running.resume()).state, "awaiting_approval");
+  assert.equal(running.strategy, "qr");
+  assert.equal(await new LoginAttempt(client, "a", storage()).resume(), null);
+  // A lost submission stays saved for an explicit sign-in to repeat.
+  const lost = storage({ key: "k" });
+  assert.equal(await new LoginAttempt(client, "a", lost).resume(), null);
+  assert.deepEqual(lost.read(), { key: "k" });
+  const ended = storage({ key: "k", operationId: "login-1" });
+  client.operation = async () => operation("failed");
+  assert.equal(await new LoginAttempt(client, "a", ended).resume(), null);
+  assert.equal(ended.read(), null);
+});

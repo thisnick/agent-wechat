@@ -435,6 +435,7 @@
     "sign": "Sign in",
     "signCouldNotFinish": "Sign-in could not finish",
     "signInFailureDetails": "Details: {{details}}",
+    "signInWhenReady": "This app won't sign in again on its own. Choose how to sign in when you're ready.",
     "signInWithQrInstead": "Sign in with a QR code instead",
     "signNeeded": "Sign-in needed",
     "signWechat": "Sign in to WeChat",

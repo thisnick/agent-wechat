@@ -138,6 +138,29 @@ export const scenes = [
     },
   },
   {
+    name: "login-signed-out-waits",
+    route: "chats",
+    description: "An account signed out while its chats were open: the sign-in screen waits for a choice instead of signing in on its own.",
+    viewports: ["desktop", "narrow"],
+    setup: async (sim) => {
+      await sim.addAccount(SPARE);
+      await sim.signIn(SPARE);
+      await sim.signOutLocally(SPARE);
+      return {};
+    },
+    target: () => ({ account: SPARE.id }),
+    prepare: async ({ page }) => {
+      // Waiting means sending nothing. A sign-in request would fail here, and the
+      // screen would leave the waiting state, so `ready` would not pass.
+      await page.route(`**/v1/accounts/${SPARE.id}/auth/login`, (route) => route.abort());
+    },
+    ready: async ({ page, expect }) => {
+      await expect(page.getByText("This app won't sign in again on its own.", { exact: false })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Sign in", exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Sign in with a QR code instead" })).toBeVisible();
+    },
+  },
+  {
     name: "login-account-busy",
     route: "login",
     description: "Sign-in screen while the hub reports the account busy, waiting to try again instead of showing an error.",

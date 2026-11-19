@@ -1,13 +1,14 @@
-// The sign-in screen's request is refused because the account is busy, while an
-// earlier sign-in has already succeeded on the hub. The screen waits, sees the
-// account signed in and opens the chats instead of stopping on an error.
+// After a sign-out the sign-in screen waits for a choice. Once the person signs
+// in, the request is refused because the account is busy while an earlier
+// sign-in completes on the hub. The screen waits, sees the account signed in
+// and opens the chats instead of stopping on an error.
 import { ACCOUNT } from "../scenes/accounts.mjs";
 import { standardWorld } from "../scenes/scenes.mjs";
 
 const wait = (ms) => new Promise((done) => setTimeout(done, ms));
 
 export default {
-  description: "A sign-in refused because the account is busy waits, then opens the chats once the account is signed in.",
+  description: "After a sign-out the app waits for you to sign in; a sign-in refused because the account is busy waits, then opens the chats.",
   viewport: "desktop",
   setup: standardWorld,
   route: "chat",
@@ -25,6 +26,11 @@ export default {
     await video.chapter("Signed out", "WeChat ends the session and the app asks to sign in");
     await sim.signOutLocally(ACCOUNT);
     await expect(page.getByText("WeChat signed out. Sign in again.")).toBeVisible();
+    await expect(page.getByText("This app won't sign in again on its own.", { exact: false })).toBeVisible();
+    await video.caption("Nothing is sent to WeChat until you choose to sign in");
+    await video.pause(2500);
+    await video.chapter("Sign in", "You choose to sign in again");
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
     const status = page.getByText("This account is still finishing other work. Trying again in a moment…");
     await expect(status).toBeVisible();
     await video.caption("The hub refuses this sign-in because the account is busy. No error: it waits and tries again");

@@ -47,27 +47,36 @@ export class LoginAttempt {
     this.account = account;
     this.storage = storage;
   }
-  async open(strategy: LoginStrategyChoice = "auto"): Promise<NativeOperation> {
-    let saved = this.storage.read();
-    if (saved?.operationId) {
-      try {
-        const operation = await this.client.operation(
-          this.account,
-          saved.operationId,
-        );
-        if (operation.accountId !== this.account || operation.kind !== "login")
-          throw new Error("Invalid login operation identity");
-        if (!terminal.has(operation.state) || operation.state === "succeeded") {
-          this.strategy = saved.strategy ?? "auto";
-          return operation;
-        }
-      } catch (error) {
-        if (!(error instanceof NativeApiError) || error.status !== 404)
-          throw error;
+  /**
+   * The saved attempt, when it is still running or has just succeeded. Submits
+   * nothing, so a screen can pick up an attempt the user already started
+   * without starting a new one. An attempt that ended is forgotten.
+   */
+  async resume(): Promise<NativeOperation | null> {
+    const saved = this.storage.read();
+    if (!saved?.operationId) return null;
+    try {
+      const operation = await this.client.operation(
+        this.account,
+        saved.operationId,
+      );
+      if (operation.accountId !== this.account || operation.kind !== "login")
+        throw new Error("Invalid login operation identity");
+      if (!terminal.has(operation.state) || operation.state === "succeeded") {
+        this.strategy = saved.strategy ?? "auto";
+        return operation;
       }
-      this.storage.write(null);
-      saved = null;
+    } catch (error) {
+      if (!(error instanceof NativeApiError) || error.status !== 404)
+        throw error;
     }
+    this.storage.write(null);
+    return null;
+  }
+  async open(strategy: LoginStrategyChoice = "auto"): Promise<NativeOperation> {
+    const resumed = await this.resume();
+    if (resumed) return resumed;
+    const saved = this.storage.read();
     // A saved key without an operation is a submission whose response was
     // lost. Repeat it unchanged: the hub refuses a reused key with new options.
     const pending = saved?.key
