@@ -76,6 +76,7 @@ import {
   type ViewRoute,
 } from "./routes.ts";
 import { conversationAvailable } from "./route-targets.ts";
+import type { LoginStrategyChoice } from "./login-attempt.ts";
 import { RouteMessage } from "./route-message.tsx";
 import { MessageActions } from "./message-actions.tsx";
 import { ReplyContext } from "./reply-context.ts";
@@ -526,6 +527,7 @@ function Client({
           <ErrorNotice>{t("main.wechatSignedOutSignAgain")}</ErrorNotice>
         )}
         <Login
+          key={account.id}
           connection={connection}
           account={account.id}
           cancel={() => {
@@ -673,6 +675,11 @@ function Login({
     [qr, setQr] = useState(""),
     [error, setError] = useState(""),
     [attempt, setAttempt] = useState(0),
+    [strategy, setStrategy] = useState<LoginStrategyChoice>("auto"),
+    // What the running attempt actually does: a resumed or repeated attempt
+    // keeps its own strategy, and an `auto` attempt may or may not show a QR.
+    [used, setUsed] = useState<LoginStrategyChoice>("auto"),
+    [qrShown, setQrShown] = useState(false),
     [clock, setClock] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const operationId = useRef<string | null>(null);
@@ -685,7 +692,9 @@ function Login({
         setError("");
         setOperation(null);
         setQr("");
-        const op = await login.open();
+        setQrShown(false);
+        const op = await login.open(strategy);
+        setUsed(login.strategy);
         if (controller.signal.aborted) {
           await connection.session.client.cancelOperation(account, op.id);
           return;
@@ -741,6 +750,7 @@ function Login({
               new Blob([new Uint8Array(bytes).buffer], { type: "image/png" }),
             );
             setQr(url);
+            setQrShown(true);
             generation = result.qrGeneration ?? 1;
           }
           await pause(650, controller.signal);
@@ -759,7 +769,7 @@ function Login({
           .cancelOperation(account, id)
           .catch(() => {});
     };
-  }, [account, attempt]);
+  }, [account, attempt, strategy]);
   const state = operation?.state;
   const terminal = [
     "failed",
@@ -768,6 +778,22 @@ function Login({
     "cancelled",
     "needs_login",
   ].includes(state ?? "");
+  // Retrying `auto` repeats the saved sign-in. When it ended without showing a
+  // QR code (refused, or the phone prompt went unanswered or was declined),
+  // offer one for this same account so its profile and chats stay in place.
+  const offerQr = terminal && state !== "cancelled" && used === "auto" && !qrShown;
+  const failure = operation?.result as {
+    code?: string;
+    service?: string;
+    serviceCode?: number;
+  } | null;
+  // Codes, not prose: they identify the refusal in a bug report.
+  const failureDetails =
+    state === "failed"
+      ? [failure?.code, failure?.service, failure?.serviceCode]
+          .filter((part) => part !== undefined && part !== null)
+          .join(" · ")
+      : "";
   const expiresAt = (operation?.result as { expiresAt?: number } | null)
     ?.expiresAt;
   const remaining =
@@ -853,14 +879,32 @@ function Login({
               : t("main.codeRefreshSoon")}
         </p>
       )}
+      {failureDetails && (
+        <p className="login-failure-details">
+          {t("main.signInFailureDetails", { details: failureDetails })}
+        </p>
+      )}
       {error && <ErrorNotice>{error}</ErrorNotice>}
       {terminal || error ? (
-        <button
-          className="continue-button"
-          onClick={() => setAttempt((a) => a + 1)}
-        >
-          {t("main.tryAgain")}
-        </button>
+        <>
+          <button
+            className="continue-button"
+            onClick={() => setAttempt((a) => a + 1)}
+          >
+            {t("main.tryAgain")}
+          </button>
+          {offerQr && (
+            <button
+              className="quiet-button"
+              onClick={() => {
+                setStrategy("qr");
+                setAttempt((a) => a + 1);
+              }}
+            >
+              {t("main.signInWithQrInstead")}
+            </button>
+          )}
+        </>
       ) : connection.simulator ? (
         <div className="sim-phone">
           <span>{t("main.simulatedPhone")}</span>

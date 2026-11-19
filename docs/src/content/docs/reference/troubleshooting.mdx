@@ -32,6 +32,8 @@ Start with `wx accounts status`. It shows whether you're logged in (`authenticat
 
 **`wx` says login is needed after a restart.** The saved session was rejected by WeChat. Run `wx auth login`; usually you only need to approve on your phone.
 
+**Signing in to an existing account fails at once, with no QR code.** WeChat refused the saved sign-in, and trying again repeats it. In the desktop app, choose **Sign in with a QR code instead**. From the CLI, run `wx --account ACCOUNT_ID auth login --force-qr`. Both keep the same account and its chats. Don't use **Add WeChat account** for this: it creates a new, empty account. If you report the problem, include the **Details** line from the sign-in screen, or the `service` and `serviceCode` that `wx auth login` prints.
+
 ## Profile
 
 **"Unsupported schema".** The profile's database layout isn't one the daemon knows how to write. Keep the profile as it is, don't open WeChat on it, and check for a newer `wx`.

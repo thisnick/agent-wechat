@@ -433,6 +433,8 @@
     "show": "Show",
     "sign": "Sign in",
     "signCouldNotFinish": "Sign-in could not finish",
+    "signInFailureDetails": "Details: {{details}}",
+    "signInWithQrInstead": "Sign in with a QR code instead",
     "signNeeded": "Sign-in needed",
     "signWechat": "Sign in to WeChat",
     "signWechatAgainSendMessages": "Sign in to WeChat again to send messages.",
