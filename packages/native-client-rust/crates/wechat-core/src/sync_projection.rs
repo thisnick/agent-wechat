@@ -38,9 +38,7 @@ struct ProjectionBlocked {
 /// hold their batch either: a group update, a sticker control, a superseded
 /// pin and contact fields with unresolved or unreadable controls are
 /// acknowledged at once, and the group refresh, sticker reconciliation or an
-/// exact contact lookup finishes them in the background. A command whose
-/// profile row holds data this build can't parse is skipped too (see
-/// `unreadable_profile_metadata`). Deleting an existing
+/// exact contact lookup finishes them in the background. Deleting an existing
 /// contact through an unsupported path still holds: skipping it would leave a
 /// deleted contact in the profile for good.
 /// So does a recall (`revokemsg`) in a form this build doesn't accept:
@@ -50,16 +48,6 @@ const SKIPPED_BLOCKERS: [&str; 3] = [
     "unsupported_message_projection_type",
     "invalid_sync_control_metadata",
 ];
-/// Whether applying failed on official-profile data this build can't parse
-/// (`ProfileError::InvalidMetadata`), which fails the same way on every retry.
-fn unreadable_profile_metadata(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        matches!(
-            cause.downcast_ref::<wechat_profile::ProfileError>(),
-            Some(wechat_profile::ProfileError::InvalidMetadata)
-        )
-    })
-}
 /// Peers the Linux 4.1.13.26 session-entry worker (status opcode 2) returns
 /// for before any unread clear, construction, observer or timer.
 pub(super) const ENTRY_EXCLUDED_PEERS: [&str; 13] = [
@@ -499,20 +487,6 @@ impl Core {
         }) {
             return self.skip_unsupported_command(account, command, receipt, origin, blocked);
         }
-        if unreadable_profile_metadata(&error) && !self.is_recall(account, command) {
-            // The profile row this command updates holds encoded data this
-            // build can't parse, so every retry fails the same way.
-            let blocked = ProjectionBlocked {
-                command_id: command.id,
-                message_type: None,
-                classification: "profile_row_unreadable",
-                operation_ids: vec![],
-                system_kind: None,
-                peer_kind: None,
-                reason: "profile_metadata_unreadable",
-            };
-            return self.skip_unsupported_command(account, command, receipt, origin, &blocked);
-        }
         Err(error)
     }
     /// Treat a command this build can't apply as handled, so its batch
@@ -547,21 +521,6 @@ impl Core {
             .clear_runtime(account, &format!("blocked-control:{receipt}"))?;
         self.store.put_runtime(account, receipt, b"1")?;
         Ok(())
-    }
-    /// Whether this command is a recall. A recall is never skipped: that would
-    /// leave the recalled message visible.
-    fn is_recall(&self, account: &str, command: &SyncCommand) -> bool {
-        command.id == 5
-            && self.account_state(account).is_ok_and(|state| {
-                wechat_protocol::wire::decode_add_message(&command.payload, &state.own_username)
-                    .is_ok_and(|message| {
-                        message_blocker(&message).system_kind == Some("revokemsg")
-                            || !matches!(
-                                crate::recalls::incoming_recall(&message, &state.own_username),
-                                Ok(None)
-                            )
-                    })
-            })
     }
     /// Acknowledge a contact record without applying it and look the contact
     /// up in the background for its current state. Its raw bytes and a skip
@@ -841,9 +800,26 @@ impl Core {
                 }
                 if let Some(business) = crate::business_contacts::business_contact_patch(&contact)?
                 {
-                    wechat_profile::apply_contact_business_patch(
+                    match wechat_profile::apply_contact_business_patch(
                         &location, &keys, &patch, &business, &options,
-                    )?;
+                    ) {
+                        Ok(_) => {}
+                        // The business-account writer refuses this record:
+                        // the record and the profile row don't meet its
+                        // conditions (contact type 0 to 4 with the business
+                        // verify bit, one consistent identity). Every retry
+                        // fails the same way, so skip it with its raw bytes
+                        // kept.
+                        Err(wechat_profile::ProfileError::InvalidMetadata) => {
+                            let mut blocked = command_blocker(command);
+                            blocked.classification = "contact_update";
+                            blocked.reason = "business_contact_unwritable";
+                            return self.skip_unsupported_command(
+                                account, command, receipt, origin, &blocked,
+                            );
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
                 } else {
                     wechat_profile::apply_contact_patch(&location, &keys, &patch, &options)?;
                 }
@@ -979,14 +955,41 @@ impl Core {
                 return Ok(());
             }
         }
-        let planned_sort = wechat_profile::choose_message_sort_sequence(
+        let planned_sort = match wechat_profile::choose_message_sort_sequence(
             &location,
             &keys,
             &message.peer,
             sid,
             message.created_at as i64,
             &options,
-        )?;
+        ) {
+            Ok(sort) => sort,
+            // The profile already holds this server message, saved with a
+            // different time. There is nothing to write, so finish it instead
+            // of holding the batch; its raw bytes are kept.
+            Err(wechat_profile::ProfileError::InvalidMetadata)
+                if wechat_profile::find_projected_message(
+                    &location,
+                    &keys,
+                    &message.peer,
+                    sid,
+                    &options,
+                )?
+                .is_some() =>
+            {
+                let blocked = ProjectionBlocked {
+                    command_id: command.id,
+                    message_type: Some(message.message_type),
+                    classification: "message",
+                    operation_ids: vec![],
+                    system_kind: None,
+                    peer_kind: None,
+                    reason: "message_already_in_profile",
+                };
+                return self.skip_unsupported_command(account, command, receipt, origin, &blocked);
+            }
+            Err(error) => return Err(error.into()),
+        };
         let (stored_fields, summary) = fields(&message, body, planned_sort)?;
         // Minimal cached identities do not manufacture friendship flags, owner,
         // nickname, membership or a contact/group catalog entry from remote names.
@@ -2506,19 +2509,81 @@ mod encrypted_roundtrip {
     }
 
     #[test]
-    fn only_unparseable_profile_data_counts_as_unreadable() {
-        let unreadable = anyhow::Error::from(wechat_profile::ProfileError::InvalidMetadata);
-        assert!(super::unreadable_profile_metadata(&unreadable));
-        assert!(super::unreadable_profile_metadata(
-            &unreadable.context("while saving a contact")
-        ));
-        for other in [
-            anyhow::Error::from(wechat_profile::ProfileError::Database),
-            anyhow::Error::from(wechat_profile::ProfileError::NotCached),
-            anyhow::anyhow!("invalid_location_metadata"),
-        ] {
-            assert!(!super::unreadable_profile_metadata(&other));
-        }
+    fn a_message_already_saved_with_another_time_finishes_without_a_second_row() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&temporary.path().join("data")).unwrap());
+        store.create_account("one").unwrap();
+        let core = Core::new(store.clone(), None).unwrap();
+        core.configure_profile_format_key(&[9; 16]).unwrap();
+        core.install_login_state("one", &state(), None).unwrap();
+        core.ensure_managed_profile("one", &state()).unwrap();
+        core.apply_sync_command(
+            "one",
+            &add(1, "peer", "synthetic_self", b"First copy", 950, 100),
+            "projected:dup-fixture:0",
+            "live",
+        )
+        .unwrap();
+        // The same server message again, with a different time.
+        let again = add(1, "peer", "synthetic_self", b"First copy", 950, 200);
+        core.apply_sync_command("one", &again, "projected:dup-fixture:1", "live")
+            .unwrap();
+        let label: Value = serde_json::from_slice(
+            &store
+                .runtime("one", "skipped-control:projected:dup-fixture:1")
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(label["reason"], "message_already_in_profile");
+        assert_eq!(
+            store
+                .events("one", 0, 100)
+                .unwrap()
+                .iter()
+                .filter(|event| event.kind == "message.committed")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_business_record_the_writer_refuses_is_skipped_with_its_bytes_kept() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&temporary.path().join("data")).unwrap());
+        store.create_account("one").unwrap();
+        let core = Core::new(store.clone(), None).unwrap();
+        core.configure_profile_format_key(&[9; 16]).unwrap();
+        core.install_login_state("one", &state(), None).unwrap();
+        core.ensure_managed_profile("one", &state()).unwrap();
+        // A new business account (verify bit 8) with no contact type: the
+        // business writer needs a type of 0 to 4 and refuses the row.
+        let command = SyncCommand {
+            id: 2,
+            payload: p::message(&[
+                p::bytes(1, &p::bytes(1, b"gh_synthetic_business")),
+                p::uint(24, 8),
+            ])
+            .unwrap(),
+        };
+        core.apply_sync_command("one", &command, "projected:biz-fixture:0", "live")
+            .unwrap();
+        let label: Value = serde_json::from_slice(
+            &store
+                .runtime("one", "skipped-control:projected:biz-fixture:0")
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(label["reason"], "business_contact_unwritable");
+        let key = "sync-control:projected:biz-fixture:0";
+        assert_eq!(
+            *core
+                .vault
+                .open_record("one", key, &store.runtime("one", key).unwrap().unwrap())
+                .unwrap(),
+            command.payload
+        );
     }
 
     #[test]
