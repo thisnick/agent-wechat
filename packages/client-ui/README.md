@@ -494,7 +494,8 @@ hub address). The tests fail when a route has no scene.
 ## Videos of the UI
 
 `journeys/` holds short scripted walkthroughs that are recorded as videos for review:
-one `<name>.journey.mjs` per video. A journey runs against a fresh simulator hub like
+one `<name>.journey.mjs` per video. Only the `reply-in-chat` example is kept as a
+starting point; a journey written for a pull request is deleted once its video is posted. A journey runs against a fresh simulator hub like
 a scene, but keeps animations, shows the pointer and a label for every action, and
 can make the simulator act while recording, for example deliver a message.
 
@@ -517,6 +518,8 @@ can make the simulator act while recording, for example deliver a message.
 4. Commit the journey. On a pull request, `.github/workflows/ui-videos.yml` records
    every journey the PR adds or changes and posts them in one comment: the GIF plays
    inline and links to the MP4. Add the `ui-videos` label to record every journey.
+5. Once the comment shows the video, delete the journey file in a new commit. Journeys
+   made for one pull request are not kept; the comment keeps working without the file.
 
 A journey exports these fields:
 

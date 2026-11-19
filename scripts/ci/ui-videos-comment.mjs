@@ -85,7 +85,8 @@ export function commentBody({ journeys, headSha, runUrl, url }) {
   });
   return `${MARKER}\n### UI videos\n\n`
     + `Recorded from \`packages/client-ui/journeys/\` against the synthetic simulator hub at commit \`${headSha.slice(0, 7)}\` `
-    + `([workflow run](${runUrl})). Each preview links to its MP4, which downloads.\n\n`
+    + `([workflow run](${runUrl})). Each preview links to its MP4, which downloads. `
+    + 'Delete the journey files before merging; the videos here stay.\n\n'
     + `${sections.join('\n')}`;
 }
 

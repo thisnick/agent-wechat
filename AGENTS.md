@@ -41,7 +41,6 @@ Native routes/contracts live in `packages/native-client-rust/crates/wechat-api/`
 - Change the account or registry schema only through a new migration and schema version. Never edit an existing migration.
 - In the PR description, name the interface changes and anything the review comment flags as breaking.
 - UI changes are reviewed visually: CI uploads every scene to Argos, and the owner approves the changes there. Add or update a scene in `packages/client-ui/scenes/` when you add or change a screen. Never approve Argos changes yourself.
-- When asked for a video of the UI, add or update a journey in `packages/client-ui/journeys/` and record it with `pnpm --filter @agent-wechat/client-ui videos <name>` (see "Videos of the UI" in `packages/client-ui/README.md`). Check the `-frames.png` contact sheet before sharing it, and give the user the MP4 if your environment can send files. Committing the journey makes CI post the video on the PR.
 - A PR that changes `interfaces/` needs the owner's `interfaces-approved` label. Never add that label yourself, and never merge while the Interface approval check is pending or failing.
 
 ## Pull request review
@@ -54,6 +53,15 @@ An independent Claude reviewer posts inline comments and one summary comment, wi
 - After you push a PR, stay with it while its workflows run, if your environment can watch them (a fork's PR needs approval before its workflows run). Wait for the checks and the Claude review, fix CI failures, and answer the review as above. If no review starts on its own (draft, bot-opened and fork PRs), add the `claude-review` label if you can; otherwise ask the maintainer in a PR comment. Interface approval and Argos wait for the owner, so list them in your summary instead of trying to fix them. The first review is round one, and each push of fixes plus one `claude-review` label starts the next. Stop after three rounds and summarize any open findings in a PR comment for the maintainer.
 - Fill in the template's "Risk and rollback" section. Say plainly when installing the previous version would not undo the change, for example after a new migration or a changed stored format.
 - When a bug gets past review and turns up later, in a lab test, from a user or in production, add what the reviewer would have needed to know to this guide or to the review instructions.
+
+## Videos of UI changes
+
+Make a video of the client UI only when the user asks for one, or when the task is to build or fix a specific use case in the UI. A video shows the flow over time against the simulator; it does not replace the Argos scenes.
+
+1. Copy `packages/client-ui/journeys/reply-in-chat.journey.mjs` to `journeys/<name>.journey.mjs` and script the use case: what to seed, which screen to open, the clicks and typing, and any simulator events. "Videos of the UI" in `packages/client-ui/README.md` lists the fields and helpers.
+2. Record it with `pnpm --filter @agent-wechat/client-ui videos <name>`. Check the `-frames.png` contact sheet to confirm it shows the use case, and fix the journey until it does. Give the user the MP4 if your environment can send files.
+3. Commit and push the journey. `ui-videos.yml` records it on the PR's code and posts it in a PR comment.
+4. Once the comment shows the video, delete the journey file in a new commit. Journeys are not kept in the repository unless the user asks; the comment keeps working without the file. To refresh the video after later changes, add the journey back the same way.
 
 ## Documentation site
 
