@@ -1,7 +1,7 @@
 ---
 title: CLI 常用命令
 description: 用于读取会话、收发消息与媒体附件、编写自动化脚本的常用 wx 命令。
-sourceHash: ee4911c8c1a6
+sourceHash: "85089adc4167"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -98,7 +98,9 @@ wx messages media CHAT_ID MESSAGE_ID --quality original --output ./photo.jpg
 wx events watch --cursor-file ~/.cache/wx-events.cursor
 ```
 
-在新消息到达时实时输出事件详情。添加 `--json` 可逐行输出 JSON 事件。配合游标文件可在意外中断后精准断点续传。
+在新消息到达时实时输出事件详情。添加 `--json` 可逐行输出 JSON 事件。首次运行将从最新事件开始，游标文件则让下一次运行能从上一次停止的位置继续。如需从你自行保存的游标开始，请传入 `--after CURSOR`。
+
+`wx events list` 显示最近的事件；`wx events list --after CURSOR` 则显示游标之后的事件。
 
 ## 标记已读与撤回消息 \{#mark-read-and-recall}
 
@@ -122,6 +124,7 @@ wx config servers select box
 - **语音** 由 `wx` 自行编码。单条语音最长支持 60 秒；超过部分会自动切分为等长的连续语音条。**视频** 必须为 MP4 格式。这两者均要求 Daemon 所在环境安装有 FFmpeg。
 - **附件体积限制视类型而定。** 参见[发送附件与媒体](/use/media/)获取 512 MiB 普通文件限制以及视频、图片、语音的对应规格。表情无法发送。
 - **引用回复为实验性特性。** 服务端接收与手机端渲染效果仍未经验证。原消息缺失、已被撤回或会话不匹配的引用将被拒绝；被引用的原内容上限 128 KiB。引用仅支持附加纯文本回复：非空白内容（含解析后的被 @ 成员姓名）上限 16 KiB，转义后上限 256 KiB。引用媒体消息并不保证其附件可以被成功下载。
+- **Daemon 为每个账号保留最新的 10,000 条事件。** 游标若早于此范围，将返回 `event_cursor_expired` 错误，而不会静默跳过缺失的事件。若要从最新事件开始，请省略 `--after`，或删除游标文件。
 - **置顶折叠的群聊会使其展开。** 系统内置会话不支持置顶。折叠群聊行为已具有离线覆盖测试；手机端真机验证覆盖了普通单聊及展开的普通群聊。
 - **退出状态码 (Exit Codes)** 让你无需解析 JSON 即可快速感知执行结果。参考 [CLI 退出状态码参考](/reference/cli/#exit-codes)。
 </Aside>
