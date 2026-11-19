@@ -1,7 +1,7 @@
 ---
 title: 联系人
 description: 查找用户、发送和通过好友申请，以及管理已保存的联系人。
-sourceHash: "933c7b6aa5f6"
+sourceHash: "4f392487d725"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -103,19 +103,32 @@ wx contacts remove CONTACT_ID --idempotency-key remove-alice-1
 已验证通过微信号搜索。官方客户端提供手机号搜索，但手机号格式以及受隐私设置影响的结果尚未在此验证。不支持邮箱搜索和范围较广的昵称目录搜索。“申请已发送”表示已记录一次成功的发送，并不能证明该申请在服务器上仍处于待处理状态。通过好友申请不会授予 OpenClaw 访问权限。
 </Aside>
 
+## 重命名联系人 \{#rename-a-contact}
+
+你为联系人设置的私人名称（微信称之为备注）会代替对方自己设置的名称，以 `displayName` 的形式显示。
+
+在应用中，打开好友的联系人名片，在 **备注** 中输入。停止输入或离开该栏后会自动保存，标题处依次显示 **正在保存…**、**正在与微信同步…**，最后显示 **已保存**。清空输入框即可删除备注。使用 CLI：
+
+```bash
+wx contacts set CONTACT_ID --remark "Monster"
+wx contacts set CONTACT_ID --clear-remark
+```
+
+`wx --json contacts get CONTACT_ID` 会显示 `remark` 和 `displayName`。微信接受修改后，新名称要过几秒钟才会出现；在此之前，该联系人的 `remarkPending` 为 `true`。修改隐私设置和名称请分开执行命令。
+
 ## 隐私 \{#privacy}
 
-在联系人名片中可以选择“仅聊天”、“不让对方看我的朋友圈”和“不看对方的朋友圈”。可以从联系人的“详情”按钮、搜索结果或好友申请中打开名片。发送申请或通过申请时会一并提交初始设置。对于已是好友的人，请选择“保存隐私设置”。删除联系人需要确认，并会保留聊天记录。
+在联系人名片中可以选择“仅聊天”、“不让对方看我的朋友圈”和“不看对方的朋友圈”。可以从联系人的“详情”按钮、搜索结果或好友申请中打开名片。发送申请或通过申请时会一并提交初始设置。对于已是好友的人，修改会自动保存；“隐私”标题会显示修改正在保存、已保存还是需要重试。删除联系人需要确认，并会保留聊天记录。
 
 ### 通过 CLI 修改隐私设置 \{#change-privacy-from-the-cli}
 
 读取当前设置：
 
 ```bash
-wx --json contacts privacy get CONTACT_ID
+wx --json contacts get CONTACT_ID
 ```
 
-响应包含 `privacy` 及其 `version`。只修改你指定的选项：
+响应包含 `privacy` 及其 `privacyVersion`。只修改你指定的选项：
 
 ```bash
 wx contacts set CONTACT_ID --chats-only true \
@@ -128,25 +141,28 @@ wx contacts set CONTACT_ID --chats-only true \
 
 ### 隐私 API 与 Rust \{#privacy-api-and-rust}
 
-读取隐私设置和刷新联系人需要 `read` 权限；修改隐私设置需要所选账号的 `admin` 权限。路径相对于 `/v1/accounts/ACCOUNT_ID/`：
+读取和刷新联系人需要 `read` 权限；修改需要所选账号的 `admin` 权限。路径相对于 `/v1/accounts/ACCOUNT_ID/`：
 
 | 方法和路径 | 用途 |
 | --- | --- |
 | `GET contacts` | 列出联系人，并在可用时返回 `privacy` 和 `privacyVersion`。 |
-| `GET contacts/CONTACT_ID` | 读取联系人及其当前的关系设置。 |
+| `GET contacts/CONTACT_ID` | 读取联系人，包括 `remark`、`privacy` 和 `privacyVersion`。在较早的修改仍在生效时，`privacyPending` 或 `remarkPending` 为 `true`。 |
 | `POST contacts/CONTACT_ID/refresh` | 同时刷新联系人详情和隐私设置。轮询返回的操作，然后再读取该联系人。 |
-| `GET contacts/CONTACT_ID/privacy` | 通过现有的隐私路由，仅读取设置及其 `version`。 |
-| `PATCH contacts/CONTACT_ID` | 使用 `privacy` 和 `expectedVersion` 更新；需要 `Idempotency-Key` |
+| `PATCH contacts/CONTACT_ID` | 使用 `expectedVersion`（即联系人的 `privacyVersion`）更新 `privacy` 或 `remark`；需要 `Idempotency-Key` |
 
-目前 PATCH 接受完整的隐私设置值：
+PATCH 请求可以提供完整的隐私设置值，或提供备注，二者只能择一：
 
 ```json
 {
   "privacy": { "chatsOnly": true, "hideMyPosts": false, "hideTheirPosts": false },
-  "expectedVersion": "VERSION_FROM_PRIVACY_READ"
+  "expectedVersion": "PRIVACY_VERSION_FROM_CONTACT"
 }
 ```
 
-其他联系人字段保持不变。版本过期会返回 `stale_contact_privacy`；在决定是否再次修改前，请先查看当前设置。已保存状态未确定时会返回 `contact_privacy_unresolved`。返回的操作会区分服务器已接受与已保存联系人中已确认这两种状态。
+```json
+{ "remark": "Monster", "expectedVersion": "PRIVACY_VERSION_FROM_CONTACT" }
+```
 
-Rust 协议 crate 提供 `ContactPrivacySettings`、请求构建器以及关联的响应解码。核心 crate 提供 `ContactUpdate`、`contact_privacy` 和 `update_contact`，负责协调幂等性、账号归属和已保存联系人的确认。在 OpenClaw 中，私有的所有者会话可以通过 `wechat_contacts` 的 list、find 和 get 查看可用的设置。
+将 `remark` 设为 `null` 即可清除备注。其他联系人字段保持不变。版本过期会返回 `stale_contact_privacy`；在决定是否再次修改前，请先重新读取该联系人。若好友没有 `privacy` 或 `privacyVersion`，`privacyUnavailable` 会说明原因：`contact_privacy_unresolved` 表示需先刷新联系人，`ordinary_contact_required` 表示这类联系人无法编辑。返回的操作会区分服务器已接受与已保存联系人中已确认这两种状态。
+
+Rust 协议 crate 提供 `ContactPrivacySettings`、`contact_remark_request`、请求构建器以及关联的响应解码。核心 crate 提供 `ContactUpdate` 和 `update_contact`，负责协调幂等性、账号归属和已保存联系人的确认。在 OpenClaw 中，私有的所有者会话可以通过 `wechat_contacts` 的 list、find 和 get 查看可用的设置。
