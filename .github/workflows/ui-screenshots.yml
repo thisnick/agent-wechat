@@ -126,11 +126,11 @@ jobs:
           retention-days: 7
       # UI videos, only for the journeys this pull request adds or changes.
       - name: Install FFmpeg
-        # Main-branch runs install it too, only so that the package cache stays warm.
-        if: ${{ !cancelled() && (github.event_name == 'push' || steps.journeys.outputs.names != '') }}
-        uses: ./.github/actions/apt-install
-        with:
-          packages: ffmpeg
+        # The desktop's pinned static FFmpeg and FFprobe: checksummed downloads in
+        # seconds, where apt takes minutes. The build has no drawtext, so the contact
+        # sheets CI makes have no time stamps.
+        if: ${{ !cancelled() && steps.journeys.outputs.names != '' }}
+        run: node scripts/ci/media-runtime.mjs "$RUNNER_TEMP/media"
       - name: Record the journeys
         id: record
         if: ${{ !cancelled() && steps.journeys.outputs.names != '' }}

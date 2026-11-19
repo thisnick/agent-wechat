@@ -217,10 +217,12 @@ export async function publish({ github, context, core, dir, requested }) {
     !fresh.has(journey.name) && earlier.files.has(journey.files.mp4) && earlier.files.has(journey.files.frames));
   for (const journey of kept)
     if (journey.files.preview && !earlier.files.has(journey.files.preview)) journey.files.preview = null;
-  // This run's recordings always fit; earlier videos fill what room is left.
+  // This run's recordings always fit; the most recently added earlier videos fill
+  // what room is left, and the oldest are dropped.
   const order = earlier.journeys.map(journey => journey.name);
   const rank = journey => (order.includes(journey.name) ? order.indexOf(journey.name) : order.length);
-  const journeys = [...kept.slice(0, Math.max(0, MAX_JOURNEYS - recorded.length)), ...recorded].sort((a, b) => rank(a) - rank(b));
+  const room = Math.max(0, MAX_JOURNEYS - recorded.length);
+  const journeys = [...kept.slice(kept.length - Math.min(room, kept.length)), ...recorded].sort((a, b) => rank(a) - rank(b));
   const listed = new Set(journeys.flatMap(journey => Object.values(journey.files).filter(Boolean)));
 
   let commitSha = earlier.commit;

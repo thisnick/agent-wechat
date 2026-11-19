@@ -542,7 +542,10 @@ types one key at a time and `video.pause(ms)` holds a finished state for viewers
 Wait for the UI with `expect` first; a pause is never for synchronisation.
 
 The first run builds the simulator and the SDK, like the scenes, and needs `ffmpeg`
-and `ffprobe` on `PATH`. Set `WX_DEV_BINARY` to reuse a built `wx-dev`.
+and `ffprobe` on `PATH`. Set `WX_DEV_BINARY` to reuse a built `wx-dev`. Without a
+system FFmpeg, `node scripts/ci/media-runtime.mjs DIR` downloads the desktop's pinned
+static builds into `DIR` (add it to `PATH`); CI uses those. Their FFmpeg has no
+`drawtext`, so contact sheets made with it have no time stamps.
 
 > **Good to know**
 >

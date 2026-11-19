@@ -257,6 +257,7 @@ test('a new recording still fits when earlier videos already fill the comment', 
     const stored = JSON.parse(calls(github, 'createTree')[0].tree.at(-1).content);
     assert.equal(stored.length, 20);
     assert.ok(stored.some(journey => journey.name === 'fresh'));
-    assert.ok(!stored.some(journey => journey.name === 'old-19'));
+    assert.ok(!stored.some(journey => journey.name === 'old-0'), 'the oldest earlier video is dropped');
+    assert.ok(stored.some(journey => journey.name === 'old-19'));
   });
 });
