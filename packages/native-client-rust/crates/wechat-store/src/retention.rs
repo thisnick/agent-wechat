@@ -1014,7 +1014,21 @@ impl Store {
             }
             let blocked_controls = {
                 let mut query = db.prepare(
-                    "SELECT json_extract(CAST(r.value AS TEXT),'$.messageType'),json_extract(CAST(r.value AS TEXT),'$.operationIds'),json_extract(CAST(r.value AS TEXT),'$.systemKind'),json_extract(CAST(r.value AS TEXT),'$.peerKind'),json_extract(CAST(r.value AS TEXT),'$.reason'),count(*),count(DISTINCT a.id) FROM apply_intents a JOIN runtime r ON r.key>'blocked-control:projected:'||a.id||':' AND r.key<'blocked-control:projected:'||a.id||';' WHERE a.state='blocked' AND json_valid(CAST(r.value AS TEXT)) GROUP BY 1,2,3,4,5 ORDER BY 6 DESC LIMIT 50",
+                    "SELECT json_extract(CAST(r.value AS TEXT),'$.messageType'),
+                            json_extract(CAST(r.value AS TEXT),'$.operationIds'),
+                            json_extract(CAST(r.value AS TEXT),'$.systemKind'),
+                            json_extract(CAST(r.value AS TEXT),'$.peerKind'),
+                            json_extract(CAST(r.value AS TEXT),'$.reason'),
+                            count(*),count(DISTINCT a.id)
+                     FROM apply_intents a
+                     JOIN runtime r ON r.key>'blocked-control:projected:'||a.id||':'
+                                   AND r.key<'blocked-control:projected:'||a.id||';'
+                     WHERE a.state='blocked' AND json_valid(CAST(r.value AS TEXT))
+                       AND NOT EXISTS (
+                           SELECT 1 FROM runtime applied
+                           WHERE applied.key=substr(r.key,length('blocked-control:')+1)
+                       )
+                     GROUP BY 1,2,3,4,5 ORDER BY 6 DESC LIMIT 50",
                 )?;
                 let rows = query.query_map([], |r| {
                     Ok(BlockedControlCount {
@@ -1095,6 +1109,37 @@ mod tests {
             created_at: now.clone(),
             updated_at: now,
         }
+    }
+
+    #[test]
+    fn storage_usage_omits_resolved_commands_in_a_still_blocked_batch() {
+        let (_temp, store) = fixture();
+        store
+            .stage_sync("a", "mixed", b"sealed batch", b"cursor")
+            .unwrap();
+        store.block_sync("a", "mixed").unwrap();
+        store
+            .put_runtime(
+                "a",
+                "blocked-control:projected:mixed:0",
+                br#"{"messageType":10002,"systemKind":"WeChatOut"}"#,
+            )
+            .unwrap();
+        store
+            .put_runtime(
+                "a",
+                "blocked-control:projected:mixed:1",
+                br#"{"messageType":51,"operationIds":[5]}"#,
+            )
+            .unwrap();
+        assert_eq!(store.storage_usage("a").unwrap().blocked_controls.len(), 2);
+
+        store.put_runtime("a", "projected:mixed:0", b"1").unwrap();
+        let usage = store.storage_usage("a").unwrap();
+        assert_eq!(usage.unresolved["syncBatchesBlocked"], 1);
+        assert_eq!(usage.blocked_controls.len(), 1);
+        assert_eq!(usage.blocked_controls[0].message_type, Some(51));
+        assert_eq!(usage.blocked_controls[0].commands, 1);
     }
 
     #[test]

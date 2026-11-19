@@ -7,6 +7,8 @@ pub(super) enum NoLocalEffectSystem {
     ClientCheckWithoutHandler,
     SelfAppMessage35,
     ChatroomBarWithoutHandler,
+    WeChatOutWithoutHandler,
+    UpdateWxaUsageListWithoutHandler,
 }
 
 impl NoLocalEffectSystem {
@@ -15,6 +17,8 @@ impl NoLocalEffectSystem {
             Self::ClientCheckWithoutHandler => "client_check_without_handler",
             Self::SelfAppMessage35 => "self_appmsg_35_log_only",
             Self::ChatroomBarWithoutHandler => "chatroom_bar_without_handler",
+            Self::WeChatOutWithoutHandler => "wechat_out_without_handler",
+            Self::UpdateWxaUsageListWithoutHandler => "update_wxa_usage_list_without_handler",
         }
     }
 }
@@ -34,6 +38,75 @@ fn leaf(node: roxmltree::Node<'_, '_>) -> bool {
     node.attributes().len() == 0
         && node.children().count() == 1
         && node.children().all(|child| child.is_text())
+}
+
+fn empty_leaf(node: roxmltree::Node<'_, '_>) -> bool {
+    node.attributes().len() == 0
+        && node
+            .children()
+            .all(|child| child.is_text() && child.text() == Some(""))
+}
+
+fn ordered_elements<'a, 'input, const N: usize>(
+    node: roxmltree::Node<'a, 'input>,
+    names: [&str; N],
+) -> Option<[roxmltree::Node<'a, 'input>; N]> {
+    if node.attributes().len() != 0 || !elements_and_spacing(node) {
+        return None;
+    }
+    let children: [_; N] = node
+        .children()
+        .filter(|child| child.is_element())
+        .collect::<Vec<_>>()
+        .try_into()
+        .ok()?;
+    children
+        .iter()
+        .zip(names)
+        .all(|(child, name)| ordinary(*child, name))
+        .then_some(children)
+}
+
+fn wechat_out_shape(node: roxmltree::Node<'_, '_>) -> bool {
+    let Some([tab_rd, tab_wording, activity, push]) =
+        ordered_elements(node, ["TabRD", "TabWording", "ActivityInfo", "IsNeedPush"])
+    else {
+        return false;
+    };
+    let Some([title, description]) = ordered_elements(activity, ["Title", "Desc"]) else {
+        return false;
+    };
+    leaf(tab_rd)
+        && tab_rd.text() == Some("0")
+        && empty_leaf(tab_wording)
+        && empty_leaf(title)
+        && empty_leaf(description)
+        && leaf(push)
+        && push.text() == Some("1")
+}
+
+fn update_wxa_usage_list_shape(node: roxmltree::Node<'_, '_>) -> bool {
+    let Some([kind, delete_count, list]) =
+        ordered_elements(node, ["Type", "DeleteCount", "DeleteList"])
+    else {
+        return false;
+    };
+    let Some([item]) = ordered_elements(list, ["DeleteAppInfo"]) else {
+        return false;
+    };
+    let Some([username, app_id, app_type]) =
+        ordered_elements(item, ["UserName", "AppID", "AppType"])
+    else {
+        return false;
+    };
+    leaf(kind)
+        && kind.text() == Some("1")
+        && leaf(delete_count)
+        && delete_count.text() == Some("0")
+        && empty_leaf(username)
+        && empty_leaf(app_id)
+        && leaf(app_type)
+        && app_type.text() == Some("0")
 }
 
 fn exact_fields(node: roxmltree::Node<'_, '_>, fields: &[&str]) -> Result<()> {
@@ -57,10 +130,8 @@ fn exact_fields(node: roxmltree::Node<'_, '_>, fields: &[&str]) -> Result<()> {
 }
 
 /// Dispatcher 0x623c880 logs root appmsg/type 35 and returns without forwarding
-/// it. Its complete predicate set has no ClientCheckGetExtInfo or
-/// mmchatroombarannouncememt branch; the caller 0x62312d0 does not put these
-/// type-10002 entries through ordinary message projection. This policy covers
-/// only the recorded envelopes and shapes, not arbitrary system controls.
+/// it. The other recorded forms below have no handler for their exact
+/// discriminator. The caller also skips their ordinary message projection.
 pub(super) fn parse_no_local_effect_system(
     message: &AddMessage,
     own_username: &str,
@@ -160,6 +231,28 @@ pub(super) fn parse_no_local_effect_system(
                 exact_fields(children[0], &["content", "xmlcontent", "announcement_id"])?;
                 Ok(NoLocalEffectSystem::ChatroomBarWithoutHandler)
             }
+            "WeChatOut" => {
+                ensure!(
+                    message.from == "weixin"
+                        && message.to == own_username
+                        && message.peer == "weixin"
+                        && !message.outgoing
+                        && wechat_out_shape(children[0]),
+                    "unsupported_system_control"
+                );
+                Ok(NoLocalEffectSystem::WeChatOutWithoutHandler)
+            }
+            "UpdateWxaUsageListNotify" => {
+                ensure!(
+                    message.from == "weixin"
+                        && message.to == own_username
+                        && message.peer == "weixin"
+                        && !message.outgoing
+                        && update_wxa_usage_list_shape(children[0]),
+                    "unsupported_system_control"
+                );
+                Ok(NoLocalEffectSystem::UpdateWxaUsageListWithoutHandler)
+            }
             _ => anyhow::bail!("unsupported_system_control"),
         }
     };
@@ -173,6 +266,8 @@ mod tests {
     const CHECK: &str = "<sysmsg type='ClientCheckGetExtInfo'><ClientCheckGetExtInfo><ReportContext>synthetic</ReportContext><Basic>1</Basic><Cellular>0</Cellular></ClientCheckGetExtInfo></sysmsg>";
     const BAR: &str = "<sysmsg type='mmchatroombarannouncememt'><mmchatroombarannouncememt><content>notice</content><xmlcontent><![CDATA[<msg>synthetic</msg>]]></xmlcontent><announcement_id>123</announcement_id></mmchatroombarannouncememt></sysmsg>";
     const APP: &str = "<appmsg appid='' sdkver='0'><title>synthetic</title><type>35</type><appattach><extinfo>opaque</extinfo></appattach></appmsg>";
+    const WECHAT_OUT: &str = "<sysmsg type='WeChatOut'><WeChatOut><TabRD>0</TabRD><TabWording/><ActivityInfo><Title/><Desc/></ActivityInfo><IsNeedPush>1</IsNeedPush></WeChatOut></sysmsg>";
+    const USAGE_LIST: &str = "<sysmsg type='UpdateWxaUsageListNotify'><UpdateWxaUsageListNotify><Type>1</Type><DeleteCount>0</DeleteCount><DeleteList><DeleteAppInfo><UserName/><AppID/><AppType>0</AppType></DeleteAppInfo></DeleteList></UpdateWxaUsageListNotify></sysmsg>";
 
     fn message(from: &str, to: &str, xml: &str) -> AddMessage {
         AddMessage {
@@ -218,6 +313,18 @@ mod tests {
                 NoLocalEffectSystem::ChatroomBarWithoutHandler,
             ),
             ("self", "self", APP, NoLocalEffectSystem::SelfAppMessage35),
+            (
+                "weixin",
+                "self",
+                WECHAT_OUT,
+                NoLocalEffectSystem::WeChatOutWithoutHandler,
+            ),
+            (
+                "weixin",
+                "self",
+                USAGE_LIST,
+                NoLocalEffectSystem::UpdateWxaUsageListWithoutHandler,
+            ),
         ] {
             let value = message(from, to, xml);
             assert_eq!(parse_no_local_effect_system(&value, "self"), Some(expected));
@@ -233,6 +340,42 @@ mod tests {
                 }
                 assert!(parse_no_local_effect_system(&invalid, "self").is_none());
             }
+        }
+    }
+
+    #[test]
+    fn usage_list_near_misses_stay_blocked() {
+        for xml in [
+            USAGE_LIST.replace(
+                "UpdateWxaUsageListNotify",
+                "AppBrandTestUpdateWxaUsageListNotify",
+            ),
+            USAGE_LIST.replace("<Type>1", "<Type>2"),
+            USAGE_LIST.replace("<DeleteCount>0", "<DeleteCount>1"),
+            USAGE_LIST.replace("<UserName/>", "<UserName>synthetic</UserName>"),
+            USAGE_LIST.replace("<AppType>0", "<AppType>1"),
+        ] {
+            assert!(
+                parse_no_local_effect_system(&message("weixin", "self", &xml), "self").is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn wechat_out_near_misses_stay_blocked() {
+        for xml in [
+            WECHAT_OUT.replace("WeChatOut", "wechatout"),
+            WECHAT_OUT.replace("<TabRD>0", "<TabRD>1"),
+            WECHAT_OUT.replace("<TabWording/>", "<TabWording>notice</TabWording>"),
+            WECHAT_OUT.replace("<TabWording/>", "<TabWording>&#160;</TabWording>"),
+            WECHAT_OUT.replace("<Title/>", "<Title/><Title/>"),
+            WECHAT_OUT.replace("<Desc/>", "<Desc attr='value'/>"),
+            WECHAT_OUT.replace("<IsNeedPush>1", "<IsNeedPush>0"),
+            format!("synthetic:\n{WECHAT_OUT}"),
+        ] {
+            assert!(
+                parse_no_local_effect_system(&message("weixin", "self", &xml), "self").is_none()
+            );
         }
     }
 
