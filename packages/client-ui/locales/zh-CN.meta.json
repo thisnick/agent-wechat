@@ -489,6 +489,8 @@
   "main.show": {"source":"0df6f1cad36c"},
   "main.sign": {"source":"bfd402b2f6f3"},
   "main.signCouldNotFinish": {"source":"d7b568900533"},
+  "main.signInFailureDetails": {"source":"bb2e0916616e","machine":"1e903b734b31"},
+  "main.signInWithQrInstead": {"source":"ebdc676244af","machine":"33b585e5e70c"},
   "main.signNeeded": {"source":"31e23ff08451"},
   "main.signWechat": {"source":"22ac438c9091"},
   "main.signWechatAgainSendMessages": {"source":"52ad071c8274"},

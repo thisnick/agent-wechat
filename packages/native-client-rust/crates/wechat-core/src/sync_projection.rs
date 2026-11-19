@@ -588,7 +588,7 @@ impl Core {
                     account,
                     &format!("control-no-local-effect:{receipt}"),
                     "account.control_observed",
-                    &json!({"commandId":5,"messageType":51,"operationIds":[control.operation_id()],"classification":control.classification(),"projection":"no_local_effect","policy":"linux_4_1_13_26","origin":origin}),
+                    &json!({"commandId":5,"messageType":51,"operationIds":control.operation_ids(),"classification":control.classification(),"projection":"no_local_effect","policy":"linux_4_1_13_26","origin":origin}),
                 )?;
                 self.store.put_runtime(account, receipt, b"1")?;
                 return Ok(());
@@ -1625,6 +1625,9 @@ mod encrypted_roundtrip {
             add(10002, "weixin", "synthetic_self", br#"<sysmsg type="ClientCheckGetExtInfo"><ClientCheckGetExtInfo><ReportContext>private-check</ReportContext><Basic>1</Basic><Cellular>0</Cellular></ClientCheckGetExtInfo></sysmsg>"#, 905, 100),
             add(10002, "synthetic_self", "synthetic_self", br#"<appmsg appid="" sdkver="0"><type>35</type><msgcontent>private-card</msgcontent></appmsg>"#, 906, 100),
             add(10002, "synthetic_self", "room@chatroom", br#"<sysmsg type="mmchatroombarannouncememt"><mmchatroombarannouncememt><content>private-bar</content><xmlcontent>private-xml</xmlcontent><announcement_id>123</announcement_id></mmchatroombarannouncememt></sysmsg>"#, 907, 100),
+            add(10002, "weixin", "synthetic_self", br#"<sysmsg type="WeChatOut"><WeChatOut><TabRD>0</TabRD><TabWording/><ActivityInfo><Title/><Desc/></ActivityInfo><IsNeedPush>1</IsNeedPush></WeChatOut></sysmsg>"#, 908, 100),
+            add(10002, "weixin", "synthetic_self", br#"<sysmsg type="UpdateWxaUsageListNotify"><UpdateWxaUsageListNotify><Type>1</Type><DeleteCount>0</DeleteCount><DeleteList><DeleteAppInfo><UserName/><AppID/><AppType>0</AppType></DeleteAppInfo></DeleteList></UpdateWxaUsageListNotify></sysmsg>"#, 909, 100),
+            add(51, "synthetic_self", "peer", br#"<msg><op id="9"><name>deleteMessages</name><arg>0</arg></op></msg>"#, 910, 100),
         ];
         let batch = wechat_protocol::wire::SyncBatch {
             code: 0,
@@ -1661,7 +1664,7 @@ mod encrypted_roundtrip {
         store.append_event_once("one", &format!("control-observed:{receipt}"), "account.control_observed", &json!({"control":{"commandId":5,"messageType":51,"operationIds":[11]},"projection":"blocked"})).unwrap();
         assert!(store.pending_cursor_projection("one").unwrap());
         let result = core.recover_projection("one").unwrap();
-        assert_eq!(result["projectedCommands"], 8);
+        assert_eq!(result["projectedCommands"], 11);
         assert_eq!(result["pendingCommands"], 0);
         assert_eq!(store.pending_sync_count("one").unwrap(), 0);
         assert!(!store.pending_cursor_projection("one").unwrap());
@@ -1726,13 +1729,26 @@ mod encrypted_roundtrip {
                     && event.data["projection"] == "no_local_effect"
             })
             .collect();
-        assert_eq!(observed.len(), 8);
+        assert_eq!(observed.len(), 11);
         assert_eq!(observed[0].data["operationIds"], json!([11]));
         assert_eq!(
             observed[0].data["classification"],
             "empty_handoff_master_list"
         );
         assert_eq!(observed[1].data["operationIds"], json!([23]));
+        assert_eq!(
+            observed[8].data["classification"],
+            "wechat_out_without_handler"
+        );
+        assert_eq!(
+            observed[9].data["classification"],
+            "update_wxa_usage_list_without_handler"
+        );
+        assert_eq!(
+            observed[10].data["classification"],
+            "delete_messages_without_handler"
+        );
+        assert_eq!(observed[10].data["operationIds"], json!([9]));
         for event in observed {
             let value = event.data.to_string();
             assert!(
@@ -1770,7 +1786,7 @@ mod encrypted_roundtrip {
     }
 
     #[test]
-    fn known_status_controls_do_not_complete_unknown_controls_or_starve_later_messages() {
+    fn known_status_controls_do_not_complete_unknown_or_mixed_controls_or_starve_later_messages() {
         let temporary = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(&temporary.path().join("data")).unwrap());
         store.create_account("one").unwrap();
@@ -1789,7 +1805,11 @@ mod encrypted_roundtrip {
                 add(51, "synthetic_self", "synthetic_self", br#"<msg><op id="11"><name>HandOffMaster</name><arg><handofflist availablecount="1000" devicevirtualid="synthetic-device" networkstatus="wifi" opcode="4" seq="7"><handoffitem/></handofflist></arg></op></msg>"#, 902, 100),
                 add(51, "synthetic_self", "synthetic_self", br#"<msg><op id="11"><name>HandOffMaster</name><arg><handofflist availablecount="1000" devicevirtualid="synthetic-device" networkstatus="wifi" opcode="5" seq="7"/></arg></op></msg>"#, 908, 100),
                 add(51, "synthetic_self", "synthetic_self", br#"<msg><op id="11"><name>HandOffMaster</name><arg><handofflist availablecount="1000" devicevirtualid="synthetic-device" networkstatus="wifi" opcode="4" seq="7" currenthandoffcount="0"/></arg></op></msg>"#, 909, 100),
+                // No handler for 23, whatever its contents.
                 add(51, "synthetic_self", "peer", br#"<msg><op id="23"><name>packagesUpdated</name><arg>{"op":"update","packageId":1}</arg></op></msg>"#, 903, 100),
+                // Opcode 5 has a handler, so its unregistered sibling doesn't
+                // complete the control.
+                add(51, "synthetic_self", "peer", br#"<msg><op id="24"/><op id="5"/></msg>"#, 911, 100),
                 add(10002, "peer", "synthetic_self", br#"<sysmsg type="dynacfg"/>"#, 904, 100),
                 add(10002, "peer", "synthetic_self", br#"<sysmsg type="functionmsg"><private>sensitive-function-data</private></sysmsg>"#, 906, 100),
                 add(10002, "peer", "synthetic_self", b"\xff\xfe", 907, 100),
@@ -1802,7 +1822,7 @@ mod encrypted_roundtrip {
         let result = core
             .commit_sync_batch("one", batch.clone(), "fixture", "fixture")
             .unwrap();
-        assert_eq!(result["projection"]["projectedCommands"], 4);
+        assert_eq!(result["projection"]["projectedCommands"], 5);
         assert_eq!(result["projection"]["pendingCommands"], 8);
         assert_eq!(store.pending_sync_count("one").unwrap(), 1);
         assert!(store.pending_cursor_projection("one").unwrap());
@@ -1845,7 +1865,7 @@ mod encrypted_roundtrip {
                 .filter(|event| event.kind == "account.control_observed"
                     && event.data["projection"] == "no_local_effect")
                 .count(),
-            3
+            4
         );
         assert!(!events.iter().any(|event| event.kind == "sync.committed"));
         assert!(!serde_json::to_string(&events)
