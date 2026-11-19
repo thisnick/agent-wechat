@@ -74,7 +74,7 @@ Clients only see the HTTP API and events. Each decides what to do with a message
 - **Your own code** can do the same through the [HTTP API](/use/api/).
 
 <Aside title="Good to know">
-- **Changes the daemon can't apply are skipped, but kept.** Examples are status and system notices it has no support for, updates to your own profile, and message types such as contact cards. The daemon applies what it supports first: a chat-open or chat-exit notice still clears unread state. It saves the rest unread in `control.sqlite`, sends an `account.control_observed` event with `projection: "skipped"`, and moves the sync checkpoint on.
+- **Changes the daemon can't apply are skipped, but kept.** Examples are status and system notices it has no support for, updates to your own profile, and message types such as contact cards. The daemon applies what it supports first: a chat-open or chat-exit notice still clears unread state. It keeps the rest, unapplied, in `control.sqlite`, sends an `account.control_observed` event with `projection: "skipped"`, and moves the sync checkpoint on.
 - **Some changes wait.** A change that depends on other local work, such as a group refresh, holds back the sync checkpoint until that work finishes and emits `projection.blocked`. New messages still arrive normally.
 - **Messages you send from your phone arrive too,** as `outgoing` messages from your own WeChat ID. Clients that reply to messages should skip them.
 - **Recalls arrive as changes too.** The stored message becomes "[Message recalled]" and a `message.recalled` event goes out.

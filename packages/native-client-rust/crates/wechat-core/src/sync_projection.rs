@@ -31,20 +31,19 @@ struct ProjectionBlocked {
 /// work will change that: status and system controls with no supported effect
 /// (including session exit, opcode 5), own-account updates (commands 1, 35
 /// and 44), unknown commands, message types the profile writer doesn't
-/// support, unreadable control metadata, and deletion of an existing contact
-/// through an unsupported path. Since 2026-11-19 the owner treats these as
+/// support and unreadable control metadata. Since 2026-11-19 the owner treats these as
 /// handled instead of holding the batch and the official profile's saved sync
 /// position: `apply_sync_command_with_media` applies every supported part
 /// first, then skips the rest. Blockers that something later resolves still
 /// hold: a group refresh, sticker reconciliation, a superseded pin, and
 /// contact fields with unresolved version ordering, which a newer known
 /// update or a remark lookup settles and which keep notifications suppressed
-/// meanwhile.
-const SKIPPED_BLOCKERS: [&str; 4] = [
+/// meanwhile. Deleting an existing contact through an unsupported path also
+/// holds: skipping it would leave a deleted contact in the profile for good.
+const SKIPPED_BLOCKERS: [&str; 3] = [
     "unsupported_sync_control",
     "unsupported_message_projection_type",
     "invalid_sync_control_metadata",
-    "unsupported_existing_contact_deletion",
 ];
 /// Peers the Linux 4.1.13.26 session-entry worker (status opcode 2) returns
 /// for before any unread clear, construction, observer or timer.
@@ -2446,6 +2445,30 @@ mod encrypted_roundtrip {
             .put_runtime("one", "projected:earlier-blocked:0", b"1")
             .unwrap();
         store.block_sync("one", "earlier-blocked").unwrap();
+        // Another batch is still pending at start; recovery alone would only
+        // requeue blocked batches once nothing is pending.
+        let pending = wechat_protocol::wire::SyncBatch {
+            commands: vec![add(1, "peer", "synthetic_self", b"pending text", 601, 101)],
+            ..batch.clone()
+        };
+        store
+            .stage_sync(
+                "one",
+                "still-pending",
+                &core
+                    .vault
+                    .seal(
+                        "one",
+                        "apply:still-pending",
+                        &serde_json::to_vec(&pending).unwrap(),
+                    )
+                    .unwrap(),
+                &core
+                    .vault
+                    .seal("one", "received-cursor", &pending.cursor)
+                    .unwrap(),
+            )
+            .unwrap();
         assert_eq!(store.blocked_sync_count("one").unwrap(), 1);
         core.retry_blocked_projection("one").await;
         assert_eq!(store.blocked_sync_count("one").unwrap(), 0);
@@ -2454,12 +2477,17 @@ mod encrypted_roundtrip {
             .runtime("one", "skipped-control:projected:earlier-blocked:1")
             .unwrap()
             .is_some());
-        // The applied message wasn't applied again.
-        assert!(!store
-            .events("one", 0, 100)
-            .unwrap()
-            .iter()
-            .any(|event| event.kind == "message.committed"));
+        // Only the pending message committed; the applied one wasn't
+        // applied again.
+        assert_eq!(
+            store
+                .events("one", 0, 100)
+                .unwrap()
+                .iter()
+                .filter(|event| event.kind == "message.committed")
+                .count(),
+            1
+        );
     }
 
     fn partial_read_fixture(

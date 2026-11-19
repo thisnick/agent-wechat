@@ -159,9 +159,11 @@ pub struct StorageUsage {
     pub runtime_families: Vec<StorageCount>,
     /// Records retention keeps whole until they finish or expire.
     pub unresolved: BTreeMap<String, i64>,
-    /// Status and system controls (AddMsg types 51 and 10002) that keep sync
-    /// batches blocked, by form. Batches blocked by another kind of command,
-    /// or last retried before these records existed, aren't listed.
+    /// Status and system controls (AddMsg types 51 and 10002) recorded by an
+    /// earlier version as keeping sync batches blocked, by form. Such
+    /// controls are now skipped (see `skipped_controls`), so this only lists
+    /// batches no retry has reached yet. Batches waiting on local work, such
+    /// as a group refresh, aren't listed.
     pub blocked_controls: Vec<BlockedControlCount>,
     /// Commands this build couldn't apply and skipped as handled in the last
     /// 30 days, by form. Their raw bytes are kept.
