@@ -221,9 +221,9 @@ enum Command {
     Events {
         #[command(subcommand)]
         command: Option<EventCommand>,
-        /// Start after this event cursor, such as the last one you processed.
-        #[arg(long, default_value = "0")]
-        after: String,
+        /// Start after this event cursor, such as the last one you processed. Without it, a listing shows the most recent events and --watch starts from the newest event.
+        #[arg(long)]
+        after: Option<String>,
         /// Keep printing new events as they arrive instead of listing once.
         #[arg(long)]
         watch: bool,
@@ -783,18 +783,18 @@ enum MemberCommand {
 enum EventCommand {
     /// Stream new events, optionally saving a resume cursor.
     Watch {
-        /// Start after this event cursor, such as the last one you processed.
-        #[arg(long, default_value = "0")]
-        after: String,
+        /// Start after this event cursor, such as the last one you processed. Without it, the watch resumes from --cursor-file or starts from the newest event.
+        #[arg(long)]
+        after: Option<String>,
         /// Save the last event cursor to this private file and resume from it next time.
         #[arg(long)]
         cursor_file: Option<PathBuf>,
     },
-    /// Read events after a cursor.
+    /// Read events after a cursor, or the most recent events.
     List {
-        /// Start after this event cursor, such as the last one you processed.
-        #[arg(long, default_value = "0")]
-        after: String,
+        /// Start after this event cursor, such as the last one you processed. Without it, the most recent events are shown.
+        #[arg(long)]
+        after: Option<String>,
         /// Return at most this many events.
         #[arg(long, default_value_t = 100)]
         limit: usize,
@@ -920,9 +920,9 @@ enum MessageCommand {
     },
     /// Stream message events, optionally saving a resume cursor.
     Watch {
-        /// Start after this event cursor, such as the last one you processed.
-        #[arg(long, default_value = "0")]
-        after: String,
+        /// Start after this event cursor, such as the last one you processed. Without it, the watch resumes from --cursor-file or starts from the newest event.
+        #[arg(long)]
+        after: Option<String>,
         /// Save the last event cursor to this private file and resume from it next time.
         #[arg(long)]
         cursor_file: Option<PathBuf>,
@@ -2408,13 +2408,7 @@ async fn run(cli: Cli) -> Result<()> {
             EventCommand::Watch { after, cursor_file } => {
                 return events::watch(&r, after, cursor_file, false, cli.json).await
             }
-            EventCommand::List { after, limit } => {
-                r.get(&query(
-                    r.path("events")?,
-                    &[("after", Some(after)), ("limit", Some(limit.to_string()))],
-                ))
-                .await?
-            }
+            EventCommand::List { after, limit } => events::list(&r, after, Some(limit)).await?,
             EventCommand::Ack { consumer, through } => {
                 r.post(
                     &r.path(&format!("consumers/{}/ack", encode(&consumer)))?,
@@ -2431,8 +2425,7 @@ async fn run(cli: Cli) -> Result<()> {
             if watch {
                 return events::watch(&r, after, None, false, cli.json).await;
             }
-            r.get(&query(r.path("events")?, &[("after", Some(after))]))
-                .await?
+            events::list(&r, after, None).await?
         }
         Command::Version
         | Command::Licenses

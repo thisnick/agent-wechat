@@ -98,7 +98,9 @@ wx messages media CHAT_ID MESSAGE_ID --quality original --output ./photo.jpg
 wx events watch --cursor-file ~/.cache/wx-events.cursor
 ```
 
-Prints event details as messages arrive. Add `--json` for one JSON event per line. The cursor file lets you resume where you stopped.
+Prints event details as messages arrive. Add `--json` for one JSON event per line. The first run starts from the newest event, and the cursor file lets the next run resume where this one stopped. To start from a cursor you saved yourself, pass `--after CURSOR`.
+
+`wx events list` shows the most recent events; `wx events list --after CURSOR` shows the ones after a cursor.
 
 ## Mark read and recall
 
@@ -123,5 +125,6 @@ wx config servers select box
 - **Attachment limits depend on the send kind.** See [Send attachments](/use/media/) for the 512 MiB file limit, video, image and voice limits and current validation status. Stickers can't be sent.
 - **Quoted replies are experimental.** Server acceptance and phone rendering remain unverified. Missing, recalled or mismatched sources are rejected; source content must fit 128 KiB. Only text replies accept quotes: non-whitespace text up to 16 KiB, including resolved mention names, and escaped messages up to 256 KiB. Quoting media doesn't ensure it can be downloaded.
 - **Pinning a folded group unfolds it.** Built-in chats are unsupported. Folded-group behavior has offline coverage; phone checks covered an ordinary direct chat and an unfolded group.
+- **The daemon keeps the newest 10,000 events of each account.** A cursor older than that fails with `event_cursor_expired` rather than skipping the missing events. To start from the newest event, leave out `--after`, or delete the cursor file.
 - **Exit codes** tell you what happened without parsing JSON. See the [CLI reference](/reference/cli/#exit-codes).
 </Aside>

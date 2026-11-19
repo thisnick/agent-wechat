@@ -1,7 +1,7 @@
 ---
 title: HTTP API
 description: 基于 Daemon 的 /v1 API 和事件流构建专属智能体插件、机器人或应用。
-sourceHash: 0f2aa5668b7c
+sourceHash: "c65867183081"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -197,6 +197,8 @@ curl -N -H "Authorization: Bearer $TOKEN" "$WX/accounts/$ACCOUNT/events/stream"
 ```
 
 基于 Server-Sent Events (SSE) 的长连接事件流。新收到的消息将作为 `message.committed` 事件推送；随后可通过 `GET /messages/{messageId}` 获取详情。发生断线后，带上 `?after=CURSOR` 参数（或标准 `Last-Event-ID` 请求头）重连，Daemon 将自动补发期间错过的所有事件。向 `POST /consumers/{name}/ack` 提交 `{"cursor": "..."}` 可记录消费者的消费位点。
+
+若不提供游标，事件流将从游标 0 开始；而一旦较早的事件已被丢弃，这一请求便会失败。添加 `?newest=true` 参数即可只获取连接建立之后新增的事件。`GET /events?newest=true` 返回最新的事件，其 `nextCursor` 即为最新事件的游标。Daemon 为每个账号保留最新的 10,000 条事件；若游标早于此范围，则返回 `410 event_cursor_expired`。
 
 连接建立时将立即收到心跳注释，随后会周期性发送保活信息。心跳注释不包含消息内容，不会推动事件游标前进。
 

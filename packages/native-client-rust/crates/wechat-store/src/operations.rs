@@ -30,6 +30,15 @@ pub struct Event {
     pub data: Value,
     pub created_at: String,
 }
+fn event_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
+    let raw: String = r.get(2)?;
+    Ok(Event {
+        cursor: r.get::<_, i64>(0)?.to_string(),
+        kind: r.get(1)?,
+        data: serde_json::from_str(&raw).unwrap_or(Value::Null),
+        created_at: r.get(3)?,
+    })
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Operation {
@@ -437,9 +446,24 @@ impl Store {
         let earliest:Option<i64>=db.query_row("SELECT MIN(sequence) FROM events",[],|r|r.get(0))?;
         if earliest.is_some_and(|first|after<first-1) {bail!("event_cursor_expired");}
         let mut q=db.prepare("SELECT sequence,kind,data_json,created_at FROM events WHERE sequence>?1 ORDER BY sequence LIMIT ?2")?;
-        let rows=q.query_map(params![after,limit as i64],|r|{let raw:String=r.get(2)?;Ok(Event {cursor:r.get::<_,i64>(0)?.to_string(),kind:r.get(1)?,data:serde_json::from_str(&raw).unwrap_or(Value::Null),created_at:r.get(3)?})})?;
+        let rows=q.query_map(params![after,limit as i64],event_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     })
+    }
+    /// The newest `limit` retained events, oldest first. It takes no cursor,
+    /// so it reads the end of the log even when cursor 0 has expired.
+    pub fn newest_events(&self, id: &str, limit: usize) -> Result<Vec<Event>> {
+        self.control(id, |db| {
+            if !(1..=200).contains(&limit) {
+                bail!("invalid event cursor/limit");
+            }
+            let mut q = db.prepare(
+                "SELECT sequence,kind,data_json,created_at FROM \
+                 (SELECT * FROM events ORDER BY sequence DESC LIMIT ?1) ORDER BY sequence",
+            )?;
+            let rows = q.query_map([limit as i64], event_row)?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
     }
     pub fn acknowledge(&self, id: &str, consumer: &str, cursor: i64) -> Result<()> {
         self.control(id,|db|{
@@ -1090,6 +1114,41 @@ mod tests {
         store.acknowledge("test", "consumer", 0).unwrap();
         assert!(store.acknowledge("test", "consumer", 2).is_err());
         assert_eq!(store.read_version("test", "thread").unwrap(), "0");
+    }
+    #[test]
+    fn newest_events_read_the_end_of_a_trimmed_log() {
+        let (_t, store) = setup();
+        assert!(store.newest_events("test", 1).unwrap().is_empty());
+        let limit = crate::EVENT_LIMIT;
+        store
+            .control("test", |db| {
+                let tx = db.transaction()?;
+                for n in 1..=limit + 5 {
+                    tx.execute(
+                        "INSERT INTO events VALUES(?1,'account.push',?2,'2026-01-01T00:00:00+00:00')",
+                        params![n, format!("{{\"n\":{n}}}")],
+                    )?;
+                }
+                crate::trim_events(&tx)?;
+                tx.commit()?;
+                Ok(())
+            })
+            .unwrap();
+        // The oldest kept event is 6, so cursor 0 has expired.
+        let error = store.events("test", 0, 1).unwrap_err();
+        assert_eq!(error.to_string(), "event_cursor_expired");
+        assert_eq!(store.events("test", 5, 1).unwrap()[0].cursor, "6");
+        let newest = store.newest_events("test", 3).unwrap();
+        let cursors: Vec<_> = newest.iter().map(|e| e.cursor.as_str()).collect();
+        let head = limit + 5;
+        assert_eq!(
+            cursors,
+            [head - 2, head - 1, head].map(|n| n.to_string()),
+            "newest events are returned oldest first"
+        );
+        assert_eq!(newest[2].data["n"], head);
+        assert!(store.newest_events("test", 0).is_err());
+        assert!(store.newest_events("test", 201).is_err());
     }
     #[test]
     fn read_generation_and_recovery_intent_are_compare_and_swap() {

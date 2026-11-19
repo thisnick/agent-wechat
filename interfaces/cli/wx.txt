@@ -264,16 +264,16 @@ wx daemon status | - | Show the local managed daemon's state and identity
 wx daemon stop | - | Stop the owned local daemon without logging out of WeChat
 wx daemon stop --timeout | takes <TIMEOUT>, default 30 | Seconds to wait for the daemon to exit (1 to 300); it is never force-killed
 wx events | - | Read account events or watch for new events
-wx events --after | takes <AFTER>, default 0 | Start after this event cursor, such as the last one you processed
+wx events --after | takes <AFTER> | Start after this event cursor, such as the last one you processed. Without it, a listing shows the most recent events and --watch starts from the newest event
 wx events --watch | switch | Keep printing new events as they arrive instead of listing once
 wx events ack | - | Save a consumer's progress through an event cursor
 wx events ack --consumer | required, takes <CONSUMER> | Name of the consumer whose progress is being saved
 wx events ack --through | required, takes <THROUGH> | Cursor of the last event this consumer has finished handling
-wx events list | - | Read events after a cursor
-wx events list --after | takes <AFTER>, default 0 | Start after this event cursor, such as the last one you processed
+wx events list | - | Read events after a cursor, or the most recent events
+wx events list --after | takes <AFTER> | Start after this event cursor, such as the last one you processed. Without it, the most recent events are shown
 wx events list --limit | takes <LIMIT>, default 100 | Return at most this many events
 wx events watch | - | Stream new events, optionally saving a resume cursor
-wx events watch --after | takes <AFTER>, default 0 | Start after this event cursor, such as the last one you processed
+wx events watch --after | takes <AFTER> | Start after this event cursor, such as the last one you processed. Without it, the watch resumes from --cursor-file or starts from the newest event
 wx events watch --cursor-file | takes <CURSOR_FILE> | Save the last event cursor to this private file and resume from it next time
 wx groups | - | Find groups and manage their names, settings and members
 wx groups --cursor | takes <CURSOR> | Continue from the next-page cursor of the previous result
@@ -438,7 +438,7 @@ wx messages voice retry --reuse-completed-upload | switch | Reuse a completed fi
 wx messages voice retry <ID> | position 1, required | ID printed when the job, operation or login attempt was started
 wx messages voice status | hidden alias | Alias of wx messages voice get
 wx messages watch | - | Stream message events, optionally saving a resume cursor
-wx messages watch --after | takes <AFTER>, default 0 | Start after this event cursor, such as the last one you processed
+wx messages watch --after | takes <AFTER> | Start after this event cursor, such as the last one you processed. Without it, the watch resumes from --cursor-file or starts from the newest event
 wx messages watch --cursor-file | takes <CURSOR_FILE> | Save the last event cursor to this private file and resume from it next time
 wx operations | - | Inspect, cancel or retry account operations
 wx operations cancel | - | Request cancellation of an item by ID

@@ -900,7 +900,7 @@
         "properties": {
           "after": {
             "default": null,
-            "description": "Return events after this cursor, a decimal string. Defaults to 0, the start.",
+            "description": "Return events after this cursor, a decimal string. Defaults to 0, which returns\n`event_cursor_expired` once older events have been dropped; use `newest` to start at the end.",
             "type": [
               "string",
               "null"
@@ -914,6 +914,11 @@
               "integer",
               "null"
             ]
+          },
+          "newest": {
+            "default": false,
+            "description": "True to start at the end of the log instead of a cursor: a JSON page holds the most recent\nevents, oldest first, and its `nextCursor` is the newest event's cursor; the stream sends\nonly events added after it connects, unless a `Last-Event-ID` header resumes it. Cannot be\ncombined with `after`.",
+            "type": "boolean"
           }
         },
         "type": "object"
