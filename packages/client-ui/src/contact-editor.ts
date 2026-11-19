@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { isCancelledError, useMutation, useQuery } from "@tanstack/react-query";
 import { NativeApiError, type NativeOperation } from "@agent-wechat/shared";
 import type { Connection } from "./connection.ts";
 import { t } from "./i18n.ts";
@@ -32,6 +32,12 @@ class EditUncertain extends Error {
     super("contact_edit_uncertain");
   }
 }
+/** Another submission's outcome is still unknown; this edit waits and is not sent. */
+class EditBlocked extends Error {
+  constructor() {
+    super("contact_edit_blocked");
+  }
+}
 /** WeChat answered and the change was not applied. */
 class EditFailed extends Error {
   constructor(readonly operation: NativeOperation) {
@@ -41,6 +47,12 @@ class EditFailed extends Error {
 
 const isEdit = (change: ContactChange | null | undefined): change is EditChange =>
   change?.action === "privacy" || change?.action === "remark";
+/** A stored submission that hasn't reached a final outcome. */
+export const unsettled = (change: ContactChange | null | undefined): change is EditChange =>
+  isEdit(change) && !["succeeded", "failed", "cancelled"].includes(change.operation?.state ?? "");
+/** The card closing or the account changing ended a read; neither is a failed save. */
+const interrupted = (error: unknown) =>
+  isCancelledError(error) || (error instanceof DOMException && error.name === "AbortError");
 const rejected = (error: unknown) =>
   error instanceof NativeApiError && error.status >= 400 && error.status < 500
   && error.code !== "idempotency_conflict" && ![408, 429].includes(error.status);
@@ -136,9 +148,7 @@ export function useContactEditor({
   // A submission whose outcome is unknown, kept across reopening the card.
   const [uncertain, setUncertain] = useState<EditChange | null>(() => {
     const restored = connection.cache.readState<ContactChange>(account, receiptKey);
-    return friendId && isEdit(restored) && !["succeeded", "failed", "cancelled"].includes(restored.operation?.state ?? "")
-      ? restored
-      : null;
+    return friendId && unsettled(restored) ? restored : null;
   });
   const [checking, setChecking] = useState(false);
   const [retryOriginal, setRetryOriginal] = useState(false);
@@ -151,15 +161,22 @@ export function useContactEditor({
   const [recovered, setRecovered] = useState<EditField | null>(null);
 
   /** Submit once with the change's key, then follow its operation to an outcome. */
+  /** Write this submission's receipt, or clear it, only while the slot is free or ours. */
+  function writeReceipt(change: EditChange, value: EditChange | null) {
+    const stored = connection.cache.readState<ContactChange>(account, receiptKey);
+    if (unsettled(stored) && stored.key !== change.key) throw new EditBlocked();
+    connection.cache.writeState(account, receiptKey, value);
+  }
   async function submitEdit(change: EditChange): Promise<NativeOperation> {
-    connection.cache.writeState(account, receiptKey, change);
+    // One receipt slot per contact: an edit queued behind an unsettled one waits.
+    writeReceipt(change, change);
     await connection.cache.flush();
     let operation: NativeOperation;
     try {
       operation = await actions.submit(change);
     } catch (error) {
       if (!rejected(error)) throw new EditUncertain(change);
-      connection.cache.writeState(account, receiptKey, null);
+      writeReceipt(change, null);
       throw error;
     }
     return settle(change, operation);
@@ -168,7 +185,7 @@ export function useContactEditor({
     let operation = first;
     try {
       while (["queued", "running"].includes(operation.state)) {
-        connection.cache.writeState(account, receiptKey, { ...change, operation });
+        writeReceipt(change, { ...change, operation });
         await pause(800, NEVER);
         operation = await client.operation(account, operation.id);
       }
@@ -176,10 +193,10 @@ export function useContactEditor({
       throw new EditUncertain({ ...change, operation });
     }
     if (operation.state === "needs_review") {
-      connection.cache.writeState(account, receiptKey, { ...change, operation });
+      writeReceipt(change, { ...change, operation });
       throw new EditUncertain({ ...change, operation });
     }
-    connection.cache.writeState(account, receiptKey, null);
+    writeReceipt(change, null);
     changed();
     if (operation.state !== "succeeded") throw new EditFailed(operation);
     return operation;
@@ -188,12 +205,12 @@ export function useContactEditor({
   async function current(): Promise<ContactPrivacySnapshot> {
     const state = queryClient.getQueryState<ContactSnapshot>(key);
     const snapshot = !state?.data || state.isInvalidated || state.fetchStatus === "fetching"
-      ? await queryClient.fetchQuery({ queryKey: key, queryFn: ({ signal }) => read(signal), staleTime: 0 })
+      ? await readFresh()
       : state.data;
     if (!snapshot) throw new NativeApiError(409, "contact_privacy_unresolved");
     return snapshot;
   }
-  /** Run one edit against the current version, reading again after a version conflict. */
+  /** Run one edit against the current version; after a version conflict, read again and retry (twice at most). */
   async function attempt(build: (snapshot: ContactPrivacySnapshot) => EditChange | null) {
     for (let tries = 0; ; tries++) {
       const change = build(await current());
@@ -202,18 +219,37 @@ export function useContactEditor({
         return await submitEdit(change);
       } catch (error) {
         if (tries >= 2 || !retryLater(error)) throw error;
-        await queryClient.invalidateQueries({ queryKey: key });
+        refresh();
+      }
+    }
+  }
+  /**
+   * Read the contact now for a save. A save outlives the card, so its read isn't tied
+   * to the card's query signal; if closing the card cancels a read it joined, read again.
+   */
+  async function readFresh(): Promise<ContactSnapshot> {
+    for (let tries = 0; ; tries++) {
+      try {
+        return await queryClient.fetchQuery({ queryKey: key, queryFn: () => read(NEVER), staleTime: 0 });
+      } catch (error) {
+        if (tries >= 2 || !isCancelledError(error)) throw error;
       }
     }
   }
   /** After an accepted privacy change, read back the settings WeChat saved. */
-  const readBack = () => queryClient.fetchQuery({ queryKey: key, queryFn: ({ signal }) => read(signal), staleTime: 0 });
+  const readBack = readFresh;
 
+  /** Mark the contact changed: refetch it, and keep older catalog pages from overwriting it. */
+  function refresh() {
+    if (friendId) queries.invalidate(account, friendId);
+  }
   function failed(field: EditField, error: unknown) {
     if (error instanceof EditUncertain) {
       setUncertain(error.change);
       return;
     }
+    // Waiting behind an unresolved save, or interrupted after WeChat accepted it: not a failure.
+    if (error instanceof EditBlocked || interrupted(error)) return;
     const permission = error instanceof NativeApiError && error.status === 403;
     if (permission) setPermissionDenied(true);
     setFieldError({
@@ -223,7 +259,7 @@ export function useContactEditor({
         : error instanceof EditFailed ? t("contactsUi.saveFailedDetail") : readableError(error),
       retry: !permission,
     });
-    void queryClient.invalidateQueries({ queryKey: key });
+    refresh();
   }
 
   const scope = { id: `contact-edit:${account}:${id}` };
@@ -259,8 +295,9 @@ export function useContactEditor({
           input: { remark, expectedVersion: snapshot.version },
         });
       if (!operation) return;
+      pollBase.current = null;
       setConfirm({ value: remark, after: reads().data });
-      void queryClient.invalidateQueries({ queryKey: key });
+      refresh();
     },
     onMutate: () => setFlashDone((done) => ({ ...done, remark: false })),
     onSuccess: (_, remark) => {
@@ -294,11 +331,14 @@ export function useContactEditor({
         operation = await settle(change, operation);
       }
       if (change.action === "privacy") await readBack();
-      else setConfirm({ value: change.input.remark, after: reads().data });
+      else {
+        pollBase.current = null;
+        setConfirm({ value: change.input.remark, after: reads().data });
+      }
       setUncertain(null);
       setFlashDone((done) => ({ ...done, [change.action]: false }));
       setRecovered(change.action);
-      if (change.action === "remark") void queryClient.invalidateQueries({ queryKey: key });
+      if (change.action === "remark") refresh();
     } catch (error) {
       if (error instanceof EditUncertain) setUncertain(error.change);
       else if (error instanceof EditFailed || rejected(error) && resend) {
@@ -448,6 +488,6 @@ export function useContactEditor({
     retryOriginal: retryOriginal && uncertain ? () => void recover(true) : undefined,
     checking,
     /** Read the contact again, e.g. after a refresh from WeChat. */
-    refresh: () => { if (friendId) queries.invalidate(account, friendId); },
+    refresh,
   };
 }
