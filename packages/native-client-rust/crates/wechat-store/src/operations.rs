@@ -686,6 +686,16 @@ impl Store {
             Ok(())
         })
     }
+    /// Sync batches held back by a command that couldn't be applied.
+    pub fn blocked_sync_count(&self, account: &str) -> Result<usize> {
+        self.control(account, |db| {
+            Ok(db.query_row(
+                "SELECT count(*) FROM apply_intents WHERE state='blocked'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )? as usize)
+        })
+    }
     pub fn retry_blocked(&self, account: &str) -> Result<()> {
         self.control(account, |db| {
             db.execute(

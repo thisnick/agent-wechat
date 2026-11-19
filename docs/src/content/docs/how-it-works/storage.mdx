@@ -40,7 +40,7 @@ If you delete an attachment's file, fetching that attachment returns `media_not_
 | Record | Kept in full while | Then |
 | --- | --- | --- |
 | Received message batches | waiting, or among the newest 256 | only the batch ID is kept, for 30 days |
-| Blocked message batches | among the newest 256 | only the commands not yet written, plus contact records |
+| Blocked message batches (waiting on other local work) | among the newest 256 | only the commands not yet written, plus contact records |
 | Text and media sends | unfinished, or not yet in the profile, plus a day | a short receipt, for 90 days |
 | Sticker jobs (packs, Saved stickers, sends, pack downloads) | unfinished, or not yet in the profile, plus a day | a short receipt; the newest five downloads of each pack keep what adding the pack again needs to reuse the file |
 | Voice note audio | until the profile holds the same audio | read from the profile |
@@ -83,7 +83,7 @@ Set `dataDir` in `~/.config/agent-wechat/server/config.toml`, or pass `--data-di
 - **Back up before upgrading.** An upgrade can change the data folder's format, and an older `wx` can't open a folder a newer one has upgraded. After that, cleanup permanently removes finished records from `control.sqlite`. To go back to an older version, restore the backup you made before upgrading.
 - **Recall markers live in the data folder.** A profile export doesn't include them.
 - **The first cleanup after upgrading can take a while.** It works in small steps, so other requests keep running. Removing the first large batch needs free disk space about twice the size of `control.sqlite`; without it the space is reclaimed later.
-- **Blocked sync batches are kept.** A batch with a command the daemon doesn't support stays until a later version can write it to the profile, and the profile's saved sync position waits for it. `wx store usage` counts them under `syncBatchesBlocked` and lists the status and system controls that block them under `blockedControls`.
+- **Commands the daemon can't apply don't hold back the sync position.** It skips them, keeps their raw bytes and a note of what was skipped in `control.sqlite`, and lists them under `skippedControls` in `wx store usage`. Batches an earlier version left blocked are retried when the daemon starts. A batch still waiting on other local work, such as a group refresh, is counted under `syncBatchesBlocked`.
 - **`wx store usage` upgrades the data folder** to the installed version's format, like any other `wx store` command. Run it on a copy if you want to keep the original as it is.
 - OpenClaw keeps its own progress in `consumerStateDir`. Back that up too. After an upgrade from an earlier plugin release, the first start converts that file to the new format and keeps the original beside it, ending in `.v1-backup`. The backup still holds message text; delete it once you no longer need to go back. An older plugin can't read the converted file; restoring the backup to go back makes it handle again the messages that arrived since the upgrade.
 </Aside>

@@ -314,7 +314,7 @@ async fn offered(f: &Fixture) -> CallOffer {
 }
 
 #[tokio::test]
-async fn fresh_staged_invite_waits_for_ready_and_ack_without_releasing_projection() {
+async fn fresh_staged_invite_waits_for_ready_and_ack_independently_of_projection() {
     let mut f = Fixture::new();
 
     let old = f.core.call_authority("one").unwrap();
@@ -446,7 +446,9 @@ async fn fresh_staged_invite_waits_for_ready_and_ack_without_releasing_projectio
     let offer = offered(&f).await;
     assert_eq!(offer.call_id, pending.call_id);
     assert_eq!(offer.revision, 3);
-    assert_eq!(f.core.store.pending_sync_count("one").unwrap(), 5);
+    // Projection skips the call controls as handled and finishes their
+    // batches; the call layer works from its own copy of each invite.
+    assert_eq!(f.core.store.pending_sync_count("one").unwrap(), 0);
     assert_eq!(
         f.core
             .store

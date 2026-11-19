@@ -581,20 +581,21 @@ try {
   }
 
   const controlCursor = streamA.events.at(-1).cursor;
+  const skipped = (events, matches) => events.some(event => event.kind === "account.control_observed" && event.data.projection === "skipped" && matches(event.data.control));
   await control({ op: "status_notification", account: "personal", operation_id: 2 });
   await control({ op: "status_notification", account: "personal", operation_id: 11 });
-  await waitFor("unhandled status controls remain staged", async () => (await a.account("personal")).pendingProjectionBatches > 0);
-  await waitFor("status control diagnostics", async () => {
+  await waitFor("unhandled status controls are skipped as handled", async () => {
     const events = (await a.events("personal", controlCursor, 200)).items;
-    return [2, 11].every(operation => events.some(event => event.kind === "projection.blocked" && event.data.commands?.some(command => command.classification === "status_notification" && command.operationIds.includes(operation))));
+    return [2, 11].every(operation => skipped(events, item => item.classification === "status_notification" && item.operationIds.includes(operation)));
   });
-  await control({ op: "inbound", account: "personal", peer: "sim_mei", body: "Live message after blocked status controls" });
-  const laterMessage = await waitFor("blocked controls do not delay live messages", async () => (await a.messages("personal", "sim_mei")).items.find(item => item.body === "Live message after blocked status controls"));
+  await waitFor("skipped status controls don't hold their batches", async () => (await a.account("personal")).pendingProjectionBatches === 0);
+  await control({ op: "inbound", account: "personal", peer: "sim_mei", body: "Live message after skipped status controls" });
+  const laterMessage = await waitFor("skipped controls do not delay live messages", async () => (await a.messages("personal", "sim_mei")).items.find(item => item.body === "Live message after skipped status controls"));
   assert.equal((await a.events("personal", controlCursor, 200)).items.find(event => event.kind === "message.committed" && event.data.messageId === laterMessage.id).data.origin, "live");
-  assert.ok((await a.account("personal")).pendingProjectionBatches > 0);
   await control({ op: "unknown_sync", account: "personal" });
-  await waitFor("unknown command remains staged", async () => (await a.account("personal")).pendingProjectionBatches > 0);
-  await waitFor("unknown command blocks official cursor publication", async () => (await a.events("personal", controlCursor, 200)).items.some(event => event.kind === "projection.blocked"));
+  await waitFor("unknown command is skipped as handled", async () => skipped((await a.events("personal", controlCursor, 200)).items, item => item.commandId === 9999));
+  await waitFor("skipped unknown command doesn't hold its batch", async () => (await a.account("personal")).pendingProjectionBatches === 0);
+  assert.ok(!(await a.events("personal", controlCursor, 200)).items.some(event => event.kind === "projection.blocked"));
   await unsubscribe(streamA);
   await unsubscribe(streamB);
   const logout = await a.logout("personal", "logout-personal");

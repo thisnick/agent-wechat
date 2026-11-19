@@ -159,10 +159,16 @@ pub struct StorageUsage {
     pub runtime_families: Vec<StorageCount>,
     /// Records retention keeps whole until they finish or expire.
     pub unresolved: BTreeMap<String, i64>,
-    /// Status and system controls (AddMsg types 51 and 10002) that keep sync
-    /// batches blocked, by form. Batches blocked by another kind of command,
-    /// or last retried before these records existed, aren't listed.
+    /// Status and system controls (AddMsg types 51 and 10002) recorded by an
+    /// earlier version as keeping sync batches blocked, by form. Such
+    /// controls are now skipped (see `skipped_controls`), so this only lists
+    /// batches no retry has reached yet. Batches waiting on local work, such
+    /// as a group refresh, aren't listed.
     pub blocked_controls: Vec<BlockedControlCount>,
+    /// Commands this build couldn't apply and skipped as handled, by form.
+    /// The labels are kept for good, like the commands' raw bytes, so a later
+    /// version can find and apply them.
+    pub skipped_controls: Vec<SkippedControlCount>,
     pub retired_keys: i64,
 }
 /// Commands of one form that keep sync batches blocked. Labels only: never a
@@ -179,6 +185,30 @@ pub struct BlockedControlCount {
     /// `group`, `excluded`, `classified` or `ordinary`.
     pub peer_kind: Option<String>,
     /// Why the command is blocked.
+    pub reason: Option<String>,
+    pub commands: i64,
+    pub batches: i64,
+}
+
+/// Commands of one form that were skipped as handled because this build
+/// can't apply them. Labels only: never a peer's identity or the command's
+/// contents.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SkippedControlCount {
+    /// Sync command ID, such as 5 (AddMsg) or 44.
+    pub command_id: Option<i64>,
+    /// AddMsg type, such as 51 (status) or 10002 (system).
+    pub message_type: Option<i64>,
+    /// What kind of command it was, such as `status_notification`.
+    pub classification: Option<String>,
+    /// Status operation IDs, as a JSON array.
+    pub operation_ids: Option<String>,
+    /// System message kind, such as `dynacfg`.
+    pub system_kind: Option<String>,
+    /// `group`, `excluded`, `classified` or `ordinary`.
+    pub peer_kind: Option<String>,
+    /// Why this build can't apply it.
     pub reason: Option<String>,
     pub commands: i64,
     pub batches: i64,
@@ -591,11 +621,12 @@ pub fn aged_runtime(key: &str) -> RuntimeRetention {
         "friend-attention-stage:projected:",
     ];
     // Once-only event receipts for one message, command, operation or minute.
-    const EVENT: [&str; 29] = [
+    const EVENT: [&str; 30] = [
         "message:",
         "remote-thread-read:",
         "control-observed:",
         "control-no-local-effect:",
+        "control-skipped:",
         "contact:",
         "contact-pin-event:",
         "contact-pin:",
@@ -1043,8 +1074,29 @@ impl Store {
                 })?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()?
             };
+            let skipped_controls = {
+                // Receipts end in ":{index}", so trimming digits leaves the batch.
+                let mut query = db.prepare(
+                    "SELECT json_extract(v,'$.commandId'),json_extract(v,'$.messageType'),json_extract(v,'$.classification'),CASE WHEN json_array_length(json_extract(v,'$.operationIds'))>0 THEN json_extract(v,'$.operationIds') END,json_extract(v,'$.systemKind'),json_extract(v,'$.peerKind'),json_extract(v,'$.reason'),count(*),count(DISTINCT rtrim(key,'0123456789')) FROM (SELECT key,CAST(value AS TEXT) AS v FROM runtime WHERE key>='skipped-control:' AND key<'skipped-control;') WHERE json_valid(v) GROUP BY 1,2,3,4,5,6,7 ORDER BY 8 DESC LIMIT 50",
+                )?;
+                let rows = query.query_map([], |r| {
+                    Ok(SkippedControlCount {
+                        command_id: r.get(0)?,
+                        message_type: r.get(1)?,
+                        classification: r.get(2)?,
+                        operation_ids: r.get(3)?,
+                        system_kind: r.get(4)?,
+                        peer_kind: r.get(5)?,
+                        reason: r.get(6)?,
+                        commands: r.get(7)?,
+                        batches: r.get(8)?,
+                    })
+                })?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
             Ok(StorageUsage {
                 blocked_controls,
+                skipped_controls,
                 file_bytes: pragma("page_count")? * page,
                 free_bytes: pragma("freelist_count")? * page,
                 tables,
@@ -1140,6 +1192,58 @@ mod tests {
         assert_eq!(usage.blocked_controls.len(), 1);
         assert_eq!(usage.blocked_controls[0].message_type, Some(51));
         assert_eq!(usage.blocked_controls[0].commands, 1);
+    }
+
+    #[test]
+    fn storage_usage_summarizes_skipped_commands_by_form_without_their_contents() {
+        let (_temp, store) = fixture();
+        for (key, label) in [
+            (
+                "skipped-control:projected:b1:0",
+                r#"{"commandId":5,"messageType":51,"classification":"status_notification","operationIds":[5],"peerKind":"group","reason":"unsupported_sync_control"}"#,
+            ),
+            (
+                "skipped-control:projected:b1:3",
+                r#"{"commandId":5,"messageType":51,"classification":"status_notification","operationIds":[5],"peerKind":"group","reason":"unsupported_sync_control"}"#,
+            ),
+            (
+                "skipped-control:projected:b2:1",
+                r#"{"commandId":5,"messageType":51,"classification":"status_notification","operationIds":[5],"peerKind":"group","reason":"unsupported_sync_control"}"#,
+            ),
+            (
+                "skipped-control:projected:b2:2",
+                r#"{"commandId":44,"messageType":null,"classification":"user_info_ext","operationIds":[],"systemKind":null,"reason":"unsupported_sync_control"}"#,
+            ),
+            ("skipped-control:projected:b3:0", "not json"),
+        ] {
+            store.put_runtime("a", key, label.as_bytes()).unwrap();
+        }
+        let usage = store.storage_usage("a").unwrap();
+        assert_eq!(
+            usage.skipped_controls,
+            vec![
+                SkippedControlCount {
+                    command_id: Some(5),
+                    message_type: Some(51),
+                    classification: Some("status_notification".into()),
+                    operation_ids: Some("[5]".into()),
+                    system_kind: None,
+                    peer_kind: Some("group".into()),
+                    reason: Some("unsupported_sync_control".into()),
+                    commands: 3,
+                    batches: 2,
+                },
+                SkippedControlCount {
+                    command_id: Some(44),
+                    classification: Some("user_info_ext".into()),
+                    reason: Some("unsupported_sync_control".into()),
+                    commands: 1,
+                    batches: 1,
+                    ..Default::default()
+                },
+            ]
+        );
+        assert!(usage.blocked_controls.is_empty());
     }
 
     #[test]
@@ -2474,6 +2578,9 @@ mod tests {
             ("contact-pinning:r:u", Keep),
             ("event:message:id", Remove(RECEIPT_DAYS)),
             ("event:blocked-v2:b", Remove(RECEIPT_DAYS)),
+            ("event:control-skipped:projected:b:1", Remove(RECEIPT_DAYS)),
+            // Kept as long as the raw bytes under `sync-control:`.
+            ("skipped-control:projected:b:1", Keep),
             ("event:profile-recovery-pending", Keep),
             ("event:profile-wal-conversion:x", Keep),
             ("sync-control:projected:b:1", Keep),
