@@ -1,27 +1,29 @@
-//! Explicit status-notification forms with no local profile effect.
-//! Every other opcode and payload remains an unresolved projection obligation.
+//! Type-51 status controls the official client applies with no local effect:
+//! those whose every op lacks a registered handler, and the recorded empty
+//! opcode-11 forms. A control with any other registered op stays an
+//! unresolved projection obligation.
 use anyhow::{ensure, Context, Result};
-use serde::Deserialize;
 use wechat_protocol::wire::AddMessage;
+
+/// Status IDs with a handler in Linux x64 4.1.13.26: constructor 0x6202080
+/// inserts exactly these ten entries from table 0xa8b0ec0.
+const REGISTERED_OPERATIONS: [u32; 10] = [1, 2, 4, 5, 7, 9, 11, 13, 14, 21];
+/// Ops one control may carry before it stays blocked as oversized.
+const MAX_OPERATIONS: usize = 64;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum NoLocalEffectStatus {
     EmptyHandOffMaster,
     EmptyHandOffMasterList,
-    PackagesUpdatedWithoutHandler,
-    OwnUsernameWithoutHandler,
-    ZeroLastMessageWithoutHandler,
-    PeerLastMessageWithoutHandler,
+    /// Every op names an ID without a registered handler, in document order.
+    UnregisteredOperations(Vec<u32>),
 }
 
 impl NoLocalEffectStatus {
-    pub(super) fn operation_id(&self) -> u32 {
+    pub(super) fn operation_ids(&self) -> Vec<u32> {
         match self {
-            Self::EmptyHandOffMaster | Self::EmptyHandOffMasterList => 11,
-            Self::PackagesUpdatedWithoutHandler => 23,
-            Self::OwnUsernameWithoutHandler => 3,
-            Self::ZeroLastMessageWithoutHandler => 15,
-            Self::PeerLastMessageWithoutHandler => 16,
+            Self::EmptyHandOffMaster | Self::EmptyHandOffMasterList => vec![11],
+            Self::UnregisteredOperations(ids) => ids.clone(),
         }
     }
 
@@ -29,29 +31,9 @@ impl NoLocalEffectStatus {
         match self {
             Self::EmptyHandOffMaster => "empty_handoff_master",
             Self::EmptyHandOffMasterList => "empty_handoff_master_list",
-            Self::PackagesUpdatedWithoutHandler => "packages_updated_without_handler",
-            Self::OwnUsernameWithoutHandler => "own_username_without_handler",
-            Self::ZeroLastMessageWithoutHandler => "zero_last_message_without_handler",
-            Self::PeerLastMessageWithoutHandler => "peer_last_message_without_handler",
+            Self::UnregisteredOperations(_) => "unregistered_operation",
         }
     }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PackagesUpdated {
-    op: String,
-    #[serde(rename = "packageId")]
-    _package_id: u64,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LastMessage {
-    #[serde(rename = "messageSvrId")]
-    server_id: String,
-    #[serde(rename = "MsgCreateTime")]
-    create_time: String,
 }
 
 fn field_text<'a, 'input>(node: roxmltree::Node<'a, 'input>) -> Result<&'a str> {
@@ -62,33 +44,66 @@ fn field_text<'a, 'input>(node: roxmltree::Node<'a, 'input>) -> Result<&'a str> 
     node.text().context("unsupported_status_control")
 }
 
+fn ordinary(node: roxmltree::Node<'_, '_>, name: &str) -> bool {
+    node.tag_name().namespace().is_none()
+        && node.tag_name().name() == name
+        && node.namespaces().len() == 0
+}
+
+/// The IDs of a control whose every op lacks a registered handler.
+///
+/// Linux x64 4.1.13.26's parser 0x61fc800 walks the `op` children of `msg`
+/// and converts each `id` with a default of zero. Lookup 0x61fe220 returns a
+/// null handler for an absent ID, and the dispatcher advances to the next op
+/// without calling one; the parser itself writes no account state. Type 51
+/// bypasses the message writers, so such a control has no local effect,
+/// whatever its sender or op contents. Only canonical decimal IDs count: a
+/// lenient conversion could read `02` or ` 2` as a registered ID.
+fn unregistered_operations(document: &roxmltree::Document<'_>) -> Result<Vec<u32>> {
+    let root = document.root_element();
+    ensure!(ordinary(root, "msg"), "unsupported_status_control");
+    let mut ids = vec![];
+    for op in root.children().filter(|node| node.is_element()) {
+        ensure!(
+            ordinary(op, "op")
+                && op
+                    .attributes()
+                    .all(|attribute| attribute.namespace().is_none())
+                && ids.len() < MAX_OPERATIONS,
+            "unsupported_status_control"
+        );
+        let raw = op.attribute("id").context("unsupported_status_control")?;
+        let id = raw
+            .parse::<u32>()
+            .ok()
+            .filter(|id| *id <= i32::MAX as u32 && id.to_string() == raw)
+            .context("unsupported_status_control")?;
+        ensure!(
+            !REGISTERED_OPERATIONS.contains(&id),
+            "unsupported_status_control"
+        );
+        ids.push(id);
+    }
+    ensure!(!ids.is_empty(), "unsupported_status_control");
+    Ok(ids)
+}
+
+/// Classify a type-51 control the official client applies without a local
+/// effect: one whose every op lacks a registered handler (see
+/// [`unregistered_operations`]), or one of the recorded empty opcode-11
+/// `HandOffMaster` forms.
+///
 /// Linux x64 4.1.13.26 dispatches opcode 11/HandOffMaster to its handoff-list
 /// consumer. Empty args have no work entries. The observed empty-list form
 /// updates only in-memory sequence/counters when its inner opcode is 4 and
 /// neither counter attribute is present; without items, dispatch loops do not
 /// run. Other inner opcodes can request synchronization and remain blocked.
-/// Table 0xa8b0ec0 and constructor 0x6202080 register exactly 1,2,4,5,7,9,11,
-/// 13,14,21. Lookup 0x61fe220 returns a null handler for absent entries, and
-/// dispatcher 0x61fc800 advances without calling one. Only the recorded forms
-/// of unregistered opcodes 3,15,16,23 are classified here.
 pub(super) fn parse_no_local_effect_status(
     message: &AddMessage,
     own_username: &str,
 ) -> Option<NoLocalEffectStatus> {
     let parse = || -> Result<NoLocalEffectStatus> {
-        let identity = |value: &str| {
-            !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
-        };
-        ensure!(
-            message.message_type == 51
-                && identity(own_username)
-                && message.from == own_username
-                && message.outgoing
-                && identity(&message.to)
-                && message.peer == message.to
-                && message.created_at != 0,
-            "unsupported_status_control"
-        );
+        ensure!(message.message_type == 51, "unsupported_status_control");
         let xml = std::str::from_utf8(&message.content)?;
         ensure!(
             xml.len() <= 1024 * 1024
@@ -101,11 +116,21 @@ pub(super) fn parse_no_local_effect_status(
             document.descendants().count() <= 4096,
             "unsupported_status_control"
         );
-        let ordinary = |node: roxmltree::Node<'_, '_>, name: &str| {
-            node.tag_name().namespace().is_none()
-                && node.tag_name().name() == name
-                && node.namespaces().len() == 0
+        if let Ok(ids) = unregistered_operations(&document) {
+            return Ok(NoLocalEffectStatus::UnregisteredOperations(ids));
+        }
+        let identity = |value: &str| {
+            !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
         };
+        ensure!(
+            identity(own_username)
+                && message.from == own_username
+                && message.outgoing
+                && identity(&message.to)
+                && message.peer == message.to
+                && message.created_at != 0,
+            "unsupported_status_control"
+        );
         let only_elements_and_spacing = |node: roxmltree::Node<'_, '_>| {
             node.children().all(|child| {
                 child.is_element()
@@ -125,7 +150,7 @@ pub(super) fn parse_no_local_effect_status(
         ensure!(
             ordinary(op, "op")
                 && op.attributes().len() == 1
-                && matches!(op.attribute("id"), Some("3" | "11" | "15" | "16" | "23"))
+                && op.attribute("id") == Some("11")
                 && op
                     .attributes()
                     .all(|attribute| attribute.namespace().is_none())
@@ -145,105 +170,53 @@ pub(super) fn parse_no_local_effect_status(
             );
             Ok(node)
         };
-        if op.attribute("id") == Some("3") {
-            ensure!(
-                children.len() == 1
-                    && message.to == own_username
-                    && field_text(field("username")?)? == own_username,
-                "unsupported_status_control"
-            );
-            return Ok(NoLocalEffectStatus::OwnUsernameWithoutHandler);
-        }
-        if matches!(op.attribute("id"), Some("15" | "16")) {
-            ensure!(
-                children.len() == 2
-                    && message.to != own_username
-                    && field_text(field("name")?)? == "lastMessage",
-                "unsupported_status_control"
-            );
-            let last: LastMessage = serde_json::from_str(field_text(field("arg")?)?)?;
-            if op.attribute("id") == Some("15") {
-                ensure!(
-                    last.server_id == "0" && last.create_time == "0",
-                    "unsupported_status_control"
-                );
-                return Ok(NoLocalEffectStatus::ZeroLastMessageWithoutHandler);
-            }
-            let positive = |value: &str| {
-                value
-                    .parse::<u64>()
-                    .is_ok_and(|n| n != 0 && n.to_string() == value)
-            };
-            ensure!(
-                positive(&last.server_id) && positive(&last.create_time),
-                "unsupported_status_control"
-            );
-            return Ok(NoLocalEffectStatus::PeerLastMessageWithoutHandler);
-        }
         ensure!(children.len() == 2, "unsupported_status_control");
         let name = field_text(field("name")?)?;
         let arg = field("arg")?;
-        match op.attribute("id") {
-            Some("11") => {
-                ensure!(
-                    message.to == own_username && name == "HandOffMaster",
-                    "unsupported_status_control"
-                );
-                if arg
-                    .children()
-                    .all(|child| child.is_text() && child.text().is_some_and(str::is_empty))
-                {
-                    return Ok(NoLocalEffectStatus::EmptyHandOffMaster);
-                }
-                ensure!(only_elements_and_spacing(arg), "unsupported_status_control");
-                let lists: Vec<_> = arg.children().filter(|node| node.is_element()).collect();
-                ensure!(lists.len() == 1, "unsupported_status_control");
-                let list = lists[0];
-                ensure!(
-                    ordinary(list, "handofflist")
-                        && list.attributes().len() == 5
-                        && list
-                            .attributes()
-                            .all(|attribute| attribute.namespace().is_none())
-                        && list.attribute("availablecount") == Some("1000")
-                        && list.attribute("opcode") == Some("4")
-                        && matches!(list.attribute("networkstatus"), Some("wifi" | "4g" | "5g"))
-                        && list.children().all(|child| {
-                            child.is_text()
-                                && child.text().is_some_and(|text| text.trim().is_empty())
-                        }),
-                    "unsupported_status_control"
-                );
-                let device = list
-                    .attribute("devicevirtualid")
-                    .context("unsupported_status_control")?;
-                ensure!(identity(device), "unsupported_status_control");
-                let sequence = list
-                    .attribute("seq")
-                    .context("unsupported_status_control")?;
-                ensure!(
-                    !sequence.is_empty()
-                        && sequence.bytes().all(|byte| byte.is_ascii_digit())
-                        && sequence
-                            .parse::<u32>()
-                            .is_ok_and(|value| value.to_string() == sequence),
-                    "unsupported_status_control"
-                );
-                Ok(NoLocalEffectStatus::EmptyHandOffMasterList)
-            }
-            Some("23") => {
-                ensure!(
-                    message.to != own_username && name == "packagesUpdated",
-                    "unsupported_status_control"
-                );
-                let argument = field_text(arg)?;
-                ensure!(argument.len() <= 4096, "unsupported_status_control");
-                let packages: PackagesUpdated = serde_json::from_str(argument)?;
-                ensure!(packages.op == "newPackage", "unsupported_status_control");
-                Ok(NoLocalEffectStatus::PackagesUpdatedWithoutHandler)
-            }
-            _ => anyhow::bail!("unsupported_status_control"),
+        ensure!(
+            message.to == own_username && name == "HandOffMaster",
+            "unsupported_status_control"
+        );
+        if arg
+            .children()
+            .all(|child| child.is_text() && child.text().is_some_and(str::is_empty))
+        {
+            return Ok(NoLocalEffectStatus::EmptyHandOffMaster);
         }
+        ensure!(only_elements_and_spacing(arg), "unsupported_status_control");
+        let lists: Vec<_> = arg.children().filter(|node| node.is_element()).collect();
+        ensure!(lists.len() == 1, "unsupported_status_control");
+        let list = lists[0];
+        ensure!(
+            ordinary(list, "handofflist")
+                && list.attributes().len() == 5
+                && list
+                    .attributes()
+                    .all(|attribute| attribute.namespace().is_none())
+                && list.attribute("availablecount") == Some("1000")
+                && list.attribute("opcode") == Some("4")
+                && matches!(list.attribute("networkstatus"), Some("wifi" | "4g" | "5g"))
+                && list.children().all(|child| {
+                    child.is_text() && child.text().is_some_and(|text| text.trim().is_empty())
+                }),
+            "unsupported_status_control"
+        );
+        let device = list
+            .attribute("devicevirtualid")
+            .context("unsupported_status_control")?;
+        ensure!(identity(device), "unsupported_status_control");
+        let sequence = list
+            .attribute("seq")
+            .context("unsupported_status_control")?;
+        ensure!(
+            !sequence.is_empty()
+                && sequence.bytes().all(|byte| byte.is_ascii_digit())
+                && sequence
+                    .parse::<u32>()
+                    .is_ok_and(|value| value.to_string() == sequence),
+            "unsupported_status_control"
+        );
+        Ok(NoLocalEffectStatus::EmptyHandOffMasterList)
     };
     parse().ok()
 }
@@ -252,71 +225,128 @@ pub(super) fn parse_no_local_effect_status(
 mod tests {
     use super::*;
 
+    fn unregistered(value: &AddMessage) -> Option<Vec<u32>> {
+        match parse_no_local_effect_status(value, "self")? {
+            NoLocalEffectStatus::UnregisteredOperations(ids) => Some(ids),
+            _ => None,
+        }
+    }
+
     #[test]
-    fn absent_handler_policy_accepts_only_the_recorded_opcode_forms() {
-        let own = "<msg><op id='3'><username>self</username></op></msg>";
+    fn controls_without_a_registered_handler_complete_whatever_their_contents_or_sender() {
         let last = |opcode, server, time| {
             format!("<msg><op id='{opcode}'><name>lastMessage</name><arg><![CDATA[{{\"messageSvrId\":\"{server}\",\"MsgCreateTime\":\"{time}\"}}]]></arg></op></msg>")
         };
-        for (xml, peer, expected, opcode) in [
+        for (xml, ids) in [
+            // Recorded forms.
             (
-                own.into(),
-                "self",
-                NoLocalEffectStatus::OwnUsernameWithoutHandler,
-                3,
+                "<msg><op id='3'><username>self</username></op></msg>".into(),
+                vec![3],
+            ),
+            (last(15, "0", "0"), vec![15]),
+            (last(16, "18446744073709551615", "1700000000123"), vec![16]),
+            (PACKAGES.into(), vec![23]),
+            // Forms this parser used to leave blocked.
+            (PACKAGES.replace("newPackage", "update"), vec![23]),
+            (PACKAGES.replace("id=\"23\"", "id=\"24\""), vec![24]),
+            (last(99, "1", "90"), vec![99]),
+            (
+                "<msg><op id='24'><private>unknown</private><arg/><arg/></op></msg>".into(),
+                vec![24],
             ),
             (
-                last(15, "0", "0"),
-                "peer",
-                NoLocalEffectStatus::ZeroLastMessageWithoutHandler,
-                15,
+                "<msg><op id='23' extra='1'/><op id='24'>text</op></msg>".into(),
+                vec![23, 24],
             ),
             (
-                last(16, "18446744073709551615", "1700000000123"),
-                "peer",
-                NoLocalEffectStatus::PeerLastMessageWithoutHandler,
-                16,
+                "<msg extra='1'>\n <op id='0'/><!-- note -->\n</msg>".into(),
+                vec![0],
             ),
+            (
+                format!("<msg><op id='{}'/></msg>", i32::MAX),
+                vec![i32::MAX as u32],
+            ),
+            (EMPTY.replace("id=\"11\"", "id=\"23\""), vec![23]),
         ] {
-            let mut value = message(&xml);
-            value.to = peer.into();
-            value.peer = peer.into();
-            let classified = parse_no_local_effect_status(&value, "self").unwrap();
-            assert_eq!(classified, expected);
-            assert_eq!(classified.operation_id(), opcode);
-            for xml in [
-                xml.replace("</msg>", "<op id='999'/></msg>"),
-                xml.replace("<msg>", "<msg xmlns='urn:unknown'>"),
-                xml.replace("<msg>", "<msg>unexpected"),
-                xml.replace("</op>", "<unknown/></op>"),
-                xml.replace("<op ", "<op extra='1' "),
-                xml.replace("</op>", "<!--unknown--></op>"),
-            ] {
-                value.content = xml.into_bytes();
-                assert!(parse_no_local_effect_status(&value, "self").is_none());
+            for mutation in 0..5 {
+                let mut value = message_to(&xml, "peer");
+                match mutation {
+                    0 => {}
+                    1 => value.from = "foreign".into(),
+                    2 => value.outgoing = false,
+                    3 => value.created_at = 0,
+                    _ => {
+                        value.to = "self".into();
+                        value.peer = "self".into();
+                    }
+                }
+                assert_eq!(unregistered(&value), Some(ids.clone()), "{xml}");
             }
         }
-        for (opcode, server, time) in [
-            (1, "0", "0"),
-            (2, "1", "90"),
-            (5, "1", "90"),
-            (15, "1", "90"),
-            (16, "0", "0"),
-            (16, "01", "90"),
-            (16, "1", "18446744073709551616"),
-            (99, "1", "90"),
-        ] {
-            let mut value = message(&last(opcode, server, time));
-            value.to = "peer".into();
-            value.peer = "peer".into();
-            assert!(parse_no_local_effect_status(&value, "self").is_none());
+        let many = "<op id='23'/>".repeat(MAX_OPERATIONS);
+        assert_eq!(
+            unregistered(&message(&format!("<msg>{many}</msg>"))),
+            Some(vec![23; MAX_OPERATIONS])
+        );
+        assert_eq!(
+            NoLocalEffectStatus::UnregisteredOperations(vec![23, 24]).operation_ids(),
+            vec![23, 24]
+        );
+    }
+
+    #[test]
+    fn registered_ambiguous_or_mixed_operation_ids_stay_blocked() {
+        let op = |id: &str| format!("<msg><op id=\"{id}\"><name>other</name></op></msg>");
+        for id in REGISTERED_OPERATIONS {
+            assert!(parse_no_local_effect_status(&message(&op(&id.to_string())), "self").is_none());
         }
-        for xml in [
-            own.replace(">self<", ">peer<"),
-            own.replace("</op>", "<username>self</username></op>"),
-        ] {
-            assert!(parse_no_local_effect_status(&message(&xml), "self").is_none());
+        let mut cases: Vec<String> = [
+            // A lenient integer conversion could read these as a registered ID.
+            "02",
+            " 23",
+            "23 ",
+            "+23",
+            "-1",
+            "0x17",
+            "23.0",
+            "",
+            "&#50;",
+            "2147483648",
+            // 2^32 + 23 wraps to 23 in 32 bits.
+            "4294967319",
+        ]
+        .iter()
+        .map(|id| op(id))
+        .collect();
+        cases.extend([
+            "<msg><op id='23'/><op id='2'/></msg>".into(),
+            "<msg><op id='5'/><op id='24'/></msg>".into(),
+            "<msg><op/></msg>".into(),
+            "<msg><op id='23'/><other/></msg>".into(),
+            "<msg/>".into(),
+            "<sysmsg><op id='23'/></sysmsg>".into(),
+            "<msg xmlns='urn:unknown'><op id='23'/></msg>".into(),
+            "<msg xmlns:o='urn:unknown'><op id='23'/></msg>".into(),
+            "<msg><o:op xmlns:o='urn:unknown' id='23'/></msg>".into(),
+            "<msg><op xmlns:o='urn:unknown' o:id='23'/></msg>".into(),
+            "<msg><op xml:id='2' id='23'/></msg>".into(),
+            "<msg><op id='23' id='24'/></msg>".into(),
+            format!("<msg>{}</msg>", "<op id='23'/>".repeat(MAX_OPERATIONS + 1)),
+            format!("<!DOCTYPE msg [<!ENTITY e SYSTEM 'file:///private'>]>{PACKAGES}"),
+            format!("{}{}", " ".repeat(1024 * 1024), PACKAGES),
+        ]);
+        for xml in cases {
+            assert!(
+                parse_no_local_effect_status(&message_to(&xml, "peer"), "self").is_none(),
+                "{xml}"
+            );
         }
+        let mut value = message_to(PACKAGES, "peer");
+        value.message_type = 10002;
+        assert!(parse_no_local_effect_status(&value, "self").is_none());
+        value.message_type = 51;
+        value.content = b"\xff\xfe".to_vec();
+        assert!(parse_no_local_effect_status(&value, "self").is_none());
     }
     use wechat_protocol::protobuf as p;
 
@@ -434,64 +464,9 @@ mod tests {
     }
 
     #[test]
-    fn only_observed_peer_directed_packages_updated_shape_is_classified() {
-        for xml in [
-            PACKAGES.to_string(),
-            PACKAGES.replace("\"packageId\":1", "\"packageId\":0"),
-            PACKAGES.replace("\"packageId\":1", &format!("\"packageId\":{}", u64::MAX)),
-            PACKAGES.replace("<![CDATA[", "").replace("]]>", ""),
-        ] {
-            assert_eq!(
-                parse_no_local_effect_status(&message_to(&xml, "peer"), "self"),
-                Some(NoLocalEffectStatus::PackagesUpdatedWithoutHandler)
-            );
-        }
-        assert!(parse_no_local_effect_status(&message(PACKAGES), "self").is_none());
-        for xml in [
-            PACKAGES.replace("packagesUpdated", "other"),
-            PACKAGES.replace("newPackage", "other"),
-            PACKAGES.replace("\"packageId\":1", "\"packageId\":-1"),
-            PACKAGES.replace("\"packageId\":1", "\"packageId\":1.0"),
-            PACKAGES.replace("\"packageId\":1", "\"packageId\":1e0"),
-            PACKAGES.replace("\"packageId\":1", "\"packageId\":\"1\""),
-            PACKAGES.replace("\"packageId\":1", "\"packageId\":18446744073709551616"),
-            PACKAGES.replace("\"packageId\":1", "\"packageId\":null"),
-            PACKAGES.replace("\"packageId\":1", "\"packageId\":true"),
-            PACKAGES.replace("\"packageId\":1", "\"packageId\":{}"),
-            PACKAGES.replace("\"packageId\":1", "\"packageId\":1,\"packageId\":1"),
-            PACKAGES.replace(
-                "\"op\":\"newPackage\"",
-                "\"op\":\"newPackage\",\"op\":\"newPackage\"",
-            ),
-            PACKAGES.replace("\"packageId\":1", "\"packageId\":1,\"extra\":0"),
-            PACKAGES.replace(",\"packageId\":1", ""),
-            PACKAGES.replace("{\"op\":\"newPackage\",\"packageId\":1}", "[]"),
-            PACKAGES.replace("<name>", "<name extra=\"value\">"),
-            PACKAGES.replace("<arg>", "<arg xmlns=\"urn:unknown\">"),
-            PACKAGES.replace("</arg>", "<function/></arg>"),
-            PACKAGES.replace("<arg>", "<username>peer</username><arg>"),
-            PACKAGES.replace("</op>", "<name>packagesUpdated</name></op>"),
-            PACKAGES.replace("id=\"23\"", "id=\"2\""),
-            PACKAGES.replace(
-                "{\"op\":\"newPackage\",\"packageId\":1}",
-                &format!(
-                    "{}{{\"op\":\"newPackage\",\"packageId\":1}}",
-                    " ".repeat(4096)
-                ),
-            ),
-        ] {
-            assert!(parse_no_local_effect_status(&message_to(&xml, "peer"), "self").is_none());
-        }
-        let mut foreign = message_to(PACKAGES, "peer");
-        foreign.from = "other".into();
-        assert!(parse_no_local_effect_status(&foreign, "self").is_none());
-    }
-
-    #[test]
     fn other_controls_and_ambiguous_or_nonempty_shapes_stay_blocked() {
         for xml in [
             EMPTY.replace("id=\"11\"", "id=\"2\""),
-            EMPTY.replace("id=\"11\"", "id=\"23\""),
             EMPTY.replace("HandOffMaster", "other"),
             EMPTY.replace("<arg/>", "<arg> </arg>"),
             EMPTY.replace("<arg/>", "<arg><![CDATA[work]]></arg>"),

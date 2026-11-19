@@ -22,6 +22,7 @@
 //! | Metadata receipts in `runtime` | while their request is pending | - | once it finishes |
 //! | Pagination views | until they expire | - | once expired |
 //! | Message attachment rows never downloaded (`pending` or `expired`), except voice | for [`IDLE_ASSET_DAYS`], while a job or queued automatic download names them, or once they hold bytes | - | ID retired; reading the message's media recreates the row |
+//! | Sticker catalog previews (`sticker_preview_*`) | until their one-day preparation window ends, while a queued or running download names them, or while they hold bytes | - | removed without retiring the ID: the catalog lists a new ID each day and never an earlier one, so a retired ID would only grow `retired_keys` |
 //!
 //! Uncertain (`needs_review`) records expire after [`REVIEW_DAYS`] or once
 //! more than [`REVIEW_LIMIT`] newer ones exist in the same family. Expiry keeps
@@ -119,6 +120,8 @@ pub struct RetentionStep {
     pub runtime_removed: usize,
     /// Never-downloaded message attachment rows removed.
     pub idle_assets: usize,
+    /// Sticker catalog previews removed after their preparation window.
+    pub expired_previews: usize,
     /// Pass back as `runtime_after` to continue the runtime scan.
     #[serde(skip)]
     pub runtime_after: i64,
@@ -132,6 +135,7 @@ impl RetentionStep {
         self.compacted += other.compacted;
         self.retired += other.retired;
         self.idle_assets += other.idle_assets;
+        self.expired_previews += other.expired_previews;
         self.runtime_removed += other.runtime_removed;
     }
 }
@@ -673,6 +677,28 @@ fn remove_idle_assets(tx: &Transaction, now: i64, budget: &mut i64) -> Result<us
     Ok(removed)
 }
 
+/// Remove sticker catalog previews whose preparation window has ended. The
+/// catalog mints a preview ID per pack, image and day, so it never lists an
+/// earlier day's ID again, and reading, downloading or fetching the content of
+/// an expired preview already fails. A preview waits while a queued or running
+/// download names it, or while it still holds bytes:
+/// [`Store::expire_sticker_preparation_assets`] releases those first.
+/// Their IDs aren't retired: nothing can reuse them, so a retired key would
+/// only add a row for good. Reading one returns `not_found`.
+fn remove_expired_previews(tx: &Transaction, now: i64, budget: &mut i64) -> Result<usize> {
+    let mut removed = 0;
+    for id in ids(
+        tx,
+        // `_` is a LIKE wildcard; '`' is the byte after '_', ending the range.
+        "SELECT id FROM media_assets a WHERE id>='sticker_preview_' AND id<'sticker_preview`' AND message_id IS NULL AND payload IS NULL AND payload_file IS NULL AND profile_key IS NULL AND json_extract(metadata_json,'$.preparationExpiresAt')<=?1 AND NOT EXISTS(SELECT 1 FROM media_jobs j WHERE j.state IN ('queued','running') AND json_extract(j.data_json,'$.assetId')=a.id) LIMIT ?2",
+        params![now, (*budget).max(0)],
+    )? {
+        tx.execute("DELETE FROM media_assets WHERE id=?1", [&id])?;
+        removed += take(budget, 1);
+    }
+    Ok(removed)
+}
+
 /// Remove metadata receipts whose request finished, and expired pagination
 /// views. Neither is read again.
 fn remove_finished(tx: &Transaction, now: i64, budget: &mut i64) -> Result<usize> {
@@ -781,6 +807,7 @@ impl Store {
             step.compacted = compact(&tx, now, &mut budget)?;
             step.retired = retire_receipts(&tx, now, &mut budget)?;
             step.idle_assets = remove_idle_assets(&tx, now, &mut budget)?;
+            step.expired_previews = remove_expired_previews(&tx, now, &mut budget)?;
             let finished = remove_finished(&tx, now, &mut budget)?;
             let (removed, last, full) = age_runtime(&tx, now, runtime_after)?;
             step.runtime_removed = removed + finished;
@@ -2238,6 +2265,96 @@ mod tests {
             error(store.media_asset("a", "unknown")),
             "operation_expired"
         );
+    }
+
+    #[test]
+    fn sticker_previews_are_removed_once_their_preparation_window_ends() {
+        let (_temp, store) = fixture();
+        let now = unix_seconds();
+        let preview = |id: &str, state: &str, expires: Option<i64>, payload: Option<&[u8]>| {
+            let mut metadata = json!({"id":id,"kind":"image","variant":"thumbnail","state":state});
+            if let Some(expires) = expires {
+                metadata["preparationExpiresAt"] = expires.into();
+            }
+            store
+                .put_media_asset(
+                    "a",
+                    &MediaAssetRecord {
+                        id: id.into(),
+                        message_id: None,
+                        variant: "thumbnail".into(),
+                        kind: "image".into(),
+                        metadata,
+                        plan: b"sealed plan".to_vec(),
+                        payload: payload.map(<[u8]>::to_vec),
+                    },
+                )
+                .unwrap();
+        };
+        preview("sticker_preview_listed", "pending", Some(now - 1), None);
+        preview(
+            "sticker_preview_released",
+            "expired",
+            Some(now - 86_400),
+            None,
+        );
+        preview("sticker_preview_current", "pending", Some(now + 60), None);
+        preview(
+            "sticker_preview_downloading",
+            "pending",
+            Some(now - 1),
+            None,
+        );
+        preview(
+            "sticker_preview_with_bytes",
+            "available",
+            Some(now - 1),
+            Some(b"sealed"),
+        );
+        preview("sticker_preview_no_window", "pending", None, None);
+        // Outside the prefix range, and a sticker preparation output.
+        preview("sticker_previewZ", "pending", Some(now - 1), None);
+        preview("sticker_prepared", "expired", Some(now - 1), None);
+        let (mut job, _) = store
+            .create_media_job(
+                "a",
+                "job",
+                "sticker-preview:key",
+                &"0".repeat(64),
+                "download",
+                &json!({"assetId":"sticker_preview_downloading"}),
+                b"",
+            )
+            .unwrap();
+        job.state = "running".into();
+        store.save_media_job("a", &job).unwrap();
+
+        let step = settle(&store, now);
+        assert_eq!(step.expired_previews, 2);
+        assert_eq!(step.idle_assets, 0);
+        for id in ["sticker_preview_listed", "sticker_preview_released"] {
+            assert!(error(store.media_asset("a", id)).contains("no rows"));
+        }
+        assert_eq!(store.storage_usage("a").unwrap().retired_keys, 0);
+        for id in [
+            "sticker_preview_current",
+            "sticker_preview_downloading",
+            "sticker_preview_with_bytes",
+            "sticker_preview_no_window",
+            "sticker_previewZ",
+            "sticker_prepared",
+        ] {
+            assert!(store.media_asset("a", id).is_ok(), "{id} was removed");
+        }
+
+        // A finished download no longer holds its preview.
+        job.state = "failed".into();
+        store.save_media_job("a", &job).unwrap();
+        assert_eq!(settle(&store, now).expired_previews, 1);
+        assert!(error(store.media_asset("a", "sticker_preview_downloading")).contains("no rows"));
+        assert_eq!(store.media_job("a", "job").unwrap().state, "failed");
+        // Once the window passes, the current preview goes too.
+        assert_eq!(settle(&store, now + 60).expired_previews, 1);
     }
 
     #[test]
