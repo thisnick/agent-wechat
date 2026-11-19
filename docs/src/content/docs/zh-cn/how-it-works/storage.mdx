@@ -1,7 +1,7 @@
 ---
 title: 数据存储与备份
 description: agent-wechat 的文件存放位置，以及需要备份哪些内容。
-sourceHash: "05e733dd070c"
+sourceHash: "c6e194e58333"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -49,6 +49,7 @@ $TMPDIR                             离线检查用的临时只读快照
 | 消息和事件的重复检查 | 30 天 | 删除 |
 | 为排查问题保留的微信原始响应 | 7 天 | 删除 |
 | 未下载过的附件（语音消息除外） | 7 天，或在下载排队期间 | 删除；重新列出该消息的媒体即可将其恢复 |
+| 表情商店预览图（表情包图标、封面和表情缩略图） | 一天，或在下载排队或进行中时 | 删除；再次浏览商店时会列出新的预览图 |
 
 结果未知（`needs_review`）的请求会完整保留 7 天，或直到之后又累积了 100 条更新的记录。之后，发送和媒体任务保持 `needs_review`，群聊和联系人变更与撤回则变为 `expired`，错误码为 `review_expired`。无论哪种情况，都无法再自动修复。参见[发送与故障恢复](/how-it-works/sends/#how-long-a-key-works)。
 
