@@ -1,5 +1,5 @@
 import { Command } from "cmdk";
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import {
   NativeApiError,
   isNativeTombstone,
@@ -15,6 +15,7 @@ import { t, formatLocale } from "./i18n.ts";
 import { pause, readableError } from "./session.ts";
 import { HubAvatar } from "./avatars.tsx";
 import { Icon } from "./ui.tsx";
+import { ComposerHelp } from "./composer-help.tsx";
 
 import {
   contactDetailActions,
@@ -546,14 +547,20 @@ function PrivacyFields({
   value,
   disabled,
   change,
+  hint,
 }: {
   value: ContactPrivacy;
   disabled: boolean;
   change: (value: ContactPrivacy) => void;
+  hint: ReactNode;
 }) {
   return (
-    <fieldset className="contact-privacy-fields" disabled={disabled}>
-      <legend>{t("contactsUi.privacy")}</legend>
+    <fieldset className="contact-privacy-fields" disabled={disabled} aria-label={t("contactsUi.privacy")}>
+      {/* Controls in the first legend stay usable while the fieldset is disabled. */}
+      <legend>
+        {t("contactsUi.privacy")}
+        <ComposerHelp label={t("contactsUi.aboutPrivacy")} icon="info" className="contact-hint">{hint}</ComposerHelp>
+      </legend>
       <div className="contact-access-options">
         {[false, true].map((chatsOnly) => (
           <label key={String(chatsOnly)}>
@@ -711,6 +718,7 @@ export function ContactDetailDialog({
   const remarkDirty = remarkDraft !== null && remarkDraft.trim() !== remarkBase;
   const remarkTooLong = new TextEncoder().encode(remarkValue.trim()).length > MAX_CONTACT_REMARK_BYTES;
   const remarkPolls = useRef(0);
+  const remarkFieldId = useId();
   // A failed poll changes no snapshot, so it bumps this to schedule the next one.
   const [remarkPollFailures, setRemarkPollFailures] = useState(0);
   const [privacyLoading, setPrivacyLoading] = useState(false),
@@ -1126,9 +1134,15 @@ export function ContactDetailDialog({
         </label>
       )}
       {friendId && !removal && !privacyDenied && (savedPrivacy || remarkReceipt || remarkDraft !== null) && (
-        <label className="contact-remark">
-          {t("contactsUi.remark")}
+        <div className="contact-remark">
+          <div className="contact-field-heading">
+            <label htmlFor={remarkFieldId}>{t("contactsUi.remark")}</label>
+            <ComposerHelp label={t("contactsUi.aboutRemarks")} icon="info" className="contact-hint">
+              {t("contactsUi.remarkHint")}
+            </ComposerHelp>
+          </div>
           <input
+            id={remarkFieldId}
             value={remarkValue}
             placeholder={t("contactsUi.remarkPlaceholder")}
             disabled={
@@ -1148,28 +1162,21 @@ export function ContactDetailDialog({
               setRemarkDraft(e.target.value);
             }}
           />
-          <small role={remarkTooLong ? "alert" : remarkConfirming ? "status" : undefined}>
-            {t(
-              remarkTooLong
-                ? "contactsUi.remarkTooLong"
-                : !remarkConfirming
-                  ? "contactsUi.remarkHint"
+          {(remarkTooLong || remarkConfirming) && (
+            <small role={remarkTooLong ? "alert" : "status"}>
+              {t(
+                remarkTooLong
+                  ? "contactsUi.remarkTooLong"
                   : remarkPolls.current < REMARK_POLL_LIMIT
                     ? "contactsUi.remarkWaiting"
                     : "contactsUi.remarkReadbackUnavailable",
-            )}
-          </small>
-        </label>
+              )}
+            </small>
+          )}
+        </div>
       )}
       {showPrivacy && (
         <section className="contact-detail-privacy">
-          <p>
-            {t(
-              friendId
-                ? "contactsUi.privacyForContact"
-                : "contactsUi.privacyBeforeRequest",
-            )}
-          </p>
           {privacyLoading && (
             <p role="status">
               {t(
@@ -1188,6 +1195,7 @@ export function ContactDetailDialog({
           {privacyConflict && <p role="alert">{t("contactsUi.privacyConflict")}</p>}
           {(!friendId || (!privacyDenied && (savedPrivacy || draft || receipt?.action === "privacy"))) && (
             <PrivacyFields
+              hint={t(friendId ? "contactsUi.privacyForContact" : "contactsUi.privacyBeforeRequest")}
               value={privacy}
               disabled={
                 locked ||

@@ -1080,7 +1080,18 @@ export const scenes = [
       // The daemon's own lookup confirms the remark on a later worker tick.
       await expect(dialog.getByRole("heading", { name: "Mei (book club)", exact: true })).toBeVisible({ timeout: 30_000 });
       await expect(dialog.getByText("Nickname: Mei Chen", { exact: true })).toBeVisible();
-      await expect(dialog.getByText("Only you see this name. It replaces their nickname in your chats.", { exact: true })).toBeVisible();
+      // Explanations stay behind the info buttons until asked for.
+      const hint = dialog.getByRole("tooltip");
+      await expect(hint).toHaveCount(0);
+      for (const [label, text] of [["About remarks", "Only you see this name."], ["About privacy", "Manage what you and this contact can see in Moments."]]) {
+        const info = dialog.getByRole("button", { name: label, exact: true });
+        await info.focus();
+        await expect(hint).toContainText(text);
+        await info.press("Escape");
+        await expect(hint).toHaveCount(0);
+        await expect(dialog).toBeVisible();
+      }
+      await page.evaluate(() => (document.activeElement)?.blur());
       await expect(dialog.locator(".contact-change-status")).toHaveCount(0);
       await expect(dialog.getByRole("button", { name: "Save remark", exact: true })).toHaveCount(0);
       await expect(dialog.getByRole("button", { name: "Message", exact: true })).toBeVisible();

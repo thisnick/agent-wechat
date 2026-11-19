@@ -968,6 +968,8 @@
     "nicknameValue": "Nickname: {{name}}",
     "wechatIdValue": "WeChat ID: {{id}}",
     "remark": "Remark",
+    "aboutRemarks": "About remarks",
+    "aboutPrivacy": "About privacy",
     "remarkPlaceholder": "Add a remark",
     "remarkHint": "Only you see this name. It replaces their nickname in your chats.",
     "remarkTooLong": "This remark is too long.",

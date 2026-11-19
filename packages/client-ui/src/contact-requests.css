@@ -205,10 +205,38 @@
   font-size: 13px;
   color: var(--muted);
 }
+/* The remark heading matches the Privacy legend. */
+.contact-field-heading label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.contact-field-heading,
+.contact-privacy-fields legend {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.contact-hint > .icon-btn {
+  width: 22px;
+  height: 22px;
+}
+.contact-hint > .icon-btn .icon {
+  width: 14px;
+  height: 14px;
+}
+/* Open below and to the right, inside the scrolling dialog. */
+.contact-hint .composer-help-content {
+  top: calc(100% + 4px);
+  bottom: auto;
+  left: 0;
+  right: auto;
+  font-weight: normal;
+}
 .contact-remark input {
   display: block;
   width: 100%;
-  margin: 8px 0 6px;
+  margin: 6px 0 6px;
   padding: 9px 10px;
   font: inherit;
   font-size: 14px;
