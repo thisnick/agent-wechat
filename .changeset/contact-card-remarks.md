@@ -2,4 +2,4 @@
 "@agent-wechat/client-ui": minor
 ---
 
-Contact cards show and edit your remark for a friend. The card names the contact by the remark, with their nickname and WeChat ID below it. Saving or clearing a remark uses the same inspected version as privacy edits and shows the new name while WeChat confirms it. Editing a remark needs account administrator access. Saved privacy and remark changes no longer show a status banner; the controls show the saved values. The remark and privacy explanations open from info buttons instead of taking space on the card.
+Contact cards show and edit your remark for a friend. The card names the contact by the remark, with their nickname and WeChat ID below it. Friend edits now save on their own: privacy right after a change, the remark once you stop typing or leave the field. Several changes in a row save one after another without Save buttons. Each field shows its own state beside its heading (saving, syncing with WeChat, saved, not saved with Retry, or not confirmed with Check) instead of a banner at the bottom of the card. The remark and privacy explanations open from info buttons. Editing needs account administrator access.

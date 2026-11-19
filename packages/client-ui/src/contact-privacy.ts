@@ -21,6 +21,11 @@ export const MAX_CONTACT_REMARK_BYTES = 256;
 /** WeChat confirms a saved remark through a separate lookup that no event announces. */
 export const REMARK_POLL_MS = 2_000;
 export const REMARK_POLL_LIMIT = 30;
+/** Friend edits save on their own: privacy after a short pause, the remark once typing stops. */
+export const PRIVACY_AUTOSAVE_MS = 300;
+export const REMARK_AUTOSAVE_MS = 800;
+/** How long a field says "Saved" after its change is confirmed. */
+export const SAVED_FLASH_MS = 2_000;
 export const defaultContactPrivacy = (): ContactPrivacy => ({
   chatsOnly: false,
   hideMyPosts: false,

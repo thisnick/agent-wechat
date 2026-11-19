@@ -1004,43 +1004,38 @@ export const scenes = [
       if (name === "contact-privacy-retry" || name === "contact-privacy-syncing") {
         let patchCount = 0;
         page.on("request", request => { if (request.method() === "PATCH" && new URL(request.url()).pathname.endsWith("/contacts/sim_mei")) patchCount++; });
-        if (name === "contact-privacy-syncing") await dialog.getByRole("switch", { name: "Hide Their Posts", exact: true }).uncheck();
-        else await hideMine.check();
-        await dialog.getByRole("radio", { name: "Chats Only", exact: true }).check();
-        await expect(hideMine).toHaveCount(0);
-        await dialog.getByRole("radio", { name: "Full access", exact: true }).check();
-        if (name === "contact-privacy-syncing") await expect(hideMine).not.toBeChecked();
-        else await expect(hideMine).toBeChecked();
-        await dialog.getByRole("button", { name: "Save privacy", exact: true }).click();
+        const status = dialog.locator(".contact-privacy-fields .contact-save-status");
         if (name === "contact-privacy-syncing") {
-          await expect(dialog.locator(".contact-detail-privacy [role=status]")).toHaveText("Waiting for saved privacy settings…");
-          await expect(hideMine).toBeDisabled();
-          await expect(dialog.getByRole("button", { name: "Save privacy", exact: true })).toHaveCount(0);
+          // Autosaves without a button; the controls stay usable while it saves.
+          await dialog.getByRole("switch", { name: "Hide Their Posts", exact: true }).uncheck();
+          await expect(status).toHaveText("Saving…");
+          await expect(hideMine).toBeEnabled();
           await expect(dialog.getByRole("alert")).toHaveCount(0);
-        }
-        if (name === "contact-privacy-retry") {
-          await expect(dialog.getByRole("alert")).toBeVisible();
+        } else {
+          await hideMine.check();
+          await expect(status).toContainText("Not confirmed");
+          await expect(dialog.locator(".contact-field-problem")).toContainText("The connection dropped while saving.");
           await dialog.getByRole("button", { name: "Close", exact: true }).click();
           const details = page.getByRole("button", { name: "Details for Mei Chen", exact: true });
           await details.focus();
           await details.press("Enter");
           await expect(hideMine).toBeChecked();
           await expect(hideMine).toBeDisabled();
-          await expect(dialog.getByRole("button", { name: "Save privacy", exact: true })).toBeDisabled();
-          await dialog.getByRole("button", { name: "Check status", exact: true }).click();
-          await dialog.getByRole("button", { name: "Retry original request", exact: true }).click();
+          await status.getByRole("button", { name: "Check", exact: true }).click();
+          await status.getByRole("button", { name: "Retry", exact: true }).click();
         }
-        // A saved change needs no banner: the controls show the saved settings.
+        await expect(status).toContainText("Saved");
         await expect(dialog.locator(".contact-change-status")).toHaveCount(0);
         await expect(dialog.getByRole("button", { name: "Check status", exact: true })).toHaveCount(0);
         await expect(hideMine).toBeEnabled();
         if (name === "contact-privacy-syncing") {
           await expect(hideMine).not.toBeChecked();
           await expect(dialog.getByRole("switch", { name: "Hide Their Posts", exact: true })).not.toBeChecked();
-          await expect(hideMine).toBeEnabled();
           await expect(dialog.getByRole("alert")).toHaveCount(0);
           expect(patchCount).toBe(1);
         } else await expect(hideMine).toBeChecked();
+        // "Saved" fades, leaving a quiet card.
+        await expect(status).toBeEmpty({ timeout: 5_000 });
       }
     },
   })),
@@ -1071,33 +1066,32 @@ export const scenes = [
       const field = dialog.getByRole("textbox", { name: "Remark" });
       await expect(field).toHaveValue("");
       await expect(dialog.getByText("WeChat ID: mei.chen", { exact: true })).toBeVisible();
+      const hideTheirs = dialog.getByRole("switch", { name: "Hide Their Posts", exact: true });
+      const remarkStatus = dialog.locator(".contact-remark .contact-save-status");
+      const privacyStatus = dialog.locator(".contact-privacy-fields .contact-save-status");
+      // Two changes in a row, no Save button: privacy saves first, then the remark.
       await field.fill("  Mei (book club) ");
-      await expect(dialog.getByRole("switch", { name: "Hide My Posts", exact: true })).toBeDisabled();
-      await expect(dialog.getByRole("button", { name: "Message", exact: true })).toHaveCount(0);
-      await dialog.getByRole("button", { name: "Save remark", exact: true }).click();
-      await expect(dialog.getByText("Waiting for WeChat to confirm the new remark…", { exact: true })).toBeVisible();
+      await hideTheirs.check();
+      await expect(dialog.getByRole("button", { name: /^Save/ })).toHaveCount(0);
+      await expect(dialog.getByRole("button", { name: "Message", exact: true })).toBeVisible();
+      await expect(privacyStatus).toHaveText("Saving…");
+      await expect(field).toBeEnabled();
+      // Leaving the field saved it at once; the saved remark is trimmed.
+      await expect(remarkStatus).toHaveText("Syncing with WeChat…", { timeout: 15_000 });
       await expect(field).toHaveValue("Mei (book club)");
       // The daemon's own lookup confirms the remark on a later worker tick.
       await expect(dialog.getByRole("heading", { name: "Mei (book club)", exact: true })).toBeVisible({ timeout: 30_000 });
+      await expect(remarkStatus).toHaveText("Saved");
       await expect(dialog.getByText("Nickname: Mei Chen", { exact: true })).toBeVisible();
-      // Explanations stay behind the info buttons until asked for.
-      const hint = dialog.getByRole("tooltip");
-      await expect(hint).toHaveCount(0);
-      for (const [label, text] of [["About remarks", "Only you see this name."], ["About privacy", "Manage what you and this contact can see in Moments."]]) {
-        const info = dialog.getByRole("button", { name: label, exact: true });
-        await info.focus();
-        await expect(hint).toContainText(text);
-        await info.press("Escape");
-        await expect(hint).toHaveCount(0);
-        await expect(dialog).toBeVisible();
-      }
-      await page.evaluate(() => (document.activeElement)?.blur());
+      await expect(hideTheirs).toBeChecked();
       await expect(dialog.locator(".contact-change-status")).toHaveCount(0);
-      await expect(dialog.getByRole("button", { name: "Save remark", exact: true })).toHaveCount(0);
-      await expect(dialog.getByRole("button", { name: "Message", exact: true })).toBeVisible();
-      expect(patches).toHaveLength(1);
-      expect(patches[0].remark).toBe("Mei (book club)");
-      expect(Object.keys(patches[0]).sort()).toEqual(["expectedVersion", "remark"]);
+      await expect(dialog.getByRole("alert")).toHaveCount(0);
+      expect(patches).toEqual([
+        { privacy: { chatsOnly: false, hideMyPosts: false, hideTheirPosts: true }, expectedVersion: patches[0].expectedVersion },
+        { remark: "Mei (book club)", expectedVersion: patches[1].expectedVersion },
+      ]);
+      await expect(remarkStatus).toBeEmpty({ timeout: 5_000 });
+      await expect(privacyStatus).toBeEmpty();
     },
   },
   {
@@ -1116,22 +1110,33 @@ export const scenes = [
       await details.press("Enter");
       const dialog = page.getByRole("dialog", { name: "Contact details" });
       const hideMine = dialog.getByRole("switch", { name: "Hide My Posts", exact: true });
+      const status = dialog.locator(".contact-privacy-fields .contact-save-status");
       await expect(hideMine).not.toBeChecked();
       await expect(hideMine).toBeEnabled();
+      // Each change saves on its own; it settles once the simulator's contact update arrives.
+      const saved = async (count) => {
+        await expect.poll(() => patches.length, { timeout: 15_000 }).toBe(count);
+        await expect(status).toHaveText("Saved", { timeout: 30_000 });
+      };
       await hideMine.check();
+      await expect(status).toHaveText("Saving…");
+      await saved(1);
       await dialog.getByRole("radio", { name: "Chats Only", exact: true }).check();
       await expect(hideMine).toHaveCount(0);
+      await saved(2);
       await dialog.getByRole("radio", { name: "Full access", exact: true }).check();
       await expect(hideMine).toBeChecked();
-      await dialog.getByRole("button", { name: "Save privacy", exact: true }).click();
-      // Settles once the simulator's contact update arrives through sync.
-      await expect(dialog.getByRole("button", { name: "Save privacy", exact: true })).toHaveCount(0);
-      await expect(hideMine).toBeEnabled({ timeout: 30_000 });
-      await expect(hideMine).toBeChecked();
+      await saved(3);
+      await expect(status).toBeEmpty({ timeout: 5_000 });
+      await expect(dialog.getByRole("button", { name: /^Save/ })).toHaveCount(0);
       await expect(dialog.getByRole("switch", { name: "Hide Their Posts", exact: true })).not.toBeChecked();
       await expect(dialog.locator(".contact-change-status")).toHaveCount(0);
       await expect(dialog.getByRole("alert")).toHaveCount(0);
-      expect(patches).toEqual([{ privacy: { chatsOnly: false, hideMyPosts: true, hideTheirPosts: false }, expectedVersion: patches[0].expectedVersion }]);
+      expect(patches.map(patch => patch.privacy)).toEqual([
+        { chatsOnly: false, hideMyPosts: true, hideTheirPosts: false },
+        { chatsOnly: true, hideMyPosts: true, hideTheirPosts: false },
+        { chatsOnly: false, hideMyPosts: true, hideTheirPosts: false },
+      ]);
     },
   },
   {
