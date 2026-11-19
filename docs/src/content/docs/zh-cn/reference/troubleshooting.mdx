@@ -1,7 +1,7 @@
 ---
 title: 故障排查
 description: 常见安装、登录、Profile 数据、多媒体及 OpenClaw 问题的排查指南。
-sourceHash: ee6cdf0b1621
+sourceHash: "9900270f5e96"
 ---
 
 遇到问题时，首先执行 `wx accounts status`。它会明确展示你是否已登录 (`authenticated`)、长连接状态 (`connection`) 以及是否有后台任务阻塞挂起。
@@ -32,6 +32,8 @@ sourceHash: ee6cdf0b1621
 **手机端确认授权无响应/挂起。** 部分扫码授权流程需要手机能够通过局域网直接与 Daemon 通信。请确保手机与主机处于同一局域网内，并排查主机防火墙及路由器的 AP 隔离策略。
 
 **重启后 `wx` 提示需要重新登录。** 说明本地已保存的会话被微信服务端下线拒绝。请执行 `wx auth login`；通常只需在手机微信上点击确认即可恢复登录。
+
+**登录时直接失败，没有二维码。** 微信拒绝了已保存的登录信息，再次尝试会重复同样的失败。在桌面应用中，选择**改用二维码登录**。在命令行中，执行 `wx --account ACCOUNT_ID auth login --force-qr`。两种方式都会保留同一个账号及其聊天记录。不要为此使用**添加微信账号**，它会新建一个空账号。如需报告问题，请附上登录界面中的**详细信息**一行，或 `wx auth login` 输出的 `service` 和 `serviceCode`。
 
 ## Profile 数据问题 \{#profile}
 
