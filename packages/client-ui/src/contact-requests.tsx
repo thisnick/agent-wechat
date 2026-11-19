@@ -711,6 +711,8 @@ export function ContactDetailDialog({
   const remarkDirty = remarkDraft !== null && remarkDraft.trim() !== remarkBase;
   const remarkTooLong = new TextEncoder().encode(remarkValue.trim()).length > MAX_CONTACT_REMARK_BYTES;
   const remarkPolls = useRef(0);
+  // A failed poll changes no snapshot, so it bumps this to schedule the next one.
+  const [remarkPollFailures, setRemarkPollFailures] = useState(0);
   const [privacyLoading, setPrivacyLoading] = useState(false),
     [privacyReadError, setPrivacyError] = useState("");
   const privacyError = privacyDenied ? t("contactsUi.privacyReadPermission") : privacyReadError;
@@ -819,13 +821,15 @@ export function ContactDetailDialog({
     const abort = new AbortController();
     const timer = setTimeout(() => {
       remarkPolls.current++;
-      void actions.readPrivacy(friendId, abort.signal).catch(() => {});
+      void actions.readPrivacy(friendId, abort.signal).catch(() => {
+        if (!abort.signal.aborted) setRemarkPollFailures((n) => n + 1);
+      });
     }, REMARK_POLL_MS);
     return () => {
       clearTimeout(timer);
       abort.abort();
     };
-  }, [actions, friendId, savedPrivacy, remarkConfirming, contactRefreshing]);
+  }, [actions, friendId, savedPrivacy, remarkConfirming, remarkPollFailures, contactRefreshing]);
   function refreshPrivacy() {
     if (friendId) privacyCache.invalidate(account, friendId);
     setPrivacyRevision((n) => n + 1);
