@@ -977,7 +977,12 @@ function Login({
         <>
           <button
             className="continue-button"
-            onClick={() => setAttempt((a) => a + 1)}
+            onClick={() => {
+              // Retrying a sign-in that ran (even a resumed one) starts a new
+              // one. An error before any attempt only checks again.
+              if (operation) setStarted(true);
+              setAttempt((a) => a + 1);
+            }}
           >
             {t("main.tryAgain")}
           </button>
@@ -986,6 +991,7 @@ function Login({
               className="quiet-button"
               onClick={() => {
                 setStrategy("qr");
+                setStarted(true);
                 setAttempt((a) => a + 1);
               }}
             >
