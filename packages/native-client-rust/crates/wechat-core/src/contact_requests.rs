@@ -1072,7 +1072,9 @@ impl Core {
         );
         receipts.reply = if let Some(rpc) = &attempt.rpc {
             Some(permit.transfer(self, account, || {
-                self.native_request(account, &mut state, |r| r.contact_rpc_raw(rpc))
+                // Through the account upstream, so the simulator can serve contact edits.
+                self.account_upstream(account)?
+                    .contact_rpc_raw(&mut state, rpc)
             })?)
         } else {
             None

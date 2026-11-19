@@ -958,11 +958,9 @@
     "refreshingContact": "Refreshing contact…",
     "contactRefreshFailed": "Could not refresh the contact. Try again.",
     "savePrivacy": "Save privacy",
-    "privacySaved": "Privacy settings saved",
     "requestHistory": "Request history",
     "deleteExplanation": "Delete this request history from your device. This does not decline the request on WeChat.",
     "privacyWaiting": "Waiting for saved privacy settings…",
-    "privacyReadbackUnavailable": "Privacy change accepted. Refresh to load the saved settings.",
     "moreActions": "More contact actions",
     "cancel": "Cancel",
     "privacyReadFailed": "We couldn’t read privacy settings for this person.",
@@ -975,9 +973,8 @@
     "remarkTooLong": "This remark is too long.",
     "saveRemark": "Save remark",
     "clearRemark": "Clear remark",
-    "remarkSaved": "Remark saved",
-    "remarkWaiting": "Remark saved. Waiting for WeChat to confirm it…",
-    "remarkReadbackUnavailable": "Remark saved. WeChat hasn’t confirmed it yet. Refresh the contact later to see it.",
+    "remarkWaiting": "Waiting for WeChat to confirm the new remark…",
+    "remarkReadbackUnavailable": "WeChat hasn’t confirmed the new remark yet. Refresh the contact later.",
     "remarkPermission": "Administrator access is required to change remarks."
   }
 }

@@ -909,9 +909,9 @@ export const scenes = [
       expect(points).toBe(0);
     },
   },
-  ...["contact-details", "contact-details-search", "contact-privacy-saved", "contact-privacy-unavailable", "contact-privacy-refresh", "contact-privacy-retry", "contact-privacy-syncing"].map(name => ({
+  ...["contact-details", "contact-details-search", "contact-privacy-unavailable", "contact-privacy-refresh", "contact-privacy-retry", "contact-privacy-syncing"].map(name => ({
     name, route: "contacts",
-    description: ({ "contact-details": "A saved contact card reached from the contact list by its keyboard-accessible Details action.", "contact-details-search": "Saved-contact search offers separate Message and Details actions; Details opens the shared card.", "contact-privacy-saved": "Moments selections survive Chats Only and save with the original privacy version.", "contact-privacy-unavailable": "A contact card omits privacy controls when the hub has no settings.", "contact-privacy-refresh": "Refreshing a contact updates the displayed name and privacy together.", "contact-privacy-retry": "An uncertain privacy save locks edits and retries only the same inspected intent.", "contact-privacy-syncing": "One accepted PATCH waits through pending canonical GETs before showing saved settings, without another mutation." })[name],
+    description: ({ "contact-details": "A saved contact card reached from the contact list by its keyboard-accessible Details action.", "contact-details-search": "Saved-contact search offers separate Message and Details actions; Details opens the shared card.", "contact-privacy-unavailable": "A contact card omits privacy controls when the hub has no settings.", "contact-privacy-refresh": "Refreshing a contact updates the displayed name and privacy together.", "contact-privacy-retry": "An uncertain privacy save locks edits and retries only the same inspected intent.", "contact-privacy-syncing": "One accepted PATCH waits through pending canonical GETs before showing saved settings, without another mutation." })[name],
     viewports: name === "contact-privacy-retry" ? ["desktop"] : ["desktop", "compact"],
     setup: standardWorld, target: () => ({ account: ACCOUNT.id }),
     prepare: async ({ page }) => {
@@ -1001,7 +1001,7 @@ export const scenes = [
       const hideMine = dialog.getByRole("switch", { name: "Hide My Posts", exact: true });
       await expect(dialog.getByRole("switch", { name: "Hide Their Posts", exact: true })).toBeChecked();
       await expect(dialog.getByRole("button", { name: "Save privacy", exact: true })).toHaveCount(0);
-      if (name === "contact-privacy-saved" || name === "contact-privacy-retry" || name === "contact-privacy-syncing") {
+      if (name === "contact-privacy-retry" || name === "contact-privacy-syncing") {
         let patchCount = 0;
         page.on("request", request => { if (request.method() === "PATCH" && new URL(request.url()).pathname.endsWith("/contacts/sim_mei")) patchCount++; });
         if (name === "contact-privacy-syncing") await dialog.getByRole("switch", { name: "Hide Their Posts", exact: true }).uncheck();
@@ -1013,7 +1013,7 @@ export const scenes = [
         else await expect(hideMine).toBeChecked();
         await dialog.getByRole("button", { name: "Save privacy", exact: true }).click();
         if (name === "contact-privacy-syncing") {
-          await expect(dialog.locator(".contact-change-status")).toContainText("Waiting for saved privacy settings");
+          await expect(dialog.locator(".contact-detail-privacy [role=status]")).toHaveText("Waiting for saved privacy settings…");
           await expect(hideMine).toBeDisabled();
           await expect(dialog.getByRole("button", { name: "Save privacy", exact: true })).toHaveCount(0);
           await expect(dialog.getByRole("alert")).toHaveCount(0);
@@ -1030,7 +1030,10 @@ export const scenes = [
           await dialog.getByRole("button", { name: "Check status", exact: true }).click();
           await dialog.getByRole("button", { name: "Retry original request", exact: true }).click();
         }
-        await expect(dialog.locator(".contact-change-status")).toContainText("Privacy settings saved");
+        // A saved change needs no banner: the controls show the saved settings.
+        await expect(dialog.locator(".contact-change-status")).toHaveCount(0);
+        await expect(dialog.getByRole("button", { name: "Check status", exact: true })).toHaveCount(0);
+        await expect(hideMine).toBeEnabled();
         if (name === "contact-privacy-syncing") {
           await expect(hideMine).not.toBeChecked();
           await expect(dialog.getByRole("switch", { name: "Hide Their Posts", exact: true })).not.toBeChecked();
@@ -1043,41 +1046,24 @@ export const scenes = [
   })),
   {
     name: "contact-remark-saved", route: "contacts",
-    description: "A remark saves with the inspected version, shows while WeChat confirms it, then names the contact above their nickname and WeChat ID.",
+    description: "A remark saves through the simulator with the inspected version, shows while WeChat confirms it, then names the contact above their nickname and WeChat ID.",
     viewports: ["desktop", "compact"], setup: standardWorld, target: () => ({ account: ACCOUNT.id }),
     prepare: async ({ page }) => {
       await prepareContactScenes({ page });
-      const privacy = { chatsOnly: false, hideMyPosts: false, hideTheirPosts: false };
-      let remark = null, savedAt = 0;
-      // WeChat's lookup confirms the saved remark shortly after the PATCH; list and point reads agree.
-      const state = () => {
-        const pending = !!savedAt && Date.now() - savedAt < 1_500;
-        return { remark: pending ? null : remark, remarkPending: pending };
-      };
+      // The simulator has no custom WeChat IDs; give the friend one to show.
       await page.route(/\/v1\/accounts\/[^/]+\/contacts\?/, async route => {
         const response = await route.fetch();
         const payload = await response.json();
-        for (const item of payload.items ?? []) {
-          if (item.id !== "sim_mei") continue;
-          const current = state();
-          Object.assign(item, { nickname: "Mei Chen", alias: "mei.chen", privacy, privacyVersion: "scene-privacy-v1", ...current });
-          if (current.remark) item.displayName = current.remark;
-        }
+        for (const item of payload.items ?? []) if (item.id === "sim_mei") item.alias = "mei.chen";
         return route.fulfill({ response, json: payload });
-      });
-      await page.route("**/v1/accounts/*/contacts/sim_mei", route => {
-        const contact = { id: "sim_mei", username: "sim_mei", relation: "friend", nickname: "Mei Chen", alias: "mei.chen", privacy, privacyVersion: "scene-privacy-v1" };
-        if (route.request().method() === "GET") return route.fulfill({ json: { ...contact, ...state() } });
-        if (route.request().method() !== "PATCH" || savedAt) throw Error("A remark saves once with PATCH");
-        const body = route.request().postDataJSON();
-        if (JSON.stringify(body) !== JSON.stringify({ remark: "Mei (book club)", expectedVersion: "scene-privacy-v1" })) throw Error("Remark submission lost the trimmed remark or source version");
-        savedAt = Date.now();
-        remark = body.remark;
-        return route.fulfill({ status: 202, json: { id: "scene-remark", accountId: ACCOUNT.id, kind: "contact_mutation", state: "succeeded", result: { action: "update_remark", remark }, createdAt: FIXED_TIME, updatedAt: FIXED_TIME } });
       });
     },
     ready: async ({ page, expect }) => { await expect(row(page, "Mei Chen")).toBeVisible(); },
     actions: async ({ page, expect }) => {
+      const patches = [];
+      page.on("request", request => {
+        if (request.method() === "PATCH" && new URL(request.url()).pathname.endsWith("/contacts/sim_mei")) patches.push(request.postDataJSON());
+      });
       const details = page.getByRole("button", { name: "Details for Mei Chen", exact: true });
       await details.focus();
       await details.press("Enter");
@@ -1089,13 +1075,52 @@ export const scenes = [
       await expect(dialog.getByRole("switch", { name: "Hide My Posts", exact: true })).toBeDisabled();
       await expect(dialog.getByRole("button", { name: "Message", exact: true })).toHaveCount(0);
       await dialog.getByRole("button", { name: "Save remark", exact: true }).click();
-      await expect(dialog.locator(".contact-change-status")).toContainText("Waiting for WeChat to confirm it");
+      await expect(dialog.getByText("Waiting for WeChat to confirm the new remark…", { exact: true })).toBeVisible();
       await expect(field).toHaveValue("Mei (book club)");
-      await expect(dialog.locator(".contact-change-status")).toHaveText("Remark saved", { timeout: 10_000 });
-      await expect(dialog.getByRole("heading", { name: "Mei (book club)", exact: true })).toBeVisible();
+      // The daemon's own lookup confirms the remark on a later worker tick.
+      await expect(dialog.getByRole("heading", { name: "Mei (book club)", exact: true })).toBeVisible({ timeout: 30_000 });
       await expect(dialog.getByText("Nickname: Mei Chen", { exact: true })).toBeVisible();
+      await expect(dialog.getByText("Only you see this name. It replaces their nickname in your chats.", { exact: true })).toBeVisible();
+      await expect(dialog.locator(".contact-change-status")).toHaveCount(0);
       await expect(dialog.getByRole("button", { name: "Save remark", exact: true })).toHaveCount(0);
       await expect(dialog.getByRole("button", { name: "Message", exact: true })).toBeVisible();
+      expect(patches).toHaveLength(1);
+      expect(patches[0].remark).toBe("Mei (book club)");
+      expect(Object.keys(patches[0]).sort()).toEqual(["expectedVersion", "remark"]);
+    },
+  },
+  {
+    name: "contact-privacy-saved", route: "contacts",
+    description: "Moments selections survive Chats Only and save through the simulator with the original privacy version, without a status banner.",
+    viewports: ["desktop", "compact"], setup: standardWorld, target: () => ({ account: ACCOUNT.id }),
+    prepare: prepareContactScenes,
+    ready: async ({ page, expect }) => { await expect(row(page, "Mei Chen")).toBeVisible(); },
+    actions: async ({ page, expect }) => {
+      const patches = [];
+      page.on("request", request => {
+        if (request.method() === "PATCH" && new URL(request.url()).pathname.endsWith("/contacts/sim_mei")) patches.push(request.postDataJSON());
+      });
+      const details = page.getByRole("button", { name: "Details for Mei Chen", exact: true });
+      await details.focus();
+      await details.press("Enter");
+      const dialog = page.getByRole("dialog", { name: "Contact details" });
+      const hideMine = dialog.getByRole("switch", { name: "Hide My Posts", exact: true });
+      await expect(hideMine).not.toBeChecked();
+      await expect(hideMine).toBeEnabled();
+      await hideMine.check();
+      await dialog.getByRole("radio", { name: "Chats Only", exact: true }).check();
+      await expect(hideMine).toHaveCount(0);
+      await dialog.getByRole("radio", { name: "Full access", exact: true }).check();
+      await expect(hideMine).toBeChecked();
+      await dialog.getByRole("button", { name: "Save privacy", exact: true }).click();
+      // Settles once the simulator's contact update arrives through sync.
+      await expect(dialog.getByRole("button", { name: "Save privacy", exact: true })).toHaveCount(0);
+      await expect(hideMine).toBeEnabled({ timeout: 30_000 });
+      await expect(hideMine).toBeChecked();
+      await expect(dialog.getByRole("switch", { name: "Hide Their Posts", exact: true })).not.toBeChecked();
+      await expect(dialog.locator(".contact-change-status")).toHaveCount(0);
+      await expect(dialog.getByRole("alert")).toHaveCount(0);
+      expect(patches).toEqual([{ privacy: { chatsOnly: false, hideMyPosts: true, hideTheirPosts: false }, expectedVersion: patches[0].expectedVersion }]);
     },
   },
   {

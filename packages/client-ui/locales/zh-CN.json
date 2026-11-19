@@ -121,8 +121,6 @@
     "privacyPermission": "修改隐私设置需要管理员权限。",
     "privacyReadFailed": "无法读取此人的隐私设置。",
     "privacyReadPermission": "此访问密钥无法读取该联系人的隐私设置。",
-    "privacyReadbackUnavailable": "隐私更改已被接受。请刷新以加载已保存的设置。",
-    "privacySaved": "隐私设置已保存",
     "privacyUnavailable": "隐私设置不可用。修改前请先刷新。",
     "privacyWaiting": "正在等待已保存的隐私设置…",
     "removeContact": "删除联系人",

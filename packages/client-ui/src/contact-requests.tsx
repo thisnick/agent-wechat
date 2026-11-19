@@ -695,11 +695,15 @@ export function ContactDetailDialog({
   const privacyConflict = !!(draft && savedPrivacy && draft.version !== savedPrivacy.version
     && !sameContactPrivacy(draft.value, savedPrivacy.privacy));
   const [remarkDraft, setRemarkDraft] = useState<string | null>(null);
+  // The snapshot read before a remark save; only a newer read can confirm the save.
+  const [remarkSavedOver, setRemarkSavedOver] = useState<object | null>(null);
   const remarkReceipt = receipt?.action === "remark" ? receipt : undefined;
   const remarkState = remarkReceipt?.operation?.state;
+  const remarkConfirming = remarkState === "succeeded"
+    && (!savedPrivacy || savedPrivacy === remarkSavedOver || savedPrivacy.remarkPending);
   // Until WeChat confirms a submitted remark, show it rather than the older saved one.
-  const remarkAwaiting = !!remarkReceipt && (!remarkState || ["queued", "running"].includes(remarkState)
-    || (remarkState === "succeeded" && (!savedPrivacy || savedPrivacy.remarkPending)));
+  const remarkAwaiting = !!remarkReceipt
+    && (!remarkState || ["queued", "running"].includes(remarkState) || remarkConfirming);
   const remarkBase = remarkAwaiting && remarkReceipt
     ? remarkReceipt.input.remark ?? ""
     : (savedPrivacy ? savedPrivacy.remark : savedContact?.remark) ?? "";
@@ -810,7 +814,7 @@ export function ContactDetailDialog({
     };
   }, [actions, savedPrivacy, friendId, privacyDenied, privacyRevision, contactRefreshing, connection, account]);
   useEffect(() => {
-    if (!friendId || !savedPrivacy?.remarkPending || contactRefreshing
+    if (!friendId || !(savedPrivacy?.remarkPending || remarkConfirming) || contactRefreshing
       || remarkPolls.current >= REMARK_POLL_LIMIT) return;
     const abort = new AbortController();
     const timer = setTimeout(() => {
@@ -821,7 +825,7 @@ export function ContactDetailDialog({
       clearTimeout(timer);
       abort.abort();
     };
-  }, [actions, friendId, savedPrivacy, contactRefreshing]);
+  }, [actions, friendId, savedPrivacy, remarkConfirming, contactRefreshing]);
   function refreshPrivacy() {
     if (friendId) privacyCache.invalidate(account, friendId);
     setPrivacyRevision((n) => n + 1);
@@ -873,12 +877,15 @@ export function ContactDetailDialog({
       )
     )
       changed();
-    if ((pending.action === "privacy" || pending.action === "remark") && operation.state === "succeeded") {
+    if (pending.action === "privacy" && operation.state === "succeeded") {
       setDraft(null);
-      setRemarkDraft(null);
-      remarkPolls.current = 0;
       setPrivacyLoading(true);
       refreshPrivacy();
+    } else if (pending.action === "remark" && operation.state === "succeeded") {
+      // Keep the privacy controls in place; re-read quietly until WeChat confirms.
+      setRemarkDraft(null);
+      setRemarkSavedOver(savedPrivacy ?? null);
+      remarkPolls.current = 0;
     } else if (pending.action === "privacy" && operation.result && typeof operation.result === "object"
       && "partial" in operation.result && operation.result.partial === true) {
       refreshPrivacy();
@@ -1031,24 +1038,8 @@ export function ContactDetailDialog({
     !receipt?.operation || receipt.operation.state === "needs_review"
       ? t("contactsUi.checkBeforeRetry")
       : receipt.operation.state === "succeeded"
-        ? receipt.action === "remark"
-          ? t(
-              privacyLoading
-                ? "contactsUi.remarkWaiting"
-                : !savedPrivacy?.remarkPending
-                  ? "contactsUi.remarkSaved"
-                  : remarkPolls.current < REMARK_POLL_LIMIT
-                    ? "contactsUi.remarkWaiting"
-                    : "contactsUi.remarkReadbackUnavailable",
-            )
-          : receipt.action === "privacy"
-          ? t(
-              privacyLoading
-                ? "contactsUi.privacyWaiting"
-                : savedPrivacy && !privacyError
-                  ? "contactsUi.privacySaved"
-                  : "contactsUi.privacyReadbackUnavailable",
-            )
+        ? receipt.action === "privacy" || receipt.action === "remark"
+          ? ""
           : t(
               (
                 {
@@ -1056,8 +1047,6 @@ export function ContactDetailDialog({
                   accept: "contactsUi.accepted",
                   delete: "contactsUi.historyDeleted",
                   remove: "contactsUi.contactRemoved",
-                  privacy: "contactsUi.privacySaved",
-                  remark: "contactsUi.remarkSaved",
                 } as const
               )[receipt.action],
             )
@@ -1155,8 +1144,16 @@ export function ContactDetailDialog({
               setRemarkDraft(e.target.value);
             }}
           />
-          <small role={remarkTooLong ? "alert" : undefined}>
-            {t(remarkTooLong ? "contactsUi.remarkTooLong" : "contactsUi.remarkHint")}
+          <small role={remarkTooLong ? "alert" : remarkConfirming ? "status" : undefined}>
+            {t(
+              remarkTooLong
+                ? "contactsUi.remarkTooLong"
+                : !remarkConfirming
+                  ? "contactsUi.remarkHint"
+                  : remarkPolls.current < REMARK_POLL_LIMIT
+                    ? "contactsUi.remarkWaiting"
+                    : "contactsUi.remarkReadbackUnavailable",
+            )}
           </small>
         </label>
       )}
@@ -1169,7 +1166,7 @@ export function ContactDetailDialog({
                 : "contactsUi.privacyBeforeRequest",
             )}
           </p>
-          {privacyLoading && !contactEditSucceeded && (
+          {privacyLoading && (
             <p role="status">
               {t(
                 privacyWaiting
@@ -1229,7 +1226,7 @@ export function ContactDetailDialog({
       {request?.direction === "outgoing" && !friendId && (
         <p>{t("contactsUi.sentExplanation")}</p>
       )}
-      {receipt && (
+      {receipt && !contactEditSucceeded && (
         <p role="status" className="contact-change-status">
           {statusText}
         </p>

@@ -301,6 +301,7 @@ impl crate::upstream::Upstream for BoundUpstream {
     forward!(heartbeat(cursor: &[u8]) -> wechat_protocol::Heartbeat => heartbeat);
     forward!(group_mutation_raw(request: &wechat_protocol::GroupRpc) -> Vec<u8> => group_mutation_raw);
     forward!(group_detail_raw(room: &str) -> Vec<u8> => group_detail_raw);
+    forward!(contact_rpc_raw(request: &wechat_protocol::ContactRpc) -> Vec<u8> => contact_rpc_raw);
     forward!(lookup_room_raw(room: &str, version: u32) -> Vec<u8> => lookup_room_raw);
     forward!(lookup_room_receipt(room: &str, version: u32) -> wechat_protocol::MetadataReply<wechat_protocol::RoomRoster> => lookup_room_receipt);
     forward!(lookup_contacts_raw(ids: &[String]) -> Vec<u8> => lookup_contacts_raw);

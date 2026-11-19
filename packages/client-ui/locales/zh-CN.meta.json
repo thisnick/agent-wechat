@@ -110,8 +110,6 @@
   "contactsUi.privacyPermission": {"source":"05904ba4f39b","machine":"fc0c41188b1d"},
   "contactsUi.privacyReadFailed": {"source":"20e5a7b6c1f1","machine":"7ca2e771aa8a"},
   "contactsUi.privacyReadPermission": {"source":"9acc018a4a7e","machine":"cbe69c17b0a4"},
-  "contactsUi.privacyReadbackUnavailable": {"source":"f10a3a4f2410","machine":"e601eb366a27"},
-  "contactsUi.privacySaved": {"source":"594ea1f30256","machine":"ce20335313e7"},
   "contactsUi.privacyUnavailable": {"source":"fcbd3b9fae7c","machine":"2afc15bc9997"},
   "contactsUi.privacyWaiting": {"source":"0b2059f2706d","machine":"f7f387b5a844"},
   "contactsUi.refreshPrivacy": {"source":"ad1247d00058","machine":"fe1015062ccb"},
