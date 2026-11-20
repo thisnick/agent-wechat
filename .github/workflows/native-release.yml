@@ -145,7 +145,9 @@ jobs:
       artifact_prefix: native-release
       simulator_checks: false
   # Starts with the CLI builds: each desktop platform compiles and tests while
-  # its CLI builds, then waits for that one artifact.
+  # its CLI builds, then waits for that one artifact. Signing in desktop.yml
+  # starts per platform, so it can run while another platform's CLI checks
+  # are still going; prepare still requires every job before publishing.
   desktop:
     needs: [plan, reserve-tag]
     if: needs.plan.outputs.publish == 'true'

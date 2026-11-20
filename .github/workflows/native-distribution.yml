@@ -267,15 +267,20 @@ jobs:
       # Main-branch runs fill the caches PRs read; releases add Windows ARM64.
       windows_arm64: false
 
-  # Starts with the CLI builds when this run makes them: each desktop platform
-  # compiles and tests meanwhile, then waits for its own CLI artifact.
+  # Unlike a release, waits for the CLI jobs before starting: a desktop job
+  # waiting for its CLI holds a runner, and several PR runs at once could fill
+  # the five macOS slots with waiting desktop jobs while their CLI jobs queue.
+  # The desktop steps are the same; the CLI wait just finds the job done.
   desktop:
-    needs: changes
+    needs: [changes, package, portable]
     permissions:
       contents: read
       id-token: write
       actions: read
-    if: needs.changes.outputs.desktop == 'true'
+    if: >-
+      !cancelled() && needs.changes.outputs.desktop == 'true' &&
+      (needs.package.result == 'success' || needs.package.result == 'skipped') &&
+      (needs.portable.result == 'success' || needs.portable.result == 'skipped')
     uses: ./.github/workflows/desktop.yml
     with:
       native_artifact_prefix: ${{ needs.changes.outputs.native == 'true' && 'native-validation' || '' }}

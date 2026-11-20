@@ -39,8 +39,9 @@ jobs:
   # YAML anchor and keep the check name "build (runner, target, platform)".
   #
   # When the caller builds the CLI in this run (native_artifact_prefix), these
-  # jobs start alongside it: they compile and test everything that doesn't run
-  # the CLI, then wait for their own platform's CLI artifact.
+  # jobs compile and test everything that doesn't run the CLI, then wait for
+  # their own platform's CLI job. A release starts them alongside its CLI
+  # builds; PR validation starts them after, so the wait finds the job done.
   build-macos-arm64:
     name: build
     strategy:
@@ -48,8 +49,9 @@ jobs:
         include:
           - { runner: macos-latest, target: aarch64-apple-darwin, platform: macos-arm64 }
     runs-on: ${{ matrix.runner }}
-    # Covers a cold compile plus the CLI wait's own 100-minute limit.
-    timeout-minutes: &build-timeout 150
+    # Up to 80 minutes of cold compile and tests, then the CLI wait's own
+    # 100-minute limit.
+    timeout-minutes: &build-timeout 180
     permissions: &build-permissions
       contents: read
       # Lists this run's artifacts while waiting for the CLI.

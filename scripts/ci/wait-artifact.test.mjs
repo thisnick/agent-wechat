@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { githubRun, producers, waitForArtifact } from './wait-artifact.mjs';
+import { githubRun, producers, unstarted, waitForArtifact } from './wait-artifact.mjs';
 
 const target = 'x86_64-pc-windows-msvc';
 const cli = (status, conclusion = null) => ({ name: `portable / build (windows-latest, ${target})`, status, conclusion });
@@ -59,6 +59,41 @@ for (const conclusion of ['failure', 'cancelled', 'skipped', 'timed_out']) {
     assert.deepEqual(h.calls.artifact, []);
   });
 }
+
+test('stops at once when a CLI job was skipped or failed before its matrix expanded', async () => {
+  for (const name of ['portable', 'build', 'portable / build']) {
+    const h = harness({ jobs: () => [{ name, status: 'completed', conclusion: 'skipped' }] });
+    await assert.rejects(waitForArtifact(h.options), new RegExp(`"${name}" ended with skipped`));
+    assert.equal(h.calls.jobs.length, 1);
+  }
+  const ignored = [
+    { name: 'desktop / build', status: 'completed', conclusion: 'skipped' },
+    { name: 'portable', status: 'in_progress', conclusion: null },
+    { name: 'build', status: 'completed', conclusion: 'success' },
+  ];
+  assert.deepEqual(unstarted(ignored, ['build', 'portable / build']), []);
+});
+
+test('fails at once on a permission or not-found response', async () => {
+  for (const status of [401, 403, 404]) {
+    const h = harness({ jobs: () => { throw Object.assign(new Error(`HTTP ${status}`), { status }); } });
+    await assert.rejects(waitForArtifact(h.options), /actions: read/);
+    assert.equal(h.calls.jobs.length, 1);
+  }
+});
+
+test('waits out a rate limit until the time GitHub gives', async () => {
+  const limited = Object.assign(new Error('HTTP 403'), { status: 403, retryAt: 300_000 });
+  const h = harness({ jobs: time => (time < 300_000 ? limited : [cli('completed', 'success')]), artifact: () => true });
+  await waitForArtifact(h.options);
+  assert.deepEqual(h.calls.jobs, [0, 300_000]);
+});
+
+test('fails clearly when no job matching the given names ever appears', async () => {
+  const h = harness({ jobs: () => [{ name: 'checks / native (ubuntu-24.04, test)', status: 'in_progress' }] });
+  await assert.rejects(waitForArtifact({ ...h.options, unmatchedMs: 90_000 }), /No job named "build \(\.\.\.\)" or "portable \/ build \(\.\.\.\)" builds/);
+  assert.deepEqual(h.calls.jobs, [0, 30_000, 60_000, 90_000]);
+});
 
 test('a re-run that reuses an earlier attempt\'s CLI accepts its artifact', async () => {
   const h = harness({ jobs: () => [], artifact: () => true });
@@ -130,10 +165,15 @@ test('reads every page of the current attempt\'s jobs and looks up the artifact 
   assert.equal(requests[0].authorization, 'Bearer token-value');
 });
 
-test('reports a failed API response', async () => {
-  const run = githubRun({
-    api: 'https://api.example.test', repository: 'owner/repo', runId: '42', attempt: '1', token: 't',
-    fetchImpl: async () => ({ ok: false, status: 403 }),
+test('reports a refused request with its status and any retry time', async () => {
+  const headers = values => ({ get: name => values[name] });
+  const refuse = (status, values = {}) => githubRun({
+    api: 'https://api.example.test', repository: 'owner/repo', runId: '42', attempt: '1', token: 't', clock: () => 1_000,
+    fetchImpl: async () => ({ ok: false, status, headers: headers(values) }),
   });
-  await assert.rejects(run.listJobs(), /HTTP 403/);
+  await assert.rejects(refuse(403).listJobs(), error => error.status === 403 && error.retryAt === undefined);
+  await assert.rejects(refuse(403, { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '50' }).listJobs(), error => error.retryAt === 50_000);
+  await assert.rejects(refuse(403, { 'retry-after': '30' }).listJobs(), error => error.retryAt === 31_000);
+  await assert.rejects(refuse(429).listJobs(), error => error.retryAt === 61_000);
+  await assert.rejects(refuse(502).listJobs(), error => error.status === 502 && error.retryAt === undefined);
 });
