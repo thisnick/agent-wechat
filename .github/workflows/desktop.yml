@@ -9,6 +9,14 @@ on:
       native_artifact_prefix:
         type: string
         default: ''
+      native_artifact_jobs:
+        description: >-
+          Comma-separated names of the caller's jobs that upload those CLI
+          artifacts, as GitHub shows them without the matrix values, such as
+          "build, portable / build". A desktop build waits for the one whose
+          matrix includes its target and stops if that job fails.
+        type: string
+        default: ''
 permissions:
   contents: read
 concurrency:
@@ -40,8 +48,8 @@ jobs:
         include:
           - { runner: macos-latest, target: aarch64-apple-darwin, platform: macos-arm64 }
     runs-on: ${{ matrix.runner }}
-    # Includes the wait for this run's CLI build.
-    timeout-minutes: &build-timeout 120
+    # Covers a cold compile plus the CLI wait's own 100-minute limit.
+    timeout-minutes: &build-timeout 150
     permissions: &build-permissions
       contents: read
       # Lists this run's artifacts while waiting for the CLI.
@@ -155,7 +163,8 @@ jobs:
         if: inputs.native_artifact_prefix != ''
         env:
           GH_TOKEN: ${{ github.token }}
-        run: node scripts/ci/wait-artifact.mjs "${{ inputs.native_artifact_prefix }}-${{ matrix.target }}"
+          CLI_JOBS: ${{ inputs.native_artifact_jobs }}
+        run: node scripts/ci/wait-artifact.mjs "${{ inputs.native_artifact_prefix }}-${{ matrix.target }}" --target ${{ matrix.target }} --job "$CLI_JOBS"
       - name: Download the CLI already built and validated in this run
         if: inputs.native_artifact_prefix != ''
         uses: actions/download-artifact@v8
@@ -192,9 +201,12 @@ jobs:
         env:
           EXE: ${{ runner.os == 'Windows' && '.exe' || '' }}
         run: |
-          pnpm --filter @agent-wechat/desktop prepare:sidecars --target ${{ matrix.target }}
           cli="packages/native-client-rust/target/${{ matrix.target }}/release/wx$EXE"
           beside="packages/desktop/src-tauri/target/${{ matrix.target }}/release/${{ runner.os == 'Linux' && 'bin/' || '' }}wx$EXE"
+          # Prove this is the copy the build made, so the app can't keep
+          # running the placeholder from somewhere else.
+          cmp "$RUNNER_TEMP/wx-placeholder" "$beside" || { echo "::error::Tauri's build did not put the stand-in at $beside"; exit 1; }
+          pnpm --filter @agent-wechat/desktop prepare:sidecars --target ${{ matrix.target }}
           cp "$cli" "$beside"
           copies=("$beside" "packages/desktop/src-tauri/binaries/wx-${{ matrix.target }}$EXE")
           if [ '${{ runner.os }}' = Linux ]; then copies+=(packages/desktop/src-tauri/binaries/linux/wx); fi

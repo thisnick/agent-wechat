@@ -137,16 +137,6 @@ jobs:
           name: native-release-${{ matrix.target }}
           path: artifacts/native/*
           if-no-files-found: error
-      # The Linux desktop build waits for this CLI (scripts/ci/wait-artifact.mjs);
-      # this marker ends its wait.
-      - name: Tell desktop builds waiting for this CLI that it failed
-        if: failure() || cancelled()
-        run: mkdir -p "$RUNNER_TEMP/cli-failed" && echo "${{ matrix.target }}" > "$RUNNER_TEMP/cli-failed/target.txt"
-      - uses: actions/upload-artifact@v7
-        if: failure() || cancelled()
-        with:
-          name: native-release-${{ matrix.target }}-failed-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/cli-failed/
   portable:
     needs: [plan, reserve-tag]
     if: needs.plan.outputs.publish == 'true'
@@ -167,6 +157,8 @@ jobs:
     with:
       release: true
       native_artifact_prefix: native-release
+      # The jobs above that upload those artifacts: Linux, then macOS/Windows.
+      native_artifact_jobs: build, portable / build
     secrets: inherit
   # Runs alongside the release for information. No publishing job waits for it.
   checks:

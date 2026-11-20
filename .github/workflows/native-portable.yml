@@ -228,13 +228,3 @@ jobs:
           name: ${{ inputs.artifact_prefix || 'native-validation' }}-${{ matrix.target }}
           path: artifacts/native/*
           if-no-files-found: error
-      # A desktop build in this run may be waiting for this CLI
-      # (scripts/ci/wait-artifact.mjs); this marker ends its wait.
-      - name: Tell desktop builds waiting for this CLI that it failed
-        if: failure() || cancelled()
-        run: mkdir -p "$RUNNER_TEMP/cli-failed" && echo "${{ matrix.target }}" > "$RUNNER_TEMP/cli-failed/target.txt"
-      - uses: actions/upload-artifact@v7
-        if: failure() || cancelled()
-        with:
-          name: ${{ inputs.artifact_prefix || 'native-validation' }}-${{ matrix.target }}-failed-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/cli-failed/

@@ -211,10 +211,8 @@ jobs:
           labels: org.opencontainers.image.revision=${{ github.sha }}
           # Export this solve directly: the later runtime solve must not replace
           # the executable target's cache records on a fresh builder. Only main
-          # exports it (2m12s per run); PRs read main's copy.
-          cache-from: |
-            type=gha,scope=native-linux-artifact-${{ runner.arch }}
-            type=gha,scope=native-linux-${{ runner.arch }}
+          # exports it (2m12s per run); PRs and release x64 builds read it.
+          cache-from: type=gha,scope=native-linux-artifact-${{ runner.arch }}
           cache-to: ${{ github.event_name != 'pull_request' && format('type=gha,mode=max,scope=native-linux-artifact-{0}', runner.arch) || '' }}
       - run: bash scripts/release/build.sh
         env:
@@ -241,11 +239,9 @@ jobs:
           load: true
           tags: agent-wechat-native:ci
           # No export: the builder layers come from the artifact scope above, and
-          # the runtime layer takes about 20 seconds. The native-linux scope
-          # belongs to release builds.
-          cache-from: |
-            type=gha,scope=native-linux-artifact-${{ runner.arch }}
-            type=gha,scope=native-linux-${{ runner.arch }}
+          # the runtime layer takes about 20 seconds. Releases write the
+          # native-linux scope only for ARM64, which this job doesn't build.
+          cache-from: type=gha,scope=native-linux-artifact-${{ runner.arch }}
       - name: Check image identity without touching account data
         run: docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges agent-wechat-native:ci --json version
       - run: python3 scripts/smoke/container.py agent-wechat-native:ci
@@ -261,16 +257,6 @@ jobs:
           name: native-validation-${{ matrix.target }}
           path: artifacts/native/*
           if-no-files-found: error
-      # The Linux desktop build waits for this CLI (scripts/ci/wait-artifact.mjs);
-      # this marker ends its wait.
-      - name: Tell desktop builds waiting for this CLI that it failed
-        if: failure() || cancelled()
-        run: mkdir -p "$RUNNER_TEMP/cli-failed" && echo "${{ matrix.target }}" > "$RUNNER_TEMP/cli-failed/target.txt"
-      - uses: actions/upload-artifact@v7
-        if: failure() || cancelled()
-        with:
-          name: native-validation-${{ matrix.target }}-failed-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/cli-failed/
 
   portable:
     needs: changes
@@ -293,3 +279,5 @@ jobs:
     uses: ./.github/workflows/desktop.yml
     with:
       native_artifact_prefix: ${{ needs.changes.outputs.native == 'true' && 'native-validation' || '' }}
+      # The jobs above that upload those artifacts: Linux, then macOS/Windows.
+      native_artifact_jobs: package, portable / build
