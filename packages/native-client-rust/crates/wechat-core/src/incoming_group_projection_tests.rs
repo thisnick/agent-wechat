@@ -123,9 +123,14 @@ async fn group_refresh_projection_attempts_do_not_scale_with_unrelated_backlog()
 
             core.tick("one").await.unwrap();
 
-            assert_eq!(attempts(&core), 1, "only the refreshed command may be attempted; backlog={backlog}, contact_stream={contact_stream}");
+            // The source was acknowledged when it arrived. The refresh writes
+            // the group without replaying it or touching the backlog.
+            assert_eq!(
+                attempts(&core),
+                0,
+                "nothing may be replayed; backlog={backlog}, contact_stream={contact_stream}"
+            );
             assert!(core.store.runtime("one", &source).unwrap().is_some());
-            // The source batch finishes once its refreshed command applies.
             assert_eq!(core.store.pending_sync_count("one").unwrap(), backlog);
             assert!(core.store.pending_sync("one").unwrap().is_empty());
             assert!(core.store.pending_contact_sync("one").unwrap().is_empty());
@@ -170,9 +175,10 @@ async fn heartbeat_polling_retries_only_the_refreshed_source_command() {
     core.projection_command_attempts.store(0, Ordering::Relaxed);
     assert!(!core.push_connected("one"));
     core.tick("one").await.unwrap();
-    assert_eq!(attempts(&core), 1);
+    // The source was acknowledged when it arrived; nothing is replayed.
+    assert_eq!(attempts(&core), 0);
     assert!(core.store.runtime("one", &source).unwrap().is_some());
-    // The source batch finished; the never-attempted backlog stays blocked.
+    // The never-attempted backlog stays blocked.
     assert_eq!(core.store.pending_sync_count("one").unwrap(), 128);
     assert!(core.store.pending_sync("one").unwrap().is_empty());
     core.projection_command_attempts.store(0, Ordering::Relaxed);
@@ -181,21 +187,20 @@ async fn heartbeat_polling_retries_only_the_refreshed_source_command() {
 }
 
 #[test]
-fn refreshed_source_finishes_only_when_its_remaining_controls_are_supported() {
+fn group_updates_finish_on_arrival_and_the_refresh_never_replays_them() {
     for contact_stream in [false, true] {
         for unresolved in [false, true] {
             let (_temp, core) = fixture();
             let source = stage_source(&core, contact_stream, 0, unresolved);
+            // Acknowledged on arrival, with or without unresolved controls.
+            assert!(core.store.runtime("one", &source).unwrap().is_some());
+            assert_eq!(core.store.pending_sync_count("one").unwrap(), 0);
             core.projection_command_attempts.store(0, Ordering::Relaxed);
             assert_eq!(core.refresh_incoming_groups("one", false).unwrap(), 1);
-            assert_eq!(attempts(&core), 1);
+            assert_eq!(attempts(&core), 0);
             assert_eq!(
-                core.store.runtime("one", &source).unwrap().is_none(),
-                unresolved
-            );
-            assert_eq!(
-                core.store.pending_sync_count("one").unwrap(),
-                usize::from(unresolved)
+                core.group_info("one", ROOM).unwrap()["name"],
+                "Fresh phone title"
             );
             assert!(core.store.pending_sync("one").unwrap().is_empty());
             assert!(core.store.pending_contact_sync("one").unwrap().is_empty());
@@ -215,7 +220,8 @@ fn restart_after_group_completion_resumes_the_source_once() {
         let store = core.store.clone();
         drop(core);
         let recovered = Core::new(store, None).unwrap();
-        assert_eq!(attempts(&recovered), 1);
+        // The source was acknowledged on arrival, so it isn't replayed.
+        assert_eq!(attempts(&recovered), 0);
         assert!(recovered.store.runtime("one", &source).unwrap().is_some());
         assert!(recovered
             .store
@@ -226,7 +232,7 @@ fn restart_after_group_completion_resumes_the_source_once() {
         recovered.project_pending("one").unwrap();
         assert_eq!(
             attempts(&recovered),
-            1,
+            0,
             "completed sources must not run again"
         );
     }
@@ -242,7 +248,9 @@ fn logout_generation_change_prevents_source_replay() {
     core.projection_command_attempts.store(0, Ordering::Relaxed);
     assert_eq!(core.refresh_incoming_groups("one", false).unwrap(), 0);
     assert_eq!(attempts(&core), 0);
-    assert!(core.store.runtime("one", &source).unwrap().is_none());
+    // The source was acknowledged on arrival; the refresh from the earlier
+    // sign-in stays queued and unused.
+    assert!(core.store.runtime("one", &source).unwrap().is_some());
     assert_eq!(core.store.incoming_group_refreshes("one").unwrap().len(), 1);
     assert_eq!(core.group_info("one", ROOM).unwrap()["name"], "Phone title");
 }

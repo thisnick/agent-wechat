@@ -2085,7 +2085,16 @@ impl Core {
                         unsupported += 1;
                         blocked_count += 1;
                         if blockers.len() < 50 {
-                            blockers.push(sync_projection::projection_blocker(&error).unwrap_or_else(||json!({"commandId":command.id,"reason":"unsupported_or_unavailable_profile"})));
+                            blockers.push(sync_projection::projection_blocker(&error).unwrap_or_else(|| {
+                                // Only an identifier-shaped error code is
+                                // reported; free text could carry account data.
+                                let message = error.to_string();
+                                let code = (!message.is_empty()
+                                    && message.len() <= 64
+                                    && message.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'))
+                                .then_some(message);
+                                json!({"commandId":command.id,"reason":"unsupported_or_unavailable_profile","errorCode":code})
+                            }));
                         }
                     }
                 }

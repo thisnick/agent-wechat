@@ -1,7 +1,7 @@
 ---
 title: wx 与微信通信原理
 description: wx serve 与微信服务端之间的登录、同步接收、发送、多媒体和已读状态交互机制。
-sourceHash: "de13398f6f76"
+sourceHash: "2745fed78a1e"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -76,7 +76,7 @@ sequenceDiagram
 
 <Aside title="使用提示">
 - **无法应用的变更会被跳过，但会保留下来。** 例如 Daemon 不支持的状态和系统通知、对你自己 Profile 的更新，以及名片等消息类型。Daemon 会先应用它支持的部分：即使是打开或退出会话的通知，也仍会清除未读状态。其余未应用的内容保存在 `control.sqlite` 中，并发出一条 `projection: "skipped"` 的 `account.control_observed` 事件，然后同步检查点继续推进。
-- **部分变更会等待。** 依赖其他本地工作（例如刷新群聊）的变更会扣住同步检查点，直到该工作完成，并发出 `projection.blocked` 事件。新消息仍会正常送达。
+- **后续工作在后台进行。** 群聊变更、表情同步通知，或包含 Daemon 无法归类字段的联系人变更，会立即确认。随后 Daemon 会在后台分别刷新群聊、重新同步表情或单独查询该联系人，因此这些工作都不会扣住同步检查点。
 - **你在手机上发出的消息同样会被同步接收，** 表现为来自你自己微信 ID 的 `outgoing` 发送方向消息。负责自动回复的机器人应当主动跳过这类由本人发出的消息。
 - **消息撤回同样作为变更事件同步下发。** 本地数据库中的原消息内容会被替换为 `[Message recalled]`，并触发 `message.recalled` 事件。
 - **手机微信始终拥有最高控制权。** Daemon 只是以一个额外登录设备的身份加入会话；它发出的消息会同步在你的手机端聊天界面中显示，如同在电脑版微信上打字一样。

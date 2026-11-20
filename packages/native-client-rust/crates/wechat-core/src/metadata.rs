@@ -1773,17 +1773,18 @@ mod tests {
         );
     }
     #[test]
-    fn pin_unknown_masks_and_controls_remain_pending_and_old_settlement_keeps_new_unknown() {
+    fn pin_unknown_masks_and_controls_stay_unapplied_and_old_settlement_keeps_new_unknown() {
         let (_temp, core) = pin_fixture();
         for (receipt, command) in [
             ("pin-controlled", direct_contact(0x800, 0x800, true)),
             ("pin-unknown-mask", direct_contact(0x801, 0x801, false)),
         ] {
-            assert!(core
-                .apply_sync_command("one", &command, receipt, "contact_sync")
-                .is_err());
+            core.apply_sync_command("one", &command, receipt, "contact_sync")
+                .unwrap();
             assert!(direct_pinned(&core).is_null());
-            assert!(core.store.runtime("one", receipt).unwrap().is_none());
+            // Acknowledged unapplied; a background lookup supplies the pin.
+            assert!(core.store.runtime("one", receipt).unwrap().is_some());
+            assert!(core.remark_refresh_pending("one", "peer").unwrap());
         }
         let known = wechat_protocol::wire::decode_contact_record(
             &direct_contact(u64::from(u32::MAX), 259, false).payload,
@@ -1812,14 +1813,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(direct_pinned(&core), false);
-        assert!(core
-            .apply_sync_command(
-                "one",
-                &direct_contact(0x801, 0x801, false),
-                "pin-unknown-mask",
-                "catchup"
-            )
-            .is_err());
+        core.apply_sync_command(
+            "one",
+            &direct_contact(0x801, 0x801, false),
+            "pin-unknown-mask",
+            "catchup",
+        )
+        .unwrap();
         assert_eq!(direct_pinned(&core), false);
     }
     #[test]
@@ -1911,25 +1911,39 @@ mod tests {
                 &serde_json::to_vec(&invalidation).unwrap(),
             )
             .unwrap();
+        core.apply_sync_command(
+            "one",
+            &direct_contact(0x801, 0x801, false),
+            "pin-new-unknown",
+            "contact_sync",
+        )
+        .unwrap();
+        // The older record is superseded: acknowledged without applying,
+        // and the contact is looked up in the background instead.
+        core.apply_sync_command(
+            "one",
+            &direct_contact(u64::from(u32::MAX), 259, false),
+            "pin-interrupted",
+            "catchup",
+        )
+        .unwrap();
         assert!(core
-            .apply_sync_command(
-                "one",
-                &direct_contact(0x801, 0x801, false),
-                "pin-new-unknown",
-                "contact_sync"
-            )
-            .is_err());
-        assert_eq!(
-            core.apply_sync_command(
-                "one",
-                &direct_contact(u64::from(u32::MAX), 259, false),
-                "pin-interrupted",
-                "catchup"
-            )
-            .unwrap_err()
-            .to_string(),
-            "contact_pin_projection_superseded"
-        );
+            .store
+            .runtime("one", "pin-interrupted")
+            .unwrap()
+            .is_some());
+        assert!(core.remark_refresh_pending("one", "peer").unwrap());
+        // It stays findable as not applied, with its raw bytes kept.
+        assert!(core
+            .store
+            .runtime("one", "skipped-control:pin-interrupted")
+            .unwrap()
+            .is_some());
+        assert!(core
+            .store
+            .runtime("one", "sync-control:pin-interrupted")
+            .unwrap()
+            .is_some());
         assert_eq!(
             core.group_revision("one", "peer").unwrap().as_deref(),
             Some(b"pin-new-unknown".as_slice())
@@ -2099,14 +2113,13 @@ mod tests {
                     .put_runtime("one", "contact-fields:legacy-mute", b"1")
                     .unwrap();
             }
-            assert_eq!(
-                core.apply_sync_command("one", &command, receipt, "live")
-                    .unwrap_err()
-                    .to_string(),
-                "contact_update_control_unresolved"
-            );
+            // Acknowledged without applying the uncertain mute; a background
+            // lookup supplies the current value.
+            core.apply_sync_command("one", &command, receipt, "live")
+                .unwrap();
             assert!(direct_muted(&core).is_null());
-            assert!(core.store.runtime("one", receipt).unwrap().is_none());
+            assert!(core.store.runtime("one", receipt).unwrap().is_some());
+            assert!(core.remark_refresh_pending("one", "peer").unwrap());
         }
     }
     #[test]
@@ -2114,9 +2127,8 @@ mod tests {
         let (_temp, core) = super::super::groups::tests::fixture();
         assert_eq!(direct_muted(&core), false);
         let unresolved = direct_contact(0x200, 0x200, true);
-        assert!(core
-            .apply_sync_command("one", &unresolved, "uncertain", "contact_sync")
-            .is_err());
+        core.apply_sync_command("one", &unresolved, "uncertain", "contact_sync")
+            .unwrap();
         assert!(direct_muted(&core).is_null());
         core.apply_sync_command(
             "one",
@@ -2126,9 +2138,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(direct_muted(&core), false);
-        assert!(core
-            .apply_sync_command("one", &unresolved, "uncertain", "contact_sync")
-            .is_err());
+        core.apply_sync_command("one", &unresolved, "uncertain", "contact_sync")
+            .unwrap();
         assert_eq!(direct_muted(&core), false);
         // An unknown field control also prevents stale saved flags becoming a
         // known unmuted state, without replacing the original profile flag.
@@ -2137,9 +2148,8 @@ mod tests {
         let control = p::message(&[p::uint(1, 1), p::bytes(2, &info)]).unwrap();
         let mut command = direct_contact(u64::from(u32::MAX), 3, false);
         command.payload.extend(p::bytes(89, &control));
-        assert!(core
-            .apply_sync_command("one", &command, "unknown-control", "contact_sync")
-            .is_err());
+        core.apply_sync_command("one", &command, "unknown-control", "contact_sync")
+            .unwrap();
         assert!(direct_muted(&core).is_null());
         let record = wechat_protocol::wire::decode_contact_record(
             &direct_contact(u64::from(u32::MAX), 3, false).payload,
@@ -2153,7 +2163,49 @@ mod tests {
         assert_eq!(direct_muted(&core), false);
     }
     #[test]
-    fn missing_flag_baseline_stays_pending_after_later_refresh() {
+    fn a_background_lookup_keeps_a_controlled_flag_and_the_mute_stays_uncertain() {
+        let (_temp, mut core) = super::super::groups::tests::fixture();
+        // The pushed update controls the flag (field 8), so it is acknowledged
+        // without applying the mute and an exact lookup is queued.
+        let controlled = direct_contact(u64::from(u32::MAX), 3 | 0x200, true);
+        core.apply_sync_command("one", &controlled, "pushed", "contact_sync")
+            .unwrap();
+        assert!(direct_muted(&core).is_null());
+        assert!(core.remark_refresh_pending("one", "peer").unwrap());
+        struct CurrentContact(Vec<u8>);
+        impl crate::upstream::Upstream for CurrentContact {
+            fn kind(&self) -> crate::upstream::UpstreamKind {
+                crate::upstream::UpstreamKind::Native
+            }
+            fn lookup_contacts_raw(&self, _: &mut AccountState, ids: &[String]) -> Result<Vec<u8>> {
+                assert_eq!(ids, ["peer"]);
+                p::message(&[
+                    p::bytes(1, &p::int32(1, 0)),
+                    p::uint(2, 1),
+                    p::bytes(3, &self.0),
+                    p::uint(4, 0),
+                ])
+            }
+        }
+        // The lookup reply carries the same control. Without the stored field
+        // versions the official client compares, its flag can't be ordered, so
+        // the saved flag is kept, as the official client does when its stored
+        // version is at least the reply's. The mute stays uncertain, which
+        // keeps notifications suppressed, and the lookup is done.
+        Arc::get_mut(&mut Arc::get_mut(&mut core).unwrap().shared)
+            .unwrap()
+            .upstream = Arc::new(CurrentContact(controlled.payload.clone()));
+        assert_eq!(core.refresh_contact_remarks("one", true).unwrap(), 1);
+        assert!(direct_muted(&core).is_null());
+        assert!(!core.remark_refresh_pending("one", "peer").unwrap());
+        assert!(core
+            .store
+            .runtime("one", "contact-notifications-unresolved:peer")
+            .unwrap()
+            .is_some());
+    }
+    #[test]
+    fn missing_flag_baseline_is_not_overwritten_by_an_old_incomplete_mute() {
         let (_temp, core) = super::super::groups::tests::fixture();
         let (loc, keys) = core.profile_location_keys("one").unwrap();
         wechat_profile::apply_contact_patch(
@@ -2167,9 +2219,8 @@ mod tests {
         )
         .unwrap();
         let command = direct_contact(0x200, 0x200, false);
-        assert!(core
-            .apply_sync_command("one", &command, "incomplete-mute", "live")
-            .is_err());
+        core.apply_sync_command("one", &command, "incomplete-mute", "live")
+            .unwrap();
         assert!(direct_muted(&core).is_null());
         core.apply_sync_command(
             "one",
@@ -2178,9 +2229,8 @@ mod tests {
             "live",
         )
         .unwrap();
-        assert!(core
-            .apply_sync_command("one", &command, "incomplete-mute", "live")
-            .is_err());
+        core.apply_sync_command("one", &command, "incomplete-mute", "live")
+            .unwrap();
         assert_eq!(direct_muted(&core), false);
     }
     #[test]

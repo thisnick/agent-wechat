@@ -34,12 +34,13 @@ struct ProjectionBlocked {
 /// support and unreadable control metadata. Since 2026-11-19 the owner treats these as
 /// handled instead of holding the batch and the official profile's saved sync
 /// position: `apply_sync_command_with_media` applies every supported part
-/// first, then skips the rest. Blockers that something later resolves still
-/// hold: a group refresh, sticker reconciliation, a superseded pin, and
-/// contact fields with unresolved version ordering, which a newer known
-/// update or a remark lookup settles and which keep notifications suppressed
-/// meanwhile. Deleting an existing contact through an unsupported path also
-/// holds: skipping it would leave a deleted contact in the profile for good.
+/// first, then skips the rest. Updates that wait on other local work don't
+/// hold their batch either: a group update, a sticker control, a superseded
+/// pin and contact fields with unresolved or unreadable controls are
+/// acknowledged at once, and the group refresh, sticker reconciliation or an
+/// exact contact lookup finishes them in the background. Deleting an existing
+/// contact through an unsupported path still holds: skipping it would leave a
+/// deleted contact in the profile for good.
 /// So does a recall (`revokemsg`) in a form this build doesn't accept:
 /// skipping it would leave the recalled message visible.
 const SKIPPED_BLOCKERS: [&str; 3] = [
@@ -481,14 +482,12 @@ impl Core {
                 Ok(()) => return Ok(()),
                 Err(error) => error,
             };
-        match error.downcast_ref::<ProjectionBlocked>().filter(|blocked| {
+        if let Some(blocked) = error.downcast_ref::<ProjectionBlocked>().filter(|blocked| {
             SKIPPED_BLOCKERS.contains(&blocked.reason) && blocked.system_kind != Some("revokemsg")
         }) {
-            Some(blocked) => {
-                self.skip_unsupported_command(account, command, receipt, origin, blocked)
-            }
-            None => Err(error),
+            return self.skip_unsupported_command(account, command, receipt, origin, blocked);
         }
+        Err(error)
     }
     /// Treat a command this build can't apply as handled, so its batch
     /// finishes and the profile's saved sync position can move. Its raw bytes
@@ -522,6 +521,43 @@ impl Core {
             .clear_runtime(account, &format!("blocked-control:{receipt}"))?;
         self.store.put_runtime(account, receipt, b"1")?;
         Ok(())
+    }
+    /// Acknowledge a contact record without applying it and look the contact
+    /// up in the background for its current state. Its raw bytes and a skip
+    /// label are kept, like any command this build doesn't apply.
+    fn acknowledge_contact_with_lookup(
+        &self,
+        account: &str,
+        command: &SyncCommand,
+        receipt: &str,
+        origin: &str,
+        username: &str,
+        reason: &'static str,
+    ) -> Result<()> {
+        self.queue_remark_refresh(account, username, receipt)?;
+        let mut blocked = command_blocker(command);
+        blocked.classification = "contact_update";
+        blocked.reason = reason;
+        self.skip_unsupported_command(account, command, receipt, origin, &blocked)
+    }
+    /// Whether a business-account record has the contact type (0 to 4) the
+    /// business writer requires, from the record or the saved contact row.
+    fn business_contact_type_known(
+        &self,
+        account: &str,
+        username: &str,
+        patch: &ContactProjection,
+    ) -> Result<bool> {
+        let local_type = match patch.fields.get("local_type") {
+            Some(SqlValue::Integer(value)) => value.parse::<i64>().ok(),
+            Some(_) => None,
+            None => match self.profile_reader(account)?.contact(username) {
+                Ok(saved) => saved.local_type,
+                Err(wechat_profile::ProfileError::NotCached) => None,
+                Err(error) => return Err(error.into()),
+            },
+        };
+        Ok(matches!(local_type, Some(0..=4)))
     }
     fn apply_sync_command_once(
         &self,
@@ -571,11 +607,13 @@ impl Core {
                 return Ok(());
             }
             if crate::sticker_control::supported_sticker_control(&message, &state.own_username) {
+                // Acknowledged now; the reconciliation job scheduled after
+                // each sync reads the retained marker and refreshes stickers
+                // in the background instead of holding this batch.
                 self.retain_control_raw(account, command, receipt)?;
                 self.retain_sticker_refresh(account, receipt)?;
-                let mut pending = message_blocker(&message);
-                pending.reason = "sticker_reconciliation_pending";
-                return Err(pending.into());
+                self.store.put_runtime(account, receipt, b"1")?;
+                return Ok(());
             }
             if let Some(recall) = crate::recalls::incoming_recall(&message, &state.own_username)? {
                 self.retain_control_raw(account, command, receipt)?;
@@ -699,10 +737,18 @@ impl Core {
             if self.store.runtime(account, &fields_applied)?.is_none() {
                 self.invalidate_contact_pinning(account, &contact, receipt)?;
                 if self.contact_pin_superseded(account, &contact, receipt)? {
-                    let mut blocked = command_blocker(command);
-                    blocked.classification = "contact_update";
-                    blocked.reason = "contact_pin_projection_superseded";
-                    return Err(blocked.into());
+                    // A newer revision of this contact exists, so this
+                    // record's values may be stale. Don't apply them or hold
+                    // the batch: acknowledge it and look the contact up in
+                    // the background for its current state.
+                    return self.acknowledge_contact_with_lookup(
+                        account,
+                        command,
+                        receipt,
+                        origin,
+                        &contact.username,
+                        "contact_pin_projection_superseded",
+                    );
                 }
                 self.invalidate_contact_privacy(account, &contact, receipt)?;
             }
@@ -711,9 +757,30 @@ impl Core {
             {
                 self.invalidate_contact_notifications(account, &contact, receipt)?;
             }
+            let controlled = match wechat_protocol::controlled_contact_fields(&contact.raw) {
+                Ok(controlled) => controlled,
+                Err(_) => {
+                    // Controls this build can't read (an unknown field ID or
+                    // a malformed list) leave it unknown which fields they
+                    // cover, so none of this record is applied. Its uncertain
+                    // state stays marked above; an exact lookup supplies the
+                    // contact's current values in the background instead of
+                    // holding the batch. A group still gets its refresh.
+                    if contact.username.ends_with("@chatroom") {
+                        self.queue_incoming_group(account, &contact, receipt, origin)?;
+                    }
+                    return self.acknowledge_contact_with_lookup(
+                        account,
+                        command,
+                        receipt,
+                        origin,
+                        &contact.username,
+                        "contact_update_control_unreadable",
+                    );
+                }
+            };
             let mute = super::metadata::contact_mute_patch(&contact)?;
             let pin = super::metadata::contact_pin_patch(&contact)?;
-            let controlled = wechat_protocol::controlled_contact_fields(&contact.raw)?;
             let wire = wechat_protocol::protobuf::decode(&contact.raw)?;
             let partial_mask = match wechat_protocol::protobuf::optional(&wire, 7)? {
                 Some(wechat_protocol::protobuf::Value::Varint(n)) => *n != u64::from(u32::MAX),
@@ -722,6 +789,21 @@ impl Core {
             };
             if self.store.runtime(account, &fields_applied)?.is_none() {
                 let patch = self.upstream.contact_patch(&contact)?;
+                // The business-account writer needs a contact type of 0 to 4
+                // (from this record, else the saved row). Without one it
+                // refuses on every retry, so skip the record, with its raw
+                // bytes kept, before anything of it is written. The verify
+                // bit it also needs is the one that made this a business
+                // record. Any other refusal still blocks.
+                if crate::business_contacts::business_contact_patch(&contact)?.is_some()
+                    && !self.business_contact_type_known(account, &contact.username, &patch)?
+                {
+                    let mut blocked = command_blocker(command);
+                    blocked.classification = "contact_update";
+                    blocked.reason = "business_contact_unwritable";
+                    return self
+                        .skip_unsupported_command(account, command, receipt, origin, &blocked);
+                }
                 let pin_phase = self.store.runtime(account, &pin_applied)?;
                 let mut applied_pin = pin.is_some() && pin_phase.is_some();
                 let mut pin_changed = pin.is_some() && pin_phase.as_deref() == Some(b"changed");
@@ -830,8 +912,12 @@ impl Core {
                 }
                 self.store.put_runtime(account, &fields_applied, b"1")?;
             }
-            let pending = contact.username.ends_with("@chatroom")
-                && self.queue_incoming_group(account, &contact, receipt, origin)?;
+            // A queued group refresh writes the group's details by itself
+            // when it succeeds (`refresh_incoming_groups`); this command
+            // doesn't wait for it, and a refresh that gave up doesn't hold it.
+            if contact.username.ends_with("@chatroom") {
+                self.queue_incoming_group(account, &contact, receipt, origin)?;
+            }
             let known_partial_mask = match wechat_protocol::protobuf::optional(&wire, 7)? {
                 Some(wechat_protocol::protobuf::Value::Varint(0x200)) => {
                     mute.is_some() && self.store.runtime(account, &mute_applied)?.is_some()
@@ -848,23 +934,17 @@ impl Core {
                 _ => false,
             };
             let unresolved_mask = partial_mask && !known_partial_mask;
-            if !pending
-                && !unresolved_mask
-                && super::contact_remarks::remark_only_controls(&controlled)
-            {
-                // Its other fields are saved above. The controlled remark copy is
-                // not applied (its version ordering is unmapped); an exact lookup
-                // supplies the current remark instead of holding this batch.
+            if !controlled.is_empty() || unresolved_mask {
+                // Its other fields are saved above. Controlled fields, or an
+                // unresolved partial mask, aren't applied: the official client
+                // orders them against a stored field version agent-wechat
+                // doesn't map yet. An exact lookup refreshes the record in the
+                // background (a controlled remark included) instead of holding
+                // this batch; a controlled flag keeps its saved value.
+                // Uncertain notification and pin state stays marked
+                // unresolved, keeping notifications suppressed, until a newer
+                // known update settles it.
                 self.queue_remark_refresh(account, &contact.username, receipt)?;
-            } else if pending || !controlled.is_empty() || unresolved_mask {
-                let mut blocked = command_blocker(command);
-                blocked.classification = "contact_update";
-                blocked.reason = if pending {
-                    "group_metadata_refresh_pending"
-                } else {
-                    "contact_update_control_unresolved"
-                };
-                return Err(blocked.into());
             }
             self.store.put_runtime(account, receipt, b"1")?;
             return Ok(());
@@ -895,14 +975,41 @@ impl Core {
                 return Ok(());
             }
         }
-        let planned_sort = wechat_profile::choose_message_sort_sequence(
+        let planned_sort = match wechat_profile::choose_message_sort_sequence(
             &location,
             &keys,
             &message.peer,
             sid,
             message.created_at as i64,
             &options,
-        )?;
+        ) {
+            Ok(sort) => sort,
+            // The profile already holds this server message, saved with a
+            // different time. There is nothing to write, so finish it instead
+            // of holding the batch; its raw bytes are kept.
+            Err(wechat_profile::ProfileError::InvalidMetadata)
+                if wechat_profile::find_projected_message(
+                    &location,
+                    &keys,
+                    &message.peer,
+                    sid,
+                    &options,
+                )?
+                .is_some() =>
+            {
+                let blocked = ProjectionBlocked {
+                    command_id: command.id,
+                    message_type: Some(message.message_type),
+                    classification: "message",
+                    operation_ids: vec![],
+                    system_kind: None,
+                    peer_kind: None,
+                    reason: "message_already_in_profile",
+                };
+                return self.skip_unsupported_command(account, command, receipt, origin, &blocked);
+            }
+            Err(error) => return Err(error.into()),
+        };
         let (stored_fields, summary) = fields(&message, body, planned_sort)?;
         // Minimal cached identities do not manufacture friendship flags, owner,
         // nickname, membership or a contact/group catalog entry from remote names.
@@ -2419,6 +2526,155 @@ mod encrypted_roundtrip {
             .runtime("one", "skipped-control:projected:skip-fixture:9")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn a_message_already_saved_with_another_time_finishes_without_a_second_row() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&temporary.path().join("data")).unwrap());
+        store.create_account("one").unwrap();
+        let core = Core::new(store.clone(), None).unwrap();
+        core.configure_profile_format_key(&[9; 16]).unwrap();
+        core.install_login_state("one", &state(), None).unwrap();
+        core.ensure_managed_profile("one", &state()).unwrap();
+        core.apply_sync_command(
+            "one",
+            &add(1, "peer", "synthetic_self", b"First copy", 950, 100),
+            "projected:dup-fixture:0",
+            "live",
+        )
+        .unwrap();
+        // The same server message again, with a different time.
+        let again = add(1, "peer", "synthetic_self", b"First copy", 950, 200);
+        core.apply_sync_command("one", &again, "projected:dup-fixture:1", "live")
+            .unwrap();
+        let label: Value = serde_json::from_slice(
+            &store
+                .runtime("one", "skipped-control:projected:dup-fixture:1")
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(label["reason"], "message_already_in_profile");
+        assert_eq!(
+            store
+                .events("one", 0, 100)
+                .unwrap()
+                .iter()
+                .filter(|event| event.kind == "message.committed")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_business_record_the_writer_refuses_is_skipped_with_its_bytes_kept() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&temporary.path().join("data")).unwrap());
+        store.create_account("one").unwrap();
+        let core = Core::new(store.clone(), None).unwrap();
+        core.configure_profile_format_key(&[9; 16]).unwrap();
+        core.install_login_state("one", &state(), None).unwrap();
+        core.ensure_managed_profile("one", &state()).unwrap();
+        // A new business account (verify bit 8) with no contact type: the
+        // business writer needs a type of 0 to 4 and refuses the row.
+        let command = SyncCommand {
+            id: 2,
+            payload: p::message(&[
+                p::bytes(1, &p::bytes(1, b"gh_synthetic_business")),
+                p::uint(24, 8),
+            ])
+            .unwrap(),
+        };
+        core.apply_sync_command("one", &command, "projected:biz-fixture:0", "live")
+            .unwrap();
+        let label: Value = serde_json::from_slice(
+            &store
+                .runtime("one", "skipped-control:projected:biz-fixture:0")
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(label["reason"], "business_contact_unwritable");
+        let key = "sync-control:projected:biz-fixture:0";
+        assert_eq!(
+            *core
+                .vault
+                .open_record("one", key, &store.runtime("one", key).unwrap().unwrap())
+                .unwrap(),
+            command.payload
+        );
+        // With a full flag the record carries contact type 1, and the business
+        // writer saves it normally.
+        let complete = SyncCommand {
+            id: 2,
+            payload: p::message(&[
+                p::bytes(1, &p::bytes(1, b"gh_synthetic_business")),
+                p::uint(7, u64::from(u32::MAX)),
+                p::uint(8, 3),
+                p::uint(24, 8),
+            ])
+            .unwrap(),
+        };
+        core.apply_sync_command("one", &complete, "projected:biz-fixture:1", "live")
+            .unwrap();
+        assert!(store
+            .runtime("one", "skipped-control:projected:biz-fixture:1")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            core.profile_reader("one")
+                .unwrap()
+                .contact("gh_synthetic_business")
+                .unwrap()
+                .local_type,
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn sticker_controls_are_acknowledged_and_reconciled_in_the_background() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&temporary.path().join("data")).unwrap());
+        store.create_account("one").unwrap();
+        let core = Core::new(store.clone(), None).unwrap();
+        core.configure_profile_format_key(&[9; 16]).unwrap();
+        core.install_login_state("one", &state(), None).unwrap();
+        core.ensure_managed_profile("one", &state()).unwrap();
+        let control = add(
+            10002,
+            "weixin",
+            "synthetic_self",
+            b"<sysmsg type='EmojiBackup'><EmojiBackup><OpCode>3</OpCode><DeviceID>00000000000000000000000000000000</DeviceID></EmojiBackup></sysmsg>",
+            800,
+            100,
+        );
+        core.apply_sync_command("one", &control, "projected:sticker-fixture:0", "live")
+            .unwrap();
+        // Acknowledged at once, with the reconciliation marker still queued.
+        assert!(store
+            .runtime("one", "projected:sticker-fixture:0")
+            .unwrap()
+            .is_some());
+        let markers = store.runtime_prefix("one", "sticker-refresh:", 10).unwrap();
+        assert_eq!(markers.len(), 1);
+        assert_eq!(markers[0].1, b"projected:sticker-fixture:0");
+        // When reconciliation finishes it clears the marker; the receipt stays.
+        let refresh = crate::sticker_control::StickerRefresh {
+            key: markers[0].0.clone(),
+            value: markers[0].1.clone(),
+            receipt: Some("projected:sticker-fixture:0".into()),
+        };
+        core.finish_sticker_controls("one", std::slice::from_ref(&refresh), None)
+            .unwrap();
+        assert!(store
+            .runtime_prefix("one", "sticker-refresh:", 10)
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .runtime("one", "projected:sticker-fixture:0")
+            .unwrap()
+            .is_some());
     }
 
     #[tokio::test]

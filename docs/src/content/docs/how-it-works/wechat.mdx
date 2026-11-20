@@ -75,7 +75,7 @@ Clients only see the HTTP API and events. Each decides what to do with a message
 
 <Aside title="Good to know">
 - **Changes the daemon can't apply are skipped, but kept.** Examples are status and system notices it has no support for, updates to your own profile, and message types such as contact cards. The daemon applies what it supports first: a chat-open or chat-exit notice still clears unread state. It keeps the rest, unapplied, in `control.sqlite`, sends an `account.control_observed` event with `projection: "skipped"`, and moves the sync checkpoint on.
-- **Some changes wait.** A change that depends on other local work, such as a group refresh, holds back the sync checkpoint until that work finishes and emits `projection.blocked`. New messages still arrive normally.
+- **Follow-up work runs in the background.** A group change, a sticker sync notice or a contact change with fields the daemon can't place is acknowledged straight away. The daemon then refreshes the group, re-syncs stickers or looks the contact up separately, so none of them holds back the sync checkpoint.
 - **Messages you send from your phone arrive too,** as `outgoing` messages from your own WeChat ID. Clients that reply to messages should skip them.
 - **Recalls arrive as changes too.** The stored message becomes "[Message recalled]" and a `message.recalled` event goes out.
 - **Your phone stays in charge.** The daemon is one more logged-in device; messages it sends show up on your phone like any other device's.

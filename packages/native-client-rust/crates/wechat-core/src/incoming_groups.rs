@@ -476,12 +476,10 @@ mod tests {
             id: 2,
             payload: contact("Phone title", true),
         };
-        assert_eq!(
-            core.apply_sync_command("one", &command, "phone-change", "live")
-                .unwrap_err()
-                .to_string(),
-            "group_metadata_refresh_pending"
-        );
+        // Acknowledged at once; the group refresh runs in the background.
+        core.apply_sync_command("one", &command, "phone-change", "live")
+            .unwrap();
+        assert!(core.store.runtime("one", "phone-change").unwrap().is_some());
         ready_refresh(core, "phone-change")
     }
     pub(super) fn ready_refresh(core: &Core, source: &str) -> (String, Refresh) {
@@ -585,12 +583,9 @@ mod tests {
             id: 2,
             payload: contact("Phone title", true),
         };
-        assert_eq!(
-            core.apply_sync_command("one", &old, "phone-change", "live")
-                .unwrap_err()
-                .to_string(),
-            "contact_update_control_unresolved"
-        );
+        // Replaying the older update never overwrites the newer one.
+        core.apply_sync_command("one", &old, "phone-change", "live")
+            .unwrap();
         assert_eq!(
             core.group_info("one", ROOM).unwrap()["name"],
             "Later phone edit"

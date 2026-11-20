@@ -11,6 +11,9 @@ use super::*;
 /// Retry delays grow from 30 seconds to an hour; a refresh is dropped after this
 /// many failed attempts. A later change or a manual refresh queues it again.
 const MAX_ATTEMPTS: u8 = 8;
+/// Lookups sent per pass, so a backlog acknowledged at once (for example
+/// after a startup replay) is spread over several ticks.
+const LOOKUPS_PER_PASS: usize = 10;
 
 #[derive(Serialize, Deserialize)]
 struct RemarkRefresh {
@@ -27,14 +30,6 @@ fn key(contact: &str) -> String {
         "contact-remark-refresh:{:x}",
         Sha256::digest(contact.as_bytes())
     )
-}
-
-/// Whether every controlled field is a personal remark field.
-pub(super) fn remark_only_controls(controlled: &[u32]) -> bool {
-    !controlled.is_empty()
-        && controlled
-            .iter()
-            .all(|id| metadata::REMARK_FIELDS.iter().any(|(n, _)| n == id))
 }
 
 impl Core {
@@ -78,7 +73,11 @@ impl Core {
         }
         let now = chrono::Utc::now().timestamp();
         let mut settled = 0;
+        let mut sent = 0;
         for (key, sealed) in self.store.contact_remark_refreshes(account)? {
+            if sent >= LOOKUPS_PER_PASS {
+                break;
+            }
             let mut job: RemarkRefresh =
                 serde_json::from_slice(&self.vault.open_record(account, &key, &sealed)?)?;
             if job.epoch != self.store.runtime(account, "logout-epoch")? {
@@ -90,6 +89,7 @@ impl Core {
                 continue;
             }
             let source = job.source.clone();
+            sent += 1;
             match self.refresh_contact_snapshot(account, &job.contact) {
                 Ok(true) => {
                     self.clear_remark_refresh(account, &key, &source)?;
@@ -271,22 +271,13 @@ mod tests {
     }
 
     #[test]
-    fn updates_controlling_other_fields_stay_held() {
+    fn updates_controlling_other_fields_are_acknowledged_and_looked_up() {
         let (_temp, core) = super::super::groups::tests::fixture();
-        let error = core
-            .apply_sync_command("one", &push("Name B", 12, &[8, 10]), "edit", "live")
-            .unwrap_err();
-        assert_eq!(error.to_string(), "contact_update_control_unresolved");
-        assert!(core.store.runtime("one", "edit").unwrap().is_none());
-        assert_eq!(queued(&core), 0);
-    }
-
-    #[test]
-    fn remark_only_controls_require_every_id_to_be_a_remark_field() {
-        assert!(remark_only_controls(&[10, 11, 12]));
-        assert!(remark_only_controls(&[10]));
-        assert!(!remark_only_controls(&[]));
-        assert!(!remark_only_controls(&[8, 10]));
-        assert!(!remark_only_controls(&[27]));
+        // Controlled fields beyond the remark don't hold the batch either: the
+        // update is acknowledged and one exact lookup is queued.
+        core.apply_sync_command("one", &push("Name B", 12, &[8, 10]), "edit", "live")
+            .unwrap();
+        assert!(core.store.runtime("one", "edit").unwrap().is_some());
+        assert_eq!(queued(&core), 1);
     }
 }
