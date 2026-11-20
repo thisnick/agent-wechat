@@ -261,6 +261,16 @@ jobs:
           name: native-validation-${{ matrix.target }}
           path: artifacts/native/*
           if-no-files-found: error
+      # The Linux desktop build waits for this CLI (scripts/ci/wait-artifact.mjs);
+      # this marker ends its wait.
+      - name: Tell desktop builds waiting for this CLI that it failed
+        if: failure() || cancelled()
+        run: mkdir -p "$RUNNER_TEMP/cli-failed" && echo "${{ matrix.target }}" > "$RUNNER_TEMP/cli-failed/target.txt"
+      - uses: actions/upload-artifact@v7
+        if: failure() || cancelled()
+        with:
+          name: native-validation-${{ matrix.target }}-failed-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cli-failed/
 
   portable:
     needs: changes
@@ -271,15 +281,15 @@ jobs:
       # Main-branch runs fill the caches PRs read; releases add Windows ARM64.
       windows_arm64: false
 
+  # Starts with the CLI builds when this run makes them: each desktop platform
+  # compiles and tests meanwhile, then waits for its own CLI artifact.
   desktop:
-    needs: [changes, package, portable]
+    needs: changes
     permissions:
       contents: read
       id-token: write
-    if: >-
-      !cancelled() && needs.changes.outputs.desktop == 'true' &&
-      (needs.package.result == 'success' || needs.package.result == 'skipped') &&
-      (needs.portable.result == 'success' || needs.portable.result == 'skipped')
+      actions: read
+    if: needs.changes.outputs.desktop == 'true'
     uses: ./.github/workflows/desktop.yml
     with:
       native_artifact_prefix: ${{ needs.changes.outputs.native == 'true' && 'native-validation' || '' }}

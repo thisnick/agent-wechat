@@ -79,6 +79,7 @@ through their unit tests.
 | `release/sync-version.mjs` | Rewrites package manifests, the desktop Tauri config and Cargo lockfiles. `pnpm version-packages` runs it. |
 | `ci/install-npm.sh`, `release/trigger.mjs`, `release/crates-release.mjs trigger` | Need GitHub Actions files such as `GITHUB_PATH`, `GITHUB_ENV`, `GITHUB_OUTPUT` or `GITHUB_EVENT_PATH`, and fail without them |
 | `ci/media-runtime.mjs DIR` | Downloads the desktop's pinned media helpers listed in `packages/desktop/media-assets.json` |
+| `ci/wait-artifact.mjs NAME` | Polls the current workflow run's artifact list through the GitHub API with `GH_TOKEN` until `NAME` or its failure marker appears. Needs `GITHUB_REPOSITORY`, `GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT`, so it only works inside a workflow job. |
 | `ci/claude-review-comment.mjs` | Creates or replaces the Claude review summary comment on a pull request. Only `claude-code-review.yml` calls it, through `actions/github-script`. |
 | `ci/ui-videos-comment.mjs` | Commits recorded UI videos under `refs/ui-videos/pr-<number>`, keeping earlier ones, and creates or updates the UI videos comment on a pull request. Only the `videos` job of `ui-screenshots.yml` calls it, through `actions/github-script`. |
 
