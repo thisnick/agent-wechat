@@ -49,9 +49,9 @@ jobs:
         include:
           - { runner: macos-latest, target: aarch64-apple-darwin, platform: macos-arm64 }
     runs-on: ${{ matrix.runner }}
-    # Up to 80 minutes of cold compile and tests, then the CLI wait's own
-    # 100-minute limit.
-    timeout-minutes: &build-timeout 180
+    # A release waits for its CLI: up to 80 minutes of cold compile and tests,
+    # then the wait's own 100-minute limit. Other runs never wait for long.
+    timeout-minutes: &build-timeout ${{ inputs.release && 180 || 90 }}
     permissions: &build-permissions
       contents: read
       # Lists this run's artifacts while waiting for the CLI.
