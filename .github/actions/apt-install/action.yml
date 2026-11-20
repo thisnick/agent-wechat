@@ -70,6 +70,7 @@ runs:
         files=("$archives"/*.deb)
         if [ ${#files[@]} -gt 0 ]; then cp "${files[@]}" "$SAVED"/; fi
         # Jobs in one run can install the same packages; each saves its own copy.
+        # scripts/ci/cache-cleanup.mjs parses this key to delete older copies.
         echo "key=$PREFIX$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$(cat /proc/sys/kernel/random/uuid)" >> "$GITHUB_OUTPUT"
     - name: Save downloaded packages
       if: inputs.save == 'true' && steps.install.outputs.download > 0

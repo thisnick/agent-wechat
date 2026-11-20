@@ -9,6 +9,14 @@ on:
       native_artifact_prefix:
         type: string
         default: ''
+      native_artifact_jobs:
+        description: >-
+          Comma-separated names of the caller's jobs that upload those CLI
+          artifacts, as GitHub shows them without the matrix values, such as
+          "build, portable / build". A desktop build waits for the one whose
+          matrix includes its target and stops if that job fails.
+        type: string
+        default: ''
 permissions:
   contents: read
 concurrency:
@@ -25,24 +33,37 @@ jobs:
           components: rustfmt
       - run: cargo fmt --check --manifest-path packages/desktop/src-tauri/Cargo.toml
 
-  build:
+  # One job per platform instead of one matrix: a job can only depend on a whole
+  # matrix, so each platform's signing now starts when its own build finishes.
+  # Each job is a one-entry matrix so all five share the steps below through a
+  # YAML anchor and keep the check name "build (runner, target, platform)".
+  #
+  # When the caller builds the CLI in this run (native_artifact_prefix), these
+  # jobs compile and test everything that doesn't run the CLI, then wait for
+  # their own platform's CLI job. A release starts them alongside its CLI
+  # builds; PR validation starts them after, so the wait finds the job done.
+  build-macos-arm64:
+    name: build
     strategy:
-      fail-fast: false
       matrix:
-        # PRs and Native distribution's main-branch runs cover each OS; releases
-        # and manual runs cover all five platforms. Those main-branch runs only
-        # build CLI artifacts for these three.
-        include: ${{ fromJSON(!(inputs.release || github.event_name == 'workflow_dispatch') && '[{"runner":"macos-latest","target":"aarch64-apple-darwin","platform":"macos-arm64"},{"runner":"windows-latest","target":"x86_64-pc-windows-msvc","platform":"windows-x64"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","platform":"linux-x64"}]' || '[{"runner":"macos-latest","target":"aarch64-apple-darwin","platform":"macos-arm64"},{"runner":"windows-latest","target":"x86_64-pc-windows-msvc","platform":"windows-x64"},{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","platform":"windows-arm64"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","platform":"linux-x64"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","platform":"linux-arm64"}]') }}
+        include:
+          - { runner: macos-latest, target: aarch64-apple-darwin, platform: macos-arm64 }
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
-    env:
+    # A release waits for its CLI: up to 80 minutes of cold compile and tests,
+    # then the wait's own 100-minute limit. Other runs never wait for long.
+    timeout-minutes: &build-timeout ${{ inputs.release && 180 || 90 }}
+    permissions: &build-permissions
+      contents: read
+      # Lists this run's artifacts while waiting for the CLI.
+      actions: read
+    env: &build-env
       RUSTFLAGS: ${{ contains(matrix.target, 'windows') && '-C target-feature=+crt-static' || '' }}
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
-    defaults:
+    defaults: &build-defaults
       run:
         shell: bash
-    steps:
+    steps: &build-steps
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
@@ -99,15 +120,6 @@ jobs:
       - run: pnpm install --frozen-lockfile --filter @agent-wechat/desktop...
       - run: pnpm --filter @agent-wechat/desktop build
       - run: pnpm --filter @agent-wechat/shared build
-      - name: Download the CLI already built and validated in this run
-        if: inputs.native_artifact_prefix != ''
-        uses: actions/download-artifact@v8
-        with:
-          name: ${{ inputs.native_artifact_prefix }}-${{ matrix.target }}
-          path: ${{ runner.temp }}/native-cli-artifact
-      - name: Require matching CLI source, compiler, target, flags and checksum
-        if: inputs.native_artifact_prefix != ''
-        run: node scripts/ci/artifact.mjs restore "$RUNNER_TEMP/native-cli-artifact"
       - name: Build native CLI
         if: inputs.native_artifact_prefix == '' && runner.os != 'Windows'
         run: cargo build --release --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }} -p wx-native
@@ -115,7 +127,18 @@ jobs:
         if: inputs.native_artifact_prefix == '' && runner.os == 'Windows'
         shell: pwsh
         run: cargo build --release --locked --manifest-path packages/native-client-rust/Cargo.toml --target ${{ matrix.target }} -p wx-native
-      - run: pnpm --filter @agent-wechat/desktop prepare:sidecars --target ${{ matrix.target }}
+      - name: Prepare the standalone CLI and media helpers
+        if: inputs.native_artifact_prefix == ''
+        run: pnpm --filter @agent-wechat/desktop prepare:sidecars --target ${{ matrix.target }}
+      # Tauri's build only needs the sidecar file to exist: it copies it into
+      # the target folder and compiles nothing from it. Every cargo step runs
+      # before the verified CLI replaces this file, because Tauri marks it as a
+      # build input and a later cargo step would recompile the app.
+      - name: Stand in for the CLI this run is still building
+        if: inputs.native_artifact_prefix != ''
+        run: |
+          node -e "require('node:fs').writeFileSync(process.argv[1], 'Placeholder for the CLI this run is still building\n')" "$RUNNER_TEMP/wx-placeholder"
+          pnpm --filter @agent-wechat/desktop prepare:sidecars --target ${{ matrix.target }} --wx "$RUNNER_TEMP/wx-placeholder"
       - name: Build desktop executable
         if: runner.os != 'Windows'
         run: pnpm --filter @agent-wechat/desktop app:build --target ${{ matrix.target }} --no-bundle
@@ -135,6 +158,26 @@ jobs:
         shell: pwsh
         run: |
           cargo test --locked --manifest-path packages/desktop/src-tauri/Cargo.toml --target ${{ matrix.target }}
+      - name: Install the WebDriver bridge for the Linux window check
+        if: runner.os == 'Linux'
+        run: cargo install tauri-driver --version 2.1.0 --locked
+      - name: Wait for this run's ${{ matrix.target }} CLI build
+        if: inputs.native_artifact_prefix != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_JOBS: ${{ inputs.native_artifact_jobs }}
+        run: node scripts/ci/wait-artifact.mjs "${{ inputs.native_artifact_prefix }}-${{ matrix.target }}" --target ${{ matrix.target }} --job "$CLI_JOBS"
+      - name: Download the CLI already built and validated in this run
+        if: inputs.native_artifact_prefix != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.native_artifact_prefix }}-${{ matrix.target }}
+          path: ${{ runner.temp }}/native-cli-artifact
+      - name: Require matching CLI source, compiler, target, flags and checksum
+        if: inputs.native_artifact_prefix != ''
+        run: node scripts/ci/artifact.mjs restore "$RUNNER_TEMP/native-cli-artifact"
+      # The tests were compiled above and take the CLI from WX_BINARY, so these
+      # steps don't rebuild.
       - name: Exercise native hub lifecycle and Linux keyring
         if: runner.os == 'Linux'
         env:
@@ -152,12 +195,31 @@ jobs:
         env:
           WX_BINARY: ${{ github.workspace }}/packages/native-client-rust/target/${{ matrix.target }}/release/wx.exe
         run: cargo test --locked --manifest-path packages/desktop/src-tauri/Cargo.toml --target ${{ matrix.target }} -- --ignored
+      # No cargo step follows. Replaces the placeholder in the sidecar folder
+      # that packaging reads, and the copy Tauri's build made for the app to
+      # run: beside it, or in bin/ on Linux, where the CLI is a resource.
+      - name: Put the verified CLI in place of the stand-in
+        if: inputs.native_artifact_prefix != ''
+        env:
+          EXE: ${{ runner.os == 'Windows' && '.exe' || '' }}
+        run: |
+          cli="packages/native-client-rust/target/${{ matrix.target }}/release/wx$EXE"
+          beside="packages/desktop/src-tauri/target/${{ matrix.target }}/release/${{ runner.os == 'Linux' && 'bin/' || '' }}wx$EXE"
+          # Prove this is the copy the build made, so the app can't keep
+          # running the placeholder from somewhere else.
+          cmp "$RUNNER_TEMP/wx-placeholder" "$beside" || { echo "::error::Tauri's build did not put the stand-in at $beside"; exit 1; }
+          pnpm --filter @agent-wechat/desktop prepare:sidecars --target ${{ matrix.target }}
+          cp "$cli" "$beside"
+          copies=("$beside" "packages/desktop/src-tauri/binaries/wx-${{ matrix.target }}$EXE")
+          if [ '${{ runner.os }}' = Linux ]; then copies+=(packages/desktop/src-tauri/binaries/linux/wx); fi
+          for copy in "${copies[@]}"; do
+            cmp "$cli" "$copy" || { echo "::error::$copy is not the verified CLI"; exit 1; }
+          done
       - name: Verify Linux native window, keyring persistence and restart
         if: runner.os == 'Linux'
         env:
           DESKTOP_BINARY: ${{ github.workspace }}/packages/desktop/src-tauri/target/${{ matrix.target }}/release/agent-wechat
         run: |
-          cargo install tauri-driver --version 2.1.0 --locked
           export HOME=$(mktemp -d)
           export XDG_RUNTIME_DIR=$(mktemp -d)
           dbus-run-session -- xvfb-run -a bash -c 'printf "fixture-password\n" | gnome-keyring-daemon --unlock --components=secrets; node packages/desktop/test/webdriver.mjs'
@@ -218,32 +280,96 @@ jobs:
           path: artifacts/desktop-release/
           if-no-files-found: error
 
-  sign-windows-binaries:
-    needs: build
-    if: inputs.release && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
+  build-windows-x64:
+    name: build
     strategy:
       matrix:
-        arch: [x64, arm64]
-    permissions:
+        include:
+          - { runner: windows-latest, target: x86_64-pc-windows-msvc, platform: windows-x64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: *build-timeout
+    permissions: *build-permissions
+    env: *build-env
+    defaults: *build-defaults
+    steps: *build-steps
+
+  build-linux-x64:
+    name: build
+    strategy:
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-gnu, platform: linux-x64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: *build-timeout
+    permissions: *build-permissions
+    env: *build-env
+    defaults: *build-defaults
+    steps: *build-steps
+
+  # PRs and Native distribution's main-branch runs cover each OS; releases and
+  # manual runs add the two ARM64 platforms. Those main-branch runs only build
+  # CLI artifacts for the three platforms above.
+  build-windows-arm64:
+    name: build
+    if: inputs.release || github.event_name == 'workflow_dispatch'
+    strategy:
+      matrix:
+        include:
+          - { runner: windows-11-arm, target: aarch64-pc-windows-msvc, platform: windows-arm64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: *build-timeout
+    permissions: *build-permissions
+    env: *build-env
+    defaults: *build-defaults
+    steps: *build-steps
+
+  build-linux-arm64:
+    name: build
+    if: inputs.release || github.event_name == 'workflow_dispatch'
+    strategy:
+      matrix:
+        include:
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, platform: linux-arm64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: *build-timeout
+    permissions: *build-permissions
+    env: *build-env
+    defaults: *build-defaults
+    steps: *build-steps
+
+  # Windows release packaging, once per architecture so x64 doesn't wait for
+  # the ARM64 build or the reverse: sign the executables, package the
+  # installer, sign the installer, then sign the updater package.
+  sign-windows-binaries-x64:
+    needs: build-windows-x64
+    if: &trusted-release inputs.release && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
+    permissions: &signing-permissions
       contents: read
       id-token: write
     uses: ./.github/workflows/windows-signing.yml
     with:
-      unsigned-artifact: desktop-input-windows-${{ matrix.arch }}
-      signed-artifact: desktop-signed-windows-${{ matrix.arch }}
+      unsigned-artifact: desktop-input-windows-x64
+      signed-artifact: desktop-signed-windows-x64
 
-  package-windows:
-    needs: sign-windows-binaries
-    if: inputs.release && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
+  sign-windows-binaries-arm64:
+    needs: build-windows-arm64
+    if: *trusted-release
+    permissions: *signing-permissions
+    uses: ./.github/workflows/windows-signing.yml
+    with:
+      unsigned-artifact: desktop-input-windows-arm64
+      signed-artifact: desktop-signed-windows-arm64
+
+  package-windows-x64:
+    name: package-windows
+    needs: sign-windows-binaries-x64
+    if: *trusted-release
     strategy:
       matrix:
         include:
-          - arch: x64
-            target: x86_64-pc-windows-msvc
-          - arch: arm64
-            target: aarch64-pc-windows-msvc
+          - { arch: x64, target: x86_64-pc-windows-msvc }
     runs-on: windows-latest
-    steps:
+    steps: &package-windows-steps
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
@@ -282,28 +408,44 @@ jobs:
           path: artifacts/installers/
           if-no-files-found: error
 
-  sign-windows-installers:
-    needs: package-windows
-    if: inputs.release && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
+  package-windows-arm64:
+    name: package-windows
+    needs: sign-windows-binaries-arm64
+    if: *trusted-release
     strategy:
       matrix:
-        arch: [x64, arm64]
-    permissions:
-      contents: read
-      id-token: write
+        include:
+          - { arch: arm64, target: aarch64-pc-windows-msvc }
+    runs-on: windows-latest
+    steps: *package-windows-steps
+
+  sign-windows-installers-x64:
+    needs: package-windows-x64
+    if: *trusted-release
+    permissions: *signing-permissions
     uses: ./.github/workflows/windows-signing.yml
     with:
-      unsigned-artifact: desktop-installers-unsigned-${{ matrix.arch }}
-      signed-artifact: desktop-installers-signed-${{ matrix.arch }}
+      unsigned-artifact: desktop-installers-unsigned-x64
+      signed-artifact: desktop-installers-signed-x64
 
-  finish-windows:
-    needs: sign-windows-installers
-    if: inputs.release && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
+  sign-windows-installers-arm64:
+    needs: package-windows-arm64
+    if: *trusted-release
+    permissions: *signing-permissions
+    uses: ./.github/workflows/windows-signing.yml
+    with:
+      unsigned-artifact: desktop-installers-unsigned-arm64
+      signed-artifact: desktop-installers-signed-arm64
+
+  finish-windows-x64:
+    name: finish-windows
+    needs: sign-windows-installers-x64
+    if: *trusted-release
     strategy:
       matrix:
-        arch: [x64, arm64]
+        arch: [x64]
     runs-on: ubuntu-24.04
-    steps:
+    steps: &finish-windows-steps
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
@@ -327,9 +469,19 @@ jobs:
           path: artifacts/desktop-release/
           if-no-files-found: error
 
+  finish-windows-arm64:
+    name: finish-windows
+    needs: sign-windows-installers-arm64
+    if: *trusted-release
+    strategy:
+      matrix:
+        arch: [arm64]
+    runs-on: ubuntu-24.04
+    steps: *finish-windows-steps
+
   sign-macos:
-    needs: build
-    if: inputs.release && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
+    needs: build-macos-arm64
+    if: *trusted-release
     runs-on: macos-latest
     timeout-minutes: 180
     steps:

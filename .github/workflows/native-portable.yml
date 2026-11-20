@@ -134,11 +134,16 @@ jobs:
           # Pin cache identity to our compiler, target, flags and MSVC version.
           add-rust-environment-hash-key: false
           # Simulator/test dependencies are needed even when wx.exe is cached.
-          # A release skips the simulator and so builds a different set.
-          key: portable-v3-${{ matrix.runner }}-${{ matrix.target }}-${{ steps.rust.outputs.cachekey }}-${{ env.VCToolsVersion }}-${{ env.WindowsSDKVersion }}-${{ env.RUSTFLAGS }}-opt${{ env.CARGO_PROFILE_DEV_OPT_LEVEL }}-debug${{ env.CARGO_PROFILE_DEV_DEBUG }}-${{ env.CARGO_PROFILE_TEST_DEBUG }}-sim${{ inputs.simulator_checks && (runner.os != 'Windows' || inputs.windows_simulator) }}-${{ steps.cache-key.outputs.rust }}
+          # Main-branch runs save the simulator set ("simtrue"): the release
+          # executable plus the simulator. A release skips the simulator, so it
+          # builds a subset of that set: it reads main's copy and never saves
+          # over it. No main run builds Windows ARM64, so a release keeps its
+          # own "simfalse" copy for that target.
+          key: portable-v3-${{ matrix.runner }}-${{ matrix.target }}-${{ steps.rust.outputs.cachekey }}-${{ env.VCToolsVersion }}-${{ env.WindowsSDKVersion }}-${{ env.RUSTFLAGS }}-opt${{ env.CARGO_PROFILE_DEV_OPT_LEVEL }}-debug${{ env.CARGO_PROFILE_DEV_DEBUG }}-${{ env.CARGO_PROFILE_TEST_DEBUG }}-sim${{ (inputs.simulator_checks && (runner.os != 'Windows' || inputs.windows_simulator)) || matrix.target != 'aarch64-pc-windows-msvc' }}-${{ steps.cache-key.outputs.rust }}
           cache-on-failure: true
           # PRs read what main saved instead of each saving their own copy.
-          save-if: ${{ github.event_name != 'pull_request' }}
+          # Only a run that built everything its key names saves it.
+          save-if: ${{ github.event_name != 'pull_request' && ((inputs.simulator_checks && (runner.os != 'Windows' || inputs.windows_simulator)) || matrix.target == 'aarch64-pc-windows-msvc') }}
       - name: Start Unix release compiler
         if: runner.os != 'Windows'
         run: python scripts/ci/build.py start ${{ matrix.target }}
