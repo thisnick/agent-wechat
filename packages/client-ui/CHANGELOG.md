@@ -1,5 +1,17 @@
 # @agent-wechat/client-ui
 
+## 0.6.1
+
+### Patch Changes
+
+- [#621](https://github.com/thisnick/agent-wechat/pull/621) [`7adb228`](https://github.com/thisnick/agent-wechat/commit/7adb228e5fbafd7c55220f260a5b5a18fa586e08) Thanks [@thisnick](https://github.com/thisnick)! - The app no longer signs in again on its own after WeChat signs an account out. When that happens while the account's chats are open, the sign-in screen now waits with **Sign in** and **Sign in with a QR code instead**. Before, it started a sign-in at once, which on a trusted computer can finish without the phone, even if you had just signed in somewhere else on purpose. Opening the account from the account list still signs in right away.
+
+  The sign-in screen also no longer stops on "This profile has an operation in progress" right after a sign-in succeeds. The hub refuses a new sign-in for a few seconds while the account's first sync runs. The screen now says the account is still finishing other work, tries again on its own, and opens the chats as soon as the account is signed in.
+
+- [#612](https://github.com/thisnick/agent-wechat/pull/612) [`309f731`](https://github.com/thisnick/agent-wechat/commit/309f73192979ddf6f90eb870d34509b9cf617e59) Thanks [@thisnick](https://github.com/thisnick)! - When signing in to an existing account fails, or its phone prompt goes unanswered or is declined, without showing a QR code, the sign-in screen now offers **Sign in with a QR code instead** under **Try again**. It skips the saved sign-in and shows a QR code for the same account, so the account keeps its chats, like `wx auth login --force-qr`. Before, **Try again** only repeated the saved sign-in, and **Add WeChat account** created a new, empty account.
+
+  A failed sign-in's result now names the step WeChat refused and the code it returned, in `service` and `serviceCode`, when WeChat returned one. The sign-in screen shows them on a **Details** line.
+
 ## 0.6.0
 
 ### Minor Changes

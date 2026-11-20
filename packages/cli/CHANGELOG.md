@@ -1,5 +1,50 @@
 # @agent-wechat/cli
 
+## 2.9.0
+
+### Minor Changes
+
+- [#623](https://github.com/thisnick/agent-wechat/pull/623) [`265bd45`](https://github.com/thisnick/agent-wechat/commit/265bd4554c03e1436cc0c07c7e3de94aaafa1271) Thanks [@thisnick](https://github.com/thisnick)! - Stop letting commands the daemon can't apply hold back the sync position.
+
+  - **Skipped, not blocked.** A sync command this build can't apply no longer keeps its batch blocked. This covers status and system controls with no supported effect (including session exit, status opcode 5), updates to your own profile, unknown commands, and message types the profile writer doesn't support, such as contact cards. Deleting an existing contact through an unsupported path, and a recall in a form the daemon doesn't accept, still wait, so neither leaves stale content behind. The daemon applies whatever it supports first; a chat-open or chat-exit notice still clears unread state. Then it keeps the command's raw bytes, emits `account.control_observed` with `projection: "skipped"` and a label of its kind, and lets the batch finish, so the profile's saved sync position moves on. The raw bytes and a note of what was skipped are kept, so a later version can apply them; `wx store usage` lists them under `skippedControls`.
+  - **Still waiting.** A command that waits on other local work, such as a group refresh, sticker reconciliation or a contact update with unresolved fields, still holds its batch and emits `projection.blocked`.
+  - **Old blocked batches retry on start.** When the daemon starts, it replays batches an earlier version left blocked, the same way `wx store recover-projection` does, so they finish without a manual step.
+
+### Patch Changes
+
+- [#630](https://github.com/thisnick/agent-wechat/pull/630) [`997b28e`](https://github.com/thisnick/agent-wechat/commit/997b28e934afacbdcdbea8f79c790090b3d90689) Thanks [@thisnick](https://github.com/thisnick)! - Acknowledge sync updates whose follow-up is local work, and finish them in the background, so they no longer hold back the sync position.
+
+  - **Group changes** are acknowledged as soon as their fields are saved. The group refresh that fetches the group's members and announcement runs separately and writes them when it succeeds. A refresh that has given up no longer holds the update forever.
+  - **Contact changes** with fields whose order the daemon can't establish, or with field controls it can't read, are acknowledged. One exact lookup of the contact is queued; it refreshes the contact's other fields and a controlled remark. A controlled flag keeps its saved value, and uncertain mute and pin state still keeps notifications suppressed until a newer known update arrives.
+  - **An older pinned-chat change** that a newer one superseded is acknowledged without applying it, and the contact is looked up again.
+  - **Sticker sync notices** are acknowledged at once. Sticker reconciliation still runs after the sync.
+  - **A message already saved under a different time** is finished without writing a second row (label `message_already_in_profile`).
+  - **A business-account record the profile writer refuses** (for example no contact type for a new row) is skipped with its raw bytes kept (label `business_contact_unwritable`).
+  - **Diagnostics.** A `projection.blocked` entry for a plain error now includes `errorCode` when the error is an identifier-shaped code.
+
+- [#620](https://github.com/thisnick/agent-wechat/pull/620) [`c27fe1c`](https://github.com/thisnick/agent-wechat/commit/c27fe1cad90158e36d4c1a777b0410acb4568c1b) Thanks [@thisnick](https://github.com/thisnick)! - Complete the recorded WeChatOut, UpdateWxaUsageListNotify and deleteMessages sync controls so they no longer hold a sync batch after the other commands have applied.
+
+  After recovery, `wx store usage` counts only the commands that still block a batch.
+
+- [#612](https://github.com/thisnick/agent-wechat/pull/612) [`309f731`](https://github.com/thisnick/agent-wechat/commit/309f73192979ddf6f90eb870d34509b9cf617e59) Thanks [@thisnick](https://github.com/thisnick)! - When signing in to an existing account fails, or its phone prompt goes unanswered or is declined, without showing a QR code, the sign-in screen now offers **Sign in with a QR code instead** under **Try again**. It skips the saved sign-in and shows a QR code for the same account, so the account keeps its chats, like `wx auth login --force-qr`. Before, **Try again** only repeated the saved sign-in, and **Add WeChat account** created a new, empty account.
+
+  A failed sign-in's result now names the step WeChat refused and the code it returned, in `service` and `serviceCode`, when WeChat returned one. The sign-in screen shows them on a **Details** line.
+
+- [#616](https://github.com/thisnick/agent-wechat/pull/616) [`b7ff268`](https://github.com/thisnick/agent-wechat/commit/b7ff268f2ece94c7cb04a8f459addc9ec0f2259a) Thanks [@thisnick](https://github.com/thisnick)! - Apply status controls the official client has no handler for, and stop keeping expired sticker store previews.
+
+  - **Status controls without a handler.** A type-51 status control now completes when every operation in it uses an ID the official Linux client has no handler for (anything other than 1, 2, 4, 5, 7, 9, 11, 13, 14 and 21), whatever the operation contains or who sent it. Before, only the recorded forms of opcodes 3, 15, 16 and 23 completed, so other forms such as opcode 24 kept their sync batch blocked. A control that also carries an operation with a handler still blocks.
+  - **Sticker store previews.** Pack icons, covers and sticker thumbnails listed from the sticker store are removed from `control.sqlite` once their one-day window ends, unless a download for them is queued or running. Reading a removed preview returns `not_found` (404), as an expired one could no longer be downloaded or read anyway; browsing the store again lists new ones. Before, each day's listing added rows that were never removed.
+
+- [#627](https://github.com/thisnick/agent-wechat/pull/627) [`325d400`](https://github.com/thisnick/agent-wechat/commit/325d40031b4d6dd2e8e05034fa92c70ea363aaaa) Thanks [@thisnick](https://github.com/thisnick)! - **Behavior change for scripts:** without `--after`, event watches and listings no longer start at cursor 0. Pass `--after 0` to keep the old behavior.
+
+  `wx events watch`, `wx events --watch` and `wx messages watch` now start from the newest event when you don't pass `--after`. Before, they started at cursor 0, and on an account with more than 10,000 events, which is more than the daemon keeps, they failed immediately with `event_cursor_expired`. A cursor file still takes priority. A new cursor file is now written as soon as the watch connects, so the next run resumes from that point even if no event arrived.
+
+  `wx events list` and `wx events` without `--after` now show the most recent events instead of the oldest ones.
+
+  An explicit `--after` or a saved cursor that is older than the kept events still fails, now with a message that says so and how to start from the newest event.
+
+  The daemon's `GET /v1/accounts/{account}/events` and `/events/stream` accept `newest=true`: a page holds the most recent events, and the stream sends only events added after it connects. It cannot be combined with `after`.
+
 ## 2.8.0
 
 ### Patch Changes
