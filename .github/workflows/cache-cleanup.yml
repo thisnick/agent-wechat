@@ -1,0 +1,55 @@
+name: Clean up unused caches
+
+# Deletes Actions cache entries no workflow will read again, so they stop
+# pushing the Rust and Docker caches that main fills (and that PRs and
+# releases read) out of the repository's 10 GB. What counts as unused is in
+# scripts/ci/cache-cleanup.mjs: a closed pull request's entries, a deleted
+# branch's entries, and older copies of the Ubuntu package cache.
+#
+# When it runs:
+# - When a pull request closes: deletes that pull request's entries.
+# - Daily, and on request: sweeps every entry. A manual run can list what
+#   it would delete without deleting it.
+#
+# Safety: pull_request_target runs the base branch's copy of this workflow,
+# so it can delete a fork's cache entries. Nothing from the pull request is
+# checked out or run; it uses only the pull request's number.
+on:
+  pull_request_target:
+    types: [closed]
+  schedule:
+    - cron: '23 11 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: List the entries a sweep would delete without deleting them
+        type: boolean
+        default: false
+permissions: {}
+# Separate groups, so a manual dry run never replaces a waiting scheduled sweep.
+concurrency:
+  group: cache-cleanup-${{ github.event.pull_request.number || github.event_name }}
+jobs:
+  clean:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: read
+    steps:
+      # The base branch for pull_request_target, never the pull request's code.
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      - name: Delete unused cache entries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PULL: ${{ github.event.pull_request.number }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          args=()
+          if [ -n "$PULL" ]; then args+=(--pull "$PULL"); fi
+          if [ "$DRY_RUN" = true ]; then args+=(--dry-run); fi
+          node scripts/ci/cache-cleanup.mjs "${args[@]}"
