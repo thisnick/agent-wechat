@@ -1,5 +1,12 @@
 # @agent-wechat/client-ui
 
+## 0.6.2-beta.0
+
+### Patch Changes
+
+- Updated dependencies [[`d74e89f`](https://github.com/thisnick/agent-wechat/commit/d74e89f2f5ed5258eba62aa2288059a911edf0d7)]:
+  - @agent-wechat/shared@3.0.0-beta.0
+
 ## 0.6.1
 
 ### Patch Changes

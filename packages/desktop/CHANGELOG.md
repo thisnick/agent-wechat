@@ -1,5 +1,12 @@
 # @agent-wechat/desktop
 
+## 3.0.0-beta.0
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @agent-wechat/client-ui@0.6.2-beta.0
+
 ## 2.9.0
 
 ### Patch Changes
