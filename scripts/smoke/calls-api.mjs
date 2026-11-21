@@ -26,7 +26,7 @@ if (process.argv.includes("--help")) {
 
 // Use the same built SDK module that the extension imports through its workspace
 // dependency, so error classes and production wire parsing are identical.
-const { NativeCallsClient, NativeCallMediaClient, NativeCallError } = await import("../../packages/shared/dist/index.js");
+const { NativeWeChatClient, NativeCallsClient, NativeCallMediaClient, NativeCallError } = await import("../../packages/shared/dist/index.js");
 const { NativeCallService, nativeCallSocketFactory } = await import("../../packages/openclaw-extension/src/calls-service.ts");
 const { resolveWeChatAccount } = await import("../../packages/openclaw-extension/src/types.ts");
 const execute = promisify(execFile);
@@ -119,7 +119,7 @@ try {
   const webSocketFactory = (url, options) => {
     const socket = rawWebSocketFactory(url, options), send = socket.send.bind(socket);
     socket.send = value => {
-      if (holdNativePcm && typeof value === "string" && JSON.parse(value).type === "audio.chunk") {
+      if (holdNativePcm && value instanceof Uint8Array && value.byteLength >= 36 && value[5] === 1) {
         holdNativePcm = false;
         heldNativePcm = () => send(value); return;
       }
@@ -211,7 +211,7 @@ try {
   if (cli === "status-and-passive-monitor") await until("CLI peer control event", () => monitorEvents.some(event => event.type === "call.control"));
   await assert.rejects(loser.dial(randomUUID(), "synthetic-peer"), error => error instanceof NativeCallError && error.code === "busy");
   const loserHello = loserEvents.events.find(event => event.type === "hello");
-  const mismatched = new NativeCallMediaClient(options, offer.callId, { type: "media.attach", supportedProtocolVersions: [2], clientId: loserHello.clientId, ownerToken: winnerResult.ownerToken });
+  const mismatched = new NativeCallMediaClient(options, offer.callId, { type: "media.attach", supportedProtocolVersions: [3], clientId: loserHello.clientId, ownerToken: winnerResult.ownerToken });
   await assert.rejects(mismatched.connect()); mismatched.close();
   const media = await winner.attachMedia(offer.callId), received = [];
   let mediaClosing = false;
@@ -250,7 +250,7 @@ try {
   const pluginSocketFactory = (url, options) => {
     const socket = webSocketFactory(url, options), send = socket.send.bind(socket);
     socket.send = value => {
-      if (holdNextPcm && typeof value === "string" && JSON.parse(value).type === "audio.chunk") {
+      if (holdNextPcm && value instanceof Uint8Array && value.byteLength >= 36 && value[5] === 1) {
         holdNextPcm = false;
         heldPcm = () => send(value);
       } else send(value);
@@ -332,6 +332,197 @@ try {
   callbacks.audio(pcm(3200), { itemId: "after-end" }); await delay(30);
   assert.equal((await control("stats")).stats.audioFrames, final.audioFrames);
   await service.stop();
+
+  // --- Video v3, ?ticket= auth, pre-answer mute/camera, conference video & OpenClaw v3 coexistence ---
+  await control("configure_video", { enabled: true, echo: true });
+  await control("configure_conference", { enabled: true });
+  const httpClient = new NativeWeChatClient({ baseUrl: ready.baseUrl, token });
+  const issuedTickets = [];
+  const ticketClient = new NativeCallsClient({
+    baseUrl: ready.baseUrl,
+    accountId: ready.accountId,
+    webSocketFactory: rawWebSocketFactory,
+    commandTimeoutMs: 5000,
+    ticketProvider: async (socket, callId) => {
+      const issued = await httpClient.issueCallTicket(ready.accountId, callId ? { socket, callId } : { socket });
+      issuedTickets.push(issued.ticket);
+      return issued.ticket;
+    },
+  });
+  const ticketEvents = watch(ticketClient);
+  const videoHello = await ticketClient.connect();
+  assert.equal(videoHello.capabilities.directVideo, true);
+  assert.equal(videoHello.capabilities.conferenceVideo, true);
+  assert.ok(videoHello.videoCapabilities?.sendCodecs.includes("h265"));
+  assert.equal(issuedTickets.length, 1);
+
+  // Single-use ticket cannot be replayed on a second socket.
+  const replay = new NativeCallsClient({
+    baseUrl: ready.baseUrl,
+    accountId: ready.accountId,
+    webSocketFactory: rawWebSocketFactory,
+    ticketProvider: async () => issuedTickets[0],
+  });
+  const replayEvents = watch(replay); replayEvents.closing = true;
+  await assert.rejects(replay.connect()); replay.close();
+
+  await ticketClient.ready(randomUUID(), true, videoHello.audioFormat, undefined, {
+    sendCodecs: ["h265"],
+    receiveCodecs: ["h265"],
+    maxWidth: 640,
+    maxHeight: 480,
+    maxFps: 15,
+  });
+  const videoDial = await ticketClient.dial(randomUUID(), "synthetic-peer", {
+    callType: "video",
+    cameraEnabled: true,
+    muted: true,
+  });
+  await until("video direct connected", () => ticketEvents.events.some(e => e.type === "call.state" && e.call.callId === videoDial.callId && e.call.state === "connected" && e.call.callType === "video"));
+  let vstats = (await control("stats")).stats;
+  assert.equal(vstats.cameraEnabled, true);
+  assert.equal(vstats.muted, true);
+
+  await ticketClient.setMute(randomUUID(), videoDial.callId, false);
+  await ticketClient.setCamera(randomUUID(), videoDial.callId, false);
+  await ticketClient.setCamera(randomUUID(), videoDial.callId, true);
+  vstats = (await control("stats")).stats;
+  assert.equal(vstats.muted, false);
+  assert.equal(vstats.muteToggles, 1);
+  assert.equal(vstats.cameraEnabled, true);
+  assert.equal(vstats.cameraToggles, 2);
+
+  const videoMedia = await ticketClient.attachMedia(videoDial.callId);
+  assert.equal(issuedTickets.length, 2, "media socket used a separate single-use ticket");
+  const vtracks = videoMedia.videoTracks();
+  assert.ok(vtracks.sendTrack && vtracks.sendTrack.id === 65537);
+  assert.equal(vtracks.receiveTracks.length, 1);
+  const rxVideoFrames = [], rxKeyframes = [];
+  let videoMediaClosing = false;
+  const rxVideoLoop = (async () => { try { for await (const f of videoMedia.videoFrames()) rxVideoFrames.push(f); } catch (e) { if (!videoMediaClosing) fixtureError = e; } })();
+  const rxKfLoop = (async () => { try { for await (const k of videoMedia.keyframeRequests()) rxKeyframes.push(k); } catch (e) { if (!videoMediaClosing) fixtureError = e; } })();
+
+  const sampleHevc = new Uint8Array([0, 0, 0, 1, 0x40, 0x01, 0x00, 0x00, 0x00, 0x01, 0x26, 0x01, 0xde, 0xad, 0xbe, 0xef]);
+  videoMedia.sendVideo(sampleHevc, vtracks.sendTrack.generation, { keyframe: true, codecConfig: true, timestampMicros: 33333 });
+  await until("echoed binary WXCM v3 H.265 frame", () => rxVideoFrames.length === 1);
+  assert.equal(rxVideoFrames[0].codec, "h265");
+  assert.equal(rxVideoFrames[0].keyframe, true);
+  assert.equal(rxVideoFrames[0].codecConfig, true);
+  assert.deepEqual([...rxVideoFrames[0].payload], [...sampleHevc]);
+
+  videoMedia.requestKeyframe(vtracks.receiveTracks[0].id);
+  await until("backend received keyframe request", async () => (await control("stats")).stats.keyframeRequests >= 1);
+  await control("peer_keyframe_requested");
+  await until("client received video.keyframe_requested", () => rxKeyframes.length === 1);
+  assert.equal(rxKeyframes[0].callId, videoDial.callId);
+  await control("peer_camera", { enabled: false });
+  await until("peer camera control delivered", () => ticketEvents.events.some(e => e.type === "call.control" && e.callId === videoDial.callId && e.control.kind === "camera" && e.control.enabled === false));
+
+  videoMediaClosing = true;
+  await control("end");
+  await until("video direct ended", () => availability(ticketEvents)?.busy === false);
+  videoMedia.close(); await Promise.all([rxVideoLoop, rxKfLoop]);
+
+  // OpenClaw audio-only v3 ignores incoming video offers cleanly and stays healthy in conferences with video peers.
+  const openclawVideoClient = new NativeCallsClient({ ...options, webSocketFactory: rawWebSocketFactory });
+  let ocMedia;
+  const ocAttach = openclawVideoClient.attachMedia.bind(openclawVideoClient);
+  openclawVideoClient.attachMedia = async (callId, observePcm) => { const m = await ocAttach(callId, observePcm); ocMedia = m; return m; };
+  const ocCfg = {
+    channels: {
+      "agent-wechat": {
+        dmPolicy: "open",
+        native: { mode: "external", accountId: ready.accountId, endpoint: ready.baseUrl, token, consumerStateDir: join(temporary, "unused-consumer-2") },
+        calls: {
+          voice: {
+            enabled: true,
+            realtime: { provider: "synthetic" },
+            agentId: "synthetic-agent",
+            inboundPolicy: "allowlist",
+            inboundAllowFrom: ["synthetic-peer"],
+            outboundPolicy: "allowlist",
+            outboundAllowTo: ["synthetic-peer"],
+            conferences: { groups: { "synthetic-group@chatroom": { autoJoin: false } } },
+          },
+          video: { enabled: false },
+        },
+      },
+    },
+  };
+  let ocOpens = 0;
+  const ocAudioIn = [];
+  const ocPrepared = {
+    sampleRate: 16000,
+    resampler: () => ({ process: value => Buffer.from(value), flush: () => Buffer.alloc(0) }),
+    async open() { ocOpens++; return { sendAudio: value => ocAudioIn.push(Buffer.from(value)), setMediaTimestamp() {}, close() {} }; },
+  };
+  const ocService = new NativeCallService(resolveWeChatAccount(ocCfg), ocCfg, {}, { client: openclawVideoClient, prepareVoice: async () => ocPrepared });
+  await ocService.start();
+  assert.equal(ocService.status().state, "available");
+
+  const videoOffer = await control("offer", { callerId: "synthetic-peer", callType: "video" });
+  await until("video offer reached SDK client", () => ticketEvents.events.some(e => e.type === "call.offered" && e.offer.callId === videoOffer.callId && e.offer.callType === "video"));
+  await delay(80);
+  assert.equal(ocOpens, 0, "OpenClaw must ignore incoming video offers");
+  assert.equal(ocService.status().owned, false);
+  assert.equal(ocService.status().state, "busy");
+
+  // Answer the incoming video offer with camera OFF and mic MUTED via SDK.
+  await ticketClient.answer(randomUUID(), videoOffer.callId, videoOffer.revision, { cameraEnabled: false, muted: true });
+  await until("incoming video call connected", () => ticketEvents.events.some(e => e.type === "call.state" && e.call.callId === videoOffer.callId && e.call.state === "connected"));
+  vstats = (await control("stats")).stats;
+  assert.equal(vstats.cameraEnabled, false);
+  assert.equal(vstats.muted, true);
+  await control("end");
+  await until("incoming video call ended", () => availability(ticketEvents)?.busy === false && ocService.status().state === "available");
+
+  // OpenClaw joins a v3 conference where peers have cameraEnabled: true and still mixes audio cleanly.
+  await ocService.joinConference("synthetic-group@chatroom", { assertCurrent() {} });
+  await until("OpenClaw joined conference and attached media", () => ocService.status().owned === true && !!ocMedia);
+  await control("conference_sources", {
+    sources: [
+      { trackId: 3, generation: 1, contactId: "alice", microphoneEnabled: true, cameraEnabled: true, videoTrackId: 65541, videoGeneration: 1 },
+      { trackId: 4, generation: 1, contactId: "bob", microphoneEnabled: true, cameraEnabled: true, videoTrackId: 65542, videoGeneration: 1 },
+    ],
+  });
+  await until("OpenClaw media learned conference audio track 3", () => ocMedia.tracks().receiveTracks.some(t => t.id === 3));
+  await control("conference_audio", { trackId: 3, generation: 1, sequence: 0, sampleOffset: 0, value: 1500 });
+  await until("OpenClaw receives conference audio alongside peer cameras", () => ocAudioIn.some(buf => buf.readInt16LE(0) === 1500));
+  assert.equal(ocService.status().participants?.find(p => p.contactId === "alice")?.cameraEnabled, true);
+  await control("end");
+  await until("OpenClaw conference ended", () => ocService.status().state === "available");
+  await ocService.stop();
+
+  // Conference video multi-track RX & dynamic camera-off removal via SDK.
+  const confCall = await ticketClient.startConference(randomUUID(), "synthetic-group@chatroom", ["alice", "bob"], { callType: "video", cameraEnabled: true });
+  await until("conference video connected", () => ticketEvents.events.some(e => e.type === "call.state" && e.call.callId === confCall.callId && e.call.state === "connected"));
+  const confMedia = await ticketClient.attachMedia(confCall.callId);
+  const confFrames = [];
+  let confClosing = false;
+  const confLoop = (async () => { try { for await (const f of confMedia.videoFrames()) confFrames.push(f); } catch (e) { if (!confClosing) fixtureError = e; } })();
+  await control("conference_sources", {
+    sources: [
+      { trackId: 3, generation: 1, contactId: "alice", microphoneEnabled: true, cameraEnabled: true, videoTrackId: 65541, videoGeneration: 1 },
+      { trackId: 4, generation: 1, contactId: "bob", microphoneEnabled: true, cameraEnabled: true, videoTrackId: 65542, videoGeneration: 1 },
+    ],
+  });
+  await until("conference media learned 2 video receive tracks", () => confMedia.videoTracks().receiveTracks.length === 2);
+  await control("inject_video", { trackId: 65541, generation: 1, codec: "h265", sequence: 0, timestampMicros: 1000, payloadBase64: Buffer.from(sampleHevc).toString("base64") });
+  await control("inject_video", { trackId: 65542, generation: 1, codec: "h265", sequence: 0, timestampMicros: 1000, payloadBase64: Buffer.from(sampleHevc).toString("base64") });
+  await until("conference media received video from both peers", () => new Set(confFrames.map(f => f.trackId)).size === 2);
+  await control("conference_sources", {
+    sources: [
+      { trackId: 3, generation: 1, contactId: "alice", microphoneEnabled: true, cameraEnabled: true, videoTrackId: 65541, videoGeneration: 1 },
+      { trackId: 4, generation: 1, contactId: "bob", microphoneEnabled: true, cameraEnabled: false },
+    ],
+  });
+  await until("conference removed bob video track when camera turned off", () => confMedia.videoTracks().receiveTracks.length === 1);
+  confClosing = true;
+  await control("end");
+  await until("conference video ended", () => availability(ticketEvents)?.busy === false);
+  confMedia.close(); await confLoop;
+  ticketEvents.closing = true; ticketClient.close();
+
   let heartbeatOwnerLoss = "not-run";
   if (process.argv.includes("--check-heartbeat")) {
     const WebSocket = createRequire(new URL("../../packages/shared/package.json", import.meta.url))("ws");

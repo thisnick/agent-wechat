@@ -87,7 +87,7 @@ pub(super) async fn assert_client_hello(
     };
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&text).unwrap(),
-        serde_json::json!({"type":"call.hello","supportedProtocolVersions":[2]})
+        serde_json::json!({"type":"call.hello","supportedProtocolVersions":[3]})
     );
 }
 
@@ -106,7 +106,7 @@ pub(super) fn remote(address: std::net::SocketAddr) -> Remote {
 pub(super) fn hello() -> CallEvent {
     CallEvent::Hello {
         conference_invitations: vec![],
-        protocol_version: 2,
+        protocol_version: 3,
         client_id: "fixture-client".into(),
         capabilities: CallCapabilities::default(),
         availability: CallsAvailability {
@@ -117,6 +117,7 @@ pub(super) fn hello() -> CallEvent {
         current_pending_offer: None,
         current_call: None,
         audio_format: CallAudioFormat::default(),
+        video_capabilities: None,
     }
 }
 
@@ -195,7 +196,10 @@ async fn json_monitor_uses_header_auth_pongs_and_never_registers_or_claims() {
 #[tokio::test]
 async fn winning_claim_attaches_generated_pcm_without_opening_devices() {
     use wechat_calls::audio::AudioFormat;
-    use wechat_core::call_types::{CallAudioTrack, CallTrackDirection};
+    use wechat_core::{
+        call_types::{CallTrack, CallTrackDirection},
+        calls::pcm_envelope::{MediaPayloadKind, WireMediaFrame},
+    };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -257,15 +261,15 @@ async fn winning_claim_attaches_generated_pcm_without_opening_devices() {
         assert_eq!(attach["clientId"], "fixture-client");
         assert_eq!(attach["ownerToken"], "synthetic-owner-proof");
         let ready = CallEvent::MediaReady {
-            protocol_version: 2,
-            send_track: CallAudioTrack {
+            protocol_version: 3,
+            send_tracks: vec![CallTrack::Audio {
                 id: 1,
                 generation: 3,
                 direction: CallTrackDirection::Send,
                 participant_id: None,
                 format: CallAudioFormat::default(),
-            },
-            receive_tracks: vec![CallAudioTrack {
+            }],
+            receive_tracks: vec![CallTrack::Audio {
                 id: 2,
                 generation: 1,
                 direction: CallTrackDirection::Receive,
@@ -282,24 +286,22 @@ async fn winning_claim_attaches_generated_pcm_without_opening_devices() {
         };
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&start).unwrap(),
-            serde_json::json!({"type":"audio.start","trackId":1,"generation":3})
+            serde_json::json!({"type":"track.start","trackId":1,"generation":3})
         );
-        let Message::Text(chunk) = media.next().await.unwrap().unwrap() else {
-            panic!("expected JSON PCM")
+        let Message::Binary(chunk) = media.next().await.unwrap().unwrap() else {
+            panic!("expected binary WXCM v3 PCM")
         };
-        let value: serde_json::Value = serde_json::from_str(&chunk).unwrap();
-        assert_eq!(value["type"], "audio.chunk");
-        assert_eq!(value["trackId"], 1);
-        use base64::Engine;
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(value["pcmBase64"].as_str().unwrap())
-            .unwrap();
+        let wire = WireMediaFrame::decode(&chunk).unwrap();
+        assert_eq!(wire.kind, MediaPayloadKind::PcmS16le);
+        assert_eq!(wire.header.track_id, 1);
+        assert_eq!(wire.header.generation, 3);
         assert_eq!(
-            bytes.to_vec(),
+            wire.payload(),
             [123i16; 320]
                 .into_iter()
                 .flat_map(i16::to_le_bytes)
                 .collect::<Vec<_>>()
+                .as_slice()
         );
         let Message::Text(text) = control.next().await.unwrap().unwrap() else {
             panic!("expected mute");
@@ -308,7 +310,7 @@ async fn winning_claim_attaches_generated_pcm_without_opening_devices() {
         assert_eq!(mute["type"], "call.mute");
         let update = CallEvent::TrackUpdated {
             call_id: "owned-call".into(),
-            track: CallAudioTrack {
+            track: CallTrack::Audio {
                 id: 1,
                 generation: 4,
                 direction: CallTrackDirection::Send,
@@ -340,18 +342,15 @@ async fn winning_claim_attaches_generated_pcm_without_opening_devices() {
         };
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&start).unwrap(),
-            serde_json::json!({"type":"audio.start","trackId":1,"generation":4})
+            serde_json::json!({"type":"track.start","trackId":1,"generation":4})
         );
-        let Message::Text(chunk) = media.next().await.unwrap().unwrap() else {
-            panic!("expected JSON PCM")
+        let Message::Binary(chunk) = media.next().await.unwrap().unwrap() else {
+            panic!("expected binary WXCM v3 PCM")
         };
-        let value: serde_json::Value = serde_json::from_str(&chunk).unwrap();
-        assert_eq!(value["type"], "audio.chunk");
-        assert_eq!(value["generation"], 4);
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(value["pcmBase64"].as_str().unwrap())
-            .unwrap();
-        assert_eq!(bytes, vec![0; 640]);
+        let wire = WireMediaFrame::decode(&chunk).unwrap();
+        assert_eq!(wire.kind, MediaPayloadKind::PcmS16le);
+        assert_eq!(wire.header.generation, 4);
+        assert_eq!(wire.payload(), vec![0; 640].as_slice());
         use wechat_core::call_types::{CallDirection, CallKind, CallState, CallView};
         let view = CallView {
             call_id: "owned-call".into(),
@@ -430,6 +429,8 @@ async fn winning_claim_attaches_generated_pcm_without_opening_devices() {
                 contact_id: "synthetic-contact".into(),
             },
             call_type: wechat_core::call_types::CallType::Voice,
+            camera_enabled: None,
+            muted: None,
         })
         .await
         .unwrap();
@@ -519,6 +520,8 @@ async fn cancellation_stays_latched_across_preparation_and_prevents_a_claim() {
             request_id: "cancelled-claim".into(),
             call_id: "pinned-offer".into(),
             expected_revision: 1,
+            camera_enabled: None,
+            muted: None,
         })
         .await;
     let error = match result {
@@ -605,6 +608,7 @@ async fn interactive_monitor_renews_all_readiness_for_a_second_offer() {
             request_id: "prepare-a".into(),
             ready: true,
             format: CallAudioFormat::default(),
+            video: None,
             scope: Some(CallReadyScope::Offer {
                 call_id: "offer-a".into(),
                 expected_revision: 3,
@@ -724,6 +728,8 @@ async fn quit_after_claim_waits_for_its_exact_state_before_cancelling_once() {
                 contact_id: "synthetic-peer".into(),
             },
             call_type: wechat_core::call_types::CallType::Voice,
+            camera_enabled: None,
+            muted: None,
         })
         .await
         .unwrap();
@@ -754,6 +760,10 @@ fn conference_commands_parse_without_losing_repeated_invitees_or_device_selectio
         "contact-b",
         "--input-device",
         "input-id",
+        "--video",
+        "--camera",
+        "test",
+        "--muted",
     ])
     .unwrap();
     let super::super::Command::Calls {
@@ -764,6 +774,7 @@ fn conference_commands_parse_without_losing_repeated_invitees_or_device_selectio
                         group,
                         invitees,
                         audio,
+                        media,
                     }),
             }),
     } = cli.command
@@ -773,6 +784,9 @@ fn conference_commands_parse_without_losing_repeated_invitees_or_device_selectio
     assert_eq!(group, "group-test");
     assert_eq!(invitees, vec!["contact-a", "contact-b"]);
     assert_eq!(audio.input_device.as_deref(), Some("input-id"));
+    assert!(media.video);
+    assert_eq!(media.camera.as_deref(), Some("test"));
+    assert!(media.muted);
     assert!(super::super::Cli::try_parse_from([
         "wx",
         "calls",
@@ -781,8 +795,163 @@ fn conference_commands_parse_without_losing_repeated_invitees_or_device_selectio
         "group-test"
     ])
     .is_err());
-    assert!(
-        super::super::Cli::try_parse_from(["wx", "calls", "conference", "join", "group-test"])
-            .is_ok()
-    );
+    assert!(super::super::Cli::try_parse_from([
+        "wx",
+        "calls",
+        "conference",
+        "join",
+        "group-test",
+        "--video",
+        "--camera-off"
+    ])
+    .is_ok());
+    assert!(super::super::Cli::try_parse_from([
+        "wx",
+        "calls",
+        "dial",
+        "alice",
+        "--video",
+        "--camera",
+        "test",
+        "--camera-off",
+        "--muted"
+    ])
+    .is_ok());
+    assert!(super::super::Cli::try_parse_from([
+        "wx",
+        "calls",
+        "answer",
+        "call-1",
+        "--camera-off",
+        "--muted"
+    ])
+    .is_ok());
+    assert!(super::super::Cli::try_parse_from([
+        "wx",
+        "calls",
+        "monitor",
+        "--camera",
+        "test",
+        "--camera-off",
+        "--muted"
+    ])
+    .is_ok());
+}
+
+#[tokio::test]
+async fn video_media_socket_accepts_large_frames_and_sends_video_track_start() {
+    use wechat_core::{
+        call_types::{
+            CallTrack, CallTrackDirection, CallVideoCodec, CallVideoFormat, CallVideoMode,
+            VIDEO_RECEIVE_TRACK_BASE, VIDEO_SEND_TRACK_ID,
+        },
+        calls::pcm_envelope::{MediaPayloadKind, WireMediaFrame, FLAG_KEYFRAME},
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let large_payload = vec![0x5a_u8; 120 * 1024];
+    let expected_payload = large_payload.clone();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut control = tokio_tungstenite::accept_async(stream).await.unwrap();
+        assert_client_hello(&mut control).await;
+        let mut initial = hello();
+        if let CallEvent::Hello { capabilities, .. } = &mut initial {
+            capabilities.direct_audio = true;
+            capabilities.direct_video = true;
+        }
+        control
+            .send(Message::Text(
+                serde_json::to_string(&initial).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut media = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let Message::Text(_) = media.next().await.unwrap().unwrap() else {
+            panic!("expected attach");
+        };
+        let video_fmt = CallVideoFormat {
+            codec: CallVideoCodec::Jpeg,
+            mode: CallVideoMode::Transcoded,
+            max_width: 640,
+            max_height: 480,
+            max_fps: 10,
+            bitrate_kbps: None,
+        };
+        let ready = CallEvent::MediaReady {
+            protocol_version: 3,
+            send_tracks: vec![
+                CallTrack::Audio {
+                    id: 1,
+                    generation: 1,
+                    direction: CallTrackDirection::Send,
+                    format: CallAudioFormat::default(),
+                    participant_id: None,
+                },
+                CallTrack::Video {
+                    id: VIDEO_SEND_TRACK_ID,
+                    generation: 2,
+                    direction: CallTrackDirection::Send,
+                    format: video_fmt,
+                    participant_id: None,
+                    active: true,
+                },
+            ],
+            receive_tracks: vec![
+                CallTrack::Audio {
+                    id: 2,
+                    generation: 1,
+                    direction: CallTrackDirection::Receive,
+                    format: CallAudioFormat::default(),
+                    participant_id: None,
+                },
+                CallTrack::Video {
+                    id: VIDEO_RECEIVE_TRACK_BASE,
+                    generation: 1,
+                    direction: CallTrackDirection::Receive,
+                    format: video_fmt,
+                    participant_id: None,
+                    active: true,
+                },
+            ],
+        };
+        media
+            .send(Message::Text(serde_json::to_string(&ready).unwrap().into()))
+            .await
+            .unwrap();
+        let Message::Text(start) = media.next().await.unwrap().unwrap() else {
+            panic!("expected video track.start");
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&start).unwrap(),
+            serde_json::json!({"type":"track.start","trackId":VIDEO_SEND_TRACK_ID,"generation":2})
+        );
+        let Message::Binary(chunk) = media.next().await.unwrap().unwrap() else {
+            panic!("expected binary video frame");
+        };
+        let wire = WireMediaFrame::decode(&chunk).unwrap();
+        assert_eq!(wire.kind, MediaPayloadKind::Jpeg);
+        assert_eq!(wire.flags, FLAG_KEYFRAME);
+        assert_eq!(wire.header.track_id, VIDEO_SEND_TRACK_ID);
+        assert_eq!(wire.header.generation, 2);
+        assert_eq!(wire.payload(), expected_payload.as_slice());
+    });
+    let remote = remote(address);
+    let (mut control, _) = Control::connect(&remote).await.unwrap();
+    let mut media = super::audio::Media::attach(&remote, &control, "video-call", "synthetic-owner")
+        .await
+        .unwrap();
+    media
+        .send_video(&super::video::CapturedVideoFrame {
+            codec: CallVideoCodec::Jpeg,
+            flags: FLAG_KEYFRAME,
+            timestamp_micros: 12_345,
+            bytes: large_payload,
+        })
+        .await
+        .unwrap();
+    drop(media);
+    control.close().await;
+    server.await.unwrap();
 }

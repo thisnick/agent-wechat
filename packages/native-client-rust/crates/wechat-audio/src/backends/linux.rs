@@ -653,12 +653,23 @@ impl Backend {
         )?;
         let record = Stream::new(pa, &context, c"WeChat microphone")?;
         let output = Stream::new(pa, &context, c"WeChat speaker")?;
-        let attr = sys::pa_buffer_attr {
-            maxlength: 48_000 * 4 / 10,
-            tlength: 48_000 * 4 / 25,
-            prebuf: 0,
-            minreq: 48_000 * 4 / 100,
+        let record_attr = sys::pa_buffer_attr {
+            maxlength: 48_000 * 4 / 5,
+            tlength: u32::MAX,
+            prebuf: u32::MAX,
+            minreq: u32::MAX,
             fragsize: 48_000 * 4 / 100,
+        };
+        // Non-zero prebuf (40 ms) keeps PulseAudio paused at read_index == write_index
+        // while no playback samples are queued (e.g. ringing, muted speaker, or silence
+        // before remote speech), so later PA_SEEK_RELATIVE writes play immediately
+        // instead of falling behind an advanced read_index and being discarded.
+        let playback_attr = sys::pa_buffer_attr {
+            maxlength: 48_000 * 4 / 5,
+            tlength: 48_000 * 4 / 10,
+            prebuf: 48_000 * 4 / 25,
+            minreq: 48_000 * 4 / 100,
+            fragsize: u32::MAX,
         };
         let input = device_name(config.input_device.as_deref())?;
         let output_device = device_name(config.output_device.as_deref())?;
@@ -668,7 +679,7 @@ impl Backend {
             (pa.stream_connect_record)(
                 record.raw,
                 input.as_ref().map_or(ptr::null(), |name| name.as_ptr()),
-                &attr,
+                &record_attr,
                 sys::PA_STREAM_ADJUST_LATENCY,
             )
         } < 0
@@ -682,7 +693,7 @@ impl Backend {
                 output_device
                     .as_ref()
                     .map_or(ptr::null(), |name| name.as_ptr()),
-                &attr,
+                &playback_attr,
                 sys::PA_STREAM_ADJUST_LATENCY,
                 ptr::null(),
                 ptr::null_mut(),
@@ -761,22 +772,24 @@ impl DeviceBackend for Backend {
                 let _ = self.capture.try_send(samples);
             }
         }
-        // Fill the whole server request. Writing only one 10ms chunk per poll
-        // adds the polling delay to every request and eventually underruns even
-        // when the producer and device have the same nominal sample rate.
+        // Write only actually queued samples so brief producer jitter never
+        // splices artificial zero-filled holes between consecutive speech frames
+        // while the PulseAudio buffer still holds live audio.
         let writable_frames = self.output.writable_size() / 4;
-        let frames = writable_frames.min(4_800);
-        if frames > 0 {
+        let max_frames = writable_frames.min(4_800);
+        if max_frames > 0 {
             let mut samples = [0.0f32; 4_800];
-            self.playback.drain(&mut samples[..frames])?;
-            let mut bytes = [0u8; 4_800 * 4];
-            for (sample, out) in samples[..frames]
-                .iter()
-                .zip(bytes[..frames * 4].chunks_exact_mut(4))
-            {
-                out.copy_from_slice(&sample.to_le_bytes());
+            let (available, _) = self.playback.drain_available(&mut samples[..max_frames])?;
+            if available > 0 {
+                let mut bytes = [0u8; 4_800 * 4];
+                for (sample, out) in samples[..available]
+                    .iter()
+                    .zip(bytes[..available * 4].chunks_exact_mut(4))
+                {
+                    out.copy_from_slice(&sample.to_le_bytes());
+                }
+                self.output.write(&bytes[..available * 4])?;
             }
-            self.output.write(&bytes[..frames * 4])?;
         }
         Ok(())
     }

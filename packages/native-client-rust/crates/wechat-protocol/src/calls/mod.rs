@@ -16,5 +16,7 @@ pub mod incoming;
 pub mod personal;
 pub mod relay;
 pub mod signaling;
+/// Video packetization, reassembly and video RTCP/QoS codecs.
+pub mod video_packet;
 
 pub mod voice_offer;

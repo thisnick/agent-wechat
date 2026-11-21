@@ -6,6 +6,9 @@ const wechat_protocol::ServiceRejected::SESSION_REJECTED | i32 | Code the sessio
 const wechat_protocol::calls::app_session::AUTH_COMMAND | u16 | MISSING DOC
 const wechat_protocol::calls::app_session::AUTH_PATH | &str | MISSING DOC
 const wechat_protocol::calls::signaling::MAX_SIGNALING_BYTES | usize | Local budget for a complete encoded signaling message, including its body.
+const wechat_protocol::calls::video_packet::DEFAULT_RSM_CHUNK_BYTES | usize | Default source payload chunk size per UDP video packet (leaves room for Live96/Live98 + RSM headers inside MTU).
+const wechat_protocol::calls::video_packet::DEFAULT_RSM_ORIENTATION | u8 | Default wire orientation code (`2` = upright 0° in `EncFecHeader` byte 13 bits 7..5).
+const wechat_protocol::calls::video_packet::MAX_VIDEO_FRAME_BYTES | usize | Maximum unframed Annex-B access unit accepted by the packetizer or reassembler.
 const wechat_protocol::contact_sync::CONTACT_SELECTOR | u64 | MISSING DOC
 const wechat_protocol::file_upload::MAX_RESERVED_FILE_BYTES | usize | MISSING DOC
 const wechat_protocol::media::MAX_CDN_TRANSFER_BYTES | usize | MISSING DOC
@@ -39,11 +42,16 @@ enum wechat_protocol::calls::host_policy::CallHostRoute | enum | Fixed host CGI/
 enum wechat_protocol::calls::host_transport::CallHostStage | enum | MISSING DOC
 enum wechat_protocol::calls::incoming::CarrierKind | enum | MISSING DOC
 enum wechat_protocol::calls::incoming::NotificationPayload | enum | MISSING DOC
+enum wechat_protocol::calls::personal::CallMediaMode | enum | Selected room media mode for direct invite, ringing acknowledgement and join.
 enum wechat_protocol::calls::personal::CancelReason | enum | MISSING DOC
 enum wechat_protocol::calls::personal::HostOperation | enum | Host operation identity. Inner Cloud command IDs are a different namespace.
 enum wechat_protocol::calls::personal::RemoteExitReason | enum | Remote-last-member cleanup uses a distinct source table from local Hangup.
 enum wechat_protocol::calls::relay::RelayProgress | enum | MISSING DOC
 enum wechat_protocol::calls::signaling::CallOperation | enum | Fixed command/path pairs; these do not select audio versus video.
+enum wechat_protocol::calls::video_packet::RsmIngestOutcome | enum | Outcome of feeding one RSM video packet into [`RsmVideoReassembler`].
+enum wechat_protocol::calls::video_packet::VideoChannelPayload | enum<'a> | Dispatched payload category on inbound `0x20..0x2f` video channels.
+enum wechat_protocol::calls::video_packet::VideoRotation | enum | Clockwise display rotation derived from the `EncFecHeader` kind-3 orientation code.
+enum wechat_protocol::calls::video_packet::VideoWireCodec | enum | Wire codec identifier in byte 0 of an MP/iLink video payload.
 enum wechat_protocol::custom_stickers::CustomStickerMutation | enum | One membership or placement intent. It is not an automatic retry policy.
 enum wechat_protocol::media::LargeCdnRoute | enum | MISSING DOC
 enum wechat_protocol::media::LargeFileDownloadControl | enum | Only these fixed, nonsecret numeric controls can enter a stored diagnostic.
@@ -395,6 +403,7 @@ field wechat_protocol::calls::incoming::InviteNotification::usernames | alloc::v
 field wechat_protocol::calls::incoming::InviteNotification::wechat_group_id | core::option::Option<alloc::string::String> | MISSING DOC
 field wechat_protocol::calls::incoming::NotificationPayload::Cancel::0 | wechat_protocol::calls::incoming::CancelNotification | -
 field wechat_protocol::calls::incoming::NotificationPayload::Invite::0 | wechat_protocol::calls::incoming::InviteNotification | -
+field wechat_protocol::calls::personal::CallMediaMode::Video::camera_enabled | bool | True when local camera video is initially enabled.
 field wechat_protocol::calls::personal::HostRequest::longpoll_seconds | core::option::Option<u32> | MISSING DOC
 field wechat_protocol::calls::personal::HostRequest::operation | wechat_protocol::calls::personal::HostOperation | MISSING DOC
 field wechat_protocol::calls::personal::HostRequest::sdk_task | u32 | MISSING DOC
@@ -480,6 +489,49 @@ field wechat_protocol::calls::signaling::CommonRequest::unknown_fields | alloc::
 field wechat_protocol::calls::signaling::CommonResponse::base_response | core::option::Option<alloc::vec::Vec<u8>> | MISSING DOC
 field wechat_protocol::calls::signaling::CommonResponse::body | core::option::Option<alloc::vec::Vec<u8>> | MISSING DOC
 field wechat_protocol::calls::signaling::CommonResponse::unknown_fields | alloc::vec::Vec<wechat_protocol::protobuf::Field> | MISSING DOC
+field wechat_protocol::calls::video_packet::FramedAnnexB::bytes | alloc::vec::Vec<u8> | Complete framed payload (`[len0_be16, len1_be16]` + Annex-B bytes).
+field wechat_protocol::calls::video_packet::FramedAnnexB::frame_count | u8 | Number of framed sections (`2` when XPS + slice are both present, else `1`).
+field wechat_protocol::calls::video_packet::FramedAnnexB::is_keyframe | bool | True when the access unit contains an IDR keyframe slice.
+field wechat_protocol::calls::video_packet::FramedAnnexB::slice_len_hi | u8 | High byte of slice length (`slice_len >> 16`) when `>= 65536`.
+field wechat_protocol::calls::video_packet::FramedAnnexB::xps_len_hi | u8 | High byte of XPS length (`xps_len >> 16`) when `>= 65536`.
+field wechat_protocol::calls::video_packet::ParsedS2p::cap_seq | u32 | Capability sequence counter if present (`field 5`).
+field wechat_protocol::calls::video_packet::ParsedS2p::member_id | u32 | Target member ID from the outer S2P envelope.
+field wechat_protocol::calls::video_packet::ParsedS2p::room_id | u64 | Room identifier from the outer S2P envelope.
+field wechat_protocol::calls::video_packet::ParsedS2p::room_key | u64 | Room key from the outer S2P envelope.
+field wechat_protocol::calls::video_packet::ParsedS2p::video_commands | alloc::vec::Vec<wechat_protocol::calls::video_packet::VideoS2pCommand> | Video QoS directives (`inner field 3: repeated video_s2p`).
+field wechat_protocol::calls::video_packet::ReassembledVideoFrame::codec | wechat_protocol::calls::video_packet::VideoWireCodec | Wire codec from byte 0 of the MP/iLink prefix.
+field wechat_protocol::calls::video_packet::ReassembledVideoFrame::fec_recovered | bool | True when one or more missing UDP fragments were recovered via Reed-Solomon FEC.
+field wechat_protocol::calls::video_packet::ReassembledVideoFrame::frame_index | u32 | Full reconstructed frame index.
+field wechat_protocol::calls::video_packet::ReassembledVideoFrame::has_codec_config | bool | True when the frame includes codec parameter sets (VPS/SPS/PPS).
+field wechat_protocol::calls::video_packet::ReassembledVideoFrame::is_keyframe | bool | True when the frame contains an IDR keyframe slice.
+field wechat_protocol::calls::video_packet::ReassembledVideoFrame::member_id | u16 | Sender member ID from bytes 1..3.
+field wechat_protocol::calls::video_packet::ReassembledVideoFrame::orientation | u8 | Raw 3-bit orientation code from `EncFecHeader` byte 13 bits 7..5 (`0..=7`).
+field wechat_protocol::calls::video_packet::ReassembledVideoFrame::payload | alloc::vec::Vec<u8> | Standard Annex-B access unit bytes (for H.264/H.265) or raw codec bytes for other codecs.
+field wechat_protocol::calls::video_packet::ReassembledVideoFrame::prior_frames_dropped | bool | True when an older incomplete frame was evicted before or alongside this frame.
+field wechat_protocol::calls::video_packet::ReassembledVideoFrame::stream_id | u8 | Video stream ID from bytes 1..3.
+field wechat_protocol::calls::video_packet::ReassembledVideoFrame::timestamp_ms | u32 | Sender millisecond timestamp from the RSM header.
+field wechat_protocol::calls::video_packet::RsmIngestOutcome::Frame::0 | wechat_protocol::calls::video_packet::ReassembledVideoFrame | -
+field wechat_protocol::calls::video_packet::VideoChannelPayload::IRequest::0 | wechat_protocol::calls::video_packet::VideoIRequest | -
+field wechat_protocol::calls::video_packet::VideoChannelPayload::Nack::0 | &'a [u8] | -
+field wechat_protocol::calls::video_packet::VideoChannelPayload::RsmVideo::0 | &'a [u8] | -
+field wechat_protocol::calls::video_packet::VideoIRequest::local_member | u16 | Requesting member ID.
+field wechat_protocol::calls::video_packet::VideoIRequest::local_stream_id | u8 | Stream ID requested by the sender.
+field wechat_protocol::calls::video_packet::VideoIRequest::target_member | u16 | Target member ID whose encoder should emit a keyframe.
+field wechat_protocol::calls::video_packet::VideoIRequest::target_stream_id | u8 | Target stream ID whose encoder should emit a keyframe.
+field wechat_protocol::calls::video_packet::VideoIRequest::timestamp_ms | u64 | Monotonic millisecond timestamp carried in the body.
+field wechat_protocol::calls::video_packet::VideoS2pCommand::alg | u32 | QoS algorithm identifier (`field 1: u8Alg`).
+field wechat_protocol::calls::video_packet::VideoS2pCommand::codec_type | u32 | Server-commanded codec selector (`field 11: u8CodecType`).
+field wechat_protocol::calls::video_packet::VideoS2pCommand::fps | u32 | Target frame rate (`field 3: u8Fps`).
+field wechat_protocol::calls::video_packet::VideoS2pCommand::i_period | u32 | Keyframe interval (`field 5: u16IPeriod`).
+field wechat_protocol::calls::video_packet::VideoS2pCommand::i_request_flag | u32 | Nonzero when the server requests an immediate keyframe (`field 10: u8IRequestFlag`).
+field wechat_protocol::calls::video_packet::VideoS2pCommand::kbps | u32 | Target bitrate in kbps (`field 2: u16VKbps`).
+field wechat_protocol::calls::video_packet::VideoS2pCommand::resolution | u32 | Resolution tier (`field 4: u8Resolution`).
+field wechat_protocol::calls::video_packet::VideoS2pCommand::rs_level | u32 | Reed-Solomon FEC level (`field 9: u8RsLevel`).
+field wechat_protocol::calls::video_packet::VideoS2pCommand::stream_id | u32 | Target video stream identifier (`field 12: u32StreamID`).
+field wechat_protocol::calls::video_packet::VideoWireCodec::Unknown::0 | u8 | -
+field wechat_protocol::calls::voice_offer::VideoOfferOptions::h264 | bool | Advertise standard H.264/AVC (`SwH264 | HW264`, bits `0x09`).
+field wechat_protocol::calls::voice_offer::VideoOfferOptions::hevc | bool | Advertise standard H.265/HEVC (`Vcodec2`, bit `0x10`).
+field wechat_protocol::calls::voice_offer::VideoOfferOptions::video_flags | u32 | Display aspect ratio hint encoded in engine capability field 4 (for example `178` for 16:9 direct or `100` for conference).
 field wechat_protocol::contact_sync::ContactSyncBatch::commands | alloc::vec::Vec<wechat_protocol::wire::SyncCommand> | MISSING DOC
 field wechat_protocol::contact_sync::ContactSyncBatch::continuation | alloc::vec::Vec<u64> | MISSING DOC
 field wechat_protocol::contact_sync::ContactSyncBatch::cursor | alloc::vec::Vec<u8> | MISSING DOC
@@ -956,17 +1008,27 @@ fn wechat_protocol::calls::audio_packet::Live96::known_audio_overlaps | fn(&self
 fn wechat_protocol::calls::audio_packet::Live96::new | fn(key: [u8; 32], nonce_base: u64, context: wechat_protocol::calls::audio_packet::MediaContext, epoch: wechat_protocol::calls::audio_packet::MediaEpoch) -> anyhow::Result<Self> | MISSING DOC
 fn wechat_protocol::calls::audio_packet::Live96::new_legacy_receive_only | fn(key: [u8; 32], nonce_base: u64, context: wechat_protocol::calls::audio_packet::MediaContext, epoch: wechat_protocol::calls::audio_packet::MediaEpoch) -> anyhow::Result<Self> | Legacy relay reception tolerates authenticated nonce reuse without resetting counters or granting transmit permission. Exact ciphertext replays are filtered within the receive window; excess variants for one nonce are dropped rather than closing the receiver.
 fn wechat_protocol::calls::audio_packet::Live96::new_receive_only | fn(key: [u8; 32], nonce_base: u64, context: wechat_protocol::calls::audio_packet::MediaContext, epoch: wechat_protocol::calls::audio_packet::MediaEpoch) -> anyhow::Result<Self> | Receive-only room inspection can include relayed self-member packets. The caller still checks socket source and roster membership before any audio delivery. This instance can never acquire transmit permission.
+fn wechat_protocol::calls::audio_packet::Live96::new_relay_qos | fn(key: [u8; 32], nonce_base: u64, room_id: u64, own_member: u16, connection_id: u16, epoch: wechat_protocol::calls::audio_packet::MediaEpoch) -> anyhow::Result<Self> | Receive-only channel bound specifically to relay QoS member `0xffff` for inbound `0x30` S2P directives.
 fn wechat_protocol::calls::audio_packet::Live96::open | fn(&mut self, current: wechat_protocol::calls::audio_packet::MediaEpoch, packet: &[u8]) -> anyhow::Result<core::option::Option<wechat_protocol::calls::audio_packet::OpenedPayload>> | MISSING DOC
 fn wechat_protocol::calls::audio_packet::Live96::received_nonce_reuses | fn(&self) -> &alloc::collections::btree::map::BTreeMap<u8, u64> | MISSING DOC
 fn wechat_protocol::calls::audio_packet::Live96::reply_to_probe | fn(&mut self, current: wechat_protocol::calls::audio_packet::MediaEpoch, now_ms: u64, opened: &wechat_protocol::calls::audio_packet::OpenedPayload) -> anyhow::Result<core::option::Option<alloc::vec::Vec<u8>>> | Reply only to the exact selected authenticated faking_type1 probe. A periodic/control response receives no echo. No general control sender is inferred, and retries would consume another semantic operation.
 fn wechat_protocol::calls::audio_packet::Live96::seal_audio | fn(&mut self, current: wechat_protocol::calls::audio_packet::MediaEpoch, now_ms: u64, conf_payload: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
+fn wechat_protocol::calls::audio_packet::Live96::seal_audio_live98 | fn(&mut self, current: wechat_protocol::calls::audio_packet::MediaEpoch, now_ms: u64, sequence32: u32, conf_payload: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Seal one `Live98` (`0x98`, 21-byte header) audio packet with an explicit 32-bit sequence.
+fn wechat_protocol::calls::audio_packet::Live96::seal_qos_p2s | fn(&mut self, current: wechat_protocol::calls::audio_packet::MediaEpoch, now_ms: u64, payload: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Seal one MP QoS P2S telemetry packet (`packed_kind = 0x30`).
+fn wechat_protocol::calls::audio_packet::Live96::seal_video | fn(&mut self, current: wechat_protocol::calls::audio_packet::MediaEpoch, now_ms: u64, stream_id: u8, is_data: bool, payload: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Seal one MP/iLink video payload (`packed_kind = 0x20 | stream_id`, `ext_byte = is_data`).
+fn wechat_protocol::calls::audio_packet::Live96::seal_video_rtcp | fn(&mut self, current: wechat_protocol::calls::audio_packet::MediaEpoch, now_ms: u64, stream_id: u8, payload: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Seal one peer-to-peer video RTCP packet (`0x66` `IRequest` or `0x06` NACK). Wire byte 14 carries `0x60 | stream_id`, while the AEAD nonce uses `kind & 0x2f` and shares the video sequence counter (`GetSeqIndex` slot 12).
+fn wechat_protocol::calls::audio_packet::Live96::set_prefer_live98_tx | fn(&mut self, enabled: bool) | Opt into `Live98` (`0x98`, 21-byte header, 32-bit sequence) for outbound media packets.
+fn wechat_protocol::calls::audio_packet::OpenedPayload::extension_byte | fn(&self) -> u8 | Header extension/data flag byte (`packet[17]` on `Live96`, `packet[19]` on `Live98`).
+fn wechat_protocol::calls::audio_packet::OpenedPayload::magic | fn(&self) -> u8 | Wire envelope magic (`0x96` for `Live96`, `0x98` for `Live98`).
 fn wechat_protocol::calls::audio_packet::OpenedPayload::payload | fn(&self) -> &[u8] | MISSING DOC
+fn wechat_protocol::calls::audio_packet::OpenedPayload::sequence32 | fn(&self) -> u32 | Full 32-bit packet sequence (`u16` zero-extended for `Live96`, native 32-bit for `Live98`).
 fn wechat_protocol::calls::audio_packet::ordinary95_pair | fn(metadata: u8, last_sequence: u16, last_timestamp: u32, first: &[u8], second: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Configured ordinary95/74 N2 sender. RTP sequence/time identify the LAST primary, independent from cryptographic counters and clear room sequence.
 fn wechat_protocol::calls::audio_packet::ordinary95_single | fn(metadata: u8, sequence: u16, timestamp: u32, frame: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Configured ordinary95/74 N1 sender for format106.
 fn wechat_protocol::calls::audio_packet::ordinary_audio_marker | fn(payload: &[u8]) -> core::option::Option<[u8; 2]> | Header marker for classifying an ordinary audio variant. This does not validate its codec body or grant decoder admission.
 fn wechat_protocol::calls::audio_packet::parse_aggregate_audio | fn(payload: &[u8]) -> anyhow::Result<wechat_protocol::calls::audio_packet::AggregateAudio<'_>> | MISSING DOC
 fn wechat_protocol::calls::audio_packet::parse_ordinary95 | fn(payload: &[u8]) -> anyhow::Result<wechat_protocol::calls::audio_packet::OrdinaryAudio<'_>> | MISSING DOC
 fn wechat_protocol::calls::audio_packet::unverified_live96_member | fn(packet: &[u8]) -> anyhow::Result<u16> | An untrusted routing hint for selecting a roster-bound receiver. The chosen receiver must still authenticate the packet and check its protected member.
+fn wechat_protocol::calls::audio_packet::unverified_live_member | fn(packet: &[u8]) -> anyhow::Result<(u8, u16)> | An untrusted routing hint for selecting a roster-bound receiver from either a `Live96` (`0x96`, 19-byte header) or `Live98` (`0x98`, 21-byte header) datagram. Returns `(magic, member_id)`. Authentication and protected-member checks remain required.
 fn wechat_protocol::calls::conference::AddMembersResponse::check_room | fn(&self, expected: wechat_protocol::calls::personal::VoiceRoom) -> anyhow::Result<()> | MISSING DOC
 fn wechat_protocol::calls::conference::AddMembersResponse::decode | fn(raw: &[u8]) -> anyhow::Result<Self> | MISSING DOC
 fn wechat_protocol::calls::conference::CreateResponse::allocated_room | fn(&self) -> anyhow::Result<core::option::Option<wechat_protocol::calls::personal::VoiceRoom>> | Identify a complete allocation without claiming membership or media. Missing/zero room identifiers can belong to a rejection; partial nonzero identity needs review and is never filled from a previous call.
@@ -974,6 +1036,9 @@ fn wechat_protocol::calls::conference::CreateResponse::decode | fn(raw: &[u8]) -
 fn wechat_protocol::calls::conference::add_members | fn(room: wechat_protocol::calls::personal::VoiceRoom, group_id: &str, invitees: &[alloc::string::String], invite_id: u64, sdk_task: u32) -> anyhow::Result<wechat_protocol::calls::personal::HostRequest> | Submit additional invitations for a known conference. Invitation submission does not add membership or audio tracks. The runtime must check current room authority and record the original intent before submitting this request.
 fn wechat_protocol::calls::conference::cancel_creation | fn(inputs: &wechat_protocol::calls::personal::VoiceInputs<'_>, room: wechat_protocol::calls::personal::VoiceRoom, invite_id: u64, pending_recipients: &[alloc::string::String], reason: wechat_protocol::calls::personal::CancelReason, sdk_task: u32) -> anyhow::Result<wechat_protocol::calls::personal::HostRequest> | Cancel the creator's original unanswered invitation. The runtime must first verify that its invitation timer is still active. Pending recipients are supplied in source traversal order, including duplicates; an empty list does not by itself prove the invitation timer has stopped.
 fn wechat_protocol::calls::conference::create_voice | fn(inputs: &wechat_protocol::calls::personal::VoiceInputs<'_>, group_id: &str, invitees: &[alloc::string::String], invite_id: u64, sdk_task: u32, custom_auth: core::option::Option<&[u8]>) -> anyhow::Result<wechat_protocol::calls::personal::HostRequest> | Prepare one voice conference creation request. Application metadata must select conference mode and the same group; direct-call inputs stay invalid. Absent custom authorization remains absent on the wire.
+fn wechat_protocol::calls::conference::create_with_mode | fn(inputs: &wechat_protocol::calls::personal::VoiceInputs<'_>, group_id: &str, invitees: &[alloc::string::String], camera_enabled: bool, invite_id: u64, sdk_task: u32, custom_auth: core::option::Option<&[u8]>) -> anyhow::Result<wechat_protocol::calls::personal::HostRequest> | Prepare one conference creation request with optional initial camera video enabled.
+fn wechat_protocol::calls::conference::subscribe_video | fn(inputs: &wechat_protocol::calls::personal::VoiceInputs<'_>, room: wechat_protocol::calls::personal::VoiceRoom, targets: &[(u32, u32)], timestamp: u64, sdk_task: u32) -> anyhow::Result<wechat_protocol::calls::signaling::CloudRequest> | Subscribe to conference participants' video streams (`Subscribe 3359`). Each `(member_id, video_length)` pair requests a member's stream at the requested target long edge (values `> 480` select the big tier, e.g. `640`).
+fn wechat_protocol::calls::conference::switch_av | fn(inputs: &wechat_protocol::calls::personal::VoiceInputs<'_>, room: wechat_protocol::calls::personal::VoiceRoom, microphone_enabled: bool, camera_enabled: bool, timestamp: u64, sdk_task: u32) -> anyhow::Result<wechat_protocol::calls::signaling::CloudRequest> | Update conference microphone and camera AV status (`SwitchAV 3197`).
 fn wechat_protocol::calls::conference::switch_microphone | fn(inputs: &wechat_protocol::calls::personal::VoiceInputs<'_>, room: wechat_protocol::calls::personal::VoiceRoom, enabled: bool, timestamp: u64, sdk_task: u32) -> anyhow::Result<wechat_protocol::calls::signaling::CloudRequest> | Voice-only microphone state, distinct from membership and local playback. Video fields remain absent. Timestamp is caller-owned and must increase for each actual change; a response retry hint never permits automatic resending.
 fn wechat_protocol::calls::host_policy::CallHostRoute::command | const fn(self) -> u16 | MISSING DOC
 fn wechat_protocol::calls::host_policy::CallHostRoute::path | const fn(self) -> &'static str | MISSING DOC
@@ -992,6 +1057,8 @@ fn wechat_protocol::calls::incoming::NotificationCarrier::conference_notificatio
 fn wechat_protocol::calls::incoming::NotificationCarrier::decode | fn(kind: wechat_protocol::calls::incoming::CarrierKind, input: &[u8]) -> anyhow::Result<Self> | MISSING DOC
 fn wechat_protocol::calls::incoming::NotificationCarrier::fields | fn(&self) -> &[wechat_protocol::protobuf::Field] | MISSING DOC
 fn wechat_protocol::calls::incoming::NotificationCarrier::kind | fn(&self) -> wechat_protocol::calls::incoming::CarrierKind | MISSING DOC
+fn wechat_protocol::calls::personal::CallMediaMode::av_status | const fn(self) -> u64 | Initial `av_status` bitmask (`bit 0 = microphone`, `bit 1 = main camera`).
+fn wechat_protocol::calls::personal::CallMediaMode::room_type | const fn(self) -> u64 | Wire `room_type` enum value (`1` for video-capable, `2` for voice-only).
 fn wechat_protocol::calls::personal::HostOperation::command | const fn(self) -> u16 | MISSING DOC
 fn wechat_protocol::calls::personal::HostOperation::path | const fn(self) -> &'static str | MISSING DOC
 fn wechat_protocol::calls::personal::HostRequest::body | fn(&self) -> &[u8] | MISSING DOC
@@ -1002,14 +1069,18 @@ fn wechat_protocol::calls::personal::LiveSyncResponse::decode | fn(input: &[u8])
 fn wechat_protocol::calls::personal::RemoteExitReason::wire | const fn(self) -> u64 | MISSING DOC
 fn wechat_protocol::calls::personal::VoiceInputs::validate | fn(&self) -> anyhow::Result<()> | MISSING DOC
 fn wechat_protocol::calls::personal::acknowledge_voice | fn(inputs: &wechat_protocol::calls::personal::VoiceInputs<'_>, room: wechat_protocol::calls::personal::VoiceRoom, sdk_task: u32) -> anyhow::Result<wechat_protocol::calls::personal::HostRequest> | Ringing ACK type1 for the selected incoming voice role. This is not Join.
+fn wechat_protocol::calls::personal::acknowledge_with_mode | fn(inputs: &wechat_protocol::calls::personal::VoiceInputs<'_>, room: wechat_protocol::calls::personal::VoiceRoom, _mode: wechat_protocol::calls::personal::CallMediaMode, sdk_task: u32) -> anyhow::Result<wechat_protocol::calls::personal::HostRequest> | Ringing ACK for an incoming voice or video direct call. Field 4 is the ringing ACK type (`1` = ringing; `3` signals busy), while video capabilities and dimensions travel in `inputs` (`12`, `14`, `15`).
 fn wechat_protocol::calls::personal::cancel | fn(inputs: &wechat_protocol::calls::personal::VoiceInputs<'_>, room: u64, room_key: u64, invite_id: u64, pending_recipients: &[alloc::string::String], reason: wechat_protocol::calls::personal::CancelReason, sdk_task: u32) -> anyhow::Result<wechat_protocol::calls::personal::HostRequest> | Cancel only the still-pending recipients of this original invitation. Preserve source traversal order and duplicates; membership/role/timer checks are the session owner's responsibility before constructing this request.
 fn wechat_protocol::calls::personal::cloud_request_info | fn(request: &wechat_protocol::calls::signaling::CloudRequest, cloud_base: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Wrap an inner Cloud request using its separate app BaseRequest. This returns IlinkRequestInfo bytes, not host CommonRequest or a packed app-task frame.
 fn wechat_protocol::calls::personal::exit | fn(inputs: &wechat_protocol::calls::personal::VoiceInputs<'_>, room: wechat_protocol::calls::personal::VoiceRoom, source_reason: u32, talk_success: bool, sdk_task: u32) -> anyhow::Result<wechat_protocol::calls::signaling::CloudRequest> | Prepare joined Cloud Exit3380. Source reason numbers belong to the selected SDK, not local HTTP/CLI enums. The caller must establish native talk-success state separately; a joined roster or decoded frame is insufficient evidence. Required reliable peer notices, when selected, are a separate operation.
 fn wechat_protocol::calls::personal::exit_remote | fn(inputs: &wechat_protocol::calls::personal::VoiceInputs<'_>, room: wechat_protocol::calls::personal::VoiceRoom, reason: wechat_protocol::calls::personal::RemoteExitReason, talk_success: bool, sdk_task: u32) -> anyhow::Result<wechat_protocol::calls::signaling::CloudRequest> | Clean up an admitted remote-terminal roster once. The owner must stop media first and retain uncertainty if the correlated reply is lost.
 fn wechat_protocol::calls::personal::invite | fn(inputs: &wechat_protocol::calls::personal::VoiceInputs<'_>, peer: &str, invite_id: u64, sdk_task: u32, custom_auth: core::option::Option<&[u8]>) -> anyhow::Result<wechat_protocol::calls::personal::HostRequest> | Prepare one direct voice invitation. `invite_id` identifies the original intent and is never allocated from a wall clock by this codec. An absent custom auth value stays absent, distinct from an invalid empty value.
+fn wechat_protocol::calls::personal::invite_with_mode | fn(inputs: &wechat_protocol::calls::personal::VoiceInputs<'_>, peer: &str, mode: wechat_protocol::calls::personal::CallMediaMode, invite_id: u64, sdk_task: u32, custom_auth: core::option::Option<&[u8]>) -> anyhow::Result<wechat_protocol::calls::personal::HostRequest> | Prepare one direct invitation selecting voice-only or video-capable mode.
 fn wechat_protocol::calls::personal::join | fn(inputs: &wechat_protocol::calls::personal::VoiceInputs<'_>, room: wechat_protocol::calls::personal::VoiceRoom, timestamp: u64, sdk_task: u32) -> anyhow::Result<wechat_protocol::calls::signaling::CloudRequest> | Prepare callee Cloud Join3361. The caller obtains its context from Invite and must not manufacture a callee Join. Timestamp is an independently selected wire value; this codec does not assume its clock or unit.
+fn wechat_protocol::calls::personal::join_with_mode | fn(inputs: &wechat_protocol::calls::personal::VoiceInputs<'_>, room: wechat_protocol::calls::personal::VoiceRoom, mode: wechat_protocol::calls::personal::CallMediaMode, timestamp: u64, sdk_task: u32) -> anyhow::Result<wechat_protocol::calls::signaling::CloudRequest> | Prepare callee Cloud Join3361 selecting voice-only or video-capable mode.
 fn wechat_protocol::calls::personal::live_sync | fn(live_id: u64, cookies: &[u8], timeout_seconds: u32, sdk_task: u32) -> anyhow::Result<wechat_protocol::calls::personal::HostRequest> | Prepare one caller LiveSync. `timeout_seconds` is source-selected (3..50), distinct from the outer request deadline. Cookies remain uncommitted until the owner has handled the entire response batch.
 fn wechat_protocol::calls::personal::reject | fn(inputs: &wechat_protocol::calls::personal::VoiceInputs<'_>, room: wechat_protocol::calls::personal::VoiceRoom, sdk_task: u32) -> anyhow::Result<wechat_protocol::calls::signaling::CloudRequest> | Decline an already-ACKed callee with source Reject reason1. Pre-ACK busy uses a different operation and is not implied by this builder.
+fn wechat_protocol::calls::personal::switch_av | fn(inputs: &wechat_protocol::calls::personal::VoiceInputs<'_>, room: wechat_protocol::calls::personal::VoiceRoom, microphone_enabled: bool, camera_enabled: bool, timestamp: u64, sdk_task: u32) -> anyhow::Result<wechat_protocol::calls::signaling::CloudRequest> | Prepare a direct-call `SwitchAV` (`3197`) request toggling microphone and camera bits.
 fn wechat_protocol::calls::relay::RoomInputs::body | fn(&self) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
 fn wechat_protocol::calls::relay::RoomInputs::initial | fn(selected: &wechat_protocol::calls::relay::SelectedRelay, network_type: u16, header_timestamp: u32, body_timestamp: u32) -> Self | MISSING DOC
 fn wechat_protocol::calls::relay::RoomInputs::random_bytes_needed | fn(&self) -> anyhow::Result<usize> | MISSING DOC
@@ -1040,9 +1111,30 @@ fn wechat_protocol::calls::signaling::CommonResponse::decode | fn(input: &[u8]) 
 fn wechat_protocol::calls::signaling::CommonResponse::encode | fn(&self) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
 fn wechat_protocol::calls::signaling::CommonResponse::return_code | fn(&self) -> anyhow::Result<i32> | Preserve negative failures and reject an absent return code.
 fn wechat_protocol::calls::signaling::decode_fields | fn(input: &[u8]) -> anyhow::Result<alloc::vec::Vec<wechat_protocol::protobuf::Field>> | Decode a size- and field-count-limited signaling envelope.
+fn wechat_protocol::calls::video_packet::RsmVideoPacketizer::build_orientation_metadata_packet | fn(&mut self, codec: wechat_protocol::calls::video_packet::VideoWireCodec, timestamp_ms: u32, fps: u8) -> anyhow::Result<alloc::vec::Vec<u8>> | Build one MP/iLink kind-3 virtual-frame metadata packet carrying the `workMode = 3` `VideoPktExtHeader` protobuf (`field 3 = orientation`, `s = 1, r = 0, pkg_idx = 3`, 128-byte leading padding) so mobile and desktop receivers apply the sender's display orientation.
+fn wechat_protocol::calls::video_packet::RsmVideoPacketizer::new | fn(local_member: u16, stream_id: u8) -> Self | Construct a new packetizer bound to a local member and video stream ID.
+fn wechat_protocol::calls::video_packet::RsmVideoPacketizer::packetize | fn(&mut self, codec: wechat_protocol::calls::video_packet::VideoWireCodec, annexb: &[u8], timestamp_ms: u32, fps: u8, kbps: u16) -> anyhow::Result<alloc::vec::Vec<alloc::vec::Vec<u8>>> | Split one standard Annex-B access unit into ready-to-seal MP/iLink video packets.
+fn wechat_protocol::calls::video_packet::RsmVideoPacketizer::with_chunk_bytes | fn(self, chunk_bytes: usize) -> anyhow::Result<Self> | Override the per-packet payload chunk budget (bounded to `64..=1350`).
+fn wechat_protocol::calls::video_packet::RsmVideoPacketizer::with_orientation | fn(self, orientation: u8) -> Self | Override the 3-bit wire orientation code (`0..=7`) written into `EncFecHeader` byte 13 and virtual-frame orientation metadata packets.
+fn wechat_protocol::calls::video_packet::RsmVideoReassembler::ingest | fn(&mut self, packet: &[u8]) -> anyhow::Result<wechat_protocol::calls::video_packet::RsmIngestOutcome> | Feed one decrypted MP/iLink RSM video packet (`[codecType, mid/sid, EncFecHeader, ...]`).
+fn wechat_protocol::calls::video_packet::RsmVideoReassembler::new | fn() -> Self | Create a fresh reassembler with empty assembly state.
+fn wechat_protocol::calls::video_packet::RsmVideoReassembler::reset | fn(&mut self) | Clear all pending assemblies (for example after a remote camera toggle).
+fn wechat_protocol::calls::video_packet::VideoRotation::degrees | const fn(self) -> u16 | Return clockwise degrees (`0`, `90`, `180` or `270`).
+fn wechat_protocol::calls::video_packet::VideoRotation::from_wire | const fn(orientation: u8, is_conference: bool) -> Self | Map the 3-bit wire orientation code (`EncFecHeader` byte 13 bits 7..5) to clockwise display rotation.
+fn wechat_protocol::calls::video_packet::VideoWireCodec::from_wire | const fn(value: u8) -> Self | Decode a wire `codecType` byte.
+fn wechat_protocol::calls::video_packet::VideoWireCodec::wire | const fn(self) -> u8 | Encode to the wire `codecType` byte.
+fn wechat_protocol::calls::video_packet::classify_video_channel_payload | fn(payload: &[u8]) -> anyhow::Result<wechat_protocol::calls::video_packet::VideoChannelPayload<'_>> | Classify a decrypted payload arriving on `packed_kind` `0x20..=0x2f`.
+fn wechat_protocol::calls::video_packet::encode_irequest | fn(local_member: u16, target_member: u16, stream_id: u8, timestamp_ms: u64, sequence: u32) -> alloc::vec::Vec<u8> | Encode a 58-byte `0x66` `IRequest` keyframe request packet.
+fn wechat_protocol::calls::video_packet::encode_p2s | fn(sequence: u16, cap_seq: u32, codec_support_mask: u32, decode_type: u32) -> anyhow::Result<alloc::vec::Vec<u8>> | Encode a minimal `0x0b` MP P2S QoS heartbeat payload for `packed_kind = 0x30`.
+fn wechat_protocol::calls::video_packet::frame_annexb_access_unit | fn(codec: wechat_protocol::calls::video_packet::VideoWireCodec, annexb: &[u8]) -> anyhow::Result<wechat_protocol::calls::video_packet::FramedAnnexB> | Frame a single standard Annex-B access unit (H.265 or H.264) with WeChat's 4-byte `[xps_len_be16, idr_len_be16]` / `[slice_len_be16, 0, 0]` prefix.
+fn wechat_protocol::calls::video_packet::parse_irequest | fn(payload: &[u8]) -> anyhow::Result<wechat_protocol::calls::video_packet::VideoIRequest> | Parse a 58-byte `0x66` `IRequest` keyframe request packet.
+fn wechat_protocol::calls::video_packet::parse_s2p | fn(payload: &[u8]) -> anyhow::Result<wechat_protocol::calls::video_packet::ParsedS2p> | Parse a `0x0c` MP S2P packet arriving on `packed_kind = 0x30`.
+fn wechat_protocol::calls::video_packet::split_annexb_nalus | fn(data: &[u8]) -> alloc::vec::Vec<(usize, usize, usize)> | Locate `(start, end, start_code_len)` spans for every Annex-B NALU in `data`.
+fn wechat_protocol::calls::video_packet::unframe_annexb_access_unit | fn(codec: wechat_protocol::calls::video_packet::VideoWireCodec, framed: &[u8], xps_len_hi: u8, slice_len_hi: u8) -> anyhow::Result<(alloc::vec::Vec<u8>, bool, bool)> | Strip WeChat's 4-byte framing prefix from a reassembled MP/iLink payload, returning standard Annex-B bytes plus keyframe/codec-config flags.
 fn wechat_protocol::calls::voice_offer::VoiceOffer::advertised_channel_identity | fn(&self) -> &[u8; 12] | MISSING DOC
 fn wechat_protocol::calls::voice_offer::VoiceOffer::engine_advertisement | fn(&self) -> &[u8] | MISSING DOC
 fn wechat_protocol::calls::voice_offer::VoiceOffer::from_owned_random | fn(owner_version: i32, random32: [u8; 32]) -> anyhow::Result<Self> | `owner_version` is this embedding client's version, not a captured peer's version. Signed int32 representation is preserved in engine field27. MD5 reproduces the channel identity transform; it is not authentication.
+fn wechat_protocol::calls::voice_offer::VoiceOffer::from_owned_random_video | fn(owner_version: i32, random32: [u8; 32], video: wechat_protocol::calls::voice_offer::VideoOfferOptions) -> anyhow::Result<Self> | Build a fresh offer advertising Opus audio together with the selected standard video codecs. Proprietary video codec bits remain unset.
 fn wechat_protocol::calls::voice_offer::VoiceOffer::internal_channel_identity | fn(&self) -> &[u8; 12] | MISSING DOC
 fn wechat_protocol::calls::voice_offer::VoiceOffer::sdk_info | fn(&self) -> &[u8] | MISSING DOC
 fn wechat_protocol::contact_notification_request | fn(record: &wechat_protocol::wire::ContactRecord, muted: bool) -> anyhow::Result<wechat_protocol::client::group_mutation::GroupRpc> | Direct contact writes use the official full-contact oplog shape. Fetch a current record first; change only the mute bit and preserve all other bytes.
@@ -1315,6 +1407,7 @@ impl core::clone::Clone for wechat_protocol::calls::host_transport::CallHostRpcE
 impl core::clone::Clone for wechat_protocol::calls::host_transport::CallHostStage | impl | -
 impl core::clone::Clone for wechat_protocol::calls::incoming::CarrierKind | impl | -
 impl core::clone::Clone for wechat_protocol::calls::incoming::ConferenceJoinContext | impl | -
+impl core::clone::Clone for wechat_protocol::calls::personal::CallMediaMode | impl | -
 impl core::clone::Clone for wechat_protocol::calls::personal::CancelReason | impl | -
 impl core::clone::Clone for wechat_protocol::calls::personal::HostOperation | impl | -
 impl core::clone::Clone for wechat_protocol::calls::personal::RemoteExitReason | impl | -
@@ -1323,6 +1416,13 @@ impl core::clone::Clone for wechat_protocol::calls::relay::RelayEpoch | impl | -
 impl core::clone::Clone for wechat_protocol::calls::relay::RelayProgress | impl | -
 impl core::clone::Clone for wechat_protocol::calls::relay::RoomInputs | impl | -
 impl core::clone::Clone for wechat_protocol::calls::signaling::CallOperation | impl | -
+impl core::clone::Clone for wechat_protocol::calls::video_packet::ParsedS2p | impl | -
+impl core::clone::Clone for wechat_protocol::calls::video_packet::ReassembledVideoFrame | impl | -
+impl core::clone::Clone for wechat_protocol::calls::video_packet::VideoIRequest | impl | -
+impl core::clone::Clone for wechat_protocol::calls::video_packet::VideoRotation | impl | -
+impl core::clone::Clone for wechat_protocol::calls::video_packet::VideoS2pCommand | impl | -
+impl core::clone::Clone for wechat_protocol::calls::video_packet::VideoWireCodec | impl | -
+impl core::clone::Clone for wechat_protocol::calls::voice_offer::VideoOfferOptions | impl | -
 impl core::clone::Clone for wechat_protocol::contact_sync::ContactSyncBatch | impl | -
 impl core::clone::Clone for wechat_protocol::custom_stickers::CustomStickerMetadata | impl | -
 impl core::clone::Clone for wechat_protocol::custom_stickers::CustomStickerMutation | impl | -
@@ -1409,6 +1509,7 @@ impl core::cmp::Eq for wechat_protocol::calls::host_policy::CallHostRoute | impl
 impl core::cmp::Eq for wechat_protocol::calls::host_transport::CallHostRpcError | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::host_transport::CallHostStage | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::incoming::CarrierKind | impl | -
+impl core::cmp::Eq for wechat_protocol::calls::personal::CallMediaMode | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::personal::CancelReason | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::personal::HostOperation | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::personal::RemoteExitReason | impl | -
@@ -1416,6 +1517,15 @@ impl core::cmp::Eq for wechat_protocol::calls::personal::VoiceRoom | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::relay::RelayEpoch | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::relay::RelayProgress | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::signaling::CallOperation | impl | -
+impl core::cmp::Eq for wechat_protocol::calls::video_packet::ParsedS2p | impl | -
+impl core::cmp::Eq for wechat_protocol::calls::video_packet::ReassembledVideoFrame | impl | -
+impl core::cmp::Eq for wechat_protocol::calls::video_packet::RsmIngestOutcome | impl | -
+impl core::cmp::Eq for wechat_protocol::calls::video_packet::VideoChannelPayload | impl<'a> | -
+impl core::cmp::Eq for wechat_protocol::calls::video_packet::VideoIRequest | impl | -
+impl core::cmp::Eq for wechat_protocol::calls::video_packet::VideoRotation | impl | -
+impl core::cmp::Eq for wechat_protocol::calls::video_packet::VideoS2pCommand | impl | -
+impl core::cmp::Eq for wechat_protocol::calls::video_packet::VideoWireCodec | impl | -
+impl core::cmp::Eq for wechat_protocol::calls::voice_offer::VideoOfferOptions | impl | -
 impl core::cmp::Eq for wechat_protocol::media::ChannelsDownloadFacts | impl | -
 impl core::cmp::Eq for wechat_protocol::media::LargeCdnRoute | impl | -
 impl core::cmp::Eq for wechat_protocol::media::LargeFileDownloadControl | impl | -
@@ -1461,6 +1571,7 @@ impl core::cmp::PartialEq for wechat_protocol::calls::host_policy::CallHostRoute
 impl core::cmp::PartialEq for wechat_protocol::calls::host_transport::CallHostRpcError | impl | -
 impl core::cmp::PartialEq for wechat_protocol::calls::host_transport::CallHostStage | impl | -
 impl core::cmp::PartialEq for wechat_protocol::calls::incoming::CarrierKind | impl | -
+impl core::cmp::PartialEq for wechat_protocol::calls::personal::CallMediaMode | impl | -
 impl core::cmp::PartialEq for wechat_protocol::calls::personal::CancelReason | impl | -
 impl core::cmp::PartialEq for wechat_protocol::calls::personal::HostOperation | impl | -
 impl core::cmp::PartialEq for wechat_protocol::calls::personal::RemoteExitReason | impl | -
@@ -1468,6 +1579,15 @@ impl core::cmp::PartialEq for wechat_protocol::calls::personal::VoiceRoom | impl
 impl core::cmp::PartialEq for wechat_protocol::calls::relay::RelayEpoch | impl | -
 impl core::cmp::PartialEq for wechat_protocol::calls::relay::RelayProgress | impl | -
 impl core::cmp::PartialEq for wechat_protocol::calls::signaling::CallOperation | impl | -
+impl core::cmp::PartialEq for wechat_protocol::calls::video_packet::ParsedS2p | impl | -
+impl core::cmp::PartialEq for wechat_protocol::calls::video_packet::ReassembledVideoFrame | impl | -
+impl core::cmp::PartialEq for wechat_protocol::calls::video_packet::RsmIngestOutcome | impl | -
+impl core::cmp::PartialEq for wechat_protocol::calls::video_packet::VideoChannelPayload | impl<'a> | -
+impl core::cmp::PartialEq for wechat_protocol::calls::video_packet::VideoIRequest | impl | -
+impl core::cmp::PartialEq for wechat_protocol::calls::video_packet::VideoRotation | impl | -
+impl core::cmp::PartialEq for wechat_protocol::calls::video_packet::VideoS2pCommand | impl | -
+impl core::cmp::PartialEq for wechat_protocol::calls::video_packet::VideoWireCodec | impl | -
+impl core::cmp::PartialEq for wechat_protocol::calls::voice_offer::VideoOfferOptions | impl | -
 impl core::cmp::PartialEq for wechat_protocol::media::ChannelsDownloadFacts | impl | -
 impl core::cmp::PartialEq for wechat_protocol::media::LargeCdnRoute | impl | -
 impl core::cmp::PartialEq for wechat_protocol::media::LargeFileDownloadControl | impl | -
@@ -1498,6 +1618,11 @@ impl core::default::Default for wechat_protocol::NativeOptions | impl | -
 impl core::default::Default for wechat_protocol::calls::signaling::CloudRequest | impl | -
 impl core::default::Default for wechat_protocol::calls::signaling::CommonRequest | impl | -
 impl core::default::Default for wechat_protocol::calls::signaling::CommonResponse | impl | -
+impl core::default::Default for wechat_protocol::calls::video_packet::ParsedS2p | impl | -
+impl core::default::Default for wechat_protocol::calls::video_packet::RsmVideoReassembler | impl | -
+impl core::default::Default for wechat_protocol::calls::video_packet::VideoRotation | impl | -
+impl core::default::Default for wechat_protocol::calls::video_packet::VideoS2pCommand | impl | -
+impl core::default::Default for wechat_protocol::calls::voice_offer::VideoOfferOptions | impl | -
 impl core::default::Default for wechat_protocol::media::ChannelsDownloadFacts | impl | -
 impl core::error::Error for wechat_protocol::AccountInterrupted | impl | -
 impl core::error::Error for wechat_protocol::AccountPersistenceFailed | impl | -
@@ -1551,12 +1676,22 @@ impl core::fmt::Debug for wechat_protocol::calls::host_transport::CallHostRpcErr
 impl core::fmt::Debug for wechat_protocol::calls::host_transport::CallHostStage | impl | -
 impl core::fmt::Debug for wechat_protocol::calls::host_transport::CallLiveSyncInterrupted | impl | -
 impl core::fmt::Debug for wechat_protocol::calls::incoming::CarrierKind | impl | -
+impl core::fmt::Debug for wechat_protocol::calls::personal::CallMediaMode | impl | -
 impl core::fmt::Debug for wechat_protocol::calls::personal::CancelReason | impl | -
 impl core::fmt::Debug for wechat_protocol::calls::personal::HostOperation | impl | -
 impl core::fmt::Debug for wechat_protocol::calls::personal::RemoteExitReason | impl | -
 impl core::fmt::Debug for wechat_protocol::calls::relay::RelayEpoch | impl | -
 impl core::fmt::Debug for wechat_protocol::calls::relay::RelayProgress | impl | -
 impl core::fmt::Debug for wechat_protocol::calls::signaling::CallOperation | impl | -
+impl core::fmt::Debug for wechat_protocol::calls::video_packet::ParsedS2p | impl | -
+impl core::fmt::Debug for wechat_protocol::calls::video_packet::ReassembledVideoFrame | impl | -
+impl core::fmt::Debug for wechat_protocol::calls::video_packet::RsmIngestOutcome | impl | -
+impl core::fmt::Debug for wechat_protocol::calls::video_packet::VideoChannelPayload | impl<'a> | -
+impl core::fmt::Debug for wechat_protocol::calls::video_packet::VideoIRequest | impl | -
+impl core::fmt::Debug for wechat_protocol::calls::video_packet::VideoRotation | impl | -
+impl core::fmt::Debug for wechat_protocol::calls::video_packet::VideoS2pCommand | impl | -
+impl core::fmt::Debug for wechat_protocol::calls::video_packet::VideoWireCodec | impl | -
+impl core::fmt::Debug for wechat_protocol::calls::voice_offer::VideoOfferOptions | impl | -
 impl core::fmt::Debug for wechat_protocol::file_upload::FileUploadReservation | impl | -
 impl core::fmt::Debug for wechat_protocol::media::CdnConfig | impl | -
 impl core::fmt::Debug for wechat_protocol::media::ChannelsDownloadFacts | impl | -
@@ -1613,6 +1748,7 @@ impl core::marker::Copy for wechat_protocol::calls::host_policy::CallHostPolicy 
 impl core::marker::Copy for wechat_protocol::calls::host_policy::CallHostRoute | impl | -
 impl core::marker::Copy for wechat_protocol::calls::host_transport::CallHostStage | impl | -
 impl core::marker::Copy for wechat_protocol::calls::incoming::CarrierKind | impl | -
+impl core::marker::Copy for wechat_protocol::calls::personal::CallMediaMode | impl | -
 impl core::marker::Copy for wechat_protocol::calls::personal::CancelReason | impl | -
 impl core::marker::Copy for wechat_protocol::calls::personal::HostOperation | impl | -
 impl core::marker::Copy for wechat_protocol::calls::personal::RemoteExitReason | impl | -
@@ -1620,6 +1756,11 @@ impl core::marker::Copy for wechat_protocol::calls::personal::VoiceRoom | impl |
 impl core::marker::Copy for wechat_protocol::calls::relay::RelayEpoch | impl | -
 impl core::marker::Copy for wechat_protocol::calls::relay::RelayProgress | impl | -
 impl core::marker::Copy for wechat_protocol::calls::signaling::CallOperation | impl | -
+impl core::marker::Copy for wechat_protocol::calls::video_packet::VideoIRequest | impl | -
+impl core::marker::Copy for wechat_protocol::calls::video_packet::VideoRotation | impl | -
+impl core::marker::Copy for wechat_protocol::calls::video_packet::VideoS2pCommand | impl | -
+impl core::marker::Copy for wechat_protocol::calls::video_packet::VideoWireCodec | impl | -
+impl core::marker::Copy for wechat_protocol::calls::voice_offer::VideoOfferOptions | impl | -
 impl core::marker::Copy for wechat_protocol::media::CdnLocation | impl | -
 impl core::marker::Copy for wechat_protocol::media::LargeCdnRoute | impl | -
 impl core::marker::Copy for wechat_protocol::media::LargeFileDownloadControl | impl | -
@@ -1659,6 +1800,7 @@ impl core::marker::StructuralPartialEq for wechat_protocol::calls::host_policy::
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::host_transport::CallHostRpcError | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::host_transport::CallHostStage | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::incoming::CarrierKind | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::calls::personal::CallMediaMode | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::personal::CancelReason | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::personal::HostOperation | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::personal::RemoteExitReason | impl | -
@@ -1666,6 +1808,15 @@ impl core::marker::StructuralPartialEq for wechat_protocol::calls::personal::Voi
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::relay::RelayEpoch | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::relay::RelayProgress | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::signaling::CallOperation | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::calls::video_packet::ParsedS2p | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::calls::video_packet::ReassembledVideoFrame | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::calls::video_packet::RsmIngestOutcome | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::calls::video_packet::VideoChannelPayload | impl<'a> | -
+impl core::marker::StructuralPartialEq for wechat_protocol::calls::video_packet::VideoIRequest | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::calls::video_packet::VideoRotation | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::calls::video_packet::VideoS2pCommand | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::calls::video_packet::VideoWireCodec | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::calls::voice_offer::VideoOfferOptions | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::media::ChannelsDownloadFacts | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::media::LargeCdnRoute | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::media::LargeFileDownloadControl | impl | -
@@ -1871,6 +2022,7 @@ mod wechat_protocol::calls::incoming | - | Offline incoming call carriers and co
 mod wechat_protocol::calls::personal | - | Personal-call request codecs. Preparation performs no transport or account I/O.
 mod wechat_protocol::calls::relay | - | Selected IPv4 personal relay setup: one initial check-in, at most one learned continuation and explicit Ready. CRC/TEA structural checks are not media AEAD. The host owns sockets, current account/key generations, time and randomness.
 mod wechat_protocol::calls::signaling | - | Experimental offline call-signaling codecs.
+mod wechat_protocol::calls::video_packet | - | Video packetization, reassembly and video RTCP/QoS codecs. MP/iLink (`workMode = 3`) video packetization, Annex-B framing and video RTCP/QoS codecs.
 mod wechat_protocol::calls::voice_offer | - | Local voice advertisements are distinct from returned selected capabilities. A fresh offer advertises only the supported Opus17 bit. The server's selected codec number, packet format and channel flags require separate admission.
 mod wechat_protocol::contact_sync | - | Linux 4.1.13.26 contact stream (CGI8674). This stream has its own `rs_config`/`sync_11` cursor; the message SyncKey is only request context.
 mod wechat_protocol::crypto | - | MISSING DOC
@@ -1955,7 +2107,7 @@ struct wechat_protocol::calls::app_session::AppAuthority | struct { public field
 struct wechat_protocol::calls::app_session::AppSession | struct { private fields } | Server-selected app identity. No app keys exist in this branch. The server does not install the encrypted branch's default expiry. Host account/logout authority still fences every use; hosts may impose a separate local deadline. Private app identities intentionally do not implement Debug or Serialize.
 struct wechat_protocol::calls::app_session::PendingAppAuth | struct { private fields } | One first-auth request. Consuming completion prevents accidental reuse after success, malformed data or rejection. The host must retain uncertain intent outcomes separately instead of automatically preparing another attempt.
 struct wechat_protocol::calls::audio_packet::AggregateAudio | struct<'a> { public fields } | Member metadata accompanying one nested audio payload. The member list does not establish independent PCM tracks or prove that every listed member spoke.
-struct wechat_protocol::calls::audio_packet::Live96 | struct { private fields } | One key/base/generation owner. No Clone, reset or implicit rekey is provided. The 64-sequence RX window is a local policy; rollover requires a verified new generation. Socket-source validation must happen before `open`.
+struct wechat_protocol::calls::audio_packet::Live96 | struct { private fields } | One key/base/generation owner. No Clone, reset or implicit rekey is provided. The 64-sequence audio / 256-sequence video RX window is a local policy; rollover requires a verified new generation. Socket-source validation must happen before `open`.
 struct wechat_protocol::calls::audio_packet::MediaContext | struct { public fields } | MISSING DOC
 struct wechat_protocol::calls::audio_packet::MediaEpoch | struct { public fields } | MISSING DOC
 struct wechat_protocol::calls::audio_packet::OpenedPayload | struct { private fields } | Authenticated current-generation payload. Clear headers are not fully in AAD; protected member equality and external source/room/roster checks remain needed. Contents have no Debug/Serialize implementation.
@@ -1984,6 +2136,14 @@ struct wechat_protocol::calls::relay::TwoRttRelay | struct { private fields } | 
 struct wechat_protocol::calls::signaling::CloudRequest | struct { public fields } | Conference-to-host callback envelope. Bodies can contain private data, so this and the network envelopes intentionally do not implement `Debug`.
 struct wechat_protocol::calls::signaling::CommonRequest | struct { public fields } | Standard base request plus an opaque inner operation body. The existing [`crate::wire::base_request`] prepares the standard base message. Validation checks wire kinds and widths, not credential or account suitability.
 struct wechat_protocol::calls::signaling::CommonResponse | struct { public fields } | Standard base response plus an opaque inner response. Decoding does not establish success: inspect the return code before admitting an inner reply.
+struct wechat_protocol::calls::video_packet::FramedAnnexB | struct { public fields } | Split an Annex-B H.264/H.265 access unit into parameter-set (XPS) bytes and slice bytes, returning the 4-byte WeChat framing prefix plus payload bytes.
+struct wechat_protocol::calls::video_packet::ParsedS2p | struct { public fields } | Parsed `0x0c` MP S2P packet arriving on `packed_kind = 0x30` from relay member `0xffff`.
+struct wechat_protocol::calls::video_packet::ReassembledVideoFrame | struct { public fields } | Complete reassembled video access unit produced by [`RsmVideoReassembler`].
+struct wechat_protocol::calls::video_packet::RsmVideoPacketizer | struct { private fields } | Stateful MP/iLink kind-3 RSM video packetizer (zero-FEC uncoded `x = 1, r = 0, y = 0`).
+struct wechat_protocol::calls::video_packet::RsmVideoReassembler | struct { private fields } | Reassembles MP/iLink kind-3 RSM video packets (including multi-group and 2D RS FEC) into complete Annex-B frames.
+struct wechat_protocol::calls::video_packet::VideoIRequest | struct { public fields } | Decoded `0x66` video keyframe request (`IRequest`) carried on `0x60..0x6f` (TX) / `0x20..0x2f` (RX).
+struct wechat_protocol::calls::video_packet::VideoS2pCommand | struct { public fields } | Parsed per-stream `video_s2p` QoS directive from a `0x0c` S2P message on `0x30`.
+struct wechat_protocol::calls::voice_offer::VideoOfferOptions | struct { public fields } | Advertised standard video codec capabilities for an engine capability offer.
 struct wechat_protocol::calls::voice_offer::VoiceOffer | struct { private fields } | Owned request metadata for one call generation. It intentionally has no `Clone` or `Debug`: create a fresh identity for each new call. The embedding owner must supply new random bytes and keep this value until that call ends.
 struct wechat_protocol::contact_sync::ContactSyncBatch | struct { public fields } | MISSING DOC
 struct wechat_protocol::crypto::Ecdh | struct { private fields } | MISSING DOC
@@ -2118,6 +2278,8 @@ variant wechat_protocol::calls::incoming::CarrierKind::Cancel | - | MISSING DOC
 variant wechat_protocol::calls::incoming::CarrierKind::Invite | - | MISSING DOC
 variant wechat_protocol::calls::incoming::NotificationPayload::Cancel | (wechat_protocol::calls::incoming::CancelNotification) | MISSING DOC
 variant wechat_protocol::calls::incoming::NotificationPayload::Invite | (wechat_protocol::calls::incoming::InviteNotification) | MISSING DOC
+variant wechat_protocol::calls::personal::CallMediaMode::Video | { public fields } | Video-capable room (`room_type = 1`, `av_status = 3` with camera enabled or `1` with camera muted).
+variant wechat_protocol::calls::personal::CallMediaMode::Voice | - | Voice-only room (`room_type = 2`, `av_status = 1`).
 variant wechat_protocol::calls::personal::CancelReason::Local | - | MISSING DOC
 variant wechat_protocol::calls::personal::CancelReason::NoResponse | - | Direct InviteTimeout sends this lower-layer wire reason, bypassing the ordinary SDK OnCancel mapping.
 variant wechat_protocol::calls::personal::CancelReason::Other | - | MISSING DOC
@@ -2140,7 +2302,23 @@ variant wechat_protocol::calls::signaling::CallOperation::Create | - | MISSING D
 variant wechat_protocol::calls::signaling::CallOperation::Exit | - | MISSING DOC
 variant wechat_protocol::calls::signaling::CallOperation::Join | - | MISSING DOC
 variant wechat_protocol::calls::signaling::CallOperation::Reject | - | MISSING DOC
+variant wechat_protocol::calls::signaling::CallOperation::Subscribe | - | Conference video and screen subscription update (`3359`).
 variant wechat_protocol::calls::signaling::CallOperation::SwitchAv | - | MISSING DOC
+variant wechat_protocol::calls::video_packet::RsmIngestOutcome::Frame | (wechat_protocol::calls::video_packet::ReassembledVideoFrame) | A complete frame was assembled.
+variant wechat_protocol::calls::video_packet::RsmIngestOutcome::FrameDroppedNeedKeyframe | - | An older incomplete frame had to be evicted; caller may request a keyframe.
+variant wechat_protocol::calls::video_packet::RsmIngestOutcome::Pending | - | Packet accepted into an in-progress frame assembly or skipped as parity/probe.
+variant wechat_protocol::calls::video_packet::VideoChannelPayload::IRequest | (wechat_protocol::calls::video_packet::VideoIRequest) | Peer-to-peer `0x66` keyframe request (58 bytes).
+variant wechat_protocol::calls::video_packet::VideoChannelPayload::Nack | (&'a [u8]) | Peer-to-peer `0x06` video NACK packet.
+variant wechat_protocol::calls::video_packet::VideoChannelPayload::RsmVideo | (&'a [u8]) | MP/iLink RSM video packet (`[codecType, LE16(mid | (sid << 11)), EncFecHeader, ...]`).
+variant wechat_protocol::calls::video_packet::VideoRotation::Deg0 | - | Upright (0 degrees).
+variant wechat_protocol::calls::video_packet::VideoRotation::Deg180 | - | Rotate 180 degrees.
+variant wechat_protocol::calls::video_packet::VideoRotation::Deg270 | - | Rotate 270 degrees clockwise (90 degrees counter-clockwise).
+variant wechat_protocol::calls::video_packet::VideoRotation::Deg90 | - | Rotate 90 degrees clockwise.
+variant wechat_protocol::calls::video_packet::VideoWireCodec::H264 | - | Standard H.264 / AVC (`codecType = 9`).
+variant wechat_protocol::calls::video_packet::VideoWireCodec::H265 | - | Standard H.265 / HEVC (`codecType = 15`).
+variant wechat_protocol::calls::video_packet::VideoWireCodec::MixVcodec1 | - | Proprietary MixVcodec1 (`codecType = 17`).
+variant wechat_protocol::calls::video_packet::VideoWireCodec::Unknown | (u8) | Any other codec identifier byte.
+variant wechat_protocol::calls::video_packet::VideoWireCodec::Vcodec1 | - | Proprietary Vcodec1 (`codecType = 0`).
 variant wechat_protocol::custom_stickers::CustomStickerMutation::Add | - | Save an uploaded/existing sticker identity.
 variant wechat_protocol::custom_stickers::CustomStickerMutation::After | { public fields } | Move after an anchor using a fresh complete-list server version.
 variant wechat_protocol::custom_stickers::CustomStickerMutation::First | - | Move the identity to the front.

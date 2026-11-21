@@ -3,10 +3,13 @@
   "channels": {
     "control": {
       "address": "/v1/accounts/{a}/calls/socket",
-      "description": "Call commands and events as JSON text. Send call.hello within five seconds of connecting, then wait for hello.",
+      "description": "Call commands and events as JSON text. Send call.hello within five seconds of connecting, then wait for hello. Authenticate with an Authorization: Bearer header or a single-use ?ticket= issued by POST /v1/accounts/{a}/calls/tickets.",
       "messages": {
         "client.call.answer": {
           "$ref": "#/components/messages/client.call.answer"
+        },
+        "client.call.camera": {
+          "$ref": "#/components/messages/client.call.camera"
         },
         "client.call.cancel": {
           "$ref": "#/components/messages/client.call.cancel"
@@ -93,19 +96,16 @@
     },
     "media": {
       "address": "/v1/accounts/{a}/calls/{call}/media",
-      "description": "Audio for one call you own, as JSON text with base64 PCM. Send media.attach within five seconds of connecting, then wait for media.ready. Binary messages are rejected.",
+      "description": "Audio and video for one call you own. Send media.attach within five seconds of connecting, then wait for media.ready. JSON text messages carry track lifecycle and keyframe requests; binary messages carry a 36-byte big-endian WXCM v3 header followed by PCM16 audio or Annex-B H.265/H.264 or JPEG video bytes. Authenticate with an Authorization: Bearer header or a single-use ?ticket= issued by POST /v1/accounts/{a}/calls/tickets.",
       "messages": {
-        "client.audio.chunk": {
-          "$ref": "#/components/messages/client.audio.chunk"
-        },
-        "client.audio.start": {
-          "$ref": "#/components/messages/client.audio.start"
-        },
         "client.media.attach": {
           "$ref": "#/components/messages/client.media.attach"
         },
-        "server.audio.chunk": {
-          "$ref": "#/components/messages/server.audio.chunk"
+        "client.track.start": {
+          "$ref": "#/components/messages/client.track.start"
+        },
+        "client.video.request_keyframe": {
+          "$ref": "#/components/messages/client.video.request_keyframe"
         },
         "server.call.error": {
           "$ref": "#/components/messages/server.call.error"
@@ -121,6 +121,12 @@
         },
         "server.track.removed": {
           "$ref": "#/components/messages/server.track.removed"
+        },
+        "server.track.updated": {
+          "$ref": "#/components/messages/server.track.updated"
+        },
+        "server.video.keyframe_requested": {
+          "$ref": "#/components/messages/server.video.keyframe_requested"
         }
       },
       "parameters": {
@@ -128,7 +134,7 @@
           "description": "Account ID or alias."
         },
         "call": {
-          "description": "ID of the call whose audio the socket carries."
+          "description": "ID of the call whose media the socket carries."
         }
       },
       "title": "The media socket"
@@ -136,24 +142,6 @@
   },
   "components": {
     "messages": {
-      "client.audio.chunk": {
-        "contentType": "application/json",
-        "name": "audio.chunk",
-        "payload": {
-          "$ref": "#/components/schemas/CallMediaCommand.audio.chunk"
-        },
-        "summary": "A chunk of PCM audio. You send it on your track; the daemon sends it on receive tracks.",
-        "title": "CallMediaCommand[audio.chunk]"
-      },
-      "client.audio.start": {
-        "contentType": "application/json",
-        "name": "audio.start",
-        "payload": {
-          "$ref": "#/components/schemas/CallMediaCommand.audio.start"
-        },
-        "summary": "Start sending audio on your track for a generation. Send it before the first chunk, and again after each new generation.",
-        "title": "CallMediaCommand[audio.start]"
-      },
       "client.call.answer": {
         "contentType": "application/json",
         "name": "call.answer",
@@ -162,6 +150,15 @@
         },
         "summary": "Answer the incoming call. The first client to answer owns the call; others get `already_claimed`.",
         "title": "CallCommand[call.answer]"
+      },
+      "client.call.camera": {
+        "contentType": "application/json",
+        "name": "call.camera",
+        "payload": {
+          "$ref": "#/components/schemas/CallCommand.call.camera"
+        },
+        "summary": "Turn your outgoing camera on or off during a video or conference call. Starts a new video send generation, announced by `track.updated`.",
+        "title": "CallCommand[call.camera]"
       },
       "client.call.cancel": {
         "contentType": "application/json",
@@ -241,7 +238,7 @@
         "payload": {
           "$ref": "#/components/schemas/CallCommand.call.ready"
         },
-        "summary": "Advertise or withdraw readiness to handle call audio. A new connection is passive until it advertises readiness.",
+        "summary": "Advertise or withdraw readiness to handle call media. A new connection is passive until it advertises readiness.",
         "title": "CallCommand[call.ready]"
       },
       "client.call.reject": {
@@ -262,14 +259,23 @@
         "summary": "Attach the socket to a call you own. Send it first, within five seconds of connecting; the daemon answers `media.ready`.",
         "title": "CallMediaCommand[media.attach]"
       },
-      "server.audio.chunk": {
+      "client.track.start": {
         "contentType": "application/json",
-        "name": "audio.chunk",
+        "name": "track.start",
         "payload": {
-          "$ref": "#/components/schemas/CallMediaCommand.audio.chunk"
+          "$ref": "#/components/schemas/CallMediaCommand.track.start"
         },
-        "summary": "A chunk of PCM audio. You send it on your track; the daemon sends it on receive tracks.",
-        "title": "CallMediaCommand[audio.chunk]"
+        "summary": "Start sending media on one of your send tracks for a generation. Send it before the first binary frame, and again after each new generation.",
+        "title": "CallMediaCommand[track.start]"
+      },
+      "client.video.request_keyframe": {
+        "contentType": "application/json",
+        "name": "video.request_keyframe",
+        "payload": {
+          "$ref": "#/components/schemas/CallMediaCommand.video.request_keyframe"
+        },
+        "summary": "Ask the remote sender of a receive video track to emit a fresh keyframe.",
+        "title": "CallMediaCommand[video.request_keyframe]"
       },
       "server.call.control": {
         "contentType": "application/json",
@@ -367,7 +373,7 @@
         "payload": {
           "$ref": "#/components/schemas/CallEvent.media.ready"
         },
-        "summary": "Sent on the media socket after `media.attach` succeeds: the tracks to use.",
+        "summary": "Sent on the media socket after `media.attach` succeeds: the audio and video tracks to use.",
         "title": "CallEvent[media.ready]"
       },
       "server.participant.updated": {
@@ -394,7 +400,7 @@
         "payload": {
           "$ref": "#/components/schemas/CallEvent.track.added"
         },
-        "summary": "A receive audio track appeared. Audio for it follows.",
+        "summary": "A receive audio or video track appeared. Frames for it follow.",
         "title": "CallEvent[track.added]"
       },
       "server.track.removed": {
@@ -403,7 +409,7 @@
         "payload": {
           "$ref": "#/components/schemas/CallEvent.track.removed"
         },
-        "summary": "A receive track ended. Audio for that generation stops.",
+        "summary": "A receive track ended. Frames for that generation stop.",
         "title": "CallEvent[track.removed]"
       },
       "server.track.updated": {
@@ -412,8 +418,17 @@
         "payload": {
           "$ref": "#/components/schemas/CallEvent.track.updated"
         },
-        "summary": "A track moved to a new generation, for example after `call.clear_audio` or a mute change. Send new audio on the new generation.",
+        "summary": "A track moved to a new generation or state, for example after `call.clear_audio`, a mute change, or `call.camera`. Send new frames on the new generation.",
         "title": "CallEvent[track.updated]"
+      },
+      "server.video.keyframe_requested": {
+        "contentType": "application/json",
+        "name": "video.keyframe_requested",
+        "payload": {
+          "$ref": "#/components/schemas/CallEvent.video.keyframe_requested"
+        },
+        "summary": "Sent on the media socket when the remote party asks your video encoder for a fresh keyframe (IDR with inline parameter sets).",
+        "title": "CallEvent[video.keyframe_requested]"
       }
     },
     "schemas": {
@@ -449,46 +464,6 @@
         ],
         "type": "object"
       },
-      "CallAudioTrack": {
-        "additionalProperties": false,
-        "description": "One audio stream: the single track you send, or one source you receive.",
-        "properties": {
-          "direction": {
-            "$ref": "#/components/schemas/CallTrackDirection",
-            "description": "Whether you send or receive audio on this track."
-          },
-          "format": {
-            "$ref": "#/components/schemas/CallAudioFormat",
-            "description": "The PCM format of the track."
-          },
-          "generation": {
-            "description": "Version of the stream. Chunks for an older generation are discarded; a\nnew generation starts after `call.clear_audio` or a mute change.",
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "id": {
-            "description": "Track ID to use in `audio.start` and `audio.chunk`.",
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "participantId": {
-            "description": "The conference participant this track carries. Omitted when the track\nis not tied to a participant.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "id",
-          "generation",
-          "direction",
-          "format"
-        ],
-        "type": "object"
-      },
       "CallCapabilities": {
         "additionalProperties": false,
         "description": "Calling operations that are available. A missing flag means unavailable.",
@@ -510,7 +485,7 @@
             "type": "boolean"
           },
           "conferenceVideo": {
-            "description": "Video in conference calls is available. This version never sets it.",
+            "description": "Video in conference calls is available.",
             "type": "boolean"
           },
           "directAudio": {
@@ -518,7 +493,7 @@
             "type": "boolean"
           },
           "directVideo": {
-            "description": "Direct video calls are available. This version never sets it.",
+            "description": "Direct video calls are available.",
             "type": "boolean"
           }
         },
@@ -556,11 +531,25 @@
             "description": "ID of the offered call.",
             "type": "string"
           },
+          "cameraEnabled": {
+            "description": "Initial camera state when answering a video call. Defaults to true for video calls, ignored for voice calls.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "expectedRevision": {
             "description": "The latest offer `revision` you received. A stale revision is\nrejected.",
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
+          },
+          "muted": {
+            "description": "Initial microphone mute state when answering. Omitted means false.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "requestId": {
             "description": "Your ID for this command. The `command.result` repeats it.",
@@ -576,6 +565,35 @@
           "requestId",
           "callId",
           "expectedRevision"
+        ],
+        "type": "object"
+      },
+      "CallCommand.call.camera": {
+        "additionalProperties": false,
+        "description": "Turn your outgoing camera on or off during a video or conference call.\nStarts a new video send generation, announced by `track.updated`.",
+        "properties": {
+          "callId": {
+            "description": "ID of the call.",
+            "type": "string"
+          },
+          "enabled": {
+            "description": "True to enable outgoing video, false to disable it.",
+            "type": "boolean"
+          },
+          "requestId": {
+            "description": "Your ID for this command. The `command.result` repeats it.",
+            "type": "string"
+          },
+          "type": {
+            "const": "call.camera",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "requestId",
+          "callId",
+          "enabled"
         ],
         "type": "object"
       },
@@ -640,7 +658,21 @@
         "properties": {
           "callType": {
             "$ref": "#/components/schemas/CallType",
-            "description": "Only voice calls are supported."
+            "description": "Whether to place a voice or video call."
+          },
+          "cameraEnabled": {
+            "description": "Initial camera state for video calls. Defaults to true when `callType` is `video`, ignored for voice calls.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "muted": {
+            "description": "Initial microphone mute state. Omitted means false.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "requestId": {
             "description": "Your ID for this command. The `command.result` repeats it.",
@@ -730,6 +762,13 @@
         "additionalProperties": false,
         "description": "Join a conference call from one of the listed invitations. The socket\nbecomes the call's owner, as with `call.dial`.",
         "properties": {
+          "cameraEnabled": {
+            "description": "Whether to join with your camera enabled. Omitted means false.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "invitationId": {
             "description": "The `invitationId` of an entry in `conferenceInvitations`.",
             "type": "string"
@@ -739,6 +778,13 @@
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
+          },
+          "muted": {
+            "description": "Whether to join with your microphone muted. Omitted means false.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "requestId": {
             "description": "Your ID for this command. The `command.result` repeats it.",
@@ -788,7 +834,7 @@
       },
       "CallCommand.call.ready": {
         "additionalProperties": false,
-        "description": "Advertise or withdraw readiness to handle call audio. A new connection\nis passive until it advertises readiness.",
+        "description": "Advertise or withdraw readiness to handle call media. A new connection\nis passive until it advertises readiness.",
         "properties": {
           "format": {
             "$ref": "#/components/schemas/CallAudioFormat",
@@ -816,6 +862,17 @@
           "type": {
             "const": "call.ready",
             "type": "string"
+          },
+          "video": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CallVideoCapabilitiesInput"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Video codecs and bounds this client supports. Omitted for audio-only clients."
           }
         },
         "required": [
@@ -909,23 +966,47 @@
         "type": "object"
       },
       "CallControl": {
-        "additionalProperties": false,
-        "description": "A control a call participant can report. A microphone update does not\nchange the audio format.",
-        "properties": {
-          "kind": {
-            "const": "microphone",
-            "type": "string"
+        "description": "A control a call participant can report. A microphone or camera update does\nnot reset the call's audio format.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The participant's microphone.",
+            "properties": {
+              "kind": {
+                "const": "microphone",
+                "type": "string"
+              },
+              "muted": {
+                "description": "True when the microphone is muted.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "kind",
+              "muted"
+            ],
+            "type": "object"
           },
-          "muted": {
-            "description": "True when the microphone is muted.",
-            "type": "boolean"
+          {
+            "additionalProperties": false,
+            "description": "The participant's camera.",
+            "properties": {
+              "enabled": {
+                "description": "True when the camera is sending video.",
+                "type": "boolean"
+              },
+              "kind": {
+                "const": "camera",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "enabled"
+            ],
+            "type": "object"
           }
-        },
-        "required": [
-          "kind",
-          "muted"
-        ],
-        "type": "object"
+        ]
       },
       "CallDirection": {
         "description": "Whether this account placed the call or received it.",
@@ -1315,6 +1396,17 @@
           "type": {
             "const": "hello",
             "type": "string"
+          },
+          "videoCapabilities": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CallVideoCapabilities"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Video codecs and bounds this daemon can exchange. Omitted when video is unavailable."
           }
         },
         "required": [
@@ -1333,7 +1425,7 @@
       },
       "CallEvent.media.ready": {
         "additionalProperties": false,
-        "description": "Sent on the media socket after `media.attach` succeeds: the tracks to\nuse.",
+        "description": "Sent on the media socket after `media.attach` succeeds: the audio and\nvideo tracks to use.",
         "properties": {
           "protocolVersion": {
             "description": "The protocol version the daemon speaks on the media socket.",
@@ -1342,15 +1434,18 @@
             "type": "integer"
           },
           "receiveTracks": {
-            "description": "The tracks for audio you receive, one per source.",
+            "description": "The tracks for media you receive, one per audio or video source.",
             "items": {
-              "$ref": "#/components/schemas/CallAudioTrack"
+              "$ref": "#/components/schemas/CallTrack"
             },
             "type": "array"
           },
-          "sendTrack": {
-            "$ref": "#/components/schemas/CallAudioTrack",
-            "description": "The track for audio you send."
+          "sendTracks": {
+            "description": "The tracks for media you send (audio, plus video when negotiated).",
+            "items": {
+              "$ref": "#/components/schemas/CallTrack"
+            },
+            "type": "array"
           },
           "type": {
             "const": "media.ready",
@@ -1360,7 +1455,7 @@
         "required": [
           "type",
           "protocolVersion",
-          "sendTrack",
+          "sendTracks",
           "receiveTracks"
         ],
         "type": "object"
@@ -1437,14 +1532,14 @@
       },
       "CallEvent.track.added": {
         "additionalProperties": false,
-        "description": "A receive audio track appeared. Audio for it follows.",
+        "description": "A receive audio or video track appeared. Frames for it follow.",
         "properties": {
           "callId": {
             "description": "ID of the call.",
             "type": "string"
           },
           "track": {
-            "$ref": "#/components/schemas/CallAudioTrack",
+            "$ref": "#/components/schemas/CallTrack",
             "description": "The new track."
           },
           "type": {
@@ -1461,7 +1556,7 @@
       },
       "CallEvent.track.removed": {
         "additionalProperties": false,
-        "description": "A receive track ended. Audio for that generation stops.",
+        "description": "A receive track ended. Frames for that generation stop.",
         "properties": {
           "callId": {
             "description": "ID of the call.",
@@ -1499,15 +1594,15 @@
       },
       "CallEvent.track.updated": {
         "additionalProperties": false,
-        "description": "A track moved to a new generation, for example after `call.clear_audio`\nor a mute change. Send new audio on the new generation.",
+        "description": "A track moved to a new generation or state, for example after\n`call.clear_audio`, a mute change, or `call.camera`. Send new frames on\nthe new generation.",
         "properties": {
           "callId": {
             "description": "ID of the call.",
             "type": "string"
           },
           "track": {
-            "$ref": "#/components/schemas/CallAudioTrack",
-            "description": "The track with its new generation."
+            "$ref": "#/components/schemas/CallTrack",
+            "description": "The track with its new generation or state."
           },
           "type": {
             "const": "track.updated",
@@ -1518,6 +1613,39 @@
           "type",
           "callId",
           "track"
+        ],
+        "type": "object"
+      },
+      "CallEvent.video.keyframe_requested": {
+        "additionalProperties": false,
+        "description": "Sent on the media socket when the remote party asks your video encoder\nfor a fresh keyframe (IDR with inline parameter sets).",
+        "properties": {
+          "callId": {
+            "description": "ID of the call.",
+            "type": "string"
+          },
+          "generation": {
+            "description": "Generation of your outgoing video track.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "trackId": {
+            "description": "ID of your outgoing video track.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": {
+            "const": "video.keyframe_requested",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "callId",
+          "trackId",
+          "generation"
         ],
         "type": "object"
       },
@@ -1594,85 +1722,6 @@
           }
         ]
       },
-      "CallMediaCommand.audio.chunk": {
-        "additionalProperties": false,
-        "description": "A chunk of PCM audio. You send it on your track; the daemon sends it on\nreceive tracks.",
-        "properties": {
-          "generation": {
-            "description": "The track generation. Chunks for an older generation are discarded.",
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "pcmBase64": {
-            "description": "PCM16 little-endian samples as padded base64. A chunk you send is\nwhole samples, at most 65,536 bytes once decoded.",
-            "type": "string"
-          },
-          "sampleOffset": {
-            "description": "Position of the chunk in per-channel samples on the shared call\ntimeline. The daemon sets it on chunks it sends; you must not send it.",
-            "format": "uint64",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "sequence": {
-            "description": "Order of the chunk within its source. The daemon sets it on chunks\nit sends; you must not send it.",
-            "format": "uint64",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "trackId": {
-            "description": "The track the audio belongs to.",
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "type": {
-            "const": "audio.chunk",
-            "type": "string"
-          }
-        },
-        "required": [
-          "type",
-          "trackId",
-          "generation",
-          "pcmBase64"
-        ],
-        "type": "object"
-      },
-      "CallMediaCommand.audio.start": {
-        "additionalProperties": false,
-        "description": "Start sending audio on your track for a generation. Send it before the\nfirst chunk, and again after each new generation.",
-        "properties": {
-          "generation": {
-            "description": "The generation to start.",
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "trackId": {
-            "description": "The send track's ID.",
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "type": {
-            "const": "audio.start",
-            "type": "string"
-          }
-        },
-        "required": [
-          "type",
-          "trackId",
-          "generation"
-        ],
-        "type": "object"
-      },
       "CallMediaCommand.media.attach": {
         "additionalProperties": false,
         "description": "Attach the socket to a call you own. Send it first, within five seconds\nof connecting; the daemon answers `media.ready`.",
@@ -1704,6 +1753,55 @@
           "supportedProtocolVersions",
           "clientId",
           "ownerToken"
+        ],
+        "type": "object"
+      },
+      "CallMediaCommand.track.start": {
+        "additionalProperties": false,
+        "description": "Start sending media on one of your send tracks for a generation. Send it\nbefore the first binary frame, and again after each new generation.",
+        "properties": {
+          "generation": {
+            "description": "The generation to start.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "trackId": {
+            "description": "The send track's ID.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": {
+            "const": "track.start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "trackId",
+          "generation"
+        ],
+        "type": "object"
+      },
+      "CallMediaCommand.video.request_keyframe": {
+        "additionalProperties": false,
+        "description": "Ask the remote sender of a receive video track to emit a fresh keyframe.",
+        "properties": {
+          "trackId": {
+            "description": "The receive video track's ID.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": {
+            "const": "video.request_keyframe",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "trackId"
         ],
         "type": "object"
       },
@@ -1772,6 +1870,13 @@
         "additionalProperties": false,
         "description": "One participant in a conference call.",
         "properties": {
+          "cameraEnabled": {
+            "description": "Whether the participant's camera is on. Omitted until the server\nreports it; an omitted value is unknown, not false.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "contactId": {
             "description": "Contact ID of the participant.",
             "type": "string"
@@ -2131,23 +2236,124 @@
           }
         ]
       },
+      "CallTrack": {
+        "description": "One audio or video stream: a track you send, or one source you receive.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "One PCM audio stream.",
+            "properties": {
+              "direction": {
+                "$ref": "#/components/schemas/CallTrackDirection",
+                "description": "Whether you send or receive media on this track."
+              },
+              "format": {
+                "$ref": "#/components/schemas/CallAudioFormat",
+                "description": "The PCM format of the track."
+              },
+              "generation": {
+                "description": "Version of the stream. Frames for an older generation are discarded; a\nnew generation starts after `call.clear_audio`, a mute change, a camera\ntoggle, or a format change.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "id": {
+                "description": "Track ID to use in `track.start`, `video.request_keyframe` and binary `WXCM` frames.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "media": {
+                "const": "audio",
+                "type": "string"
+              },
+              "participantId": {
+                "description": "The conference participant this track carries. Omitted when the track\nis not tied to a participant.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "media",
+              "id",
+              "generation",
+              "direction",
+              "format"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "One video stream.",
+            "properties": {
+              "active": {
+                "default": false,
+                "description": "True when this video track is currently active.",
+                "type": "boolean"
+              },
+              "direction": {
+                "$ref": "#/components/schemas/CallTrackDirection",
+                "description": "Whether you send or receive media on this track."
+              },
+              "format": {
+                "$ref": "#/components/schemas/CallVideoFormat",
+                "description": "The negotiated video codec, mode and bounds of the track."
+              },
+              "generation": {
+                "description": "Version of the stream. Frames for an older generation are discarded; a\nnew generation starts after `call.clear_audio`, a mute change, a camera\ntoggle, or a format change.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "id": {
+                "description": "Track ID to use in `track.start`, `video.request_keyframe` and binary `WXCM` frames.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "media": {
+                "const": "video",
+                "type": "string"
+              },
+              "participantId": {
+                "description": "The conference participant this track carries. Omitted when the track\nis not tied to a participant.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "media",
+              "id",
+              "generation",
+              "direction",
+              "format",
+              "active"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "CallTrackDirection": {
-        "description": "Whether an audio track carries audio you send or audio you receive.",
+        "description": "Whether a media track carries media you send or media you receive.",
         "oneOf": [
           {
             "const": "send",
-            "description": "Audio from you to the call.",
+            "description": "Media from you to the call.",
             "type": "string"
           },
           {
             "const": "receive",
-            "description": "Audio from the call to you.",
+            "description": "Media from the call to you.",
             "type": "string"
           }
         ]
       },
       "CallType": {
-        "description": "Whether a call is voice or video, independent of the media currently\nnegotiated. A video call can continue with audio only. This daemon places\nand answers voice calls only.",
+        "description": "Whether a call is voice or video, independent of the media currently\nnegotiated. A video call can continue with audio only.",
         "oneOf": [
           {
             "const": "voice",
@@ -2157,6 +2363,203 @@
           {
             "const": "video",
             "description": "A video call.",
+            "type": "string"
+          }
+        ]
+      },
+      "CallVideoCapabilities": {
+        "additionalProperties": false,
+        "description": "Video codecs and bounds advertised by the daemon or a ready client.",
+        "properties": {
+          "maxFps": {
+            "description": "Maximum frame rate in frames per second. Omitted when no cap is specified.",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "maxHeight": {
+            "description": "Maximum frame height in pixels. Omitted when no cap is specified.",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "maxWidth": {
+            "description": "Maximum frame width in pixels. Omitted when no cap is specified.",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "receiveCodecs": {
+            "default": [],
+            "description": "Video codecs deliverable to a receiving client, in preference order.",
+            "items": {
+              "$ref": "#/components/schemas/CallVideoCodec"
+            },
+            "type": "array"
+          },
+          "sendCodecs": {
+            "default": [],
+            "description": "Video codecs accepted from a sending client, in preference order.",
+            "items": {
+              "$ref": "#/components/schemas/CallVideoCodec"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "sendCodecs",
+          "receiveCodecs"
+        ],
+        "type": "object"
+      },
+      "CallVideoCapabilitiesInput": {
+        "additionalProperties": false,
+        "description": "Video codecs and bounds advertised by the daemon or a ready client.",
+        "properties": {
+          "maxFps": {
+            "description": "Maximum frame rate in frames per second. Omitted when no cap is specified.",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "maxHeight": {
+            "description": "Maximum frame height in pixels. Omitted when no cap is specified.",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "maxWidth": {
+            "description": "Maximum frame width in pixels. Omitted when no cap is specified.",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "receiveCodecs": {
+            "default": [],
+            "description": "Video codecs deliverable to a receiving client, in preference order.",
+            "items": {
+              "$ref": "#/components/schemas/CallVideoCodec"
+            },
+            "type": "array"
+          },
+          "sendCodecs": {
+            "default": [],
+            "description": "Video codecs accepted from a sending client, in preference order.",
+            "items": {
+              "$ref": "#/components/schemas/CallVideoCodec"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "CallVideoCodec": {
+        "description": "Video codec exchanged on a call media track.",
+        "oneOf": [
+          {
+            "const": "h265",
+            "description": "Annex-B H.265 / HEVC frames.",
+            "type": "string"
+          },
+          {
+            "const": "h264",
+            "description": "Annex-B H.264 / AVC frames.",
+            "type": "string"
+          },
+          {
+            "const": "jpeg",
+            "description": "Standalone JPEG still frames.",
+            "type": "string"
+          }
+        ]
+      },
+      "CallVideoFormat": {
+        "additionalProperties": false,
+        "description": "Negotiated format for one video track.",
+        "properties": {
+          "bitrateKbps": {
+            "description": "Target bitrate in kbps when encoding or transcoding. Omitted for pass-through or JPEG.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "codec": {
+            "$ref": "#/components/schemas/CallVideoCodec",
+            "description": "Codec carried on this track."
+          },
+          "maxFps": {
+            "description": "Maximum frame rate in frames per second for this track.",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxHeight": {
+            "description": "Maximum frame height in pixels for this track.",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxWidth": {
+            "description": "Maximum frame width in pixels for this track.",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/CallVideoMode",
+            "description": "Whether this track passes wire frames straight through or transcodes them."
+          }
+        },
+        "required": [
+          "codec",
+          "mode",
+          "maxWidth",
+          "maxHeight",
+          "maxFps"
+        ],
+        "type": "object"
+      },
+      "CallVideoMode": {
+        "description": "Whether a video track carries WeChat's active wire codec directly or is transcoded by the daemon.",
+        "oneOf": [
+          {
+            "const": "passthrough",
+            "description": "Annex-B frames are passed straight through without re-encoding.",
+            "type": "string"
+          },
+          {
+            "const": "transcoded",
+            "description": "The daemon transcodes between the client codec and WeChat's active wire codec.",
             "type": "string"
           }
         ]
@@ -2250,12 +2653,12 @@
     }
   },
   "info": {
-    "description": "Call commands, events and audio on two WebSockets of the agent-wechat daemon. Both speak call protocol version 2. The daemon's HTTP routes are described in openapi.json.",
+    "description": "Call commands, events and audio on two WebSockets of the agent-wechat daemon. Both speak call protocol version 3. The daemon's HTTP routes are described in openapi.json.",
     "license": {
       "name": "MIT"
     },
     "title": "agent-wechat calls WebSocket API",
-    "version": "2"
+    "version": "3"
   },
   "operations": {
     "controlReceive": {
@@ -2269,6 +2672,9 @@
         },
         {
           "$ref": "#/channels/control/messages/client.call.answer"
+        },
+        {
+          "$ref": "#/channels/control/messages/client.call.camera"
         },
         {
           "$ref": "#/channels/control/messages/client.call.cancel"
@@ -2377,13 +2783,13 @@
       },
       "messages": [
         {
-          "$ref": "#/channels/media/messages/client.audio.chunk"
-        },
-        {
-          "$ref": "#/channels/media/messages/client.audio.start"
-        },
-        {
           "$ref": "#/channels/media/messages/client.media.attach"
+        },
+        {
+          "$ref": "#/channels/media/messages/client.track.start"
+        },
+        {
+          "$ref": "#/channels/media/messages/client.video.request_keyframe"
         }
       ],
       "security": [
@@ -2418,7 +2824,10 @@
           "$ref": "#/channels/media/messages/server.track.removed"
         },
         {
-          "$ref": "#/channels/media/messages/server.audio.chunk"
+          "$ref": "#/channels/media/messages/server.track.updated"
+        },
+        {
+          "$ref": "#/channels/media/messages/server.video.keyframe_requested"
         }
       ],
       "security": [

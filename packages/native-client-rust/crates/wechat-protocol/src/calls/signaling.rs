@@ -22,6 +22,8 @@ pub enum CallOperation {
     Cancel,
     Exit,
     SwitchAv,
+    /// Conference video and screen subscription update (`3359`).
+    Subscribe,
 }
 
 impl CallOperation {
@@ -34,6 +36,7 @@ impl CallOperation {
             Self::Cancel => 3310,
             Self::Exit => 3380,
             Self::SwitchAv => 3197,
+            Self::Subscribe => 3359,
         }
     }
 
@@ -46,6 +49,7 @@ impl CallOperation {
             Self::Cancel => "/cloudim/cloud-bin/cloudvoipmtcancel",
             Self::Exit => "/cloudim/cloud-bin/cloudvoipmtexit",
             Self::SwitchAv => "/cloudim/cloud-bin/cloudvoipmtswitchav",
+            Self::Subscribe => "/cloudim/cloud-bin/cloudvoipmtsetmemberattr",
         }
     }
 
@@ -58,6 +62,7 @@ impl CallOperation {
             Self::Cancel,
             Self::Exit,
             Self::SwitchAv,
+            Self::Subscribe,
         ] {
             if command_id == operation.command_id() && path == operation.path() {
                 return Ok(operation);

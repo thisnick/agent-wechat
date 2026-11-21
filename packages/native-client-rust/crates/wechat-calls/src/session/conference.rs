@@ -8,6 +8,8 @@ pub struct ConferenceMember {
     pub username: String,
     pub status: u32,
     pub microphone_enabled: Option<bool>,
+    /// Whether the participant's camera video bit (`av_status & 2`) is set.
+    pub camera_enabled: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -48,6 +50,8 @@ pub struct ConferenceSession {
     creation_response: Option<wechat_protocol::calls::conference::CreateResponse>,
     entry_supported: bool,
     microphone_timestamp: u64,
+    subscribe_timestamp: u64,
+    video_mode: bool,
     ignored_controls: u64,
 }
 
@@ -91,6 +95,8 @@ impl ConferenceSession {
             creation_response: None,
             entry_supported: false,
             microphone_timestamp: 0,
+            subscribe_timestamp: 0,
+            video_mode: false,
             ignored_controls: 0,
         })
     }
@@ -106,6 +112,19 @@ impl ConferenceSession {
         target: ConferenceCreateTarget<'_>,
         tasks: TaskIds,
     ) -> Result<()> {
+        self.create_with_mode(client, state, current, target, false, tasks)
+    }
+
+    /// Create one group voice or video conference (`camera_enabled` selects initial `av_status = 3` vs `1`).
+    pub fn create_with_mode(
+        &mut self,
+        client: &impl PersonalTransport,
+        state: &mut AccountState,
+        current: AppAuthority,
+        target: ConferenceCreateTarget<'_>,
+        camera_enabled: bool,
+        tasks: TaskIds,
+    ) -> Result<()> {
         use wechat_protocol::calls::conference;
         let ConferenceCreateTarget {
             group_id,
@@ -116,16 +135,18 @@ impl ConferenceSession {
         ensure!(!self.join_spent, "Conference entry already spent");
         let mut parameters = self.base.parameters.clone();
         parameters.group = group_info(group_id, b"")?;
-        let request = conference::create_voice(
+        let request = conference::create_with_mode(
             &parameters.inputs(),
             group_id,
             invitees,
+            camera_enabled,
             invite_id,
             tasks.sdk,
             None,
         )?;
         self.base.reserve(tasks)?;
         self.join_spent = true;
+        self.video_mode = camera_enabled || parameters.video_length != 0;
         self.creator = Some(Creator {
             invite_id,
             pending_recipients: invitees.to_vec(),
@@ -210,13 +231,27 @@ impl ConferenceSession {
         target: ConferenceTarget<'_>,
         tasks: TaskIds,
     ) -> Result<()> {
+        self.join_with_mode(client, state, current, target, false, tasks)
+    }
+
+    /// Join an existing conference with optional initial camera enabled (`av_status = 3` vs `1`).
+    pub fn join_with_mode(
+        &mut self,
+        client: &impl PersonalTransport,
+        state: &mut AccountState,
+        current: AppAuthority,
+        target: ConferenceTarget<'_>,
+        camera_enabled: bool,
+        tasks: TaskIds,
+    ) -> Result<()> {
         self.base.check(state, current)?;
         ensure!(!self.join_spent, "Conference entry already spent");
-        let body = join_request(&self.base.parameters, &target)?;
+        let body = join_request(&self.base.parameters, &target, camera_enabled)?;
         let group_id = target.group_id;
         let cloud_group_id = target.cloud_group_id;
         self.base.reserve(tasks)?;
         self.join_spent = true;
+        self.video_mode = camera_enabled || self.base.parameters.video_length != 0;
         let reply = self.base.host(
             client,
             state,
@@ -293,15 +328,22 @@ impl ConferenceSession {
                     .values()
                     .cloned()
                     .map(|mut member| {
-                        member.microphone_enabled = room
-                            .av_members
-                            .get(&member.member_id)
-                            .map(|flags| flags & 1 != 0);
+                        let flags = room.av_members.get(&member.member_id).copied();
+                        member.microphone_enabled = flags.map(|f| f & 1 != 0);
+                        member.camera_enabled = flags.map(|f| f & 2 != 0);
                         member
                     })
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Latest server-intersected conference video decoder capability mask (`Cap11` field 33).
+    pub fn video_dec_cap_mask(&self) -> u32 {
+        self.room
+            .as_ref()
+            .map(|room| engine_video_dec_cap_mask(&room.engine))
+            .unwrap_or(0)
     }
 
     /// Invite contacts into this joined room exactly once for the supplied
@@ -374,6 +416,34 @@ impl ConferenceSession {
         timestamp: u64,
         tasks: TaskIds,
     ) -> Result<()> {
+        let camera_enabled = self
+            .room
+            .as_ref()
+            .and_then(|room| room.av_members.get(&(room.identity.own_member as u16)))
+            .is_some_and(|flags| flags & 2 != 0);
+        self.set_av(
+            client,
+            state,
+            current,
+            !muted,
+            camera_enabled,
+            timestamp,
+            tasks,
+        )
+    }
+
+    /// Update conference microphone and camera AV status (`SwitchAV 3197`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_av(
+        &mut self,
+        client: &impl PersonalTransport,
+        state: &mut AccountState,
+        current: AppAuthority,
+        microphone_enabled: bool,
+        camera_enabled: bool,
+        timestamp: u64,
+        tasks: TaskIds,
+    ) -> Result<()> {
         use wechat_protocol::calls::conference;
         self.base.check(state, current)?;
         ensure!(
@@ -386,18 +456,22 @@ impl ConferenceSession {
         );
         let room = self.room.as_ref().context("Conference room missing")?;
         ensure!(
-            room.av_members
-                .get(&(room.identity.own_member as u16))
-                .is_none_or(|flags| flags & !1 == 0),
+            self.video_mode
+                || camera_enabled
+                || room
+                    .av_members
+                    .get(&(room.identity.own_member as u16))
+                    .is_none_or(|flags| flags & !1 == 0),
             "Nonvoice conference microphone state unsupported"
         );
         let identity = room.identity;
         let mut parameters = self.base.parameters.clone();
         parameters.group.clone_from(&room.group_info);
-        let request = conference::switch_microphone(
+        let request = conference::switch_av(
             &parameters.inputs(),
             identity,
-            !muted,
+            microphone_enabled,
+            camera_enabled,
             timestamp,
             tasks.sdk,
         )?;
@@ -445,6 +519,75 @@ impl ConferenceSession {
         Ok(())
     }
 
+    /// Subscribe to conference participants' video streams (`Subscribe 3359`).
+    pub fn subscribe_video(
+        &mut self,
+        client: &impl PersonalTransport,
+        state: &mut AccountState,
+        current: AppAuthority,
+        targets: &[(u32, u32)],
+        timestamp: u64,
+        tasks: TaskIds,
+    ) -> Result<()> {
+        use wechat_protocol::calls::conference;
+        self.base.check(state, current)?;
+        ensure!(
+            self.entry_supported && self.has_room() && self.own_membership_ready(),
+            "Conference video subscribe unavailable"
+        );
+        ensure!(
+            timestamp > self.subscribe_timestamp,
+            "Conference video subscribe timestamp already spent"
+        );
+        let room = self.room.as_ref().context("Conference room missing")?;
+        let identity = room.identity;
+        let mut parameters = self.base.parameters.clone();
+        parameters.group.clone_from(&room.group_info);
+        let request = conference::subscribe_video(
+            &parameters.inputs(),
+            identity,
+            targets,
+            timestamp,
+            tasks.sdk,
+        )?;
+        let framing = AppFrameParameters {
+            sdk_version: parameters.sdk_version()?,
+            cloud_device_id: &parameters.cloud_device_id,
+            host_client_version: state.device.client_version as u32,
+            app_config_version: parameters.app_config_version,
+        };
+        let delegate = app_frame::prepare_transfer(
+            &self.base.app,
+            current,
+            CallOperation::Subscribe,
+            request.body.as_deref().context("Missing subscribe body")?,
+            &framing,
+        )?;
+        self.base.reserve(tasks)?;
+        self.subscribe_timestamp = timestamp;
+        let reply = self.base.host(
+            client,
+            state,
+            CallHostRoute::Transfer,
+            &delegate,
+            tasks.host,
+        )?;
+        let reply = app_frame::decode_transfer_reply(
+            &self.base.app,
+            current,
+            CallOperation::Subscribe,
+            &reply,
+        )?;
+        let fields = fields(&reply)?;
+        ensure!(
+            number(&fields, 1, None)? == identity.room
+                && number(&fields, 2, None)? == identity.room_key
+                && number(&fields, 3, None)? == u64::from(identity.own_member),
+            "Conference video subscribe response context mismatch"
+        );
+        Ok(())
+    }
+
     pub fn take_media(
         &self,
         connection: usize,
@@ -463,7 +606,7 @@ impl ConferenceSession {
                     ),
             "Conference membership incomplete"
         );
-        conference_receive_profile(&room.engine, &room.channel)?;
+        conference_receive_profile_for_mode(&room.engine, &room.channel, self.video_mode)?;
         wechat_protocol::calls::relay::SelectedRelay::from_strategy(
             room.identity.room,
             room.identity.room_key,
@@ -743,11 +886,29 @@ fn empty_room(identity: VoiceRoom, group_id: &str, cloud_group: &[u8]) -> Result
 
 // Receiving is limited to this negotiated codec/layout. Personal-call mode is
 // deliberately excluded, and this does not admit a conference transmitter.
+#[cfg(test)]
 fn conference_receive_profile(engine: &[u8], channel: &[u8]) -> Result<()> {
-    if !matches!(
-        profile_shape(engine, channel)?,
-        [17, 0x106 | 0x206, 0, 0, 2, 3] | [17, 0x206, 0, 0, 2, 0]
-    ) {
+    conference_receive_profile_for_mode(engine, channel, false)
+}
+
+fn conference_receive_profile_for_mode(
+    engine: &[u8],
+    channel: &[u8],
+    video_mode: bool,
+) -> Result<()> {
+    let shape = profile_shape(engine, channel)?;
+    let ok = if video_mode {
+        shape[0] == 17
+            && matches!(shape[1], 0x106 | 0x206)
+            && shape[4] == 2
+            && matches!(shape[5], 0 | 3)
+    } else {
+        matches!(
+            shape,
+            [17, 0x106 | 0x206, 0, 0, 2, 3] | [17, 0x206, 0, 0, 2, 0]
+        )
+    };
+    if !ok {
         return Err(UnsupportedCallMedia.into());
     }
     Ok(())
@@ -831,6 +992,7 @@ fn install_roster(
                 username: username.to_owned(),
                 status: u32::try_from(number(&entry, 3, None)?)?,
                 microphone_enabled: None,
+                camera_enabled: None,
             },
         );
     }
@@ -868,7 +1030,11 @@ fn install_av(room: &mut ConferenceRoom, values: &[Field]) -> Result<()> {
     Ok(())
 }
 
-fn join_request(parameters: &VoiceParameters, target: &ConferenceTarget<'_>) -> Result<Vec<u8>> {
+fn join_request(
+    parameters: &VoiceParameters,
+    target: &ConferenceTarget<'_>,
+    camera_enabled: bool,
+) -> Result<Vec<u8>> {
     let ConferenceTarget {
         group_id,
         cloud_group_id,
@@ -892,11 +1058,12 @@ fn join_request(parameters: &VoiceParameters, target: &ConferenceTarget<'_>) -> 
         p::bytes(1, &parameters.engine_capability),
         p::bytes(2, &parameters.channel_capability),
     ])?;
+    let av_status = if camera_enabled { 3 } else { 1 };
     let mut parts = vec![
         p::uint(1, number(&sdk, 1, None)?),
         p::bytes(2, data(&sdk, 2)?),
         p::uint(3, u64::from(parameters.network_type)),
-        p::uint(4, 1),
+        p::uint(4, av_status),
         p::bytes(5, &capabilities),
         p::bytes(6, &parameters.device),
         p::uint(7, u64::from(parameters.video_length)),
@@ -1857,7 +2024,7 @@ mod tests {
             cloud_group_id: "synthetic-conference",
             join_id: 123,
         };
-        let request = join_request(&parameters, &target).unwrap();
+        let request = join_request(&parameters, &target, false).unwrap();
         let wrapper = fields(&request).unwrap();
         // Separate host fields, no personal invitation or custom-auth request.
         assert_eq!(data(&wrapper, 1).unwrap(), b"test@chatroom");
@@ -1905,7 +2072,7 @@ mod tests {
                 join_id: 0,
             },
         ] {
-            assert!(join_request(&parameters, &target).is_err());
+            assert!(join_request(&parameters, &target, false).is_err());
         }
     }
 }

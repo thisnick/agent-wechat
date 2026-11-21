@@ -145,6 +145,48 @@ impl ConferenceSender {
             )?,
         }))
     }
+    /// Seal one MP/iLink conference video payload sharing this sender's room media key.
+    pub fn seal_video(
+        &mut self,
+        now: Duration,
+        stream_id: u8,
+        is_data: bool,
+        payload: &[u8],
+    ) -> Result<Vec<u8>> {
+        self.channel.seal_video(
+            self.epoch,
+            u64::try_from(now.as_millis())?,
+            stream_id,
+            is_data,
+            payload,
+        )
+    }
+
+    /// Seal one peer-to-peer video RTCP packet (`0x66 IRequest` or `0x06 NACK`).
+    pub fn seal_video_rtcp(
+        &mut self,
+        now: Duration,
+        stream_id: u8,
+        payload: &[u8],
+    ) -> Result<Vec<u8>> {
+        self.channel.seal_video_rtcp(
+            self.epoch,
+            u64::try_from(now.as_millis())?,
+            stream_id,
+            payload,
+        )
+    }
+
+    /// Seal one MP QoS P2S telemetry heartbeat (`0x0b` on `0x30`).
+    pub fn seal_qos_p2s(&mut self, now: Duration, payload: &[u8]) -> Result<Vec<u8>> {
+        self.channel
+            .seal_qos_p2s(self.epoch, u64::try_from(now.as_millis())?, payload)
+    }
+
+    /// Opt into `Live98` (`0x98`) framing on outbound packets.
+    pub fn set_prefer_live98_tx(&mut self, enabled: bool) {
+        self.channel.set_prefer_live98_tx(enabled);
+    }
 }
 impl Drop for ConferenceSender {
     fn drop(&mut self) {

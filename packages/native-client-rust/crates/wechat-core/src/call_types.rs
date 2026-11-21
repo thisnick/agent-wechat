@@ -3,7 +3,16 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const CALL_PROTOCOL_VERSION: u32 = 2;
+pub const CALL_PROTOCOL_VERSION: u32 = 3;
+
+/// Fixed track ID for outgoing call audio.
+pub const AUDIO_SEND_TRACK_ID: u32 = 1;
+/// Base track ID for incoming call audio (`2` in direct calls; `2 + member_id` in conferences).
+pub const AUDIO_RECEIVE_TRACK_BASE: u32 = 2;
+/// Fixed track ID for outgoing call video.
+pub const VIDEO_SEND_TRACK_ID: u32 = 65_537;
+/// Base track ID for incoming call video (`65538` in direct calls; `65538 + member_id` in conferences).
+pub const VIDEO_RECEIVE_TRACK_BASE: u32 = 65_538;
 
 /// The first message a client sends on the control socket. It announces which
 /// protocol versions the client supports.
@@ -54,7 +63,7 @@ pub struct CallCapabilities {
     #[serde(default, skip_serializing_if = "capability_unavailable")]
     #[ts(optional, as = "Option<_>")]
     pub direct_audio: bool,
-    /// Direct video calls are available. This version never sets it.
+    /// Direct video calls are available.
     #[serde(default, skip_serializing_if = "capability_unavailable")]
     #[ts(optional, as = "Option<_>")]
     pub direct_video: bool,
@@ -62,13 +71,120 @@ pub struct CallCapabilities {
     #[serde(default, skip_serializing_if = "capability_unavailable")]
     #[ts(optional, as = "Option<_>")]
     pub conference_audio: bool,
-    /// Video in conference calls is available. This version never sets it.
+    /// Video in conference calls is available.
     #[serde(default, skip_serializing_if = "capability_unavailable")]
     #[ts(optional, as = "Option<_>")]
     pub conference_video: bool,
 }
 fn capability_unavailable(value: &bool) -> bool {
     !value
+}
+
+/// Video codec exchanged on a call media track.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CallVideoCodec {
+    /// Annex-B H.265 / HEVC frames.
+    H265,
+    /// Annex-B H.264 / AVC frames.
+    H264,
+    /// Standalone JPEG still frames.
+    Jpeg,
+}
+
+/// Whether a video track carries WeChat's active wire codec directly or is transcoded by the daemon.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CallVideoMode {
+    /// Annex-B frames are passed straight through without re-encoding.
+    Passthrough,
+    /// The daemon transcodes between the client codec and WeChat's active wire codec.
+    Transcoded,
+}
+
+/// Video codecs and bounds advertised by the daemon or a ready client.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CallVideoCapabilities {
+    /// Video codecs accepted from a sending client, in preference order.
+    #[serde(default)]
+    pub send_codecs: Vec<CallVideoCodec>,
+    /// Video codecs deliverable to a receiving client, in preference order.
+    #[serde(default)]
+    pub receive_codecs: Vec<CallVideoCodec>,
+    /// Maximum frame width in pixels. Omitted when no cap is specified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub max_width: Option<u16>,
+    /// Maximum frame height in pixels. Omitted when no cap is specified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub max_height: Option<u16>,
+    /// Maximum frame rate in frames per second. Omitted when no cap is specified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub max_fps: Option<u8>,
+}
+
+/// Negotiated format for one video track.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CallVideoFormat {
+    /// Codec carried on this track.
+    pub codec: CallVideoCodec,
+    /// Whether this track passes wire frames straight through or transcodes them.
+    pub mode: CallVideoMode,
+    /// Maximum frame width in pixels for this track.
+    pub max_width: u16,
+    /// Maximum frame height in pixels for this track.
+    pub max_height: u16,
+    /// Maximum frame rate in frames per second for this track.
+    pub max_fps: u8,
+    /// Target bitrate in kbps when encoding or transcoding. Omitted for pass-through or JPEG.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub bitrate_kbps: Option<u32>,
+}
+
+/// Which calls WebSocket a single-use browser ticket authorizes.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CallTicketSocket {
+    /// The call control WebSocket (`/v1/accounts/{a}/calls/socket`).
+    Control,
+    /// The call media WebSocket (`/v1/accounts/{a}/calls/{call}/media`).
+    Media,
+}
+
+/// Request body for issuing a short-lived single-use browser WebSocket ticket.
+#[derive(Clone, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CallTicketRequest {
+    /// Which calls WebSocket this ticket authorizes.
+    pub socket: CallTicketSocket,
+    /// Required when `socket` is `media`; omitted when `socket` is `control`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub call_id: Option<String>,
+}
+
+/// Response returned when issuing a single-use browser WebSocket ticket.
+#[derive(Clone, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CallTicketResponse {
+    /// Opaque single-use ticket to pass as `?ticket=` on the matching WebSocket URL. Do not log it.
+    pub ticket: String,
+    /// Unix timestamp in seconds when the ticket expires.
+    #[ts(type = "number")]
+    pub expires_at: i64,
+    /// Ticket lifetime in seconds from issuance.
+    pub expires_in_seconds: u32,
+    /// Which calls WebSocket this ticket authorizes.
+    pub socket: CallTicketSocket,
+    /// Bound call ID when `socket` is `media`. Omitted for `control`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub call_id: Option<String>,
 }
 
 /// The PCM format of call audio. The daemon currently supports only 16,000 Hz,
@@ -124,8 +240,7 @@ pub enum CallKind {
     Conference,
 }
 /// Whether a call is voice or video, independent of the media currently
-/// negotiated. A video call can continue with audio only. This daemon places
-/// and answers voice calls only.
+/// negotiated. A video call can continue with audio only.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CallType {
@@ -282,6 +397,11 @@ pub struct CallParticipant {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub microphone_enabled: Option<bool>,
+    /// Whether the participant's camera is on. Omitted until the server
+    /// reports it; an omitted value is unknown, not false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub camera_enabled: Option<bool>,
 }
 
 /// Whether a participant is in a conference call.
@@ -350,8 +470,8 @@ pub struct CallConferenceInvitation {
     pub caller_id: String,
 }
 
-/// A control a call participant can report. A microphone update does not
-/// change the audio format.
+/// A control a call participant can report. A microphone or camera update does
+/// not reset the call's audio format.
 #[derive(Clone, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[ts(tag = "kind", rename_all = "snake_case")]
@@ -360,6 +480,11 @@ pub enum CallControl {
     Microphone {
         /// True when the microphone is muted.
         muted: bool,
+    },
+    /// The participant's camera.
+    Camera {
+        /// True when the camera is sending video.
+        enabled: bool,
     },
 }
 /// A control reported by one participant.
@@ -403,6 +528,10 @@ pub struct CallSnapshot {
     pub current_call: Option<CallView>,
     /// The PCM format used for call audio.
     pub audio_format: CallAudioFormat,
+    /// Video codecs and bounds this daemon can exchange. Omitted when video is unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub video_capabilities: Option<CallVideoCapabilities>,
 }
 
 /// A command a client sends on the control socket. Every command has a
@@ -439,8 +568,17 @@ pub enum CallCommand {
         /// `offer_expired`.
         #[serde(rename = "invitationRevision")]
         invitation_revision: u32,
+        /// Whether to join with your camera enabled. Omitted means false.
+        #[serde(rename = "cameraEnabled")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(rename = "cameraEnabled", optional)]
+        camera_enabled: Option<bool>,
+        /// Whether to join with your microphone muted. Omitted means false.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        muted: Option<bool>,
     },
-    /// Advertise or withdraw readiness to handle call audio. A new connection
+    /// Advertise or withdraw readiness to handle call media. A new connection
     /// is passive until it advertises readiness.
     #[serde(rename = "call.ready")]
     Ready {
@@ -457,6 +595,10 @@ pub enum CallCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         scope: Option<CallReadyScope>,
+        /// Video codecs and bounds this client supports. Omitted for audio-only clients.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        video: Option<CallVideoCapabilities>,
     },
     /// Start an outgoing call. The socket becomes the call's owner.
     #[serde(rename = "call.dial")]
@@ -466,9 +608,18 @@ pub enum CallCommand {
         request_id: String,
         /// Who to call.
         target: CallTarget,
-        /// Only voice calls are supported.
+        /// Whether to place a voice or video call.
         #[serde(rename = "callType")]
         call_type: CallType,
+        /// Initial camera state for video calls. Defaults to true when `callType` is `video`, ignored for voice calls.
+        #[serde(rename = "cameraEnabled")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(rename = "cameraEnabled", optional)]
+        camera_enabled: Option<bool>,
+        /// Initial microphone mute state. Omitted means false.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        muted: Option<bool>,
     },
     /// Answer the incoming call. The first client to answer owns the call;
     /// others get `already_claimed`.
@@ -484,6 +635,15 @@ pub enum CallCommand {
         /// rejected.
         #[serde(rename = "expectedRevision")]
         expected_revision: u32,
+        /// Initial camera state when answering a video call. Defaults to true for video calls, ignored for voice calls.
+        #[serde(rename = "cameraEnabled")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(rename = "cameraEnabled", optional)]
+        camera_enabled: Option<bool>,
+        /// Initial microphone mute state when answering. Omitted means false.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        muted: Option<bool>,
     },
     /// Reject the incoming call.
     #[serde(rename = "call.reject")]
@@ -552,6 +712,19 @@ pub enum CallCommand {
         #[serde(rename = "callId")]
         call_id: String,
     },
+    /// Turn your outgoing camera on or off during a video or conference call.
+    /// Starts a new video send generation, announced by `track.updated`.
+    #[serde(rename = "call.camera")]
+    Camera {
+        /// Your ID for this command. The `command.result` repeats it.
+        #[serde(rename = "requestId")]
+        request_id: String,
+        /// ID of the call.
+        #[serde(rename = "callId")]
+        call_id: String,
+        /// True to enable outgoing video, false to disable it.
+        enabled: bool,
+    },
 }
 impl CallCommand {
     pub fn request_id(&self) -> &str {
@@ -565,7 +738,8 @@ impl CallCommand {
             | Self::Cancel { request_id, .. }
             | Self::Hangup { request_id, .. }
             | Self::Mute { request_id, .. }
-            | Self::ClearAudio { request_id, .. } => request_id,
+            | Self::ClearAudio { request_id, .. }
+            | Self::Camera { request_id, .. } => request_id,
         }
     }
 }
@@ -614,33 +788,108 @@ pub enum CallErrorCode {
     Closed,
 }
 
-/// Whether an audio track carries audio you send or audio you receive.
+/// Whether a media track carries media you send or media you receive.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CallTrackDirection {
-    /// Audio from you to the call.
+    /// Media from you to the call.
     Send,
-    /// Audio from the call to you.
+    /// Media from the call to you.
     Receive,
 }
-/// One audio stream: the single track you send, or one source you receive.
+/// One audio or video stream: a track you send, or one source you receive.
 #[derive(Clone, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CallAudioTrack {
-    /// Track ID to use in `audio.start` and `audio.chunk`.
-    pub id: u32,
-    /// Version of the stream. Chunks for an older generation are discarded; a
-    /// new generation starts after `call.clear_audio` or a mute change.
-    pub generation: u32,
-    /// Whether you send or receive audio on this track.
-    pub direction: CallTrackDirection,
-    /// The PCM format of the track.
-    pub format: CallAudioFormat,
-    /// The conference participant this track carries. Omitted when the track
-    /// is not tied to a participant.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub participant_id: Option<String>,
+#[serde(tag = "media", rename_all = "snake_case", deny_unknown_fields)]
+#[ts(tag = "media", rename_all = "snake_case")]
+pub enum CallTrack {
+    /// One PCM audio stream.
+    Audio {
+        /// Track ID to use in `track.start`, `video.request_keyframe` and binary `WXCM` frames.
+        id: u32,
+        /// Version of the stream. Frames for an older generation are discarded; a
+        /// new generation starts after `call.clear_audio`, a mute change, a camera
+        /// toggle, or a format change.
+        generation: u32,
+        /// Whether you send or receive media on this track.
+        direction: CallTrackDirection,
+        /// The PCM format of the track.
+        format: CallAudioFormat,
+        /// The conference participant this track carries. Omitted when the track
+        /// is not tied to a participant.
+        #[serde(rename = "participantId")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(rename = "participantId", optional)]
+        participant_id: Option<String>,
+    },
+    /// One video stream.
+    Video {
+        /// Track ID to use in `track.start`, `video.request_keyframe` and binary `WXCM` frames.
+        id: u32,
+        /// Version of the stream. Frames for an older generation are discarded; a
+        /// new generation starts after `call.clear_audio`, a mute change, a camera
+        /// toggle, or a format change.
+        generation: u32,
+        /// Whether you send or receive media on this track.
+        direction: CallTrackDirection,
+        /// The negotiated video codec, mode and bounds of the track.
+        format: CallVideoFormat,
+        /// The conference participant this track carries. Omitted when the track
+        /// is not tied to a participant.
+        #[serde(rename = "participantId")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(rename = "participantId", optional)]
+        participant_id: Option<String>,
+        /// True when this video track is currently active.
+        #[serde(default)]
+        active: bool,
+    },
+}
+
+impl CallTrack {
+    /// Return the track's numeric ID.
+    pub fn id(&self) -> u32 {
+        match self {
+            Self::Audio { id, .. } | Self::Video { id, .. } => *id,
+        }
+    }
+    /// Return the track's current generation.
+    pub fn generation(&self) -> u32 {
+        match self {
+            Self::Audio { generation, .. } | Self::Video { generation, .. } => *generation,
+        }
+    }
+    /// Return the track's direction.
+    pub fn direction(&self) -> CallTrackDirection {
+        match self {
+            Self::Audio { direction, .. } | Self::Video { direction, .. } => *direction,
+        }
+    }
+    /// Return true when this track carries video.
+    pub fn is_video(&self) -> bool {
+        matches!(self, Self::Video { .. })
+    }
+    /// Return the audio format if this is an audio track.
+    pub fn audio_format(&self) -> Option<CallAudioFormat> {
+        match self {
+            Self::Audio { format, .. } => Some(*format),
+            Self::Video { .. } => None,
+        }
+    }
+    /// Return the video format if this is a video track.
+    pub fn video_format(&self) -> Option<CallVideoFormat> {
+        match self {
+            Self::Video { format, .. } => Some(*format),
+            Self::Audio { .. } => None,
+        }
+    }
+    /// Return the participant ID associated with this track, if any.
+    pub fn participant_id(&self) -> Option<&str> {
+        match self {
+            Self::Audio { participant_id, .. } | Self::Video { participant_id, .. } => {
+                participant_id.as_deref()
+            }
+        }
+    }
 }
 
 /// What happened to one invitation. It is separate from room membership.
@@ -677,6 +926,7 @@ pub struct CallInvitationResult {
 
 /// An event the daemon sends. Successful owner results include a secret
 /// `ownerToken`, so do not log whole events.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(tag = "type", deny_unknown_fields)]
 #[ts(tag = "type")]
@@ -743,6 +993,11 @@ pub enum CallEvent {
         /// The PCM format used for call audio.
         #[serde(rename = "audioFormat")]
         audio_format: CallAudioFormat,
+        /// Video codecs and bounds this daemon can exchange. Omitted when video is unavailable.
+        #[serde(rename = "videoCapabilities")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(rename = "videoCapabilities", optional)]
+        video_capabilities: Option<CallVideoCapabilities>,
     },
     /// The result of a command, matched to it by `requestId`. Acceptance starts
     /// the operation; it does not mean the call connected.
@@ -814,26 +1069,27 @@ pub enum CallEvent {
         /// The new availability.
         availability: CallsAvailability,
     },
-    /// A receive audio track appeared. Audio for it follows.
+    /// A receive audio or video track appeared. Frames for it follow.
     #[serde(rename = "track.added")]
     TrackAdded {
         /// ID of the call.
         #[serde(rename = "callId")]
         call_id: String,
         /// The new track.
-        track: CallAudioTrack,
+        track: CallTrack,
     },
-    /// A track moved to a new generation, for example after `call.clear_audio`
-    /// or a mute change. Send new audio on the new generation.
+    /// A track moved to a new generation or state, for example after
+    /// `call.clear_audio`, a mute change, or `call.camera`. Send new frames on
+    /// the new generation.
     #[serde(rename = "track.updated")]
     TrackUpdated {
         /// ID of the call.
         #[serde(rename = "callId")]
         call_id: String,
-        /// The track with its new generation.
-        track: CallAudioTrack,
+        /// The track with its new generation or state.
+        track: CallTrack,
     },
-    /// A receive track ended. Audio for that generation stops.
+    /// A receive track ended. Frames for that generation stop.
     #[serde(rename = "track.removed")]
     TrackRemoved {
         /// ID of the call.
@@ -847,19 +1103,32 @@ pub enum CallEvent {
         /// Why the track ended. Currently `source_unavailable`.
         reason: String,
     },
-    /// Sent on the media socket after `media.attach` succeeds: the tracks to
-    /// use.
+    /// Sent on the media socket after `media.attach` succeeds: the audio and
+    /// video tracks to use.
     #[serde(rename = "media.ready")]
     MediaReady {
         /// The protocol version the daemon speaks on the media socket.
         #[serde(rename = "protocolVersion")]
         protocol_version: u32,
-        /// The track for audio you send.
-        #[serde(rename = "sendTrack")]
-        send_track: CallAudioTrack,
-        /// The tracks for audio you receive, one per source.
+        /// The tracks for media you send (audio, plus video when negotiated).
+        #[serde(rename = "sendTracks")]
+        send_tracks: Vec<CallTrack>,
+        /// The tracks for media you receive, one per audio or video source.
         #[serde(rename = "receiveTracks")]
-        receive_tracks: Vec<CallAudioTrack>,
+        receive_tracks: Vec<CallTrack>,
+    },
+    /// Sent on the media socket when the remote party asks your video encoder
+    /// for a fresh keyframe (IDR with inline parameter sets).
+    #[serde(rename = "video.keyframe_requested")]
+    VideoKeyframeRequested {
+        /// ID of the call.
+        #[serde(rename = "callId")]
+        call_id: String,
+        /// ID of your outgoing video track.
+        #[serde(rename = "trackId")]
+        track_id: u32,
+        /// Generation of your outgoing video track.
+        generation: u32,
     },
     /// A failure that is not tied to a command, such as an invalid message or a
     /// missing permission. The daemon then closes the socket, except for
@@ -871,9 +1140,9 @@ pub enum CallEvent {
     },
 }
 
-/// A message on the media socket. Setup is JSON and audio is base64 PCM. Both
-/// sides send `audio.chunk`: you on the send track, the daemon on receive
-/// tracks. Binary messages are rejected.
+/// A JSON control message sent by the client on the media socket. Audio and
+/// video payloads travel as binary WebSocket messages with a 36-byte `WXCM` v3
+/// header.
 #[derive(Serialize, Deserialize, TS, JsonSchema)]
 #[serde(tag = "type", deny_unknown_fields)]
 #[ts(tag = "type")]
@@ -893,42 +1162,21 @@ pub enum CallMediaCommand {
         #[serde(rename = "ownerToken")]
         owner_token: String,
     },
-    /// Start sending audio on your track for a generation. Send it before the
-    /// first chunk, and again after each new generation.
-    #[serde(rename = "audio.start")]
-    AudioStart {
+    /// Start sending media on one of your send tracks for a generation. Send it
+    /// before the first binary frame, and again after each new generation.
+    #[serde(rename = "track.start")]
+    TrackStart {
         /// The send track's ID.
         #[serde(rename = "trackId")]
         track_id: u32,
         /// The generation to start.
         generation: u32,
     },
-    /// A chunk of PCM audio. You send it on your track; the daemon sends it on
-    /// receive tracks.
-    #[serde(rename = "audio.chunk")]
-    AudioChunk {
-        /// The track the audio belongs to.
+    /// Ask the remote sender of a receive video track to emit a fresh keyframe.
+    #[serde(rename = "video.request_keyframe")]
+    VideoRequestKeyframe {
+        /// The receive video track's ID.
         #[serde(rename = "trackId")]
         track_id: u32,
-        /// The track generation. Chunks for an older generation are discarded.
-        generation: u32,
-        /// PCM16 little-endian samples as padded base64. A chunk you send is
-        /// whole samples, at most 65,536 bytes once decoded.
-        #[serde(rename = "pcmBase64")]
-        pcm_base64: String,
-        /// Order of the chunk within its source. The daemon sets it on chunks
-        /// it sends; you must not send it.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional, type = "number")]
-        sequence: Option<u64>,
-        /// Position of the chunk in per-channel samples on the shared call
-        /// timeline. The daemon sets it on chunks it sends; you must not send it.
-        #[serde(
-            rename = "sampleOffset",
-            default,
-            skip_serializing_if = "Option::is_none"
-        )]
-        #[ts(optional, type = "number")]
-        sample_offset: Option<u64>,
     },
 }

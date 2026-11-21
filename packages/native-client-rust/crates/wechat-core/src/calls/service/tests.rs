@@ -7,13 +7,19 @@ struct Attempt {
     sink: BackendSink,
     reply: oneshot::Sender<Result<BackendOutcome>>,
 }
+type SubmittedVideo = (CallVideoCodec, u16, u64, Vec<u8>);
+
 struct FakeBackend {
     conference_enabled: AtomicBool,
+    video_enabled: AtomicBool,
     invited: Arc<Mutex<Vec<Vec<String>>>>,
     authorities: Arc<Mutex<BTreeMap<String, AccountAuthority>>>,
     attempts: mpsc::UnboundedSender<Attempt>,
     sinks: Mutex<BTreeMap<String, BackendSink>>,
     submitted_pcm: Arc<Mutex<Vec<Vec<i16>>>>,
+    submitted_video: Arc<Mutex<Vec<SubmittedVideo>>>,
+    camera_updates: Arc<Mutex<Vec<(CallIdentity, bool)>>>,
+    keyframe_requests: Arc<Mutex<Vec<(CallIdentity, u32)>>>,
     cleared: Arc<Mutex<Vec<(CallIdentity, u32)>>>,
     held_audio: Mutex<Option<oneshot::Receiver<()>>>,
     audio_started: Arc<Notify>,
@@ -30,11 +36,15 @@ impl FakeBackend {
         (
             Arc::new(Self {
                 conference_enabled: AtomicBool::new(false),
+                video_enabled: AtomicBool::new(false),
                 invited: Arc::new(Mutex::new(Vec::new())),
                 authorities: Arc::new(Mutex::new(authorities)),
                 attempts,
                 sinks: Mutex::new(BTreeMap::new()),
                 submitted_pcm: Arc::new(Mutex::new(Vec::new())),
+                submitted_video: Arc::new(Mutex::new(Vec::new())),
+                camera_updates: Arc::new(Mutex::new(Vec::new())),
+                keyframe_requests: Arc::new(Mutex::new(Vec::new())),
                 cleared: Arc::new(Mutex::new(Vec::new())),
                 held_audio: Mutex::new(None),
                 audio_started: Arc::new(Notify::new()),
@@ -80,10 +90,13 @@ impl CallBackend for FakeBackend {
         self.authorities.lock().unwrap().get(account).cloned()
     }
     fn capabilities(&self, account: &str) -> CallCapabilities {
+        let video = self.video_enabled.load(Ordering::Acquire);
         CallCapabilities {
             direct_audio: self.authority(account).is_some(),
+            direct_video: video && self.authority(account).is_some(),
             conference_create: self.conference_enabled.load(Ordering::Acquire),
             conference_invite: self.conference_enabled.load(Ordering::Acquire),
+            conference_video: video && self.conference_enabled.load(Ordering::Acquire),
             ..CallCapabilities::default()
         }
     }
@@ -143,6 +156,36 @@ impl CallBackend for FakeBackend {
         self.cleared.lock().unwrap().push((identity, generation));
         Box::pin(async { Ok(()) })
     }
+    fn set_camera(&self, identity: CallIdentity, enabled: bool) -> BackendFuture<Result<()>> {
+        self.camera_updates
+            .lock()
+            .unwrap()
+            .push((identity, enabled));
+        Box::pin(async { Ok(()) })
+    }
+    fn send_video(&self, request: BackendVideoRequest) -> BackendFuture<Result<()>> {
+        if !request.is_current() {
+            return Box::pin(async { Err(error(CallErrorCode::Stale)) });
+        }
+        self.submitted_video.lock().unwrap().push((
+            request.codec,
+            request.flags,
+            request.timestamp_micros,
+            request.payload,
+        ));
+        Box::pin(async { Ok(()) })
+    }
+    fn request_video_keyframe(
+        &self,
+        identity: CallIdentity,
+        track_id: u32,
+    ) -> BackendFuture<Result<()>> {
+        self.keyframe_requests
+            .lock()
+            .unwrap()
+            .push((identity, track_id));
+        Box::pin(async { Ok(()) })
+    }
     fn stop(&self, identity: CallIdentity) -> BackendFuture<Result<BackendOutcome>> {
         self.stopped.lock().unwrap().push(identity);
         let outcome = *self.stop_outcome.lock().unwrap();
@@ -170,6 +213,8 @@ fn dial(request: &str) -> CallCommand {
             contact_id: "synthetic-contact".into(),
         },
         call_type: CallType::Voice,
+        camera_enabled: None,
+        muted: None,
     }
 }
 async fn next_attempt(receiver: &mut mpsc::UnboundedReceiver<Attempt>) -> Attempt {
@@ -234,6 +279,7 @@ async fn ready(service: &Arc<CallService>, account: &str, principal: &str) -> Co
                 request_id: "ready".into(),
                 ready: true,
                 format: CallAudioFormat::default(),
+                video: None,
                 scope: None,
             },
         )
@@ -541,6 +587,7 @@ async fn slow_owner_control_reader_is_disconnected_and_queued_media_is_not_autho
                     request_id: format!("unread-{index}"),
                     ready: true,
                     format: CallAudioFormat::default(),
+                    video: None,
                     scope: None,
                 },
             )
@@ -774,6 +821,7 @@ async fn recovered_unknown_calls_block_all_accounts_without_fabricating_an_owner
                 request_id: "ready".into(),
                 ready: true,
                 format: CallAudioFormat::default(),
+                video: None,
                 scope: None,
             },
         )
@@ -910,7 +958,7 @@ async fn track_controls_precede_pcm_and_retired_generations_cannot_return() {
         .attach_media("a", "owner", &call, &owner.client_id, &token)
         .await
         .unwrap();
-    let track = |generation| CallAudioTrack {
+    let track = |generation| CallTrack::Audio {
         id: 3,
         generation,
         direction: CallTrackDirection::Receive,
@@ -936,7 +984,7 @@ async fn track_controls_precede_pcm_and_retired_generations_cannot_return() {
     assert!(matches!(
         media.frames.recv_delivery().await.unwrap(),
         MediaDelivery::Control(CallEvent::TrackAdded {
-            track: CallAudioTrack {
+            track: CallTrack::Audio {
                 id: 3,
                 generation: 1,
                 ..
@@ -987,7 +1035,7 @@ async fn track_controls_precede_pcm_and_retired_generations_cannot_return() {
     assert!(matches!(
         media.frames.recv_delivery().await.unwrap(),
         MediaDelivery::Control(CallEvent::TrackAdded {
-            track: CallAudioTrack {
+            track: CallTrack::Audio {
                 id: 3,
                 generation: 2,
                 ..
@@ -1010,6 +1058,7 @@ async fn participant_microphone_and_departure_are_separate_ordered_updates() {
         membership: CallMembership::Joined,
         status: None,
         microphone_enabled,
+        camera_enabled: None,
     };
     sink.participants(vec![participant(None)]).await.unwrap();
     sink.participants(vec![participant(Some(false))])
@@ -1065,6 +1114,7 @@ async fn leave_survives_roster_revisions_and_repeated_requests_submit_only_once(
             membership: CallMembership::Joined,
             status: None,
             microphone_enabled: Some(false),
+            camera_enabled: None,
         }])
         .await
         .unwrap();
@@ -1148,6 +1198,8 @@ async fn conference_creation_and_later_invitation_keep_admission_outcomes_separa
                     invitees: vec!["contact-a".into()],
                 },
                 call_type: CallType::Voice,
+                camera_enabled: None,
+                muted: None,
             },
         )
         .await
@@ -1216,4 +1268,223 @@ async fn conference_creation_and_later_invitation_keep_admission_outcomes_separa
         CallCommandStatus::Replayed
     );
     assert_eq!(backend.invited.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn video_negotiation_camera_control_and_binary_frames_work_independently_of_audio() {
+    let (backend, mut attempts) = FakeBackend::new();
+    backend.video_enabled.store(true, Ordering::Release);
+    let service = Arc::new(CallService::new(backend.clone()));
+    let mut owner = service.connect("a", "owner", true).await.unwrap();
+    let Some(CallEvent::Hello {
+        protocol_version,
+        capabilities,
+        ..
+    }) = owner.events.recv().await
+    else {
+        panic!("expected hello");
+    };
+    assert_eq!(protocol_version, CALL_PROTOCOL_VERSION);
+    assert!(capabilities.direct_video);
+    // Client advertises H.264 send and JPEG receive -> both negotiate transcoded
+    // against default H.265 wire codec, then H.265 wire codec switch flips to passthrough.
+    service
+        .command(
+            &owner.client_id,
+            CallCommand::Ready {
+                request_id: "ready-video".into(),
+                ready: true,
+                format: CallAudioFormat::default(),
+                video: Some(CallVideoCapabilities {
+                    send_codecs: vec![CallVideoCodec::H264, CallVideoCodec::Jpeg],
+                    receive_codecs: vec![CallVideoCodec::H265, CallVideoCodec::Jpeg],
+                    max_width: None,
+                    max_height: None,
+                    max_fps: None,
+                }),
+                scope: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result(&mut owner, "ready-video").await.0,
+        CallCommandStatus::Accepted
+    );
+    service
+        .command(
+            &owner.client_id,
+            CallCommand::Dial {
+                request_id: "dial-video".into(),
+                target: CallTarget::Direct {
+                    contact_id: "synthetic-contact".into(),
+                },
+                call_type: CallType::Video,
+                camera_enabled: Some(true),
+                muted: None,
+            },
+        )
+        .await
+        .unwrap();
+    let (_, call, token, _) = result(&mut owner, "dial-video").await;
+    let call = call.unwrap();
+    let token = token.unwrap();
+    let attempt = next_attempt(&mut attempts).await;
+    assert_eq!(attempt.request.call_type, CallType::Video);
+    assert!(attempt.request.camera_enabled);
+    let sink = attempt.sink.clone();
+    attempt
+        .reply
+        .send(Ok(BackendOutcome::Connected))
+        .unwrap_or_else(|_| panic!("active operation"));
+    state(&mut owner, CallState::Connected).await;
+    let mut media = service
+        .attach_media("a", "owner", &call, &owner.client_id, &token)
+        .await
+        .unwrap();
+    let CallEvent::MediaReady {
+        send_tracks,
+        receive_tracks,
+        ..
+    } = &media.ready
+    else {
+        panic!("expected media.ready");
+    };
+    assert!(send_tracks.iter().any(|track| matches!(
+        track,
+        CallTrack::Video {
+            id,
+            generation: 1,
+            format: CallVideoFormat {
+                codec: CallVideoCodec::H264,
+                mode: CallVideoMode::Transcoded,
+                ..
+            },
+            ..
+        } if *id == VIDEO_SEND_TRACK_ID
+    )));
+    assert!(receive_tracks.iter().any(|track| matches!(
+        track,
+        CallTrack::Video {
+            id,
+            generation: 1,
+            format: CallVideoFormat {
+                codec: CallVideoCodec::H265,
+                mode: CallVideoMode::Passthrough,
+                ..
+            },
+            ..
+        } if *id == VIDEO_RECEIVE_TRACK_BASE
+    )));
+    // Peer microphone and peer camera controls coexist independently.
+    sink.peer_microphone(true).await.unwrap();
+    sink.peer_camera(false).await.unwrap();
+    let controls = service
+        .current("a", "owner")
+        .await
+        .unwrap()
+        .current_call
+        .unwrap()
+        .controls;
+    assert_eq!(controls.len(), 2);
+    assert!(controls
+        .iter()
+        .any(|c| c.control == CallControl::Microphone { muted: true }));
+    assert!(controls
+        .iter()
+        .any(|c| c.control == CallControl::Camera { enabled: false }));
+    // Start video send track and submit one H.264 keyframe.
+    service
+        .start_media_track(&media.id, VIDEO_SEND_TRACK_ID, 1)
+        .await
+        .unwrap();
+    service
+        .submit_video(
+            &media.id,
+            VIDEO_SEND_TRACK_ID,
+            1,
+            frame::MediaPayloadKind::H264AnnexB,
+            frame::FLAG_KEYFRAME,
+            40_000,
+            &[0, 0, 0, 1, 0x65, 0xaa],
+        )
+        .await
+        .unwrap();
+    assert_eq!(backend.submitted_video.lock().unwrap().len(), 1);
+    // Receive a peer video frame and a peer keyframe request.
+    sink.video_frame(
+        VIDEO_RECEIVE_TRACK_BASE,
+        1,
+        CallVideoCodec::H265,
+        frame::FLAG_KEYFRAME | frame::FLAG_CODEC_CONFIG,
+        0,
+        80_000,
+        &[0, 0, 0, 1, 0x26, 0x01],
+    )
+    .await
+    .unwrap();
+    sink.peer_keyframe_requested().await.unwrap();
+    let mut saw_keyframe_req = false;
+    let mut saw_video = false;
+    for _ in 0..4 {
+        match media.frames.recv_delivery().await.unwrap() {
+            MediaDelivery::Control(CallEvent::VideoKeyframeRequested { track_id, .. })
+                if track_id == VIDEO_SEND_TRACK_ID =>
+            {
+                saw_keyframe_req = true;
+            }
+            MediaDelivery::Audio(frame) => {
+                let wire = frame::WireMediaFrame::decode(&frame.bytes).unwrap();
+                assert_eq!(wire.kind, frame::MediaPayloadKind::H265AnnexB);
+                assert_eq!(wire.header.track_id, VIDEO_RECEIVE_TRACK_BASE);
+                assert_eq!(wire.flags, frame::FLAG_KEYFRAME | frame::FLAG_CODEC_CONFIG);
+                saw_video = true;
+            }
+            _ => {}
+        }
+        if saw_keyframe_req && saw_video {
+            break;
+        }
+    }
+    assert!(saw_keyframe_req && saw_video);
+    // Client requests keyframe from peer video track.
+    service
+        .request_video_keyframe(&media.id, VIDEO_RECEIVE_TRACK_BASE)
+        .await
+        .unwrap();
+    assert_eq!(backend.keyframe_requests.lock().unwrap().len(), 1);
+    // Toggle camera off bumps video send track generation to 2 without bumping audio.
+    service
+        .command(
+            &owner.client_id,
+            CallCommand::Camera {
+                request_id: "cam-off".into(),
+                call_id: call.clone(),
+                enabled: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result(&mut owner, "cam-off").await.0,
+        CallCommandStatus::Accepted
+    );
+    for _ in 0..50 {
+        if !backend.camera_updates.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(backend.camera_updates.lock().unwrap().len(), 1);
+    assert!(!backend.camera_updates.lock().unwrap()[0].1);
+    assert_eq!(
+        service
+            .video_send_track(&media.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .0,
+        2
+    );
+    assert_eq!(service.media_generation(&media.id).await.unwrap(), 1);
 }

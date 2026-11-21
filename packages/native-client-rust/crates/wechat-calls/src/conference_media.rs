@@ -11,7 +11,24 @@ use std::collections::BTreeMap;
 use wechat_protocol::calls::{
     audio_packet::{self, Live96, MediaContext, MediaEpoch},
     relay::SelectedRelay,
+    video_packet::{
+        classify_video_channel_payload, ReassembledVideoFrame, RsmIngestOutcome,
+        RsmVideoReassembler, VideoChannelPayload,
+    },
 };
+
+/// Outcome of consuming one conference relay datagram, including audio, video and RTCP signals.
+#[derive(Default)]
+pub struct ConferenceConsumeOutput {
+    /// Decoded Opus PCM frames from this datagram.
+    pub audio: Vec<DecodedAudio>,
+    /// Reassembled video frame completed by this datagram, if any.
+    pub video: Option<ReassembledVideoFrame>,
+    /// True when the remote peer requested a keyframe (`0x66 IRequest`).
+    pub peer_requested_keyframe: bool,
+    /// True when a video frame assembly dropped and the local side should send `0x66 IRequest`.
+    pub need_keyframe: bool,
+}
 
 pub struct DecodedAudio {
     pub sequence: u64,
@@ -52,6 +69,7 @@ pub struct ConferenceReceiver {
     channel: Live96,
     decoder: OpusDecoder,
     order: RtpOrder,
+    video: RsmVideoReassembler,
     pub report: StreamReport,
     timeline: Option<(u32, u64)>,
     sequence: u64,
@@ -73,6 +91,7 @@ impl ConferenceReceiver {
             )?,
             decoder: OpusDecoder::new(AudioFormat::new(16000, 1, 20)?)?,
             order: RtpOrder::new(),
+            video: RsmVideoReassembler::new(),
             report: StreamReport::default(),
             timeline: None,
             sequence: 0,
@@ -86,13 +105,28 @@ impl ConferenceReceiver {
         elapsed_ms: u64,
         decode_audio: bool,
     ) -> Result<Vec<DecodedAudio>> {
+        Ok(self
+            .consume_media(epoch, packet, elapsed_ms, decode_audio)?
+            .audio)
+    }
+
+    /// Consume one conference relay packet and return decoded audio, reassembled video
+    /// and keyframe-request signals.
+    pub fn consume_media(
+        &mut self,
+        epoch: MediaEpoch,
+        packet: &[u8],
+        elapsed_ms: u64,
+        decode_audio: bool,
+    ) -> Result<ConferenceConsumeOutput> {
+        let mut out = ConferenceConsumeOutput::default();
         let result = self.channel.open(epoch, packet);
         self.report.authenticated_nonce_reuses = self.channel.received_nonce_reuses().clone();
         let opened = match result {
             Ok(Some(opened)) => opened,
             Ok(None) => {
                 self.report.replayed_packets += 1;
-                return Ok(vec![]);
+                return Ok(out);
             }
             Err(error) => {
                 self.report.invalid_packets += 1;
@@ -107,20 +141,45 @@ impl ConferenceReceiver {
                     _ => "other",
                 };
                 *self.report.invalid_reasons.entry(reason).or_default() += 1;
-                return Ok(vec![]);
+                return Ok(out);
             }
         };
         self.report.authenticated_packets += 1;
+        if (opened.packed_kind & 0xf0) == 0x20 {
+            if let Ok(kind) = classify_video_channel_payload(opened.payload()) {
+                match kind {
+                    VideoChannelPayload::IRequest(_) => {
+                        out.peer_requested_keyframe = true;
+                    }
+                    VideoChannelPayload::Nack(_) => {
+                        self.report.feedback_packets += 1;
+                    }
+                    VideoChannelPayload::RsmVideo(raw) => match self.video.ingest(raw) {
+                        Ok(RsmIngestOutcome::Frame(frame)) => {
+                            if frame.prior_frames_dropped && !frame.is_keyframe {
+                                out.need_keyframe = true;
+                            }
+                            out.video = Some(frame);
+                        }
+                        Ok(RsmIngestOutcome::FrameDroppedNeedKeyframe) => {
+                            out.need_keyframe = true;
+                        }
+                        Ok(RsmIngestOutcome::Pending) | Err(_) => {}
+                    },
+                }
+            }
+            return Ok(out);
+        }
         if opened.packed_kind != 0x10 {
             self.report.control_packets += 1;
-            return Ok(vec![]);
+            return Ok(out);
         }
         if let Some(kind) = opened.payload().first() {
             *self.report.payload_kinds.entry(*kind).or_default() += 1;
         }
         if opened.payload().first() == Some(&2) {
             self.report.feedback_packets += 1;
-            return Ok(vec![]);
+            return Ok(out);
         }
         if opened.payload().first() == Some(&0x65) {
             match audio_packet::parse_aggregate_audio(opened.payload()) {
@@ -141,7 +200,7 @@ impl ConferenceReceiver {
                 Err(_) => self.report.malformed_aggregates += 1,
             }
             // One nested aggregate payload is not separate per-member PCM.
-            return Ok(vec![]);
+            return Ok(out);
         }
         if self.decoding != decode_audio {
             self.decoder.reset()?;
@@ -174,7 +233,7 @@ impl ConferenceReceiver {
                     _ => "other",
                 };
                 *self.report.unsupported_reasons.entry(reason).or_default() += 1;
-                return Ok(vec![]);
+                return Ok(out);
             }
         };
         let admitted = match self.order.admit(
@@ -185,7 +244,7 @@ impl ConferenceReceiver {
             Ok(admitted) => admitted,
             Err(_) => {
                 self.report.ordering_drops += 1;
-                return Ok(vec![]);
+                return Ok(out);
             }
         };
         let count = primary.primaries.len();
@@ -196,7 +255,6 @@ impl ConferenceReceiver {
             .saturating_mul(320)
             .saturating_sub((count as u64 - 1) * 320);
         let (origin, offset) = *self.timeline.get_or_insert((first_timestamp, first_offset));
-        let mut output = Vec::new();
         for (index, frame) in primary
             .primaries
             .into_iter()
@@ -239,13 +297,13 @@ impl ConferenceReceiver {
                     .entry((elapsed_ms / 1000).min(u64::from(u16::MAX)) as u16)
                     .or_default() += 1;
             }
-            output.push(DecodedAudio {
+            out.audio.push(DecodedAudio {
                 sequence,
                 sample_offset,
                 samples: pcm,
             });
         }
-        Ok(output)
+        Ok(out)
     }
 
     pub fn close(&mut self) {

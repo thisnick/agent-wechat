@@ -94,6 +94,7 @@ pub fn version() -> Version {
 struct App {
     core: Arc<Core>,
     token_hash: [u8; 32],
+    call_tickets: calls::CallSocketTickets,
 }
 #[derive(Clone)]
 struct Claims {
@@ -472,39 +473,99 @@ impl From<anyhow::Error> for ApiError {
         Self(StatusCode::INTERNAL_SERVER_ERROR, "operation_failed")
     }
 }
+fn parse_call_socket_ticket_route(
+    method: &axum::http::Method,
+    uri: &axum::http::Uri,
+) -> Option<(
+    String,
+    wechat_core::call_types::CallTicketSocket,
+    Option<String>,
+    String,
+)> {
+    if method != axum::http::Method::GET {
+        return None;
+    }
+    let rest = uri.path().strip_prefix("/v1/accounts/")?;
+    let (account, tail) = rest.split_once('/')?;
+    if account.is_empty() {
+        return None;
+    }
+    let (socket, call_id) = if tail == "calls/socket" {
+        (wechat_core::call_types::CallTicketSocket::Control, None)
+    } else if let Some(mid) = tail
+        .strip_prefix("calls/")
+        .and_then(|s| s.strip_suffix("/media"))
+    {
+        if mid.is_empty() || mid.contains('/') {
+            return None;
+        }
+        (
+            wechat_core::call_types::CallTicketSocket::Media,
+            Some(mid.to_owned()),
+        )
+    } else {
+        return None;
+    };
+    let query = uri.query()?;
+    let mut found = None;
+    for pair in query.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            if k == "ticket" {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(v.to_owned());
+            }
+        }
+    }
+    let ticket = found?;
+    Some((account.to_owned(), socket, call_id, ticket))
+}
+
 async fn authorize(State(app): State<App>, mut request: Request, next: Next) -> Response {
     if request.method() == axum::http::Method::GET && request.uri().path() == "/health" {
         return next.run(request).await;
     }
-    let Some(token) = request
+    let claims = if let Some(token) = request
         .headers()
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
-    else {
-        return ApiError(StatusCode::UNAUTHORIZED, "unauthorized").into_response();
-    };
-    if token.len() > 1024 {
-        return ApiError(StatusCode::UNAUTHORIZED, "unauthorized").into_response();
-    }
-    let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-    let claims = if bool::from(digest.ct_eq(&app.token_hash)) {
-        Some(Claims { grant: None })
-    } else {
-        let hash = format!("{:x}", Sha256::digest(token.as_bytes()));
-        app.core
-            .store
-            .access_tokens()
-            .ok()
-            .and_then(|tokens| {
-                tokens.into_iter().find(|t| {
-                    !t.revoked
-                        && t.expires_at
-                            .is_none_or(|e| e > wechat_store::unix_seconds())
-                        && bool::from(t.digest.as_bytes().ct_eq(hash.as_bytes()))
+    {
+        if token.len() > 1024 {
+            return ApiError(StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+        }
+        let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        if bool::from(digest.ct_eq(&app.token_hash)) {
+            Some(Claims { grant: None })
+        } else {
+            let hash = format!("{:x}", Sha256::digest(token.as_bytes()));
+            app.core
+                .store
+                .access_tokens()
+                .ok()
+                .and_then(|tokens| {
+                    tokens.into_iter().find(|t| {
+                        !t.revoked
+                            && t.expires_at
+                                .is_none_or(|e| e > wechat_store::unix_seconds())
+                            && bool::from(t.digest.as_bytes().ct_eq(hash.as_bytes()))
+                    })
                 })
-            })
-            .map(|grant| Claims { grant: Some(grant) })
+                .map(|grant| Claims { grant: Some(grant) })
+        }
+    } else if request.headers().get("authorization").is_none() {
+        parse_call_socket_ticket_route(request.method(), request.uri()).and_then(
+            |(account, socket, call_id, ticket)| {
+                let canonical = app.core.store.resolve_account(&account).unwrap_or(account);
+                let claims =
+                    app.call_tickets
+                        .consume(&ticket, &canonical, socket, call_id.as_deref())?;
+                claims.valid(&app.core.store).then_some(claims)
+            },
+        )
+    } else {
+        None
     };
     let Some(claims) = claims else {
         return ApiError(StatusCode::UNAUTHORIZED, "unauthorized").into_response();
@@ -1320,6 +1381,7 @@ pub fn router(core: Arc<Core>, token: &str) -> Router {
     let app = App {
         core,
         token_hash: Sha256::digest(token.as_bytes()).into(),
+        call_tickets: calls::CallSocketTickets::default(),
     };
     let routes = Router::new()
         .api_route("/health", get(|| async { Json(json!({"status":"ok"})) }))

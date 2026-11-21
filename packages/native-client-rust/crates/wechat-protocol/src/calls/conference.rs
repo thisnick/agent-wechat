@@ -20,24 +20,85 @@ pub fn switch_microphone(
     timestamp: u64,
     sdk_task: u32,
 ) -> Result<signaling::CloudRequest> {
+    switch_av(inputs, room, enabled, false, timestamp, sdk_task)
+}
+
+/// Update conference microphone and camera AV status (`SwitchAV 3197`).
+pub fn switch_av(
+    inputs: &VoiceInputs<'_>,
+    room: VoiceRoom,
+    microphone_enabled: bool,
+    camera_enabled: bool,
+    timestamp: u64,
+    sdk_task: u32,
+) -> Result<signaling::CloudRequest> {
     inputs.validate_conference_context()?;
     ensure!(
         room.room != 0 && room.room_key != 0 && timestamp != 0 && sdk_task != 0,
-        "Invalid conference microphone context"
+        "Invalid conference AV context"
     );
+    let av_status = u64::from(microphone_enabled) | (u64::from(camera_enabled) << 1);
+    let mut fields = vec![
+        p::bytes(1, inputs.sdk),
+        p::bytes(2, inputs.group),
+        p::uint(3, room.room),
+        p::uint(4, room.room_key),
+        p::uint(5, u64::from(room.own_member)),
+        p::uint(6, av_status),
+        p::uint(7, timestamp),
+        p::bytes(8, &[]),
+    ];
+    if camera_enabled {
+        fields.push(p::uint(9, 1));
+    }
+    let body = p::message(&fields)?;
+    Ok(signaling::CloudRequest::for_operation(
+        sdk_task,
+        signaling::CallOperation::SwitchAv,
+        body,
+    ))
+}
+
+/// Subscribe to conference participants' video streams (`Subscribe 3359`).
+/// Each `(member_id, video_length)` pair requests a member's stream at the
+/// requested target long edge (values `> 480` select the big tier, e.g. `640`).
+pub fn subscribe_video(
+    inputs: &VoiceInputs<'_>,
+    room: VoiceRoom,
+    targets: &[(u32, u32)],
+    timestamp: u64,
+    sdk_task: u32,
+) -> Result<signaling::CloudRequest> {
+    inputs.validate_conference_context()?;
+    ensure!(
+        room.room != 0
+            && room.room_key != 0
+            && timestamp != 0
+            && sdk_task != 0
+            && targets.len() <= MAX_INVITEES,
+        "Invalid conference video subscription context"
+    );
+    let mut video_entries = Vec::with_capacity(targets.len());
+    for &(member_id, video_length) in targets {
+        let entry = p::message(&[
+            p::uint(1, u64::from(member_id)),
+            p::uint(2, u64::from(video_length)),
+        ])?;
+        video_entries.push(p::bytes(2, &entry));
+    }
+    let resolutions = p::message(&video_entries)?;
     let body = p::message(&[
         p::bytes(1, inputs.sdk),
         p::bytes(2, inputs.group),
         p::uint(3, room.room),
         p::uint(4, room.room_key),
         p::uint(5, u64::from(room.own_member)),
-        p::uint(6, u64::from(enabled)),
+        p::bytes(6, &resolutions),
         p::uint(7, timestamp),
-        p::bytes(8, &[]),
     ])?;
     Ok(signaling::CloudRequest::for_operation(
         sdk_task,
-        signaling::CallOperation::SwitchAv,
+        signaling::CallOperation::Subscribe,
         body,
     ))
 }
@@ -53,13 +114,35 @@ pub fn create_voice(
     sdk_task: u32,
     custom_auth: Option<&[u8]>,
 ) -> Result<HostRequest> {
+    create_with_mode(
+        inputs,
+        group_id,
+        invitees,
+        false,
+        invite_id,
+        sdk_task,
+        custom_auth,
+    )
+}
+
+/// Prepare one conference creation request with optional initial camera video enabled.
+pub fn create_with_mode(
+    inputs: &VoiceInputs<'_>,
+    group_id: &str,
+    invitees: &[String],
+    camera_enabled: bool,
+    invite_id: u64,
+    sdk_task: u32,
+    custom_auth: Option<&[u8]>,
+) -> Result<HostRequest> {
     group(group_id)?;
     contacts(invitees)?;
     ensure!(
         invite_id != 0 && sdk_task != 0,
         "Missing conference intent or task"
     );
-    let client = inputs.conference_client_info(group_id)?;
+    let av_status = if camera_enabled { 3 } else { 1 };
+    let client = inputs.conference_client_info(group_id, av_status)?;
     let mut fields = invitees
         .iter()
         .map(|name| p::bytes(1, name.as_bytes()))

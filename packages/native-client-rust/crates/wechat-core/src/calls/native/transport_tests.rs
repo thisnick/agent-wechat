@@ -230,6 +230,29 @@ async fn conference_poll_wait_stops_when_media_or_owner_stops() {
         assert!(f.records().is_empty());
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn direct_poll_wait_stops_when_direct_command_queued() {
+    let f = Fixture::new(Hold::BeforeHandoff).await;
+    let transport = f.transport.clone();
+    let waiting = tokio::task::spawn_blocking(move || {
+        transport.wait_for_direct_sync::<Vec<u8>>(std::future::pending())
+    });
+    let (reply, _rx) = oneshot::channel();
+    f.transport
+        .worker
+        .direct_commands
+        .lock()
+        .unwrap()
+        .push_back(DirectCommand { reply });
+    f.transport.worker.notify.notify_waiters();
+    let result = tokio::time::timeout(Duration::from_secs(1), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.unwrap_err().is::<CallLiveSyncInterrupted>());
+    assert!(f.records().is_empty());
+}
 fn reply(route: CallHostRoute) -> Vec<u8> {
     let body = match route {
         CallHostRoute::AppAuth => {
@@ -307,6 +330,7 @@ impl Fixture {
                     request_id: "ready".into(),
                     ready: true,
                     format: CallAudioFormat::default(),
+                    video: None,
                     scope: Some(CallReadyScope::All),
                 },
             )
@@ -330,15 +354,21 @@ impl Fixture {
                 .unwrap();
         let lease = request.notification.lease.clone();
         let (audio, _) = mpsc::sync_channel(1);
+        let (video, _) = mpsc::sync_channel(1);
+        let (video_keyframe_requests, _) = mpsc::sync_channel(1);
         let worker = Arc::new(Worker {
             identity: request.identity.clone(),
             peer_id: request.notification.caller_username.clone(),
+            call_type: CallType::Voice,
             lease: lease.clone(),
             account_lease: std::sync::OnceLock::new(),
             stop: AtomicBool::new(false),
             media_stop: AtomicBool::new(false),
             locally_closed: AtomicBool::new(false),
             generation: AtomicU32::new(1),
+            video_generation: AtomicU32::new(1),
+            muted: AtomicBool::new(false),
+            camera_enabled: AtomicBool::new(false),
             submission: SendAdmission::default(),
             metrics: MediaMetrics::default(),
 
@@ -347,7 +377,10 @@ impl Fixture {
             conference: None,
             conference_start: None,
             conference_commands: Mutex::new(std::collections::VecDeque::new()),
+            direct_commands: Mutex::new(std::collections::VecDeque::new()),
             audio,
+            video,
+            video_keyframe_requests,
             done: Mutex::new(None),
             notify: Notify::new(),
         });

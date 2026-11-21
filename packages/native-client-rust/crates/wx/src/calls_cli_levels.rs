@@ -1,7 +1,9 @@
-//! Signal-only terminal meters. No audio, device volume or call state is retained.
+//! Signal-only terminal meters and unified voice/video alternate-screen layout.
+//! No audio, device volume or call state is retained.
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     io::{self, IsTerminal, Write},
+    time::{Duration, Instant},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use wechat_core::call_types::{
@@ -9,6 +11,7 @@ use wechat_core::call_types::{
 };
 
 const FLOOR_DB: f64 = -60.0;
+const MAX_NOTICES: usize = 4;
 
 struct Level {
     squares: f64,
@@ -48,7 +51,7 @@ impl Level {
         } else {
             FLOOR_DB
         };
-        // Immediate attack; a quiet signal falls 8 dB per 100 ms refresh.
+        // Immediate attack; a quiet signal falls 8 dB per refresh tick.
         self.db = db.max(self.db - 8.0);
         self.clip_ticks = if self.peak >= 0.999 {
             10
@@ -79,6 +82,7 @@ struct ParticipantLevel {
     membership: CallMembership,
     status: Option<CallParticipantStatus>,
     microphone: Option<bool>,
+    camera: Option<bool>,
 }
 
 pub(super) fn clean_label(text: &str, width: usize) -> String {
@@ -100,10 +104,18 @@ pub(super) struct CallLevels {
     speaker: Level,
     muted: bool,
     enabled: bool,
-    drawn: bool,
-    drawn_rows: usize,
+    alt_screen: bool,
+    prompt_drawn: bool,
+    last_size: Option<(usize, usize)>,
     participants: BTreeMap<String, ParticipantLevel>,
     speaker_enabled: bool,
+    header_title: String,
+    local_camera: Option<bool>,
+    camera_source: Option<String>,
+    is_conference: bool,
+    notices: VecDeque<String>,
+    last_draw: Option<Instant>,
+    video_dirty: bool,
     #[cfg(windows)]
     console_mode: Option<u32>,
 }
@@ -135,13 +147,39 @@ impl CallLevels {
             speaker: Level::default(),
             muted: false,
             enabled,
-            drawn: false,
-            drawn_rows: 0,
+            alt_screen: false,
+            prompt_drawn: false,
+            last_size: None,
             participants: BTreeMap::new(),
             speaker_enabled: true,
+            header_title: String::from("Call"),
+            local_camera: None,
+            camera_source: None,
+            is_conference: false,
+            notices: VecDeque::new(),
+            last_draw: None,
+            video_dirty: false,
             #[cfg(windows)]
             console_mode: None,
         }
+    }
+    pub(super) fn configure_header(
+        &mut self,
+        title: String,
+        local_camera: Option<bool>,
+        camera_source: Option<String>,
+        is_conference: bool,
+    ) {
+        self.header_title = clean_label(&title, 96);
+        self.local_camera = local_camera;
+        self.camera_source = camera_source.map(|s| clean_label(&s, 32));
+        self.is_conference = is_conference;
+    }
+    pub(super) fn set_camera(&mut self, enabled: Option<bool>) {
+        self.local_camera = enabled;
+    }
+    pub(super) fn is_interactive(&self) -> bool {
+        self.enabled
     }
     pub(super) fn microphone(&mut self, samples: &[i16], muted: bool) {
         self.muted = muted;
@@ -171,6 +209,7 @@ impl CallLevels {
         )
     }
     pub(super) fn roster(&mut self, call: &CallView) {
+        self.is_conference = call.kind == wechat_core::call_types::CallKind::Conference;
         for participant in &call.participants {
             let row = self
                 .participants
@@ -181,11 +220,13 @@ impl CallLevels {
                     membership: CallMembership::Unknown,
                     status: None,
                     microphone: None,
+                    camera: None,
                 });
             row.label = clean_label(&participant.contact_id, 64);
             row.membership = participant.membership;
             row.status = participant.status;
             row.microphone = participant.microphone_enabled;
+            row.camera = participant.camera_enabled;
             if participant.membership == CallMembership::Left
                 || participant.microphone_enabled == Some(false)
             {
@@ -199,6 +240,9 @@ impl CallLevels {
         participant: Option<&str>,
         samples: &[i16],
     ) {
+        if !self.is_conference && participant.is_none() {
+            return;
+        }
         let id = participant
             .map(str::to_owned)
             .unwrap_or_else(|| format!("track-{track}"));
@@ -218,6 +262,7 @@ impl CallLevels {
                 membership: CallMembership::Unknown,
                 status: None,
                 microphone: None,
+                camera: None,
             });
         if row.microphone != Some(false) && row.membership != CallMembership::Left {
             row.level
@@ -268,7 +313,12 @@ impl CallLevels {
                 Some(false) => "mic off",
                 None => "mic unknown",
             };
-            let tail = format!(" {} {status} {mic}", row.level.text());
+            let cam = match row.camera {
+                Some(true) => " cam on",
+                Some(false) => " cam off",
+                None => "",
+            };
+            let tail = format!(" {} {status} {mic}{cam}", row.level.text());
             let label = clean_label(&row.label, width.saturating_sub(tail.width() + 2));
             lines.push(clean_label(
                 &format!("{label}{tail}"),
@@ -283,65 +333,221 @@ impl CallLevels {
         }
         lines
     }
+    fn header_bar(&self, width: usize) -> String {
+        let mic = if self.muted { "Mic: MUTED" } else { "Mic: ON" };
+        let spk = if self.speaker_enabled {
+            "Spk: ON"
+        } else {
+            "Spk: OFF"
+        };
+        let cam = match (self.local_camera, self.camera_source.as_deref()) {
+            (Some(true), Some(src)) => format!("Cam: ON ({src})"),
+            (Some(true), None) => "Cam: ON".into(),
+            (Some(false), _) => "Cam: OFF".into(),
+            (None, _) => "Cam: N/A".into(),
+        };
+        let raw = format!(" {}  |  {mic}  |  {cam}  |  {spk} ", self.header_title);
+        let clipped = clean_label(&raw, width);
+        let fill = width.saturating_sub(clipped.width());
+        format!(
+            "\x1b[1;38;2;245;248;252;48;2;28;56;88m{clipped}{}\x1b[0m",
+            " ".repeat(fill)
+        )
+    }
+    fn controls_bar(&self, width: usize) -> String {
+        let raw = match (self.local_camera.is_some(), self.is_conference) {
+            (true, true) => {
+                " [m] Mic  [v] Cam  [s] Spk  [i] Invite  [p] Roster  [d] Devices  [l/h] Leave  [?] Help "
+            }
+            (true, false) => {
+                " [m] Mic  [v] Cam  [s] Spk  [d] Devices  [h] Hangup  [?] Help "
+            }
+            (false, true) => {
+                " [m] Mic  [s] Spk  [i] Invite  [p] Roster  [d] Devices  [l/h] Leave  [?] Help "
+            }
+            (false, false) => " [m] Mic  [s] Spk  [d] Devices  [h] Hangup  [?] Help ",
+        };
+        let clipped = clean_label(raw, width);
+        let fill = width.saturating_sub(clipped.width());
+        format!(
+            "\x1b[38;2;200;210;224;48;2;32;36;46m{clipped}{}\x1b[0m",
+            " ".repeat(fill)
+        )
+    }
+    fn screen_rows(
+        &self,
+        width: usize,
+        rows: usize,
+        video: Option<&super::video::ReceiveVideo>,
+    ) -> Vec<String> {
+        let body_budget = rows.saturating_sub(1); // Reserve last row for "> " prompt.
+        let meter_and_roster = self.lines(width, body_budget.min(10));
+        let notice_count = self.notices.len().min(3);
+        let fixed_rows = 1 /* header */ + meter_and_roster.len() + notice_count + 1 /* controls */;
+        let video_budget = body_budget.saturating_sub(fixed_rows + 1);
+
+        let mut frame = Vec::with_capacity(body_budget);
+        frame.push(self.header_bar(width));
+
+        if let Some(video) = video.filter(|v| v.has_visible_video()) {
+            let vrows = video.render_rows(width, video_budget);
+            if !vrows.is_empty() {
+                frame.extend(vrows);
+            }
+        }
+
+        // Subtle divider before audio meters when video is shown.
+        if frame.len() > 1 && frame.len() + meter_and_roster.len() + notice_count + 1 < body_budget
+        {
+            frame.push(format!(
+                "\x1b[38;2;74;84;100m{}\x1b[0m",
+                "─".repeat(width.saturating_sub(1))
+            ));
+        }
+
+        for line in meter_and_roster {
+            if frame.len() + 1 < body_budget {
+                frame.push(line);
+            }
+        }
+
+        let start_notice = self.notices.len().saturating_sub(notice_count);
+        for notice in self.notices.iter().skip(start_notice) {
+            if frame.len() + 1 < body_budget {
+                let clipped = clean_label(notice, width.saturating_sub(2));
+                frame.push(format!("\x1b[38;2;152;195;235m• {clipped}\x1b[0m"));
+            }
+        }
+
+        // Pad empty rows so the controls bar sits neatly right above the prompt.
+        while frame.len() + 1 < body_budget {
+            frame.push(String::new());
+        }
+        if frame.len() < body_budget {
+            frame.push(self.controls_bar(width));
+        }
+        frame
+    }
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn refresh(&mut self) {
+        self.refresh_with_video(None);
+    }
+    pub(super) fn refresh_with_video(&mut self, video: Option<&super::video::ReceiveVideo>) {
         self.mic.advance();
         self.speaker.advance();
         for row in self.participants.values_mut() {
             row.level.advance();
         }
+        self.draw(video);
+    }
+    /// Record that a freshly decoded video frame is ready to be painted on the next due slot.
+    pub(super) fn mark_video_dirty(&mut self) {
+        self.video_dirty = true;
+    }
+    /// Repaint the screen when a fresh video frame is pending and the minimum
+    /// inter-frame interval (~33 ms / 30 fps cap) has elapsed, without stepping
+    /// audio-meter decay faster than the meter tick.
+    pub(super) fn draw_video_if_due(&mut self, video: &super::video::ReceiveVideo) {
+        if !self.enabled || !self.video_dirty {
+            return;
+        }
+        if self
+            .last_draw
+            .is_some_and(|last| last.elapsed() < Duration::from_millis(33))
+        {
+            return;
+        }
+        self.draw(Some(video));
+    }
+    fn draw(&mut self, video: Option<&super::video::ReceiveVideo>) {
         if !self.enabled {
             return;
         }
         let Some(columns) = terminal_columns().filter(|width| *width >= 32) else {
-            self.clear();
+            self.leave_alt_screen();
             return;
         };
-        let lines = self.lines(columns, terminal_rows());
-        if self.drawn && self.drawn_rows != lines.len() {
-            self.clear();
-        }
+        let rows = terminal_rows().max(10);
+        let resized = self.last_size != Some((columns, rows));
+        self.last_size = Some((columns, rows));
+        let frame = self.screen_rows(columns, rows, video);
         let mut out = io::stderr().lock();
-        let result = if self.drawn {
-            let mut redraw = format!("\x1b7\x1b[{}A\r", lines.len());
-            for line in &lines {
-                redraw.push_str("\x1b[2K");
-                redraw.push_str(line);
-                redraw.push('\n');
+        let mut buf = String::with_capacity(columns * rows * 4);
+        buf.push_str("\x1b[?2026h");
+        if !self.alt_screen {
+            buf.push_str("\x1b[?1049h\x1b[2J");
+            self.alt_screen = true;
+            self.prompt_drawn = false;
+        }
+        if self.prompt_drawn && !resized {
+            buf.push_str("\x1b7");
+            for (idx, line) in frame.iter().enumerate() {
+                let row = idx + 1;
+                buf.push_str(&format!("\x1b[{row};1H\x1b[2K"));
+                buf.push_str(line);
+                buf.push_str("\x1b[0m");
             }
-            redraw.push_str("\x1b8");
-            write!(out, "{redraw}")
+            for row in (frame.len() + 1)..rows {
+                buf.push_str(&format!("\x1b[{row};1H\x1b[2K"));
+            }
+            buf.push_str("\x1b8");
         } else {
-            self.drawn = true;
-            write!(out, "{}\n> ", lines.join("\n"))
-        };
-        self.drawn_rows = lines.len();
-        if result.and_then(|_| out.flush()).is_err() {
+            for (idx, line) in frame.iter().enumerate() {
+                let row = idx + 1;
+                buf.push_str(&format!("\x1b[{row};1H\x1b[2K"));
+                buf.push_str(line);
+                buf.push_str("\x1b[0m");
+            }
+            for row in (frame.len() + 1)..rows {
+                buf.push_str(&format!("\x1b[{row};1H\x1b[2K"));
+            }
+            buf.push_str(&format!("\x1b[{rows};1H\x1b[2K> "));
+            self.prompt_drawn = true;
+        }
+        buf.push_str("\x1b[?2026l");
+        let result = write!(out, "{buf}").and_then(|_| out.flush());
+        if result.is_err() {
             self.enabled = false;
+        } else {
+            self.last_draw = Some(Instant::now());
+            self.video_dirty = false;
         }
     }
-    /// The terminal echoed Enter, moving below the command prompt.
+    /// The terminal echoed Enter on the bottom prompt line; repaint cleanly next tick.
     pub(super) fn input_received(&mut self) {
-        if self.enabled && self.drawn {
-            let rows = self.drawn_rows + 1;
-            let _ = write!(io::stderr(), "\x1b[{rows}A\r\x1b[J");
-            self.drawn = false;
+        if self.enabled && self.alt_screen {
+            self.prompt_drawn = false;
         }
     }
     pub(super) fn notice(&mut self, message: &str) {
-        self.clear();
-        eprintln!("{message}");
+        if !self.enabled {
+            eprintln!("{message}");
+            return;
+        }
+        for line in message.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if self.notices.len() >= MAX_NOTICES {
+                self.notices.pop_front();
+            }
+            self.notices.push_back(trimmed.to_owned());
+        }
     }
-    fn clear(&mut self) {
-        if self.enabled && self.drawn {
-            let rows = self.drawn_rows;
-            let _ = write!(io::stderr(), "\r\x1b[2K\x1b[{rows}A\r\x1b[J");
-            self.drawn = false;
+    fn leave_alt_screen(&mut self) {
+        if self.alt_screen {
+            let mut out = io::stderr().lock();
+            let _ = write!(out, "\x1b[0m\x1b[?1049l");
+            let _ = out.flush();
+            self.alt_screen = false;
+            self.prompt_drawn = false;
         }
     }
 }
 impl Drop for CallLevels {
     fn drop(&mut self) {
-        self.clear();
+        self.leave_alt_screen();
         #[cfg(windows)]
         if let Some(mode) = self.console_mode {
             windows_console::restore(mode);
@@ -462,7 +668,7 @@ mod tests {
         assert!((meter.mic.db + 6.02).abs() < 0.1);
         assert!((meter.speaker.db + 12.04).abs() < 0.1);
         assert!(meter.line().contains("-6dB"));
-        assert!(!meter.drawn);
+        assert!(!meter.alt_screen);
         meter.speaker(&[1.0; 320]);
         meter.refresh();
         assert_eq!(meter.speaker.clip_ticks, 10);
@@ -511,6 +717,7 @@ mod participant_tests {
                     kind: CallParticipantStatusKind::Acknowledged,
                 }),
                 microphone: None,
+                camera: None,
             },
         );
         assert!(levels.lines(120, 24)[1].contains("acknowledged"));
@@ -550,24 +757,29 @@ mod participant_tests {
                 membership: CallMembership::Joined,
                 status: None,
                 microphone_enabled: Some(true),
+                camera_enabled: Some(true),
             }],
         };
         levels.roster(&call);
         levels.participant_audio(7, Some("person"), &[16000; 320]);
         levels.refresh();
         assert!(levels.participant_level("person") > -10.0);
+        assert!(levels.lines(96, 24)[1].contains("cam on"));
         call.participants[0].microphone_enabled = Some(false);
+        call.participants[0].camera_enabled = Some(false);
         levels.roster(&call);
         levels.participant_audio(7, Some("person"), &[16000; 320]);
         levels.refresh();
         assert_eq!(levels.participant_level("person"), FLOOR_DB);
-        assert!(levels.lines(80, 24)[1].contains("mic off"));
-        assert!(!levels.lines(80, 24)[1].contains('\x1b'));
+        assert!(levels.lines(96, 24)[1].contains("mic off"));
+        assert!(levels.lines(96, 24)[1].contains("cam off"));
+        assert!(!levels.lines(96, 24)[1].contains('\x1b'));
         assert_eq!(
             levels.participants["person"].membership,
             CallMembership::Joined
         );
         call.participants[0].microphone_enabled = None;
+        call.participants[0].camera_enabled = None;
         levels.roster(&call);
         assert!(levels.lines(80, 24)[1].contains("mic unknown"));
         levels.playback_enabled(false);
@@ -577,5 +789,21 @@ mod participant_tests {
         assert!(levels.line().contains("Speaker(off)"));
         assert_eq!(clean_label("你好 Alice", 5), "你好 ");
         assert!(levels.lines(32, 10).iter().all(|line| line.width() < 32));
+    }
+
+    #[test]
+    fn unified_screen_shows_header_controls_and_collapses_video_for_voice() {
+        let mut levels = CallLevels::for_test();
+        levels.configure_header(
+            "Direct Video Call • alice".into(),
+            Some(true),
+            Some("test".into()),
+            false,
+        );
+        let rows = levels.screen_rows(80, 24, None);
+        assert_eq!(rows.len(), 23);
+        assert!(rows[0].contains("Direct Video Call • alice"));
+        assert!(rows[0].contains("Cam: ON (test)"));
+        assert!(rows.last().unwrap().contains("[v] Cam"));
     }
 }

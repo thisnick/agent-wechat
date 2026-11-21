@@ -423,19 +423,29 @@ impl<'a> Walker<'a> {
                 continue;
             }
             let first = properties(objects[owners[0]])[&key].clone();
-            for &i in &owners[1..] {
-                let other = properties(objects[i])[&key].clone();
-                assert_eq!(
-                    first, other,
-                    "{field} differs between variants; the listing merges them"
-                );
-            }
-            let all_required = owners
+            let all_identical = owners[1..]
                 .iter()
-                .all(|&i| required_keys(objects[i]).iter().any(|name| name == &key));
-            let when = (owners.len() < objects.len())
-                .then(|| format!("when {tag} {}", owner_values.join("|")));
-            self.walk(field, &first, all_required, when);
+                .all(|&i| properties(objects[i])[&key] == first);
+            if all_identical {
+                let all_required = owners
+                    .iter()
+                    .all(|&i| required_keys(objects[i]).iter().any(|name| name == &key));
+                let when = (owners.len() < objects.len())
+                    .then(|| format!("when {tag} {}", owner_values.join("|")));
+                self.walk(field, &first, all_required, when);
+            } else {
+                for &i in &owners {
+                    let variant = tag_value(objects[i]);
+                    let schema = properties(objects[i])[&key].clone();
+                    let required = required_keys(objects[i]).iter().any(|name| name == &key);
+                    self.walk(
+                        format!("{item}[{variant}].{key}"),
+                        &schema,
+                        required,
+                        Some(format!("when {tag} {variant}")),
+                    );
+                }
+            }
         }
         self.stack.truncate(depth);
     }

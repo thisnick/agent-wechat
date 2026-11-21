@@ -70,17 +70,29 @@ pub(super) async fn prepare(
     else {
         return Ok(IncomingPreparation::Ignored);
     };
+    let is_video = invite.room_type == Some(1);
+    let call_type = if is_video {
+        CallType::Video
+    } else {
+        CallType::Voice
+    };
     let (mailbox, commands) = Mailbox::new(room, room_key, member);
     let (audio, receive_audio) = mpsc::sync_channel(32);
+    let (video, receive_video) = mpsc::sync_channel(8);
+    let (video_keyframe_requests, keyframe_rx) = mpsc::sync_channel(8);
     let worker = Arc::new(Worker {
         identity: request.identity.clone(),
         peer_id: request.notification.caller_username.clone(),
+        call_type,
         lease: request.notification.lease.clone(),
         account_lease: std::sync::OnceLock::new(),
         stop: AtomicBool::new(false),
         media_stop: AtomicBool::new(false),
         locally_closed: AtomicBool::new(false),
         generation: AtomicU32::new(1),
+        video_generation: AtomicU32::new(1),
+        muted: AtomicBool::new(false),
+        camera_enabled: AtomicBool::new(false),
         submission: SendAdmission::default(),
         metrics: MediaMetrics::default(),
         mutations_submitted: AtomicBool::new(false),
@@ -88,7 +100,10 @@ pub(super) async fn prepare(
         conference: None,
         conference_start: None,
         conference_commands: Mutex::new(std::collections::VecDeque::new()),
+        direct_commands: Mutex::new(std::collections::VecDeque::new()),
         audio,
+        video,
+        video_keyframe_requests,
         done: Mutex::new(None),
         notify: Notify::new(),
     });
@@ -124,6 +139,8 @@ pub(super) async fn prepare(
                     mailbox,
                     commands,
                     receive_audio,
+                    receive_video,
+                    keyframe_rx,
                     prepared.clone(),
                     runtime,
                 )?
@@ -206,6 +223,8 @@ struct Actor {
     mailbox: Arc<Mailbox>,
     commands: Receiver<Command>,
     audio: Option<Receiver<QueuedAudio>>,
+    video: Option<Receiver<QueuedVideo>>,
+    keyframe_rx: Option<Receiver<u32>>,
     prepared: PreparationReply,
     transport: FencedTransport,
     state: AccountState,
@@ -215,6 +234,7 @@ struct Actor {
     sink: Option<BackendSink>,
     media: Option<thread::JoinHandle<Result<()>>>,
     joined_deadline: Option<Instant>,
+    last_av_ts: u64,
     ignored_cancellations: u64,
 }
 impl Actor {
@@ -226,6 +246,8 @@ impl Actor {
         mailbox: Arc<Mailbox>,
         commands: Receiver<Command>,
         audio: Receiver<QueuedAudio>,
+        video: Receiver<QueuedVideo>,
+        keyframe_rx: Receiver<u32>,
         prepared: PreparationReply,
         runtime: tokio::runtime::Handle,
     ) -> Result<Self> {
@@ -269,6 +291,8 @@ impl Actor {
             mailbox,
             commands,
             audio: Some(audio),
+            video: Some(video),
+            keyframe_rx: Some(keyframe_rx),
             prepared,
             transport,
             state,
@@ -278,6 +302,7 @@ impl Actor {
             sink: None,
             media: None,
             joined_deadline: None,
+            last_av_ts: 0,
             ignored_cancellations: 0,
         })
     }
@@ -288,11 +313,25 @@ impl Actor {
         let NotificationPayload::Invite(invite) = &self.request.notification.control.payload else {
             bail!("Incoming invitation unavailable")
         };
-        let offer = VoiceOffer::from_owned_random(
-            self.state.device.client_version,
-            crypto::random::<32>()?,
-        )?;
-        let mut parameters = independent_voice_parameters()?;
+        let is_video = self.worker.call_type == CallType::Video;
+        let (offer, mut parameters) = if is_video {
+            (
+                VoiceOffer::from_owned_random_video(
+                    self.state.device.client_version,
+                    crypto::random::<32>()?,
+                    VideoOfferOptions::default(),
+                )?,
+                independent_video_parameters(false)?,
+            )
+        } else {
+            (
+                VoiceOffer::from_owned_random(
+                    self.state.device.client_version,
+                    crypto::random::<32>()?,
+                )?,
+                independent_voice_parameters()?,
+            )
+        };
         parameters.apply_offer(&offer);
         let session = NativeIncomingSession::authenticate(
             &self.transport,
@@ -385,6 +424,32 @@ impl Actor {
                 }
                 if self.media.is_some() && self.worker.media_stop.load(Ordering::Acquire) {
                     return self.exit();
+                }
+                if self.worker.call_type == CallType::Video {
+                    let transport = &self.transport;
+                    let state = &mut self.state;
+                    let authority = self.authority;
+                    let tasks = &mut self.tasks;
+                    let session = self.session.as_mut().expect("incoming session");
+                    let worker = &self.worker;
+                    let last_av_ts = &mut self.last_av_ts;
+                    drain_direct_switch_av(worker, &mut || {
+                        let mic = !worker.muted.load(Ordering::Acquire);
+                        let cam = worker.camera_enabled.load(Ordering::Acquire);
+                        let now = u64::try_from(
+                            SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros(),
+                        )?;
+                        *last_av_ts = last_av_ts.saturating_add(1).max(now);
+                        session.switch_av(
+                            transport,
+                            state,
+                            authority,
+                            mic,
+                            cam,
+                            *last_av_ts,
+                            tasks.next()?,
+                        )
+                    })?;
                 }
             } else {
                 // No controller owns an unanswered offer. Neither local expiry
@@ -524,6 +589,14 @@ impl Actor {
             ) {
                 let _ = self.transport.runtime.block_on(sink.peer_microphone(muted));
             }
+            if let (Some(sink), Some(camera)) = (
+                self.sink.as_ref(),
+                self.session
+                    .as_ref()
+                    .and_then(|session| session.peer_camera_enabled()),
+            ) {
+                let _ = self.transport.runtime.block_on(sink.peer_camera(camera));
+            }
         }
         Ok(matches!(progress, SyncProgress::Terminal(_)))
     }
@@ -645,7 +718,7 @@ impl Actor {
             request.ticket.identity() == self.worker.identity
                 && request.ticket.authority() == self.worker.lease.authority()
                 && request.peer_id == self.request.notification.caller_username
-                && request.call_type == crate::call_types::CallType::Voice
+                && request.call_type == self.worker.call_type
                 && self.worker.authorized(),
             "Incoming winner identity mismatch"
         );
@@ -661,14 +734,23 @@ impl Actor {
                         && !self.worker.stop.load(Ordering::Acquire),
                     "Incoming Answer admission revoked"
                 );
+                self.worker.muted.store(request.muted, Ordering::Release);
+                self.worker
+                    .camera_enabled
+                    .store(request.camera_enabled, Ordering::Release);
                 self.transport.admission = ControlAdmission::Owner(sink.clone());
                 self.sink = Some(sink);
-                let result = self.session.as_mut().expect("incoming session").accept(
-                    &self.transport,
-                    &mut self.state,
-                    self.authority,
-                    self.tasks.next()?,
-                );
+                let result = self
+                    .session
+                    .as_mut()
+                    .expect("incoming session")
+                    .accept_with_camera(
+                        &self.transport,
+                        &mut self.state,
+                        self.authority,
+                        request.camera_enabled,
+                        self.tasks.next()?,
+                    );
                 if let Err(error) = result {
                     if error.is::<UnsupportedCallMedia>() && self.phase() == IncomingPhase::Joined {
                         self.exit()?;
@@ -744,10 +826,19 @@ impl Actor {
         if let Some(muted) = session.peer_microphone_muted() {
             let _ = self.transport.runtime.block_on(sink.peer_microphone(muted));
         }
+        if let Some(camera) = session.peer_camera_enabled() {
+            let _ = self.transport.runtime.block_on(sink.peer_camera(camera));
+        }
         let audio = self
             .audio
             .take()
             .context("Incoming audio already consumed")?;
+        let video = self.video.take();
+        let keyframe_rx = self
+            .keyframe_rx
+            .take()
+            .context("Incoming keyframe receiver already consumed")?;
+        let is_video = self.worker.call_type == CallType::Video;
         let config = self.inner.config.clone();
         let worker = self.worker.clone();
         let runtime = self.transport.runtime.clone();
@@ -755,7 +846,16 @@ impl Actor {
             thread::Builder::new()
                 .name("wechat-call-media".into())
                 .spawn(move || {
-                    let result = run_media(&config, &worker, media, audio, &sink, &runtime);
+                    let result = run_media(
+                        &config,
+                        &worker,
+                        media,
+                        audio,
+                        is_video.then_some(video).flatten(),
+                        keyframe_rx,
+                        &sink,
+                        &runtime,
+                    );
                     worker.media_stop.store(true, Ordering::Release);
                     result
                 })?,

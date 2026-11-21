@@ -14,9 +14,12 @@ use std::collections::BTreeMap;
 use zeroize::Zeroizing;
 
 const HEADER: usize = 19;
+const HEADER_LIVE98: usize = 21;
 const MAX_PACKET: usize = 1519;
+const MAX_PACKET_LIVE98: usize = 1521;
 const MAX_CONF: usize = 1024;
-const WINDOW: u16 = 64;
+const WINDOW: u32 = 64;
+const VIDEO_WINDOW: u32 = 256;
 const MAX_NONCE_VARIANTS: usize = 8;
 // Leave 60,000 sequences for the current 20-minute limit at 50 audio packets/sec.
 const MAX_LEGACY_AUDIO_START: u16 = u16::MAX - 59_999;
@@ -56,6 +59,20 @@ pub fn unverified_live96_member(packet: &[u8]) -> Result<u16> {
     Ok(u16::from_le_bytes(packet[10..12].try_into()?))
 }
 
+/// An untrusted routing hint for selecting a roster-bound receiver from either a
+/// `Live96` (`0x96`, 19-byte header) or `Live98` (`0x98`, 21-byte header) datagram.
+/// Returns `(magic, member_id)`. Authentication and protected-member checks remain required.
+pub fn unverified_live_member(packet: &[u8]) -> Result<(u8, u16)> {
+    ensure!(packet.len() >= 12, "Unsupported Live media packet shape");
+    let valid = match (packet[0], packet[1]) {
+        (0x96, 19) => (38..=MAX_PACKET).contains(&packet.len()),
+        (0x98, 21) => (40..=MAX_PACKET_LIVE98).contains(&packet.len()),
+        _ => false,
+    };
+    ensure!(valid, "Unsupported Live media packet shape");
+    Ok((packet[0], u16::from_le_bytes(packet[10..12].try_into()?)))
+}
+
 /// The owner must establish a fresh media generation before authorizing sends.
 /// The legacy relay scope trades cross-direction audio nonce uniqueness for
 /// interoperability with peers that share media key material. It also permits
@@ -80,6 +97,9 @@ pub enum TransmitScope {
 pub struct OpenedPayload {
     pub packed_kind: u8,
     pub sequence: u16,
+    sequence32: u32,
+    extension_byte: u8,
+    magic: u8,
     payload: Zeroizing<Vec<u8>>,
     epoch: MediaEpoch,
     context: MediaContext,
@@ -88,11 +108,26 @@ impl OpenedPayload {
     pub fn payload(&self) -> &[u8] {
         &self.payload
     }
+
+    /// Full 32-bit packet sequence (`u16` zero-extended for `Live96`, native 32-bit for `Live98`).
+    pub fn sequence32(&self) -> u32 {
+        self.sequence32
+    }
+
+    /// Header extension/data flag byte (`packet[17]` on `Live96`, `packet[19]` on `Live98`).
+    pub fn extension_byte(&self) -> u8 {
+        self.extension_byte
+    }
+
+    /// Wire envelope magic (`0x96` for `Live96`, `0x98` for `Live98`).
+    pub fn magic(&self) -> u8 {
+        self.magic
+    }
 }
 
 /// One key/base/generation owner. No Clone, reset or implicit rekey is provided.
-/// The 64-sequence RX window is a local policy; rollover requires a verified new
-/// generation. Socket-source validation must happen before `open`.
+/// The 64-sequence audio / 256-sequence video RX window is a local policy; rollover
+/// requires a verified new generation. Socket-source validation must happen before `open`.
 pub struct Live96 {
     key: Zeroizing<[u8; 32]>,
     base: Zeroizing<u64>,
@@ -100,11 +135,15 @@ pub struct Live96 {
     epoch: MediaEpoch,
     tx_scope: Option<TransmitScope>,
     receive_only: bool,
+    prefer_live98_tx: bool,
     first_tx_audio: u16,
+    first_tx_video: u16,
     next_audio: u32,
+    next_video: u32,
+    next_qos: u32,
     next_control: u32,
     clear_sequence: u32,
-    rx_highest: BTreeMap<u8, u16>,
+    rx_highest: BTreeMap<u8, u32>,
     rx_seen: BTreeMap<u8, Box<[u64; 1024]>>,
     rx: BTreeMap<[u8; 8], Vec<[u8; 32]>>,
     legacy_receive_nonce_reuse: bool,
@@ -149,6 +188,34 @@ impl Live96 {
         Ok(channel)
     }
 
+    /// Receive-only channel bound specifically to relay QoS member `0xffff` for
+    /// inbound `0x30` S2P directives.
+    pub fn new_relay_qos(
+        key: [u8; 32],
+        nonce_base: u64,
+        room_id: u64,
+        own_member: u16,
+        connection_id: u16,
+        epoch: MediaEpoch,
+    ) -> Result<Self> {
+        Self::new_legacy_receive_only(
+            key,
+            nonce_base,
+            MediaContext {
+                room_id,
+                own_member,
+                peer_member: 0xffff,
+                connection_id,
+            },
+            epoch,
+        )
+    }
+
+    /// Opt into `Live98` (`0x98`, 21-byte header, 32-bit sequence) for outbound media packets.
+    pub fn set_prefer_live98_tx(&mut self, enabled: bool) {
+        self.prefer_live98_tx = enabled;
+    }
+
     fn create(
         key: [u8; 32],
         nonce_base: u64,
@@ -170,8 +237,12 @@ impl Live96 {
             epoch,
             tx_scope: None,
             receive_only,
+            prefer_live98_tx: false,
             first_tx_audio: 0,
+            first_tx_video: 0,
             next_audio: 0,
+            next_video: 0,
+            next_qos: 0,
             next_control: 0,
             clear_sequence: 0,
             rx_highest: BTreeMap::new(),
@@ -213,17 +284,19 @@ impl Live96 {
             ),
         };
         if matches!(scope, TransmitScope::LegacyRelayAudio { .. }) {
-            self.first_tx_audio = self.legacy_audio_start()?;
+            self.first_tx_audio = self.legacy_start(b"agent-wechat/live96/audio-start/v1")?;
             self.next_audio = u32::from(self.first_tx_audio);
+            self.first_tx_video = self.legacy_start(b"agent-wechat/live96/video-start/v1")?;
+            self.next_video = u32::from(self.first_tx_video);
             self.legacy_receive_nonce_reuse = true;
         }
         self.tx_scope = Some(scope);
         Ok(())
     }
-    fn legacy_audio_start(&self) -> Result<u16> {
+    fn legacy_start(&self, domain: &[u8]) -> Result<u16> {
         let key = PKey::hmac(&self.key[..])?;
         let mut mac = Signer::new(MessageDigest::sha256(), &key)?;
-        mac.update(b"agent-wechat/live96/audio-start/v1")?;
+        mac.update(domain)?;
         mac.update(&self.context.room_id.to_le_bytes())?;
         mac.update(&self.base.to_le_bytes())?;
         mac.update(&self.context.own_member.to_le_bytes())?;
@@ -247,14 +320,15 @@ impl Live96 {
             }
         }
     }
-    fn nonce(&self, kind: u8, sequence: u16) -> [u8; 8] {
+    fn nonce32(&self, kind: u8, sequence: u32) -> [u8; 8] {
         self.base
             .wrapping_add(u64::from(kind) << 32)
             .wrapping_add(u64::from(sequence))
             .to_le_bytes()
     }
-    fn diagnostic_audio_overlap(&mut self, kind: u8) -> Result<()> {
-        if kind == 0x10
+    fn diagnostic_overlap(&mut self, kind: u8) -> Result<()> {
+        let allowed_family = kind == 0x10 || (kind & 0xf0) == 0x20;
+        if allowed_family
             && matches!(
                 self.tx_scope,
                 Some(
@@ -289,8 +363,98 @@ impl Live96 {
         conf_payload: &[u8],
     ) -> Result<Vec<u8>> {
         parse_ordinary95(conf_payload)?;
-        self.seal(current, now_ms, 0x10, conf_payload)
+        self.seal_inner(
+            current,
+            now_ms,
+            0x10,
+            0,
+            self.prefer_live98_tx,
+            None,
+            conf_payload,
+        )
     }
+
+    /// Seal one `Live98` (`0x98`, 21-byte header) audio packet with an explicit 32-bit sequence.
+    pub fn seal_audio_live98(
+        &mut self,
+        current: MediaEpoch,
+        now_ms: u64,
+        sequence32: u32,
+        conf_payload: &[u8],
+    ) -> Result<Vec<u8>> {
+        parse_ordinary95(conf_payload)?;
+        self.seal_inner(
+            current,
+            now_ms,
+            0x10,
+            0,
+            true,
+            Some(sequence32),
+            conf_payload,
+        )
+    }
+
+    /// Seal one MP/iLink video payload (`packed_kind = 0x20 | stream_id`, `ext_byte = is_data`).
+    pub fn seal_video(
+        &mut self,
+        current: MediaEpoch,
+        now_ms: u64,
+        stream_id: u8,
+        is_data: bool,
+        payload: &[u8],
+    ) -> Result<Vec<u8>> {
+        let kind = 0x20 | (stream_id & 0x0f);
+        self.seal_inner(
+            current,
+            now_ms,
+            kind,
+            u8::from(is_data),
+            self.prefer_live98_tx,
+            None,
+            payload,
+        )
+    }
+
+    /// Seal one peer-to-peer video RTCP packet (`0x66` `IRequest` or `0x06` NACK).
+    /// Wire byte 14 carries `0x60 | stream_id`, while the AEAD nonce uses `kind & 0x2f`
+    /// and shares the video sequence counter (`GetSeqIndex` slot 12).
+    pub fn seal_video_rtcp(
+        &mut self,
+        current: MediaEpoch,
+        now_ms: u64,
+        stream_id: u8,
+        payload: &[u8],
+    ) -> Result<Vec<u8>> {
+        let kind = 0x60 | (stream_id & 0x0f);
+        self.seal_inner(
+            current,
+            now_ms,
+            kind,
+            0,
+            self.prefer_live98_tx,
+            None,
+            payload,
+        )
+    }
+
+    /// Seal one MP QoS P2S telemetry packet (`packed_kind = 0x30`).
+    pub fn seal_qos_p2s(
+        &mut self,
+        current: MediaEpoch,
+        now_ms: u64,
+        payload: &[u8],
+    ) -> Result<Vec<u8>> {
+        self.seal_inner(
+            current,
+            now_ms,
+            0x30,
+            0,
+            self.prefer_live98_tx,
+            None,
+            payload,
+        )
+    }
+
     fn seal(
         &mut self,
         current: MediaEpoch,
@@ -298,69 +462,130 @@ impl Live96 {
         kind: u8,
         payload: &[u8],
     ) -> Result<Vec<u8>> {
+        self.seal_inner(current, now_ms, kind, 0, false, None, payload)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn seal_inner(
+        &mut self,
+        current: MediaEpoch,
+        now_ms: u64,
+        wire_kind: u8,
+        ext_byte: u8,
+        use_live98: bool,
+        explicit_seq32: Option<u32>,
+        payload: &[u8],
+    ) -> Result<Vec<u8>> {
         self.tx_check(current, now_ms)?;
         ensure!(
             !payload.is_empty() && payload.len() <= 1482,
             "Invalid media payload extent"
         );
-        let next = match kind {
-            0x10 => &mut self.next_audio,
-            0x70 => &mut self.next_control,
-            _ => bail!("Unsupported media sender family"),
+        // Official EncryptLive96/EncryptLive98 masks 0x60..0x6f with 0x2f for the AEAD nonce.
+        let nonce_kind = if (wire_kind & 0xf0) == 0x60 {
+            wire_kind & 0x2f
+        } else {
+            wire_kind
         };
-        ensure!(
-            *next <= u32::from(u16::MAX) && self.clear_sequence < u32::MAX,
-            "Media sequence exhausted; verified rekey required"
-        );
-        let sequence = *next as u16;
-        *next += 1;
-        let nonce = self.nonce(kind, sequence);
-        if self
-            .rx_seen
-            .get(&kind)
-            .is_some_and(|seen| seen[usize::from(sequence) / 64] & (1u64 << (sequence % 64)) != 0)
+        let max_seq = if use_live98 {
+            u32::MAX - 1
+        } else {
+            u32::from(u16::MAX)
+        };
+        let sequence = if let Some(seq) = explicit_seq32 {
+            ensure!(
+                self.clear_sequence < u32::MAX,
+                "Media sequence exhausted; verified rekey required"
+            );
+            seq
+        } else {
+            let next = match wire_kind & 0xf0 {
+                0x10 if wire_kind == 0x10 => &mut self.next_audio,
+                0x20 | 0x60 => &mut self.next_video,
+                0x30 if wire_kind == 0x30 => &mut self.next_qos,
+                0x70 if wire_kind == 0x70 => &mut self.next_control,
+                _ => bail!("Unsupported media sender family"),
+            };
+            ensure!(
+                *next <= max_seq && self.clear_sequence < u32::MAX,
+                "Media sequence exhausted; verified rekey required"
+            );
+            let seq = *next;
+            *next += 1;
+            seq
+        };
+        let nonce = self.nonce32(nonce_kind, sequence);
+        if sequence <= u32::from(u16::MAX)
+            && self.rx_seen.get(&nonce_kind).is_some_and(|seen| {
+                let s = sequence as usize;
+                seen[s / 64] & (1u64 << (s % 64)) != 0
+            })
         {
-            self.diagnostic_audio_overlap(kind)?;
+            self.diagnostic_overlap(nonce_kind)?;
         }
         let mut protected = Zeroizing::new(Vec::with_capacity(payload.len() + 2));
         protected.extend(self.context.own_member.to_le_bytes());
         protected.extend(payload);
         let cipher = seal_original(&self.key, nonce, &protected)?;
-        let mut packet = Vec::with_capacity(HEADER + cipher.len());
-        packet.extend([0x96, 19]);
+        let hdr_len = if use_live98 { HEADER_LIVE98 } else { HEADER };
+        let mut packet = Vec::with_capacity(hdr_len + cipher.len());
+        if use_live98 {
+            packet.extend([0x98, HEADER_LIVE98 as u8]);
+        } else {
+            packet.extend([0x96, HEADER as u8]);
+        }
         packet.extend(self.context.room_id.to_le_bytes());
         packet.extend(self.context.own_member.to_le_bytes());
         packet.extend((self.clear_sequence as u16).to_le_bytes());
-        packet.push(kind);
-        packet.extend(sequence.to_le_bytes());
-        packet.extend([0, self.context.connection_id as u8]);
+        packet.push(wire_kind);
+        if use_live98 {
+            packet.extend(sequence.to_le_bytes());
+        } else {
+            packet.extend((sequence as u16).to_le_bytes());
+        }
+        packet.extend([ext_byte, self.context.connection_id as u8]);
         packet.extend(cipher);
         self.clear_sequence += 1;
         Ok(packet)
     }
     pub fn open(&mut self, current: MediaEpoch, packet: &[u8]) -> Result<Option<OpenedPayload>> {
         self.check(current)?;
-        let member = unverified_live96_member(packet)?;
+        let (magic, member) = unverified_live_member(packet)?;
         ensure!(
             u64::from_le_bytes(packet[2..10].try_into()?) == self.context.room_id
                 && member == self.context.peer_member,
             "Media room/member mismatch"
         );
         let kind = packet[14];
-        ensure!(
-            matches!(kind, 0x10 | 0x20 | 0x70) && packet[17] == 0,
-            "Unsupported Live96 packet family or extension"
-        );
-        let sequence = u16::from_le_bytes(packet[15..17].try_into()?);
-        let nonce = self.nonce(kind, sequence);
-        let clear = open_original(&self.key, nonce, &packet[HEADER..])?;
+        let (sequence32, ext_byte, hdr_len) = if magic == 0x98 {
+            (
+                u32::from_le_bytes(packet[15..19].try_into()?),
+                packet[19],
+                HEADER_LIVE98,
+            )
+        } else {
+            (
+                u32::from(u16::from_le_bytes(packet[15..17].try_into()?)),
+                packet[17],
+                HEADER,
+            )
+        };
+        let family_ok = match kind & 0xf0 {
+            0x10 | 0x30 | 0x50 | 0x70 => kind == (kind & 0xf0) && ext_byte == 0,
+            0x20 | 0x40 => ext_byte <= 1,
+            0x60 => ext_byte == 0,
+            _ => false,
+        };
+        ensure!(family_ok, "Unsupported Live96 packet family or extension");
+        let nonce = self.nonce32(kind, sequence32);
+        let clear = open_original(&self.key, nonce, &packet[hdr_len..])?;
         ensure!(
             clear.len() > 2
                 && clear.len() <= 1484
                 && u16::from_le_bytes(clear[..2].try_into()?) == self.context.peer_member,
             "Protected media member mismatch or extent"
         );
-        let digest: [u8; 32] = openssl::sha::sha256(&packet[HEADER..]);
+        let digest: [u8; 32] = openssl::sha::sha256(&packet[hdr_len..]);
         if let Some(previous) = self.rx.get(&nonce) {
             if previous.contains(&digest) {
                 return Ok(None);
@@ -375,46 +600,56 @@ impl Live96 {
                 return Ok(None);
             }
         }
-        let own_next = if kind == 0x10 {
-            self.next_audio
-        } else if kind == 0x70 {
-            self.next_control
-        } else {
-            0
+        let (own_next, first_tx) = match kind & 0xf0 {
+            0x10 => (self.next_audio, u32::from(self.first_tx_audio)),
+            0x20 => (self.next_video, u32::from(self.first_tx_video)),
+            0x70 => (self.next_control, 0),
+            _ => (0, 0),
         };
-        if u32::from(sequence) < own_next && (kind != 0x10 || sequence >= self.first_tx_audio) {
-            self.diagnostic_audio_overlap(kind)?;
+        if sequence32 < own_next && sequence32 >= first_tx {
+            self.diagnostic_overlap(kind)?;
         }
         // Retire every authenticated, sender-bound nonce before payload classification.
         // Fixed 65536-bit ledgers preserve known cross-direction overlap checks
         // after ciphertext digests leave the smaller reordering window.
-        let seen = self
-            .rx_seen
-            .entry(kind)
-            .or_insert_with(|| Box::new([0; 1024]));
-        seen[usize::from(sequence) / 64] |= 1u64 << (sequence % 64);
+        if sequence32 <= u32::from(u16::MAX) {
+            let seen = self
+                .rx_seen
+                .entry(kind)
+                .or_insert_with(|| Box::new([0; 1024]));
+            let s = sequence32 as usize;
+            seen[s / 64] |= 1u64 << (s % 64);
+        }
+        let window = if matches!(kind & 0xf0, 0x20 | 0x40) {
+            VIDEO_WINDOW
+        } else {
+            WINDOW
+        };
         if self
             .rx_highest
             .get(&kind)
-            .is_some_and(|high| sequence < *high && *high - sequence >= WINDOW)
+            .is_some_and(|high| sequence32 < *high && *high - sequence32 >= window)
         {
             return Ok(None);
         }
-        let high = self.rx_highest.entry(kind).or_insert(sequence);
-        *high = (*high).max(sequence);
-        let minimum = high.saturating_sub(WINDOW - 1);
+        let high = self.rx_highest.entry(kind).or_insert(sequence32);
+        *high = (*high).max(sequence32);
+        let minimum = high.saturating_sub(window - 1);
         let base = *self.base;
         self.rx.retain(|nonce, _| {
             let combined = u64::from_le_bytes(*nonce).wrapping_sub(base);
             let k = (combined >> 32) as u8;
-            let s = combined as u16;
+            let s = combined as u32;
             k != kind || s >= minimum
         });
         self.rx.entry(nonce).or_default().push(digest);
         // RX connection ID is not assumed equal to the local TX connection ID.
         Ok(Some(OpenedPayload {
             packed_kind: kind,
-            sequence,
+            sequence: sequence32 as u16,
+            sequence32,
+            extension_byte: ext_byte,
+            magic,
             payload: Zeroizing::new(clear[2..].to_vec()),
             epoch: current,
             context: self.context,
@@ -1041,5 +1276,47 @@ mod tests {
         assert!(receiver
             .seal(epoch(), 0, 0x70, &[8, 1, 18, 2, 8, 2])
             .is_err());
+    }
+
+    #[test]
+    fn video_rtcp_tx_mask_relay_rewrite_and_live98_roundtrip() {
+        let mut sender = peer();
+        let video_pkt = sender
+            .seal_video(epoch(), 0, 1, true, &[15, 1, 0, 3])
+            .unwrap();
+        assert_eq!(video_pkt[14], 0x21);
+        assert_eq!(video_pkt[17], 1);
+        let mut rtcp_pkt = sender
+            .seal_video_rtcp(epoch(), 0, 1, &[0x66, 1, 8, 0, 0, 8])
+            .unwrap();
+        assert_eq!(rtcp_pkt[14], 0x61);
+        assert_eq!(rtcp_pkt[17], 0);
+        // Relay rewrites 0x61 -> 0x21 (0x61 & 0x2f) before delivery.
+        rtcp_pkt[14] &= 0x2f;
+
+        let mut recv = receiver();
+        let opened_video = recv.open(epoch(), &video_pkt).unwrap().unwrap();
+        assert_eq!(opened_video.packed_kind, 0x21);
+        assert_eq!(opened_video.extension_byte(), 1);
+        assert_eq!(opened_video.payload(), &[15, 1, 0, 3]);
+
+        let opened_rtcp = recv.open(epoch(), &rtcp_pkt).unwrap().unwrap();
+        assert_eq!(opened_rtcp.packed_kind, 0x21);
+        assert_eq!(opened_rtcp.extension_byte(), 0);
+        assert_eq!(opened_rtcp.payload(), &[0x66, 1, 8, 0, 0, 8]);
+        // Shared slot-12 counter advances monotonically across video and RTCP.
+        assert_eq!(opened_rtcp.sequence32(), opened_video.sequence32() + 1);
+
+        // Live98 (0x98, 21-byte header) with seq32 >= 65536.
+        let raw_audio = ordinary95_single(0, 1, 320, &[1, 2, 3]).unwrap();
+        let live98 = sender
+            .seal_audio_live98(epoch(), 0, 0x0001_0005, &raw_audio)
+            .unwrap();
+        assert_eq!(&live98[..2], &[0x98, 21]);
+        assert_eq!(unverified_live_member(&live98).unwrap(), (0x98, 1));
+        let opened98 = recv.open(epoch(), &live98).unwrap().unwrap();
+        assert_eq!(opened98.magic(), 0x98);
+        assert_eq!(opened98.sequence32(), 0x0001_0005);
+        assert_eq!(opened98.payload(), raw_audio);
     }
 }

@@ -124,7 +124,7 @@ enum Command {
     },
     /// Show the selected server's health and identity.
     Status,
-    /// Observe calls or use this computer's microphone and speakers.
+    /// Observe calls or use this computer's microphone, speakers and camera.
     Calls {
         #[command(subcommand)]
         command: Option<calls_cli::CallsCommand>,

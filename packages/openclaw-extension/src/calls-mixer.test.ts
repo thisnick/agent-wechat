@@ -4,8 +4,8 @@ import type { CallAudioTrack, CallParticipant } from "@agent-wechat/shared";
 import { CallPcmMixer } from "./calls-mixer.ts";
 
 const format = { sampleRate: 16000, channels: 1, frameMs: 20 };
-const sendTrack: CallAudioTrack = { id: 1, generation: 1, direction: "send", format };
-const track = (id: number, generation = 1, participantId?: string): CallAudioTrack => ({ id, generation, direction: "receive", format, ...(participantId ? { participantId } : {}) });
+const sendTrack: CallAudioTrack = { media: "audio", id: 1, generation: 1, direction: "send", format };
+const track = (id: number, generation = 1, participantId?: string): CallAudioTrack => ({ media: "audio", id, generation, direction: "receive", format, ...(participantId ? { participantId } : {}) });
 function pcm(value: number, count = 320): Buffer { const bytes = Buffer.alloc(count * 2); for (let i = 0; i < count; i++) bytes.writeInt16LE(value, i * 2); return bytes; }
 const frame = (id: number, value: number, offset = 0, generation = 1, sequence = 0) => ({ trackId: id, generation, sequence, sampleOffset: offset, payload: pcm(value) });
 const all = (bytes: Buffer, value: number) => { for (let i = 0; i < bytes.length; i += 2) assert.equal(bytes.readInt16LE(i), value); };

@@ -35,6 +35,7 @@ struct Backend {
     stopped: AtomicUsize,
     audio: AtomicUsize,
     registration_mode: AtomicUsize,
+    direct_video: std::sync::atomic::AtomicBool,
     actors: std::sync::Mutex<Vec<CallIdentity>>,
     last_registration: std::sync::Mutex<Option<IncomingRegistration>>,
 }
@@ -57,6 +58,7 @@ impl CallBackend for Backend {
     fn capabilities(&self, _: &str) -> CallCapabilities {
         CallCapabilities {
             direct_audio: true,
+            direct_video: self.direct_video.load(Ordering::Acquire),
             ..Default::default()
         }
     }
@@ -167,6 +169,7 @@ impl Fixture {
             stopped: AtomicUsize::new(0),
             audio: AtomicUsize::new(0),
             registration_mode: AtomicUsize::new(0),
+            direct_video: std::sync::atomic::AtomicBool::new(false),
             actors: std::sync::Mutex::new(Vec::new()),
             last_registration: std::sync::Mutex::new(None),
         });
@@ -284,6 +287,7 @@ async fn ready(
                 request_id: uuid::Uuid::new_v4().to_string(),
                 ready: true,
                 format: CallAudioFormat::default(),
+                video: None,
                 scope: Some(scope),
             },
         )
@@ -704,4 +708,34 @@ async fn unregistered_synchronous_preparation_ignores_or_ends_without_false_canc
             .mark_registered());
         assert_eq!(f.backend.stopped.load(Ordering::SeqCst), 0);
     }
+}
+
+#[tokio::test]
+async fn incoming_video_invite_admits_video_offer_when_direct_video_enabled() {
+    let mut f = Fixture::new();
+    f.backend.direct_video.store(true, Ordering::Release);
+    f.live();
+    let mut client = f.client(true).await;
+    f.stage(batch(55, false, 1, "synthetic_self"));
+    let snapshot = f
+        .core
+        .call_service("one")
+        .unwrap()
+        .current("one", "fixture")
+        .await
+        .unwrap();
+    let pending = snapshot.current_pending_offer.unwrap();
+    assert_eq!(pending.call_type, CallType::Video);
+    assert_eq!(
+        ready(&f, &mut client, CallReadyScope::All).await,
+        CallCommandStatus::Accepted
+    );
+    let attempt = tokio::time::timeout(Duration::from_secs(1), f.attempts.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    attempt.reply.send(IncomingPreparation::Acked).unwrap();
+    let offer = offered(&f).await;
+    assert_eq!(offer.call_id, pending.call_id);
+    assert_eq!(offer.call_type, CallType::Video);
 }

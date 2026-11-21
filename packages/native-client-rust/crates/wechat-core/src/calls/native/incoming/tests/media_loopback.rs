@@ -572,6 +572,7 @@ async fn generated_audio_crosses_native_queues_opus_encryption_and_local_udp() -
                         request_id: "ready".into(),
                         ready: true,
                         format: audio_format,
+                        video: None,
                         scope: Some(CallReadyScope::All),
                     },
                 )
@@ -589,6 +590,8 @@ async fn generated_audio_crosses_native_queues_opus_encryption_and_local_udp() -
                         request_id: "answer".into(),
                         call_id: offer.call_id.clone(),
                         expected_revision: offer.revision,
+                        camera_enabled: None,
+                        muted: None,
                     },
                 )
                 .await?;
@@ -635,23 +638,42 @@ async fn generated_audio_crosses_native_queues_opus_encryption_and_local_udp() -
                 .attach_media("one", "fixture", &offer.call_id, &client.client_id, &token)
                 .await?;
             let CallEvent::MediaReady {
-                send_track,
+                send_tracks,
                 receive_tracks,
                 ..
             } = &media.ready
             else {
                 bail!("Synthetic missing tracks")
             };
-            let receive_track = &receive_tracks[0];
+            let Some(CallTrack::Audio {
+                id: send_id,
+                generation: send_generation,
+                direction: send_direction,
+                format: send_format,
+                ..
+            }) = send_tracks.first()
+            else {
+                bail!("Synthetic missing send audio track")
+            };
+            let Some(CallTrack::Audio {
+                id: receive_id,
+                generation: receive_generation,
+                direction: receive_direction,
+                format: receive_format,
+                ..
+            }) = receive_tracks.first()
+            else {
+                bail!("Synthetic missing receive audio track")
+            };
             ensure!(
-                send_track.format == audio_format
-                    && receive_track.format == audio_format
-                    && send_track.direction == CallTrackDirection::Send
-                    && receive_track.direction == CallTrackDirection::Receive,
+                *send_format == audio_format
+                    && *receive_format == audio_format
+                    && *send_direction == CallTrackDirection::Send
+                    && *receive_direction == CallTrackDirection::Receive,
                 "Synthetic announced track format/direction"
             );
-            let send_track = send_track.clone();
-            let receive_track = receive_track.clone();
+            let (send_id, send_generation) = (*send_id, *send_generation);
+            let (receive_id, receive_generation) = (*receive_id, *receive_generation);
             let worker = f
                 .backend
                 .inner
@@ -673,8 +695,8 @@ async fn generated_audio_crosses_native_queues_opus_encryption_and_local_udp() -
                 for n in 0..FRAMES {
                     let raw = frame::encode_pcm(
                         MediaHeader {
-                            track_id: send_track.id,
-                            generation: send_track.generation,
+                            track_id: send_id,
+                            generation: send_generation,
                             sequence: n as u64,
                             timestamp_micros: n as u64 * u64::from(audio_format.frame_ms) * 1000,
                         },
@@ -697,8 +719,8 @@ async fn generated_audio_crosses_native_queues_opus_encryption_and_local_udp() -
                         .context("Synthetic owner media closed")?;
                     let frame = MediaFrame::decode(&raw, format)?;
                     ensure!(
-                        frame.header.track_id == receive_track.id
-                            && frame.header.generation == receive_track.generation
+                        frame.header.track_id == receive_id
+                            && frame.header.generation == receive_generation
                             && frame.header.sequence == n as u64,
                         "Synthetic owner receive ordering"
                     );

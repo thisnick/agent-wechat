@@ -267,6 +267,10 @@ impl Registry {
         self.receipts
             .insert(receipt, now + Duration::from_secs(DEDUP_SECONDS));
         let id = uuid::Uuid::new_v4().to_string();
+        let call_type = match &note.control.payload {
+            NotificationPayload::Invite(invite) if invite.room_type == Some(1) => CallType::Video,
+            _ => CallType::Voice,
+        };
         self.entries.insert(
             id.clone(),
             PendingEntry {
@@ -274,7 +278,7 @@ impl Registry {
                     call_id: id.clone(),
                     revision: 1,
                     kind: CallKind::Direct,
-                    call_type: CallType::Voice,
+                    call_type,
                     caller_id: note.caller_username.clone(),
                     phase: CallPendingPhase::WaitingForReady,
                 },
@@ -373,7 +377,7 @@ pub(crate) fn after_sync_staged(
         }
         let caller = match &control.payload {
             NotificationPayload::Invite(invite) => {
-                if invite.room_type != Some(2)
+                if !matches!(invite.room_type, Some(1 | 2))
                     || invite.app_id.as_deref() != Some("wechat")
                     || invite.sub_app_id.as_deref() != Some("voip-2p")
                     || invite.callee_username.as_deref() != Some(own.as_str())

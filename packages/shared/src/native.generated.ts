@@ -325,7 +325,12 @@ status?: CallParticipantStatus,
  * Whether the participant's microphone is on. Omitted until the server
  * reports it; an omitted value is unknown, not false.
  */
-microphoneEnabled?: boolean, };
+microphoneEnabled?: boolean,
+/**
+ * Whether the participant's camera is on. Omitted until the server
+ * reports it; an omitted value is unknown, not false.
+ */
+cameraEnabled?: boolean, };
 export type CallMembership = "joined" | "invited" | "left" | "unknown";
 export type CallParticipantStatus = {
 /**
@@ -393,7 +398,7 @@ conferenceJoin?: boolean,
  */
 directAudio?: boolean,
 /**
- * Direct video calls are available. This version never sets it.
+ * Direct video calls are available.
  */
 directVideo?: boolean,
 /**
@@ -401,7 +406,7 @@ directVideo?: boolean,
  */
 conferenceAudio?: boolean,
 /**
- * Video in conference calls is available. This version never sets it.
+ * Video in conference calls is available.
  */
 conferenceVideo?: boolean, };
 export type CallAudioFormat = {
@@ -417,6 +422,85 @@ channels: number,
  * Length of one audio frame in milliseconds.
  */
 frameMs: number, };
+export type CallVideoCodec = "h265" | "h264" | "jpeg";
+export type CallVideoMode = "passthrough" | "transcoded";
+export type CallVideoCapabilities = {
+/**
+ * Video codecs accepted from a sending client, in preference order.
+ */
+sendCodecs: Array<CallVideoCodec>,
+/**
+ * Video codecs deliverable to a receiving client, in preference order.
+ */
+receiveCodecs: Array<CallVideoCodec>,
+/**
+ * Maximum frame width in pixels. Omitted when no cap is specified.
+ */
+maxWidth?: number,
+/**
+ * Maximum frame height in pixels. Omitted when no cap is specified.
+ */
+maxHeight?: number,
+/**
+ * Maximum frame rate in frames per second. Omitted when no cap is specified.
+ */
+maxFps?: number, };
+export type CallVideoFormat = {
+/**
+ * Codec carried on this track.
+ */
+codec: CallVideoCodec,
+/**
+ * Whether this track passes wire frames straight through or transcodes them.
+ */
+mode: CallVideoMode,
+/**
+ * Maximum frame width in pixels for this track.
+ */
+maxWidth: number,
+/**
+ * Maximum frame height in pixels for this track.
+ */
+maxHeight: number,
+/**
+ * Maximum frame rate in frames per second for this track.
+ */
+maxFps: number,
+/**
+ * Target bitrate in kbps when encoding or transcoding. Omitted for pass-through or JPEG.
+ */
+bitrateKbps?: number, };
+export type CallTicketSocket = "control" | "media";
+export type CallTicketRequest = {
+/**
+ * Which calls WebSocket this ticket authorizes.
+ */
+socket: CallTicketSocket,
+/**
+ * Required when `socket` is `media`; omitted when `socket` is `control`.
+ */
+callId?: string, };
+export type CallTicketResponse = {
+/**
+ * Opaque single-use ticket to pass as `?ticket=` on the matching WebSocket URL. Do not log it.
+ */
+ticket: string,
+/**
+ * Unix timestamp in seconds when the ticket expires.
+ */
+expiresAt: number,
+/**
+ * Ticket lifetime in seconds from issuance.
+ */
+expiresInSeconds: number,
+/**
+ * Which calls WebSocket this ticket authorizes.
+ */
+socket: CallTicketSocket,
+/**
+ * Bound call ID when `socket` is `media`. Omitted for `control`.
+ */
+callId?: string, };
 export type CallTarget = { "kind": "direct",
 /**
  * The contact to call. A group ID is not accepted.
@@ -538,7 +622,11 @@ export type CallControl = { "kind": "microphone",
 /**
  * True when the microphone is muted.
  */
-muted: boolean, };
+muted: boolean, } | { "kind": "camera",
+/**
+ * True when the camera is sending video.
+ */
+enabled: boolean, };
 export type CallParticipantControl = {
 /**
  * The participant the control belongs to. In a direct call this is the
@@ -587,7 +675,11 @@ currentCall: CallView | null,
 /**
  * The PCM format used for call audio.
  */
-audioFormat: CallAudioFormat, };
+audioFormat: CallAudioFormat,
+/**
+ * Video codecs and bounds this daemon can exchange. Omitted when video is unavailable.
+ */
+videoCapabilities?: CallVideoCapabilities, };
 export type CallCommand = { "type": "call.invite",
 /**
  * Your ID for this command. The `command.result` repeats it.
@@ -613,7 +705,15 @@ invitationId: string,
  * The `revision` of that entry. A stale or used invitation fails with
  * `offer_expired`.
  */
-invitationRevision: number, } | { "type": "call.ready",
+invitationRevision: number,
+/**
+ * Whether to join with your camera enabled. Omitted means false.
+ */
+cameraEnabled?: boolean,
+/**
+ * Whether to join with your microphone muted. Omitted means false.
+ */
+muted?: boolean, } | { "type": "call.ready",
 /**
  * Your ID for this command. The `command.result` repeats it.
  */
@@ -631,7 +731,11 @@ format: CallAudioFormat,
  * Which calls readiness covers. Omitted means all. Ignored when
  * withdrawing readiness.
  */
-scope?: CallReadyScope, } | { "type": "call.dial",
+scope?: CallReadyScope,
+/**
+ * Video codecs and bounds this client supports. Omitted for audio-only clients.
+ */
+video?: CallVideoCapabilities, } | { "type": "call.dial",
 /**
  * Your ID for this command. The `command.result` repeats it.
  */
@@ -641,9 +745,17 @@ requestId: string,
  */
 target: CallTarget,
 /**
- * Only voice calls are supported.
+ * Whether to place a voice or video call.
  */
-callType: CallType, } | { "type": "call.answer",
+callType: CallType,
+/**
+ * Initial camera state for video calls. Defaults to true when `callType` is `video`, ignored for voice calls.
+ */
+cameraEnabled?: boolean,
+/**
+ * Initial microphone mute state. Omitted means false.
+ */
+muted?: boolean, } | { "type": "call.answer",
 /**
  * Your ID for this command. The `command.result` repeats it.
  */
@@ -656,7 +768,15 @@ callId: string,
  * The latest offer `revision` you received. A stale revision is
  * rejected.
  */
-expectedRevision: number, } | { "type": "call.reject",
+expectedRevision: number,
+/**
+ * Initial camera state when answering a video call. Defaults to true for video calls, ignored for voice calls.
+ */
+cameraEnabled?: boolean,
+/**
+ * Initial microphone mute state when answering. Omitted means false.
+ */
+muted?: boolean, } | { "type": "call.reject",
 /**
  * Your ID for this command. The `command.result` repeats it.
  */
@@ -715,22 +835,35 @@ requestId: string,
 /**
  * ID of the call.
  */
-callId: string, };
+callId: string, } | { "type": "call.camera",
+/**
+ * Your ID for this command. The `command.result` repeats it.
+ */
+requestId: string,
+/**
+ * ID of the call.
+ */
+callId: string,
+/**
+ * True to enable outgoing video, false to disable it.
+ */
+enabled: boolean, };
 export type CallCommandStatus = "accepted" | "replayed" | "error";
 export type CallErrorCode = "invalid_request" | "busy" | "already_claimed" | "offer_expired" | "not_owner" | "unsupported" | "media_not_ready" | "outcome_unknown" | "capacity" | "stale" | "forbidden" | "closed";
 export type CallTrackDirection = "send" | "receive";
-export type CallAudioTrack = {
+export type CallTrack = { "media": "audio",
 /**
- * Track ID to use in `audio.start` and `audio.chunk`.
+ * Track ID to use in `track.start`, `video.request_keyframe` and binary `WXCM` frames.
  */
 id: number,
 /**
- * Version of the stream. Chunks for an older generation are discarded; a
- * new generation starts after `call.clear_audio` or a mute change.
+ * Version of the stream. Frames for an older generation are discarded; a
+ * new generation starts after `call.clear_audio`, a mute change, a camera
+ * toggle, or a format change.
  */
 generation: number,
 /**
- * Whether you send or receive audio on this track.
+ * Whether you send or receive media on this track.
  */
 direction: CallTrackDirection,
 /**
@@ -741,7 +874,34 @@ format: CallAudioFormat,
  * The conference participant this track carries. Omitted when the track
  * is not tied to a participant.
  */
-participantId?: string, };
+participantId?: string, } | { "media": "video",
+/**
+ * Track ID to use in `track.start`, `video.request_keyframe` and binary `WXCM` frames.
+ */
+id: number,
+/**
+ * Version of the stream. Frames for an older generation are discarded; a
+ * new generation starts after `call.clear_audio`, a mute change, a camera
+ * toggle, or a format change.
+ */
+generation: number,
+/**
+ * Whether you send or receive media on this track.
+ */
+direction: CallTrackDirection,
+/**
+ * The negotiated video codec, mode and bounds of the track.
+ */
+format: CallVideoFormat,
+/**
+ * The conference participant this track carries. Omitted when the track
+ * is not tied to a participant.
+ */
+participantId?: string,
+/**
+ * True when this video track is currently active.
+ */
+active: boolean, };
 export type CallEvent = { "type": "call.invitation_result",
 /**
  * ID of the conference call.
@@ -806,7 +966,11 @@ currentCall: CallView | null,
 /**
  * The PCM format used for call audio.
  */
-audioFormat: CallAudioFormat, } | { "type": "command.result",
+audioFormat: CallAudioFormat,
+/**
+ * Video codecs and bounds this daemon can exchange. Omitted when video is unavailable.
+ */
+videoCapabilities?: CallVideoCapabilities, } | { "type": "command.result",
 /**
  * The `requestId` of the command.
  */
@@ -876,15 +1040,15 @@ callId: string,
 /**
  * The new track.
  */
-track: CallAudioTrack, } | { "type": "track.updated",
+track: CallTrack, } | { "type": "track.updated",
 /**
  * ID of the call.
  */
 callId: string,
 /**
- * The track with its new generation.
+ * The track with its new generation or state.
  */
-track: CallAudioTrack, } | { "type": "track.removed",
+track: CallTrack, } | { "type": "track.removed",
 /**
  * ID of the call.
  */
@@ -906,13 +1070,25 @@ reason: string, } | { "type": "media.ready",
  */
 protocolVersion: number,
 /**
- * The track for audio you send.
+ * The tracks for media you send (audio, plus video when negotiated).
  */
-sendTrack: CallAudioTrack,
+sendTracks: Array<CallTrack>,
 /**
- * The tracks for audio you receive, one per source.
+ * The tracks for media you receive, one per audio or video source.
  */
-receiveTracks: Array<CallAudioTrack>, } | { "type": "call.error",
+receiveTracks: Array<CallTrack>, } | { "type": "video.keyframe_requested",
+/**
+ * ID of the call.
+ */
+callId: string,
+/**
+ * ID of your outgoing video track.
+ */
+trackId: number,
+/**
+ * Generation of your outgoing video track.
+ */
+generation: number, } | { "type": "call.error",
 /**
  * What went wrong.
  */
@@ -930,7 +1106,7 @@ clientId: string,
  * The secret `ownerToken` from the `command.result` that claimed the
  * call. Do not log it.
  */
-ownerToken: string, } | { "type": "audio.start",
+ownerToken: string, } | { "type": "track.start",
 /**
  * The send track's ID.
  */
@@ -938,30 +1114,11 @@ trackId: number,
 /**
  * The generation to start.
  */
-generation: number, } | { "type": "audio.chunk",
+generation: number, } | { "type": "video.request_keyframe",
 /**
- * The track the audio belongs to.
+ * The receive video track's ID.
  */
-trackId: number,
-/**
- * The track generation. Chunks for an older generation are discarded.
- */
-generation: number,
-/**
- * PCM16 little-endian samples as padded base64. A chunk you send is
- * whole samples, at most 65,536 bytes once decoded.
- */
-pcmBase64: string,
-/**
- * Order of the chunk within its source. The daemon sets it on chunks
- * it sends; you must not send it.
- */
-sequence?: number,
-/**
- * Position of the chunk in per-channel samples on the shared call
- * timeline. The daemon sets it on chunks it sends; you must not send it.
- */
-sample_offset?: number, };
+trackId: number, };
 export type NativeMentions = {
 /**
  * `known` when the mention list was read, `unknown` when it is missing or cannot be parsed.

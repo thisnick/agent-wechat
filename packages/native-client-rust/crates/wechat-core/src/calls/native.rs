@@ -8,13 +8,13 @@ use super::{
     ownership::{AccountAuthority, CallIdentity, Operation},
     service::{
         BackendAudioRequest, BackendInviteRequest, BackendOutcome, BackendRequest, BackendSink,
-        CallBackend, CallServiceError,
+        BackendVideoRequest, CallBackend, CallServiceError,
     },
 };
 use crate::{
     call_types::{
         CallAudioFormat, CallCapabilities, CallConferenceInvitation, CallErrorCode,
-        CallInvitationResult,
+        CallInvitationResult, CallType,
     },
     runtime::authorization,
     Core,
@@ -36,8 +36,9 @@ use std::{
 };
 use tokio::sync::{oneshot, Notify};
 use wechat_calls::session::{
-    CallLiveSyncInterrupted, CallRpcNotSubmitted, NativePersonalSession, PersonalPhase,
-    PersonalTransport, SyncProgress, TaskIds, UnsupportedCallMedia, VoiceParameters,
+    independent_video_parameters, CallLiveSyncInterrupted, CallRpcNotSubmitted,
+    NativePersonalSession, PersonalPhase, PersonalTransport, SyncProgress, TaskIds,
+    UnsupportedCallMedia, VoiceParameters,
 };
 use wechat_protocol::{
     calls::{
@@ -46,7 +47,8 @@ use wechat_protocol::{
         host_policy::{
             is_reject_request, is_teardown_request, selected_policy, CallHostPolicy, CallHostRoute,
         },
-        voice_offer::VoiceOffer,
+        personal::CallMediaMode,
+        voice_offer::{VideoOfferOptions, VoiceOffer},
     },
     crypto, AccountState,
 };
@@ -83,6 +85,7 @@ type BackendFuture<T> =
 struct NativeCallConfig {
     conference_join_profile: bool,
     conference_probe_mode: conference::ProbeMode,
+    prefer_live98: bool,
     ring_timeout: Duration,
     peer_idle_timeout: Duration,
     max_duration: Duration,
@@ -98,6 +101,7 @@ impl Default for NativeCallConfig {
                 Ok("join-profile") => conference::ProbeMode::Profile,
                 _ => conference::ProbeMode::Application,
             },
+            prefer_live98: std::env::var("WX_CALL_LIVE98").as_deref() == Ok("1"),
             ring_timeout: Duration::from_secs(60),
             peer_idle_timeout: Duration::from_secs(60),
             // The supported media counter must not roll over without rekeying.
@@ -122,12 +126,16 @@ struct Inner {
 struct Worker {
     identity: CallIdentity,
     peer_id: String,
+    call_type: CallType,
     lease: CallAuthorityLease,
     account_lease: std::sync::OnceLock<wechat_protocol::AccountLease>,
     stop: AtomicBool,
     media_stop: AtomicBool,
     locally_closed: AtomicBool,
     generation: AtomicU32,
+    video_generation: AtomicU32,
+    muted: AtomicBool,
+    camera_enabled: AtomicBool,
     submission: SendAdmission,
     metrics: MediaMetrics,
     mutations_submitted: AtomicBool,
@@ -135,17 +143,32 @@ struct Worker {
     conference: Option<Arc<conference::Pending>>,
     conference_start: Option<Vec<String>>,
     conference_commands: Mutex<std::collections::VecDeque<conference::Command>>,
+    direct_commands: Mutex<std::collections::VecDeque<DirectCommand>>,
     audio: SyncSender<QueuedAudio>,
+    video: SyncSender<QueuedVideo>,
+    video_keyframe_requests: SyncSender<u32>,
     done: Mutex<Option<BackendOutcome>>,
     notify: Notify,
+}
+struct DirectCommand {
+    reply: oneshot::Sender<std::result::Result<(), CallServiceError>>,
 }
 struct QueuedAudio {
     request: BackendAudioRequest,
     queued: Instant,
 }
+struct QueuedVideo {
+    request: BackendVideoRequest,
+    queued: Instant,
+}
 impl Worker {
     fn has_commands(&self) -> bool {
         self.conference_commands
+            .lock()
+            .is_ok_and(|commands| !commands.is_empty())
+    }
+    fn has_direct_commands(&self) -> bool {
+        self.direct_commands
             .lock()
             .is_ok_and(|commands| !commands.is_empty())
     }
@@ -173,6 +196,13 @@ impl Worker {
     }
     fn finish(&self, outcome: BackendOutcome) {
         if let Ok(mut commands) = self.conference_commands.lock() {
+            for command in commands.drain(..) {
+                let _ = command
+                    .reply
+                    .send(Err(service_error(CallErrorCode::Closed)));
+            }
+        }
+        if let Ok(mut commands) = self.direct_commands.lock() {
             for command in commands.drain(..) {
                 let _ = command
                     .reply
@@ -245,7 +275,7 @@ impl CallBackend for NativeCallBackend {
                 .map_err(|_| service_error(CallErrorCode::Closed))??
             {
                 conference::CommandResult::Invitations(results) => Ok(results),
-                conference::CommandResult::Muted => {
+                conference::CommandResult::Muted | conference::CommandResult::Camera => {
                     Err(service_error(CallErrorCode::InvalidRequest))
                 }
             }
@@ -258,8 +288,25 @@ impl CallBackend for NativeCallBackend {
             if !worker.current() || worker.stop.load(Ordering::Acquire) {
                 return Err(service_error(CallErrorCode::Stale));
             }
+            worker.muted.store(muted, Ordering::Release);
             if !worker.is_conference() {
-                return Ok(());
+                if worker.call_type != CallType::Video {
+                    return Ok(());
+                }
+                let (reply, received) = oneshot::channel();
+                {
+                    let mut commands = worker
+                        .direct_commands
+                        .lock()
+                        .map_err(|_| service_error(CallErrorCode::Closed))?;
+                    if commands.len() >= 16 {
+                        return Err(service_error(CallErrorCode::Capacity));
+                    }
+                    commands.push_back(DirectCommand { reply });
+                }
+                return received
+                    .await
+                    .map_err(|_| service_error(CallErrorCode::Closed))?;
             }
             let (reply, received) = oneshot::channel();
             {
@@ -280,7 +327,56 @@ impl CallBackend for NativeCallBackend {
                 .map_err(|_| service_error(CallErrorCode::Closed))??
             {
                 conference::CommandResult::Muted => Ok(()),
-                conference::CommandResult::Invitations(_) => {
+                conference::CommandResult::Invitations(_) | conference::CommandResult::Camera => {
+                    Err(service_error(CallErrorCode::InvalidRequest))
+                }
+            }
+        })
+    }
+    fn set_camera(&self, identity: CallIdentity, enabled: bool) -> BackendFuture<()> {
+        let inner = self.inner.clone();
+        Box::pin(async move {
+            let worker = active(&inner, &identity)?;
+            if !worker.current() || worker.stop.load(Ordering::Acquire) {
+                return Err(service_error(CallErrorCode::Stale));
+            }
+            worker.camera_enabled.store(enabled, Ordering::Release);
+            if !worker.is_conference() {
+                let (reply, received) = oneshot::channel();
+                {
+                    let mut commands = worker
+                        .direct_commands
+                        .lock()
+                        .map_err(|_| service_error(CallErrorCode::Closed))?;
+                    if commands.len() >= 16 {
+                        return Err(service_error(CallErrorCode::Capacity));
+                    }
+                    commands.push_back(DirectCommand { reply });
+                }
+                return received
+                    .await
+                    .map_err(|_| service_error(CallErrorCode::Closed))?;
+            }
+            let (reply, received) = oneshot::channel();
+            {
+                let mut commands = worker
+                    .conference_commands
+                    .lock()
+                    .map_err(|_| service_error(CallErrorCode::Closed))?;
+                if commands.len() >= 16 {
+                    return Err(service_error(CallErrorCode::Capacity));
+                }
+                commands.push_back(conference::Command {
+                    action: conference::CommandAction::Camera(enabled),
+                    reply,
+                });
+            }
+            match received
+                .await
+                .map_err(|_| service_error(CallErrorCode::Closed))??
+            {
+                conference::CommandResult::Camera => Ok(()),
+                conference::CommandResult::Invitations(_) | conference::CommandResult::Muted => {
                     Err(service_error(CallErrorCode::InvalidRequest))
                 }
             }
@@ -292,20 +388,17 @@ impl CallBackend for NativeCallBackend {
         lease.current().then(|| lease.authority().clone())
     }
     fn capabilities(&self, account: &str) -> CallCapabilities {
+        let authorized = self.authority(account).is_some();
+        let app_mode =
+            self.inner.config.conference_probe_mode == conference::ProbeMode::Application;
         CallCapabilities {
-            direct_audio: self.authority(account).is_some(),
-            conference_join: self.inner.config.conference_join_profile
-                && self.authority(account).is_some(),
-            conference_create: self.inner.config.conference_probe_mode
-                == conference::ProbeMode::Application
-                && self.authority(account).is_some(),
-            conference_audio: self.inner.config.conference_probe_mode
-                == conference::ProbeMode::Application
-                && self.authority(account).is_some(),
-            conference_invite: self.inner.config.conference_probe_mode
-                == conference::ProbeMode::Application
-                && self.authority(account).is_some(),
-            ..CallCapabilities::default()
+            direct_audio: authorized,
+            direct_video: authorized,
+            conference_join: self.inner.config.conference_join_profile && authorized,
+            conference_create: app_mode && authorized,
+            conference_audio: app_mode && authorized,
+            conference_video: app_mode && authorized,
+            conference_invite: app_mode && authorized,
         }
     }
     fn observe_conference(
@@ -345,9 +438,6 @@ impl CallBackend for NativeCallBackend {
                     return incoming::action(inner, request, sink).await
                 }
             }
-            if request.call_type != crate::call_types::CallType::Voice {
-                return Ok(BackendOutcome::Ended);
-            }
             let Some(core) = inner.core.upgrade() else {
                 return Ok(BackendOutcome::Ended);
             };
@@ -379,15 +469,21 @@ impl CallBackend for NativeCallBackend {
                 None
             };
             let (audio, rx) = mpsc::sync_channel(32);
+            let (video, video_rx) = mpsc::sync_channel(8);
+            let (video_keyframe_requests, keyframe_rx) = mpsc::sync_channel(8);
             let worker = Arc::new(Worker {
                 identity: request.ticket.identity(),
                 peer_id: request.peer_id.clone(),
+                call_type: request.call_type,
                 lease,
                 account_lease: std::sync::OnceLock::new(),
                 stop: AtomicBool::new(false),
                 media_stop: AtomicBool::new(false),
                 locally_closed: AtomicBool::new(false),
                 generation: AtomicU32::new(1),
+                video_generation: AtomicU32::new(1),
+                muted: AtomicBool::new(request.muted),
+                camera_enabled: AtomicBool::new(request.camera_enabled),
                 submission: SendAdmission::default(),
                 metrics: MediaMetrics::default(),
                 mutations_submitted: AtomicBool::new(false),
@@ -395,7 +491,10 @@ impl CallBackend for NativeCallBackend {
                 conference,
                 conference_start: request.conference_invitees.clone(),
                 conference_commands: Mutex::new(std::collections::VecDeque::new()),
+                direct_commands: Mutex::new(std::collections::VecDeque::new()),
                 audio,
+                video,
+                video_keyframe_requests,
                 done: Mutex::new(None),
                 notify: Notify::new(),
             });
@@ -423,6 +522,8 @@ impl CallBackend for NativeCallBackend {
                             request,
                             sink.clone(),
                             rx,
+                            video_rx,
+                            keyframe_rx,
                             admitted,
                             &runtime,
                         )
@@ -512,6 +613,51 @@ impl CallBackend for NativeCallBackend {
                 .submission
                 .advance(&worker.generation, generation)
                 .map_err(|_| service_error(CallErrorCode::Closed))
+        })
+    }
+    fn send_video(&self, request: BackendVideoRequest) -> BackendFuture<()> {
+        let inner = self.inner.clone();
+        Box::pin(async move {
+            let worker = active(&inner, &request.identity)?;
+            if !worker.current()
+                || !request.is_current()
+                || request.generation != worker.video_generation.load(Ordering::Acquire)
+            {
+                return Err(service_error(CallErrorCode::Stale));
+            }
+            if !worker.camera_enabled.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            worker
+                .video
+                .try_send(QueuedVideo {
+                    request,
+                    queued: Instant::now(),
+                })
+                .map_err(|_| service_error(CallErrorCode::Capacity))?;
+            Ok(())
+        })
+    }
+    fn clear_video(&self, identity: CallIdentity, generation: u32) -> BackendFuture<()> {
+        let inner = self.inner.clone();
+        Box::pin(async move {
+            let worker = active(&inner, &identity)?;
+            if generation == 0 {
+                return Err(service_error(CallErrorCode::Stale));
+            }
+            worker.video_generation.store(generation, Ordering::Release);
+            Ok(())
+        })
+    }
+    fn request_video_keyframe(&self, identity: CallIdentity, track_id: u32) -> BackendFuture<()> {
+        let inner = self.inner.clone();
+        Box::pin(async move {
+            let worker = active(&inner, &identity)?;
+            if !worker.current() || worker.stop.load(Ordering::Acquire) {
+                return Err(service_error(CallErrorCode::Stale));
+            }
+            let _ = worker.video_keyframe_requests.try_send(track_id);
+            Ok(())
         })
     }
     fn stop(&self, identity: CallIdentity) -> BackendFuture<BackendOutcome> {
@@ -651,6 +797,26 @@ impl FencedTransport {
                     reply = &mut exchange => return reply,
                     _ = stop_check.tick() => {
                         if !self.worker.current() || self.worker.stop.load(Ordering::Acquire) || self.worker.has_commands() {
+                            return Err(CallLiveSyncInterrupted.into());
+                        }
+                    }
+                }
+            }
+        })
+    }
+    fn wait_for_direct_sync<T>(
+        &self,
+        exchange: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        self.runtime.block_on(async {
+            tokio::pin!(exchange);
+            let mut stop_check = tokio::time::interval(Duration::from_millis(20));
+            loop {
+                tokio::select! {
+                    biased;
+                    reply = &mut exchange => return reply,
+                    _ = stop_check.tick() => {
+                        if !self.worker.current() || self.worker.stop.load(Ordering::Acquire) || self.worker.has_direct_commands() {
                             return Err(CallLiveSyncInterrupted.into());
                         }
                     }
@@ -907,6 +1073,14 @@ impl PersonalTransport for FencedTransport {
                     |exchange| self.wait_for_conference_sync(exchange),
                     retain,
                 )
+            } else if route == CallHostRoute::LiveSync && self.worker.call_type == CallType::Video {
+                operation.call_live_sync(
+                    request,
+                    self.timeout,
+                    handoff,
+                    |exchange| self.wait_for_direct_sync(exchange),
+                    retain,
+                )
             } else {
                 operation.call_rpc(route, request, handoff, retain)
             }
@@ -991,12 +1165,15 @@ fn begin_operational_call(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_control(
     inner: &Arc<Inner>,
     worker: &Arc<Worker>,
     request: BackendRequest,
     sink: BackendSink,
     audio: Receiver<QueuedAudio>,
+    video: Receiver<QueuedVideo>,
+    keyframe_rx: Receiver<u32>,
     admitted: oneshot::Sender<std::result::Result<BackendOutcome, CallServiceError>>,
     runtime: &tokio::runtime::Handle,
 ) -> Result<()> {
@@ -1024,11 +1201,24 @@ fn run_control(
         credential_digest: authorization(&state)?,
     };
     let mut tasks = Tasks::new()?;
+    let is_video = request.call_type == CallType::Video;
     // Retain this fresh identity until the complete call actor (including its
     // media worker) has ended. A startup template is never reused on the wire.
-    let voice_offer =
-        VoiceOffer::from_owned_random(state.device.client_version, crypto::random::<32>()?)?;
-    let mut parameters = independent_voice_parameters()?;
+    let (voice_offer, mut parameters) = if is_video {
+        (
+            VoiceOffer::from_owned_random_video(
+                state.device.client_version,
+                crypto::random::<32>()?,
+                VideoOfferOptions::default(),
+            )?,
+            independent_video_parameters(worker.is_conference())?,
+        )
+    } else {
+        (
+            VoiceOffer::from_owned_random(state.device.client_version, crypto::random::<32>()?)?,
+            independent_voice_parameters()?,
+        )
+    };
     parameters.apply_offer(&voice_offer);
     if worker.is_conference() {
         return conference::run(
@@ -1040,7 +1230,10 @@ fn run_control(
             conference::RunInput {
                 admitted,
                 probe: inner.config.conference_probe_mode,
+                prefer_live98: inner.config.prefer_live98,
                 audio,
+                video,
+                keyframe_rx,
                 request_id: request.request_id,
             },
         );
@@ -1058,11 +1251,19 @@ fn run_control(
         let _ = admitted.send(Ok(BackendOutcome::Ended));
         return Ok(());
     }
-    if let Err(error) = session.invite(
+    let mode = if is_video {
+        CallMediaMode::Video {
+            camera_enabled: request.camera_enabled,
+        }
+    } else {
+        CallMediaMode::Voice
+    };
+    if let Err(error) = session.invite_with_mode(
         &transport,
         &mut state,
         auth,
         &request.peer_id,
+        mode,
         unix_ms()?,
         tasks.next()?,
     ) {
@@ -1106,6 +1307,7 @@ fn run_control(
                 break;
             }
             Ok(_) => {}
+            Err(error) if error.is::<CallLiveSyncInterrupted>() => continue,
             Err(error)
                 if error.is::<CallRpcNotSubmitted>() || error.is::<UnsupportedCallMedia>() =>
             {
@@ -1139,6 +1341,9 @@ fn run_control(
     if let Some(muted) = session.peer_microphone_muted() {
         let _ = runtime.block_on(sink.peer_microphone(muted));
     }
+    if let Some(camera) = session.peer_camera_enabled() {
+        let _ = runtime.block_on(sink.peer_camera(camera));
+    }
     let cfg = inner.config.clone();
     let media_worker = worker.clone();
     let media_sink = sink.clone();
@@ -1151,6 +1356,8 @@ fn run_control(
                 &media_worker,
                 negotiated,
                 audio,
+                is_video.then_some(video),
+                keyframe_rx,
                 &media_sink,
                 &media_runtime,
             );
@@ -1158,6 +1365,7 @@ fn run_control(
             result
         })?;
     let deadline = Instant::now() + inner.config.max_duration;
+    let mut last_av_ts = 0u64;
     let control_result = (|| -> Result<()> {
         while !worker.stop.load(Ordering::Acquire)
             && !worker.media_stop.load(Ordering::Acquire)
@@ -1168,10 +1376,31 @@ fn run_control(
                 worker.stop.store(true, Ordering::Release);
                 break;
             }
+            if is_video {
+                drain_direct_switch_av(worker, &mut || {
+                    let mic = !worker.muted.load(Ordering::Acquire);
+                    let cam = worker.camera_enabled.load(Ordering::Acquire);
+                    let now =
+                        u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
+                    last_av_ts = last_av_ts.saturating_add(1).max(now);
+                    session.switch_av(
+                        &transport,
+                        &mut state,
+                        auth,
+                        mic,
+                        cam,
+                        last_av_ts,
+                        tasks.next()?,
+                    )
+                })?;
+            }
             match session.poll(&transport, &mut state, auth, tasks.next()?) {
                 Ok(SyncProgress::MediaReady) => {
                     if let Some(muted) = session.peer_microphone_muted() {
                         let _ = runtime.block_on(sink.peer_microphone(muted));
+                    }
+                    if let Some(camera) = session.peer_camera_enabled() {
+                        let _ = runtime.block_on(sink.peer_camera(camera));
                     }
                 }
                 Ok(SyncProgress::Terminal(_)) => {
@@ -1179,6 +1408,7 @@ fn run_control(
                     break;
                 }
                 Ok(SyncProgress::Waiting) => bail!("Peer left current voice state"),
+                Err(error) if error.is::<CallLiveSyncInterrupted>() => continue,
                 Err(error)
                     if error.is::<CallRpcNotSubmitted>() || error.is::<UnsupportedCallMedia>() =>
                 {
@@ -1247,6 +1477,33 @@ fn run_control(
     };
     core.store.finish_call(account, call_id, ended.is_ok())?;
     ended
+}
+
+fn drain_direct_switch_av(
+    worker: &Worker,
+    send_switch: &mut impl FnMut() -> Result<()>,
+) -> Result<()> {
+    let commands: Vec<DirectCommand> = {
+        let mut queue = worker
+            .direct_commands
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Direct command queue closed"))?;
+        queue.drain(..).collect()
+    };
+    if commands.is_empty() {
+        return Ok(());
+    }
+    let result = send_switch().map_err(|error| {
+        if error.is::<CallRpcNotSubmitted>() {
+            service_error(CallErrorCode::Stale)
+        } else {
+            service_error(CallErrorCode::OutcomeUnknown)
+        }
+    });
+    for command in commands {
+        let _ = command.reply.send(result);
+    }
+    Ok(())
 }
 
 fn audio_current(worker: &Worker, item: &QueuedAudio) -> bool {

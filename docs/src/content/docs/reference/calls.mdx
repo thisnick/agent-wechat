@@ -1,17 +1,19 @@
 ---
 title: Calling
-description: CLI voice calls, conference controls and OpenClaw setup.
+description: CLI voice and video calls, conference controls and OpenClaw setup.
 ---
 
-Use `wx` to make direct or conference voice calls with this computer's microphone
-and speakers. OpenClaw setup is in [Set up calling](/openclaw/calling/).
+Use `wx` to make direct or conference voice and video calls with this computer's
+microphone, speakers and camera. OpenClaw setup (voice-only) is in
+[Set up calling](/openclaw/calling/).
 
 ## Check availability
 
 1. Select your daemon and account, then run `wx calls status`. Accounts without
    a current authenticated session report `capabilities: {}`. Require the
-   advertised capability for the operation you want.
-2. Run `wx calls devices` to list local microphones and speakers.
+   advertised capability for the operation you want (`directAudio`,
+   `directVideo`, `conferenceAudio`, `conferenceVideo`).
+2. Run `wx calls devices` to list local microphones, speakers and cameras.
 3. Start or answer a call below. Keep the owning terminal open until cleanup
    finishes; a second client cannot take over.
 
@@ -19,10 +21,16 @@ and speakers. OpenClaw setup is in [Set up calling](/openclaw/calling/).
 
 | Command | Behavior |
 | --- | --- |
-| `wx calls monitor --json` | Observe events without opening audio devices |
-| `wx calls monitor` | Wait for invitations; open audio when you accept |
-| `wx calls dial CONTACT` | Participate using this computer's microphone and speakers |
-| `wx calls answer [CALL_ID]` | Answer the current matching offer using local audio |
+| `wx calls monitor --json` | Observe events without opening audio or camera devices |
+| `wx calls monitor` | Wait for invitations; open audio (and camera on video calls) when you accept |
+| `wx calls dial CONTACT` | Start a direct voice call using local microphone and speakers |
+| `wx calls dial CONTACT --video` | Start a direct video call with camera capture and terminal video preview |
+| `wx calls answer [CALL_ID]` | Answer the current matching voice or video offer |
+
+Pass `--camera <source>` to choose a camera (`auto`, `off`, `test` for an
+animated FFmpeg test pattern, `file:<path>` to loop a media file, or a device
+path/name), `--camera-off` to join a video call without sending camera video,
+and `--muted` to start muted.
 
 The monitor shows direct offers after the daemon acknowledges ringing. For a
 conference invitation, enter `j NUMBER`. Leaving returns to watching; standalone
@@ -31,11 +39,13 @@ start/join exits. JSON monitoring never answers or joins automatically.
 ## Conference calls
 
 1. Require `conferenceCreate` and `conferenceAudio` to start, or
-   `conferenceJoin` and `conferenceAudio` to join.
+   `conferenceJoin` and `conferenceAudio` to join. Add `conferenceVideo` for
+   `--video`.
 2. Start in an existing group with contact IDs:
 
    ```sh
    wx calls conference start GROUP_ID --invite CONTACT_A --invite CONTACT_B
+   wx calls conference start GROUP_ID --invite CONTACT_A --video
    ```
 
    Or join a current invitation:
@@ -45,13 +55,14 @@ start/join exits. JSON monitoring never answers or joins automatically.
    ```
 
    No current invitation means join fails; it never creates a room.
-3. Speak after connection. Incoming tracks are mixed for playback:
+3. Speak after connection. Incoming audio tracks are mixed for playback, and
+   incoming video tracks render in the terminal:
 
    ```text
-   Connected. Microphone and mixed speakers active; 2 receive tracks.
+   Connected. Audio tracks: 1, video tracks: 1.
    ```
 
-## Audio and in-call controls
+## Audio, video and in-call controls
 
 Run `wx calls devices` first, then select endpoints with
 `wx calls dial CONTACT --input-device INPUT_ID --output-device OUTPUT_ID`.
@@ -59,17 +70,19 @@ Without those options, OS defaults are used. Linux accepts PulseAudio or
 PipeWire-Pulse names; Windows accepts endpoint IDs. On macOS, select defaults in
 System Settings; custom endpoint IDs are unsupported.
 
-Interactive calls show the controls and meters below. Press Enter after a key;
-`l` or `h` leaves the call and returns to watching in `monitor`. Ctrl-C leaves
-and exits the command after a short cleanup wait.
+Interactive calls show the controls, meters and (when video is active) a 24-bit
+TrueColor terminal video preview. Press Enter after a key; `l` or `h` leaves the
+call and returns to watching in `monitor`. Ctrl-C leaves and exits the command
+after a short cleanup wait.
 
 ```text
-m + Enter    Microphone          s + Enter    Speaker
-i + Enter    Invite              p + Enter    Participants
-d + Enter    Devices             ? + Enter    Help
-l/h + Enter  Leave call          Ctrl-C       Leave and exit
+m + Enter    Microphone          v + Enter    Camera (video calls)
+s + Enter    Speaker             i + Enter    Invite
+p + Enter    Participants        d + Enter    Devices
+l/h + Enter  Leave call          ? + Enter    Help
+Ctrl-C       Leave and exit
 Mic [#######...] -18dB  Speaker [########..] -10dB
-Alice [######....] -24dB joined mic on
+Alice [######....] -24dB joined mic on cam on
 Bob   [..........] -60dB joined mic off
 >
 ```
@@ -78,7 +91,8 @@ Bars measure digital PCM; `0 dB` is full scale and `!` marks a recent near-clipp
 peak. Mic measures outgoing signal; Speaker measures mixed playback, not hardware
 volume. Participant meters measure each source before mixing, even with playback
 off. Silence does not prove mute or departure. Unattributed sources use track
-labels. Meters stay out of JSON and redirected output; `p` shows the full roster.
+labels. Meters and terminal video stay out of JSON and redirected output; `p`
+shows the full roster.
 
 Use `i` to search contacts or enter `invite CONTACT_ID OTHER_ID`. Submission does
 not mean someone joined. Invite works only in conferences; it cannot promote a
@@ -87,12 +101,19 @@ Device preparation leaves current audio running, but switching can briefly
 interrupt it. Enter `cancel` to close a picker.
 
 Use the [Calls API](../calls-api/) and [media reference](../calls-media/) for
-authentication, ownership and PCM payloads.
+authentication, ownership, binary `WXCM` audio/video frames and codec
+negotiation.
 
 :::note[Good to know]
 This build limits native calls to 20 minutes; longer calls still need validation.
-Video and direct-call promotion are unavailable. Leaving ends our participation,
-not the room. Inspect an uncertain end before another call.
+Direct-call promotion and screen sharing are unavailable. Leaving ends our
+participation, not the room. Inspect an uncertain end before another call.
+
+Outgoing camera capture and daemon-side video transcoding require `ffmpeg` on
+`PATH` (or `WX_FFMPEG_BIN`) with HEVC (`hevc`/`libx265`), H.264
+(`h264`/`libx264`) or MJPEG codecs. The CLI displays received video using
+standalone JPEG frames and rotates frames locally when the peer changes
+orientation.
 
 The legacy WeChat relay can reuse an audio nonce across senders. The daemon
 continues the call for compatibility, which weakens audio confidentiality and

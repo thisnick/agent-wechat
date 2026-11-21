@@ -82,6 +82,8 @@ payloads! {
     "AccountSettings" => wechat_store::AccountSettings,
     "OwnedMediaSource" => wechat_store::OwnedMediaSource,
     "CallSnapshot" => wechat_core::call_types::CallSnapshot,
+    "CallTicketRequest" => wechat_core::call_types::CallTicketRequest,
+    "CallTicketResponse" => wechat_core::call_types::CallTicketResponse,
     "NativeStatus" => crate::contracts::NativeStatus,
     "NativeAccountRemovalRequest" => crate::contracts::NativeAccountRemovalRequest,
     "NativeAccountRemoval" => crate::contracts::NativeAccountRemoval,
@@ -486,7 +488,7 @@ const TAGS: &[(&str, &str)] = &[
     ("auth", "Signing in, connecting and signing out."),
     (
         "calls",
-        "Voice calls. The two sockets are described in asyncapi.json.",
+        "Voice and video calls. The two sockets are described in asyncapi.json.",
     ),
     ("contacts", "Saved contacts and their avatars."),
     ("events", "The replayable event log and stream."),

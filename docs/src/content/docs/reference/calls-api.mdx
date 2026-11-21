@@ -4,20 +4,24 @@ description: Call snapshots and complete client/server JSON payload examples.
 ---
 
 Use the control WebSocket for call commands and events. Its winning owner can
-attach the separate [JSON PCM media socket](../calls-media/).
+attach the separate [binary `WXCM` v3 media socket](../calls-media/).
 [Rust crate architecture](../../how-it-works/rust-crates/) explains package responsibilities.
 
 ## Routes and snapshot
 
 All routes require an account-authorized `calls` bearer token in the
-`Authorization` header, including WebSocket upgrades. URL-encode identifiers;
-never put credentials in URLs.
+`Authorization` header. WebSocket routes also accept a single-use `?ticket=`
+query parameter minted by `POST /v1/accounts/{account}/calls/socket-ticket`
+(valid for 30 seconds, bound to the exact account, route and call ID) for
+clients that cannot set custom upgrade headers. URL-encode identifiers; never
+put bearer tokens in URLs.
 
 | Method | Path | Response |
 | --- | --- | --- |
 | GET | `/v1/accounts/{account}/calls/current` | JSON snapshot |
-| WebSocket | `/v1/accounts/{account}/calls/socket` | JSON control messages |
-| WebSocket | `/v1/accounts/{account}/calls/{callId}/media` | Versioned JSON and base64 PCM |
+| POST | `/v1/accounts/{account}/calls/socket-ticket` | Single-use WebSocket ticket (`target`: `control` or `media`) |
+| WebSocket | `/v1/accounts/{account}/calls/socket` | JSON control messages (protocol 3) |
+| WebSocket | `/v1/accounts/{account}/calls/{callId}/media` | JSON track lifecycle + binary `WXCM` v3 audio/video frames |
 
 ```bash
 curl -sS -H "Authorization: Bearer $TOKEN" \
@@ -34,10 +38,12 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
   }],
   "capabilities": {
     "directAudio": true,
+    "directVideo": true,
     "conferenceCreate": true,
     "conferenceJoin": true,
     "conferenceInvite": true,
-    "conferenceAudio": true
+    "conferenceAudio": true,
+    "conferenceVideo": true
   },
   "availability": {
     "busy": false,
@@ -50,6 +56,13 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
     "sampleRate": 16000,
     "channels": 1,
     "frameMs": 20
+  },
+  "videoCapabilities": {
+    "sendCodecs": ["h265", "h264", "jpeg"],
+    "receiveCodecs": ["h265", "h264", "jpeg"],
+    "maxWidth": 640,
+    "maxHeight": 480,
+    "maxFps": 15
   }
 }
 ```
@@ -62,6 +75,7 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
 | `currentOffer` | Actionable incoming offer; clears when claimed or ended |
 | `currentCall` | Active call metadata, including kind, type, state, conference roster or reported direct-call controls |
 | `audioFormat` | Client/daemon PCM format, independent of the WeChat codec |
+| `videoCapabilities` | Supported video send/receive codecs and bounds when video calling is available |
 
 Reported conference participants include `participantId`, `contactId` and
 `membership` (`joined`, `invited`, `left` or `unknown`). When the server supplies microphone state, `microphoneEnabled` is
@@ -158,21 +172,22 @@ promotion is unavailable in this version.
 Within five seconds of opening the control socket, announce supported versions:
 
 ```json
-{"type": "call.hello", "supportedProtocolVersions": [2]}
+{"type": "call.hello", "supportedProtocolVersions": [3]}
 ```
 
 Wait for the server's `hello` and check `protocolVersion` before sending commands.
-The daemon supports version 2 only. An omitted announcement means version 1;
+The daemon supports version 3 only. An omitted announcement means version 1;
 there is no compatibility fallback. A mismatch returns this before closing with
 WebSocket code 1002:
 
 ```json
-{"type":"protocol.error","code":"unsupported_protocol_version","clientVersions":[1],"serverVersions":[2]}
+{"type":"protocol.error","code":"unsupported_protocol_version","clientVersions":[2],"serverVersions":[3]}
 ```
 
 Empty, null, duplicate or malformed version lists return
-`invalid_protocol_version`. The CLI and OpenClaw plugin announce version 2 and
-reject an unsupported server. Media attachment negotiates independently.
+`invalid_protocol_version`. The CLI, shared SDK and OpenClaw plugin announce
+version 3 and reject an unsupported server. Media attachment negotiates
+independently.
 
 ## Client messages
 
@@ -311,14 +326,15 @@ after answering/connecting:
 }
 ```
 
-### Audio controls
+### Audio and video controls
 
-Mute outgoing audio; send `muted: false` to unmute. Clear queued outgoing audio
-when interrupting a response; see [stream generations](../calls-media/#mute-and-interrupt).
+Mute outgoing audio (`call.mute`), toggle the local camera on a video call
+(`call.camera`), or clear queued outgoing audio (`call.clear_audio`); see
+[stream generations](../calls-media/#mute-camera-toggle-and-interrupt).
 `call.mute` silences this client's outgoing stream in the daemon. For a conference,
-it also requests our room microphone state. It does not control another
-participant's microphone. A mute change clears queued audio and advances the
-send generation, just as `call.clear_audio` does.
+it also requests our room microphone state. `call.camera` requests our camera
+state (`SwitchAV`) and advances the video send track generation. Neither controls
+another participant's devices.
 
 ```json
 {
@@ -331,11 +347,25 @@ send generation, just as `call.clear_audio` does.
 
 ```json
 {
+  "type": "call.camera",
+  "requestId": "camera-1",
+  "callId": "example-call",
+  "enabled": false
+}
+```
+
+```json
+{
   "type": "call.clear_audio",
   "requestId": "clear-1",
   "callId": "example-call"
 }
 ```
+
+Include optional `video` capabilities in `call.ready` (`sendCodecs`,
+`receiveCodecs`, `maxWidth`, `maxHeight`, `maxFps`) when participating in video
+calls, and optional `cameraEnabled` / `muted` flags on `call.dial`,
+`call.answer` and `call.join`.
 
 ## Server messages
 
@@ -349,7 +379,7 @@ The first event includes the connection's `clientId` and a current snapshot:
 ```json
 {
   "type": "hello",
-  "protocolVersion": 2,
+  "protocolVersion": 3,
   "clientId": "example-client",
   "conferenceInvitations": [{
     "invitationId": "invitation-example",
@@ -359,10 +389,12 @@ The first event includes the connection's `clientId` and a current snapshot:
   }],
   "capabilities": {
     "directAudio": true,
+    "directVideo": true,
     "conferenceCreate": true,
     "conferenceJoin": true,
     "conferenceInvite": true,
-    "conferenceAudio": true
+    "conferenceAudio": true,
+    "conferenceVideo": true
   },
   "availability": {
     "busy": false,
@@ -375,6 +407,13 @@ The first event includes the connection's `clientId` and a current snapshot:
     "sampleRate": 16000,
     "channels": 1,
     "frameMs": 20
+  },
+  "videoCapabilities": {
+    "sendCodecs": ["h265", "h264", "jpeg"],
+    "receiveCodecs": ["h265", "h264", "jpeg"],
+    "maxWidth": 640,
+    "maxHeight": 480,
+    "maxFps": 15
   }
 }
 ```
@@ -657,9 +696,10 @@ its network receipts are retained even when the local session closes.
 
 ### Participant control events
 
-For direct calls, `call.control` reports a participant's control state. The current
-control kind is `microphone`; `muted: true` means muted, and `false` means unmuted. `participantId`
-is the contact ID used by the direct-call target or incoming offer.
+For direct calls, `call.control` reports a participant's control state. Supported
+control kinds are `microphone` (`muted: true|false`) and `camera`
+(`enabled: true|false`). `participantId` is the contact ID used by the
+direct-call target or incoming offer.
 
 ```json
 {
@@ -679,30 +719,31 @@ is the contact ID used by the direct-call target or incoming offer.
   "callId": "example-call",
   "participantId": "example-contact",
   "control": {
-    "kind": "microphone",
-    "muted": false
+    "kind": "camera",
+    "enabled": true
   }
 }
 ```
 
 These events go to the owner and same-account observers. They need no reply;
-clients can ignore them. Repeated unchanged microphone state produces no event.
-The latest known values also appear in `currentCall.controls` in HTTP snapshots,
-`hello` and `call.state`. An omitted `controls` means no state has been reported.
-Control updates do not change the call-state revision or PCM format, end the call,
-or interrupt audio in the other direction.
-Conference microphone changes appear in `participants` and `participant.updated`;
-an omitted `microphoneEnabled` is unknown, not `false`.
+clients can ignore them. Repeated unchanged state produces no event. The latest
+known values also appear in `currentCall.controls` in HTTP snapshots, `hello`
+and `call.state`. An omitted `controls` means no state has been reported.
+Conference microphone and camera changes appear in `participants`
+(`microphoneEnabled`, `cameraEnabled`) and `participant.updated`; an omitted
+value is unknown, not `false`.
 
-### Audio generation and errors
+### Track generations and errors
 
-After successful `call.clear_audio` or a mute change, the send track advances:
+After successful `call.clear_audio`, `call.mute` or `call.camera`, the affected
+send track advances:
 
 ```json
 {
   "type": "track.updated",
   "callId": "example-call",
   "track": {
+    "media": "audio",
     "id": 1,
     "generation": 2,
     "direction": "send",
@@ -716,7 +757,7 @@ After successful `call.clear_audio` or a mute change, the send track advances:
 ```
 
 Receive-track `track.added` and `track.removed` examples and their ordering with
-audio are in the [media reference](../calls-media/#receive-tracks-and-timing).
+binary `WXCM` frames are in the [media reference](../calls-media/#receive-tracks-and-video-keyframes).
 
 A socket-level failure uses `call.error`:
 
@@ -741,7 +782,8 @@ audio does not count as a lost control connection.
 On daemon restart, previous calls are locally ended and `currentCall` is empty.
 Old requests are never replayed. A normal shutdown first attempts call cleanup;
 unconfirmed network outcomes remain recorded separately from local call state.
-`kind` is `direct` or `conference`; this backend implements voice calls when the
-corresponding capabilities are present. Video and direct-to-conference promotion
-are unavailable. Native calls currently have a 20-minute safety limit.
+`kind` is `direct` or `conference`, and `callType` is `voice` or `video` when
+the corresponding capabilities are present. Screen sharing and
+direct-to-conference promotion are unavailable. Native calls currently have a
+20-minute safety limit.
 :::

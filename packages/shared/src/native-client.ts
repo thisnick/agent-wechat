@@ -116,8 +116,12 @@ export class NativeWeChatClient {
     if (response.status === 204) return undefined as T;
     return JSON.parse(new TextDecoder().decode(await this.readBounded(response))) as T;
   }
-  calls(accountId: string, webSocketFactory: NativeCallWebSocketFactory, options: Pick<NativeCallsClientOptions, "handshakeTimeoutMs" | "commandTimeoutMs" | "maxEvents" | "maxBufferedBytes"> = {}): NativeCallsClient {
+  calls(accountId: string, webSocketFactory: NativeCallWebSocketFactory, options: Pick<NativeCallsClientOptions, "handshakeTimeoutMs" | "commandTimeoutMs" | "maxEvents" | "maxBufferedBytes" | "ticketProvider"> = {}): NativeCallsClient {
     return new NativeCallsClient({ baseUrl: this.baseUrl.toString(), token: this.token, accountId, webSocketFactory, ...options });
+  }
+  /** Issue a short-lived single-use browser WebSocket ticket for a calls socket. */
+  issueCallTicket(accountId: string, request: import("./native.generated.js").CallTicketRequest, signal?: AbortSignal): Promise<import("./native.generated.js").CallTicketResponse> {
+    return this.request(`v1/accounts/${id(accountId)}/calls/tickets`, { method: "POST", body: JSON.stringify(request), signal });
   }
   status(): Promise<NativeStatus> { return this.request("v1/status"); }
   accounts(): Promise<{ items: Record<string, unknown>[] }> { return this.request("v1/accounts"); }

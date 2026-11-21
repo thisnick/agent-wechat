@@ -19,7 +19,7 @@ use wechat_protocol::{
 use zeroize::Zeroizing;
 
 mod parameters;
-pub use parameters::independent_voice_parameters;
+pub use parameters::{independent_video_parameters, independent_voice_parameters};
 
 mod conference;
 pub use conference::{
@@ -168,6 +168,7 @@ struct ActiveRoom {
     channel: Vec<u8>,
     av_sequence: u32,
     av: AvSnapshot,
+    video_mode: bool,
     media_taken: bool,
 }
 
@@ -175,6 +176,10 @@ pub struct NegotiatedMedia {
     pub relay: SelectedRelay,
     pub peer_member: u16,
     pub frames_per_packet: u8,
+    /// True when the call negotiated a video-capable room (`room_type = 1`).
+    pub video_enabled: bool,
+    /// Server-intersected peer video decoder capability mask (`Cap11` field 33).
+    pub video_dec_cap_mask: u32,
 }
 
 /// One generic app session with at most one personal call. It is not Clone and
@@ -192,6 +197,8 @@ pub struct NativePersonalSession {
     control: Option<PersonalControl>,
     host_tasks: BTreeSet<u32>,
     sdk_tasks: BTreeSet<u32>,
+    video_mode: bool,
+    av_timestamp: u64,
 }
 impl NativePersonalSession {
     /// Perform exactly one generic7994 request after the host has journaled its
@@ -225,6 +232,8 @@ impl NativePersonalSession {
             control: None,
             host_tasks: BTreeSet::from([host_task]),
             sdk_tasks: BTreeSet::new(),
+            video_mode: false,
+            av_timestamp: 0,
         })
     }
     pub fn ignored_control_count(&self) -> u64 {
@@ -244,11 +253,41 @@ impl NativePersonalSession {
         if member.status != 1 {
             return None;
         }
-        match room.av.get(&member.member)?.0 {
-            0 => Some(true),
-            1 => Some(false),
-            _ => None,
+        let status = room.av.get(&member.member)?.0;
+        if room.video_mode {
+            (status <= 3).then_some(status & 1 == 0)
+        } else {
+            match status {
+                0 => Some(true),
+                1 => Some(false),
+                _ => None,
+            }
         }
+    }
+
+    /// Current authenticated remote camera state while joined in a video call.
+    pub fn peer_camera_enabled(&self) -> Option<bool> {
+        if self.phase != PersonalPhase::Joined {
+            return None;
+        }
+        let room = self.active.as_ref()?;
+        if !room.video_mode {
+            return None;
+        }
+        let member = room.members.get(&room.peer)?;
+        if member.status != 1 {
+            return None;
+        }
+        let status = room.av.get(&member.member)?.0;
+        (status <= 3).then_some(status & 2 != 0)
+    }
+
+    /// Latest server-intersected peer video decoder capability mask (`Cap11` field 33).
+    pub fn video_dec_cap_mask(&self) -> u32 {
+        self.active
+            .as_ref()
+            .map(|room| engine_video_dec_cap_mask(&room.engine))
+            .unwrap_or(0)
     }
     /// Allocated control identity survives a later media-admission failure. It
     /// does not by itself authorize Cancel or Exit; the current phase still must
@@ -318,14 +357,39 @@ impl NativePersonalSession {
         invite_id: u64,
         tasks: TaskIds,
     ) -> Result<()> {
+        self.invite_with_mode(
+            client,
+            state,
+            current,
+            peer,
+            personal::CallMediaMode::Voice,
+            invite_id,
+            tasks,
+        )
+    }
+
+    /// Place a direct voice or video invitation selecting the wire `room_type`
+    /// and initial `av_status`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn invite_with_mode(
+        &mut self,
+        client: &impl PersonalTransport,
+        state: &mut AccountState,
+        current: AppAuthority,
+        peer: &str,
+        mode: personal::CallMediaMode,
+        invite_id: u64,
+        tasks: TaskIds,
+    ) -> Result<()> {
         self.check(state, current)?;
         ensure!(
             self.phase == PersonalPhase::Idle && peer != self.own_username,
             "Personal session busy or invalid peer"
         );
         self.reserve(tasks)?;
+        self.video_mode = matches!(mode, personal::CallMediaMode::Video { .. });
         self.phase = PersonalPhase::Inviting;
-        let result = self.invite_once(client, state, peer, invite_id, tasks);
+        let result = self.invite_once(client, state, peer, mode, invite_id, tasks);
         let understood_media_error = result
             .as_ref()
             .is_err_and(|error| error.is::<UnsupportedCallMedia>())
@@ -344,11 +408,18 @@ impl NativePersonalSession {
         client: &impl PersonalTransport,
         state: &mut AccountState,
         peer: &str,
+        mode: personal::CallMediaMode,
         invite_id: u64,
         tasks: TaskIds,
     ) -> Result<()> {
-        let request =
-            personal::invite(&self.parameters.inputs(), peer, invite_id, tasks.sdk, None)?;
+        let request = personal::invite_with_mode(
+            &self.parameters.inputs(),
+            peer,
+            mode,
+            invite_id,
+            tasks.sdk,
+            None,
+        )?;
         let body = self.host(
             client,
             state,
@@ -481,6 +552,7 @@ impl NativePersonalSession {
             channel,
             av_sequence,
             av,
+            video_mode: self.video_mode,
             media_taken: false,
         };
         self.active = Some(active);
@@ -673,7 +745,7 @@ impl NativePersonalSession {
                             continue;
                         }
                         ensure!(
-                            !next.media_taken || terminal.is_some(),
+                            !next.media_taken || next.video_mode || terminal.is_some(),
                             "Post-start call capability reconfiguration unsupported"
                         );
                         next.cap_sequence = sequence;
@@ -695,7 +767,7 @@ impl NativePersonalSession {
                         ensure!(
                             !next.media_taken
                                 || terminal.is_some()
-                                || microphone_update(&next, &av, &self.own_username),
+                                || av_update_allowed(&next, &av, &self.own_username),
                             "Post-start call AV reconfiguration unsupported"
                         );
                         next.av_sequence = sequence;
@@ -800,11 +872,92 @@ impl NativePersonalSession {
             udp_index,
         )?;
         active.media_taken = true;
+        let video_dec_cap_mask = if active.video_mode {
+            engine_video_dec_cap_mask(&active.engine)
+        } else {
+            0
+        };
         Ok(NegotiatedMedia {
             relay,
             peer_member: active.members[&active.peer].member,
             frames_per_packet: (profile_shape(&active.engine, &active.channel)?[1] >> 8) as u8,
+            video_enabled: active.video_mode,
+            video_dec_cap_mask,
         })
+    }
+
+    /// Submit a direct-call `SwitchAV` (`3197`) request toggling local microphone
+    /// and/or camera status while joined.
+    #[allow(clippy::too_many_arguments)]
+    pub fn switch_av(
+        &mut self,
+        client: &impl PersonalTransport,
+        state: &mut AccountState,
+        current: AppAuthority,
+        microphone_enabled: bool,
+        camera_enabled: bool,
+        timestamp: u64,
+        tasks: TaskIds,
+    ) -> Result<()> {
+        self.check(state, current)?;
+        ensure!(
+            self.phase == PersonalPhase::Joined && timestamp > self.av_timestamp,
+            "Personal SwitchAV unavailable or stale timestamp"
+        );
+        let active = self
+            .active
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Missing personal room"))?;
+        let identity = active.identity;
+        let own_member = identity.own_member as u16;
+        let peer_member = active
+            .original_members
+            .get(&active.peer)
+            .context("Missing direct peer member")?
+            .member;
+        let request = personal::switch_av(
+            &self.parameters.inputs(),
+            identity,
+            microphone_enabled,
+            camera_enabled,
+            timestamp,
+            tasks.sdk,
+        )?;
+        let parameters = AppFrameParameters {
+            sdk_version: self.parameters.sdk_version()?,
+            cloud_device_id: &self.parameters.cloud_device_id,
+            host_client_version: state.device.client_version as u32,
+            app_config_version: self.parameters.app_config_version,
+        };
+        let body = app_frame::prepare_transfer(
+            &self.app,
+            current,
+            CallOperation::SwitchAv,
+            request.body.as_deref().context("Missing SwitchAV body")?,
+            &parameters,
+        )?;
+        self.reserve(tasks)?;
+        self.av_timestamp = timestamp;
+        let reply = self.host(client, state, CallHostRoute::Transfer, &body, tasks.host)?;
+        let reply =
+            app_frame::decode_transfer_reply(&self.app, current, CallOperation::SwitchAv, &reply)?;
+        let values = fields(&reply)?;
+        ensure!(
+            number(&values, 1, None)? == identity.room
+                && number(&values, 2, None)? == identity.room_key
+                && number(&values, 3, None)? == u64::from(identity.own_member),
+            "Personal SwitchAV response context mismatch"
+        );
+        if let Some(raw_av) = p::optional_data(&values, 4)? {
+            let (sequence, parsed) = av(raw_av, own_member, peer_member)?;
+            if let Some(room) = self.active.as_mut() {
+                if sequence > room.av_sequence {
+                    room.av_sequence = sequence;
+                    room.av = parsed;
+                }
+            }
+        }
+        Ok(())
     }
     /// Cancel the original unanswered personal invitation once. This selected
     /// client owns one original pending peer; no unrelated recipients are added.
@@ -1226,17 +1379,31 @@ fn cap(raw: &[u8]) -> Result<(u32, Vec<u8>, Vec<u8>)> {
 }
 fn av(raw: &[u8], own: u16, peer: u16) -> Result<(u32, AvSnapshot)> {
     let values = fields(raw)?;
-    only(&values, &[1, 3, 4])?;
+    only(&values, &[1, 2, 3, 4])?;
+    for field in values.iter().filter(|f| matches!(f.number, 1 | 2)) {
+        match &field.value {
+            Value::Varint(v) => {
+                u32::try_from(*v)?;
+            }
+            Value::Bytes(packed) => {
+                ensure!(packed.len() <= 256, "AV member list too large");
+            }
+            _ => bail!("Invalid AV member list wire type"),
+        }
+    }
     let sequence = u32::try_from(number(&values, 3, Some(0))?)?;
     let mut members = BTreeMap::new();
     for raw in repeated(&values, 4, 2)? {
         let values = fields(raw)?;
-        only(&values, &[1, 2, 3])?;
+        only(&values, &[1, 2, 3, 4, 5])?;
         let member = u16::try_from(number(&values, 1, None)?)?;
         ensure!(
             [own, peer].contains(&member) && !members.contains_key(&member),
             "Unexpected AV member"
         );
+        for tag in [4, 5] {
+            u32::try_from(number(&values, tag, Some(0))?)?;
+        }
         members.insert(
             member,
             (
@@ -1258,9 +1425,16 @@ fn profile_shape(engine: &[u8], channel: &[u8]) -> Result<[u64; 6]> {
     let mut seen = BTreeSet::new();
     for field in &ef {
         ensure!(
-            (1..=42).contains(&field.number) && field.number != 41 && seen.insert(field.number),
+            (1..=42).contains(&field.number) && seen.insert(field.number),
             "Unsupported engine capability shape"
         );
+        if field.number == 41 {
+            let Value::Bytes(raw) = &field.value else {
+                bail!("Invalid engine capability wire type")
+            };
+            ensure!(raw.len() <= 1024, "Engine InitVCap too large");
+            continue;
+        }
         let Value::Varint(value) = field.value else {
             bail!("Invalid engine capability wire type")
         };
@@ -1280,29 +1454,56 @@ fn profile_shape(engine: &[u8], channel: &[u8]) -> Result<[u64; 6]> {
         u64::from(u32::try_from(number(&cf, 2, Some(0))?)?),
     ])
 }
+fn engine_video_dec_cap_mask(engine: &[u8]) -> u32 {
+    fields(engine)
+        .ok()
+        .and_then(|ef| number(&ef, 33, Some(0)).ok())
+        .and_then(|v| u32::try_from(v).ok())
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
 fn profile(engine: &[u8], channel: &[u8]) -> Result<()> {
-    if !matches!(
-        profile_shape(engine, channel)?,
-        [17, 0x106 | 0x206, 0x800000, 0, 2, 3]
-    ) {
+    profile_for_mode(engine, channel, false)
+}
+
+fn profile_for_mode(engine: &[u8], channel: &[u8], video_mode: bool) -> Result<()> {
+    let shape = profile_shape(engine, channel)?;
+    let ok = if video_mode {
+        shape[0] == 17
+            && matches!(shape[1], 0x106 | 0x206)
+            && shape[4] == 2
+            && matches!(shape[5], 0 | 3)
+    } else {
+        matches!(shape, [17, 0x106 | 0x206, 0x800000, 0, 2, 3])
+    };
+    if !ok {
         return Err(UnsupportedCallMedia.into());
     }
     Ok(())
 }
-/// A microphone change does not replace the already admitted media context.
-/// Keep microphone metadata opaque: it cannot reset codec, crypto or counters.
-fn microphone_update(room: &ActiveRoom, av: &AvSnapshot, own: &str) -> bool {
+/// A microphone (or video-call camera) change does not replace the already
+/// admitted media context. Keep metadata opaque: it cannot reset codec, crypto or counters.
+fn av_update_allowed(room: &ActiveRoom, av: &AvSnapshot, own: &str) -> bool {
     let Some(local) = room.members.get(own) else {
         return false;
     };
     let Some(peer) = room.members.get(&room.peer) else {
         return false;
     };
-    av.len() == 2
-        && av
-            .get(&local.member)
-            .is_some_and(|(status, info)| *status == 1 && info.is_none())
-        && av.get(&peer.member).is_some_and(|(status, _)| *status <= 1)
+    if room.video_mode {
+        av.len() == 2
+            && av
+                .get(&local.member)
+                .is_some_and(|(status, _)| *status <= 3)
+            && av.get(&peer.member).is_some_and(|(status, _)| *status <= 3)
+    } else {
+        av.len() == 2
+            && av
+                .get(&local.member)
+                .is_some_and(|(status, info)| *status == 1 && info.is_none())
+            && av.get(&peer.member).is_some_and(|(status, _)| *status <= 1)
+    }
 }
 fn ready(room: &ActiveRoom, own: &str) -> Result<bool> {
     // Current capability bytes are validated even while a peer/AV stream is
@@ -1317,18 +1518,24 @@ fn ready(room: &ActiveRoom, own: &str) -> Result<bool> {
         .members
         .get(&room.peer)
         .context("Missing current peer member")?;
-    if peer.status != 1
-        || room.av.len() != 2
-        || !(room.media_taken && microphone_update(room, &room.av, own)
-            || [own_id, peer.member].iter().all(|id| {
-                room.av
-                    .get(id)
-                    .is_some_and(|(status, info)| *status == 1 && info.is_none())
-            }))
-    {
+    let av_ok = if room.video_mode {
+        room.av.len() == 2
+            && [own_id, peer.member]
+                .iter()
+                .all(|id| room.av.get(id).is_some_and(|(status, _)| *status <= 3))
+    } else {
+        room.av.len() == 2
+            && (room.media_taken && av_update_allowed(room, &room.av, own)
+                || [own_id, peer.member].iter().all(|id| {
+                    room.av
+                        .get(id)
+                        .is_some_and(|(status, info)| *status == 1 && info.is_none())
+                }))
+    };
+    if peer.status != 1 || !av_ok {
         return Ok(false);
     }
-    profile(&room.engine, &room.channel)?;
+    profile_for_mode(&room.engine, &room.channel, room.video_mode)?;
     Ok(true)
 }
 fn replace_group(raw: &[u8], live_id: u64, group: &str) -> Result<Vec<u8>> {
@@ -1886,7 +2093,7 @@ mod tests {
         let active = session.active.as_ref().unwrap();
         let mut unsupported = active.av.clone();
         unsupported.get_mut(&1).unwrap().0 = 4;
-        assert!(!microphone_update(
+        assert!(!av_update_allowed(
             active,
             &unsupported,
             &state.own_username
@@ -2707,5 +2914,37 @@ mod tests {
             )
             .is_err());
         assert!(transport.0.borrow().is_empty());
+    }
+
+    #[test]
+    fn video_av_snapshot_accepts_room_key_and_video_type_fields_and_init_vcap() {
+        let raw_av = p::message(&[
+            p::uint(1, 0),
+            p::uint(1, 1),
+            p::uint(2, 0),
+            p::uint(2, 1),
+            p::uint(3, 2),
+            p::bytes(
+                4,
+                &p::message(&[p::uint(1, 0), p::uint(2, 3), p::uint(4, 1)]).unwrap(),
+            ),
+            p::bytes(4, &p::message(&[p::uint(1, 1), p::uint(2, 3)]).unwrap()),
+        ])
+        .unwrap();
+        let (seq, parsed) = av(&raw_av, 0, 1).unwrap();
+        assert_eq!(seq, 2);
+        assert_eq!(parsed.get(&0).map(|(s, _)| *s), Some(3));
+        assert_eq!(parsed.get(&1).map(|(s, _)| *s), Some(3));
+
+        let engine = p::message(&[
+            p::uint(5, 17),
+            p::uint(6, 0x206),
+            p::uint(7, 0x800000),
+            p::uint(33, 0x8808_0800),
+            p::bytes(41, &[8, 1]),
+        ])
+        .unwrap();
+        let channel = p::message(&[p::uint(1, 2), p::uint(2, 3)]).unwrap();
+        assert!(profile_for_mode(&engine, &channel, true).is_ok());
     }
 }

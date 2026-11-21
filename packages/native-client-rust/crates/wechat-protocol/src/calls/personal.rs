@@ -144,12 +144,12 @@ impl VoiceInputs<'_> {
         Ok((version, owner_version.to_vec(), owner_group.to_vec()))
     }
 
-    fn client_info(&self) -> Result<Vec<u8>> {
+    fn client_info(&self, av_status: u64) -> Result<Vec<u8>> {
         let (version, owner_version, _) = self.checked()?;
-        self.encode_client_info(version, &owner_version)
+        self.encode_client_info(version, &owner_version, av_status)
     }
 
-    pub(super) fn conference_client_info(&self, group_id: &str) -> Result<Vec<u8>> {
+    pub(super) fn conference_client_info(&self, group_id: &str, av_status: u64) -> Result<Vec<u8>> {
         let (version, owner_version, owner_group) = self.checked_context(b"voip-mt")?;
         let group = fields(self.group)?;
         ensure!(
@@ -158,7 +158,7 @@ impl VoiceInputs<'_> {
                 && owner_group == group_id.as_bytes(),
             "Conference creation context mismatch"
         );
-        self.encode_client_info(version, &owner_version)
+        self.encode_client_info(version, &owner_version, av_status)
     }
 
     pub(super) fn validate_conference_context(&self) -> Result<()> {
@@ -170,7 +170,12 @@ impl VoiceInputs<'_> {
         Ok(())
     }
 
-    fn encode_client_info(&self, version: u32, owner_version: &[u8]) -> Result<Vec<u8>> {
+    fn encode_client_info(
+        &self,
+        version: u32,
+        owner_version: &[u8],
+        av_status: u64,
+    ) -> Result<Vec<u8>> {
         let capabilities = message(&[
             p::bytes(1, self.engine_capability),
             p::bytes(2, self.channel_capability),
@@ -179,7 +184,7 @@ impl VoiceInputs<'_> {
             p::uint(1, u64::from(version)),
             p::bytes(2, owner_version),
             p::uint(3, u64::from(self.network_type)),
-            p::uint(4, 1),
+            p::uint(4, av_status),
             p::bytes(5, &capabilities),
             p::bytes(6, self.device),
             p::uint(7, u64::from(self.video_length)),
@@ -188,6 +193,42 @@ impl VoiceInputs<'_> {
         values.extend(self.nics.iter().map(|nic| p::bytes(9, nic)));
         values.push(p::uint(10, u64::from(self.sim_type)));
         message(&values)
+    }
+}
+
+/// Selected room media mode for direct invite, ringing acknowledgement and join.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallMediaMode {
+    /// Voice-only room (`room_type = 2`, `av_status = 1`).
+    Voice,
+    /// Video-capable room (`room_type = 1`, `av_status = 3` with camera enabled or `1` with camera muted).
+    Video {
+        /// True when local camera video is initially enabled.
+        camera_enabled: bool,
+    },
+}
+
+impl CallMediaMode {
+    /// Wire `room_type` enum value (`1` for video-capable, `2` for voice-only).
+    pub const fn room_type(self) -> u64 {
+        match self {
+            Self::Voice => 2,
+            Self::Video { .. } => 1,
+        }
+    }
+
+    /// Initial `av_status` bitmask (`bit 0 = microphone`, `bit 1 = main camera`).
+    pub const fn av_status(self) -> u64 {
+        match self {
+            Self::Voice => 1,
+            Self::Video { camera_enabled } => {
+                if camera_enabled {
+                    3
+                } else {
+                    1
+                }
+            }
+        }
     }
 }
 
@@ -201,6 +242,25 @@ pub fn invite(
     sdk_task: u32,
     custom_auth: Option<&[u8]>,
 ) -> Result<HostRequest> {
+    invite_with_mode(
+        inputs,
+        peer,
+        CallMediaMode::Voice,
+        invite_id,
+        sdk_task,
+        custom_auth,
+    )
+}
+
+/// Prepare one direct invitation selecting voice-only or video-capable mode.
+pub fn invite_with_mode(
+    inputs: &VoiceInputs<'_>,
+    peer: &str,
+    mode: CallMediaMode,
+    invite_id: u64,
+    sdk_task: u32,
+    custom_auth: Option<&[u8]>,
+) -> Result<HostRequest> {
     text(peer.as_bytes(), 128, true)?;
     ensure!(
         invite_id != 0 && sdk_task != 0,
@@ -209,9 +269,9 @@ pub fn invite(
     let (_, _, owner_group) = inputs.checked()?;
     let mut values = vec![
         p::bytes(1, peer.as_bytes()),
-        p::uint(2, 2),
+        p::uint(2, mode.room_type()),
         p::bytes(3, &owner_group),
-        p::bytes(4, &inputs.client_info()?),
+        p::bytes(4, &inputs.client_info(mode.av_status())?),
         p::uint(5, invite_id),
     ];
     if let Some(auth) = custom_auth {
@@ -349,6 +409,18 @@ pub fn acknowledge_voice(
     room: VoiceRoom,
     sdk_task: u32,
 ) -> Result<HostRequest> {
+    acknowledge_with_mode(inputs, room, CallMediaMode::Voice, sdk_task)
+}
+
+/// Ringing ACK for an incoming voice or video direct call.
+/// Field 4 is the ringing ACK type (`1` = ringing; `3` signals busy), while
+/// video capabilities and dimensions travel in `inputs` (`12`, `14`, `15`).
+pub fn acknowledge_with_mode(
+    inputs: &VoiceInputs<'_>,
+    room: VoiceRoom,
+    _mode: CallMediaMode,
+    sdk_task: u32,
+) -> Result<HostRequest> {
     inputs.checked()?;
     room.validate()?;
     ensure!(sdk_task != 0, "Missing incoming ACK task");
@@ -410,6 +482,17 @@ pub fn join(
     timestamp: u64,
     sdk_task: u32,
 ) -> Result<CloudRequest> {
+    join_with_mode(inputs, room, CallMediaMode::Voice, timestamp, sdk_task)
+}
+
+/// Prepare callee Cloud Join3361 selecting voice-only or video-capable mode.
+pub fn join_with_mode(
+    inputs: &VoiceInputs<'_>,
+    room: VoiceRoom,
+    mode: CallMediaMode,
+    timestamp: u64,
+    sdk_task: u32,
+) -> Result<CloudRequest> {
     inputs.checked()?;
     room.validate()?;
     ensure!(sdk_task != 0, "Missing call task");
@@ -422,8 +505,8 @@ pub fn join(
         p::bytes(2, inputs.group),
         p::uint(3, u64::from(inputs.network_type)),
         p::bytes(4, &capabilities),
-        p::uint(5, 2),
-        p::uint(6, 1),
+        p::uint(5, mode.room_type()),
+        p::uint(6, mode.av_status()),
         p::bytes(7, inputs.device),
         p::uint(8, timestamp),
         p::uint(9, u64::from(inputs.video_length)),
@@ -437,6 +520,42 @@ pub fn join(
         sdk_task,
         CallOperation::Join,
         message(&values)?,
+    ))
+}
+
+/// Prepare a direct-call `SwitchAV` (`3197`) request toggling microphone and camera bits.
+pub fn switch_av(
+    inputs: &VoiceInputs<'_>,
+    room: VoiceRoom,
+    microphone_enabled: bool,
+    camera_enabled: bool,
+    timestamp: u64,
+    sdk_task: u32,
+) -> Result<CloudRequest> {
+    inputs.checked()?;
+    room.validate()?;
+    ensure!(
+        timestamp != 0 && sdk_task != 0,
+        "Invalid direct SwitchAV context"
+    );
+    let av_status = u64::from(microphone_enabled) | (u64::from(camera_enabled) << 1);
+    let mut fields = vec![
+        p::bytes(1, inputs.sdk),
+        p::bytes(2, inputs.group),
+        p::uint(3, room.room),
+        p::uint(4, room.room_key),
+        p::uint(5, u64::from(room.own_member)),
+        p::uint(6, av_status),
+        p::uint(7, timestamp),
+        p::bytes(8, &[]),
+    ];
+    if camera_enabled {
+        fields.push(p::uint(9, 1));
+    }
+    Ok(CloudRequest::for_operation(
+        sdk_task,
+        CallOperation::SwitchAv,
+        message(&fields)?,
     ))
 }
 
@@ -821,5 +940,52 @@ mod tests {
         ])
         .unwrap();
         assert!(InviteResponse::decode(&bad).is_err());
+    }
+
+    #[test]
+    fn video_ringing_ack_keeps_field_4_at_ringing_type_1() {
+        let sdk = message(&[p::uint(1, 0x0500_00cb), p::bytes(2, b"0x1")]).unwrap();
+        let group = message(&[
+            p::bytes(1, b"wechat"),
+            p::uint(2, 0),
+            p::bytes(3, b"voip-2p"),
+            p::bytes(4, b"grp"),
+            p::uint(5, 1),
+            p::bytes(6, b""),
+            p::uint(7, 0),
+        ])
+        .unwrap();
+        let device = message(&[p::bytes(1, b"dev")]).unwrap();
+        let inputs = VoiceInputs {
+            sdk: &sdk,
+            group: &group,
+            device: &device,
+            engine_capability: &[8, 1],
+            channel_capability: &[8, 2],
+            network_type: 4,
+            video_length: 640,
+            video_ratio: 178,
+            sim_type: 65536,
+            nics: &[],
+        };
+        let room = VoiceRoom {
+            room: 11,
+            room_key: 22,
+            own_member: 1,
+        };
+        let req = acknowledge_with_mode(
+            &inputs,
+            room,
+            CallMediaMode::Video {
+                camera_enabled: true,
+            },
+            7,
+        )
+        .unwrap();
+        let outer = fields(req.body()).unwrap();
+        let inner = fields(required_bytes(&outer, 1).unwrap()).unwrap();
+        assert_eq!(required_u64(&inner, 4).unwrap(), 1);
+        assert_eq!(required_u64(&inner, 14).unwrap(), 640);
+        assert_eq!(required_u64(&inner, 15).unwrap(), 178);
     }
 }

@@ -1413,6 +1413,23 @@ pub(crate) const ROUTES: &[Route] = &[
         summary: "Show whether the account is in a call, the incoming offer and the available call features.",
     },
     Route {
+        method: "POST",
+        path: "/v1/accounts/{a}/calls/tickets",
+        id: "createCallSocketTicket",
+        tag: "calls",
+        scope: Scope::One("calls"),
+        idempotency: Idempotency::No,
+        request: Body::Type("CallTicketRequest"),
+        query: Body::None,
+        response: Body::Type("CallTicketResponse"),
+        status: 200,
+        sdk: &[
+            ("request", "CallTicketRequest"),
+            ("response", "CallTicketResponse"),
+        ],
+        summary: "Issue a short-lived single-use ticket for opening a call WebSocket from a browser.",
+    },
+    Route {
         method: "GET",
         path: "/v1/accounts/{a}/calls/socket",
         id: "openCallControlSocket",
@@ -1438,6 +1455,6 @@ pub(crate) const ROUTES: &[Route] = &[
         response: Body::Upgrade("media"),
         status: 200,
         sdk: &[],
-        summary: "Open the call media WebSocket that carries audio for a call you own. See calls-websocket.txt.",
+        summary: "Open the call media WebSocket that carries binary audio and video for a call you own. See calls-websocket.txt.",
     },
 ];

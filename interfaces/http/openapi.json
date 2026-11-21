@@ -117,7 +117,7 @@
             "type": "boolean"
           },
           "conferenceVideo": {
-            "description": "Video in conference calls is available. This version never sets it.",
+            "description": "Video in conference calls is available.",
             "type": "boolean"
           },
           "directAudio": {
@@ -125,7 +125,7 @@
             "type": "boolean"
           },
           "directVideo": {
-            "description": "Direct video calls are available. This version never sets it.",
+            "description": "Direct video calls are available.",
             "type": "boolean"
           }
         },
@@ -163,23 +163,47 @@
         "type": "object"
       },
       "CallControl": {
-        "additionalProperties": false,
-        "description": "A control a call participant can report. A microphone update does not\nchange the audio format.",
-        "properties": {
-          "kind": {
-            "const": "microphone",
-            "type": "string"
+        "description": "A control a call participant can report. A microphone or camera update does\nnot reset the call's audio format.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The participant's microphone.",
+            "properties": {
+              "kind": {
+                "const": "microphone",
+                "type": "string"
+              },
+              "muted": {
+                "description": "True when the microphone is muted.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "kind",
+              "muted"
+            ],
+            "type": "object"
           },
-          "muted": {
-            "description": "True when the microphone is muted.",
-            "type": "boolean"
+          {
+            "additionalProperties": false,
+            "description": "The participant's camera.",
+            "properties": {
+              "enabled": {
+                "description": "True when the camera is sending video.",
+                "type": "boolean"
+              },
+              "kind": {
+                "const": "camera",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "enabled"
+            ],
+            "type": "object"
           }
-        },
-        "required": [
-          "kind",
-          "muted"
-        ],
-        "type": "object"
+        ]
       },
       "CallDirection": {
         "description": "Whether this account placed the call or received it.",
@@ -276,6 +300,13 @@
         "additionalProperties": false,
         "description": "One participant in a conference call.",
         "properties": {
+          "cameraEnabled": {
+            "description": "Whether the participant's camera is on. Omitted until the server\nreports it; an omitted value is unknown, not false.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "contactId": {
             "description": "Contact ID of the participant.",
             "type": "string"
@@ -522,6 +553,17 @@
             ],
             "default": null,
             "description": "An incoming call that cannot be answered yet, or null."
+          },
+          "videoCapabilities": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CallVideoCapabilities"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Video codecs and bounds this daemon can exchange. Omitted when video is unavailable."
           }
         },
         "required": [
@@ -580,8 +622,82 @@
           }
         ]
       },
+      "CallTicketRequest": {
+        "additionalProperties": false,
+        "description": "Request body for issuing a short-lived single-use browser WebSocket ticket.",
+        "properties": {
+          "callId": {
+            "description": "Required when `socket` is `media`; omitted when `socket` is `control`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "socket": {
+            "$ref": "#/components/schemas/CallTicketSocket",
+            "description": "Which calls WebSocket this ticket authorizes."
+          }
+        },
+        "required": [
+          "socket"
+        ],
+        "type": "object"
+      },
+      "CallTicketResponse": {
+        "description": "Response returned when issuing a single-use browser WebSocket ticket.",
+        "properties": {
+          "callId": {
+            "description": "Bound call ID when `socket` is `media`. Omitted for `control`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expiresAt": {
+            "description": "Unix timestamp in seconds when the ticket expires.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "expiresInSeconds": {
+            "description": "Ticket lifetime in seconds from issuance.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "socket": {
+            "$ref": "#/components/schemas/CallTicketSocket",
+            "description": "Which calls WebSocket this ticket authorizes."
+          },
+          "ticket": {
+            "description": "Opaque single-use ticket to pass as `?ticket=` on the matching WebSocket URL. Do not log it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ticket",
+          "expiresAt",
+          "expiresInSeconds",
+          "socket"
+        ],
+        "type": "object"
+      },
+      "CallTicketSocket": {
+        "description": "Which calls WebSocket a single-use browser ticket authorizes.",
+        "oneOf": [
+          {
+            "const": "control",
+            "description": "The call control WebSocket (`/v1/accounts/{a}/calls/socket`).",
+            "type": "string"
+          },
+          {
+            "const": "media",
+            "description": "The call media WebSocket (`/v1/accounts/{a}/calls/{call}/media`).",
+            "type": "string"
+          }
+        ]
+      },
       "CallType": {
-        "description": "Whether a call is voice or video, independent of the media currently\nnegotiated. A video call can continue with audio only. This daemon places\nand answers voice calls only.",
+        "description": "Whether a call is voice or video, independent of the media currently\nnegotiated. A video call can continue with audio only.",
         "oneOf": [
           {
             "const": "voice",
@@ -591,6 +707,83 @@
           {
             "const": "video",
             "description": "A video call.",
+            "type": "string"
+          }
+        ]
+      },
+      "CallVideoCapabilities": {
+        "additionalProperties": false,
+        "description": "Video codecs and bounds advertised by the daemon or a ready client.",
+        "properties": {
+          "maxFps": {
+            "description": "Maximum frame rate in frames per second. Omitted when no cap is specified.",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "maxHeight": {
+            "description": "Maximum frame height in pixels. Omitted when no cap is specified.",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "maxWidth": {
+            "description": "Maximum frame width in pixels. Omitted when no cap is specified.",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "receiveCodecs": {
+            "default": [],
+            "description": "Video codecs deliverable to a receiving client, in preference order.",
+            "items": {
+              "$ref": "#/components/schemas/CallVideoCodec"
+            },
+            "type": "array"
+          },
+          "sendCodecs": {
+            "default": [],
+            "description": "Video codecs accepted from a sending client, in preference order.",
+            "items": {
+              "$ref": "#/components/schemas/CallVideoCodec"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "sendCodecs",
+          "receiveCodecs"
+        ],
+        "type": "object"
+      },
+      "CallVideoCodec": {
+        "description": "Video codec exchanged on a call media track.",
+        "oneOf": [
+          {
+            "const": "h265",
+            "description": "Annex-B H.265 / HEVC frames.",
+            "type": "string"
+          },
+          {
+            "const": "h264",
+            "description": "Annex-B H.264 / AVC frames.",
+            "type": "string"
+          },
+          {
+            "const": "jpeg",
+            "description": "Standalone JPEG still frames.",
             "type": "string"
           }
         ]
@@ -5673,6 +5866,71 @@
         "x-agent-wechat-websocket": "asyncapi.json#/channels/control"
       }
     },
+    "/v1/accounts/{a}/calls/tickets": {
+      "post": {
+        "operationId": "createCallSocketTicket",
+        "parameters": [
+          {
+            "description": "Account ID or alias.",
+            "in": "path",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CallTicketRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CallTicketResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "calls"
+            ]
+          }
+        ],
+        "summary": "Issue a short-lived single-use ticket for opening a call WebSocket from a browser.",
+        "tags": [
+          "calls"
+        ],
+        "x-agent-wechat-sdk-request": [
+          {
+            "$ref": "#/components/schemas/CallTicketRequest"
+          }
+        ],
+        "x-agent-wechat-sdk-response": [
+          {
+            "$ref": "#/components/schemas/CallTicketResponse"
+          }
+        ]
+      }
+    },
     "/v1/accounts/{a}/calls/{call}/media": {
       "get": {
         "operationId": "openCallMediaSocket",
@@ -5714,7 +5972,7 @@
             ]
           }
         ],
-        "summary": "Open the call media WebSocket that carries audio for a call you own. See calls-websocket.txt.",
+        "summary": "Open the call media WebSocket that carries binary audio and video for a call you own. See calls-websocket.txt.",
         "tags": [
           "calls"
         ],
@@ -12038,7 +12296,7 @@
       "name": "auth"
     },
     {
-      "description": "Voice calls. The two sockets are described in asyncapi.json.",
+      "description": "Voice and video calls. The two sockets are described in asyncapi.json.",
       "name": "calls"
     },
     {
