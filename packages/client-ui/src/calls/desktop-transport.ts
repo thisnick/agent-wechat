@@ -38,6 +38,7 @@ export type DesktopCallPacket =
       trackLevels: Record<number, number>;
     }
   | { type: "mediaError"; code: string; message?: string }
+  | { type: "osCallAlert"; callId: string | null }
   | { type: "disconnected"; code: string };
 
 export type DesktopPreviewPacket =
@@ -149,6 +150,9 @@ export class DesktopCallTransport implements CallSessionTransport {
         case "mediaError":
           callbacks.onMediaError(packet.code, packet.message);
           break;
+        case "osCallAlert":
+          callbacks.onOsCallAlert?.(packet.callId);
+          break;
         case "disconnected":
           this.activeSession = 0;
           this.nativeSessionId = null;
@@ -229,8 +233,9 @@ export class DesktopCallTransport implements CallSessionTransport {
         listener(bytes);
       }
     };
+    let generation: number;
     try {
-      await this.invokeFn("call_preview_start", {
+      generation = await this.invokeFn<number>("call_preview_start", {
         cameraId: cameraId ?? null,
         channel,
       });
@@ -249,7 +254,7 @@ export class DesktopCallTransport implements CallSessionTransport {
         if (stopped) return;
         stopped = true;
         listeners.clear();
-        void this.invokeFn("call_preview_stop").catch(() => {});
+        void this.invokeFn("call_preview_stop", { generation }).catch(() => {});
       },
     };
   }

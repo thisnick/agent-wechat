@@ -45,7 +45,7 @@ test("DesktopCallTransport bridges Tauri IPC commands, channels, base64 JPEG fra
     if (cmd === "call_dial") return { callId: "call-99" };
     if (cmd === "call_preview_start") {
       previewChannel = args.channel;
-      return null;
+      return 11;
     }
     if (cmd === "call_devices") {
       return {
@@ -91,6 +91,7 @@ test("DesktopCallTransport bridges Tauri IPC commands, channels, base64 JPEG fra
     cleared: [],
     levels: [],
     errors: [],
+    osAlerts: [],
     disconnected: [],
   };
 
@@ -104,6 +105,7 @@ test("DesktopCallTransport bridges Tauri IPC commands, channels, base64 JPEG fra
     onTrackCleared: (id) => received.cleared.push(id),
     onLevels: (levels) => received.levels.push(levels),
     onMediaError: (code, msg) => received.errors.push({ code, msg }),
+    onOsCallAlert: (callId) => received.osAlerts.push(callId),
   });
   assert.equal(hello.clientId, "desktop-1");
 
@@ -124,6 +126,8 @@ test("DesktopCallTransport bridges Tauri IPC commands, channels, base64 JPEG fra
     trackLevels: { 2: 0.6 },
   });
   activeChannel.onmessage({ type: "trackCleared", trackId: 65538 });
+  activeChannel.onmessage({ type: "osCallAlert", callId: "offer-9" });
+  activeChannel.onmessage({ type: "osCallAlert", callId: null });
 
   assert.equal(received.remoteFrames.length, 1);
   assert.equal(received.remoteFrames[0].rotationDegrees, 90);
@@ -131,6 +135,7 @@ test("DesktopCallTransport bridges Tauri IPC commands, channels, base64 JPEG fra
   assert.deepEqual([...received.localJpegs[0]], [0xff, 0xd8, 0xff, 0xd9]);
   assert.equal(received.levels[0].micLevel, 0.4);
   assert.deepEqual(received.cleared, [65538]);
+  assert.deepEqual(received.osAlerts, ["offer-9", null]);
 
   // Exiting fullscreen when we never entered it is a no-op (never clobbers user window state).
   assert.equal(await transport.setFullscreen(false), false);
@@ -144,7 +149,7 @@ test("DesktopCallTransport bridges Tauri IPC commands, channels, base64 JPEG fra
     1,
   );
 
-  // Preview streams decoded JPEG frames and stops cleanly.
+  // Preview streams decoded JPEG frames and stops only its own generation.
   const preview = await transport.startLocalPreview("0");
   const previewFrames = [];
   const unsub = preview.subscribeJpeg((bytes) => previewFrames.push(bytes));
@@ -152,7 +157,9 @@ test("DesktopCallTransport bridges Tauri IPC commands, channels, base64 JPEG fra
   assert.equal(previewFrames.length, 1);
   unsub();
   preview.stop();
-  assert.ok(calls.some((c) => c.cmd === "call_preview_stop"));
+  assert.ok(
+    calls.some((c) => c.cmd === "call_preview_stop" && c.args.generation === 11),
+  );
 
   const dial = await transport.dialDirect("req-1", "alice", { callType: "video" });
   assert.equal(dial.callId, "call-99");
@@ -205,21 +212,76 @@ test("DesktopCallTransport maps forbidden and outcome_unknown errors into Native
   assert.deepEqual([...decodeBase64Bytes(Buffer.from("hi").toString("base64"))], [104, 105]);
 });
 
-test("CallController suppresses Web Audio ringtone on Desktop while window is unfocused", async () => {
-  let focused = false;
-  let ringStarted = 0;
-  let ringStopped = 0;
+test("DesktopCallTransport scopes preview stop by generation so a stale start cannot kill a newer preview", async () => {
+  let nextGen = 0;
+  let activeGen = 0;
+  const stops = [];
+  let resolveA;
+
+  const invoke = async (cmd, args = {}) => {
+    if (cmd === "call_preview_start") {
+      const gen = ++nextGen;
+      activeGen = gen;
+      if (gen === 1) {
+        return await new Promise((resolve) => {
+          resolveA = () => resolve(gen);
+        });
+      }
+      return gen;
+    }
+    if (cmd === "call_preview_stop") {
+      stops.push(args.generation);
+      if (args.generation === activeGen) {
+        activeGen = 0;
+      }
+      return null;
+    }
+    return null;
+  };
+
+  const client = { async callSnapshot() { throw new Error("unused"); } };
+  const transport = new DesktopCallTransport("conn-1", "acct-1", client, {
+    invoke,
+    createPreviewChannel: () => new FakeChannel(),
+  });
+
+  // Start preview A (still booting), then switch camera to start preview B.
+  const startA = transport.startLocalPreview("cam-a");
+  const surfaceB = await transport.startLocalPreview("cam-b");
+  assert.equal(activeGen, 2);
+
+  // Preview A resolves late and its cancelled cleanup calls stop(); B must remain active.
+  resolveA();
+  const surfaceA = await startA;
+  surfaceA.stop();
+  assert.deepEqual(stops, [1]);
+  assert.equal(activeGen, 2, "stale preview A stop must not tear down preview B");
+
+  // Stopping B tears down generation 2.
+  surfaceB.stop();
+  assert.deepEqual(stops, [1, 2]);
+  assert.equal(activeGen, 0);
+});
+
+test("CallController suppresses Web Audio ringtone on Desktop only while Rust confirms a sounding OS alert", async () => {
+  let playing = false;
+  let ringStarts = 0;
+  let ringStops = 0;
   let callbacks = null;
 
   const fakeRingtone = {
     start() {
-      ringStarted += 1;
+      if (!playing) ringStarts += 1;
+      playing = true;
     },
     stop() {
-      ringStopped += 1;
+      if (playing) ringStops += 1;
+      playing = false;
     },
     setMuted() {},
-    dispose() {},
+    dispose() {
+      playing = false;
+    },
   };
 
   const fakeTransport = {
@@ -271,12 +333,13 @@ test("CallController suppresses Web Audio ringtone on Desktop while window is un
   const controller = new CallController({
     transport: fakeTransport,
     ringtone: fakeRingtone,
-    isWindowFocused: () => focused,
   });
   controller.start();
   await new Promise((resolve) => setTimeout(resolve, 10));
 
-  // Unfocused Desktop window: OS notification handles AgentWechatSoftRing.wav, so Web Audio must NOT start.
+  // Case 1: Offer arrives with no confirmed sounding OS alert (window focused, or unfocused
+  // with desktop notifications/sound disabled) -> in-app ringtone rings and never goes silent
+  // if the user switches away without an OS alert.
   callbacks.onEvent({
     type: "call.offered",
     offer: {
@@ -287,11 +350,19 @@ test("CallController suppresses Web Audio ringtone on Desktop while window is un
       callerId: "alice",
     },
   });
-  assert.equal(ringStarted, 0);
-  assert.ok(ringStopped > 0);
+  assert.equal(playing, true);
+  assert.equal(ringStarts, 1);
 
-  // Once window is focused, in-app Web Audio ringtone starts on next offer/sync.
-  focused = true;
+  // Case 2: Rust confirms a sounding OS alert for a DIFFERENT callId -> must not silence offer-1.
+  callbacks.onOsCallAlert("offer-other");
+  assert.equal(playing, true);
+
+  // Case 3: Rust confirms a sounding OS alert for offer-1 -> suppresses in-app Web Audio ringtone.
+  callbacks.onOsCallAlert("offer-1");
+  assert.equal(playing, false);
+  assert.equal(ringStops, 1);
+
+  // Offer revision bump for the same call stays suppressed while the OS alert is still ringing.
   callbacks.onEvent({
     type: "call.offered",
     offer: {
@@ -302,7 +373,12 @@ test("CallController suppresses Web Audio ringtone on Desktop while window is un
       callerId: "alice",
     },
   });
-  assert.equal(ringStarted, 1);
+  assert.equal(playing, false);
+
+  // Case 4: User focuses the Desktop window and Rust clears the OS alert -> in-app ringtone resumes.
+  callbacks.onOsCallAlert(null);
+  assert.equal(playing, true);
+  assert.equal(ringStarts, 2);
 
   controller.close();
 });

@@ -32,6 +32,16 @@ pub struct ActiveCallAlert {
 }
 
 impl ActiveCallAlert {
+    #[cfg(test)]
+    pub(crate) fn dummy_for_test() -> Self {
+        Self {
+            #[cfg(target_os = "macos")]
+            request_id: None,
+            #[cfg(target_os = "linux")]
+            cancel: tokio_util::sync::CancellationToken::new(),
+        }
+    }
+
     pub fn clear(self) {
         #[cfg(target_os = "macos")]
         if let Some(request_id) = self.request_id {

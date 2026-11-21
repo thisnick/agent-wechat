@@ -522,14 +522,7 @@ export type CallControllerOptions = {
   disabled?: boolean;
   now?: () => number;
   ringtone?: CallRingtone;
-  isWindowFocused?: () => boolean;
 };
-
-function defaultWindowFocused(): boolean {
-  if (typeof document === "undefined") return true;
-  if (document.hidden) return false;
-  return typeof document.hasFocus === "function" ? document.hasFocus() : true;
-}
 
 /**
  * Per-account call store (`useSyncExternalStore` compatible) owning signaling
@@ -539,8 +532,6 @@ export class CallController {
   private readonly transport: CallSessionTransport | null;
   private readonly now: () => number;
   private readonly ringtone: CallRingtone;
-  private readonly isWindowFocused: () => boolean;
-  private readonly removeFocusListeners: (() => void) | null;
   private readonly listeners = new Set<() => void>();
   private readonly remoteFrames = new Map<number, RemoteVideoFrame>();
   private readonly frameListeners = new Map<number, Set<(frame: RemoteVideoFrame | null) => void>>();
@@ -550,6 +541,7 @@ export class CallController {
   private started = false;
   private probedOnce = false;
   private disposed = false;
+  private osSoundingCallId: string | null = null;
   private probeAbort: AbortController | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectDelayMs = 1000;
@@ -558,7 +550,6 @@ export class CallController {
   constructor(options: CallControllerOptions) {
     this.transport = options.disabled ? null : (options.transport ?? null);
     this.now = options.now ?? Date.now;
-    this.isWindowFocused = options.isWindowFocused ?? defaultWindowFocused;
     this.ringtone =
       options.ringtone ??
       new CallRingtone((blocked) => {
@@ -596,25 +587,6 @@ export class CallController {
       localStream: null,
       remoteTrackFrames: {},
     };
-    if (this.transport?.kind === "desktop" && typeof window !== "undefined") {
-      const onFocusChange = () => {
-        if (!this.disposed) this.syncRingtone();
-      };
-      window.addEventListener("focus", onFocusChange);
-      window.addEventListener("blur", onFocusChange);
-      if (typeof document !== "undefined") {
-        document.addEventListener("visibilitychange", onFocusChange);
-      }
-      this.removeFocusListeners = () => {
-        window.removeEventListener("focus", onFocusChange);
-        window.removeEventListener("blur", onFocusChange);
-        if (typeof document !== "undefined") {
-          document.removeEventListener("visibilitychange", onFocusChange);
-        }
-      };
-    } else {
-      this.removeFocusListeners = null;
-    }
   }
 
   subscribe = (listener: () => void): (() => void) => {
@@ -668,6 +640,7 @@ export class CallController {
     this.ringtone.stop();
     if (this.state.currentCall?.ownedByThisClient) return;
     this.started = false;
+    this.osSoundingCallId = null;
     this.probeAbort?.abort();
     this.probeAbort = null;
     if (this.reconnectTimer) {
@@ -685,7 +658,7 @@ export class CallController {
   close(): void {
     this.disposed = true;
     this.started = false;
-    this.removeFocusListeners?.();
+    this.osSoundingCallId = null;
     this.probeAbort?.abort();
     this.probeAbort = null;
     if (this.reconnectTimer) {
@@ -1054,6 +1027,10 @@ export class CallController {
         onMediaError: (code) => {
           if (!this.disposed) this.update({ mediaWarning: code });
         },
+        onOsCallAlert: (callId) => {
+          this.osSoundingCallId = callId;
+          if (!this.disposed) this.syncRingtone();
+        },
       });
       if (this.disposed || !this.started) {
         this.transport.disconnect();
@@ -1306,6 +1283,7 @@ export class CallController {
 
   private handleDisconnect(code: string): void {
     if (this.disposed || !this.started) return;
+    this.osSoundingCallId = null;
     this.ringtone.stop();
     this.stopDurationTimer();
     const hadOwnedCall = this.state.currentCall?.ownedByThisClient === true;
@@ -1357,13 +1335,13 @@ export class CallController {
   private syncRingtone(): void {
     const offer = this.state.currentOffer;
     const key = offerKey(offer);
-    // On Desktop, OS notifications play AgentWechatSoftRing.wav while the window is
-    // hidden or unfocused; suppress Web Audio ringing then to avoid double chimes.
-    const windowFocused = this.transport?.kind !== "desktop" || this.isWindowFocused();
+    // On Desktop, suppress the in-app Web Audio ringtone only when Rust confirms a
+    // sounding OS call notification is currently active for this offer's call ID.
+    const osAlertRinging = !!offer && this.osSoundingCallId === offer.callId;
     const shouldRing =
       this.started &&
-      windowFocused &&
       !!offer &&
+      !osAlertRinging &&
       key !== this.state.dismissedOfferKey &&
       !this.state.currentCall?.ownedByThisClient;
     if (shouldRing) {

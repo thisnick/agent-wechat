@@ -24,7 +24,7 @@ use std::{
 };
 use tauri::{ipc::Channel, State};
 use tokio::{
-    sync::{mpsc, oneshot, Mutex},
+    sync::{mpsc, oneshot, watch, Mutex},
     time::{interval, timeout, MissedTickBehavior},
 };
 use tokio_tungstenite::tungstenite::Message;
@@ -98,6 +98,10 @@ pub enum DesktopCallPacket {
         code: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         message: Option<String>,
+    },
+    OsCallAlert {
+        #[serde(rename = "callId")]
+        call_id: Option<String>,
     },
     Disconnected {
         code: String,
@@ -201,6 +205,7 @@ struct AccountHandle {
 }
 
 struct PreviewSession {
+    generation: u64,
     cancel: CancellationToken,
     task: tauri::async_runtime::JoinHandle<()>,
 }
@@ -239,8 +244,54 @@ enum ActorRequest {
 
 impl CallManager {
     pub async fn stop_preview(&self) {
-        self.preview_gen.fetch_add(1, Ordering::AcqRel);
-        if let Some(preview) = self.preview.lock().await.take() {
+        self.stop_preview_if(None).await;
+    }
+
+    pub async fn stop_preview_if(&self, expected_generation: Option<u64>) {
+        let taken = {
+            let mut guard = self.preview.lock().await;
+            match expected_generation {
+                Some(gen) => {
+                    let _ = self.preview_gen.compare_exchange(
+                        gen,
+                        gen.wrapping_add(1),
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    );
+                    if guard
+                        .as_ref()
+                        .is_some_and(|preview| preview.generation == gen)
+                    {
+                        guard.take()
+                    } else {
+                        None
+                    }
+                }
+                None => {
+                    self.preview_gen.fetch_add(1, Ordering::AcqRel);
+                    guard.take()
+                }
+            }
+        };
+        if let Some(preview) = taken {
+            preview.cancel.cancel();
+            let _ = timeout(TEARDOWN_TIMEOUT, preview.task).await;
+        }
+    }
+
+    async fn stop_preview_older_than(&self, min_generation: u64) {
+        let taken = {
+            let mut guard = self.preview.lock().await;
+            if guard
+                .as_ref()
+                .is_some_and(|preview| preview.generation < min_generation)
+            {
+                guard.take()
+            } else {
+                None
+            }
+        };
+        if let Some(preview) = taken {
             preview.cancel.cancel();
             let _ = timeout(TEARDOWN_TIMEOUT, preview.task).await;
         }
@@ -628,6 +679,7 @@ struct ActiveMediaState {
     audio_format: AudioFormat,
     local_audio: Option<LocalAudio>,
     local_video: Option<LocalVideoCapture>,
+    video_gen: u64,
     active_video_format: Option<CallVideoFormat>,
     self_view: Option<SelfViewDecoder>,
     devices: DeviceSelection,
@@ -643,6 +695,7 @@ struct ActiveMediaState {
 
 impl ActiveMediaState {
     async fn stop_video(&mut self) {
+        self.video_gen = self.video_gen.wrapping_add(1);
         self.active_video_format = None;
         let video = self.local_video.take();
         let self_view = self.self_view.take();
@@ -755,6 +808,12 @@ async fn send_actor_command(
     }
 }
 
+struct PendingKeyframeTask {
+    call_id: String,
+    video_gen: u64,
+    handle: tokio::task::JoinHandle<(LocalVideoCapture, Result<()>)>,
+}
+
 /// Runs one account's persistent Calls Protocol v3 control socket, pending command
 /// correlations, and optional connected media loop.
 async fn run_account_actor(
@@ -763,11 +822,23 @@ async fn run_account_actor(
     mut control: ControlClient,
     mut requests: mpsc::UnboundedReceiver<ActorRequest>,
     channel: Channel<DesktopCallPacket>,
+    mut sounding_rx: watch::Receiver<HashMap<String, String>>,
     cancel: CancellationToken,
 ) {
     let mut pending: HashMap<String, oneshot::Sender<Result<OwnerResult, String>>> = HashMap::new();
     let mut owner_tokens: HashMap<String, String> = HashMap::new();
     let mut active_media: Option<ActiveMediaState> = None;
+    let mut keyframe_task: Option<PendingKeyframeTask> = None;
+
+    let mut last_sounding_call_id = sounding_rx
+        .borrow_and_update()
+        .get(&endpoint.account)
+        .cloned();
+    if last_sounding_call_id.is_some() {
+        let _ = channel.send(DesktopCallPacket::OsCallAlert {
+            call_id: last_sounding_call_id.clone(),
+        });
+    }
 
     let mut audio_tick = interval(Duration::from_millis(20));
     audio_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -776,6 +847,7 @@ async fn run_account_actor(
 
     let disconnect_code = loop {
         let has_media = active_media.is_some();
+        let has_keyframe_task = keyframe_task.is_some();
         let should_tick_media = active_media
             .as_ref()
             .is_some_and(|state| !state.local_media_stopped);
@@ -895,6 +967,7 @@ async fn run_account_actor(
                                     audio_format,
                                     local_audio,
                                     local_video: None,
+                                    video_gen: 0,
                                     active_video_format: None,
                                     self_view: None,
                                     devices,
@@ -1235,8 +1308,24 @@ async fn run_account_actor(
                         if let Ok(event) = serde_json::from_str::<CallEvent>(&text) {
                             match event {
                                 CallEvent::VideoKeyframeRequested { .. } => {
-                                    if let Some(capture) = active_media.as_mut().and_then(|s| s.local_video.as_mut()) {
-                                        let _ = capture.request_keyframe();
+                                    if keyframe_task.is_none() {
+                                        if let Some(state) = active_media.as_mut().filter(|s| {
+                                            !s.local_media_stopped && s.camera_enabled
+                                        }) {
+                                            if let Some(mut capture) = state.local_video.take() {
+                                                let target_call_id = state.call_id.clone();
+                                                let target_video_gen = state.video_gen;
+                                                let handle = tokio::task::spawn_blocking(move || {
+                                                    let result = capture.request_keyframe();
+                                                    (capture, result)
+                                                });
+                                                keyframe_task = Some(PendingKeyframeTask {
+                                                    call_id: target_call_id,
+                                                    video_gen: target_video_gen,
+                                                    handle,
+                                                });
+                                            }
+                                        }
                                     }
                                 }
                                 CallEvent::Error { code } => {
@@ -1371,6 +1460,45 @@ async fn run_account_actor(
                     });
                 }
             }
+            Ok(()) = sounding_rx.changed() => {
+                let next = sounding_rx.borrow_and_update().get(&endpoint.account).cloned();
+                if next != last_sounding_call_id {
+                    last_sounding_call_id = next.clone();
+                    let _ = channel.send(DesktopCallPacket::OsCallAlert { call_id: next });
+                }
+            }
+            keyframe_res = async {
+                match keyframe_task.as_mut() {
+                    Some(task) => (&mut task.handle).await,
+                    None => std::future::pending().await,
+                }
+            }, if has_keyframe_task => {
+                if let Some(task) = keyframe_task.take() {
+                    if let Ok((capture, result)) = keyframe_res {
+                        let still_valid = active_media.as_ref().is_some_and(|state| {
+                            state.call_id == task.call_id
+                                && state.video_gen == task.video_gen
+                                && !state.local_media_stopped
+                                && state.camera_enabled
+                                && state.video_track_is_active()
+                                && state.local_video.is_none()
+                        });
+                        if still_valid {
+                            if let Err(error) = result {
+                                debug_call(
+                                    "desktop-media",
+                                    format_args!("camera keyframe recovery failed: {error:#}"),
+                                );
+                            }
+                            if let Some(state) = active_media.as_mut() {
+                                state.local_video = Some(capture);
+                            }
+                        } else {
+                            stop_video_handles(Some(capture), None).await;
+                        }
+                    }
+                }
+            }
             _ = level_tick.tick(), if has_media => {
                 if let Some(state) = active_media.as_mut() {
                     state.mic_level.advance();
@@ -1393,6 +1521,11 @@ async fn run_account_actor(
     if let Some(old) = active_media.take() {
         old.close().await;
     }
+    if let Some(task) = keyframe_task.take() {
+        if let Ok(Ok((capture, _))) = timeout(TEARDOWN_TIMEOUT, task.handle).await {
+            stop_video_handles(Some(capture), None).await;
+        }
+    }
     for (_, waiter) in pending.drain() {
         let _ = waiter.send(Err("closed".into()));
     }
@@ -1411,6 +1544,7 @@ pub async fn call_connect(
 ) -> Result<CallConnectResponse, String> {
     let endpoint = resolve_active_endpoint(&state, &connection_id, &account_id).await?;
     let ffmpeg = resolve_ffmpeg(&state.binaries);
+    let session_id = state.calls.next_session.fetch_add(1, Ordering::AcqRel) + 1;
 
     // Warm the FFmpeg encoder capability cache before opening the control socket so no
     // socket events sit unread during probing.
@@ -1422,7 +1556,7 @@ pub async fn call_connect(
     .ok()
     .flatten();
 
-    let (control, hello_event) = ControlClient::connect(&endpoint)
+    let (mut control, hello_event) = ControlClient::connect(&endpoint)
         .await
         .map_err(|error| map_connect_error(&error))?;
 
@@ -1436,23 +1570,31 @@ pub async fn call_connect(
     };
     let control_format = control.format;
     let hello_json = sanitized_event_value(&hello_event).map_err(|error| error.to_string())?;
+    let sounding_rx = state.notifications.subscribe_sounding_calls();
 
-    let session_id = state.calls.next_session.fetch_add(1, Ordering::AcqRel) + 1;
-    let cancel = state.calls.root_cancel.child_token();
-    let (tx, rx) = mpsc::unbounded_channel();
-    let actor_cancel = cancel.clone();
-    let task = tauri::async_runtime::spawn(run_account_actor(
-        endpoint,
-        ffmpeg,
-        control,
-        rx,
-        channel,
-        actor_cancel,
-    ));
-
-    let previous = {
+    let (tx, previous) = {
         let mut accounts = state.calls.accounts.lock().await;
-        accounts.insert(
+        if accounts
+            .get(&account_id)
+            .is_some_and(|existing| existing.session_id > session_id)
+        {
+            drop(accounts);
+            control.close().await;
+            return Err("closed".into());
+        }
+        let cancel = state.calls.root_cancel.child_token();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let actor_cancel = cancel.clone();
+        let task = tauri::async_runtime::spawn(run_account_actor(
+            endpoint,
+            ffmpeg,
+            control,
+            rx,
+            channel,
+            sounding_rx,
+            actor_cancel,
+        ));
+        let replaced = accounts.insert(
             account_id,
             AccountHandle {
                 session_id,
@@ -1461,7 +1603,8 @@ pub async fn call_connect(
                 tx: tx.clone(),
                 task,
             },
-        )
+        );
+        (tx, replaced)
     };
     if let Some(old) = previous {
         old.cancel.cancel();
@@ -1563,11 +1706,11 @@ pub async fn call_preview_start(
     state: State<'_, Desktop>,
     camera_id: Option<String>,
     channel: Channel<DesktopPreviewPacket>,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let _ = validate_camera_id_syntax(camera_id.as_deref())?;
     let ffmpeg = resolve_ffmpeg(&state.binaries);
-    state.calls.stop_preview().await;
     let gen = state.calls.preview_gen.fetch_add(1, Ordering::AcqRel) + 1;
+    state.calls.stop_preview_older_than(gen).await;
 
     let capture = tokio::task::spawn_blocking(move || -> Result<LocalVideoCapture, String> {
         let source = resolve_verified_camera_source(camera_id.as_deref(), ffmpeg.as_deref())?;
@@ -1578,10 +1721,11 @@ pub async fn call_preview_start(
     .map_err(|_| "Camera preview task failed".to_string())??;
 
     // If another preview start/stop or call start arrived while FFmpeg was booting,
-    // immediately dispose this superseded capture off the Tokio worker thread.
+    // immediately dispose this superseded capture off the Tokio worker thread and
+    // return an error so stale callers never tear down the newer preview.
     if state.calls.preview_gen.load(Ordering::Acquire) != gen {
         stop_video_handles(Some(capture), None).await;
-        return Ok(());
+        return Err("preview_superseded".into());
     }
 
     let cancel = state.calls.root_cancel.child_token();
@@ -1617,20 +1761,27 @@ pub async fn call_preview_start(
             cancel.cancel();
             drop(guard);
             let _ = timeout(TEARDOWN_TIMEOUT, task).await;
-            return Ok(());
+            return Err("preview_superseded".into());
         }
-        guard.replace(PreviewSession { cancel, task })
+        guard.replace(PreviewSession {
+            generation: gen,
+            cancel,
+            task,
+        })
     };
     if let Some(old) = replaced {
         old.cancel.cancel();
         let _ = timeout(TEARDOWN_TIMEOUT, old.task).await;
     }
-    Ok(())
+    Ok(gen)
 }
 
 #[tauri::command]
-pub async fn call_preview_stop(state: State<'_, Desktop>) -> Result<(), String> {
-    state.calls.stop_preview().await;
+pub async fn call_preview_stop(
+    state: State<'_, Desktop>,
+    generation: Option<u64>,
+) -> Result<(), String> {
+    state.calls.stop_preview_if(generation).await;
     Ok(())
 }
 
@@ -2217,12 +2368,16 @@ mod tests {
             Ok(())
         });
 
+        let mut initial_sounding = HashMap::new();
+        initial_sounding.insert("acc".into(), "offer-7".into());
+        let (sounding_tx, sounding_rx) = watch::channel(initial_sounding);
         let actor_task = tokio::spawn(run_account_actor(
             endpoint,
             None,
             control,
             rx,
             channel,
+            sounding_rx,
             cancel.clone(),
         ));
 
@@ -2246,6 +2401,7 @@ mod tests {
             Some("secret-owner-token-never-expose")
         );
 
+        sounding_tx.send(HashMap::new()).unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
         cancel.cancel();
         actor_task.await.unwrap();
@@ -2258,6 +2414,18 @@ mod tests {
                 .any(|p| p["type"] == "event" && p["event"]["type"] == "call.state"),
             "interleaved call.state event must not be swallowed: {packets:?}"
         );
+        assert!(
+            packets
+                .iter()
+                .any(|p| p["type"] == "osCallAlert" && p["callId"] == "offer-7"),
+            "initial sounding OS alert must be forwarded to the WebView: {packets:?}"
+        );
+        assert!(
+            packets
+                .iter()
+                .any(|p| p["type"] == "osCallAlert" && p["callId"].is_null()),
+            "cleared sounding OS alert must be forwarded to the WebView: {packets:?}"
+        );
         for packet in packets.iter() {
             let serialized = serde_json::to_string(packet).unwrap();
             assert!(
@@ -2265,5 +2433,32 @@ mod tests {
                 "ownerToken leaked to IPC channel: {serialized}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn preview_stop_with_stale_generation_keeps_newer_preview_alive() {
+        let manager = CallManager::default();
+        let gen2 = manager.preview_gen.fetch_add(2, Ordering::AcqRel) + 2;
+        let cancel = CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let task = tauri::async_runtime::spawn(async move {
+            task_cancel.cancelled().await;
+        });
+        *manager.preview.lock().await = Some(PreviewSession {
+            generation: gen2,
+            cancel: cancel.clone(),
+            task,
+        });
+
+        // A stale stop for generation 1 must leave generation 2 running and untouched.
+        manager.stop_preview_if(Some(1)).await;
+        assert!(!cancel.is_cancelled());
+        assert!(manager.preview.lock().await.is_some());
+        assert_eq!(manager.preview_gen.load(Ordering::Acquire), gen2);
+
+        // Stopping generation 2 tears it down cleanly.
+        manager.stop_preview_if(Some(gen2)).await;
+        assert!(cancel.is_cancelled());
+        assert!(manager.preview.lock().await.is_none());
     }
 }

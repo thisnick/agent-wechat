@@ -13,18 +13,48 @@ use std::{
 };
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_notification::NotificationExt;
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
 use tokio_util::sync::CancellationToken;
 
-#[derive(Default)]
+struct PostedCallAlert {
+    alert: crate::notification_sound::ActiveCallAlert,
+    call_id: String,
+    sounding: bool,
+}
+
 pub struct Notifications {
     pub cancel: CancellationToken,
     focus: Mutex<Option<Focus>>,
     pending: Mutex<Option<Target>>,
     pending_call: Mutex<Option<CallActionTarget>>,
-    active_call_alerts: Mutex<HashMap<String, crate::notification_sound::ActiveCallAlert>>,
+    active_call_alerts: Mutex<HashMap<String, PostedCallAlert>>,
+    sounding_call_ids: watch::Sender<HashMap<String, String>>,
     status: Mutex<String>,
     last_sound: Mutex<Option<Instant>>,
+}
+
+impl Default for Notifications {
+    fn default() -> Self {
+        let (sounding_call_ids, _) = watch::channel(HashMap::new());
+        Self {
+            cancel: CancellationToken::new(),
+            focus: Mutex::new(None),
+            pending: Mutex::new(None),
+            pending_call: Mutex::new(None),
+            active_call_alerts: Mutex::new(HashMap::new()),
+            sounding_call_ids,
+            status: Mutex::new(String::new()),
+            last_sound: Mutex::new(None),
+        }
+    }
+}
+
+impl Notifications {
+    /// Subscribes to the live map of `account_id -> call_id` for incoming calls
+    /// currently playing a sounding OS notification alert.
+    pub(crate) fn subscribe_sounding_calls(&self) -> watch::Receiver<HashMap<String, String>> {
+        self.sounding_call_ids.subscribe()
+    }
 }
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -392,26 +422,86 @@ pub(crate) fn open_call_action(app: tauri::AppHandle, target: CallActionTarget) 
         let _ = app.emit("desktop-call-action", target);
     });
 }
-async fn clear_call_alert(desktop: &Desktop, account_id: &str) {
-    if let Some(alert) = desktop
-        .notifications
-        .active_call_alerts
-        .lock()
-        .await
-        .remove(account_id)
+fn sync_sounding_calls(
+    alerts: &HashMap<String, PostedCallAlert>,
+    tx: &watch::Sender<HashMap<String, String>>,
+) {
+    let next: HashMap<String, String> = alerts
+        .iter()
+        .filter(|(_, entry)| entry.sounding)
+        .map(|(account, entry)| (account.clone(), entry.call_id.clone()))
+        .collect();
+    let _ = tx.send_if_modified(|current| {
+        if *current == next {
+            false
+        } else {
+            *current = next;
+            true
+        }
+    });
+}
+fn os_call_sound_permitted() -> bool {
+    #[cfg(target_os = "macos")]
+    if crate::macos_notifications::available()
+        && crate::macos_notifications::permitted() == Some(false)
     {
-        alert.clear();
+        return false;
+    }
+    true
+}
+async fn store_call_alert_if_unfocused(
+    notifications: &Notifications,
+    account_id: String,
+    call_id: String,
+    sounding: bool,
+    alert: crate::notification_sound::ActiveCallAlert,
+    focused_now: impl FnOnce() -> bool,
+) -> bool {
+    let replaced = {
+        let mut alerts = notifications.active_call_alerts.lock().await;
+        if focused_now() {
+            drop(alerts);
+            alert.clear();
+            return false;
+        }
+        let replaced = alerts.insert(
+            account_id,
+            PostedCallAlert {
+                alert,
+                call_id,
+                sounding,
+            },
+        );
+        sync_sounding_calls(&alerts, &notifications.sounding_call_ids);
+        replaced
+    };
+    if let Some(old) = replaced {
+        old.alert.clear();
+    }
+    true
+}
+async fn clear_call_alert(desktop: &Desktop, account_id: &str) {
+    let removed = {
+        let mut alerts = desktop.notifications.active_call_alerts.lock().await;
+        let removed = alerts.remove(account_id);
+        if removed.is_some() {
+            sync_sounding_calls(&alerts, &desktop.notifications.sounding_call_ids);
+        }
+        removed
+    };
+    if let Some(entry) = removed {
+        entry.alert.clear();
     }
 }
 pub(crate) async fn clear_all_call_alerts(desktop: &Desktop) {
-    let alerts: Vec<_> = desktop
-        .notifications
-        .active_call_alerts
-        .lock()
-        .await
-        .drain()
-        .map(|(_, alert)| alert)
-        .collect();
+    let alerts: Vec<_> = {
+        let mut guard = desktop.notifications.active_call_alerts.lock().await;
+        let drained: Vec<_> = guard.drain().map(|(_, entry)| entry.alert).collect();
+        if !drained.is_empty() {
+            sync_sounding_calls(&guard, &desktop.notifications.sounding_call_ids);
+        }
+        drained
+    };
     for alert in alerts {
         alert.clear();
     }
@@ -498,11 +588,51 @@ fn has_any_call_capability(caps: &wechat_call_contracts::call_types::CallCapabil
         || caps.conference_invite
         || caps.conference_video
 }
+const NO_CAPABILITY_INITIAL_BACKOFF: Duration = Duration::from_secs(15);
+const NO_CAPABILITY_MAX_BACKOFF: Duration = Duration::from_secs(60);
+
+fn call_observer_reject_backoff(status: u16) -> Duration {
+    match status {
+        401 | 403 => Duration::from_secs(30),
+        404 | 501 => Duration::from_secs(60),
+        _ => Duration::from_secs(5),
+    }
+}
+fn next_no_capability_backoff(current: Duration) -> Duration {
+    current.saturating_mul(2).min(NO_CAPABILITY_MAX_BACKOFF)
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct IncomingCallSummary {
+    call_id: String,
+    revision: u32,
+    call_type: wechat_call_contracts::call_types::CallType,
+    caller_id: String,
+}
+impl From<&wechat_call_contracts::call_types::CallOffer> for IncomingCallSummary {
+    fn from(offer: &wechat_call_contracts::call_types::CallOffer) -> Self {
+        Self {
+            call_id: offer.call_id.clone(),
+            revision: offer.revision,
+            call_type: offer.call_type,
+            caller_id: offer.caller_id.clone(),
+        }
+    }
+}
+impl From<&wechat_call_contracts::call_types::CallPendingOffer> for IncomingCallSummary {
+    fn from(offer: &wechat_call_contracts::call_types::CallPendingOffer) -> Self {
+        Self {
+            call_id: offer.call_id.clone(),
+            revision: offer.revision,
+            call_type: offer.call_type,
+            caller_id: offer.caller_id.clone(),
+        }
+    }
+}
 /// Passive per-account `/calls/socket` observer for OS incoming-call and group-call
 /// notifications. Strictly passive: NEVER sends `call.ready`.
 async fn listen_calls(app: tauri::AppHandle, active: Arc<Active>, account: String) {
     use wechat_call_client::transport::{CallClientError, CallEndpoint, ControlClient};
-    use wechat_call_contracts::call_types::{CallEvent, CallOffer, CallType};
+    use wechat_call_contracts::call_types::{CallEvent, CallType};
 
     let Ok(base) = crate::config::endpoint(&active.connection.endpoint) else {
         return;
@@ -518,47 +648,53 @@ async fn listen_calls(app: tauri::AppHandle, active: Arc<Active>, account: Strin
     };
 
     let mut conferences = ConferenceTracker::default();
-    let mut posted_offer_key: Option<String> = None;
+    let mut posted_offer_call_id: Option<String> = None;
+    let mut no_cap_backoff = NO_CAPABILITY_INITIAL_BACKOFF;
 
     loop {
         let connect_result = ControlClient::connect(&endpoint).await;
         let (mut control, hello) = match connect_result {
             Ok(pair) => pair,
             Err(error) => {
-                if let Some(CallClientError::SocketRejected { status }) =
-                    error.downcast_ref::<CallClientError>()
-                {
-                    if matches!(*status, 401 | 403 | 404 | 501) {
-                        // Stay parked until cancelled (hub change / sign-out) instead of
-                        // finishing and being respawned every 15 s by `coordinate()`.
-                        std::future::pending::<()>().await;
-                    }
-                }
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                let delay = error
+                    .downcast_ref::<CallClientError>()
+                    .and_then(|err| match err {
+                        CallClientError::SocketRejected { status } => {
+                            Some(call_observer_reject_backoff(*status))
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(Duration::from_secs(5));
+                tokio::time::sleep(delay).await;
                 continue;
             }
         };
 
         if !has_any_call_capability(&control.capabilities) {
+            // The daemon accepts the control socket even before an account's first
+            // sync binds call authority (returning all-false capabilities). Retry
+            // with bounded backoff instead of parking forever.
             control.close().await;
-            std::future::pending::<()>().await;
+            let delay = no_cap_backoff;
+            no_cap_backoff = next_no_capability_backoff(no_cap_backoff);
+            tokio::time::sleep(delay).await;
+            continue;
         }
+        no_cap_backoff = NO_CAPABILITY_INITIAL_BACKOFF;
         // Seed existing conference invitations on connect so reconnects do not re-alert.
         conferences.seed(&control.conference_invitations);
 
-        let handle_offer = |offer: &CallOffer,
+        let handle_offer = |offer: IncomingCallSummary,
                             posted: &mut Option<String>,
                             app: &tauri::AppHandle,
                             active: &Arc<Active>,
                             account: &str,
                             server_id: &str| {
-            let key = format!("{}:{}", offer.call_id, offer.revision);
-            let should_send = posted.as_deref() != Some(key.as_str());
+            let should_send = posted.as_deref() != Some(offer.call_id.as_str());
             let app = app.clone();
             let active = active.clone();
             let account = account.to_owned();
             let server_id = server_id.to_owned();
-            let offer = offer.clone();
             async move {
                 if !should_send {
                     return true;
@@ -587,6 +723,11 @@ async fn listen_calls(app: tauri::AppHandle, active: Arc<Active>, account: Strin
                             offer.caller_id.clone()
                         }
                     });
+                // Re-check focus after the thread lookup so focusing during the
+                // lookup does not flash an OS banner or play an overlapping chime.
+                if is_window_focused(&app) {
+                    return false;
+                }
                 let body = match offer.call_type {
                     CallType::Video => crate::i18n::text("callIncomingVideo"),
                     CallType::Voice => crate::i18n::text("callIncomingVoice"),
@@ -619,34 +760,49 @@ async fn listen_calls(app: tauri::AppHandle, active: Arc<Active>, account: Strin
                 )
                 .await
                 {
-                    desktop
-                        .notifications
-                        .active_call_alerts
-                        .lock()
-                        .await
-                        .insert(account, alert);
-                    return true;
+                    let sounding = sound_enabled && os_call_sound_permitted();
+                    return store_call_alert_if_unfocused(
+                        &desktop.notifications,
+                        account,
+                        offer.call_id,
+                        sounding,
+                        alert,
+                        || is_window_focused(&app),
+                    )
+                    .await;
                 }
                 false
             }
         };
 
         if let CallEvent::Hello {
-            current_offer: Some(offer),
+            current_offer,
+            current_pending_offer,
             ..
         } = &hello
         {
-            if handle_offer(
-                offer,
-                &mut posted_offer_key,
-                &app,
-                &active,
-                &account,
-                &server_id,
-            )
-            .await
+            if let Some(summary) = current_offer
+                .as_ref()
+                .map(IncomingCallSummary::from)
+                .or_else(|| {
+                    current_pending_offer
+                        .as_ref()
+                        .map(IncomingCallSummary::from)
+                })
             {
-                posted_offer_key = Some(format!("{}:{}", offer.call_id, offer.revision));
+                let call_id = summary.call_id.clone();
+                if handle_offer(
+                    summary,
+                    &mut posted_offer_call_id,
+                    &app,
+                    &active,
+                    &account,
+                    &server_id,
+                )
+                .await
+                {
+                    posted_offer_call_id = Some(call_id);
+                }
             }
         }
 
@@ -656,9 +812,10 @@ async fn listen_calls(app: tauri::AppHandle, active: Arc<Active>, account: Strin
                     control.update(&event);
                     match &event {
                         CallEvent::Offered { offer } => {
+                            let call_id = offer.call_id.clone();
                             if handle_offer(
-                                offer,
-                                &mut posted_offer_key,
+                                IncomingCallSummary::from(offer),
+                                &mut posted_offer_call_id,
                                 &app,
                                 &active,
                                 &account,
@@ -666,21 +823,39 @@ async fn listen_calls(app: tauri::AppHandle, active: Arc<Active>, account: Strin
                             )
                             .await
                             {
-                                posted_offer_key =
-                                    Some(format!("{}:{}", offer.call_id, offer.revision));
+                                posted_offer_call_id = Some(call_id);
+                            }
+                        }
+                        CallEvent::Pending {
+                            offer: Some(pending),
+                        } => {
+                            let call_id = pending.call_id.clone();
+                            if handle_offer(
+                                IncomingCallSummary::from(pending),
+                                &mut posted_offer_call_id,
+                                &app,
+                                &active,
+                                &account,
+                                &server_id,
+                            )
+                            .await
+                            {
+                                posted_offer_call_id = Some(call_id);
+                            }
+                        }
+                        CallEvent::Pending { offer: None } => {
+                            if control.offer.is_none() && posted_offer_call_id.take().is_some() {
+                                clear_call_alert(&app.state::<Desktop>(), &account).await;
                             }
                         }
                         CallEvent::Availability { availability } => {
-                            if !availability.busy && posted_offer_key.take().is_some() {
+                            if !availability.busy && posted_offer_call_id.take().is_some() {
                                 clear_call_alert(&app.state::<Desktop>(), &account).await;
                             }
                         }
                         CallEvent::State { call } => {
-                            if posted_offer_key
-                                .as_deref()
-                                .is_some_and(|key| key.starts_with(&format!("{}:", call.call_id)))
-                            {
-                                posted_offer_key = None;
+                            if posted_offer_call_id.as_deref() == Some(call.call_id.as_str()) {
+                                posted_offer_call_id = None;
                                 clear_call_alert(&app.state::<Desktop>(), &account).await;
                             }
                         }
@@ -752,7 +927,7 @@ async fn listen_calls(app: tauri::AppHandle, active: Arc<Active>, account: Strin
                     }
                 }
                 Err(_) => {
-                    if posted_offer_key.take().is_some() {
+                    if posted_offer_call_id.take().is_some() {
                         clear_call_alert(&app.state::<Desktop>(), &account).await;
                     }
                     break;
@@ -1392,14 +1567,17 @@ fn install_macos(app: &tauri::AppHandle) {
     );
 }
 /// Declines an incoming call in the background from a macOS notification without
-/// bringing the app forward or advertising `call.ready`.
+/// bringing the app forward.
 ///
-/// Keeps the control socket open until the daemon emits a terminal state for the
-/// rejected call so admission is never revoked mid-RPC.
+/// If the call is still `Pending` (for example on a background signed-in account
+/// whose UI controller paused `call.ready`), promotes only that single offer via
+/// `CallReadyScope::Offer` before sending `call.reject`, and keeps the control
+/// socket open until the daemon emits a terminal state so admission is never
+/// revoked mid-RPC.
 #[cfg(target_os = "macos")]
 async fn decline_call(app: &tauri::AppHandle, target: &CallActionTarget) -> Result<()> {
     use wechat_call_client::transport::{CallEndpoint, ControlClient};
-    use wechat_call_contracts::call_types::{CallCommand, CallEvent, CallState};
+    use wechat_call_contracts::call_types::{CallCommand, CallEvent, CallReadyScope, CallState};
 
     let dummy_target = Target {
         connection_id: target.connection_id.clone(),
@@ -1415,12 +1593,65 @@ async fn decline_call(app: &tauri::AppHandle, target: &CallActionTarget) -> Resu
         token: active.key.as_str().to_owned(),
         account: target.account_id.clone(),
     };
-    let (mut control, _) = ControlClient::connect(&endpoint).await?;
+    let (mut control, hello) = ControlClient::connect(&endpoint).await?;
+    let mut reject_revision = target.revision;
+    if let CallEvent::Hello {
+        current_offer,
+        current_pending_offer,
+        ..
+    } = &hello
+    {
+        if let Some(offer) = current_offer
+            .as_ref()
+            .filter(|offer| offer.call_id == target.call_id)
+        {
+            reject_revision = offer.revision;
+        } else if let Some(pending) = current_pending_offer
+            .as_ref()
+            .filter(|offer| offer.call_id == target.call_id)
+        {
+            let _ = control
+                .command(CallCommand::Ready {
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    ready: true,
+                    format: control.format,
+                    scope: Some(CallReadyScope::Offer {
+                        call_id: target.call_id.clone(),
+                        expected_revision: pending.revision,
+                    }),
+                    video: None,
+                })
+                .await;
+            if let Some(offer) = control
+                .offer
+                .as_ref()
+                .filter(|offer| offer.call_id == target.call_id)
+            {
+                reject_revision = offer.revision;
+            } else {
+                let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                    while let Ok(event) = control.next_event().await {
+                        control.update(&event);
+                        match &event {
+                            CallEvent::Offered { offer } if offer.call_id == target.call_id => {
+                                reject_revision = offer.revision;
+                                break;
+                            }
+                            CallEvent::Pending { offer: None } => break,
+                            CallEvent::Availability { availability } if !availability.busy => break,
+                            _ => {}
+                        }
+                    }
+                })
+                .await;
+            }
+        }
+    }
     let result = control
         .command(CallCommand::Reject {
             request_id: uuid::Uuid::new_v4().to_string(),
             call_id: target.call_id.clone(),
-            expected_revision: target.revision,
+            expected_revision: reject_revision,
         })
         .await;
     if result.is_ok() {
@@ -1698,6 +1929,74 @@ mod tests {
         assert!(!should_post_call_alert(false, false));
         assert!(!should_post_call_alert(false, true));
         assert!(should_post_call_alert(true, false));
+    }
+    #[test]
+    fn call_observer_backoff_retries_with_bounded_delay() {
+        assert_eq!(call_observer_reject_backoff(401), Duration::from_secs(30));
+        assert_eq!(call_observer_reject_backoff(403), Duration::from_secs(30));
+        assert_eq!(call_observer_reject_backoff(404), Duration::from_secs(60));
+        assert_eq!(call_observer_reject_backoff(501), Duration::from_secs(60));
+        assert_eq!(call_observer_reject_backoff(503), Duration::from_secs(5));
+        assert_eq!(
+            next_no_capability_backoff(Duration::from_secs(15)),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            next_no_capability_backoff(Duration::from_secs(30)),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            next_no_capability_backoff(Duration::from_secs(60)),
+            Duration::from_secs(60)
+        );
+    }
+    #[tokio::test]
+    async fn sounding_call_alerts_sync_watch_channel_and_clear_on_focus_race() {
+        let notifications = Notifications::default();
+        let rx = notifications.subscribe_sounding_calls();
+        assert!(rx.borrow().is_empty());
+
+        // Focus gained before storing rejects the alert and never publishes a sounding ID.
+        let stored = store_call_alert_if_unfocused(
+            &notifications,
+            "acct-1".into(),
+            "call-1".into(),
+            true,
+            crate::notification_sound::ActiveCallAlert::dummy_for_test(),
+            || true,
+        )
+        .await;
+        assert!(!stored);
+        assert!(rx.borrow().is_empty());
+
+        // Unfocused silent alert is stored but must not suppress the in-app ringtone.
+        let stored = store_call_alert_if_unfocused(
+            &notifications,
+            "acct-1".into(),
+            "call-1".into(),
+            false,
+            crate::notification_sound::ActiveCallAlert::dummy_for_test(),
+            || false,
+        )
+        .await;
+        assert!(stored);
+        assert!(rx.borrow().is_empty());
+
+        // Unfocused sounding alert publishes the call ID via the watch channel.
+        let stored = store_call_alert_if_unfocused(
+            &notifications,
+            "acct-1".into(),
+            "call-2".into(),
+            true,
+            crate::notification_sound::ActiveCallAlert::dummy_for_test(),
+            || false,
+        )
+        .await;
+        assert!(stored);
+        assert_eq!(
+            rx.borrow().get("acct-1").map(String::as_str),
+            Some("call-2")
+        );
     }
     #[test]
     fn conference_tracker_seeds_initial_invitations_and_deduplicates_by_revision() {
