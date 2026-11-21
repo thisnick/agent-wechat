@@ -10,5 +10,11 @@
     "@agent-wechat/rust-crates": "2.9.0",
     "@agent-wechat/shared": "2.2.0"
   },
-  "changesets": []
+  "changesets": [
+    "calls-shared-media-client",
+    "calls-stage3-desktop",
+    "calls-stage3-ui",
+    "native-video-calls-protocol-v3",
+    "receive-vweixinf-stickers"
+  ]
 }
