@@ -4,27 +4,39 @@ use wechat_calls::track_queue::{Delivery, TrackQueue};
 
 pub type MediaDelivery = Delivery<ReceivedCallAudio, CallEvent>;
 
+const VIDEO_RECEIVE_CAPACITY: usize = 4;
+
 pub(super) struct MediaQueue {
     data: Mutex<QueueData>,
     changed: Notify,
 }
 struct QueueData {
-    queue: TrackQueue<ReceivedCallAudio, CallEvent>,
+    audio: TrackQueue<ReceivedCallAudio, CallEvent>,
+    video: TrackQueue<ReceivedCallAudio, ()>,
     closed: bool,
 }
 
 impl MediaQueue {
-    pub(super) fn new(tracks: &[CallAudioTrack]) -> Result<Arc<Self>> {
-        let mut queue = TrackQueue::new(128, MEDIA_RECEIVE_CAPACITY, 512)
+    pub(super) fn new(tracks: &[CallTrack]) -> Result<Arc<Self>> {
+        let mut audio = TrackQueue::new(128, MEDIA_RECEIVE_CAPACITY, 512)
+            .map_err(|_| error(CallErrorCode::Capacity))?;
+        let mut video = TrackQueue::new(128, VIDEO_RECEIVE_CAPACITY, 512)
             .map_err(|_| error(CallErrorCode::Capacity))?;
         for track in tracks {
-            queue
-                .initial_track(track.id, track.generation)
-                .map_err(|_| error(CallErrorCode::Stale))?;
+            if track.is_video() {
+                video
+                    .initial_track(track.id(), track.generation())
+                    .map_err(|_| error(CallErrorCode::Stale))?;
+            } else {
+                audio
+                    .initial_track(track.id(), track.generation())
+                    .map_err(|_| error(CallErrorCode::Stale))?;
+            }
         }
         Ok(Arc::new(Self {
             data: Mutex::new(QueueData {
-                queue,
+                audio,
+                video,
                 closed: false,
             }),
             changed: Notify::new(),
@@ -33,15 +45,13 @@ impl MediaQueue {
 
     fn change(
         &self,
-        change: impl FnOnce(
-            &mut TrackQueue<ReceivedCallAudio, CallEvent>,
-        ) -> std::result::Result<(), wechat_calls::audio::MediaError>,
+        change: impl FnOnce(&mut QueueData) -> std::result::Result<(), wechat_calls::audio::MediaError>,
     ) -> Result<()> {
         let mut data = self.data.lock().map_err(|_| error(CallErrorCode::Closed))?;
         if data.closed {
             return Err(error(CallErrorCode::Closed));
         }
-        let result = change(&mut data.queue);
+        let result = change(&mut data);
         if result.is_err() {
             data.closed = true;
         }
@@ -56,19 +66,53 @@ impl MediaQueue {
         generation: u32,
         audio: ReceivedCallAudio,
     ) -> Result<()> {
-        self.change(|queue| queue.push(track, generation, audio))
+        self.change(|data| data.audio.push(track, generation, audio))
     }
+
+    pub(super) fn video(
+        &self,
+        track: u32,
+        generation: u32,
+        frame: ReceivedCallAudio,
+    ) -> Result<()> {
+        self.change(|data| {
+            let _ = data.video.push(track, generation, frame);
+            Ok(())
+        })
+    }
+
     pub(super) fn control(&self, event: CallEvent) -> Result<()> {
-        self.change(|queue| match &event {
-            CallEvent::TrackAdded { track, .. } => queue.add(track.id, track.generation, event),
+        self.change(|data| match &event {
+            CallEvent::TrackAdded { track, .. } if track.is_video() => {
+                data.video.add(track.id(), track.generation(), ())?;
+                data.audio.control(event)
+            }
+            CallEvent::TrackAdded { track, .. } => {
+                data.audio.add(track.id(), track.generation(), event)
+            }
+            CallEvent::TrackUpdated { track, .. } if track.is_video() => {
+                if track.direction() == CallTrackDirection::Receive {
+                    let _ = data.video.add(track.id(), track.generation(), ());
+                }
+                data.audio.control(event)
+            }
             CallEvent::TrackRemoved {
                 track_id,
                 generation,
                 ..
-            } => queue.remove(*track_id, *generation, event),
-            _ => queue.control(event),
+            } if *track_id >= VIDEO_SEND_TRACK_ID => {
+                let _ = data.video.remove(*track_id, *generation, ());
+                data.audio.control(event)
+            }
+            CallEvent::TrackRemoved {
+                track_id,
+                generation,
+                ..
+            } => data.audio.remove(*track_id, *generation, event),
+            _ => data.audio.control(event),
         })
     }
+
     pub(super) fn close(&self) {
         if let Ok(mut data) = self.data.lock() {
             data.closed = true;
@@ -85,10 +129,9 @@ impl Drop for MediaReceiveQueue {
 }
 impl MediaReceiveQueue {
     pub fn pending_frames(&self) -> usize {
-        self.0
-            .data
-            .lock()
-            .map_or(0, |data| data.queue.pending_audio())
+        self.0.data.lock().map_or(0, |data| {
+            data.audio.pending_audio() + data.video.pending_audio()
+        })
     }
     fn poll_delivery(
         &mut self,
@@ -101,13 +144,22 @@ impl MediaReceiveQueue {
         if data.closed {
             return Err(broadcast::error::TryRecvError::Closed);
         }
-        let dropped = data.queue.take_dropped();
+        let dropped = data.audio.take_dropped();
         if dropped != 0 {
             return Err(broadcast::error::TryRecvError::Lagged(dropped));
         }
-        data.queue
-            .pop()
-            .ok_or(broadcast::error::TryRecvError::Empty)
+        // Controls and audio always drain ahead of video.
+        if let Some(delivery) = data.audio.pop() {
+            return Ok(delivery);
+        }
+        // Discard silent video drops and internal video control sentinels.
+        let _ = data.video.take_dropped();
+        while let Some(delivery) = data.video.pop() {
+            if let Delivery::Audio(frame) = delivery {
+                return Ok(Delivery::Audio(frame));
+            }
+        }
+        Err(broadcast::error::TryRecvError::Empty)
     }
     pub async fn recv_delivery(
         &mut self,

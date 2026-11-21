@@ -21,9 +21,10 @@ struct Invite {
     caller_openid: Vec<u8>,
     callee_openid: Vec<u8>,
     caller_member: Option<u16>,
+    video_mode: bool,
 }
 
-/// One incoming direct voice call. ACK is ringing setup, not acceptance. Only
+/// One incoming direct voice or video call. ACK is ringing setup, not acceptance. Only
 /// the embedding broker's winning owner may request Join. These methods do not
 /// verify carrier freshness, consume account sync, retry or create history.
 pub struct NativeIncomingSession {
@@ -35,11 +36,48 @@ pub struct NativeIncomingSession {
     reject_spent: bool,
 }
 impl NativeIncomingSession {
+    /// True when the incoming offer is a video call (`room_type = 1`).
+    pub fn is_video(&self) -> bool {
+        self.invite.video_mode
+    }
     /// Current remote microphone state from the authenticated AV snapshot.
     pub fn peer_microphone_muted(&self) -> Option<bool> {
         (self.phase == IncomingPhase::Joined)
             .then(|| self.base.peer_microphone_muted())
             .flatten()
+    }
+    /// Current remote camera state from the authenticated AV snapshot.
+    pub fn peer_camera_enabled(&self) -> Option<bool> {
+        (self.phase == IncomingPhase::Joined)
+            .then(|| self.base.peer_camera_enabled())
+            .flatten()
+    }
+    /// Submit a direct-call `SwitchAV` (`3197`) request toggling local microphone
+    /// and/or camera status while joined.
+    #[allow(clippy::too_many_arguments)]
+    pub fn switch_av(
+        &mut self,
+        client: &impl PersonalTransport,
+        state: &mut AccountState,
+        current: AppAuthority,
+        microphone_enabled: bool,
+        camera_enabled: bool,
+        timestamp: u64,
+        tasks: TaskIds,
+    ) -> Result<()> {
+        ensure!(
+            self.phase == IncomingPhase::Joined,
+            "Incoming SwitchAV unavailable"
+        );
+        self.base.switch_av(
+            client,
+            state,
+            current,
+            microphone_enabled,
+            camera_enabled,
+            timestamp,
+            tasks,
+        )
     }
     /// Call only after a current account-owned live notification has been
     /// retained and a listening controller has reserved the global call slot.
@@ -59,11 +97,12 @@ impl NativeIncomingSession {
             "Unknown incoming invitation fields"
         );
         ensure!(
-            notification.room_type == Some(2)
+            matches!(notification.room_type, Some(1 | 2))
                 && notification.app_id.as_deref() == Some("wechat")
                 && notification.sub_app_id.as_deref() == Some("voip-2p"),
             "Unsupported incoming call family"
         );
+        let video_mode = notification.room_type == Some(1);
         ensure!(
             notification.callee_username.as_deref() == Some(state.own_username.as_str())
                 && notification.caller_username.as_deref() == Some(expected_caller)
@@ -148,6 +187,7 @@ impl NativeIncomingSession {
             pending_recipients: vec![],
         });
         base.phase = PersonalPhase::Ringing;
+        base.video_mode = video_mode;
         Ok(Self {
             base,
             invite: Invite {
@@ -156,6 +196,7 @@ impl NativeIncomingSession {
                 caller_openid,
                 callee_openid,
                 caller_member,
+                video_mode,
             },
             phase: IncomingPhase::Invited,
             ack_spent: false,
@@ -205,9 +246,17 @@ impl NativeIncomingSession {
         state: &mut AccountState,
         tasks: TaskIds,
     ) -> Result<()> {
-        let request = personal::acknowledge_voice(
+        let mode = if self.invite.video_mode {
+            personal::CallMediaMode::Video {
+                camera_enabled: true,
+            }
+        } else {
+            personal::CallMediaMode::Voice
+        };
+        let request = personal::acknowledge_with_mode(
             &self.base.parameters.inputs(),
             self.invite.room,
+            mode,
             tasks.sdk,
         )?;
         let body = self.base.host(
@@ -361,6 +410,7 @@ impl NativeIncomingSession {
             channel: vec![],
             av_sequence: 0,
             av: BTreeMap::new(),
+            video_mode: self.invite.video_mode,
             media_taken: false,
         });
         self.base.phase = PersonalPhase::Ringing;
@@ -376,6 +426,18 @@ impl NativeIncomingSession {
         current: AppAuthority,
         tasks: TaskIds,
     ) -> Result<()> {
+        self.accept_with_camera(client, state, current, self.invite.video_mode, tasks)
+    }
+
+    /// Accept an incoming direct call with explicit initial camera state (ignored for voice offers).
+    pub fn accept_with_camera(
+        &mut self,
+        client: &impl PersonalTransport,
+        state: &mut AccountState,
+        current: AppAuthority,
+        camera_enabled: bool,
+        tasks: TaskIds,
+    ) -> Result<()> {
         self.base.check(state, current)?;
         ensure!(
             self.phase == IncomingPhase::Acknowledged && !self.join_spent,
@@ -384,7 +446,7 @@ impl NativeIncomingSession {
         self.base.reserve(tasks)?;
         self.join_spent = true;
         self.phase = IncomingPhase::Joining;
-        let result = self.accept_once(client, state, current, tasks);
+        let result = self.accept_once(client, state, current, camera_enabled, tasks);
         if let Err(error) = &result {
             if error.is::<CallRpcNotSubmitted>() {
                 self.phase = IncomingPhase::Acknowledged;
@@ -401,11 +463,18 @@ impl NativeIncomingSession {
         client: &impl PersonalTransport,
         state: &mut AccountState,
         current: AppAuthority,
+        camera_enabled: bool,
         tasks: TaskIds,
     ) -> Result<()> {
-        let request = personal::join(
+        let mode = if self.invite.video_mode {
+            personal::CallMediaMode::Video { camera_enabled }
+        } else {
+            personal::CallMediaMode::Voice
+        };
+        let request = personal::join_with_mode(
             &self.base.parameters.inputs(),
             self.invite.room,
+            mode,
             0,
             tasks.sdk,
         )?;
@@ -427,8 +496,10 @@ impl NativeIncomingSession {
                 && number(&joined, 2, None)? == self.invite.room.room_key,
             "Incoming Join room mismatch"
         );
+        let expected_room_type = mode.room_type();
         ensure!(
-            matches!(number(&joined, 8, Some(2))?, 2) && number(&joined, 18, Some(0))? == 0,
+            number(&joined, 8, Some(expected_room_type))? == expected_room_type
+                && number(&joined, 18, Some(0))? == 0,
             "Unsupported incoming Join mode"
         );
         // Tags5/6 are opaque compatibility fields in this selected message.
@@ -522,6 +593,7 @@ impl NativeIncomingSession {
             channel,
             av_sequence,
             av,
+            video_mode: self.invite.video_mode,
             media_taken: false,
         });
         let _ = self.base.media_ready(state, current)?;

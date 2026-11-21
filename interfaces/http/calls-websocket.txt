@@ -6,8 +6,14 @@ client CallClientHello[call.hello] | message, socket control, rejects unknown fi
 client CallClientHello[call.hello].supportedProtocolVersions | array of integer, required, items min 0, items format uint32 | One to eight distinct positive version numbers. The daemon speaks a single version and answers `protocol.error` when the list does not include it.
 client CallCommand[call.answer] | message, socket control, rejects unknown fields | Answer the incoming call. The first client to answer owns the call; others get `already_claimed`.
 client CallCommand[call.answer].callId | string, required | ID of the offered call.
+client CallCommand[call.answer].cameraEnabled | boolean, nullable | Initial camera state when answering a video call. Defaults to true for video calls, ignored for voice calls.
 client CallCommand[call.answer].expectedRevision | integer, required, min 0, format uint32 | The latest offer `revision` you received. A stale revision is rejected.
+client CallCommand[call.answer].muted | boolean, nullable | Initial microphone mute state when answering. Omitted means false.
 client CallCommand[call.answer].requestId | string, required | Your ID for this command. The `command.result` repeats it.
+client CallCommand[call.camera] | message, socket control, rejects unknown fields | Turn your outgoing camera on or off during a video or conference call. Starts a new video send generation, announced by `track.updated`.
+client CallCommand[call.camera].callId | string, required | ID of the call.
+client CallCommand[call.camera].enabled | boolean, required | True to enable outgoing video, false to disable it.
+client CallCommand[call.camera].requestId | string, required | Your ID for this command. The `command.result` repeats it.
 client CallCommand[call.cancel] | message, socket control, rejects unknown fields | Cancel your outgoing call before the other side picks up.
 client CallCommand[call.cancel].callId | string, required | ID of your outgoing call.
 client CallCommand[call.cancel].expectedRevision | integer, required, min 0, format uint32 | The latest call `revision` you received. A stale revision is rejected.
@@ -16,7 +22,9 @@ client CallCommand[call.clear_audio] | message, socket control, rejects unknown 
 client CallCommand[call.clear_audio].callId | string, required | ID of the call.
 client CallCommand[call.clear_audio].requestId | string, required | Your ID for this command. The `command.result` repeats it.
 client CallCommand[call.dial] | message, socket control, rejects unknown fields | Start an outgoing call. The socket becomes the call's owner.
-client CallCommand[call.dial].callType | string, required, values voice|video | Only voice calls are supported.
+client CallCommand[call.dial].callType | string, required, values voice|video | Whether to place a voice or video call.
+client CallCommand[call.dial].cameraEnabled | boolean, nullable | Initial camera state for video calls. Defaults to true when `callType` is `video`, ignored for voice calls.
+client CallCommand[call.dial].muted | boolean, nullable | Initial microphone mute state. Omitted means false.
 client CallCommand[call.dial].requestId | string, required | Your ID for this command. The `command.result` repeats it.
 client CallCommand[call.dial].target | object, required | Who to call.
 client CallCommand[call.dial].target.contactId | string, required, when kind direct | The contact to call. A group ID is not accepted.
@@ -32,14 +40,16 @@ client CallCommand[call.invite].callId | string, required | ID of the conference
 client CallCommand[call.invite].contactIds | array of string, required | Contacts to invite: between 1 and 100.
 client CallCommand[call.invite].requestId | string, required | Your ID for this command. The `command.result` repeats it.
 client CallCommand[call.join] | message, socket control, rejects unknown fields | Join a conference call from one of the listed invitations. The socket becomes the call's owner, as with `call.dial`.
+client CallCommand[call.join].cameraEnabled | boolean, nullable | Whether to join with your camera enabled. Omitted means false.
 client CallCommand[call.join].invitationId | string, required | The `invitationId` of an entry in `conferenceInvitations`.
 client CallCommand[call.join].invitationRevision | integer, required, min 0, format uint32 | The `revision` of that entry. A stale or used invitation fails with `offer_expired`.
+client CallCommand[call.join].muted | boolean, nullable | Whether to join with your microphone muted. Omitted means false.
 client CallCommand[call.join].requestId | string, required | Your ID for this command. The `command.result` repeats it.
 client CallCommand[call.mute] | message, socket control, rejects unknown fields | Mute or unmute your outgoing audio. This also clears queued audio and starts a new send generation, announced by `track.updated`.
 client CallCommand[call.mute].callId | string, required | ID of the call.
 client CallCommand[call.mute].muted | boolean, required | True to mute, false to unmute.
 client CallCommand[call.mute].requestId | string, required | Your ID for this command. The `command.result` repeats it.
-client CallCommand[call.ready] | message, socket control, rejects unknown fields | Advertise or withdraw readiness to handle call audio. A new connection is passive until it advertises readiness.
+client CallCommand[call.ready] | message, socket control, rejects unknown fields | Advertise or withdraw readiness to handle call media. A new connection is passive until it advertises readiness.
 client CallCommand[call.ready].format | object, required, rejects unknown fields | The PCM format you will send and receive. It must match the daemon's audio format.
 client CallCommand[call.ready].format.channels | integer, required, min 0, max 255, format uint8 | Number of interleaved channels.
 client CallCommand[call.ready].format.frameMs | integer, required, min 0, max 65535, format uint16 | Length of one audio frame in milliseconds.
@@ -50,28 +60,33 @@ client CallCommand[call.ready].scope | object, nullable | Which calls readiness 
 client CallCommand[call.ready].scope.callId | string, required, when kind offer | ID of the pending incoming call.
 client CallCommand[call.ready].scope.expectedRevision | integer, required, min 0, format uint32, when kind offer | The offer revision you expect; a different revision is rejected.
 client CallCommand[call.ready].scope.kind | string, required, values all|outgoing|offer | all: Incoming and outgoing calls; outgoing: Outgoing calls only; offer: One pending incoming call
+client CallCommand[call.ready].video | object, nullable, rejects unknown fields | Video codecs and bounds this client supports. Omitted for audio-only clients.
+client CallCommand[call.ready].video.maxFps | integer, nullable, min 0, max 255, format uint8 | Maximum frame rate in frames per second. Omitted when no cap is specified.
+client CallCommand[call.ready].video.maxHeight | integer, nullable, min 0, max 65535, format uint16 | Maximum frame height in pixels. Omitted when no cap is specified.
+client CallCommand[call.ready].video.maxWidth | integer, nullable, min 0, max 65535, format uint16 | Maximum frame width in pixels. Omitted when no cap is specified.
+client CallCommand[call.ready].video.receiveCodecs | array of string, default [] | Video codecs deliverable to a receiving client, in preference order.
+client CallCommand[call.ready].video.receiveCodecs[] | string, values h265|h264|jpeg | Video codec exchanged on a call media track.
+client CallCommand[call.ready].video.sendCodecs | array of string, default [] | Video codecs accepted from a sending client, in preference order.
+client CallCommand[call.ready].video.sendCodecs[] | string, values h265|h264|jpeg | Video codec exchanged on a call media track.
 client CallCommand[call.reject] | message, socket control, rejects unknown fields | Reject the incoming call.
 client CallCommand[call.reject].callId | string, required | ID of the offered call.
 client CallCommand[call.reject].expectedRevision | integer, required, min 0, format uint32 | The latest offer `revision` you received. A stale revision is rejected.
 client CallCommand[call.reject].requestId | string, required | Your ID for this command. The `command.result` repeats it.
-client CallMediaCommand[audio.chunk] | message, socket media, rejects unknown fields | A chunk of PCM audio. You send it on your track; the daemon sends it on receive tracks.
-client CallMediaCommand[audio.chunk].generation | integer, required, min 0, format uint32 | The track generation. Chunks for an older generation are discarded.
-client CallMediaCommand[audio.chunk].pcmBase64 | string, required | PCM16 little-endian samples as padded base64. A chunk you send is whole samples, at most 65,536 bytes once decoded.
-client CallMediaCommand[audio.chunk].sampleOffset | integer, nullable, min 0, format uint64 | Position of the chunk in per-channel samples on the shared call timeline. The daemon sets it on chunks it sends; you must not send it.
-client CallMediaCommand[audio.chunk].sequence | integer, nullable, min 0, format uint64 | Order of the chunk within its source. The daemon sets it on chunks it sends; you must not send it.
-client CallMediaCommand[audio.chunk].trackId | integer, required, min 0, format uint32 | The track the audio belongs to.
-client CallMediaCommand[audio.start] | message, socket media, rejects unknown fields | Start sending audio on your track for a generation. Send it before the first chunk, and again after each new generation.
-client CallMediaCommand[audio.start].generation | integer, required, min 0, format uint32 | The generation to start.
-client CallMediaCommand[audio.start].trackId | integer, required, min 0, format uint32 | The send track's ID.
 client CallMediaCommand[media.attach] | message, socket media, rejects unknown fields | Attach the socket to a call you own. Send it first, within five seconds of connecting; the daemon answers `media.ready`.
 client CallMediaCommand[media.attach].clientId | string, required | The `clientId` from the control socket's `hello`.
 client CallMediaCommand[media.attach].ownerToken | string, required | The secret `ownerToken` from the `command.result` that claimed the call. Do not log it.
 client CallMediaCommand[media.attach].supportedProtocolVersions | array of integer, required, items min 0, items format uint32 | The protocol versions you support.
+client CallMediaCommand[track.start] | message, socket media, rejects unknown fields | Start sending media on one of your send tracks for a generation. Send it before the first binary frame, and again after each new generation.
+client CallMediaCommand[track.start].generation | integer, required, min 0, format uint32 | The generation to start.
+client CallMediaCommand[track.start].trackId | integer, required, min 0, format uint32 | The send track's ID.
+client CallMediaCommand[video.request_keyframe] | message, socket media, rejects unknown fields | Ask the remote sender of a receive video track to emit a fresh keyframe.
+client CallMediaCommand[video.request_keyframe].trackId | integer, required, min 0, format uint32 | The receive video track's ID.
 server CallEvent[call.control] | message, socket control | The other party of a direct call changed a control, such as muting their microphone. It needs no reply.
 server CallEvent[call.control].callId | string, required | ID of the direct call.
 server CallEvent[call.control].control | object, required | The control and its new value.
-server CallEvent[call.control].control.kind | string, required, values microphone | microphone: The participant's microphone
-server CallEvent[call.control].control.muted | boolean, required | True when the microphone is muted.
+server CallEvent[call.control].control.enabled | boolean, required, when kind camera | True when the camera is sending video.
+server CallEvent[call.control].control.kind | string, required, values microphone|camera | microphone: The participant's microphone; camera: The participant's camera
+server CallEvent[call.control].control.muted | boolean, required, when kind microphone | True when the microphone is muted.
 server CallEvent[call.control].participantId | string, required | The contact whose control changed.
 server CallEvent[call.error] | message, sockets control|media | A failure that is not tied to a command, such as an invalid message or a missing permission. The daemon then closes the socket, except for `outcome_unknown`, which follows `hello` and leaves it open.
 server CallEvent[call.error].code | string, required, values invalid_request|busy|already_claimed|offer_expired|not_owner|unsupported|media_not_ready|outcome_unknown|capacity|stale|forbidden|closed | What went wrong.
@@ -106,8 +121,9 @@ server CallEvent[call.state].call.callType | string, required, values voice|vide
 server CallEvent[call.state].call.controls | array of object | The latest controls reported by the other party of a direct call, also given to a newly connected observer. Omitted until one is reported.
 server CallEvent[call.state].call.controls[] | object | A control reported by one participant.
 server CallEvent[call.state].call.controls[].control | object, required | The control and its value.
-server CallEvent[call.state].call.controls[].control.kind | string, required, values microphone | microphone: The participant's microphone
-server CallEvent[call.state].call.controls[].control.muted | boolean, required | True when the microphone is muted.
+server CallEvent[call.state].call.controls[].control.enabled | boolean, required, when kind camera | True when the camera is sending video.
+server CallEvent[call.state].call.controls[].control.kind | string, required, values microphone|camera | microphone: The participant's microphone; camera: The participant's camera
+server CallEvent[call.state].call.controls[].control.muted | boolean, required, when kind microphone | True when the microphone is muted.
 server CallEvent[call.state].call.controls[].participantId | string, required | The participant the control belongs to. In a direct call this is the contact ID.
 server CallEvent[call.state].call.direction | string, required, values incoming|outgoing | Whether this account placed the call or received it.
 server CallEvent[call.state].call.groupId | string, nullable | The group of a conference call. Omitted for a direct call.
@@ -115,6 +131,7 @@ server CallEvent[call.state].call.kind | string, required, values direct|confere
 server CallEvent[call.state].call.ownedByThisClient | boolean, required | True when this connection owns the call. Always false in HTTP snapshots.
 server CallEvent[call.state].call.participants | array of object | The latest conference roster. Omitted for a direct call.
 server CallEvent[call.state].call.participants[] | object | One participant in a conference call.
+server CallEvent[call.state].call.participants[].cameraEnabled | boolean, nullable | Whether the participant's camera is on. Omitted until the server reports it; an omitted value is unknown, not false.
 server CallEvent[call.state].call.participants[].contactId | string, required | Contact ID of the participant.
 server CallEvent[call.state].call.participants[].membership | string, required, values joined|invited|left|unknown | Whether the participant is in the room.
 server CallEvent[call.state].call.participants[].microphoneEnabled | boolean, nullable | Whether the participant's microphone is on. Omitted until the server reports it; an omitted value is unknown, not false.
@@ -154,9 +171,9 @@ server CallEvent[hello].capabilities.conferenceAudio | boolean | Audio in confer
 server CallEvent[hello].capabilities.conferenceCreate | boolean | Starting a conference call in a group is available.
 server CallEvent[hello].capabilities.conferenceInvite | boolean | Inviting more contacts into a connected conference call is available.
 server CallEvent[hello].capabilities.conferenceJoin | boolean | Joining a conference call from an invitation is available.
-server CallEvent[hello].capabilities.conferenceVideo | boolean | Video in conference calls is available. This version never sets it.
+server CallEvent[hello].capabilities.conferenceVideo | boolean | Video in conference calls is available.
 server CallEvent[hello].capabilities.directAudio | boolean | Direct voice calls with one contact are available.
-server CallEvent[hello].capabilities.directVideo | boolean | Direct video calls are available. This version never sets it.
+server CallEvent[hello].capabilities.directVideo | boolean | Direct video calls are available.
 server CallEvent[hello].clientId | string, required | ID of this connection. Send it as `clientId` in `media.attach`.
 server CallEvent[hello].conferenceInvitations | array of object, required | Conference calls this account can join.
 server CallEvent[hello].conferenceInvitations[] | object | A conference call this account can join. It carries no room credentials.
@@ -170,8 +187,9 @@ server CallEvent[hello].currentCall.callType | string, required, values voice|vi
 server CallEvent[hello].currentCall.controls | array of object | The latest controls reported by the other party of a direct call, also given to a newly connected observer. Omitted until one is reported.
 server CallEvent[hello].currentCall.controls[] | object | A control reported by one participant.
 server CallEvent[hello].currentCall.controls[].control | object, required | The control and its value.
-server CallEvent[hello].currentCall.controls[].control.kind | string, required, values microphone | microphone: The participant's microphone
-server CallEvent[hello].currentCall.controls[].control.muted | boolean, required | True when the microphone is muted.
+server CallEvent[hello].currentCall.controls[].control.enabled | boolean, required, when kind camera | True when the camera is sending video.
+server CallEvent[hello].currentCall.controls[].control.kind | string, required, values microphone|camera | microphone: The participant's microphone; camera: The participant's camera
+server CallEvent[hello].currentCall.controls[].control.muted | boolean, required, when kind microphone | True when the microphone is muted.
 server CallEvent[hello].currentCall.controls[].participantId | string, required | The participant the control belongs to. In a direct call this is the contact ID.
 server CallEvent[hello].currentCall.direction | string, required, values incoming|outgoing | Whether this account placed the call or received it.
 server CallEvent[hello].currentCall.groupId | string, nullable | The group of a conference call. Omitted for a direct call.
@@ -179,6 +197,7 @@ server CallEvent[hello].currentCall.kind | string, required, values direct|confe
 server CallEvent[hello].currentCall.ownedByThisClient | boolean, required | True when this connection owns the call. Always false in HTTP snapshots.
 server CallEvent[hello].currentCall.participants | array of object | The latest conference roster. Omitted for a direct call.
 server CallEvent[hello].currentCall.participants[] | object | One participant in a conference call.
+server CallEvent[hello].currentCall.participants[].cameraEnabled | boolean, nullable | Whether the participant's camera is on. Omitted until the server reports it; an omitted value is unknown, not false.
 server CallEvent[hello].currentCall.participants[].contactId | string, required | Contact ID of the participant.
 server CallEvent[hello].currentCall.participants[].membership | string, required, values joined|invited|left|unknown | Whether the participant is in the room.
 server CallEvent[hello].currentCall.participants[].microphoneEnabled | boolean, nullable | Whether the participant's microphone is on. Omitted until the server reports it; an omitted value is unknown, not false.
@@ -202,30 +221,58 @@ server CallEvent[hello].currentPendingOffer.kind | string, required, values dire
 server CallEvent[hello].currentPendingOffer.phase | string, required, values waiting_for_ready|preparing | What the call is waiting for.
 server CallEvent[hello].currentPendingOffer.revision | integer, required, min 0, format uint32 | Increases when the offer changes.
 server CallEvent[hello].protocolVersion | integer, required, min 0, format uint32 | The protocol version the daemon speaks on this socket.
-server CallEvent[media.ready] | message, socket media | Sent on the media socket after `media.attach` succeeds: the tracks to use.
+server CallEvent[hello].videoCapabilities | object, nullable | Video codecs and bounds this daemon can exchange. Omitted when video is unavailable.
+server CallEvent[hello].videoCapabilities.maxFps | integer, nullable, min 0, max 255, format uint8 | Maximum frame rate in frames per second. Omitted when no cap is specified.
+server CallEvent[hello].videoCapabilities.maxHeight | integer, nullable, min 0, max 65535, format uint16 | Maximum frame height in pixels. Omitted when no cap is specified.
+server CallEvent[hello].videoCapabilities.maxWidth | integer, nullable, min 0, max 65535, format uint16 | Maximum frame width in pixels. Omitted when no cap is specified.
+server CallEvent[hello].videoCapabilities.receiveCodecs | array of string, required | Video codecs deliverable to a receiving client, in preference order.
+server CallEvent[hello].videoCapabilities.receiveCodecs[] | string, values h265|h264|jpeg | Video codec exchanged on a call media track.
+server CallEvent[hello].videoCapabilities.sendCodecs | array of string, required | Video codecs accepted from a sending client, in preference order.
+server CallEvent[hello].videoCapabilities.sendCodecs[] | string, values h265|h264|jpeg | Video codec exchanged on a call media track.
+server CallEvent[media.ready] | message, socket media | Sent on the media socket after `media.attach` succeeds: the audio and video tracks to use.
 server CallEvent[media.ready].protocolVersion | integer, required, min 0, format uint32 | The protocol version the daemon speaks on the media socket.
-server CallEvent[media.ready].receiveTracks | array of object, required | The tracks for audio you receive, one per source.
-server CallEvent[media.ready].receiveTracks[] | object | One audio stream: the single track you send, or one source you receive.
-server CallEvent[media.ready].receiveTracks[].direction | string, required, values send|receive | Whether you send or receive audio on this track.
-server CallEvent[media.ready].receiveTracks[].format | object, required | The PCM format of the track.
-server CallEvent[media.ready].receiveTracks[].format.channels | integer, required, min 0, max 255, format uint8 | Number of interleaved channels.
-server CallEvent[media.ready].receiveTracks[].format.frameMs | integer, required, min 0, max 65535, format uint16 | Length of one audio frame in milliseconds.
-server CallEvent[media.ready].receiveTracks[].format.sampleRate | integer, required, min 0, format uint32 | Samples per second, per channel.
-server CallEvent[media.ready].receiveTracks[].generation | integer, required, min 0, format uint32 | Version of the stream. Chunks for an older generation are discarded; a new generation starts after `call.clear_audio` or a mute change.
-server CallEvent[media.ready].receiveTracks[].id | integer, required, min 0, format uint32 | Track ID to use in `audio.start` and `audio.chunk`.
+server CallEvent[media.ready].receiveTracks | array of object, required | The tracks for media you receive, one per audio or video source.
+server CallEvent[media.ready].receiveTracks[] | object | One audio or video stream: a track you send, or one source you receive.
+server CallEvent[media.ready].receiveTracks[].active | boolean, required, when media video | True when this video track is currently active.
+server CallEvent[media.ready].receiveTracks[].direction | string, required, values send|receive | Whether you send or receive media on this track.
+server CallEvent[media.ready].receiveTracks[].generation | integer, required, min 0, format uint32 | Version of the stream. Frames for an older generation are discarded; a new generation starts after `call.clear_audio`, a mute change, a camera toggle, or a format change.
+server CallEvent[media.ready].receiveTracks[].id | integer, required, min 0, format uint32 | Track ID to use in `track.start`, `video.request_keyframe` and binary `WXCM` frames.
+server CallEvent[media.ready].receiveTracks[].media | string, required, values audio|video | audio: One PCM audio stream; video: One video stream
 server CallEvent[media.ready].receiveTracks[].participantId | string, nullable | The conference participant this track carries. Omitted when the track is not tied to a participant.
-server CallEvent[media.ready].sendTrack | object, required | The track for audio you send.
-server CallEvent[media.ready].sendTrack.direction | string, required, values send|receive | Whether you send or receive audio on this track.
-server CallEvent[media.ready].sendTrack.format | object, required | The PCM format of the track.
-server CallEvent[media.ready].sendTrack.format.channels | integer, required, min 0, max 255, format uint8 | Number of interleaved channels.
-server CallEvent[media.ready].sendTrack.format.frameMs | integer, required, min 0, max 65535, format uint16 | Length of one audio frame in milliseconds.
-server CallEvent[media.ready].sendTrack.format.sampleRate | integer, required, min 0, format uint32 | Samples per second, per channel.
-server CallEvent[media.ready].sendTrack.generation | integer, required, min 0, format uint32 | Version of the stream. Chunks for an older generation are discarded; a new generation starts after `call.clear_audio` or a mute change.
-server CallEvent[media.ready].sendTrack.id | integer, required, min 0, format uint32 | Track ID to use in `audio.start` and `audio.chunk`.
-server CallEvent[media.ready].sendTrack.participantId | string, nullable | The conference participant this track carries. Omitted when the track is not tied to a participant.
+server CallEvent[media.ready].receiveTracks[][audio].format | object, required, when media audio | The PCM format of the track.
+server CallEvent[media.ready].receiveTracks[][audio].format.channels | integer, required, min 0, max 255, format uint8 | Number of interleaved channels.
+server CallEvent[media.ready].receiveTracks[][audio].format.frameMs | integer, required, min 0, max 65535, format uint16 | Length of one audio frame in milliseconds.
+server CallEvent[media.ready].receiveTracks[][audio].format.sampleRate | integer, required, min 0, format uint32 | Samples per second, per channel.
+server CallEvent[media.ready].receiveTracks[][video].format | object, required, when media video | The negotiated video codec, mode and bounds of the track.
+server CallEvent[media.ready].receiveTracks[][video].format.bitrateKbps | integer, nullable, min 0, format uint32 | Target bitrate in kbps when encoding or transcoding. Omitted for pass-through or JPEG.
+server CallEvent[media.ready].receiveTracks[][video].format.codec | string, required, values h265|h264|jpeg | Codec carried on this track.
+server CallEvent[media.ready].receiveTracks[][video].format.maxFps | integer, required, min 0, max 255, format uint8 | Maximum frame rate in frames per second for this track.
+server CallEvent[media.ready].receiveTracks[][video].format.maxHeight | integer, required, min 0, max 65535, format uint16 | Maximum frame height in pixels for this track.
+server CallEvent[media.ready].receiveTracks[][video].format.maxWidth | integer, required, min 0, max 65535, format uint16 | Maximum frame width in pixels for this track.
+server CallEvent[media.ready].receiveTracks[][video].format.mode | string, required, values passthrough|transcoded | Whether this track passes wire frames straight through or transcodes them.
+server CallEvent[media.ready].sendTracks | array of object, required | The tracks for media you send (audio, plus video when negotiated).
+server CallEvent[media.ready].sendTracks[] | object | One audio or video stream: a track you send, or one source you receive.
+server CallEvent[media.ready].sendTracks[].active | boolean, required, when media video | True when this video track is currently active.
+server CallEvent[media.ready].sendTracks[].direction | string, required, values send|receive | Whether you send or receive media on this track.
+server CallEvent[media.ready].sendTracks[].generation | integer, required, min 0, format uint32 | Version of the stream. Frames for an older generation are discarded; a new generation starts after `call.clear_audio`, a mute change, a camera toggle, or a format change.
+server CallEvent[media.ready].sendTracks[].id | integer, required, min 0, format uint32 | Track ID to use in `track.start`, `video.request_keyframe` and binary `WXCM` frames.
+server CallEvent[media.ready].sendTracks[].media | string, required, values audio|video | audio: One PCM audio stream; video: One video stream
+server CallEvent[media.ready].sendTracks[].participantId | string, nullable | The conference participant this track carries. Omitted when the track is not tied to a participant.
+server CallEvent[media.ready].sendTracks[][audio].format | object, required, when media audio | The PCM format of the track.
+server CallEvent[media.ready].sendTracks[][audio].format.channels | integer, required, min 0, max 255, format uint8 | Number of interleaved channels.
+server CallEvent[media.ready].sendTracks[][audio].format.frameMs | integer, required, min 0, max 65535, format uint16 | Length of one audio frame in milliseconds.
+server CallEvent[media.ready].sendTracks[][audio].format.sampleRate | integer, required, min 0, format uint32 | Samples per second, per channel.
+server CallEvent[media.ready].sendTracks[][video].format | object, required, when media video | The negotiated video codec, mode and bounds of the track.
+server CallEvent[media.ready].sendTracks[][video].format.bitrateKbps | integer, nullable, min 0, format uint32 | Target bitrate in kbps when encoding or transcoding. Omitted for pass-through or JPEG.
+server CallEvent[media.ready].sendTracks[][video].format.codec | string, required, values h265|h264|jpeg | Codec carried on this track.
+server CallEvent[media.ready].sendTracks[][video].format.maxFps | integer, required, min 0, max 255, format uint8 | Maximum frame rate in frames per second for this track.
+server CallEvent[media.ready].sendTracks[][video].format.maxHeight | integer, required, min 0, max 65535, format uint16 | Maximum frame height in pixels for this track.
+server CallEvent[media.ready].sendTracks[][video].format.maxWidth | integer, required, min 0, max 65535, format uint16 | Maximum frame width in pixels for this track.
+server CallEvent[media.ready].sendTracks[][video].format.mode | string, required, values passthrough|transcoded | Whether this track passes wire frames straight through or transcodes them.
 server CallEvent[participant.updated] | message, socket control | A conference participant's membership or microphone changed. A `call.state` with the new roster follows.
 server CallEvent[participant.updated].callId | string, required | ID of the conference call.
 server CallEvent[participant.updated].participant | object, required | The participant as it is now.
+server CallEvent[participant.updated].participant.cameraEnabled | boolean, nullable | Whether the participant's camera is on. Omitted until the server reports it; an omitted value is unknown, not false.
 server CallEvent[participant.updated].participant.contactId | string, required | Contact ID of the participant.
 server CallEvent[participant.updated].participant.membership | string, required, values joined|invited|left|unknown | Whether the participant is in the room.
 server CallEvent[participant.updated].participant.microphoneEnabled | boolean, nullable | Whether the participant's microphone is on. Omitted until the server reports it; an omitted value is unknown, not false.
@@ -238,38 +285,54 @@ server CallEvent[protocol.error] | message, sockets control|media | The protocol
 server CallEvent[protocol.error].clientVersions | array of integer, required, items min 0, items format uint32 | The versions the client announced. Empty when the list was invalid.
 server CallEvent[protocol.error].code | string, required, values unsupported_protocol_version|invalid_protocol_version | Why the versions were refused.
 server CallEvent[protocol.error].serverVersions | array of integer, required, items min 0, items format uint32 | The versions the daemon supports.
-server CallEvent[track.added] | message, sockets control|media | A receive audio track appeared. Audio for it follows.
+server CallEvent[track.added] | message, sockets control|media | A receive audio or video track appeared. Frames for it follow.
 server CallEvent[track.added].callId | string, required | ID of the call.
 server CallEvent[track.added].track | object, required | The new track.
-server CallEvent[track.added].track.direction | string, required, values send|receive | Whether you send or receive audio on this track.
-server CallEvent[track.added].track.format | object, required | The PCM format of the track.
-server CallEvent[track.added].track.format.channels | integer, required, min 0, max 255, format uint8 | Number of interleaved channels.
-server CallEvent[track.added].track.format.frameMs | integer, required, min 0, max 65535, format uint16 | Length of one audio frame in milliseconds.
-server CallEvent[track.added].track.format.sampleRate | integer, required, min 0, format uint32 | Samples per second, per channel.
-server CallEvent[track.added].track.generation | integer, required, min 0, format uint32 | Version of the stream. Chunks for an older generation are discarded; a new generation starts after `call.clear_audio` or a mute change.
-server CallEvent[track.added].track.id | integer, required, min 0, format uint32 | Track ID to use in `audio.start` and `audio.chunk`.
+server CallEvent[track.added].track.active | boolean, required, when media video | True when this video track is currently active.
+server CallEvent[track.added].track.direction | string, required, values send|receive | Whether you send or receive media on this track.
+server CallEvent[track.added].track.generation | integer, required, min 0, format uint32 | Version of the stream. Frames for an older generation are discarded; a new generation starts after `call.clear_audio`, a mute change, a camera toggle, or a format change.
+server CallEvent[track.added].track.id | integer, required, min 0, format uint32 | Track ID to use in `track.start`, `video.request_keyframe` and binary `WXCM` frames.
+server CallEvent[track.added].track.media | string, required, values audio|video | audio: One PCM audio stream; video: One video stream
 server CallEvent[track.added].track.participantId | string, nullable | The conference participant this track carries. Omitted when the track is not tied to a participant.
-server CallEvent[track.removed] | message, sockets control|media | A receive track ended. Audio for that generation stops.
+server CallEvent[track.added].track[audio].format | object, required, when media audio | The PCM format of the track.
+server CallEvent[track.added].track[audio].format.channels | integer, required, min 0, max 255, format uint8 | Number of interleaved channels.
+server CallEvent[track.added].track[audio].format.frameMs | integer, required, min 0, max 65535, format uint16 | Length of one audio frame in milliseconds.
+server CallEvent[track.added].track[audio].format.sampleRate | integer, required, min 0, format uint32 | Samples per second, per channel.
+server CallEvent[track.added].track[video].format | object, required, when media video | The negotiated video codec, mode and bounds of the track.
+server CallEvent[track.added].track[video].format.bitrateKbps | integer, nullable, min 0, format uint32 | Target bitrate in kbps when encoding or transcoding. Omitted for pass-through or JPEG.
+server CallEvent[track.added].track[video].format.codec | string, required, values h265|h264|jpeg | Codec carried on this track.
+server CallEvent[track.added].track[video].format.maxFps | integer, required, min 0, max 255, format uint8 | Maximum frame rate in frames per second for this track.
+server CallEvent[track.added].track[video].format.maxHeight | integer, required, min 0, max 65535, format uint16 | Maximum frame height in pixels for this track.
+server CallEvent[track.added].track[video].format.maxWidth | integer, required, min 0, max 65535, format uint16 | Maximum frame width in pixels for this track.
+server CallEvent[track.added].track[video].format.mode | string, required, values passthrough|transcoded | Whether this track passes wire frames straight through or transcodes them.
+server CallEvent[track.removed] | message, sockets control|media | A receive track ended. Frames for that generation stop.
 server CallEvent[track.removed].callId | string, required | ID of the call.
 server CallEvent[track.removed].generation | integer, required, min 0, format uint32 | The generation that ended.
 server CallEvent[track.removed].reason | string, required | Why the track ended. Currently `source_unavailable`.
 server CallEvent[track.removed].trackId | integer, required, min 0, format uint32 | ID of the track that ended.
-server CallEvent[track.updated] | message, socket control | A track moved to a new generation, for example after `call.clear_audio` or a mute change. Send new audio on the new generation.
+server CallEvent[track.updated] | message, sockets control|media | A track moved to a new generation or state, for example after `call.clear_audio`, a mute change, or `call.camera`. Send new frames on the new generation.
 server CallEvent[track.updated].callId | string, required | ID of the call.
-server CallEvent[track.updated].track | object, required | The track with its new generation.
-server CallEvent[track.updated].track.direction | string, required, values send|receive | Whether you send or receive audio on this track.
-server CallEvent[track.updated].track.format | object, required | The PCM format of the track.
-server CallEvent[track.updated].track.format.channels | integer, required, min 0, max 255, format uint8 | Number of interleaved channels.
-server CallEvent[track.updated].track.format.frameMs | integer, required, min 0, max 65535, format uint16 | Length of one audio frame in milliseconds.
-server CallEvent[track.updated].track.format.sampleRate | integer, required, min 0, format uint32 | Samples per second, per channel.
-server CallEvent[track.updated].track.generation | integer, required, min 0, format uint32 | Version of the stream. Chunks for an older generation are discarded; a new generation starts after `call.clear_audio` or a mute change.
-server CallEvent[track.updated].track.id | integer, required, min 0, format uint32 | Track ID to use in `audio.start` and `audio.chunk`.
+server CallEvent[track.updated].track | object, required | The track with its new generation or state.
+server CallEvent[track.updated].track.active | boolean, required, when media video | True when this video track is currently active.
+server CallEvent[track.updated].track.direction | string, required, values send|receive | Whether you send or receive media on this track.
+server CallEvent[track.updated].track.generation | integer, required, min 0, format uint32 | Version of the stream. Frames for an older generation are discarded; a new generation starts after `call.clear_audio`, a mute change, a camera toggle, or a format change.
+server CallEvent[track.updated].track.id | integer, required, min 0, format uint32 | Track ID to use in `track.start`, `video.request_keyframe` and binary `WXCM` frames.
+server CallEvent[track.updated].track.media | string, required, values audio|video | audio: One PCM audio stream; video: One video stream
 server CallEvent[track.updated].track.participantId | string, nullable | The conference participant this track carries. Omitted when the track is not tied to a participant.
-server CallMediaCommand[audio.chunk] | message, socket media | A chunk of PCM audio. You send it on your track; the daemon sends it on receive tracks.
-server CallMediaCommand[audio.chunk].generation | integer, required, min 0, format uint32 | The track generation. Chunks for an older generation are discarded.
-server CallMediaCommand[audio.chunk].pcmBase64 | string, required | PCM16 little-endian samples as padded base64. A chunk you send is whole samples, at most 65,536 bytes once decoded.
-server CallMediaCommand[audio.chunk].sampleOffset | integer, nullable, min 0, format uint64 | Position of the chunk in per-channel samples on the shared call timeline. The daemon sets it on chunks it sends; you must not send it.
-server CallMediaCommand[audio.chunk].sequence | integer, nullable, min 0, format uint64 | Order of the chunk within its source. The daemon sets it on chunks it sends; you must not send it.
-server CallMediaCommand[audio.chunk].trackId | integer, required, min 0, format uint32 | The track the audio belongs to.
-socket control | path /v1/accounts/{a}/calls/socket, scope calls, protocol 2 | Call commands and events as JSON text. Send call.hello within five seconds of connecting, then wait for hello.
-socket media | path /v1/accounts/{a}/calls/{call}/media, scope calls, protocol 2 | Audio for one call you own, as JSON text with base64 PCM. Send media.attach within five seconds of connecting, then wait for media.ready. Binary messages are rejected.
+server CallEvent[track.updated].track[audio].format | object, required, when media audio | The PCM format of the track.
+server CallEvent[track.updated].track[audio].format.channels | integer, required, min 0, max 255, format uint8 | Number of interleaved channels.
+server CallEvent[track.updated].track[audio].format.frameMs | integer, required, min 0, max 65535, format uint16 | Length of one audio frame in milliseconds.
+server CallEvent[track.updated].track[audio].format.sampleRate | integer, required, min 0, format uint32 | Samples per second, per channel.
+server CallEvent[track.updated].track[video].format | object, required, when media video | The negotiated video codec, mode and bounds of the track.
+server CallEvent[track.updated].track[video].format.bitrateKbps | integer, nullable, min 0, format uint32 | Target bitrate in kbps when encoding or transcoding. Omitted for pass-through or JPEG.
+server CallEvent[track.updated].track[video].format.codec | string, required, values h265|h264|jpeg | Codec carried on this track.
+server CallEvent[track.updated].track[video].format.maxFps | integer, required, min 0, max 255, format uint8 | Maximum frame rate in frames per second for this track.
+server CallEvent[track.updated].track[video].format.maxHeight | integer, required, min 0, max 65535, format uint16 | Maximum frame height in pixels for this track.
+server CallEvent[track.updated].track[video].format.maxWidth | integer, required, min 0, max 65535, format uint16 | Maximum frame width in pixels for this track.
+server CallEvent[track.updated].track[video].format.mode | string, required, values passthrough|transcoded | Whether this track passes wire frames straight through or transcodes them.
+server CallEvent[video.keyframe_requested] | message, socket media | Sent on the media socket when the remote party asks your video encoder for a fresh keyframe (IDR with inline parameter sets).
+server CallEvent[video.keyframe_requested].callId | string, required | ID of the call.
+server CallEvent[video.keyframe_requested].generation | integer, required, min 0, format uint32 | Generation of your outgoing video track.
+server CallEvent[video.keyframe_requested].trackId | integer, required, min 0, format uint32 | ID of your outgoing video track.
+socket control | path /v1/accounts/{a}/calls/socket, scope calls, protocol 3 | Call commands and events as JSON text. Send call.hello within five seconds of connecting, then wait for hello. Authenticate with an Authorization: Bearer header or a single-use ?ticket= issued by POST /v1/accounts/{a}/calls/tickets.
+socket media | path /v1/accounts/{a}/calls/{call}/media, scope calls, protocol 3 | Audio and video for one call you own. Send media.attach within five seconds of connecting, then wait for media.ready. JSON text messages carry track lifecycle and keyframe requests; binary messages carry a 36-byte big-endian WXCM v3 header followed by PCM16 audio or Annex-B H.265/H.264 or JPEG video bytes. Authenticate with an Authorization: Bearer header or a single-use ?ticket= issued by POST /v1/accounts/{a}/calls/tickets.

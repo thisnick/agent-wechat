@@ -81,28 +81,46 @@ wx auth qr | - | Show or save the QR code for a login attempt
 wx auth qr --output | takes <OUTPUT> | Save the QR code PNG to this path instead of the default folder
 wx auth qr <ID> | position 1, required | Login attempt ID printed by wx auth login
 wx auth status | - | Show the selected account's WeChat login state
-wx calls | - | Observe calls or use this computer's microphone and speakers
-wx calls answer | - | Answer the current offer using this computer's microphone and speakers
+wx calls | - | Observe calls or use this computer's microphone, speakers and camera
+wx calls answer | - | Answer the current offer using this computer's microphone, speakers and optional camera
+wx calls answer --camera | takes <CAMERA> | Local camera source for video calls: auto, off, test, file:PATH, or a device path
+wx calls answer --camera-off | switch | Start video calls with the camera turned off; toggle with v before or during the call
 wx calls answer --input-device | takes <INPUT_DEVICE> | Local backend source name or endpoint ID; defaults to the OS microphone
+wx calls answer --muted | switch | Start with the microphone muted; toggle with m before or during the call
 wx calls answer --output-device | takes <OUTPUT_DEVICE> | Local backend sink name or endpoint ID; defaults to the OS speakers
 wx calls answer <CALL_ID> | position 1 | Incoming call ID to answer; omit to answer the current offer
-wx calls conference | - | Start or join a conference with local microphone, mixed playback and participant meters
+wx calls conference | - | Start or join a voice or video conference with local devices and participant meters
 wx calls conference join | - | Join a current invitation for this group; never creates a room
+wx calls conference join --camera | takes <CAMERA> | Local camera source: auto, off, test, file:PATH, or a device path
+wx calls conference join --camera-off | switch | Start with the camera turned off; toggle with v during the call
 wx calls conference join --input-device | takes <INPUT_DEVICE> | Local backend source name or endpoint ID; defaults to the OS microphone
+wx calls conference join --muted | switch | Start with the microphone muted; toggle with m during the call
 wx calls conference join --output-device | takes <OUTPUT_DEVICE> | Local backend sink name or endpoint ID; defaults to the OS speakers
+wx calls conference join --video | switch | Enable video for this call (camera and microphone start on unless overridden)
 wx calls conference join <GROUP> | position 1, required | Group ID, ending in @chatroom, that has a current conference invitation
-wx calls conference start | - | Start a group voice conference; use i inside the call for later invitations
+wx calls conference start | - | Start a group voice or video conference; use i inside the call for later invitations
+wx calls conference start --camera | takes <CAMERA> | Local camera source: auto, off, test, file:PATH, or a device path
+wx calls conference start --camera-off | switch | Start with the camera turned off; toggle with v during the call
 wx calls conference start --input-device | takes <INPUT_DEVICE> | Local backend source name or endpoint ID; defaults to the OS microphone
 wx calls conference start --invite | required, takes <INVITEES>, repeatable | Contact ID to invite; repeat for several
+wx calls conference start --muted | switch | Start with the microphone muted; toggle with m during the call
 wx calls conference start --output-device | takes <OUTPUT_DEVICE> | Local backend sink name or endpoint ID; defaults to the OS speakers
+wx calls conference start --video | switch | Enable video for this call (camera and microphone start on unless overridden)
 wx calls conference start <GROUP> | position 1, required | Group ID, ending in @chatroom, to start the conference in
-wx calls devices | - | List local microphone/speaker devices without connecting to a daemon
-wx calls dial | - | Call one contact using this computer's microphone and speakers
+wx calls devices | - | List local microphone, speaker and camera devices without connecting to a daemon
+wx calls dial | - | Call one contact using this computer's microphone, speakers and optional camera
+wx calls dial --camera | takes <CAMERA> | Local camera source: auto, off, test, file:PATH, or a device path
+wx calls dial --camera-off | switch | Start with the camera turned off; toggle with v during the call
 wx calls dial --input-device | takes <INPUT_DEVICE> | Local backend source name or endpoint ID; defaults to the OS microphone
+wx calls dial --muted | switch | Start with the microphone muted; toggle with m during the call
 wx calls dial --output-device | takes <OUTPUT_DEVICE> | Local backend sink name or endpoint ID; defaults to the OS speakers
+wx calls dial --video | switch | Enable video for this call (camera and microphone start on unless overridden)
 wx calls dial <CONTACT> | position 1, required | Contact ID to call, from wx contacts list
-wx calls monitor | - | Wait for incoming calls. With --json, observe only without audio devices
+wx calls monitor | - | Wait for incoming voice or video calls. With --json, observe only without local devices
+wx calls monitor --camera | takes <CAMERA> | Local camera source for video calls: auto, off, test, file:PATH, or a device path
+wx calls monitor --camera-off | switch | Start video calls with the camera turned off; toggle with v before or during the call
 wx calls monitor --input-device | takes <INPUT_DEVICE> | Local backend source name or endpoint ID; defaults to the OS microphone
+wx calls monitor --muted | switch | Start with the microphone muted; toggle with m before or during the call
 wx calls monitor --output-device | takes <OUTPUT_DEVICE> | Local backend sink name or endpoint ID; defaults to the OS speakers
 wx calls status | - | Read the daemon's current call state and exit
 wx chats | - | Find chats and change their read state and settings

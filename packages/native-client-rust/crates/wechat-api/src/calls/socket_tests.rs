@@ -16,11 +16,21 @@ use tokio_tungstenite::{
     tungstenite::{client::IntoClientRequest, Message as ClientMessage},
     MaybeTlsStream, WebSocketStream,
 };
-use wechat_core::call_types::CallCapabilities;
+use wechat_core::call_types::{
+    CallCapabilities, CallTicketResponse, AUDIO_SEND_TRACK_ID, CALL_PROTOCOL_VERSION,
+    VIDEO_RECEIVE_TRACK_BASE, VIDEO_SEND_TRACK_ID,
+};
 use wechat_core::{
     calls::{
         ownership::{AccountAuthority, CallIdentity, Operation},
-        service::{BackendAudioRequest, BackendOutcome, BackendRequest, BackendSink, CallBackend},
+        pcm_envelope::{
+            self, MediaHeader, MediaPayloadKind, WireMediaFrame, FLAG_CODEC_CONFIG, FLAG_KEYFRAME,
+            MAX_AUDIO_PAYLOAD_BYTES,
+        },
+        service::{
+            BackendAudioRequest, BackendOutcome, BackendRequest, BackendSink, BackendVideoRequest,
+            CallBackend,
+        },
     },
     Core,
 };
@@ -32,8 +42,11 @@ const OWNER: &str = "synthetic-owner-api-token-for-call-tests-only";
 
 #[derive(Default)]
 struct EchoBackend {
+    direct_video: std::sync::atomic::AtomicBool,
     submits: AtomicUsize,
     received: AtomicUsize,
+    received_video: AtomicUsize,
+    camera_changes: Mutex<Vec<bool>>,
     sink: Mutex<Option<BackendSink>>,
     held_audio: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     audio_started: Arc<tokio::sync::Notify>,
@@ -50,6 +63,7 @@ impl CallBackend for EchoBackend {
     fn capabilities(&self, _: &str) -> CallCapabilities {
         CallCapabilities {
             direct_audio: true,
+            direct_video: self.direct_video.load(Ordering::Acquire),
             ..CallCapabilities::default()
         }
     }
@@ -97,6 +111,33 @@ impl CallBackend for EchoBackend {
             Ok(())
         })
     }
+    fn set_camera(&self, _identity: CallIdentity, enabled: bool) -> BackendFuture<()> {
+        self.camera_changes.lock().unwrap().push(enabled);
+        Box::pin(async { Ok(()) })
+    }
+    fn send_video(&self, request: BackendVideoRequest) -> BackendFuture<()> {
+        let seq = self.received_video.fetch_add(1, Ordering::SeqCst) as u64;
+        let sink = self.sink.lock().unwrap().clone().unwrap();
+        Box::pin(async move {
+            if !request.is_current() {
+                return Err(CallServiceError(CallErrorCode::Stale));
+            }
+            sink.video_frame(
+                VIDEO_RECEIVE_TRACK_BASE,
+                1,
+                request.codec,
+                request.flags,
+                seq,
+                request.timestamp_micros,
+                &request.payload,
+            )
+            .await
+        })
+    }
+    fn request_video_keyframe(&self, _identity: CallIdentity, _track_id: u32) -> BackendFuture<()> {
+        let sink = self.sink.lock().unwrap().clone().unwrap();
+        Box::pin(async move { sink.peer_keyframe_requested().await })
+    }
     fn stop(&self, _: CallIdentity) -> BackendFuture<BackendOutcome> {
         Box::pin(async { Ok(BackendOutcome::Ended) })
     }
@@ -105,6 +146,7 @@ struct Fixture {
     _temp: tempfile::TempDir,
     core: Arc<Core>,
     backend: Arc<EchoBackend>,
+    routes: axum::Router,
     address: std::net::SocketAddr,
     server: JoinHandle<()>,
 }
@@ -127,13 +169,15 @@ impl Fixture {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let routes = router(core.clone(), OWNER);
+        let served = routes.clone();
         let server = tokio::spawn(async move {
-            axum::serve(listener, routes).await.unwrap();
+            axum::serve(listener, served).await.unwrap();
         });
         Self {
             _temp: temp,
             core,
             backend,
+            routes,
             address,
             server,
         }
@@ -153,7 +197,7 @@ impl Fixture {
         if path.ends_with("/calls/socket") {
             command(
                 &mut socket,
-                json!({"type":"call.hello","supportedProtocolVersions":[2]}),
+                json!({"type":"call.hello","supportedProtocolVersions":[CALL_PROTOCOL_VERSION]}),
             )
             .await;
         }
@@ -212,16 +256,29 @@ async fn ready(socket: &mut Socket, id: &str) {
 }
 
 fn audio_chunk(bytes: &[u8], generation: u32) -> ClientMessage {
-    ClientMessage::Text(json!({"type":"audio.chunk","trackId":1,"generation":generation,"pcmBase64":BASE64.encode(bytes)}).to_string().into())
+    audio_chunk_for(AUDIO_SEND_TRACK_ID, bytes, generation)
+}
+fn audio_chunk_for(track_id: u32, bytes: &[u8], generation: u32) -> ClientMessage {
+    let encoded = pcm_envelope::encode_pcm_chunk(
+        MediaHeader {
+            track_id,
+            generation,
+            sequence: 0,
+            timestamp_micros: 0,
+        },
+        bytes,
+    )
+    .unwrap();
+    ClientMessage::Binary(encoded.into())
 }
 fn pcm_chunk(message: ClientMessage) -> Option<Vec<u8>> {
-    let ClientMessage::Text(text) = message else {
+    let ClientMessage::Binary(bytes) = message else {
         return None;
     };
-    let value: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(value["type"], "audio.chunk");
-    assert_eq!(value["trackId"], 2);
-    Some(BASE64.decode(value["pcmBase64"].as_str().unwrap()).unwrap())
+    let wire = WireMediaFrame::decode(&bytes).unwrap();
+    assert_eq!(wire.kind, MediaPayloadKind::PcmS16le);
+    assert_eq!(wire.header.track_id, 2);
+    Some(wire.payload().to_vec())
 }
 
 #[tokio::test]
@@ -234,9 +291,9 @@ async fn protocol_negotiation_rejects_legacy_and_invalid_lists_before_actions() 
             json!([1]),
         ),
         (
-            json!({"type":"call.hello","supportedProtocolVersions":[1,3]}),
+            json!({"type":"call.hello","supportedProtocolVersions":[1,2]}),
             "unsupported_protocol_version",
-            json!([1, 3]),
+            json!([1, 2]),
         ),
         (
             json!({"type":"call.hello","supportedProtocolVersions":[]}),
@@ -249,7 +306,7 @@ async fn protocol_negotiation_rejects_legacy_and_invalid_lists_before_actions() 
             json!([]),
         ),
         (
-            json!({"type":"call.hello","supportedProtocolVersions":[2,2]}),
+            json!({"type":"call.hello","supportedProtocolVersions":[3,3]}),
             "invalid_protocol_version",
             json!([]),
         ),
@@ -260,7 +317,7 @@ async fn protocol_negotiation_rejects_legacy_and_invalid_lists_before_actions() 
         assert_eq!(error["type"], "protocol.error");
         assert_eq!(error["code"], code);
         assert_eq!(error["clientVersions"], versions);
-        assert_eq!(error["serverVersions"], json!([2]));
+        assert_eq!(error["serverVersions"], json!([CALL_PROTOCOL_VERSION]));
         assert!(
             matches!(socket.next().await.unwrap().unwrap(), ClientMessage::Close(Some(frame)) if u16::from(frame.code) == 1002)
         );
@@ -273,10 +330,13 @@ async fn protocol_negotiation_rejects_legacy_and_invalid_lists_before_actions() 
         .unwrap();
     command(
         &mut socket,
-        json!({"type":"call.hello","supportedProtocolVersions":[3,2]}),
+        json!({"type":"call.hello","supportedProtocolVersions":[2,3]}),
     )
     .await;
-    assert_eq!(json_event(&mut socket).await["protocolVersion"], 2);
+    assert_eq!(
+        json_event(&mut socket).await["protocolVersion"],
+        CALL_PROTOCOL_VERSION
+    );
 }
 
 #[tokio::test]
@@ -332,7 +392,7 @@ async fn websocket_upgrade_checks_bearer_scope_account_and_origin() {
     let (mut socket, _) = connect_async(request.clone()).await.unwrap();
     command(
         &mut socket,
-        json!({"type":"call.hello","supportedProtocolVersions":[2]}),
+        json!({"type":"call.hello","supportedProtocolVersions":[CALL_PROTOCOL_VERSION]}),
     )
     .await;
     let hello = json_event(&mut socket).await;
@@ -505,7 +565,7 @@ async fn first_answer_owns_media_and_generated_pcm_roundtrips_without_keys() {
         .await;
     command(
         &mut wrong,
-        json!({"type":"media.attach","supportedProtocolVersions":[2],"clientId":client_one,"ownerToken":"0".repeat(64)}),
+        json!({"type":"media.attach","supportedProtocolVersions":[CALL_PROTOCOL_VERSION],"clientId":client_one,"ownerToken":"0".repeat(64)}),
     )
     .await;
     assert_eq!(json_event(&mut wrong).await["code"], "not_owner");
@@ -520,7 +580,7 @@ async fn first_answer_owns_media_and_generated_pcm_roundtrips_without_keys() {
         let mut foreign = f.socket(path, bearer).await;
         command(
             &mut foreign,
-            json!({"type":"media.attach","supportedProtocolVersions":[2],"clientId":client_one,"ownerToken":owner_token}),
+            json!({"type":"media.attach","supportedProtocolVersions":[CALL_PROTOCOL_VERSION],"clientId":client_one,"ownerToken":owner_token}),
         )
         .await;
         assert_eq!(json_event(&mut foreign).await["code"], "forbidden");
@@ -528,7 +588,7 @@ async fn first_answer_owns_media_and_generated_pcm_roundtrips_without_keys() {
     let mut malformed = f
         .socket("/v1/accounts/one/calls/incoming-fixture/media", calls_token)
         .await;
-    command(&mut malformed, json!({"type":"media.attach","supportedProtocolVersions":[2],"clientId":client_one,"ownerToken":owner_token,"unexpected":true})).await;
+    command(&mut malformed, json!({"type":"media.attach","supportedProtocolVersions":[CALL_PROTOCOL_VERSION],"clientId":client_one,"ownerToken":owner_token,"unexpected":true})).await;
     assert!(matches!(
         timeout(Duration::from_secs(1), malformed.next())
             .await
@@ -540,7 +600,7 @@ async fn first_answer_owns_media_and_generated_pcm_roundtrips_without_keys() {
         .await;
     command(
         &mut media,
-        json!({"type":"media.attach","supportedProtocolVersions":[2],"clientId":client_one,"ownerToken":owner_token}),
+        json!({"type":"media.attach","supportedProtocolVersions":[CALL_PROTOCOL_VERSION],"clientId":client_one,"ownerToken":owner_token}),
     )
     .await;
     let ack = json_event(&mut media).await;
@@ -554,7 +614,7 @@ async fn first_answer_owns_media_and_generated_pcm_roundtrips_without_keys() {
         .collect();
     command(
         &mut media,
-        json!({"type":"audio.start","trackId":1,"generation":1}),
+        json!({"type":"track.start","trackId":1,"generation":1}),
     )
     .await;
     // Application chunks need not match codec frame boundaries. The daemon
@@ -634,7 +694,7 @@ async fn clear_ack_waits_for_backend_and_old_inflight_audio_does_not_revoke_owne
     let mut media = f
         .socket(&format!("/v1/accounts/one/calls/{call_id}/media"), OWNER)
         .await;
-    command(&mut media,json!({"type":"media.attach","supportedProtocolVersions":[2],"clientId":hello["clientId"],"ownerToken":owner["ownerToken"]})).await;
+    command(&mut media,json!({"type":"media.attach","supportedProtocolVersions":[CALL_PROTOCOL_VERSION],"clientId":hello["clientId"],"ownerToken":owner["ownerToken"]})).await;
     assert_eq!(json_event(&mut media).await["type"], "media.ready");
     let frame = || {
         [432i16; 320]
@@ -644,7 +704,7 @@ async fn clear_ack_waits_for_backend_and_old_inflight_audio_does_not_revoke_owne
     };
     command(
         &mut media,
-        json!({"type":"audio.start","trackId":1,"generation":1}),
+        json!({"type":"track.start","trackId":1,"generation":1}),
     )
     .await;
     let (release_audio, audio_gate) = tokio::sync::oneshot::channel();
@@ -703,7 +763,7 @@ async fn clear_ack_waits_for_backend_and_old_inflight_audio_does_not_revoke_owne
     assert_eq!(track.unwrap()["track"]["generation"], 2);
     command(
         &mut media,
-        json!({"type":"audio.start","trackId":1,"generation":2}),
+        json!({"type":"track.start","trackId":1,"generation":2}),
     )
     .await;
     media.send(audio_chunk(&frame(), 2)).await.unwrap();
@@ -787,48 +847,51 @@ async fn active_outgoing_call_does_not_block_another_accounts_incoming_call() {
 }
 
 #[tokio::test]
-async fn json_pcm_limits_tracks_and_generations_are_checked_before_audio_admission() {
-    let oversized = BASE64.encode(vec![0; MEDIA_LIMIT + 2]);
+async fn binary_wxcm_limits_tracks_and_generations_are_checked_before_audio_admission() {
+    let mut bad_version = pcm_envelope::encode_pcm_chunk(
+        MediaHeader {
+            track_id: 1,
+            generation: 1,
+            sequence: 0,
+            timestamp_micros: 0,
+        },
+        &[0; 640],
+    )
+    .unwrap();
+    bad_version[4] = 2;
+    let mut oversized_audio =
+        Vec::with_capacity(pcm_envelope::HEADER_BYTES + MAX_AUDIO_PAYLOAD_BYTES + 2);
+    oversized_audio.extend_from_slice(b"WXCM");
+    oversized_audio.push(CALL_PROTOCOL_VERSION as u8);
+    oversized_audio.push(MediaPayloadKind::PcmS16le as u8);
+    oversized_audio.extend_from_slice(&0u16.to_be_bytes());
+    oversized_audio.extend_from_slice(&1u32.to_be_bytes());
+    oversized_audio.extend_from_slice(&1u32.to_be_bytes());
+    oversized_audio.extend_from_slice(&0u64.to_be_bytes());
+    oversized_audio.extend_from_slice(&0u64.to_be_bytes());
+    oversized_audio.extend_from_slice(&((MAX_AUDIO_PAYLOAD_BYTES + 2) as u32).to_be_bytes());
+    oversized_audio.resize(pcm_envelope::HEADER_BYTES + MAX_AUDIO_PAYLOAD_BYTES + 2, 0);
     for (start, chunk, accepted) in [
         (true, ClientMessage::Binary(vec![0, 0].into()), false),
+        (true, ClientMessage::Binary(bad_version.into()), false),
+        (true, ClientMessage::Binary(oversized_audio.into()), false),
         (
             true,
             ClientMessage::Text(
-                json!({"type":"audio.chunk","trackId":1,"generation":1,"pcmBase64":"!!!!"})
+                json!({"type":"audio.chunk","trackId":1,"generation":1,"pcmBase64":"AAA="})
                     .to_string()
                     .into(),
             ),
             false,
         ),
-        (
-            true,
-            ClientMessage::Text(
-                json!({"type":"audio.chunk","trackId":1,"generation":1,"pcmBase64":oversized})
-                    .to_string()
-                    .into(),
-            ),
-            false,
-        ),
-        (
-            true,
-            ClientMessage::Text(
-                json!({"type":"audio.chunk","trackId":2,"generation":1,"pcmBase64":"AAA="})
-                    .to_string()
-                    .into(),
-            ),
-            false,
-        ),
-        (
-            true,
-            ClientMessage::Text(
-                json!({"type":"audio.chunk","trackId":1,"generation":2,"pcmBase64":"AAA="})
-                    .to_string()
-                    .into(),
-            ),
-            false,
-        ),
+        (true, audio_chunk_for(2, &[0, 0], 1), false),
+        (true, audio_chunk(&[0, 0], 2), false),
         (false, audio_chunk(&[0, 0], 1), false),
-        (true, audio_chunk(&vec![0; MEDIA_LIMIT], 1), true),
+        (
+            true,
+            audio_chunk(&vec![0; MAX_AUDIO_PAYLOAD_BYTES], 1),
+            true,
+        ),
     ] {
         let f = Fixture::new(true).await;
         let mut control = f.socket("/v1/accounts/one/calls/socket", OWNER).await;
@@ -849,12 +912,12 @@ async fn json_pcm_limits_tracks_and_generations_are_checked_before_audio_admissi
             owner["callId"].as_str().unwrap()
         );
         let mut media = f.socket(&path, OWNER).await;
-        command(&mut media, json!({"type":"media.attach","supportedProtocolVersions":[2],"clientId":hello["clientId"],"ownerToken":owner["ownerToken"]})).await;
+        command(&mut media, json!({"type":"media.attach","supportedProtocolVersions":[CALL_PROTOCOL_VERSION],"clientId":hello["clientId"],"ownerToken":owner["ownerToken"]})).await;
         assert_eq!(json_event(&mut media).await["type"], "media.ready");
         if start {
             command(
                 &mut media,
-                json!({"type":"audio.start","trackId":1,"generation":1}),
+                json!({"type":"track.start","trackId":1,"generation":1}),
             )
             .await;
         }
@@ -880,4 +943,546 @@ async fn json_pcm_limits_tracks_and_generations_are_checked_before_audio_admissi
             assert_eq!(f.backend.received.load(Ordering::SeqCst), 0);
         }
     }
+}
+
+#[tokio::test]
+async fn call_socket_tickets_are_single_use_scoped_and_revoked_with_bearer() {
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    let f = Fixture::new(true).await;
+    let grant = f.grant("browser-calls-token", &["calls"], &["one"]);
+    f.grant("read-only-token", &["read"], &["one"]);
+
+    let post_ticket = |token: &str, body: Value| {
+        let app = f.routes.clone();
+        let auth = format!("Bearer {token}");
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/accounts/one/calls/tickets")
+                    .header(header::AUTHORIZATION, auth)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+
+    // Non-calls token cannot mint a ticket.
+    let denied = post_ticket("read-only-token", json!({"socket": "control"})).await;
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+    // Media socket ticket requires callId.
+    let bad_req = post_ticket("browser-calls-token", json!({"socket": "media"})).await;
+    assert_eq!(bad_req.status(), StatusCode::BAD_REQUEST);
+
+    // Wrong account cannot use a ticket, and the mismatched attempt burns it.
+    let probe_resp = post_ticket("browser-calls-token", json!({"socket": "control"})).await;
+    let probe_ticket: CallTicketResponse =
+        serde_json::from_slice(&probe_resp.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
+    let wrong_account = connect_async(format!(
+        "ws://{}/v1/accounts/two/calls/socket?ticket={}",
+        f.address, probe_ticket.ticket
+    ))
+    .await;
+    assert!(matches!(
+        wrong_account,
+        Err(tokio_tungstenite::tungstenite::Error::Http(r)) if r.status() == StatusCode::UNAUTHORIZED
+    ));
+    let reused_probe = connect_async(format!(
+        "ws://{}/v1/accounts/one/calls/socket?ticket={}",
+        f.address, probe_ticket.ticket
+    ))
+    .await;
+    assert!(matches!(
+        reused_probe,
+        Err(tokio_tungstenite::tungstenite::Error::Http(r)) if r.status() == StatusCode::UNAUTHORIZED
+    ));
+
+    // Mint a control ticket and connect without Authorization header.
+    let ticket_resp = post_ticket("browser-calls-token", json!({"socket": "control"})).await;
+    assert_eq!(ticket_resp.status(), StatusCode::OK);
+    assert_eq!(
+        ticket_resp.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
+    let bytes = ticket_resp.into_body().collect().await.unwrap().to_bytes();
+    let issued: CallTicketResponse = serde_json::from_slice(&bytes).unwrap();
+    assert!(!issued.ticket.is_empty());
+
+    // Correct account + socket upgrades without Authorization header.
+    let (mut control, _) = connect_async(format!(
+        "ws://{}/v1/accounts/one/calls/socket?ticket={}",
+        f.address, issued.ticket
+    ))
+    .await
+    .unwrap();
+    command(
+        &mut control,
+        json!({"type":"call.hello","supportedProtocolVersions":[CALL_PROTOCOL_VERSION]}),
+    )
+    .await;
+    let hello = json_event(&mut control).await;
+    assert_eq!(hello["type"], "hello");
+    assert_eq!(hello["protocolVersion"], CALL_PROTOCOL_VERSION);
+
+    // Replay of the exact same ticket is rejected.
+    let replay = connect_async(format!(
+        "ws://{}/v1/accounts/one/calls/socket?ticket={}",
+        f.address, issued.ticket
+    ))
+    .await;
+    assert!(matches!(
+        replay,
+        Err(tokio_tungstenite::tungstenite::Error::Http(r)) if r.status() == StatusCode::UNAUTHORIZED
+    ));
+
+    // Ticket cannot be used on ordinary REST routes like /calls/current.
+    let rest_resp = post_ticket("browser-calls-token", json!({"socket": "control"})).await;
+    let rest_ticket: CallTicketResponse =
+        serde_json::from_slice(&rest_resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let rest_denied = f
+        .routes
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/accounts/one/calls/current?ticket={}",
+                    rest_ticket.ticket
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rest_denied.status(), StatusCode::UNAUTHORIZED);
+
+    // Dial a call and verify a media-scoped ticket connects to the exact call only.
+    ready(&mut control, "ready-ticket").await;
+    command(&mut control, json!({"type":"call.dial","requestId":"dial-ticket","target":{"kind":"direct","contactId":"synthetic-peer"},"callType":"voice"})).await;
+    let owner = until(&mut control, |e| {
+        e["type"] == "command.result" && e["requestId"] == "dial-ticket"
+    })
+    .await;
+    let call_id = owner["callId"].as_str().unwrap().to_string();
+    until(&mut control, |e| {
+        e["type"] == "call.state" && e["call"]["state"] == "connected"
+    })
+    .await;
+
+    let wrong_media_resp = post_ticket(
+        "browser-calls-token",
+        json!({"socket": "media", "callId": call_id}),
+    )
+    .await;
+    let wrong_media_ticket: CallTicketResponse = serde_json::from_slice(
+        &wrong_media_resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
+    let wrong_call = connect_async(format!(
+        "ws://{}/v1/accounts/one/calls/other-call/media?ticket={}",
+        f.address, wrong_media_ticket.ticket
+    ))
+    .await;
+    assert!(matches!(
+        wrong_call,
+        Err(tokio_tungstenite::tungstenite::Error::Http(r)) if r.status() == StatusCode::UNAUTHORIZED
+    ));
+    let media_resp = post_ticket(
+        "browser-calls-token",
+        json!({"socket": "media", "callId": call_id}),
+    )
+    .await;
+    let media_ticket: CallTicketResponse =
+        serde_json::from_slice(&media_resp.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
+    let (mut media, _) = connect_async(format!(
+        "ws://{}/v1/accounts/one/calls/{call_id}/media?ticket={}",
+        f.address, media_ticket.ticket
+    ))
+    .await
+    .unwrap();
+    command(&mut media, json!({"type":"media.attach","supportedProtocolVersions":[CALL_PROTOCOL_VERSION],"clientId":hello["clientId"],"ownerToken":owner["ownerToken"]})).await;
+    assert_eq!(json_event(&mut media).await["type"], "media.ready");
+
+    // Revoking the issuing bearer invalidates unused tickets too.
+    let doomed_resp = post_ticket("browser-calls-token", json!({"socket": "control"})).await;
+    let doomed_ticket: CallTicketResponse =
+        serde_json::from_slice(&doomed_resp.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
+    f.core.store.revoke_token(&grant.id).unwrap();
+    let revoked_connect = connect_async(format!(
+        "ws://{}/v1/accounts/one/calls/socket?ticket={}",
+        f.address, doomed_ticket.ticket
+    ))
+    .await;
+    assert!(matches!(
+        revoked_connect,
+        Err(tokio_tungstenite::tungstenite::Error::Http(r)) if r.status() == StatusCode::UNAUTHORIZED
+    ));
+}
+
+#[tokio::test]
+async fn video_call_negotiates_passthrough_and_roundtrips_binary_video_and_keyframe_requests() {
+    let f = Fixture::new(true).await;
+    f.backend.direct_video.store(true, Ordering::Release);
+    let mut control = f.socket("/v1/accounts/one/calls/socket", OWNER).await;
+    let hello = json_event(&mut control).await;
+    assert_eq!(hello["capabilities"]["directVideo"], true);
+    command(
+        &mut control,
+        json!({
+            "type": "call.ready",
+            "requestId": "ready-v",
+            "ready": true,
+            "format": {"sampleRate": 16000, "channels": 1, "frameMs": 20},
+            "video": {"sendCodecs": ["h265", "jpeg"], "receiveCodecs": ["h265", "jpeg"]}
+        }),
+    )
+    .await;
+    assert_eq!(
+        until(&mut control, |e| e["requestId"] == "ready-v").await["status"],
+        "accepted"
+    );
+    command(
+        &mut control,
+        json!({
+            "type": "call.dial",
+            "requestId": "dial-v",
+            "target": {"kind": "direct", "contactId": "synthetic-peer"},
+            "callType": "video",
+            "cameraEnabled": true
+        }),
+    )
+    .await;
+    let owner = until(&mut control, |e| e["requestId"] == "dial-v").await;
+    let call_id = owner["callId"].as_str().unwrap().to_string();
+    until(&mut control, |e| {
+        e["type"] == "call.state" && e["call"]["state"] == "connected"
+    })
+    .await;
+
+    let mut media = f
+        .socket(&format!("/v1/accounts/one/calls/{call_id}/media"), OWNER)
+        .await;
+    command(
+        &mut media,
+        json!({
+            "type": "media.attach",
+            "supportedProtocolVersions": [CALL_PROTOCOL_VERSION],
+            "clientId": hello["clientId"],
+            "ownerToken": owner["ownerToken"]
+        }),
+    )
+    .await;
+    let ready_event = json_event(&mut media).await;
+    assert_eq!(ready_event["type"], "media.ready");
+    assert!(ready_event["sendTracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["media"] == "video"
+            && t["id"] == VIDEO_SEND_TRACK_ID
+            && t["format"]["codec"] == "h265"
+            && t["format"]["mode"] == "passthrough"));
+    assert!(ready_event["receiveTracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["media"] == "video"
+            && t["id"] == VIDEO_RECEIVE_TRACK_BASE
+            && t["format"]["codec"] == "h265"
+            && t["format"]["mode"] == "passthrough"));
+
+    // Start video send track and send one binary H.265 keyframe.
+    command(
+        &mut media,
+        json!({"type": "track.start", "trackId": VIDEO_SEND_TRACK_ID, "generation": 1}),
+    )
+    .await;
+    let nal = vec![0x00, 0x00, 0x00, 0x01, 0x26, 0x01, 0xde, 0xad, 0xbe, 0xef];
+    let packet = pcm_envelope::encode_video(
+        MediaPayloadKind::H265AnnexB,
+        FLAG_KEYFRAME | FLAG_CODEC_CONFIG,
+        MediaHeader {
+            track_id: VIDEO_SEND_TRACK_ID,
+            generation: 1,
+            sequence: 0,
+            timestamp_micros: 33_333,
+        },
+        &nal,
+    )
+    .unwrap();
+    media
+        .send(ClientMessage::Binary(packet.into()))
+        .await
+        .unwrap();
+
+    // EchoBackend echoes video frames onto VIDEO_RECEIVE_TRACK_BASE_ID.
+    loop {
+        match timeout(Duration::from_secs(2), media.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+        {
+            ClientMessage::Binary(bytes) => {
+                let wire = WireMediaFrame::decode(&bytes).unwrap();
+                assert_eq!(wire.kind, MediaPayloadKind::H265AnnexB);
+                assert_eq!(wire.header.track_id, VIDEO_RECEIVE_TRACK_BASE);
+                assert_eq!(wire.flags, FLAG_KEYFRAME | FLAG_CODEC_CONFIG);
+                assert_eq!(wire.header.timestamp_micros, 33_333);
+                assert_eq!(wire.payload(), nal.as_slice());
+                break;
+            }
+            ClientMessage::Ping(_) | ClientMessage::Pong(_) => {}
+            other => panic!("unexpected frame: {other:?}"),
+        }
+    }
+    assert_eq!(f.backend.received_video.load(Ordering::SeqCst), 1);
+
+    // Client requests keyframe -> EchoBackend emits video.keyframe_requested.
+    command(
+        &mut media,
+        json!({"type": "video.request_keyframe", "trackId": VIDEO_RECEIVE_TRACK_BASE}),
+    )
+    .await;
+    let kf_event = until(&mut media, |e| e["type"] == "video.keyframe_requested").await;
+    assert_eq!(kf_event["trackId"], VIDEO_SEND_TRACK_ID);
+
+    // Client toggles camera off -> backend records it and video send track generation bumps to 2.
+    command(
+        &mut control,
+        json!({"type": "call.camera", "requestId": "cam-toggle", "callId": call_id, "enabled": false}),
+    )
+    .await;
+    let cam_res = until(&mut control, |e| e["requestId"] == "cam-toggle").await;
+    assert_eq!(cam_res["status"], "accepted");
+    assert_eq!(
+        f.backend.camera_changes.lock().unwrap().as_slice(),
+        &[false]
+    );
+    let track_upd = until(&mut media, |e| {
+        e["type"] == "track.updated" && e["track"]["id"] == VIDEO_SEND_TRACK_ID
+    })
+    .await;
+    assert_eq!(track_upd["track"]["generation"], 2);
+
+    // Superseded track.start (generation 1 < current 2) and stale video.request_keyframe on an
+    // unknown receive track ID >= VIDEO_RECEIVE_TRACK_BASE must not fail or detach the owner.
+    command(
+        &mut media,
+        json!({"type": "track.start", "trackId": VIDEO_SEND_TRACK_ID, "generation": 1}),
+    )
+    .await;
+    command(
+        &mut media,
+        json!({"type": "video.request_keyframe", "trackId": VIDEO_RECEIVE_TRACK_BASE + 9}),
+    )
+    .await;
+    // Toggle camera back on (generation 3) and confirm video delivery still works afterward.
+    command(
+        &mut control,
+        json!({"type": "call.camera", "requestId": "cam-toggle-on", "callId": call_id, "enabled": true}),
+    )
+    .await;
+    assert_eq!(
+        until(&mut control, |e| e["requestId"] == "cam-toggle-on").await["status"],
+        "accepted"
+    );
+    let track_upd_on = until(&mut media, |e| {
+        e["type"] == "track.updated"
+            && e["track"]["id"] == VIDEO_SEND_TRACK_ID
+            && e["track"]["generation"] == 3
+    })
+    .await;
+    assert_eq!(track_upd_on["track"]["active"], true);
+    command(
+        &mut media,
+        json!({"type": "track.start", "trackId": VIDEO_SEND_TRACK_ID, "generation": 3}),
+    )
+    .await;
+    let packet_g3 = pcm_envelope::encode_video(
+        MediaPayloadKind::H265AnnexB,
+        FLAG_KEYFRAME | FLAG_CODEC_CONFIG,
+        MediaHeader {
+            track_id: VIDEO_SEND_TRACK_ID,
+            generation: 3,
+            sequence: 1,
+            timestamp_micros: 66_666,
+        },
+        &nal,
+    )
+    .unwrap();
+    media
+        .send(ClientMessage::Binary(packet_g3.into()))
+        .await
+        .unwrap();
+    loop {
+        match timeout(Duration::from_secs(2), media.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+        {
+            ClientMessage::Binary(bytes) => {
+                let wire = WireMediaFrame::decode(&bytes).unwrap();
+                assert_eq!(wire.header.timestamp_micros, 66_666);
+                break;
+            }
+            ClientMessage::Ping(_) | ClientMessage::Pong(_) => {}
+            other => panic!("unexpected frame after stale track.start: {other:?}"),
+        }
+    }
+    assert_eq!(f.backend.received_video.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn call_tickets_enforce_ttl_socket_binding_origin_and_account_aliases() {
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    // 1. Direct TTL expiration check on CallSocketTickets.
+    let store = CallSocketTickets::default();
+    let issued = store
+        .issue(
+            "one",
+            Claims { grant: None },
+            CallTicketSocket::Control,
+            None,
+        )
+        .unwrap();
+    {
+        let mut entries = store.entries.lock().unwrap();
+        for item in entries.values_mut() {
+            item.expires_at = Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .unwrap_or_else(Instant::now);
+        }
+    }
+    assert!(store
+        .consume(&issued.ticket, "one", CallTicketSocket::Control, None)
+        .is_none());
+
+    // 2. HTTP + WebSocket end-to-end checks for cross-socket misuse, alias resolution, and Origin.
+    let f = Fixture::new(true).await;
+    f.core.store.set_account_alias("one", "alias-one").unwrap();
+    f.grant("alias-token", &["calls"], &["one"]);
+
+    let post_ticket = |account: &str, body: Value| {
+        let routes = f.routes.clone();
+        let uri = format!("/v1/accounts/{account}/calls/tickets");
+        async move {
+            let resp = routes
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header(header::AUTHORIZATION, "Bearer alias-token")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            serde_json::from_slice::<CallTicketResponse>(&bytes).unwrap()
+        }
+    };
+
+    // Cross-socket: control ticket cannot connect to /media and is burned on mismatch.
+    let ctrl_tkt = post_ticket("one", json!({"socket": "control"})).await;
+    assert!(matches!(
+        connect_async(format!(
+            "ws://{}/v1/accounts/one/calls/call-x/media?ticket={}",
+            f.address, ctrl_tkt.ticket
+        ))
+        .await,
+        Err(tokio_tungstenite::tungstenite::Error::Http(r)) if r.status() == StatusCode::UNAUTHORIZED
+    ));
+    assert!(matches!(
+        connect_async(format!(
+            "ws://{}/v1/accounts/one/calls/socket?ticket={}",
+            f.address, ctrl_tkt.ticket
+        ))
+        .await,
+        Err(tokio_tungstenite::tungstenite::Error::Http(r)) if r.status() == StatusCode::UNAUTHORIZED
+    ));
+
+    // Cross-socket: media ticket cannot connect to /socket and is burned on mismatch.
+    let media_tkt = post_ticket("one", json!({"socket": "media", "callId": "call-x"})).await;
+    assert!(matches!(
+        connect_async(format!(
+            "ws://{}/v1/accounts/one/calls/socket?ticket={}",
+            f.address, media_tkt.ticket
+        ))
+        .await,
+        Err(tokio_tungstenite::tungstenite::Error::Http(r)) if r.status() == StatusCode::UNAUTHORIZED
+    ));
+    assert!(matches!(
+        connect_async(format!(
+            "ws://{}/v1/accounts/one/calls/call-x/media?ticket={}",
+            f.address, media_tkt.ticket
+        ))
+        .await,
+        Err(tokio_tungstenite::tungstenite::Error::Http(r)) if r.status() == StatusCode::UNAUTHORIZED
+    ));
+
+    // Origin check still rejects cross-origin browser upgrades even with a valid ticket.
+    let origin_tkt = post_ticket("one", json!({"socket": "control"})).await;
+    let mut bad_origin_req = format!(
+        "ws://{}/v1/accounts/one/calls/socket?ticket={}",
+        f.address, origin_tkt.ticket
+    )
+    .into_client_request()
+    .unwrap();
+    bad_origin_req
+        .headers_mut()
+        .insert(header::ORIGIN, "https://elsewhere.example".parse().unwrap());
+    assert!(matches!(
+        connect_async(bad_origin_req).await,
+        Err(tokio_tungstenite::tungstenite::Error::Http(r)) if r.status() == StatusCode::FORBIDDEN
+    ));
+
+    // Alias resolution: issue via alias, consume via canonical ID, and vice versa.
+    let from_alias = post_ticket("alias-one", json!({"socket": "control"})).await;
+    let (mut sock_a, _) = connect_async(format!(
+        "ws://{}/v1/accounts/one/calls/socket?ticket={}",
+        f.address, from_alias.ticket
+    ))
+    .await
+    .unwrap();
+    command(
+        &mut sock_a,
+        json!({"type":"call.hello","supportedProtocolVersions":[CALL_PROTOCOL_VERSION]}),
+    )
+    .await;
+    assert_eq!(json_event(&mut sock_a).await["type"], "hello");
+
+    let from_canonical = post_ticket("one", json!({"socket": "control"})).await;
+    let (mut sock_b, _) = connect_async(format!(
+        "ws://{}/v1/accounts/alias-one/calls/socket?ticket={}",
+        f.address, from_canonical.ticket
+    ))
+    .await
+    .unwrap();
+    command(
+        &mut sock_b,
+        json!({"type":"call.hello","supportedProtocolVersions":[CALL_PROTOCOL_VERSION]}),
+    )
+    .await;
+    assert_eq!(json_event(&mut sock_b).await["type"], "hello");
 }

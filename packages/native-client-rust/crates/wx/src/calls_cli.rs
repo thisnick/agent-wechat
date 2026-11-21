@@ -37,8 +37,12 @@ mod receive_audio;
 #[path = "calls_cli_levels.rs"]
 mod levels;
 
+#[path = "calls_cli_video.rs"]
+mod video;
+
 type Socket = WebSocketStream<reqwest::Upgraded>;
-const SOCKET_LIMIT: usize = (64_usize * 1024).div_ceil(3) * 4 + 1024;
+const CONTROL_SOCKET_LIMIT: usize = (64_usize * 1024).div_ceil(3) * 4 + 1024;
+const MEDIA_SOCKET_LIMIT: usize = wechat_core::calls::pcm_envelope::MAX_FRAME_BYTES + 4096;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -58,39 +62,45 @@ fn debug_call(socket: &str, detail: fmt::Arguments<'_>) {
 
 #[derive(Subcommand)]
 pub(crate) enum CallsCommand {
-    /// List local microphone/speaker devices without connecting to a daemon.
+    /// List local microphone, speaker and camera devices without connecting to a daemon.
     Devices,
     /// Read the daemon's current call state and exit.
     Status,
-    /// Wait for incoming calls. With --json, observe only without audio devices.
+    /// Wait for incoming voice or video calls. With --json, observe only without local devices.
     Monitor {
         #[command(flatten)]
         audio: AudioOptions,
+        #[command(flatten)]
+        media: IncomingMediaOptions,
     },
-    /// Start or join a conference with local microphone, mixed playback and participant meters.
+    /// Start or join a voice or video conference with local devices and participant meters.
     Conference {
         #[command(subcommand)]
         command: Option<ConferenceCommand>,
     },
-    /// Call one contact using this computer's microphone and speakers.
+    /// Call one contact using this computer's microphone, speakers and optional camera.
     Dial {
         /// Contact ID to call, from wx contacts list.
         contact: String,
         #[command(flatten)]
         audio: AudioOptions,
+        #[command(flatten)]
+        media: OutgoingMediaOptions,
     },
-    /// Answer the current offer using this computer's microphone and speakers.
+    /// Answer the current offer using this computer's microphone, speakers and optional camera.
     Answer {
         /// Incoming call ID to answer; omit to answer the current offer.
         call_id: Option<String>,
         #[command(flatten)]
         audio: AudioOptions,
+        #[command(flatten)]
+        media: IncomingMediaOptions,
     },
 }
 
 #[derive(Subcommand)]
 pub(crate) enum ConferenceCommand {
-    /// Start a group voice conference; use i inside the call for later invitations.
+    /// Start a group voice or video conference; use i inside the call for later invitations.
     Start {
         /// Group ID, ending in @chatroom, to start the conference in.
         group: String,
@@ -99,6 +109,8 @@ pub(crate) enum ConferenceCommand {
         invitees: Vec<String>,
         #[command(flatten)]
         audio: AudioOptions,
+        #[command(flatten)]
+        media: OutgoingMediaOptions,
     },
     /// Join a current invitation for this group; never creates a room.
     Join {
@@ -106,6 +118,8 @@ pub(crate) enum ConferenceCommand {
         group: String,
         #[command(flatten)]
         audio: AudioOptions,
+        #[command(flatten)]
+        media: OutgoingMediaOptions,
     },
 }
 
@@ -117,6 +131,35 @@ pub(crate) struct AudioOptions {
     /// Local backend sink name or endpoint ID; defaults to the OS speakers.
     #[arg(long)]
     output_device: Option<String>,
+}
+
+#[derive(Args, Clone, Default)]
+pub(crate) struct OutgoingMediaOptions {
+    /// Enable video for this call (camera and microphone start on unless overridden).
+    #[arg(long)]
+    video: bool,
+    /// Local camera source: auto, off, test, file:PATH, or a device path.
+    #[arg(long)]
+    camera: Option<String>,
+    /// Start with the camera turned off; toggle with v during the call.
+    #[arg(long)]
+    camera_off: bool,
+    /// Start with the microphone muted; toggle with m during the call.
+    #[arg(long)]
+    muted: bool,
+}
+
+#[derive(Args, Clone, Default)]
+pub(crate) struct IncomingMediaOptions {
+    /// Local camera source for video calls: auto, off, test, file:PATH, or a device path.
+    #[arg(long)]
+    camera: Option<String>,
+    /// Start video calls with the camera turned off; toggle with v before or during the call.
+    #[arg(long)]
+    camera_off: bool,
+    /// Start with the microphone muted; toggle with m before or during the call.
+    #[arg(long)]
+    muted: bool,
 }
 
 pub(crate) async fn run(remote: &Remote, command: CallsCommand, json: bool) -> Result<()> {
@@ -134,8 +177,13 @@ pub(crate) async fn run(remote: &Remote, command: CallsCommand, json: bool) -> R
 
 pub(crate) async fn devices(json: bool) -> Result<()> {
     {
-        let devices = tokio::task::spawn_blocking(wechat_audio::AudioSession::devices).await??;
-        let values: Vec<_> = devices
+        let (devices, cameras) = tokio::task::spawn_blocking(|| {
+            let audio = wechat_audio::AudioSession::devices()?;
+            let cameras = video::list_cameras();
+            Ok::<_, anyhow::Error>((audio, cameras))
+        })
+        .await??;
+        let mut values: Vec<_> = devices
             .iter()
             .map(|device| {
                 serde_json::json!({
@@ -144,17 +192,25 @@ pub(crate) async fn devices(json: bool) -> Result<()> {
                 })
             })
             .collect();
+        for camera in &cameras {
+            values.push(serde_json::json!({
+                "kind": "video_input",
+                "id": camera.id,
+                "name": camera.name,
+                "default": camera.is_default,
+            }));
+        }
         if json {
             return super::Output::new(json).print(&serde_json::json!({"devices": values}));
         }
-        println!("Local audio devices (no microphone capture or playback started):");
+        println!("Local audio and camera devices (no capture or playback started):");
+        let clean = |text: &str| {
+            text.chars()
+                .filter(|c| !c.is_control())
+                .take(256)
+                .collect::<String>()
+        };
         for device in devices {
-            let clean = |text: &str| {
-                text.chars()
-                    .filter(|c| !c.is_control())
-                    .take(256)
-                    .collect::<String>()
-            };
             println!(
                 "{}{}: {}\n  {}",
                 if device.input {
@@ -171,6 +227,18 @@ pub(crate) async fn devices(json: bool) -> Result<()> {
                     .unwrap_or_else(|| "Use the operating system's default device".into())
             );
         }
+        if cameras.is_empty() {
+            println!("Camera: None detected\n  Pass --camera test for a synthetic test pattern");
+        } else {
+            for camera in cameras {
+                println!(
+                    "Camera{}: {}\n  {}",
+                    if camera.is_default { " (default)" } else { "" },
+                    clean(&camera.name),
+                    clean(&camera.id)
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -178,6 +246,10 @@ pub(crate) async fn devices(json: bool) -> Result<()> {
 /// Keep the existing HTTP client's verified TLS, custom CA, proxy and redirect
 /// policy. Only WebSocket framing is added after a validated HTTP/1.1 upgrade.
 async fn open_socket(remote: &Remote, suffix: &str) -> Result<Socket> {
+    open_socket_with_limit(remote, suffix, CONTROL_SOCKET_LIMIT).await
+}
+
+async fn open_socket_with_limit(remote: &Remote, suffix: &str, limit: usize) -> Result<Socket> {
     let key = generate_key();
     let response = remote
         .http
@@ -209,11 +281,11 @@ async fn open_socket(remote: &Remote, suffix: &str) -> Result<Socket> {
         .await
         .context("call socket upgrade timed out")??;
     let config = WebSocketConfig::default()
-        .read_buffer_size(16 * 1024)
+        .read_buffer_size(64 * 1024)
         .write_buffer_size(0)
-        .max_write_buffer_size(SOCKET_LIMIT * 2)
-        .max_message_size(Some(SOCKET_LIMIT))
-        .max_frame_size(Some(SOCKET_LIMIT));
+        .max_write_buffer_size(limit * 2)
+        .max_message_size(Some(limit))
+        .max_frame_size(Some(limit));
     Ok(WebSocketStream::from_raw_socket(stream, Role::Client, Some(config)).await)
 }
 
@@ -323,7 +395,8 @@ async fn receive_event(socket: &mut Socket, label: &str) -> Result<CallEvent> {
             != u64::from(wechat_core::call_types::CALL_PROTOCOL_VERSION)
     {
         bail!(
-            "unsupported call protocol version: client [2], daemon [{}]",
+            "unsupported call protocol version: client [{}], daemon [{}]",
+            wechat_core::call_types::CALL_PROTOCOL_VERSION,
             value["protocolVersion"].as_u64().unwrap_or(1)
         );
     }
@@ -355,7 +428,7 @@ struct Control {
 
     pending_offer: Option<CallPendingOffer>,
 
-    tracks: std::collections::BTreeMap<(String, u32), wechat_core::call_types::CallAudioTrack>,
+    tracks: std::collections::BTreeMap<(String, u32), wechat_core::call_types::CallTrack>,
 
     call: Option<CallView>,
 
@@ -460,7 +533,7 @@ impl Control {
                 if self
                     .tracks
                     .get(&key)
-                    .is_some_and(|track| track.generation <= *generation)
+                    .is_some_and(|track| track.generation() <= *generation)
                 {
                     self.tracks.remove(&key);
                 }
@@ -469,11 +542,11 @@ impl Control {
             CallEvent::Pending { offer } => self.pending_offer = offer.clone(),
             CallEvent::TrackAdded { call_id, track }
             | CallEvent::TrackUpdated { call_id, track } => {
-                let key = (call_id.clone(), track.id);
+                let key = (call_id.clone(), track.id());
                 if self
                     .tracks
                     .get(&key)
-                    .is_none_or(|current| track.generation >= current.generation)
+                    .is_none_or(|current| track.generation() >= current.generation())
                 {
                     self.tracks.insert(key, track.clone());
                 }

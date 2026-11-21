@@ -1,6 +1,7 @@
 //! Synthetic cross-language fixture for the real authenticated call API/broker.
 //! No native upstream, profile login, account workers or host audio is started.
 use anyhow::{ensure, Context, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -17,15 +18,17 @@ use tokio::{
 };
 use wechat_core::{
     call_types::{
-        CallAudioFormat, CallAudioTrack, CallCapabilities, CallConferenceInvitation, CallErrorCode,
-        CallInvitationResult, CallInvitationStatus, CallMembership, CallParticipant,
-        CallTrackDirection,
+        CallAudioFormat, CallCapabilities, CallConferenceInvitation, CallErrorCode,
+        CallInvitationResult, CallInvitationStatus, CallMembership, CallParticipant, CallTrack,
+        CallTrackDirection, CallType, CallVideoCodec, CallVideoFormat, CallVideoMode,
+        VIDEO_RECEIVE_TRACK_BASE,
     },
     calls::{
         ownership::{AccountAuthority, CallIdentity, Operation},
+        pcm_envelope::{FLAG_CODEC_CONFIG, FLAG_KEYFRAME},
         service::{
             BackendAudioRequest, BackendInviteRequest, BackendOutcome, BackendRequest, BackendSink,
-            CallBackend, CallServiceError,
+            BackendVideoRequest, CallBackend, CallServiceError,
         },
     },
     upstream::{Upstream, UpstreamKind},
@@ -35,7 +38,7 @@ use wechat_simulator::workspace;
 
 const ACCOUNT: &str = "calls-fixture";
 const GENERATION: &str = "synthetic-fixture-generation";
-const MAX_LINE: usize = 16 * 1024;
+const MAX_LINE: usize = 512 * 1024;
 type BackendResult<T> = std::result::Result<T, CallServiceError>;
 type BackendFuture<T> = Pin<Box<dyn Future<Output = BackendResult<T>> + Send>>;
 
@@ -66,6 +69,16 @@ struct Stats {
     stop: u64,
     active: bool,
     invitations: u64,
+    video_frames: u64,
+    video_bytes: u64,
+    video_keyframes: u64,
+    last_video_generation: u32,
+    camera_enabled: bool,
+    muted: bool,
+    camera_toggles: u64,
+    mute_toggles: u64,
+    keyframe_requests: u64,
+    video_clear_requested: u64,
 }
 struct Active {
     identity: CallIdentity,
@@ -74,6 +87,11 @@ struct Active {
 }
 struct BackendState {
     conference: bool,
+    conference_group_id: String,
+    conference_caller_id: String,
+    video: bool,
+    echo_audio: bool,
+    echo_video: bool,
     stats: Stats,
     active: Option<Active>,
 }
@@ -89,6 +107,11 @@ impl Backend {
         Self {
             state: Arc::new(Mutex::new(BackendState {
                 conference: false,
+                conference_group_id: "synthetic-group@chatroom".into(),
+                conference_caller_id: "synthetic-caller".into(),
+                video: false,
+                echo_audio: true,
+                echo_video: false,
                 stats: Stats::default(),
                 active: None,
             })),
@@ -149,29 +172,38 @@ impl CallBackend for Backend {
         })
     }
     fn capabilities(&self, account: &str) -> CallCapabilities {
+        let (conference, video) = self
+            .state
+            .lock()
+            .map(|s| (s.conference, s.video))
+            .unwrap_or((false, false));
         CallCapabilities {
             direct_audio: account == ACCOUNT,
-            conference_create: account == ACCOUNT && self.state.lock().is_ok_and(|s| s.conference),
-            conference_join: account == ACCOUNT && self.state.lock().is_ok_and(|s| s.conference),
-            conference_invite: account == ACCOUNT && self.state.lock().is_ok_and(|s| s.conference),
-            conference_audio: account == ACCOUNT && self.state.lock().is_ok_and(|s| s.conference),
-            ..Default::default()
+            direct_video: account == ACCOUNT && video,
+            conference_create: account == ACCOUNT && conference,
+            conference_join: account == ACCOUNT && conference,
+            conference_invite: account == ACCOUNT && conference,
+            conference_audio: account == ACCOUNT && conference,
+            conference_video: account == ACCOUNT && conference && video,
         }
     }
     fn conference_invitations(
         &self,
         authority: &AccountAuthority,
     ) -> Vec<CallConferenceInvitation> {
-        if authority.account_id == ACCOUNT && self.state.lock().is_ok_and(|s| s.conference) {
-            vec![CallConferenceInvitation {
-                invitation_id: "synthetic-invitation".into(),
-                revision: 1,
-                group_id: "synthetic-group@chatroom".into(),
-                caller_id: "synthetic-caller".into(),
-            }]
-        } else {
-            vec![]
+        if authority.account_id == ACCOUNT {
+            if let Ok(state) = self.state.lock() {
+                if state.conference {
+                    return vec![CallConferenceInvitation {
+                        invitation_id: "synthetic-invitation".into(),
+                        revision: 1,
+                        group_id: state.conference_group_id.clone(),
+                        caller_id: state.conference_caller_id.clone(),
+                    }];
+                }
+            }
         }
+        vec![]
     }
     fn invite(&self, request: BackendInviteRequest) -> BackendFuture<Vec<CallInvitationResult>> {
         let state = self.state.clone();
@@ -217,6 +249,8 @@ impl CallBackend for Backend {
                 };
                 *counter = counter.saturating_add(1);
                 if starting {
+                    state.stats.camera_enabled = request.camera_enabled;
+                    state.stats.muted = request.muted;
                     state.active = Some(Active {
                         identity: request.ticket.identity(),
                         conference: request.peer_id.ends_with("@chatroom"),
@@ -250,7 +284,7 @@ impl CallBackend for Backend {
             if !request.is_current() {
                 return Err(CallServiceError(CallErrorCode::Stale));
             }
-            let (sink, conference) = {
+            let (sink, echo_audio) = {
                 let mut state = state
                     .lock()
                     .map_err(|_| CallServiceError(CallErrorCode::Closed))?;
@@ -260,7 +294,7 @@ impl CallBackend for Backend {
                     .filter(|active| active.identity == request.identity)
                     .ok_or(CallServiceError(CallErrorCode::Stale))?;
                 let sink = active.sink.clone();
-                let conference = active.conference;
+                let echo_audio = state.echo_audio && !active.conference;
                 state.stats.audio_frames = state.stats.audio_frames.saturating_add(1);
                 state.stats.audio_samples = state
                     .stats
@@ -276,12 +310,12 @@ impl CallBackend for Backend {
                     .map(|sample| u32::from(sample.unsigned_abs()))
                     .max()
                     .unwrap_or(0);
-                (sink, conference)
+                (sink, echo_audio)
             };
-            if conference {
-                Ok(())
-            } else {
+            if echo_audio {
                 sink.audio(&request.samples).await
+            } else {
+                Ok(())
             }
         })
     }
@@ -304,6 +338,121 @@ impl CallBackend for Backend {
                 .lock()
                 .map_err(|_| CallServiceError(CallErrorCode::Closed))?;
             state.stats.clear_completed = state.stats.clear_completed.saturating_add(1);
+            Ok(())
+        })
+    }
+    fn set_muted(&self, identity: CallIdentity, muted: bool) -> BackendFuture<()> {
+        let state = self.state.clone();
+        Box::pin(async move {
+            let mut state = state
+                .lock()
+                .map_err(|_| CallServiceError(CallErrorCode::Closed))?;
+            if !state
+                .active
+                .as_ref()
+                .is_some_and(|active| active.identity == identity)
+            {
+                return Err(CallServiceError(CallErrorCode::Stale));
+            }
+            state.stats.muted = muted;
+            state.stats.mute_toggles = state.stats.mute_toggles.saturating_add(1);
+            Ok(())
+        })
+    }
+    fn set_camera(&self, identity: CallIdentity, enabled: bool) -> BackendFuture<()> {
+        let state = self.state.clone();
+        Box::pin(async move {
+            let mut state = state
+                .lock()
+                .map_err(|_| CallServiceError(CallErrorCode::Closed))?;
+            if !state
+                .active
+                .as_ref()
+                .is_some_and(|active| active.identity == identity)
+            {
+                return Err(CallServiceError(CallErrorCode::Stale));
+            }
+            state.stats.camera_enabled = enabled;
+            state.stats.camera_toggles = state.stats.camera_toggles.saturating_add(1);
+            Ok(())
+        })
+    }
+    fn send_video(&self, request: BackendVideoRequest) -> BackendFuture<()> {
+        let state = self.state.clone();
+        Box::pin(async move {
+            if !request.is_current() {
+                return Err(CallServiceError(CallErrorCode::Stale));
+            }
+            let (sink, echo, sequence) = {
+                let mut state = state
+                    .lock()
+                    .map_err(|_| CallServiceError(CallErrorCode::Closed))?;
+                let active = state
+                    .active
+                    .as_ref()
+                    .filter(|active| active.identity == request.identity)
+                    .ok_or(CallServiceError(CallErrorCode::Stale))?;
+                let sink = active.sink.clone();
+                let echo = state.echo_video && !active.conference;
+                let sequence = state.stats.video_frames;
+                state.stats.video_frames = state.stats.video_frames.saturating_add(1);
+                state.stats.video_bytes = state
+                    .stats
+                    .video_bytes
+                    .saturating_add(request.payload.len() as u64);
+                if (request.flags & FLAG_KEYFRAME) != 0 {
+                    state.stats.video_keyframes = state.stats.video_keyframes.saturating_add(1);
+                }
+                state.stats.last_video_generation = request.generation;
+                (sink, echo, sequence)
+            };
+            if echo {
+                let recv_codec = sink
+                    .negotiated_video_formats()
+                    .ok()
+                    .and_then(|(_, recv)| recv.map(|f| f.codec))
+                    .unwrap_or(request.codec);
+                if recv_codec == request.codec {
+                    let _ = sink
+                        .video_frame(
+                            VIDEO_RECEIVE_TRACK_BASE,
+                            1,
+                            request.codec,
+                            request.flags & (FLAG_KEYFRAME | FLAG_CODEC_CONFIG),
+                            sequence,
+                            request.timestamp_micros,
+                            &request.payload,
+                        )
+                        .await;
+                }
+            }
+            Ok(())
+        })
+    }
+    fn clear_video(&self, _: CallIdentity, _: u32) -> BackendFuture<()> {
+        let state = self.state.clone();
+        Box::pin(async move {
+            let mut state = state
+                .lock()
+                .map_err(|_| CallServiceError(CallErrorCode::Closed))?;
+            state.stats.video_clear_requested = state.stats.video_clear_requested.saturating_add(1);
+            Ok(())
+        })
+    }
+    fn request_video_keyframe(&self, identity: CallIdentity, _: u32) -> BackendFuture<()> {
+        let state = self.state.clone();
+        Box::pin(async move {
+            let mut state = state
+                .lock()
+                .map_err(|_| CallServiceError(CallErrorCode::Closed))?;
+            if !state
+                .active
+                .as_ref()
+                .is_some_and(|active| active.identity == identity)
+            {
+                return Err(CallServiceError(CallErrorCode::Stale));
+            }
+            state.stats.keyframe_requests = state.stats.keyframe_requests.saturating_add(1);
             Ok(())
         })
     }
@@ -345,6 +494,12 @@ struct ConferenceSource {
     generation: u32,
     contact_id: String,
     microphone_enabled: Option<bool>,
+    #[serde(default)]
+    camera_enabled: Option<bool>,
+    #[serde(default)]
+    video_track_id: Option<u32>,
+    #[serde(default)]
+    video_generation: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -358,6 +513,18 @@ struct Request {
 enum Command {
     ConfigureConference {
         enabled: bool,
+        #[serde(rename = "groupId", default)]
+        group_id: Option<String>,
+        #[serde(rename = "callerId", default)]
+        caller_id: Option<String>,
+    },
+    ConfigureAudio {
+        echo: bool,
+    },
+    ConfigureVideo {
+        enabled: bool,
+        #[serde(default)]
+        echo: bool,
     },
     ConferenceSources {
         sources: Vec<ConferenceSource>,
@@ -369,19 +536,47 @@ enum Command {
         sequence: u64,
         #[serde(rename = "sampleOffset")]
         sample_offset: u64,
+        #[serde(default)]
         value: i16,
+        #[serde(rename = "pcmBase64", default)]
+        pcm_base64: Option<String>,
     },
     Offer {
         #[serde(rename = "callerId")]
         caller_id: String,
+        #[serde(rename = "callType", default)]
+        call_type: Option<CallType>,
     },
     InjectAudio {
+        #[serde(default)]
         value: i16,
+        #[serde(default)]
         frames: u8,
+        #[serde(rename = "pcmBase64", default)]
+        pcm_base64: Option<String>,
+    },
+    InjectVideo {
+        #[serde(rename = "trackId", default)]
+        track_id: Option<u32>,
+        #[serde(default)]
+        generation: Option<u32>,
+        codec: CallVideoCodec,
+        #[serde(default)]
+        flags: Option<u16>,
+        #[serde(default)]
+        sequence: Option<u64>,
+        #[serde(rename = "timestampMicros", default)]
+        timestamp_micros: Option<u64>,
+        #[serde(rename = "payloadBase64")]
+        payload_base64: String,
     },
     PeerMicrophone {
         muted: bool,
     },
+    PeerCamera {
+        enabled: bool,
+    },
+    PeerKeyframeRequested,
     BeginEnd,
     End,
     Stats,
@@ -436,13 +631,37 @@ async fn control(
     command: Command,
 ) -> Result<Value, &'static str> {
     match command {
-        Command::ConfigureConference { enabled } => {
+        Command::ConfigureConference {
+            enabled,
+            group_id,
+            caller_id,
+        } => {
             let mut state = backend.state.lock().map_err(|_| "fixture_closed")?;
             if state.active.is_some() {
                 return Err("fixture_busy");
             }
             state.conference = enabled;
+            if let Some(group_id) = group_id {
+                state.conference_group_id = group_id;
+            }
+            if let Some(caller_id) = caller_id {
+                state.conference_caller_id = caller_id;
+            }
             Ok(json!({"enabled":enabled}))
+        }
+        Command::ConfigureAudio { echo } => {
+            let mut state = backend.state.lock().map_err(|_| "fixture_closed")?;
+            state.echo_audio = echo;
+            Ok(json!({"echo":echo}))
+        }
+        Command::ConfigureVideo { enabled, echo } => {
+            let mut state = backend.state.lock().map_err(|_| "fixture_closed")?;
+            if state.active.is_some() {
+                return Err("fixture_busy");
+            }
+            state.video = enabled;
+            state.echo_video = echo;
+            Ok(json!({"enabled":enabled,"echo":echo}))
         }
         Command::ConferenceSources { sources } => {
             if sources.len() > 32
@@ -465,6 +684,7 @@ async fn control(
                         membership: CallMembership::Joined,
                         status: None,
                         microphone_enabled: source.microphone_enabled,
+                        camera_enabled: source.camera_enabled,
                     })
                     .collect(),
             )
@@ -473,7 +693,7 @@ async fn control(
             sink.receive_tracks(
                 sources
                     .iter()
-                    .map(|source| CallAudioTrack {
+                    .map(|source| CallTrack::Audio {
                         id: source.track_id,
                         generation: source.generation,
                         direction: CallTrackDirection::Receive,
@@ -484,6 +704,35 @@ async fn control(
             )
             .await
             .map_err(|e| e.code())?;
+            let recv_video_format = sink
+                .negotiated_video_formats()
+                .ok()
+                .and_then(|(_, recv)| recv)
+                .unwrap_or(CallVideoFormat {
+                    codec: CallVideoCodec::H265,
+                    mode: CallVideoMode::Passthrough,
+                    max_width: 640,
+                    max_height: 480,
+                    max_fps: 15,
+                    bitrate_kbps: None,
+                });
+            let video_tracks: Vec<CallTrack> = sources
+                .iter()
+                .filter(|source| source.camera_enabled == Some(true))
+                .map(|source| CallTrack::Video {
+                    id: source
+                        .video_track_id
+                        .unwrap_or(VIDEO_RECEIVE_TRACK_BASE + source.track_id),
+                    generation: source.video_generation.unwrap_or(source.generation),
+                    direction: CallTrackDirection::Receive,
+                    format: recv_video_format,
+                    participant_id: Some(format!("participant-{}", source.track_id)),
+                    active: true,
+                })
+                .collect();
+            sink.receive_video_tracks(video_tracks)
+                .await
+                .map_err(|e| e.code())?;
             Ok(json!({"sources":sources.len()}))
         }
         Command::ConferenceAudio {
@@ -492,11 +741,24 @@ async fn control(
             sequence,
             sample_offset,
             value,
+            pcm_base64,
         } => {
             let micros = sample_offset
                 .checked_mul(1_000_000)
                 .ok_or("clock_overflow")?
                 / 16000;
+            let samples = match pcm_base64 {
+                Some(encoded) => {
+                    let raw = BASE64.decode(encoded).map_err(|_| "invalid_payload")?;
+                    if raw.len() != 640 {
+                        return Err("invalid_payload");
+                    }
+                    raw.chunks_exact(2)
+                        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                        .collect::<Vec<_>>()
+                }
+                None => vec![value; 320],
+            };
             backend
                 .active_sink()
                 .map_err(|e| e.code())?
@@ -507,13 +769,16 @@ async fn control(
                         sequence,
                         timestamp_micros: micros,
                     },
-                    &[value; 320],
+                    &samples,
                 )
                 .await
                 .map_err(|e| e.code())?;
             Ok(json!({"delivered":true}))
         }
-        Command::Offer { caller_id } => {
+        Command::Offer {
+            caller_id,
+            call_type,
+        } => {
             if caller_id.is_empty()
                 || caller_id.len() > 200
                 || caller_id.chars().any(char::is_control)
@@ -524,27 +789,76 @@ async fn control(
             let identity = core
                 .call_service(ACCOUNT)
                 .map_err(|_| "fixture_unavailable")?
-                .offer(
+                .offer_with_type(
                     authority,
                     uuid::Uuid::new_v4().to_string(),
                     caller_id,
+                    call_type.unwrap_or(CallType::Voice),
                     Duration::from_secs(60),
                 )
                 .await
                 .map_err(|error| error.code())?;
             Ok(json!({"callId":identity.call_id(),"revision":1}))
         }
-        Command::InjectAudio { value, frames } => {
+        Command::InjectAudio {
+            value,
+            frames,
+            pcm_base64,
+        } => {
+            let sink = backend.active_sink().map_err(|error| error.code())?;
+            if let Some(encoded) = pcm_base64 {
+                let raw = BASE64.decode(encoded).map_err(|_| "invalid_payload")?;
+                if raw.is_empty() || raw.len() % 640 != 0 || raw.len() > 4 * 640 {
+                    return Err("invalid_payload");
+                }
+                let count = raw.len() / 640;
+                for chunk in raw.chunks_exact(640) {
+                    let samples: Vec<i16> = chunk
+                        .chunks_exact(2)
+                        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                        .collect();
+                    sink.audio(&samples).await.map_err(|error| error.code())?;
+                }
+                return Ok(json!({"frames":count}));
+            }
             if !(1..=4).contains(&frames) {
                 return Err("invalid_frame_count");
             }
-            let sink = backend.active_sink().map_err(|error| error.code())?;
             for _ in 0..frames {
                 sink.audio(&[value; 320])
                     .await
                     .map_err(|error| error.code())?;
             }
             Ok(json!({"frames":frames}))
+        }
+        Command::InjectVideo {
+            track_id,
+            generation,
+            codec,
+            flags,
+            sequence,
+            timestamp_micros,
+            payload_base64,
+        } => {
+            let payload = BASE64
+                .decode(payload_base64)
+                .map_err(|_| "invalid_payload")?;
+            if payload.is_empty() || payload.len() > 512 * 1024 {
+                return Err("invalid_payload");
+            }
+            let sink = backend.active_sink().map_err(|error| error.code())?;
+            sink.video_frame(
+                track_id.unwrap_or(VIDEO_RECEIVE_TRACK_BASE),
+                generation.unwrap_or(1),
+                codec,
+                flags.unwrap_or(FLAG_KEYFRAME),
+                sequence.unwrap_or(0),
+                timestamp_micros.unwrap_or(0),
+                &payload,
+            )
+            .await
+            .map_err(|error| error.code())?;
+            Ok(json!({"bytes":payload.len()}))
         }
         Command::PeerMicrophone { muted } => {
             backend
@@ -554,6 +868,24 @@ async fn control(
                 .await
                 .map_err(|error| error.code())?;
             Ok(json!({"muted":muted}))
+        }
+        Command::PeerCamera { enabled } => {
+            backend
+                .active_sink()
+                .map_err(|error| error.code())?
+                .peer_camera(enabled)
+                .await
+                .map_err(|error| error.code())?;
+            Ok(json!({"enabled":enabled}))
+        }
+        Command::PeerKeyframeRequested => {
+            backend
+                .active_sink()
+                .map_err(|error| error.code())?
+                .peer_keyframe_requested()
+                .await
+                .map_err(|error| error.code())?;
+            Ok(json!({"requested":true}))
         }
         Command::BeginEnd => {
             backend

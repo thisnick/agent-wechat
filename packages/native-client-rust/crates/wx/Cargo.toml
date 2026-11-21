@@ -43,7 +43,7 @@ fs2.workspace = true
 tempfile.workspace = true
 sha2.workspace = true
 toml = "0.8"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 unicode-width = "0.2"
 
 [target.'cfg(windows)'.dependencies]

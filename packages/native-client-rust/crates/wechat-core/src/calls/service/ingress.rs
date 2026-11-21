@@ -122,7 +122,9 @@ impl CallService {
                     call.state = CallState::Uncertain;
                     call.revision = call.revision.saturating_add(1);
                     call.audio_lease.store(0, Ordering::Release);
+                    call.video_lease.store(0, Ordering::Release);
                     call.stop_requested = false;
+                    s.media.clear();
                     changed = true;
                 }
             } else {
@@ -150,6 +152,17 @@ impl CallService {
             .incoming_supported(note.lease.authority(), &note.caller_username)
         {
             return;
+        }
+        if let NotificationPayload::Invite(invite) = &note.control.payload {
+            let capabilities = self
+                .backend
+                .capabilities(&note.lease.authority().account_id);
+            if invite.room_type == Some(1) && !capabilities.direct_video {
+                return;
+            }
+            if invite.room_type == Some(2) && !capabilities.direct_audio {
+                return;
+            }
         }
         if let Ok(mut s) = self.lock() {
             self.prune_incoming(&mut s);
@@ -304,6 +317,7 @@ impl CallService {
             return;
         };
         let entry = s.incoming.entries.get_mut(&id).expect("selected candidate");
+        let call_type = entry.metadata.call_type;
         let registration = IncomingRegistration::new();
         entry.stage = PendingStage::Preparing;
         entry.metadata.phase = CallPendingPhase::Preparing;
@@ -311,7 +325,7 @@ impl CallService {
         entry.identity = Some(identity.clone());
         entry.registration = Some(registration.clone());
         s.call = Some(LiveCall {
-            call_type: CallType::Voice,
+            call_type,
             identity: identity.clone(),
             authority: note.lease.authority().clone(),
             peer: note.caller_username.clone(),
@@ -323,9 +337,17 @@ impl CallService {
             revision: 1,
             send_generation: 1,
             receive_generation: 1,
+            video_send_generation: 1,
+            video_receive_generation: 1,
             receive_tracks: BTreeMap::new(),
             track_generations: BTreeMap::new(),
             audio_lease: Arc::new(AtomicU32::new(1)),
+            video_lease: Arc::new(AtomicU32::new(1)),
+            camera_enabled: false,
+            video_wire_codec: CallVideoCodec::H265,
+            client_video: None,
+            video_send_format: None,
+            video_receive_format: None,
             offer_until: None,
             stop_requested: false,
             revoked: false,
@@ -581,6 +603,7 @@ impl CallService {
                 call.state = CallState::Uncertain;
                 call.revision = call.revision.saturating_add(1);
                 call.audio_lease.store(0, Ordering::Release);
+                call.video_lease.store(0, Ordering::Release);
                 call.stop_requested = false;
             }
         }
@@ -696,6 +719,7 @@ impl CallService {
             call.revision = call.revision.saturating_add(1);
         }
         call.audio_lease.store(0, Ordering::Release);
+        call.video_lease.store(0, Ordering::Release);
         if changed {
             // The actor preserves its uncertain receipt; maintenance still has
             // to wait for it to stop and close the separate local session.

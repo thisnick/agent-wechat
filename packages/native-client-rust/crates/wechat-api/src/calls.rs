@@ -1,4 +1,5 @@
-//! Authenticated control and owner-bound PCM sockets. No account keys cross these routes.
+//! Authenticated control and owner-bound binary audio/video sockets, plus
+//! single-use browser WebSocket ticket issuance. No account keys cross these routes.
 use super::{ApiError, ApiResult, ApiRoute, App, Claims};
 use axum::{
     extract::{
@@ -7,41 +8,156 @@ use axum::{
     },
     http::{header, HeaderMap, StatusCode, Uri},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use futures_util::{
     future::{select, Either},
     stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
 };
-use std::{pin::pin, time::Duration};
+use rand::RngCore;
+use sha2::{Digest, Sha256};
+use std::{
+    collections::BTreeMap,
+    pin::pin,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tokio::{
     sync::{broadcast::error::RecvError, mpsc, watch},
     time::{interval, timeout, Instant, MissedTickBehavior},
 };
 use wechat_calls::audio::AudioFormat;
-use wechat_core::calls::pcm_envelope::MediaFrame;
+use wechat_core::calls::pcm_envelope::{
+    MediaPayloadKind, WireMediaFrame, MAX_AUDIO_PAYLOAD_BYTES, MAX_FRAME_BYTES,
+};
 use wechat_core::{
     call_types::{
         CallClientHello, CallCommand, CallErrorCode, CallEvent, CallMediaCommand,
-        CallProtocolErrorCode, CallSnapshot, CALL_PROTOCOL_VERSION,
+        CallProtocolErrorCode, CallSnapshot, CallTicketRequest, CallTicketResponse,
+        CallTicketSocket, CallTrack, AUDIO_SEND_TRACK_ID, CALL_PROTOCOL_VERSION,
     },
     calls::service::{CallService, CallServiceError, MediaDelivery, MediaReceiveQueue},
 };
 
 const CONTROL_LIMIT: usize = 16 * 1024;
-const MEDIA_LIMIT: usize = 64 * 1024;
-const MEDIA_TEXT_LIMIT: usize = MEDIA_LIMIT.div_ceil(3) * 4 + 1024;
+const MEDIA_BINARY_LIMIT: usize = MAX_FRAME_BYTES;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const TICKET_TTL_SECONDS: u32 = 20;
+const TICKET_TTL: Duration = Duration::from_secs(TICKET_TTL_SECONDS as u64);
+const MAX_PENDING_TICKETS: usize = 256;
 
 /// Token scope that every calls route requires.
 const CALLS_SCOPE: &str = "calls";
 const CONTROL_PATH: &str = "/v1/accounts/{a}/calls/socket";
 const MEDIA_PATH: &str = "/v1/accounts/{a}/calls/{call}/media";
+const TICKETS_PATH: &str = "/v1/accounts/{a}/calls/tickets";
+
+struct IssuedTicket {
+    account: String,
+    claims: Claims,
+    socket: CallTicketSocket,
+    call_id: Option<String>,
+    expires_at: Instant,
+}
+
+/// Short-lived, single-use opaque tickets authorizing one browser WebSocket upgrade.
+#[derive(Clone, Default)]
+pub(crate) struct CallSocketTickets {
+    entries: Arc<Mutex<BTreeMap<[u8; 32], IssuedTicket>>>,
+}
+
+impl CallSocketTickets {
+    fn issue(
+        &self,
+        account: &str,
+        claims: Claims,
+        socket: CallTicketSocket,
+        call_id: Option<String>,
+    ) -> ApiResult<CallTicketResponse> {
+        match (socket, &call_id) {
+            (CallTicketSocket::Control, Some(_)) => {
+                return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_request"));
+            }
+            (CallTicketSocket::Media, None) => {
+                return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_request"));
+            }
+            (CallTicketSocket::Media, Some(id))
+                if id.is_empty()
+                    || id.len() > 200
+                    || !id.bytes().all(|b| {
+                        b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~')
+                    }) =>
+            {
+                return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_request"));
+            }
+            _ => {}
+        }
+        let now = Instant::now();
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "operation_failed"))?;
+        entries.retain(|_, item| item.expires_at > now);
+        if entries.len() >= MAX_PENDING_TICKETS {
+            return Err(ApiError(StatusCode::TOO_MANY_REQUESTS, "capacity"));
+        }
+        let mut raw = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut raw);
+        let mut ticket = String::with_capacity(64);
+        for byte in raw {
+            use std::fmt::Write as _;
+            let _ = write!(&mut ticket, "{byte:02x}");
+        }
+        let digest: [u8; 32] = Sha256::digest(ticket.as_bytes()).into();
+        let expires_at_unix = wechat_store::unix_seconds() + i64::from(TICKET_TTL_SECONDS);
+        entries.insert(
+            digest,
+            IssuedTicket {
+                account: account.to_owned(),
+                claims,
+                socket,
+                call_id: call_id.clone(),
+                expires_at: now + TICKET_TTL,
+            },
+        );
+        Ok(CallTicketResponse {
+            ticket,
+            expires_at: expires_at_unix,
+            expires_in_seconds: TICKET_TTL_SECONDS,
+            socket,
+            call_id,
+        })
+    }
+
+    pub(crate) fn consume(
+        &self,
+        ticket: &str,
+        account: &str,
+        socket: CallTicketSocket,
+        call_id: Option<&str>,
+    ) -> Option<Claims> {
+        if ticket.len() != 64 || !ticket.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let now = Instant::now();
+        let digest: [u8; 32] = Sha256::digest(ticket.as_bytes()).into();
+        let mut entries = self.entries.lock().ok()?;
+        entries.retain(|_, item| item.expires_at > now);
+        let entry = entries.remove(&digest)?;
+        if entry.expires_at <= now
+            || entry.account != account
+            || entry.socket != socket
+            || entry.call_id.as_deref() != call_id
+        {
+            return None;
+        }
+        Some(entry.claims)
+    }
+}
 
 /// Which variants of a tagged message type a socket side sends.
 #[cfg(test)]
@@ -86,7 +202,7 @@ pub(crate) const SOCKETS: &[CallSocket] = &[
         path: CONTROL_PATH,
         scope: CALLS_SCOPE,
         protocol_version: CALL_PROTOCOL_VERSION,
-        doc: "Call commands and events as JSON text. Send call.hello within five seconds of connecting, then wait for hello.",
+        doc: "Call commands and events as JSON text. Send call.hello within five seconds of connecting, then wait for hello. Authenticate with an Authorization: Bearer header or a single-use ?ticket= issued by POST /v1/accounts/{a}/calls/tickets.",
         client: &[
             SocketMessage {
                 type_name: "CallClientHello",
@@ -99,7 +215,7 @@ pub(crate) const SOCKETS: &[CallSocket] = &[
         ],
         server: &[SocketMessage {
             type_name: "CallEvent",
-            variants: Variants::Except(&["media.ready"]),
+            variants: Variants::Except(&["media.ready", "video.keyframe_requested"]),
         }],
     },
     CallSocket {
@@ -107,33 +223,30 @@ pub(crate) const SOCKETS: &[CallSocket] = &[
         path: MEDIA_PATH,
         scope: CALLS_SCOPE,
         protocol_version: CALL_PROTOCOL_VERSION,
-        doc: "Audio for one call you own, as JSON text with base64 PCM. Send media.attach within five seconds of connecting, then wait for media.ready. Binary messages are rejected.",
+        doc: "Audio and video for one call you own. Send media.attach within five seconds of connecting, then wait for media.ready. JSON text messages carry track lifecycle and keyframe requests; binary messages carry a 36-byte big-endian WXCM v3 header followed by PCM16 audio or Annex-B H.265/H.264 or JPEG video bytes. Authenticate with an Authorization: Bearer header or a single-use ?ticket= issued by POST /v1/accounts/{a}/calls/tickets.",
         client: &[SocketMessage {
             type_name: "CallMediaCommand",
             variants: Variants::All,
         }],
-        server: &[
-            SocketMessage {
-                type_name: "CallEvent",
-                variants: Variants::Only(&[
-                    "call.error",
-                    "media.ready",
-                    "protocol.error",
-                    "track.added",
-                    "track.removed",
-                ]),
-            },
-            SocketMessage {
-                type_name: "CallMediaCommand",
-                variants: Variants::Only(&["audio.chunk"]),
-            },
-        ],
+        server: &[SocketMessage {
+            type_name: "CallEvent",
+            variants: Variants::Only(&[
+                "call.error",
+                "media.ready",
+                "protocol.error",
+                "track.added",
+                "track.removed",
+                "track.updated",
+                "video.keyframe_requested",
+            ]),
+        }],
     },
 ];
 
 pub(super) fn routes() -> Router<App> {
     Router::new()
         .api_route("/v1/accounts/{a}/calls/current", get(current))
+        .api_route(TICKETS_PATH, post(create_ticket))
         .api_route(CONTROL_PATH, get(control))
         .api_route(MEDIA_PATH, get(media))
 }
@@ -175,8 +288,23 @@ async fn current(
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(snapshot)))
 }
 
-/// Header authentication is required. Browser ticket issuance is a separate API;
-/// persistent bearer credentials are never accepted from a socket URL.
+async fn create_ticket(
+    State(app): State<App>,
+    Extension(claims): Extension<Claims>,
+    Path(account): Path<String>,
+    Json(body): Json<CallTicketRequest>,
+) -> ApiResult<impl IntoResponse> {
+    claims.require(Some(&account), CALLS_SCOPE)?;
+    ensure_current(&app, &claims).await?;
+    app.core.store.account(&account)?;
+    let response = app
+        .call_tickets
+        .issue(&account, claims, body.socket, body.call_id)?;
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(response)))
+}
+
+/// Accepts header bearer auth or a single-use short-lived `?ticket=` bound to this
+/// exact account and socket. Persistent bearer credentials are never accepted in URLs.
 async fn control(
     State(app): State<App>,
     Extension(claims): Extension<Claims>,
@@ -206,8 +334,8 @@ async fn media(
     check_origin(&headers)?;
     app.core.store.account(&account)?;
     Ok(upgrade
-        .max_message_size(MEDIA_TEXT_LIMIT)
-        .max_frame_size(MEDIA_TEXT_LIMIT)
+        .max_message_size(MEDIA_BINARY_LIMIT)
+        .max_frame_size(MEDIA_BINARY_LIMIT)
         .on_upgrade(move |socket| media_socket(socket, app, claims, account, call)))
 }
 
@@ -457,14 +585,25 @@ async fn media_socket(socket: WebSocket, app: App, claims: Claims, account: Stri
         service.detach_media(&connection.id).await;
         return;
     }
-    let CallEvent::MediaReady { send_track, .. } = &connection.ready else {
+    let CallEvent::MediaReady { send_tracks, .. } = &connection.ready else {
+        service.detach_media(&connection.id).await;
+        return;
+    };
+    let Some(CallTrack::Audio {
+        id: audio_track_id,
+        format: audio_format,
+        ..
+    }) = send_tracks
+        .iter()
+        .find(|track| matches!(track, CallTrack::Audio { id, .. } if *id == AUDIO_SEND_TRACK_ID))
+    else {
         service.detach_media(&connection.id).await;
         return;
     };
     let Ok(format) = AudioFormat::new(
-        send_track.format.sample_rate,
-        send_track.format.channels,
-        send_track.format.frame_ms,
+        audio_format.sample_rate,
+        audio_format.channels,
+        audio_format.frame_ms,
     ) else {
         service.detach_media(&connection.id).await;
         return;
@@ -488,7 +627,6 @@ async fn media_socket(socket: WebSocket, app: App, claims: Claims, account: Stri
             &mut sink,
             &mut connection.frames,
             pending_pongs,
-            format,
             &mut receive_trace,
             shutdown.clone(),
         ));
@@ -496,7 +634,7 @@ async fn media_socket(socket: WebSocket, app: App, claims: Claims, account: Stri
             &scope,
             &mut input,
             pongs,
-            send_track.id,
+            *audio_track_id,
             format,
             &mut reply_trace,
             shutdown,
@@ -598,7 +736,6 @@ async fn write_media(
     sink: &mut SplitSink<WebSocket, Message>,
     frames: &mut MediaReceiveQueue,
     mut pongs: mpsc::Receiver<Message>,
-    format: AudioFormat,
     trace: &mut Option<ReceiveTrace>,
     mut shutdown: watch::Receiver<()>,
 ) -> &'static str {
@@ -622,12 +759,17 @@ async fn write_media(
                 let frame = match frame {
                     Ok(MediaDelivery::Audio(frame)) => frame,
                     Ok(MediaDelivery::Control(event)) => {
-                        if ensure_current(scope.app, scope.claims).await.is_err()
-                            || !matches!(scope.service.media_delivery_allowed(scope.id).await, Ok(true)) {
+                        if ensure_current(scope.app, scope.claims).await.is_err() {
                             return "media-track-event-fenced";
                         }
-                        let Ok(text) = serde_json::to_string(&event) else { return "media-track-encode-failed"; };
-                        if !send(sink, Message::Text(text.into())).await { return "media-track-send-failed"; }
+                        match scope.service.media_delivery_allowed(scope.id).await {
+                            Ok(true) => {
+                                let Ok(text) = serde_json::to_string(&event) else { return "media-track-encode-failed"; };
+                                if !send(sink, Message::Text(text.into())).await { return "media-track-send-failed"; }
+                            }
+                            Ok(false) => {}
+                            Err(_) => return "media-track-event-fenced",
+                        }
                         continue;
                     }
                     Err(RecvError::Lagged(dropped)) => {
@@ -653,7 +795,7 @@ async fn write_media(
                 if let Some(trace) = trace {
                     trace.credential_max = trace.credential_max.max(start.elapsed());
                 }
-                if credential.is_err() || frame.bytes.len() > MEDIA_LIMIT { return "media-receive-fenced"; }
+                if credential.is_err() || frame.bytes.len() > MEDIA_BINARY_LIMIT { return "media-receive-fenced"; }
                 let start = Instant::now();
                 let delivery = scope.service.media_delivery_allowed(scope.id).await;
                 if let Some(trace) = trace {
@@ -661,17 +803,11 @@ async fn write_media(
                 }
                 match delivery {
                     Ok(true) => {
-                        let Ok(frame) = MediaFrame::decode(&frame.bytes, format) else { return "media-received-frame-invalid"; };
+                        if WireMediaFrame::decode(&frame.bytes).is_err() {
+                            return "media-received-frame-invalid";
+                        }
                         let start = Instant::now();
-                        let chunk = CallMediaCommand::AudioChunk {
-                            track_id: frame.header.track_id,
-                            generation: frame.header.generation,
-                            pcm_base64: BASE64.encode(frame.payload()),
-                            sequence: Some(frame.header.sequence),
-                            sample_offset: Some(frame.header.timestamp_micros * u64::from(format.sample_rate()) / 1_000_000),
-                        };
-                        let Ok(text) = serde_json::to_string(&chunk) else { return "media-encode-failed"; };
-                        let sent = send(sink, Message::Text(text.into())).await;
+                        let sent = send(sink, Message::Binary(frame.bytes.into())).await;
                         if let Some(trace) = trace {
                             trace.socket_write_max = trace.socket_write_max.max(start.elapsed());
                             trace.written += u64::from(sent);
@@ -691,7 +827,7 @@ async fn read_media(
     scope: &MediaScope<'_>,
     input: &mut SplitStream<WebSocket>,
     pongs: mpsc::Sender<Message>,
-    track: u32,
+    audio_track: u32,
     format: AudioFormat,
     trace: &mut Option<ReplyTrace>,
     mut shutdown: watch::Receiver<()>,
@@ -713,7 +849,6 @@ async fn read_media(
             _ = trace_tick.tick(), if trace.is_some() => {
                 if let Some(trace) = trace {
                     trace.report();
-
                 }
             }
             message = input.next() => {
@@ -725,30 +860,76 @@ async fn read_media(
                 }
                 if credential.is_err() { return "media-credential-fenced"; }
                 match message {
-                    Message::Text(text) if text.len() <= MEDIA_TEXT_LIMIT => {
+                    Message::Text(text) if text.len() <= CONTROL_LIMIT => {
                         let Ok(command) = serde_json::from_str::<CallMediaCommand>(&text) else { return "media-message-invalid"; };
-                        let Ok(current) = scope.service.media_generation(scope.id).await else { return "media-generation-unavailable"; };
                         match command {
-                            CallMediaCommand::AudioStart { track_id, generation } => {
-                                if track_id != track || scope.service.start_media_audio(scope.id, track_id, generation).await.is_err() { return "media-generation-rejected"; }
+                            CallMediaCommand::TrackStart { track_id, generation } => {
+                                if scope.service.start_media_track(scope.id, track_id, generation).await.is_err() {
+                                    return "media-generation-rejected";
+                                }
                             }
-                            CallMediaCommand::AudioChunk { track_id, generation, pcm_base64, sequence, sample_offset } => {
-                                if sequence.is_some() || sample_offset.is_some() { return "media-client-clock-not-allowed"; }
-                                if track_id != track || generation == 0 || generation > current { return "media-track-rejected"; }
-                                if pcm_base64.len() > MEDIA_LIMIT.div_ceil(3) * 4 { return "media-chunk-too-large"; }
-                                let Ok(bytes) = BASE64.decode(&pcm_base64) else { return "media-base64-invalid"; };
-                                if bytes.is_empty() || !bytes.len().is_multiple_of(format.channels() as usize * 2) || bytes.len() > MEDIA_LIMIT { return "media-pcm-invalid"; }
-                                if generation < current { continue; }
+                            CallMediaCommand::VideoRequestKeyframe { track_id } => {
+                                if scope.service.request_video_keyframe(scope.id, track_id).await.is_err() {
+                                    return "media-keyframe-rejected";
+                                }
+                            }
+                            CallMediaCommand::Attach { .. } => return "media-unexpected-message",
+                        }
+                    }
+                    Message::Binary(bytes) if bytes.len() <= MEDIA_BINARY_LIMIT => {
+                        let Ok(frame) = WireMediaFrame::decode(&bytes) else {
+                            return "media-binary-invalid";
+                        };
+                        match frame.kind {
+                            MediaPayloadKind::PcmS16le => {
+                                let Ok(current) = scope.service.media_generation(scope.id).await else {
+                                    return "media-generation-unavailable";
+                                };
+                                let track_id = frame.header.track_id;
+                                let generation = frame.header.generation;
+                                if track_id != audio_track || generation == 0 || generation > current {
+                                    return "media-track-rejected";
+                                }
+                                let payload = frame.payload();
+                                if payload.is_empty()
+                                    || !payload.len().is_multiple_of(format.channels() as usize * 2)
+                                    || payload.len() > MAX_AUDIO_PAYLOAD_BYTES
+                                {
+                                    return "media-pcm-invalid";
+                                }
+                                if generation < current {
+                                    continue;
+                                }
                                 let start = Instant::now();
-                                let Ok(pending) = scope.service.submit_pcm(scope.id, track_id, generation, &bytes).await else { return "media-pcm-rejected"; };
+                                let Ok(pending) = scope.service.submit_pcm(scope.id, track_id, generation, payload).await else {
+                                    return "media-pcm-rejected";
+                                };
                                 if let Some(trace) = trace {
                                     trace.chunks += 1;
-                                    trace.bytes += bytes.len();
+                                    trace.bytes += payload.len();
                                     trace.peak_pending_bytes = trace.peak_pending_bytes.max(pending);
                                     trace.backend_max = trace.backend_max.max(start.elapsed());
                                 }
                             }
-                            _ => return "media-unexpected-message",
+                            kind if kind.is_video() => {
+                                if scope
+                                    .service
+                                    .submit_video(
+                                        scope.id,
+                                        frame.header.track_id,
+                                        frame.header.generation,
+                                        kind,
+                                        frame.flags,
+                                        frame.header.timestamp_micros,
+                                        frame.payload(),
+                                    )
+                                    .await
+                                    .is_err()
+                                {
+                                    return "media-video-rejected";
+                                }
+                            }
+                            _ => return "media-binary-invalid",
                         }
                     }
                     Message::Ping(bytes) => {

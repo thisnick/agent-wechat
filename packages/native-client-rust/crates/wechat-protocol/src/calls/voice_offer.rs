@@ -6,6 +6,27 @@ use crate::{crypto, protobuf as p};
 use anyhow::Result;
 use zeroize::Zeroizing;
 
+/// Advertised standard video codec capabilities for an engine capability offer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VideoOfferOptions {
+    /// Advertise standard H.265/HEVC (`Vcodec2`, bit `0x10`).
+    pub hevc: bool,
+    /// Advertise standard H.264/AVC (`SwH264 | HW264`, bits `0x09`).
+    pub h264: bool,
+    /// Display aspect ratio hint encoded in engine capability field 4 (for example `178` for 16:9 direct or `100` for conference).
+    pub video_flags: u32,
+}
+
+impl Default for VideoOfferOptions {
+    fn default() -> Self {
+        Self {
+            hevc: true,
+            h264: true,
+            video_flags: 178,
+        }
+    }
+}
+
 /// Owned request metadata for one call generation. It intentionally has no
 /// `Clone` or `Debug`: create a fresh identity for each new call. The embedding
 /// owner must supply new random bytes and keep this value until that call ends.
@@ -20,6 +41,24 @@ impl VoiceOffer {
     /// version. Signed int32 representation is preserved in engine field27.
     /// MD5 reproduces the channel identity transform; it is not authentication.
     pub fn from_owned_random(owner_version: i32, random32: [u8; 32]) -> Result<Self> {
+        Self::build(owner_version, random32, None)
+    }
+
+    /// Build a fresh offer advertising Opus audio together with the selected
+    /// standard video codecs. Proprietary video codec bits remain unset.
+    pub fn from_owned_random_video(
+        owner_version: i32,
+        random32: [u8; 32],
+        video: VideoOfferOptions,
+    ) -> Result<Self> {
+        Self::build(owner_version, random32, Some(video))
+    }
+
+    fn build(
+        owner_version: i32,
+        random32: [u8; 32],
+        video: Option<VideoOfferOptions>,
+    ) -> Result<Self> {
         let random32 = Zeroizing::new(random32);
         let digest = Zeroizing::new(crypto::md5(random32.as_ref()));
         let mut internal = Zeroizing::new([0; 12]);
@@ -34,12 +73,34 @@ impl VoiceOffer {
             if field == 27 {
                 engine.extend(p::int32(field, owner_version));
             } else {
-                let value = match field {
-                    1 => 0x457,
-                    5 => 0x40000,
-                    6 => 0x100,
-                    25 => 5,
-                    26 => 2,
+                let value = match (field, video) {
+                    (1, _) => 0x457,
+                    (2, Some(v)) => {
+                        let mut mask = 0u64;
+                        if v.hevc {
+                            mask |= 0x10;
+                        }
+                        if v.h264 {
+                            mask |= 0x09;
+                        }
+                        mask
+                    }
+                    (3, Some(_)) => 0x3f,
+                    (4, Some(v)) => u64::from(v.video_flags),
+                    (5, _) => 0x40000,
+                    (6, _) => 0x100,
+                    (8, Some(_)) => 4,
+                    (9, Some(_)) => 30,
+                    (10, Some(_)) => 0x41,
+                    (13, Some(v)) if v.hevc => 6,
+                    (14, Some(v)) if v.hevc => 8,
+                    (19, Some(v)) if v.h264 => 6,
+                    (20, Some(v)) if v.h264 => 8,
+                    (23, Some(v)) if v.h264 => 6,
+                    (24, Some(v)) if v.h264 => 8,
+                    (25, _) => 5,
+                    (26, _) => 2,
+                    (40, Some(_)) => 7,
                     _ => 0,
                 };
                 engine.extend(p::uint(field, value));
@@ -113,5 +174,24 @@ mod tests {
             p::data(&p::decode(signed.sdk_info()).unwrap(), 2).unwrap(),
             b"0x80000000"
         );
+    }
+
+    #[test]
+    fn video_offer_advertises_standard_hevc_and_h264_without_proprietary_vcodec1() {
+        let offer =
+            VoiceOffer::from_owned_random_video(0x01020300, [9; 32], VideoOfferOptions::default())
+                .unwrap();
+        let fields = p::decode(offer.engine_advertisement()).unwrap();
+        assert_eq!(p::scalar(&fields, 2).unwrap(), 0x19);
+        assert_eq!(p::scalar(&fields, 3).unwrap(), 0x3f);
+        assert_eq!(p::scalar(&fields, 4).unwrap(), 178);
+        assert_eq!(p::scalar(&fields, 5).unwrap(), 0x40000);
+        assert_eq!(p::scalar(&fields, 11).unwrap(), 0);
+        assert_eq!(p::scalar(&fields, 12).unwrap(), 0);
+        assert_eq!(p::scalar(&fields, 13).unwrap(), 6);
+        assert_eq!(p::scalar(&fields, 14).unwrap(), 8);
+        assert_eq!(p::scalar(&fields, 19).unwrap(), 6);
+        assert_eq!(p::scalar(&fields, 20).unwrap(), 8);
+        assert_eq!(p::scalar(&fields, 40).unwrap(), 7);
     }
 }

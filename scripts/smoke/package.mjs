@@ -61,7 +61,7 @@ try {
   assert.match(audioHelp.stdout, /--input-device/);
   assert.match(audioHelp.stdout, /--output-device/);
   const devicesHelp = await exec(process.execPath, [launcher, 'calls', 'devices', '--help'], { env: { ...process.env, AGENT_WECHAT_NATIVE_BINARY: '' } });
-  assert.match(devicesHelp.stdout, /local microphone\/speaker/i);
+  assert.match(devicesHelp.stdout, /local microphone, speaker and camera devices/i);
   // Exercise the same canonical npm-bin symlink/payload adapter used by managed
   // OpenClaw hosting; this creates only temporary empty account slots.
   const bin = join(temporary, 'bin'); await mkdir(bin); if (process.platform === 'win32') { await cp(root, join(bin, 'node_modules', '@agent-wechat', 'cli'), { recursive: true }); } else await symlink(launcher, join(bin, 'wx'));

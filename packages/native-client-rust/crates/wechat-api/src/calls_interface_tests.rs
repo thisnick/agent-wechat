@@ -180,7 +180,7 @@ fn socket_rows(sockets: &[CallSocket]) -> Vec<Row> {
 fn path_parameter_doc(name: &str) -> &'static str {
     match name {
         "a" => "Account ID or alias.",
-        "call" => "ID of the call whose audio the socket carries.",
+        "call" => "ID of the call whose media the socket carries.",
         other => panic!("describe the {{{other}}} path parameter of the call sockets"),
     }
 }
@@ -387,10 +387,13 @@ fn calls_websocket_listing_lists_each_direction_separately() {
     for expected in [
         "client CallClientHello[call.hello] | ",
         "client CallCommand[call.dial] | ",
+        "client CallCommand[call.camera] | ",
         "client CallMediaCommand[media.attach] | ",
+        "client CallMediaCommand[track.start] | ",
+        "client CallMediaCommand[video.request_keyframe] | ",
         "server CallEvent[hello] | ",
         "server CallEvent[media.ready] | ",
-        "server CallMediaCommand[audio.chunk] | ",
+        "server CallEvent[video.keyframe_requested] | ",
     ] {
         assert!(
             listing.lines().any(|line| line.starts_with(expected)),
@@ -400,7 +403,7 @@ fn calls_websocket_listing_lists_each_direction_separately() {
     // The daemon never sends these on the media socket, and never receives events.
     for absent in [
         "server CallMediaCommand[media.attach]",
-        "server CallMediaCommand[audio.start]",
+        "server CallMediaCommand[track.start]",
         "client CallEvent[",
         "server CallEvent[media.ready] | message, socket control",
     ] {

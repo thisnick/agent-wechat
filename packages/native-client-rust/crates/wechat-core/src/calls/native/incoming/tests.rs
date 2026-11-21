@@ -525,6 +525,7 @@ impl Fixture {
                     request_id: "ready".into(),
                     ready: true,
                     format: CallAudioFormat::default(),
+                    video: None,
                     scope: Some(CallReadyScope::All),
                 },
             )
@@ -672,6 +673,8 @@ async fn incoming_call_can_answer_then_exit_without_media() {
                 request_id: "answer".into(),
                 call_id: offer.call_id.clone(),
                 expected_revision: offer.revision,
+                camera_enabled: None,
+                muted: None,
             },
         )
         .await
@@ -805,6 +808,8 @@ async fn incoming_answer_interrupts_submitted_poll_and_joins_once() {
                 request_id: "answer".into(),
                 call_id: offer.call_id.clone(),
                 expected_revision: offer.revision,
+                camera_enabled: None,
+                muted: None,
             },
         )
         .await
@@ -1014,6 +1019,8 @@ async fn held_owner_action_with_cancel(case: Case, member: u32) {
             request_id: "owner".into(),
             call_id: offer.call_id.clone(),
             expected_revision: offer.revision,
+            camera_enabled: None,
+            muted: None,
         }
     };
     f.core
@@ -1271,6 +1278,8 @@ async fn held_join_reply_change(case: Case, change: JoinReplyChange) {
                 request_id: "answer".into(),
                 call_id: offer.call_id.clone(),
                 expected_revision: offer.revision,
+                camera_enabled: None,
+                muted: None,
             },
         )
         .await

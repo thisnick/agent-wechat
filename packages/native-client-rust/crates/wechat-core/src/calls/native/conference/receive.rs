@@ -6,11 +6,12 @@ use wechat_calls::conference_media::ConferenceReceiver as Receiver;
 #[cfg(test)]
 use wechat_calls::native_media::reconcile_roster;
 use wechat_calls::native_media::{
-    run_conference_media, ConferenceMediaOptions, ConferenceMediaReport as ReceiveReport,
-    ConferenceRoster as RosterSnapshot,
+    run_conference_media_with_video, ConferenceMediaOptions,
+    ConferenceMediaReport as ReceiveReport, ConferenceRoster as RosterSnapshot,
 };
 use wechat_protocol::calls::relay::SelectedRelay;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn run(
     transport: &FencedTransport,
     state: &mut AccountState,
@@ -18,36 +19,76 @@ pub(super) fn run(
     session: &mut ConferenceSession,
     tasks: &mut Tasks,
     probe: ProbeMode,
+    prefer_live98: bool,
     audio: std::sync::mpsc::Receiver<QueuedAudio>,
+    video: std::sync::mpsc::Receiver<QueuedVideo>,
+    keyframe_rx: std::sync::mpsc::Receiver<u32>,
 ) -> Result<()> {
     let core = transport.core.upgrade().context("Conference core closed")?;
     let selected = session.take_media(0, 0)?;
     let initial_profile = session.media_profile()?;
+    let is_video = transport.worker.call_type == CallType::Video;
+    let wire_codec = super::super::media::wire_codec_for_mask(session.video_dec_cap_mask());
     let multi_speaker = matches!(probe, ProbeMode::MultiReceive | ProbeMode::DuplexTone);
     let transmit_grouping = matches!(probe, ProbeMode::Application | ProbeMode::DuplexTone)
         .then_some((initial_profile[1] >> 8) as u8);
-    let application = if probe == ProbeMode::Application {
+    let (application, recv_video_format) = if probe == ProbeMode::Application {
         let ControlAdmission::Owner(sink) = &transport.admission else {
             bail!("Conference application requires an owner")
         };
-        Some(Application {
-            sink: sink.clone(),
-            runtime: transport.runtime.clone(),
-            audio,
-        })
+        if is_video {
+            let _ = transport
+                .runtime
+                .block_on(sink.set_video_wire_codec(wire_codec));
+        }
+        let (send_fmt, recv_fmt) = if is_video {
+            sink.negotiated_video_formats().unwrap_or((None, None))
+        } else {
+            (None, None)
+        };
+        (
+            Some(Application {
+                sink: sink.clone(),
+                runtime: transport.runtime.clone(),
+                audio,
+                video: is_video.then_some(video),
+                send_video_format: send_fmt,
+                recv_video_format: recv_fmt,
+                wire_codec,
+            }),
+            recv_fmt,
+        )
     } else {
-        None
+        (None, None)
     };
     let roster = Arc::new(Mutex::new(RosterSnapshot {
         revision: 0,
         members: session.members(),
     }));
+    let (peer_kf_tx, peer_kf_rx) = std::sync::mpsc::sync_channel::<()>(4);
+    let has_tx_video = application
+        .as_ref()
+        .is_some_and(|app| app.send_video_format.is_some() && app.video.is_some());
+    let video_owner = application
+        .as_ref()
+        .map(|app| (app.sink.clone(), app.runtime.clone()));
+    let video_bridge = Arc::new(super::super::media::VideoRxBridge::new(
+        None,
+        recv_video_format,
+        keyframe_rx,
+        transport.worker.video_keyframe_requests.clone(),
+        has_tx_video.then_some(peer_kf_tx),
+        prefer_live98,
+        video_owner,
+    ));
     let stop = Arc::new(AtomicBool::new(false));
     let done = Arc::new(AtomicBool::new(false));
     let media_stop = stop.clone();
     let media_done = done.clone();
     let media_roster = roster.clone();
+    let media_video_bridge = video_bridge.clone();
     let worker = transport.worker.clone();
+    let own_member = selected.own_member;
     let thread = thread::Builder::new()
         .name("wechat-group-receive-probe".into())
         .spawn(move || {
@@ -56,9 +97,12 @@ pub(super) fn run(
                 selected,
                 &media_roster,
                 &media_stop,
+                &media_video_bridge,
+                peer_kf_rx,
                 ProbeOptions {
                     multi_speaker,
                     transmit_grouping,
+                    video_enabled: is_video,
                     application,
                 },
             );
@@ -69,6 +113,23 @@ pub(super) fn run(
     let control = (|| -> Result<()> {
         let mut last_invitation = unix_ms()?;
         let mut last_microphone = 0u64;
+        let mut last_subscribe = 0u64;
+        let mut subscribed_video = Vec::<u16>::new();
+        let mut video_track_gens = BTreeMap::<u16, u32>::new();
+        if transport.worker.muted.load(Ordering::Acquire) {
+            let now = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
+            last_microphone = last_microphone.saturating_add(1).max(now);
+            let camera = transport.worker.camera_enabled.load(Ordering::Acquire);
+            let _ = session.set_av(
+                transport,
+                state,
+                authority,
+                false,
+                camera,
+                last_microphone,
+                tasks.next()?,
+            );
+        }
         let deadline = Instant::now()
             + Duration::from_secs(if probe == ProbeMode::Application {
                 1200
@@ -77,6 +138,10 @@ pub(super) fn run(
             } else {
                 48
             });
+        transport
+            .worker
+            .joined_commands_ready
+            .store(true, Ordering::Release);
         while transport.worker.current()
             && !transport.worker.stop.load(Ordering::Acquire)
             && !done.load(Ordering::Acquire)
@@ -119,7 +184,7 @@ pub(super) fn run(
                                 ))
                             })
                     }
-                    CommandAction::Mute(muted) => {
+                    CommandAction::Mute => {
                         let now = u64::try_from(
                             SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros(),
                         )?;
@@ -127,16 +192,41 @@ pub(super) fn run(
                             .checked_add(1)
                             .context("Conference microphone clock exhausted")?
                             .max(now);
+                        let mic = !transport.worker.muted.load(Ordering::Acquire);
+                        let camera = transport.worker.camera_enabled.load(Ordering::Acquire);
                         session
-                            .set_muted(
+                            .set_av(
                                 transport,
                                 state,
                                 authority,
-                                muted,
+                                mic,
+                                camera,
                                 last_microphone,
                                 tasks.next()?,
                             )
                             .map(|()| CommandResult::Muted)
+                    }
+                    CommandAction::Camera => {
+                        let now = u64::try_from(
+                            SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros(),
+                        )?;
+                        last_microphone = last_microphone
+                            .checked_add(1)
+                            .context("Conference AV clock exhausted")?
+                            .max(now);
+                        let mic = !transport.worker.muted.load(Ordering::Acquire);
+                        let camera = transport.worker.camera_enabled.load(Ordering::Acquire);
+                        session
+                            .set_av(
+                                transport,
+                                state,
+                                authority,
+                                mic,
+                                camera,
+                                last_microphone,
+                                tasks.next()?,
+                            )
+                            .map(|()| CommandResult::Camera)
                     }
                 };
                 let result = result.map_err(|error| {
@@ -149,6 +239,21 @@ pub(super) fn run(
                 let _ = command.reply.send(result);
             }
             publish_roster(transport, session, &roster)?;
+            if is_video {
+                sync_conference_video_subscriptions(
+                    transport,
+                    state,
+                    authority,
+                    session,
+                    tasks,
+                    own_member,
+                    recv_video_format,
+                    &video_bridge,
+                    &mut subscribed_video,
+                    &mut video_track_gens,
+                    &mut last_subscribe,
+                )?;
+            }
             match session.poll(transport, state, authority, tasks.next()?) {
                 Ok(true) => {}
                 Ok(false) => bail!("Conference membership ended"),
@@ -174,13 +279,30 @@ pub(super) fn run(
                 );
             }
             publish_roster(transport, session, &roster)?;
+            if is_video {
+                sync_conference_video_subscriptions(
+                    transport,
+                    state,
+                    authority,
+                    session,
+                    tasks,
+                    own_member,
+                    recv_video_format,
+                    &video_bridge,
+                    &mut subscribed_video,
+                    &mut video_track_gens,
+                    &mut last_subscribe,
+                )?;
+            }
         }
         Ok(())
     })();
     stop.store(true, Ordering::Release);
+    transport.worker.media_stop.store(true, Ordering::Release);
     let mut report = thread
         .join()
         .map_err(|_| anyhow::anyhow!("Conference receive worker failed"))?;
+    video_bridge.shutdown();
     report.ignored_controls = session.ignored_control_count();
     report.control_stopped = control.is_err();
     report.control_failure = control.as_ref().err().map(|error| {
@@ -233,31 +355,139 @@ fn publish_roster(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn sync_conference_video_subscriptions(
+    transport: &FencedTransport,
+    state: &mut AccountState,
+    authority: AppAuthority,
+    session: &mut ConferenceSession,
+    tasks: &mut Tasks,
+    own_member: u16,
+    recv_video_format: Option<crate::call_types::CallVideoFormat>,
+    video_bridge: &super::super::media::VideoRxBridge,
+    subscribed_video: &mut Vec<u16>,
+    video_track_gens: &mut BTreeMap<u16, u32>,
+    last_subscribe: &mut u64,
+) -> Result<()> {
+    let mut desired: Vec<u16> = session
+        .members()
+        .into_iter()
+        .filter(|member| {
+            member.member_id != own_member
+                && member.status == 1
+                && member.camera_enabled == Some(true)
+        })
+        .map(|member| member.member_id)
+        .collect();
+    desired.sort_unstable();
+    desired.dedup();
+    desired.truncate(9);
+    if desired == *subscribed_video {
+        return Ok(());
+    }
+    let targets: Vec<(u32, u32)> = desired.iter().map(|&id| (u32::from(id), 640)).collect();
+    let now = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
+    *last_subscribe = last_subscribe
+        .checked_add(1)
+        .context("Conference subscribe clock exhausted")?
+        .max(now);
+    // Best-effort subscribe: tolerate transient failure without tearing down audio.
+    if session
+        .subscribe_video(
+            transport,
+            state,
+            authority,
+            &targets,
+            *last_subscribe,
+            tasks.next()?,
+        )
+        .is_ok()
+    {
+        for &member in &desired {
+            if !subscribed_video.contains(&member) {
+                let entry = video_track_gens.entry(member).or_insert(0);
+                *entry = entry.saturating_add(1);
+            }
+        }
+        *subscribed_video = desired;
+        let active: Vec<(u16, u32)> = subscribed_video
+            .iter()
+            .map(|&member| (member, *video_track_gens.get(&member).unwrap_or(&1)))
+            .collect();
+        video_bridge.set_conference_tracks(&active);
+        if let (Some(format), ControlAdmission::Owner(sink)) =
+            (recv_video_format, &transport.admission)
+        {
+            let tracks = active
+                .into_iter()
+                .map(|(member, generation)| crate::call_types::CallTrack::Video {
+                    id: crate::call_types::VIDEO_RECEIVE_TRACK_BASE + u32::from(member),
+                    generation,
+                    direction: crate::call_types::CallTrackDirection::Receive,
+                    format,
+                    participant_id: Some(format!("member-{member}")),
+                    active: true,
+                })
+                .collect();
+            let _ = transport
+                .runtime
+                .block_on(sink.receive_video_tracks(tracks));
+        }
+    }
+    Ok(())
+}
+
 struct Application {
     sink: BackendSink,
     runtime: tokio::runtime::Handle,
     audio: std::sync::mpsc::Receiver<QueuedAudio>,
+    video: Option<std::sync::mpsc::Receiver<QueuedVideo>>,
+    send_video_format: Option<crate::call_types::CallVideoFormat>,
+    #[allow(dead_code)]
+    recv_video_format: Option<crate::call_types::CallVideoFormat>,
+    wire_codec: crate::call_types::CallVideoCodec,
 }
 struct ProbeOptions {
     multi_speaker: bool,
     transmit_grouping: Option<u8>,
+    video_enabled: bool,
     application: Option<Application>,
 }
 fn observe(
-    worker: &Worker,
+    worker: &Arc<Worker>,
     selected: SelectedRelay,
     roster: &Mutex<RosterSnapshot>,
     stop: &AtomicBool,
+    video_bridge: &super::super::media::VideoRxBridge,
+    peer_kf_rx: std::sync::mpsc::Receiver<()>,
     options: ProbeOptions,
 ) -> ReceiveReport {
-    let (application, audio) = if let Some(app) = options.application {
-        (Some((app.sink, app.runtime)), Some(app.audio))
+    let (application, audio, tx_bridge) = if let Some(app) = options.application {
+        let tx_bridge = match (app.send_video_format, app.video) {
+            (Some(fmt), Some(rx)) => super::super::media::spawn_video_tx_bridge(
+                worker.clone(),
+                fmt,
+                app.wire_codec,
+                rx,
+                peer_kf_rx,
+                app.sink.clone(),
+                app.runtime.clone(),
+            )
+            .ok(),
+            _ => None,
+        };
+        (Some((app.sink, app.runtime)), Some(app.audio), tx_bridge)
     } else {
-        (None, None)
+        (None, None, None)
+    };
+    let (direct_video_rx, tx_handle) = match tx_bridge {
+        Some((rx, handle)) => (Some(rx), Some(handle)),
+        None => (None, None),
     };
     let host = super::super::media::Host {
         worker,
         owner: application.as_ref().map(|(sink, runtime)| (sink, runtime)),
+        video: Some(video_bridge),
     };
     let options = ConferenceMediaOptions {
         epoch: MediaEpoch {
@@ -268,8 +498,24 @@ fn observe(
         },
         multi_speaker: options.multi_speaker,
         transmit_grouping: options.transmit_grouping,
+        video_enabled: options.video_enabled,
     };
-    run_conference_media(&host, selected, roster, stop, options, audio)
+    let report = run_conference_media_with_video(
+        &host,
+        selected,
+        roster,
+        stop,
+        options,
+        audio,
+        direct_video_rx,
+    );
+    // Signal worker.media_stop before joining wechat-video-tx so remote-end/all-remotes-left
+    // exits never deadlock waiting for Worker.video to disconnect.
+    worker.media_stop.store(true, Ordering::Release);
+    if let Some(handle) = tx_handle {
+        let _ = handle.join();
+    }
+    report
 }
 
 #[cfg(test)]
@@ -454,6 +700,7 @@ mod tests {
             username: name.into(),
             status: 1,
             microphone_enabled: None,
+            camera_enabled: None,
         }
     }
     #[test]

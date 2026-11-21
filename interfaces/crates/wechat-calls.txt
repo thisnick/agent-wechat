@@ -5,11 +5,16 @@ enum wechat_calls::audio::MediaError | enum | MISSING DOC
 enum wechat_calls::ordering::RtpOrderError | enum | MISSING DOC
 enum wechat_calls::playout::OverflowPolicy | enum | Overflow is chosen per stream. Incoming playback can discard stale frames; outgoing audio rejects overflow so a producer cannot silently outrun pacing.
 enum wechat_calls::track_queue::Delivery | enum<A, E> | MISSING DOC
+enum wechat_calls::video_codec::VideoCodec | enum | Video codec exchanged on a call media track or WeChat wire stream.
 field wechat_calls::audio::AudioFrame::generation | u64 | MISSING DOC
 field wechat_calls::audio::AudioFrame::samples | alloc::vec::Vec<i16> | MISSING DOC
 field wechat_calls::audio::AudioFrame::sequence | u64 | MISSING DOC
 field wechat_calls::audio::AudioFrame::timestamp | u64 | MISSING DOC
 field wechat_calls::audio::MediaError::Codec::code | i32 | MISSING DOC
+field wechat_calls::conference_media::ConferenceConsumeOutput::audio | alloc::vec::Vec<wechat_calls::conference_media::DecodedAudio> | Decoded Opus PCM frames from this datagram.
+field wechat_calls::conference_media::ConferenceConsumeOutput::need_keyframe | bool | True when a video frame assembly dropped and the local side should send `0x66 IRequest`.
+field wechat_calls::conference_media::ConferenceConsumeOutput::peer_requested_keyframe | bool | True when the remote peer requested a keyframe (`0x66 IRequest`).
+field wechat_calls::conference_media::ConferenceConsumeOutput::video | core::option::Option<wechat_protocol::calls::video_packet::ReassembledVideoFrame> | Reassembled video frame completed by this datagram, if any.
 field wechat_calls::conference_media::ConferenceReceiver::report | wechat_calls::conference_media::StreamReport | MISSING DOC
 field wechat_calls::conference_media::DecodedAudio::sample_offset | u64 | MISSING DOC
 field wechat_calls::conference_media::DecodedAudio::samples | alloc::vec::Vec<i16> | MISSING DOC
@@ -54,6 +59,24 @@ field wechat_calls::playout::QueueMetrics::dropped_frames | u64 | MISSING DOC
 field wechat_calls::playout::QueueMetrics::underruns | u64 | MISSING DOC
 field wechat_calls::track_queue::Delivery::Audio::0 | A | -
 field wechat_calls::track_queue::Delivery::Control::0 | E | -
+field wechat_calls::video_codec::EncodedVideoFrame::bytes | alloc::vec::Vec<u8> | Raw Annex-B access unit or JPEG bytes.
+field wechat_calls::video_codec::EncodedVideoFrame::codec | wechat_calls::video_codec::VideoCodec | Codec of `bytes`.
+field wechat_calls::video_codec::EncodedVideoFrame::has_codec_config | bool | True when inline parameter sets (VPS/SPS/PPS) precede the frame.
+field wechat_calls::video_codec::EncodedVideoFrame::is_keyframe | bool | True for keyframes (IDR slices or standalone JPEG frames).
+field wechat_calls::video_codec::TranscodeConfig::bitrate_kbps | u32 | Target bitrate in kbps (`64..=8000`) for H.264/H.265 outputs.
+field wechat_calls::video_codec::TranscodeConfig::fps | u8 | Target frame rate (`1..=60`).
+field wechat_calls::video_codec::TranscodeConfig::from | wechat_calls::video_codec::VideoCodec | Input codec written to the transcoder.
+field wechat_calls::video_codec::TranscodeConfig::height | u16 | Target output maximum height in pixels (`64..=1080`).
+field wechat_calls::video_codec::TranscodeConfig::rotation | wechat_protocol::calls::video_packet::VideoRotation | Clockwise display rotation applied before scaling.
+field wechat_calls::video_codec::TranscodeConfig::to | wechat_calls::video_codec::VideoCodec | Output codec read from the transcoder.
+field wechat_calls::video_codec::TranscodeConfig::width | u16 | Target output maximum width in pixels (`64..=1920`).
+field wechat_calls::video_codec::VideoCodecCapabilities::ffmpeg_path | core::option::Option<std::path::PathBuf> | Path to the discovered `ffmpeg` executable, if present.
+field wechat_calls::video_codec::VideoCodecCapabilities::h264_decode | bool | Whether H.264/AVC decoding (`h264`) is available.
+field wechat_calls::video_codec::VideoCodecCapabilities::h264_encode | bool | Whether H.264/AVC software encoding (`libx264`) is available.
+field wechat_calls::video_codec::VideoCodecCapabilities::h265_decode | bool | Whether H.265/HEVC decoding (`hevc`) is available.
+field wechat_calls::video_codec::VideoCodecCapabilities::h265_encode | bool | Whether H.265/HEVC software encoding (`libx265`) is available.
+field wechat_calls::video_codec::VideoCodecCapabilities::jpeg_decode | bool | Whether MJPEG decoding (`mjpeg`) is available.
+field wechat_calls::video_codec::VideoCodecCapabilities::jpeg_encode | bool | Whether MJPEG encoding (`mjpeg`) is available.
 fn wechat_calls::audio::AudioDecoder::conceal | required fn(&mut self) -> core::result::Result<alloc::vec::Vec<i16>, wechat_calls::audio::MediaError> | MISSING DOC
 fn wechat_calls::audio::AudioDecoder::decode | required fn(&mut self, packet: &[u8]) -> core::result::Result<alloc::vec::Vec<i16>, wechat_calls::audio::MediaError> | MISSING DOC
 fn wechat_calls::audio::AudioDecoder::format | required fn(&self) -> wechat_calls::audio::AudioFormat | MISSING DOC
@@ -70,10 +93,15 @@ fn wechat_calls::audio::AudioFormat::samples_per_frame | fn(self) -> usize | MIS
 fn wechat_calls::audio::AudioFormat::validate_frame | fn(self, samples: &[i16]) -> core::result::Result<(), wechat_calls::audio::MediaError> | MISSING DOC
 fn wechat_calls::conference_media::ConferenceReceiver::close | fn(&mut self) | MISSING DOC
 fn wechat_calls::conference_media::ConferenceReceiver::consume | fn(&mut self, epoch: wechat_protocol::calls::audio_packet::MediaEpoch, packet: &[u8], elapsed_ms: u64, decode_audio: bool) -> anyhow::Result<alloc::vec::Vec<wechat_calls::conference_media::DecodedAudio>> | MISSING DOC
+fn wechat_calls::conference_media::ConferenceReceiver::consume_media | fn(&mut self, epoch: wechat_protocol::calls::audio_packet::MediaEpoch, packet: &[u8], elapsed_ms: u64, decode_audio: bool) -> anyhow::Result<wechat_calls::conference_media::ConferenceConsumeOutput> | Consume one conference relay packet and return decoded audio, reassembled video and keyframe-request signals.
 fn wechat_calls::conference_media::ConferenceReceiver::new | fn(selected: &wechat_protocol::calls::relay::SelectedRelay, member: u16, epoch: wechat_protocol::calls::audio_packet::MediaEpoch) -> anyhow::Result<Self> | MISSING DOC
 fn wechat_calls::conference_media::ConferenceReceiver::reset_decoder | fn(&mut self) -> anyhow::Result<()> | New application track incarnation; keep authenticated replay/order state and the shared presentation clock, while discarding codec history.
 fn wechat_calls::conference_send::ConferenceSender::new | fn(selected: &wechat_protocol::calls::relay::SelectedRelay, reference_member: u16, epoch: wechat_protocol::calls::audio_packet::MediaEpoch, grouping: u8, start: core::time::Duration) -> anyhow::Result<Self> | MISSING DOC
 fn wechat_calls::conference_send::ConferenceSender::poll | fn(&mut self, now: core::time::Duration, generation: u32, microphone_enabled: bool, source: impl core::ops::function::FnOnce() -> core::option::Option<alloc::vec::Vec<i16>>) -> anyhow::Result<core::option::Option<wechat_calls::conference_send::PreparedAudio>> | The source is called only for one due slot. A late worker skips elapsed slots instead of requesting a catch-up burst. The host must recheck this returned generation under its physical UDP handoff gate.
+fn wechat_calls::conference_send::ConferenceSender::seal_qos_p2s | fn(&mut self, now: core::time::Duration, payload: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Seal one MP QoS P2S telemetry heartbeat (`0x0b` on `0x30`).
+fn wechat_calls::conference_send::ConferenceSender::seal_video | fn(&mut self, now: core::time::Duration, stream_id: u8, is_data: bool, payload: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Seal one MP/iLink conference video payload sharing this sender's room media key.
+fn wechat_calls::conference_send::ConferenceSender::seal_video_rtcp | fn(&mut self, now: core::time::Duration, stream_id: u8, payload: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Seal one peer-to-peer video RTCP packet (`0x66 IRequest` or `0x06 NACK`).
+fn wechat_calls::conference_send::ConferenceSender::set_prefer_live98_tx | fn(&mut self, enabled: bool) | Opt into `Live98` (`0x98`) framing on outbound packets.
 fn wechat_calls::mixer::PcmMixer::add_track | fn(&mut self, track_id: u32, generation: u64) -> core::result::Result<(), wechat_calls::audio::MediaError> | Announce a receive source. A newer generation replaces queued PCM but does not reset the call clock or any transport cryptographic state.
 fn wechat_calls::mixer::PcmMixer::metrics | fn(&self) -> wechat_calls::mixer::MixerMetrics | MISSING DOC
 fn wechat_calls::mixer::PcmMixer::new | fn(format: wechat_calls::audio::AudioFormat, track_capacity: usize, frames_per_track: usize, start_offset: u64) -> core::result::Result<Self, wechat_calls::audio::MediaError> | MISSING DOC
@@ -113,6 +141,20 @@ fn wechat_calls::track_queue::TrackQueue::pop | fn(&mut self) -> core::option::O
 fn wechat_calls::track_queue::TrackQueue::push | fn(&mut self, id: u32, generation: u32, audio: A) -> core::result::Result<(), wechat_calls::audio::MediaError> | MISSING DOC
 fn wechat_calls::track_queue::TrackQueue::remove | fn(&mut self, id: u32, generation: u32, event: E) -> core::result::Result<(), wechat_calls::audio::MediaError> | MISSING DOC
 fn wechat_calls::track_queue::TrackQueue::take_dropped | fn(&mut self) -> u64 | MISSING DOC
+fn wechat_calls::video_codec::VideoCodec::from_wire | const fn(wire: wechat_protocol::calls::video_packet::VideoWireCodec) -> core::option::Option<Self> | Convert a WeChat wire codec byte to a standard [`VideoCodec`], if supported.
+fn wechat_calls::video_codec::VideoCodec::to_wire | const fn(self) -> core::option::Option<wechat_protocol::calls::video_packet::VideoWireCodec> | Convert a standard codec to its WeChat wire codec enum, if directly representable.
+fn wechat_calls::video_codec::VideoCodecCapabilities::can_transcode | fn(&self, from: wechat_calls::video_codec::VideoCodec, to: wechat_calls::video_codec::VideoCodec) -> bool | Return whether the local FFmpeg installation can transcode `from -> to`.
+fn wechat_calls::video_codec::VideoCodecCapabilities::supported_receive_codecs | fn(&self) -> alloc::vec::Vec<wechat_calls::video_codec::VideoCodec> | Return the codecs this daemon can emit to a receive client given an active wire codec.
+fn wechat_calls::video_codec::VideoCodecCapabilities::supported_send_codecs | fn(&self) -> alloc::vec::Vec<wechat_calls::video_codec::VideoCodec> | Return the codecs this daemon can accept from a sending client.
+fn wechat_calls::video_codec::VideoTranscoder::finish_input | fn(&mut self) | Close stdin so FFmpeg flushes any buffered trailing output frames (used for batch/test teardown).
+fn wechat_calls::video_codec::VideoTranscoder::push | fn(&mut self, input: &[u8]) -> anyhow::Result<()> | Push one complete input frame (Annex-B access unit or JPEG) into the transcoder.
+fn wechat_calls::video_codec::VideoTranscoder::recv | fn(&mut self) -> core::option::Option<wechat_calls::video_codec::EncodedVideoFrame> | Blocking receive for the next completed output frame until the stream closes.
+fn wechat_calls::video_codec::VideoTranscoder::request_keyframe | fn(&mut self) -> anyhow::Result<()> | Restart the underlying encoder so the very next pushed frame emits a fresh keyframe with inline parameter sets (`VPS`/`SPS`/`PPS` + `IDR`).
+fn wechat_calls::video_codec::VideoTranscoder::start | fn(config: wechat_calls::video_codec::TranscodeConfig) -> anyhow::Result<Self> | Start a streaming transcoder for `config`.
+fn wechat_calls::video_codec::VideoTranscoder::try_recv | fn(&mut self) -> core::option::Option<wechat_calls::video_codec::EncodedVideoFrame> | Non-blocking poll for the next completed output frame.
+fn wechat_calls::video_codec::find_ffmpeg | fn() -> core::option::Option<std::path::PathBuf> | Locate the `ffmpeg` binary via `WX_FFMPEG_BIN` or `PATH`.
+fn wechat_calls::video_codec::negotiate_video_codec | fn(wire: wechat_calls::video_codec::VideoCodec, client_codecs: &[wechat_calls::video_codec::VideoCodec], caps: &wechat_calls::video_codec::VideoCodecCapabilities, is_send: bool) -> core::option::Option<(wechat_calls::video_codec::VideoCodec, bool)> | Choose the local client codec and mode (`passthrough = true` when matching WeChat's active wire codec, otherwise transcoding to the client's first supported codec).
+fn wechat_calls::video_codec::probe_video_capabilities | fn() -> wechat_calls::video_codec::VideoCodecCapabilities | Probe and cache local FFmpeg encoder/decoder capabilities.
 impl core::clone::Clone for wechat_calls::audio::AudioFormat | impl | -
 impl core::clone::Clone for wechat_calls::audio::AudioFrame | impl | -
 impl core::clone::Clone for wechat_calls::audio::MediaError | impl | -
@@ -122,6 +164,10 @@ impl core::clone::Clone for wechat_calls::ordering::PrimaryAdmission | impl | -
 impl core::clone::Clone for wechat_calls::ordering::RtpOrderError | impl | -
 impl core::clone::Clone for wechat_calls::playout::OverflowPolicy | impl | -
 impl core::clone::Clone for wechat_calls::playout::QueueMetrics | impl | -
+impl core::clone::Clone for wechat_calls::video_codec::EncodedVideoFrame | impl | -
+impl core::clone::Clone for wechat_calls::video_codec::TranscodeConfig | impl | -
+impl core::clone::Clone for wechat_calls::video_codec::VideoCodec | impl | -
+impl core::clone::Clone for wechat_calls::video_codec::VideoCodecCapabilities | impl | -
 impl core::cmp::Eq for wechat_calls::audio::AudioFormat | impl | -
 impl core::cmp::Eq for wechat_calls::audio::AudioFrame | impl | -
 impl core::cmp::Eq for wechat_calls::audio::MediaError | impl | -
@@ -131,6 +177,10 @@ impl core::cmp::Eq for wechat_calls::ordering::PrimaryAdmission | impl | -
 impl core::cmp::Eq for wechat_calls::ordering::RtpOrderError | impl | -
 impl core::cmp::Eq for wechat_calls::playout::OverflowPolicy | impl | -
 impl core::cmp::Eq for wechat_calls::playout::QueueMetrics | impl | -
+impl core::cmp::Eq for wechat_calls::video_codec::EncodedVideoFrame | impl | -
+impl core::cmp::Eq for wechat_calls::video_codec::TranscodeConfig | impl | -
+impl core::cmp::Eq for wechat_calls::video_codec::VideoCodec | impl | -
+impl core::cmp::Eq for wechat_calls::video_codec::VideoCodecCapabilities | impl | -
 impl core::cmp::PartialEq for wechat_calls::audio::AudioFormat | impl | -
 impl core::cmp::PartialEq for wechat_calls::audio::AudioFrame | impl | -
 impl core::cmp::PartialEq for wechat_calls::audio::MediaError | impl | -
@@ -140,10 +190,16 @@ impl core::cmp::PartialEq for wechat_calls::ordering::PrimaryAdmission | impl | 
 impl core::cmp::PartialEq for wechat_calls::ordering::RtpOrderError | impl | -
 impl core::cmp::PartialEq for wechat_calls::playout::OverflowPolicy | impl | -
 impl core::cmp::PartialEq for wechat_calls::playout::QueueMetrics | impl | -
+impl core::cmp::PartialEq for wechat_calls::video_codec::EncodedVideoFrame | impl | -
+impl core::cmp::PartialEq for wechat_calls::video_codec::TranscodeConfig | impl | -
+impl core::cmp::PartialEq for wechat_calls::video_codec::VideoCodec | impl | -
+impl core::cmp::PartialEq for wechat_calls::video_codec::VideoCodecCapabilities | impl | -
+impl core::default::Default for wechat_calls::conference_media::ConferenceConsumeOutput | impl | -
 impl core::default::Default for wechat_calls::conference_media::StreamReport | impl | -
 impl core::default::Default for wechat_calls::mixer::MixerMetrics | impl | -
 impl core::default::Default for wechat_calls::ordering::RtpOrder | impl | -
 impl core::default::Default for wechat_calls::playout::QueueMetrics | impl | -
+impl core::default::Default for wechat_calls::video_codec::VideoCodecCapabilities | impl | -
 impl core::error::Error for wechat_calls::audio::MediaError | impl | -
 impl core::error::Error for wechat_calls::ordering::RtpOrderError | impl | -
 impl core::fmt::Debug for wechat_calls::audio::AudioFormat | impl | -
@@ -155,6 +211,10 @@ impl core::fmt::Debug for wechat_calls::ordering::PrimaryAdmission | impl | -
 impl core::fmt::Debug for wechat_calls::ordering::RtpOrderError | impl | -
 impl core::fmt::Debug for wechat_calls::playout::OverflowPolicy | impl | -
 impl core::fmt::Debug for wechat_calls::playout::QueueMetrics | impl | -
+impl core::fmt::Debug for wechat_calls::video_codec::EncodedVideoFrame | impl | -
+impl core::fmt::Debug for wechat_calls::video_codec::TranscodeConfig | impl | -
+impl core::fmt::Debug for wechat_calls::video_codec::VideoCodec | impl | -
+impl core::fmt::Debug for wechat_calls::video_codec::VideoCodecCapabilities | impl | -
 impl core::fmt::Display for wechat_calls::audio::MediaError | impl | -
 impl core::fmt::Display for wechat_calls::ordering::RtpOrderError | impl | -
 impl core::marker::Copy for wechat_calls::audio::AudioFormat | impl | -
@@ -163,6 +223,8 @@ impl core::marker::Copy for wechat_calls::ordering::PrimaryAdmission | impl | -
 impl core::marker::Copy for wechat_calls::ordering::RtpOrderError | impl | -
 impl core::marker::Copy for wechat_calls::playout::OverflowPolicy | impl | -
 impl core::marker::Copy for wechat_calls::playout::QueueMetrics | impl | -
+impl core::marker::Copy for wechat_calls::video_codec::TranscodeConfig | impl | -
+impl core::marker::Copy for wechat_calls::video_codec::VideoCodec | impl | -
 impl core::marker::StructuralPartialEq for wechat_calls::audio::AudioFormat | impl | -
 impl core::marker::StructuralPartialEq for wechat_calls::audio::AudioFrame | impl | -
 impl core::marker::StructuralPartialEq for wechat_calls::audio::MediaError | impl | -
@@ -172,8 +234,13 @@ impl core::marker::StructuralPartialEq for wechat_calls::ordering::PrimaryAdmiss
 impl core::marker::StructuralPartialEq for wechat_calls::ordering::RtpOrderError | impl | -
 impl core::marker::StructuralPartialEq for wechat_calls::playout::OverflowPolicy | impl | -
 impl core::marker::StructuralPartialEq for wechat_calls::playout::QueueMetrics | impl | -
+impl core::marker::StructuralPartialEq for wechat_calls::video_codec::EncodedVideoFrame | impl | -
+impl core::marker::StructuralPartialEq for wechat_calls::video_codec::TranscodeConfig | impl | -
+impl core::marker::StructuralPartialEq for wechat_calls::video_codec::VideoCodec | impl | -
+impl core::marker::StructuralPartialEq for wechat_calls::video_codec::VideoCodecCapabilities | impl | -
 impl core::ops::drop::Drop for wechat_calls::conference_media::ConferenceReceiver | impl | -
 impl core::ops::drop::Drop for wechat_calls::conference_send::ConferenceSender | impl | -
+impl core::ops::drop::Drop for wechat_calls::video_codec::VideoTranscoder | impl | -
 impl serde_core::ser::Serialize for wechat_calls::conference_media::StreamReport | impl | -
 impl wechat_calls::audio::AudioDecoder for wechat_calls::opus::OpusDecoder | impl | -
 impl wechat_calls::audio::AudioEncoder for wechat_calls::opus::OpusEncoder | impl | -
@@ -188,8 +255,10 @@ mod wechat_calls::pcm_output | - | Generation-scoped PCM chunk admission and fra
 mod wechat_calls::playout | - | Queue and pacing policy without a timer or executor dependency.
 mod wechat_calls::tone | - | Synthetic pulsed PCM for an operator-approved audio check.
 mod wechat_calls::track_queue | - | Independent audio budgets with ordered, non-droppable track controls. The host supplies synchronization and wakeups; this queue opens no runtime.
+mod wechat_calls::video_codec | #[cfg(all(feature = \"native-runtime\", not(target_arch = \"wasm32\")))] | FFmpeg-backed video codec probing and low-latency transcoding bridge. Low-latency FFmpeg video codec probing and transcoding bridge for call media.
 struct wechat_calls::audio::AudioFormat | struct { private fields } | Interleaved signed 16-bit PCM, grouped into fixed-duration frames.
 struct wechat_calls::audio::AudioFrame | struct { public fields } | An owned frame. Generation fences queued output after interruption; timestamp is the stream's sample-frame position per channel, not wall-clock time.
+struct wechat_calls::conference_media::ConferenceConsumeOutput | struct { public fields } | Outcome of consuming one conference relay datagram, including audio, video and RTCP signals.
 struct wechat_calls::conference_media::ConferenceReceiver | struct { private fields } | MISSING DOC
 struct wechat_calls::conference_media::DecodedAudio | struct { public fields } | MISSING DOC
 struct wechat_calls::conference_media::StreamReport | struct { public fields } | MISSING DOC
@@ -208,6 +277,10 @@ struct wechat_calls::playout::FramePacer | struct { private fields } | One frame
 struct wechat_calls::playout::QueueMetrics | struct { public fields } | MISSING DOC
 struct wechat_calls::tone::PulseTone | struct { private fields } | MISSING DOC
 struct wechat_calls::track_queue::TrackQueue | struct<A, E> { private fields } | Controls are drained before audio. Audio pressure drops only that source's oldest waiting frame; it cannot consume another source's budget or a control.
+struct wechat_calls::video_codec::EncodedVideoFrame | struct { public fields } | One complete encoded frame produced by a [`VideoTranscoder`].
+struct wechat_calls::video_codec::TranscodeConfig | struct { public fields } | Configuration for a streaming [`VideoTranscoder`] worker.
+struct wechat_calls::video_codec::VideoCodecCapabilities | struct { public fields } | Probed local FFmpeg video codec availability.
+struct wechat_calls::video_codec::VideoTranscoder | struct { private fields } | Streaming low-latency FFmpeg subprocess transcoder.
 trait wechat_calls::audio::AudioDecoder | trait | Decode only packets admitted by the authenticated transport. Empty packets are rejected; concealment is a separate deliberate operation by the host.
 trait wechat_calls::audio::AudioEncoder | trait | Encode exactly one configured PCM frame to one raw codec packet. This method is called by a worker, never the audio device callback.
 variant wechat_calls::audio::MediaError::Capacity | - | MISSING DOC
@@ -226,3 +299,6 @@ variant wechat_calls::playout::OverflowPolicy::DropOldest | - | MISSING DOC
 variant wechat_calls::playout::OverflowPolicy::RejectNewest | - | MISSING DOC
 variant wechat_calls::track_queue::Delivery::Audio | (A) | MISSING DOC
 variant wechat_calls::track_queue::Delivery::Control | (E) | MISSING DOC
+variant wechat_calls::video_codec::VideoCodec::H264 | - | Standard Annex-B H.264 / AVC.
+variant wechat_calls::video_codec::VideoCodec::H265 | - | Standard Annex-B H.265 / HEVC.
+variant wechat_calls::video_codec::VideoCodec::Jpeg | - | Standalone JPEG still frames.

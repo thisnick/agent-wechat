@@ -137,6 +137,7 @@ impl PlaybackHandle {
         feature = "native-audio",
         any(target_os = "linux", target_os = "windows")
     ))]
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     pub(crate) fn drain(&self, output: &mut [f32]) -> Result<u64, AudioError> {
         let mut state = self.0.lock().map_err(|_| AudioError::Closed)?;
         for sample in output {
@@ -147,6 +148,20 @@ impl PlaybackHandle {
             };
         }
         Ok(state.generation)
+    }
+    /// Pop up to `output.len()` currently queued samples without padding missing
+    /// tail slots with synthetic silence.
+    #[cfg(any(all(feature = "native-audio", target_os = "linux"), test))]
+    pub(crate) fn drain_available(&self, output: &mut [f32]) -> Result<(usize, u64), AudioError> {
+        let mut state = self.0.lock().map_err(|_| AudioError::Closed)?;
+        if state.closed {
+            return Ok((0, state.generation));
+        }
+        let count = output.len().min(state.samples.len());
+        for sample in &mut output[..count] {
+            *sample = state.samples.pop_front().expect("bounded by queue length");
+        }
+        Ok((count, state.generation))
     }
     #[cfg(all(
         feature = "native-audio",
@@ -202,5 +217,20 @@ mod tests {
         let state = queue.0.lock().unwrap();
         assert!(state.samples.is_empty());
         assert!(state.resampler.is_none());
+    }
+    #[test]
+    fn drain_available_returns_only_queued_samples_without_zero_padding() {
+        let queue = PlaybackHandle::new(48_000, 100).unwrap();
+        let token = queue.token().unwrap();
+        queue.enqueue(token, &[0.25; 120], 48_000).unwrap();
+        let mut out = [-1.0f32; 480];
+        let (count, generation) = queue.drain_available(&mut out).unwrap();
+        assert_eq!(count, 120);
+        assert_eq!(generation, 0);
+        assert!(out[..120].iter().all(|s| *s == 0.25));
+        assert!(out[120..].iter().all(|s| *s == -1.0));
+        // Second call with empty queue returns 0 instead of synthesizing silence.
+        let (count2, _) = queue.drain_available(&mut out).unwrap();
+        assert_eq!(count2, 0);
     }
 }

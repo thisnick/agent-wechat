@@ -37,8 +37,8 @@ function configuration() {
 class Media implements CallMediaPort {
   input = new Queue<NativeCallMediaFrame>(); sent: Array<{ generation: number; samples: Int16Array }> = []; generation = 1; closed = false; stopped = false;
   observePcm?: NativeCallPcmObserver;
-  receiveTracks: CallAudioTrack[] = [{ id: 2, generation: 1, direction: "receive", format }];
-  tracks() { return { sendTrack: { id: 1, generation: this.generation, direction: "send" as const, format }, receiveTracks: structuredClone(this.receiveTracks) }; }
+  receiveTracks: CallAudioTrack[] = [{ media: "audio", id: 2, generation: 1, direction: "receive", format }];
+  tracks() { return { sendTrack: { media: "audio" as const, id: 1, generation: this.generation, direction: "send" as const, format }, receiveTracks: structuredClone(this.receiveTracks) }; }
   frames() { return this.input; }
   sendPcm(samples: Int16Array, generation: number) { if (this.closed || this.stopped) throw Error("Closed"); this.sent.push({ generation, samples: samples.slice() }); }
   stopAudio() { this.stopped = true; this.input.values = []; }
@@ -50,7 +50,7 @@ class Control implements CallControlPort {
   conferenceCapabilities = false;
   scopes: Array<CallReadyScope | undefined> = [];
   answerHook?: () => Promise<void>; dialHook?: () => Promise<void>; clearHook?: () => Promise<void>; readyHook?: () => Promise<void>;
-  async connect(): Promise<Extract<CallEvent, { type: "hello" }>> { this.connects++; const hello = { type: "hello" as const, conferenceInvitations: [], protocolVersion: 2, clientId: "client", capabilities: { ...(this.directAudio ? capabilities : {}), ...(this.conferenceCapabilities ? { conferenceCreate: true, conferenceJoin: true, conferenceInvite: true, conferenceAudio: true } : {}) }, availability: { busy: false, ownedByThisClient: false }, currentPendingOffer: null, currentOffer: null, currentCall: null, audioFormat: format }; this.eventsQueue.push(hello); return hello; }
+  async connect(): Promise<Extract<CallEvent, { type: "hello" }>> { this.connects++; const hello = { type: "hello" as const, conferenceInvitations: [], protocolVersion: 3, clientId: "client", capabilities: { ...(this.directAudio ? capabilities : {}), ...(this.conferenceCapabilities ? { conferenceCreate: true, conferenceJoin: true, conferenceInvite: true, conferenceAudio: true } : {}) }, availability: { busy: false, ownedByThisClient: false }, currentPendingOffer: null, currentOffer: null, currentCall: null, audioFormat: format }; this.eventsQueue.push(hello); return hello; }
   events() { return this.eventsQueue; }
   async ready(_id: string, _ready: boolean, _format = format, scope?: CallReadyScope) {
     this.readied++; this.scopes.push(scope);
@@ -807,7 +807,7 @@ test('an admitted conference mixes simultaneous tracks once, updates mute and so
   t.mock.method(performance, 'now', () => now);
   const { service, client, voice } = await conferenceFixture(true);
   t.after(() => service.stop());
-  client.media.receiveTracks = [7, 8].map((id, index) => ({ id, generation: 1, direction: 'receive', participantId: index ? 'b' : 'a', format }));
+  client.media.receiveTracks = [7, 8].map((id, index) => ({ media: 'audio' as const, id, generation: 1, direction: 'receive' as const, participantId: index ? 'b' : 'a', format }));
   client.eventsQueue.push({ type: 'conference.invitations', invitations: [conferenceInvitation] }); await until(() => client.attaches === 1);
   const pcm = (value: number) => { const bytes = Buffer.alloc(640); for (let i = 0; i < 320; i++) bytes.writeInt16LE(value, i * 2); return bytes; };
   client.media.input.push({ trackId: 7, generation: 1, sampleOffset: 0, sequence: 0, payload: pcm(1000) });
@@ -1050,4 +1050,39 @@ test("call metadata resolves our own account and exact owner matches without cha
   assert.equal(voice.state.contexts[0].callContext?.remote?.configuredOwner, true);
   assert.equal(voice.state.contexts[0].callContext?.selfContactId, "contact-self");
   assert.equal(voice.state.contexts[0].policyAtAdmission, "none", "relationship metadata does not grant tools");
+});
+
+test("protocol v3 audio-only OpenClaw ignores video offers and stays healthy alongside conference video participants", async t => {
+  let now = 100;
+  t.mock.method(performance, "now", () => now);
+  const { service, client, voice } = await conferenceFixture(true);
+  t.after(() => service.stop());
+
+  // Incoming pending and offered direct video calls are ignored cleanly without opening voice or advertising readiness.
+  client.eventsQueue.push({ type: "call.pending", offer: { ...offer, callId: "video-pending", callType: "video", phase: "waiting_for_ready" } });
+  client.eventsQueue.push({ type: "call.offered", offer: { ...offer, callId: "video-offer", callType: "video" } });
+  await delay(15);
+  assert.equal(client.readied, 0);
+  assert.equal(client.answers, 0);
+  assert.equal(voice.state.opens, 0);
+  assert.equal(service.status().state, "available");
+
+  // Joining a conference whose participants have cameras enabled still routes audio cleanly on v3.
+  client.media.receiveTracks = [
+    { media: "audio" as const, id: 7, generation: 1, direction: "receive" as const, participantId: "a", format },
+  ];
+  client.eventsQueue.push({ type: "conference.invitations", invitations: [conferenceInvitation] });
+  await until(() => client.attaches === 1);
+  client.eventsQueue.push({
+    type: "participant.updated",
+    callId: "conference",
+    revision: 3,
+    participant: { participantId: "a", contactId: "contact-a", membership: "joined", microphoneEnabled: true, cameraEnabled: true },
+  });
+  const pcm = Buffer.alloc(640);
+  for (let i = 0; i < 320; i++) pcm.writeInt16LE(1400, i * 2);
+  client.media.input.push({ trackId: 7, generation: 1, sampleOffset: 0, sequence: 0, payload: pcm });
+  await delay(0); now += 40;
+  await until(() => voice.state.incoming.some(bytes => bytes.readInt16LE(0) === 1400));
+  assert.equal(service.status().participants?.find(member => member.participantId === "a")?.cameraEnabled, true);
 });

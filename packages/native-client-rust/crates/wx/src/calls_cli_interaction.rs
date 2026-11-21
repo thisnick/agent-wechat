@@ -295,6 +295,7 @@ mod tests {
                 membership: wechat_core::call_types::CallMembership::Joined,
                 status: None,
                 microphone_enabled: Some(true),
+                camera_enabled: None,
             }],
         };
         let remote = super::super::tests::remote(address);

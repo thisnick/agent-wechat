@@ -43,6 +43,11 @@ fn participant(member: wechat_calls::session::ConferenceMember) -> CallParticipa
         } else {
             member.microphone_enabled
         },
+        camera_enabled: if membership == CallMembership::Left {
+            None
+        } else {
+            member.camera_enabled
+        },
     }
 }
 
@@ -264,17 +269,22 @@ pub(super) struct Command {
 
 pub(super) enum CommandAction {
     Invite(Vec<String>),
-    Mute(bool),
+    Mute,
+    Camera,
 }
 pub(super) enum CommandResult {
     Invitations(Vec<CallInvitationResult>),
     Muted,
+    Camera,
 }
 
 pub(super) struct RunInput {
     pub(super) admitted: oneshot::Sender<std::result::Result<BackendOutcome, CallServiceError>>,
     pub(super) probe: ProbeMode,
+    pub(super) prefer_live98: bool,
     pub(super) audio: Receiver<QueuedAudio>,
+    pub(super) video: Receiver<QueuedVideo>,
+    pub(super) keyframe_rx: Receiver<u32>,
     pub(super) request_id: String,
 }
 
@@ -320,7 +330,10 @@ pub(super) fn run(
     let RunInput {
         admitted,
         probe,
+        prefer_live98,
         audio,
+        video,
+        keyframe_rx,
         request_id,
     } = input;
     let core = transport.core.upgrade().context("Conference core closed")?;
@@ -382,8 +395,9 @@ pub(super) fn run(
         &format!("call-conference-phase:{call_id}"),
         b"join",
     )?;
+    let camera_enabled = worker.camera_enabled.load(Ordering::Acquire);
     let joined = if let Some(pending) = pending {
-        session.join(
+        session.join_with_mode(
             transport,
             &mut state,
             authority,
@@ -392,10 +406,11 @@ pub(super) fn run(
                 cloud_group_id: &pending.context.context_id,
                 join_id: unix_ms()?,
             },
+            camera_enabled,
             tasks.next()?,
         )
     } else {
-        session.create(
+        session.create_with_mode(
             transport,
             &mut state,
             authority,
@@ -407,6 +422,7 @@ pub(super) fn run(
                     .context("Conference invitees missing")?,
                 invite_id: unix_ms()?,
             },
+            camera_enabled,
             tasks.next()?,
         )
     };
@@ -491,7 +507,10 @@ pub(super) fn run(
             &mut session,
             &mut tasks,
             probe,
+            prefer_live98,
             audio,
+            video,
+            keyframe_rx,
         );
         if let Err(error) = &observation {
             record_failure(&core, worker, error);
@@ -753,6 +772,7 @@ mod tests {
                     request_id: "ready".into(),
                     ready: true,
                     format: CallAudioFormat::default(),
+                    video: None,
                     scope: Some(CallReadyScope::Outgoing),
                 },
             )
@@ -772,6 +792,8 @@ mod tests {
                     request_id: "join".into(),
                     invitation_id: invitation.invitation_id,
                     invitation_revision: invitation.revision,
+                    camera_enabled: None,
+                    muted: None,
                 },
             )
             .await

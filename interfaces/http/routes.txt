@@ -10,6 +10,9 @@ request AddCustomStickerRequest.source.assetId | string, required, when kind mes
 request AddCustomStickerRequest.source.kind | string, required, values prepared|message | prepared: Validated temporary output created by sticker preparation; message: A verified original attachment belonging to a received sticker message
 request AddCustomStickerRequest.source.messageId | string, required, when kind message | Existing message identity in this account.
 request AddCustomStickerRequest.source.preparationId | string, required, when kind prepared | ID of a completed, unexpired preparation.
+request CallTicketRequest | object, rejects unknown fields | Request body for issuing a short-lived single-use browser WebSocket ticket.
+request CallTicketRequest.callId | string, nullable | Required when `socket` is `media`; omitted when `socket` is `control`.
+request CallTicketRequest.socket | string, required, values control|media | Which calls WebSocket this ticket authorizes.
 request ContactLookupRequest | object, rejects unknown fields | Request to look up one or two contacts live on WeChat.
 request ContactLookupRequest.ids | array of string, required | One or two distinct contact IDs to look up.
 request ContactMutationKeyQuery | object, rejects unknown fields | Original key for inspecting a contact mutation.
@@ -201,9 +204,9 @@ response CallSnapshot.capabilities.conferenceAudio | boolean | Audio in conferen
 response CallSnapshot.capabilities.conferenceCreate | boolean | Starting a conference call in a group is available.
 response CallSnapshot.capabilities.conferenceInvite | boolean | Inviting more contacts into a connected conference call is available.
 response CallSnapshot.capabilities.conferenceJoin | boolean | Joining a conference call from an invitation is available.
-response CallSnapshot.capabilities.conferenceVideo | boolean | Video in conference calls is available. This version never sets it.
+response CallSnapshot.capabilities.conferenceVideo | boolean | Video in conference calls is available.
 response CallSnapshot.capabilities.directAudio | boolean | Direct voice calls with one contact are available.
-response CallSnapshot.capabilities.directVideo | boolean | Direct video calls are available. This version never sets it.
+response CallSnapshot.capabilities.directVideo | boolean | Direct video calls are available.
 response CallSnapshot.conferenceInvitations | array of object, required | Conference calls this account can join.
 response CallSnapshot.conferenceInvitations[] | object | A conference call this account can join. It carries no room credentials.
 response CallSnapshot.conferenceInvitations[].callerId | string, required | Contact ID of the caller.
@@ -216,8 +219,9 @@ response CallSnapshot.currentCall.callType | string, required, values voice|vide
 response CallSnapshot.currentCall.controls | array of object | The latest controls reported by the other party of a direct call, also given to a newly connected observer. Omitted until one is reported.
 response CallSnapshot.currentCall.controls[] | object | A control reported by one participant.
 response CallSnapshot.currentCall.controls[].control | object, required | The control and its value.
-response CallSnapshot.currentCall.controls[].control.kind | string, required, values microphone | microphone: The participant's microphone
-response CallSnapshot.currentCall.controls[].control.muted | boolean, required | True when the microphone is muted.
+response CallSnapshot.currentCall.controls[].control.enabled | boolean, required, when kind camera | True when the camera is sending video.
+response CallSnapshot.currentCall.controls[].control.kind | string, required, values microphone|camera | microphone: The participant's microphone; camera: The participant's camera
+response CallSnapshot.currentCall.controls[].control.muted | boolean, required, when kind microphone | True when the microphone is muted.
 response CallSnapshot.currentCall.controls[].participantId | string, required | The participant the control belongs to. In a direct call this is the contact ID.
 response CallSnapshot.currentCall.direction | string, required, values incoming|outgoing | Whether this account placed the call or received it.
 response CallSnapshot.currentCall.groupId | string, nullable | The group of a conference call. Omitted for a direct call.
@@ -225,6 +229,7 @@ response CallSnapshot.currentCall.kind | string, required, values direct|confere
 response CallSnapshot.currentCall.ownedByThisClient | boolean, required | True when this connection owns the call. Always false in HTTP snapshots.
 response CallSnapshot.currentCall.participants | array of object | The latest conference roster. Omitted for a direct call.
 response CallSnapshot.currentCall.participants[] | object | One participant in a conference call.
+response CallSnapshot.currentCall.participants[].cameraEnabled | boolean, nullable | Whether the participant's camera is on. Omitted until the server reports it; an omitted value is unknown, not false.
 response CallSnapshot.currentCall.participants[].contactId | string, required | Contact ID of the participant.
 response CallSnapshot.currentCall.participants[].membership | string, required, values joined|invited|left|unknown | Whether the participant is in the room.
 response CallSnapshot.currentCall.participants[].microphoneEnabled | boolean, nullable | Whether the participant's microphone is on. Omitted until the server reports it; an omitted value is unknown, not false.
@@ -247,6 +252,20 @@ response CallSnapshot.currentPendingOffer.callerId | string, required | Contact 
 response CallSnapshot.currentPendingOffer.kind | string, required, values direct|conference | Whether the call is direct or a conference.
 response CallSnapshot.currentPendingOffer.phase | string, required, values waiting_for_ready|preparing | What the call is waiting for.
 response CallSnapshot.currentPendingOffer.revision | integer, required, min 0, format uint32 | Increases when the offer changes.
+response CallSnapshot.videoCapabilities | object, nullable | Video codecs and bounds this daemon can exchange. Omitted when video is unavailable.
+response CallSnapshot.videoCapabilities.maxFps | integer, nullable, min 0, max 255, format uint8 | Maximum frame rate in frames per second. Omitted when no cap is specified.
+response CallSnapshot.videoCapabilities.maxHeight | integer, nullable, min 0, max 65535, format uint16 | Maximum frame height in pixels. Omitted when no cap is specified.
+response CallSnapshot.videoCapabilities.maxWidth | integer, nullable, min 0, max 65535, format uint16 | Maximum frame width in pixels. Omitted when no cap is specified.
+response CallSnapshot.videoCapabilities.receiveCodecs | array of string, required | Video codecs deliverable to a receiving client, in preference order.
+response CallSnapshot.videoCapabilities.receiveCodecs[] | string, values h265|h264|jpeg | Video codec exchanged on a call media track.
+response CallSnapshot.videoCapabilities.sendCodecs | array of string, required | Video codecs accepted from a sending client, in preference order.
+response CallSnapshot.videoCapabilities.sendCodecs[] | string, values h265|h264|jpeg | Video codec exchanged on a call media track.
+response CallTicketResponse | object | Response returned when issuing a single-use browser WebSocket ticket.
+response CallTicketResponse.callId | string, nullable | Bound call ID when `socket` is `media`. Omitted for `control`.
+response CallTicketResponse.expiresAt | integer, required, format int64 | Unix timestamp in seconds when the ticket expires.
+response CallTicketResponse.expiresInSeconds | integer, required, min 0, format uint32 | Ticket lifetime in seconds from issuance.
+response CallTicketResponse.socket | string, required, values control|media | Which calls WebSocket this ticket authorizes.
+response CallTicketResponse.ticket | string, required | Opaque single-use ticket to pass as `?ticket=` on the matching WebSocket URL. Do not log it.
 response CustomSticker | object | One saved custom sticker read from the official profile.
 response CustomSticker.caption | string, required, nullable | Optional official caption, not an editable local label.
 response CustomSticker.id | string, required | Official content identity.
@@ -1233,7 +1252,7 @@ route GET /v1/accounts/{a} | scope read, response untyped | Show one account and
 route GET /v1/accounts/{a}/avatars/{id} | scope media, response image/* | Get the cached avatar picture of a contact or group. It does not download a new one.
 route GET /v1/accounts/{a}/calls/current | scope calls, response CallSnapshot, sdk response CallSnapshot | Show whether the account is in a call, the incoming offer and the available call features.
 route GET /v1/accounts/{a}/calls/socket | scope calls, upgrade websocket, socket control | Open the call control WebSocket for commands and events. See calls-websocket.txt.
-route GET /v1/accounts/{a}/calls/{call}/media | scope calls, upgrade websocket, socket media | Open the call media WebSocket that carries audio for a call you own. See calls-websocket.txt.
+route GET /v1/accounts/{a}/calls/{call}/media | scope calls, upgrade websocket, socket media | Open the call media WebSocket that carries binary audio and video for a call you own. See calls-websocket.txt.
 route GET /v1/accounts/{a}/capabilities | scope read, response untyped | List what this daemon can do for the account, such as media limits and group changes.
 route GET /v1/accounts/{a}/contact-mutations/by-idempotency-key | scope admin, query ContactMutationKeyQuery, response NativeOperation, sdk response NativeOperation | Inspect a contact operation using its original idempotency key.
 route GET /v1/accounts/{a}/contact-requests | scope read, query NativeContactRequestQuery, response NativeContactRequestPage, sdk response NativeContactRequestPage | List saved incoming and outgoing request conversations.
@@ -1288,6 +1307,7 @@ route POST /v1/accounts/{a}/auth/disconnect | scope login, response untyped | Cl
 route POST /v1/accounts/{a}/auth/login | scope login, idempotency key optional, request LoginRequest, response NativeOperation, status 202, sdk request LoginRequest, sdk response NativeOperation | Start signing the account in with a saved device or a QR code. Poll the returned operation.
 route POST /v1/accounts/{a}/auth/logout-local | scope login, response untyped | Sign the account out on this daemon only, without asking WeChat to revoke the login.
 route POST /v1/accounts/{a}/avatars/{id}/refresh | scope media and read, request RefreshAvatarRequest (optional), response untyped, status 202, sdk response NativeOperation | Ask WeChat for the latest avatar of one contact, with optional group context for an OpenIM member. Poll the returned operation.
+route POST /v1/accounts/{a}/calls/tickets | scope calls, request CallTicketRequest, response CallTicketResponse, sdk request CallTicketRequest, sdk response CallTicketResponse | Issue a short-lived single-use ticket for opening a call WebSocket from a browser.
 route POST /v1/accounts/{a}/connect | scope login, response untyped, status 202, sdk response NativeOperation | Connect the signed-in account to WeChat. Poll the returned operation.
 route POST /v1/accounts/{a}/consumers/{consumer}/ack | scope read, request EventAckRequest, response untyped | Record how far a named consumer has read the event stream. It never marks messages read.
 route POST /v1/accounts/{a}/contact-requests | scope admin, idempotency key required, request NativeContactRequestSend, response NativeOperation, status 202, sdk response NativeOperation | Send one friend request with an account-bound discovery reference.
