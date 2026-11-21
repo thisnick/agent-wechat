@@ -648,6 +648,10 @@ impl ReceiveAudio {
     pub fn track_count(&self) -> usize {
         self.tracks.len()
     }
+
+    pub fn tracks(&self) -> impl Iterator<Item = &CallTrack> {
+        self.tracks.values()
+    }
 }
 
 #[cfg(test)]

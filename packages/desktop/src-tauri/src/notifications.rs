@@ -21,6 +21,8 @@ pub struct Notifications {
     pub cancel: CancellationToken,
     focus: Mutex<Option<Focus>>,
     pending: Mutex<Option<Target>>,
+    pending_call: Mutex<Option<CallActionTarget>>,
+    active_call_alerts: Mutex<HashMap<String, crate::notification_sound::ActiveCallAlert>>,
     status: Mutex<String>,
     last_sound: Mutex<Option<Instant>>,
 }
@@ -30,6 +32,18 @@ pub struct Focus {
     connection_id: String,
     account_id: Option<String>,
     thread_id: Option<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CallActionTarget {
+    pub connection_id: String,
+    pub server_id: String,
+    pub account_id: String,
+    pub peer_id: String,
+    pub call_id: String,
+    pub revision: u32,
+    pub call_type: String,
+    pub action: String,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -62,7 +76,7 @@ impl Target {
 fn thread_key(connection: &str, account: &str, thread: &str) -> String {
     format!("{connection}|{account}|{thread}")
 }
-/// What a macOS alert carries, so a click or reply still works after the app restarts.
+/// What a macOS message alert carries, so a click or reply still works after the app restarts.
 #[cfg(target_os = "macos")]
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -71,6 +85,15 @@ pub(crate) struct Payload {
     /// WeChat's ID of the message, needed to quote it. Reply is offered only with it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) server_id: Option<String>,
+}
+/// Union of macOS alert payloads; message payloads stay untagged for compatibility
+/// with delivered alerts persisted across app restarts.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum MacPayload {
+    Call(CallActionTarget),
+    Message(Payload),
 }
 #[derive(Default, Serialize, Deserialize)]
 struct Ledger {
@@ -326,9 +349,20 @@ pub fn start(app: tauri::AppHandle) -> Result<()> {
         if action.action_id() != "tap" {
             return;
         }
-        let Some(target) = action
-            .notification()
-            .and_then(|notification| notification.extra().get("target"))
+        let Some(notification) = action.notification() else {
+            return;
+        };
+        if let Some(call_target) = notification
+            .extra()
+            .get("callTarget")
+            .and_then(|value| serde_json::from_value::<CallActionTarget>(value.clone()).ok())
+        {
+            open_call_action(clicked.clone(), call_target);
+            return;
+        }
+        let Some(target) = notification
+            .extra()
+            .get("target")
             .and_then(|target| serde_json::from_value::<Target>(target.clone()).ok())
         else {
             return;
@@ -337,6 +371,384 @@ pub fn start(app: tauri::AppHandle) -> Result<()> {
     })?;
     tauri::async_runtime::spawn(coordinate(app));
     Ok(())
+}
+pub(crate) fn open_call_action(app: tauri::AppHandle, target: CallActionTarget) {
+    tauri::async_runtime::spawn(async move {
+        let desktop = app.state::<Desktop>();
+        let active = desktop.inner.lock().await.active.clone();
+        if active.is_some_and(|active| {
+            active.connection.id != target.connection_id
+                || active.connection.server_id.as_deref() != Some(target.server_id.as_str())
+        }) {
+            return;
+        }
+        clear_call_alert(&desktop, &target.account_id).await;
+        *desktop.notifications.pending_call.lock().await = Some(target.clone());
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+        let _ = app.emit("desktop-call-action", target);
+    });
+}
+async fn clear_call_alert(desktop: &Desktop, account_id: &str) {
+    if let Some(alert) = desktop
+        .notifications
+        .active_call_alerts
+        .lock()
+        .await
+        .remove(account_id)
+    {
+        alert.clear();
+    }
+}
+async fn clear_all_call_alerts(desktop: &Desktop) {
+    let alerts: Vec<_> = desktop
+        .notifications
+        .active_call_alerts
+        .lock()
+        .await
+        .drain()
+        .map(|(_, alert)| alert)
+        .collect();
+    for alert in alerts {
+        alert.clear();
+    }
+}
+fn is_window_focused(app: &tauri::AppHandle) -> bool {
+    app.get_webview_window("main").is_some_and(|window| {
+        window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false)
+    })
+}
+fn should_post_call_alert(account_enabled: bool, window_focused: bool) -> bool {
+    account_enabled && !window_focused
+}
+#[derive(Default)]
+struct ConferenceTracker {
+    seen: VecDeque<String>,
+}
+impl ConferenceTracker {
+    fn seed(
+        &mut self,
+        invitations: &[wechat_call_contracts::call_types::CallConferenceInvitation],
+    ) {
+        for inv in invitations {
+            let key = format!("{}:{}", inv.invitation_id, inv.revision);
+            if !self.seen.iter().any(|item| item == &key) {
+                self.seen.push_back(key);
+                if self.seen.len() > 128 {
+                    self.seen.pop_front();
+                }
+            }
+        }
+    }
+    fn take_fresh<'a>(
+        &mut self,
+        invitations: &'a [wechat_call_contracts::call_types::CallConferenceInvitation],
+    ) -> Vec<&'a wechat_call_contracts::call_types::CallConferenceInvitation> {
+        let mut fresh = Vec::new();
+        for inv in invitations {
+            let key = format!("{}:{}", inv.invitation_id, inv.revision);
+            if !self.seen.iter().any(|item| item == &key) {
+                self.seen.push_back(key);
+                if self.seen.len() > 128 {
+                    self.seen.pop_front();
+                }
+                fresh.push(inv);
+            }
+        }
+        fresh
+    }
+}
+async fn cached_thread_name(active: &Active, account: &str, thread_id: &str) -> Option<String> {
+    let url = api(active, &["v1", "accounts", account, "threads", thread_id]).ok()?;
+    let thread = tokio::time::timeout(Duration::from_secs(1), get(active, url))
+        .await
+        .ok()?
+        .ok()?;
+    thread["displayName"]
+        .as_str()
+        .map(|name| {
+            name.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(100)
+                .collect::<String>()
+        })
+        .filter(|name| !name.is_empty())
+}
+fn has_any_call_capability(caps: &wechat_call_contracts::call_types::CallCapabilities) -> bool {
+    caps.direct_audio
+        || caps.direct_video
+        || caps.conference_create
+        || caps.conference_join
+        || caps.conference_invite
+        || caps.conference_video
+}
+/// Passive per-account `/calls/socket` observer for OS incoming-call and group-call
+/// notifications. Strictly passive: NEVER sends `call.ready`.
+async fn listen_calls(app: tauri::AppHandle, active: Arc<Active>, account: String) {
+    use wechat_call_client::transport::{CallClientError, CallEndpoint, ControlClient};
+    use wechat_call_contracts::call_types::{CallEvent, CallOffer, CallType};
+
+    let Ok(base) = crate::config::endpoint(&active.connection.endpoint) else {
+        return;
+    };
+    let Some(server_id) = active.connection.server_id.clone() else {
+        return;
+    };
+    let endpoint = CallEndpoint {
+        http: active.http.clone(),
+        base,
+        token: active.key.as_str().to_owned(),
+        account: account.clone(),
+    };
+
+    let mut conferences = ConferenceTracker::default();
+    let mut posted_offer_key: Option<String> = None;
+
+    loop {
+        let connect_result = ControlClient::connect(&endpoint).await;
+        let (mut control, hello) = match connect_result {
+            Ok(pair) => pair,
+            Err(error) => {
+                if let Some(CallClientError::SocketRejected { status }) =
+                    error.downcast_ref::<CallClientError>()
+                {
+                    if matches!(*status, 401 | 403 | 404 | 501) {
+                        return;
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+        };
+
+        if !has_any_call_capability(&control.capabilities) {
+            control.close().await;
+            return;
+        }
+        // Seed existing conference invitations on connect so reconnects do not re-alert.
+        conferences.seed(&control.conference_invitations);
+
+        let handle_offer = |offer: &CallOffer,
+                            posted: &mut Option<String>,
+                            app: &tauri::AppHandle,
+                            active: &Arc<Active>,
+                            account: &str,
+                            server_id: &str| {
+            let key = format!("{}:{}", offer.call_id, offer.revision);
+            let should_send = posted.as_deref() != Some(key.as_str());
+            let app = app.clone();
+            let active = active.clone();
+            let account = account.to_owned();
+            let server_id = server_id.to_owned();
+            let offer = offer.clone();
+            async move {
+                if !should_send {
+                    return true;
+                }
+                let desktop = app.state::<Desktop>();
+                let (enabled, sound_enabled) = {
+                    let inner = desktop.inner.lock().await;
+                    let same_active = inner
+                        .active
+                        .as_ref()
+                        .is_some_and(|current| Arc::ptr_eq(&active, current));
+                    (
+                        same_active && inner.config.notifications_for(&server_id, &account),
+                        inner.config.notification_sound_enabled,
+                    )
+                };
+                if !should_post_call_alert(enabled, is_window_focused(&app)) {
+                    return false;
+                }
+                let caller = cached_thread_name(&active, &account, &offer.caller_id)
+                    .await
+                    .unwrap_or_else(|| {
+                        if offer.caller_id.is_empty() {
+                            crate::i18n::text("callCallerFallback")
+                        } else {
+                            offer.caller_id.clone()
+                        }
+                    });
+                let body = match offer.call_type {
+                    CallType::Video => crate::i18n::text("callIncomingVideo"),
+                    CallType::Voice => crate::i18n::text("callIncomingVoice"),
+                };
+                let request_id = format!(
+                    "call|{}|{}|{}|{}",
+                    active.connection.id, account, offer.call_id, offer.revision
+                );
+                let target = CallActionTarget {
+                    connection_id: active.connection.id.clone(),
+                    server_id,
+                    account_id: account.clone(),
+                    peer_id: offer.caller_id.clone(),
+                    call_id: offer.call_id.clone(),
+                    revision: offer.revision,
+                    call_type: match offer.call_type {
+                        CallType::Video => "video".into(),
+                        CallType::Voice => "voice".into(),
+                    },
+                    action: "open".into(),
+                };
+                clear_call_alert(&desktop, &account).await;
+                if let Ok(alert) = crate::notification_sound::show_call(
+                    &app,
+                    &request_id,
+                    &caller,
+                    &body,
+                    target,
+                    sound_enabled,
+                )
+                .await
+                {
+                    desktop
+                        .notifications
+                        .active_call_alerts
+                        .lock()
+                        .await
+                        .insert(account, alert);
+                    return true;
+                }
+                false
+            }
+        };
+
+        if let CallEvent::Hello {
+            current_offer: Some(offer),
+            ..
+        } = &hello
+        {
+            if handle_offer(
+                offer,
+                &mut posted_offer_key,
+                &app,
+                &active,
+                &account,
+                &server_id,
+            )
+            .await
+            {
+                posted_offer_key = Some(format!("{}:{}", offer.call_id, offer.revision));
+            }
+        }
+
+        loop {
+            match control.next_event().await {
+                Ok(event) => {
+                    control.update(&event);
+                    match &event {
+                        CallEvent::Offered { offer } => {
+                            if handle_offer(
+                                offer,
+                                &mut posted_offer_key,
+                                &app,
+                                &active,
+                                &account,
+                                &server_id,
+                            )
+                            .await
+                            {
+                                posted_offer_key =
+                                    Some(format!("{}:{}", offer.call_id, offer.revision));
+                            }
+                        }
+                        CallEvent::Availability { availability } => {
+                            if !availability.busy && posted_offer_key.take().is_some() {
+                                clear_call_alert(&app.state::<Desktop>(), &account).await;
+                            }
+                        }
+                        CallEvent::State { call } => {
+                            if posted_offer_key
+                                .as_deref()
+                                .is_some_and(|key| key.starts_with(&format!("{}:", call.call_id)))
+                            {
+                                posted_offer_key = None;
+                                clear_call_alert(&app.state::<Desktop>(), &account).await;
+                            }
+                        }
+                        CallEvent::ConferenceInvitations { invitations } => {
+                            let fresh = conferences.take_fresh(invitations);
+                            for inv in fresh {
+                                let desktop = app.state::<Desktop>();
+                                let (enabled, sound_enabled) = {
+                                    let inner = desktop.inner.lock().await;
+                                    let same_active = inner
+                                        .active
+                                        .as_ref()
+                                        .is_some_and(|current| Arc::ptr_eq(&active, current));
+                                    (
+                                        same_active
+                                            && inner.config.notifications_for(&server_id, &account),
+                                        inner.config.notification_sound_enabled,
+                                    )
+                                };
+                                if !should_post_call_alert(enabled, is_window_focused(&app)) {
+                                    continue;
+                                }
+                                let group_name =
+                                    cached_thread_name(&active, &account, &inv.group_id)
+                                        .await
+                                        .unwrap_or_else(|| {
+                                            crate::i18n::text("callConferenceActive")
+                                        });
+                                let caller_name =
+                                    cached_thread_name(&active, &account, &inv.caller_id).await;
+                                let body = match caller_name {
+                                    Some(caller) => crate::i18n::text_with(
+                                        "callConferenceBody",
+                                        &[("caller", &caller)],
+                                    ),
+                                    None => crate::i18n::text("callConferenceBodyUnnamed"),
+                                };
+                                let sound = sound_due(
+                                    &mut *desktop.notifications.last_sound.lock().await,
+                                    sound_enabled,
+                                    Instant::now(),
+                                );
+                                #[cfg(target_os = "linux")]
+                                let body = body
+                                    .replace('&', "&amp;")
+                                    .replace('<', "&lt;")
+                                    .replace('>', "&gt;");
+                                let target = Target {
+                                    connection_id: active.connection.id.clone(),
+                                    server_id: server_id.clone(),
+                                    account_id: account.clone(),
+                                    thread_id: inv.group_id.clone(),
+                                    message_id: None,
+                                };
+                                let _ = crate::notification_sound::show(
+                                    &app,
+                                    &group_name,
+                                    None,
+                                    &body,
+                                    Some(target),
+                                    None,
+                                    sound,
+                                )
+                                .await;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Err(_) => {
+                    if posted_offer_key.take().is_some() {
+                        clear_call_alert(&app.state::<Desktop>(), &account).await;
+                    }
+                    break;
+                }
+            }
+        }
+        control.close().await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
 }
 pub(crate) fn open_target(app: tauri::AppHandle, target: Target) {
     tauri::async_runtime::spawn(async move {
@@ -363,6 +775,7 @@ async fn coordinate(app: tauri::AppHandle) {
     let mut current: Option<Arc<Active>> = None;
     let mut cancel = CancellationToken::new();
     let mut tasks: HashMap<String, tauri::async_runtime::JoinHandle<()>> = HashMap::new();
+    let mut call_tasks: HashMap<String, tauri::async_runtime::JoinHandle<()>> = HashMap::new();
     let mut check_at = tokio::time::Instant::now();
     loop {
         let desktop = app.state::<Desktop>();
@@ -384,6 +797,10 @@ async fn coordinate(app: tauri::AppHandle) {
             for (_, task) in tasks.drain() {
                 task.abort();
             }
+            for (_, task) in call_tasks.drain() {
+                task.abort();
+            }
+            clear_all_call_alerts(&desktop).await;
             current = active;
             cancel = CancellationToken::new();
             check_at = tokio::time::Instant::now();
@@ -413,17 +830,40 @@ async fn coordinate(app: tauri::AppHandle) {
                         !task.inner().is_finished()
                     }
                 });
-                for account in accounts {
-                    if tasks.contains_key(&account) {
-                        continue;
+                call_tasks.retain(|id, task| {
+                    if !accounts.contains(id) {
+                        task.abort();
+                        false
+                    } else {
+                        !task.inner().is_finished()
                     }
-                    let active = active.clone();
-                    let app = app.clone();
-                    let child = cancel.child_token();
-                    let id = account.clone();
-                    tasks.insert(id, tauri::async_runtime::spawn(async move {
-                        tokio::select! { _ = child.cancelled() => {}, _ = listen(app, active, account) => {} }
-                    }));
+                });
+                for account in accounts {
+                    if !tasks.contains_key(&account) {
+                        let active = active.clone();
+                        let app = app.clone();
+                        let child = cancel.child_token();
+                        let id = account.clone();
+                        let acct = account.clone();
+                        tasks.insert(
+                            id,
+                            tauri::async_runtime::spawn(async move {
+                                tokio::select! { _ = child.cancelled() => {}, _ = listen(app, active, acct) => {} }
+                            }),
+                        );
+                    }
+                    if !call_tasks.contains_key(&account) {
+                        let active = active.clone();
+                        let app = app.clone();
+                        let child = cancel.child_token();
+                        let id = account.clone();
+                        call_tasks.insert(
+                            id,
+                            tauri::async_runtime::spawn(async move {
+                                tokio::select! { _ = child.cancelled() => {}, _ = listen_calls(app, active, account) => {} }
+                            }),
+                        );
+                    }
                 }
                 *desktop.notifications.status.lock().await = listening_status();
             } else {
@@ -444,6 +884,10 @@ async fn coordinate(app: tauri::AppHandle) {
     for (_, task) in tasks {
         task.abort();
     }
+    for (_, task) in call_tasks {
+        task.abort();
+    }
+    clear_all_call_alerts(&app.state::<Desktop>()).await;
 }
 /// The status shown while listening, which on macOS also reports alerts that cannot
 /// be shown.
@@ -713,8 +1157,34 @@ pub async fn notifications_context(
             crate::macos_notifications::clear_thread(&thread_key(connection_id, account, thread));
         }
     }
-    *state.notifications.focus.lock().await = focus;
+    *state.notifications.focus.lock().await = focus.clone();
+    if let Some(Focus {
+        account_id: Some(account),
+        ..
+    }) = focus
+    {
+        clear_call_alert(&state, &account).await;
+    }
     Ok(())
+}
+#[tauri::command]
+pub async fn notifications_take_call_action(
+    state: State<'_, Desktop>,
+    connection_id: Option<String>,
+) -> Result<Option<CallActionTarget>, String> {
+    let inner = state.inner.lock().await;
+    let mut pending = state.notifications.pending_call.lock().await;
+    if let (Some(expected), Some(target)) = (connection_id.as_deref(), pending.as_ref()) {
+        if target.connection_id != expected {
+            return Ok(None);
+        }
+    }
+    Ok(pending.take().filter(|target| {
+        inner.active.as_ref().is_some_and(|active| {
+            active.connection.id == target.connection_id
+                && active.connection.server_id.as_deref() == Some(target.server_id.as_str())
+        })
+    }))
 }
 #[tauri::command]
 pub async fn notifications_take_target(
@@ -837,14 +1307,40 @@ fn install_macos(app: &tauri::AppHandle) {
               }| {
             let Some(payload) = payload
                 .as_deref()
-                .and_then(|payload| serde_json::from_str::<Payload>(payload).ok())
+                .and_then(|payload| serde_json::from_str::<MacPayload>(payload).ok())
             else {
                 return;
             };
             let app = app.clone();
-            match action {
-                Action::Open => open_target(app, payload.target),
-                Action::Reply(text) => {
+            match (payload, action) {
+                (MacPayload::Call(mut call_target), Action::Open) => {
+                    call_target.action = "open".into();
+                    open_call_action(app, call_target);
+                }
+                (MacPayload::Call(mut call_target), Action::CallAnswer) => {
+                    call_target.action = "answer".into();
+                    open_call_action(app, call_target);
+                }
+                (MacPayload::Call(call_target), Action::CallDecline) => {
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(error) = decline_call(&app, &call_target).await {
+                            let fallback = Payload {
+                                target: Target {
+                                    connection_id: call_target.connection_id,
+                                    server_id: call_target.server_id,
+                                    account_id: call_target.account_id,
+                                    thread_id: call_target.peer_id,
+                                    message_id: None,
+                                },
+                                server_id: None,
+                            };
+                            action_failed(&request_id, &fallback, "callDeclineFailed", &error);
+                        }
+                    });
+                }
+                (MacPayload::Call(_), _) => {}
+                (MacPayload::Message(payload), Action::Open) => open_target(app, payload.target),
+                (MacPayload::Message(payload), Action::Reply(text)) => {
                     tauri::async_runtime::spawn(async move {
                         match send_reply(&app, &request_id, &payload, &text).await {
                             Err(error) => {
@@ -865,17 +1361,50 @@ fn install_macos(app: &tauri::AppHandle) {
                         }
                     });
                 }
-                Action::MarkRead => {
+                (MacPayload::Message(payload), Action::MarkRead) => {
                     tauri::async_runtime::spawn(async move {
                         if let Err(error) = mark_read(&app, &payload).await {
                             action_failed(&request_id, &payload, "notMarkedRead", &error);
                         }
                     });
                 }
-                Action::Other => {}
+                (MacPayload::Message(_), _) => {}
             }
         },
     );
+}
+/// Declines an incoming call in the background from a macOS notification without
+/// bringing the app forward or advertising `call.ready`.
+#[cfg(target_os = "macos")]
+async fn decline_call(app: &tauri::AppHandle, target: &CallActionTarget) -> Result<()> {
+    use wechat_call_client::transport::{CallEndpoint, ControlClient};
+    use wechat_call_contracts::call_types::CallCommand;
+
+    let dummy_target = Target {
+        connection_id: target.connection_id.clone(),
+        server_id: target.server_id.clone(),
+        account_id: target.account_id.clone(),
+        thread_id: target.peer_id.clone(),
+        message_id: None,
+    };
+    let active = connected(app, &dummy_target).await?;
+    let endpoint = CallEndpoint {
+        http: active.http.clone(),
+        base: crate::config::endpoint(&active.connection.endpoint)?,
+        token: active.key.as_str().to_owned(),
+        account: target.account_id.clone(),
+    };
+    let (mut control, _) = ControlClient::connect(&endpoint).await?;
+    let result = control
+        .command(CallCommand::Reject {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            call_id: target.call_id.clone(),
+            expected_revision: target.revision,
+        })
+        .await;
+    control.close().await;
+    clear_call_alert(&app.state::<Desktop>(), &target.account_id).await;
+    result.map(|_| ())
 }
 /// The idempotency key and body of a quoted reply, or `None` when there is nothing to
 /// send or the message cannot be quoted. The key is derived from the alert, so a
@@ -1048,7 +1577,7 @@ fn action_failed(request_id: &str, payload: &Payload, title: &str, error: &anyho
         body: &crate::i18n::text_with("actionFailedBody", &[("error", &error.to_string())]),
         sound: None,
         payload: &json,
-        reply: false,
+        category: crate::macos_notifications::AlertCategory::Message,
     });
 }
 #[cfg(test)]
@@ -1112,6 +1641,42 @@ mod tests {
             &target,
             false
         ));
+    }
+    #[test]
+    fn call_alerts_are_suppressed_when_window_is_focused_or_account_muted() {
+        assert!(!should_post_call_alert(true, true));
+        assert!(!should_post_call_alert(false, false));
+        assert!(!should_post_call_alert(false, true));
+        assert!(should_post_call_alert(true, false));
+    }
+    #[test]
+    fn conference_tracker_seeds_initial_invitations_and_deduplicates_by_revision() {
+        use wechat_call_contracts::call_types::CallConferenceInvitation;
+        let inv1 = CallConferenceInvitation {
+            invitation_id: "inv-1".into(),
+            revision: 1,
+            group_id: "room@chatroom".into(),
+            caller_id: "alice".into(),
+        };
+        let inv2 = CallConferenceInvitation {
+            invitation_id: "inv-2".into(),
+            revision: 1,
+            group_id: "room2@chatroom".into(),
+            caller_id: "bob".into(),
+        };
+        let inv2_rev2 = CallConferenceInvitation {
+            revision: 2,
+            ..inv2.clone()
+        };
+        let mut tracker = ConferenceTracker::default();
+        tracker.seed(std::slice::from_ref(&inv1));
+        // Initial invitation is not alerted again.
+        assert!(tracker.take_fresh(std::slice::from_ref(&inv1)).is_empty());
+        // Fresh invitation alerts once.
+        assert_eq!(tracker.take_fresh(&[inv1.clone(), inv2.clone()]).len(), 1);
+        assert!(tracker.take_fresh(&[inv1.clone(), inv2.clone()]).is_empty());
+        // A bumped revision is treated as fresh.
+        assert_eq!(tracker.take_fresh(&[inv1, inv2_rev2]).len(), 1);
     }
     #[test]
     fn face_aliases_are_displayed_before_notification_truncation() {

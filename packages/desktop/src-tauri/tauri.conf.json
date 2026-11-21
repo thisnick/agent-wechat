@@ -44,7 +44,8 @@
     ],
     "resources": {
       "resources/": "resources/",
-      "sounds/AgentWechatSoftPair.wav": "AgentWechatSoftPair.wav"
+      "sounds/AgentWechatSoftPair.wav": "AgentWechatSoftPair.wav",
+      "sounds/AgentWechatSoftRing.wav": "AgentWechatSoftRing.wav"
     },
     "category": "SocialNetworking",
     "shortDescription": "WeChat desktop client and local agent-wechat hub",

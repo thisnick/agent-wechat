@@ -23,7 +23,7 @@ import type { CallSessionTransport } from "./calls/media-backend.ts";
 
 export type ConnectOptions = {
   webSocketFactory?: NativeCallWebSocketFactory;
-  callTransportFactory?: (account: string) => CallSessionTransport;
+  callTransportFactory?: (account: string, client: NativeWeChatClient) => CallSessionTransport;
   callsDisabled?: boolean;
 };
 
@@ -322,7 +322,7 @@ export async function connect(
         const callTransport = disabled
           ? null
           : options?.callTransportFactory
-            ? options.callTransportFactory(account)
+            ? options.callTransportFactory(account, client)
             : new BrowserCallTransport(client, account, {
                 webSocketFactory: options?.webSocketFactory,
               });

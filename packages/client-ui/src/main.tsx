@@ -8,7 +8,7 @@ import { ThreadNotifications } from "./thread-notifications.tsx";
 import { emojiText } from "./emoji-text.ts";
 import { formatLocale, richText, t, useLanguage } from "./i18n.ts";
 import { DesktopUpdates } from "./desktop-updates.tsx";
-import { desktop, desktopConnect, desktopInvoke, desktopNotifications, installDesktopLinks, type DesktopSession } from "./desktop.ts";
+import { desktop, desktopCallActions, desktopConnect, desktopInvoke, desktopNotifications, installDesktopLinks, type DesktopSession } from "./desktop.ts";
 import { DesktopWelcome, DesktopPreferences } from "./desktop-ui.tsx";
 import { LocalCacheSettings } from "./local-cache-settings.tsx";
 import { GroupSettings } from "./group-settings.tsx";
@@ -427,7 +427,52 @@ function Client({
   }, [own, address]);
   useEffect(() => {
     if (!desktop) return;
-    return desktopNotifications(connection, (route) => router.push(route));
+    const stopMessages = desktopNotifications(connection, (route) => router.push(route));
+    let cancelPendingAnswer: (() => void) | null = null;
+    const stopCalls = desktopCallActions(connection, (action) => {
+      cancelPendingAnswer?.();
+      cancelPendingAnswer = null;
+      router.push({
+        name: "chat",
+        server: connection.serverId,
+        account: action.accountId,
+        thread: action.peerId,
+      });
+      const controller = connection.calls(action.accountId);
+      controller.start();
+      if (action.action === "answer") {
+        const answerOptions = { cameraEnabled: action.callType === "video" };
+        const tryAnswer = (): boolean => {
+          const snap = controller.snapshot();
+          if (snap.currentOffer?.callId === action.callId) {
+            void controller.answerOffer(answerOptions);
+            return true;
+          }
+          return !!snap.currentCall;
+        };
+        if (!tryAnswer()) {
+          const unsub = controller.subscribe(() => {
+            if (tryAnswer()) {
+              cancelPendingAnswer?.();
+              cancelPendingAnswer = null;
+            }
+          });
+          const timer = setTimeout(() => {
+            cancelPendingAnswer?.();
+            cancelPendingAnswer = null;
+          }, 6000);
+          cancelPendingAnswer = () => {
+            clearTimeout(timer);
+            unsub();
+          };
+        }
+      }
+    });
+    return () => {
+      cancelPendingAnswer?.();
+      stopMessages();
+      stopCalls();
+    };
   }, [connection]);
   // The list can be older than the link: check the hub before calling an account unknown.
   const unknownAccount = intent.name !== "accounts" && !account ? intent.account : null;

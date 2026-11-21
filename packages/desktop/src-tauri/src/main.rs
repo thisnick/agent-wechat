@@ -1,4 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod calls;
 mod config;
 mod credentials;
 mod emoji;
@@ -59,6 +60,7 @@ pub struct Desktop {
     /// read without the `inner` lock when the app ends.
     hub_pid: AtomicU32,
     notifications: notifications::Notifications,
+    calls: calls::CallManager,
     updates: updates::Updates,
 }
 /// How long an ending app waits for its hub to stop.
@@ -278,18 +280,26 @@ impl Desktop {
         let mut session = Session::from(&connection);
         session.status = Some(identity);
         let local = connection.local;
+        let switching_hub = inner
+            .active
+            .as_ref()
+            .is_some_and(|prior| prior.connection.id != id);
         inner.config.connections.retain(|value| value.id != id);
         inner.config.connections.push(connection);
         inner.config.active = Some(id.into());
         inner.config.save(&self.config_file)?;
         inner.active = Some(active);
         drop(inner);
+        if switching_hub {
+            self.calls.shutdown_all().await;
+        }
         if !local {
             self.stop_unused_local().await;
         }
         Ok(session)
     }
     async fn stop_hub(&self) -> Result<()> {
+        self.calls.shutdown_all().await;
         for control in self.requests.lock().await.values() {
             control.cancel.cancel();
         }
@@ -297,6 +307,7 @@ impl Desktop {
         self.stop_local(&mut inner).await
     }
     async fn stop(&self) -> Result<()> {
+        self.calls.shutdown_all().await;
         self.stop_hub().await?;
         self.inner.lock().await.active = None;
         self.notifications.cancel.cancel();
@@ -546,14 +557,21 @@ async fn desktop_forget(state: State<'_, Desktop>, id: String) -> Result<(), Str
     }
     credentials::remove(&inner.config.installation_id, &id).map_err(|error| error.to_string())?;
     inner.config.connections.retain(|value| value.id != id);
+    let mut cleared_active = false;
     if inner.config.active.as_ref() == Some(&id) {
         inner.config.active = None;
         inner.active = None;
+        cleared_active = true;
     }
-    inner
+    let saved = inner
         .config
         .save(&state.config_file)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string());
+    drop(inner);
+    if cleared_active {
+        state.calls.shutdown_all().await;
+    }
+    saved
 }
 #[tauri::command]
 fn desktop_install_cli(state: State<'_, Desktop>) -> Result<String, String> {
@@ -784,6 +802,7 @@ fn main() {
                 quit: AtomicU8::new(0),
                 hub_pid: AtomicU32::new(0),
                 notifications: notifications::Notifications::default(),
+                calls: calls::CallManager::default(),
                 updates: updates::Updates::default(),
             });
             notifications::start(app.handle().clone())?;
@@ -856,9 +875,30 @@ fn main() {
             desktop_quit,
             notifications::notifications_context,
             notifications::notifications_take_target,
+            notifications::notifications_take_call_action,
             notifications::notifications_enabled,
             notifications::notifications_account_settings,
             notifications::notifications_sound_enabled,
+            calls::call_connect,
+            calls::call_disconnect,
+            calls::call_devices,
+            calls::call_preview_start,
+            calls::call_preview_stop,
+            calls::call_dial,
+            calls::call_conference_start,
+            calls::call_conference_join,
+            calls::call_answer,
+            calls::call_reject,
+            calls::call_invite,
+            calls::call_set_mute,
+            calls::call_set_camera,
+            calls::call_set_speaker_muted,
+            calls::call_switch_devices,
+            calls::call_end,
+            calls::call_attach_media,
+            calls::call_stop_local_media,
+            calls::call_stop_media,
+            calls::call_set_fullscreen,
             updates::updates_status,
             updates::updates_preferences,
             updates::updates_check,
@@ -909,6 +949,7 @@ mod tests {
             quit: AtomicU8::new(0),
             hub_pid: AtomicU32::new(0),
             notifications: notifications::Notifications::default(),
+            calls: calls::CallManager::default(),
             updates: updates::Updates::default(),
         }
     }
@@ -1017,6 +1058,7 @@ mod tests {
                 quit: AtomicU8::new(quit),
                 hub_pid: AtomicU32::new(0),
                 notifications: notifications::Notifications::default(),
+                calls: calls::CallManager::default(),
                 updates: updates::Updates::default(),
             };
             let mut inner = desktop.inner.lock().await;
@@ -1077,6 +1119,7 @@ mod tests {
             quit: AtomicU8::new(0),
             hub_pid: AtomicU32::new(0),
             notifications: notifications::Notifications::default(),
+            calls: calls::CallManager::default(),
             updates: updates::Updates::default(),
         };
         // Off by default: the local hub runs only while it is selected.
