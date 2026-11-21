@@ -1,0 +1,13 @@
+[package]
+name = "wechat-call-contracts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Shared Calls Protocol v3 JSON contracts and WXCM v3 binary media framing"
+
+[dependencies]
+serde.workspace = true
+schemars.workspace = true
+ts-rs = "10"
+wechat-calls = { path = "../wechat-calls", default-features = false }

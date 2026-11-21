@@ -7,6 +7,7 @@ const selected = files => steps.filter(step => affects(step, files)).map(step =>
 test('only the listings whose sources changed are selected', () => {
   assert.deepEqual(selected(['packages/client-ui/src/main.tsx']), ['ui', 'scenes']);
   assert.deepEqual(selected(['packages/native-client-rust/crates/wechat-api/src/lib.rs']), ['websocket', 'http']);
+  assert.deepEqual(selected(['packages/native-client-rust/crates/wechat-call-contracts/src/call_types.rs']), ['websocket', 'http']);
   assert.deepEqual(selected(['packages/native-client-rust/crates/wx/src/main.rs']), ['cli']);
   assert.deepEqual(selected(['packages/native-client-rust/crates/wechat-calls/src/mixer.rs']), ['crates']);
   assert.deepEqual(selected(['packages/openclaw-extension/src/native-login.ts']), ['openclaw']);

@@ -1,28 +1,22 @@
 //! Interactive local audio and video devices. No device is opened until dial
 //! or an accepted call, and cameras are only captured while enabled in a call.
 use super::*;
-use anyhow::ensure;
-use std::{
-    collections::VecDeque,
-    io::IsTerminal,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    time::Instant,
-};
+use anyhow::{bail, ensure, Context};
+use std::{io::IsTerminal, time::Instant};
 use tokio::{
     io::{AsyncBufReadExt, BufReader, Lines, Stdin},
-    sync::mpsc,
+    time::timeout,
 };
-use wechat_audio::{AudioConfig, AudioError, AudioSession, PlaybackHandle, PlaybackToken};
+use tokio_tungstenite::tungstenite::Message;
+use wechat_audio::AudioError;
+use wechat_call_client::{audio::LocalAudio, media::MediaClient};
 use wechat_calls::audio::AudioFormat;
 use wechat_core::{
     call_types::{
-        CallConferenceInvitation, CallMediaCommand, CallReadyScope, CallState, CallTarget,
-        CallTrack, CallTrackDirection, CallType,
+        CallConferenceInvitation, CallReadyScope, CallState, CallTarget, CallTrack,
+        CallTrackDirection, CallType,
     },
-    calls::pcm_envelope::{MediaHeader, MediaPayloadKind, WireMediaFrame},
+    calls::pcm_envelope::{MediaPayloadKind, WireMediaFrame},
 };
 
 type Input = Lines<BufReader<Stdin>>;
@@ -152,7 +146,7 @@ pub(super) async fn run(remote: &Remote, command: CallsCommand, json: bool) -> R
     if !std::io::stdin().is_terminal() {
         bail!("interactive calls require a terminal; use calls monitor --json to observe without devices");
     }
-    let (cancellation, _signals) = Cancellation::listen();
+    let (cancellation, _signals) = listen_cancellation();
     let (mut control, _) = tokio::select! {
         _=cancellation.wait()=>return Err(failure(130,"client_interrupted","call connection cancelled")),
         result=Control::connect(remote)=>result?,
@@ -367,15 +361,21 @@ fn daemon_video_available(control: &Control) -> bool {
 }
 
 async fn ready(control: &mut Control, enabled: bool) -> Result<()> {
+    let video = if enabled {
+        let daemon_video = daemon_video_available(control);
+        tokio::task::spawn_blocking(move || super::video::client_video_capabilities(daemon_video))
+            .await
+            .context("video capability probe failed")?
+    } else {
+        None
+    };
     control
         .command(CallCommand::Ready {
             request_id: request_id(),
             ready: enabled,
             format: control.format,
             scope: Some(CallReadyScope::All),
-            video: enabled
-                .then(|| super::video::client_video_capabilities(daemon_video_available(control)))
-                .flatten(),
+            video,
         })
         .await?;
     Ok(())
@@ -792,9 +792,10 @@ async fn participate(
 ) -> Result<()> {
     // For late answers the exact ID/revision was captured before device startup.
     // The server revalidates it atomically; failure never targets the next offer.
+    let device_options = AudioDeviceOptions::from(options);
     let mut audio = tokio::select! {
         _=cancellation.wait()=>return Err(failure(130,"client_interrupted","device preparation cancelled; no call was placed or answered")),
-        audio=LocalAudio::open(options)=>audio?,
+        audio=LocalAudio::open(&device_options)=>audio?,
     };
     eprintln!("{}", audio.startup_summary);
     let scope = match &action {
@@ -806,13 +807,18 @@ async fn participate(
             expected_revision: target.revision,
         },
     };
+    let daemon_video = daemon_video_available(control);
+    let video_caps =
+        tokio::task::spawn_blocking(move || super::video::client_video_capabilities(daemon_video))
+            .await
+            .context("video capability probe failed")?;
     control
         .command(CallCommand::Ready {
             request_id: request_id(),
             ready: true,
             format: control.format,
             scope: Some(scope),
-            video: super::video::client_video_capabilities(daemon_video_available(control)),
+            video: video_caps,
         })
         .await?;
     let (command, intent) = match action {
@@ -990,7 +996,7 @@ async fn participate(
 pub(super) struct OwnedCall {
     pub(super) call_id: String,
     pub(super) owner_token: String,
-    pub(super) media: Option<Media>,
+    pub(super) media: Option<MediaClient>,
 }
 impl OwnedCall {
     pub(super) async fn finish(&mut self, control: &mut Control, terminal: bool) -> Result<()> {
@@ -1015,252 +1021,20 @@ impl OwnedCall {
     }
 }
 
-pub(super) struct Media {
-    socket: Socket,
-    send_track: CallTrack,
-    video_send_track: Option<CallTrack>,
-    receive: super::receive_audio::ReceiveAudio,
-    receive_video: super::video::ReceiveVideo,
-    attached: Instant,
-    started_generation: Option<u32>,
-    video_started_generation: Option<u32>,
-    pcm_writes: u64,
-    video_writes: u64,
-}
-impl Media {
-    pub(super) async fn attach(
-        remote: &Remote,
-        control: &Control,
-        call_id: &str,
-        owner_token: &str,
-    ) -> Result<Self> {
-        let suffix = format!("calls/{}/media", super::super::encode(call_id));
-        let mut socket = open_socket_with_limit(remote, &suffix, MEDIA_SOCKET_LIMIT).await?;
-        send_json(
-            &mut socket,
-            &CallMediaCommand::Attach {
-                supported_protocol_versions: vec![wechat_core::call_types::CALL_PROTOCOL_VERSION],
-                client_id: control.client_id.clone(),
-                owner_token: owner_token.into(),
-            },
-        )
-        .await?;
-        let event = timeout(STARTUP_TIMEOUT, receive_event(&mut socket, "media"))
-            .await
-            .context("media attachment timed out")??;
-        if let CallEvent::Error { code } = &event {
-            bail!("media attachment rejected: {}", serde_json::to_value(code)?);
-        }
-        let CallEvent::MediaReady {
-            protocol_version,
-            send_tracks,
-            receive_tracks,
-        } = event
-        else {
-            bail!("media attachment was not accepted");
-        };
-        ensure!(
-            protocol_version == wechat_core::call_types::CALL_PROTOCOL_VERSION,
-            "unsupported call media version"
-        );
-        let send_track = send_tracks
-            .iter()
-            .find(|track| !track.is_video() && track.direction() == CallTrackDirection::Send)
-            .cloned()
-            .context("missing send audio track")?;
-        let video_send_track = send_tracks
-            .into_iter()
-            .find(|track| track.is_video() && track.direction() == CallTrackDirection::Send);
-        ensure!(
-            send_track.audio_format() == Some(control.format)
-                && send_track.direction() == CallTrackDirection::Send
-                && send_track.id() != 0
-                && send_track.generation() != 0,
-            "unsupported send audio track"
-        );
-        ensure!(
-            receive_tracks
-                .iter()
-                .all(|track| track.id() != send_track.id()),
-            "overlapping send and receive tracks"
-        );
-        let format = AudioFormat::new(
-            control.format.sample_rate,
-            control.format.channels,
-            control.format.frame_ms,
-        )?;
-        let receive_video = super::video::ReceiveVideo::new(receive_tracks.clone());
-        let receive = super::receive_audio::ReceiveAudio::new(format, receive_tracks)?;
-        debug_call(
-            "media",
-            format_args!(
-                "media.ready call={call_id} audio_gen={} video_send={}",
-                send_track.generation(),
-                video_send_track.is_some()
-            ),
-        );
-        Ok(Self {
-            socket,
-            receive,
-            receive_video,
-            attached: Instant::now(),
-            send_track,
-            video_send_track,
-            started_generation: None,
-            video_started_generation: None,
-            pcm_writes: 0,
-            video_writes: 0,
-        })
-    }
-    pub(super) fn synchronize_tracks(
-        &mut self,
-        control: &Control,
-        call_id: &str,
-    ) -> Result<(bool, bool)> {
-        let mut send_changed = false;
-        let mut video_send_changed = false;
-        for ((id, _), track) in &control.tracks {
-            if id != call_id {
-                continue;
-            }
-            if track.is_video() {
-                if track.direction() == CallTrackDirection::Send {
-                    let should_update = self
-                        .video_send_track
-                        .as_ref()
-                        .is_none_or(|cur| track.generation() > cur.generation());
-                    if should_update {
-                        self.video_send_track = Some(track.clone());
-                        video_send_changed = true;
-                    }
-                }
-                continue;
-            }
-            if track.audio_format() != Some(control.format) {
-                bail!("unsupported updated audio format");
-            }
-            if track.direction() == CallTrackDirection::Send
-                && track.id() == self.send_track.id()
-                && track.generation() > self.send_track.generation()
-            {
-                self.send_track = track.clone();
-                send_changed = true;
-            }
-        }
-        Ok((send_changed, video_send_changed))
-    }
-    pub(super) async fn send(&mut self, samples: &[i16], format: AudioFormat) -> Result<()> {
-        format.validate_frame(samples)?;
-        let generation = self.send_track.generation();
-        let track_id = self.send_track.id();
-        let first = self.started_generation != Some(generation);
-        if first {
-            debug_call(
-                "media",
-                format_args!("track.start write attempted generation={generation}"),
-            );
-            if let Err(error) = send_json(
-                &mut self.socket,
-                &CallMediaCommand::TrackStart {
-                    track_id,
-                    generation,
-                },
-            )
-            .await
-            {
-                debug_call("media", format_args!("track.start write failed: {error:#}"));
-                return Err(error);
-            }
-            debug_call(
-                "media",
-                format_args!("track.start write completed generation={generation}"),
-            );
-            self.started_generation = Some(generation);
-        }
-        let bytes: Vec<u8> = samples
-            .iter()
-            .flat_map(|sample| sample.to_le_bytes())
-            .collect();
-        let packet = wechat_core::calls::pcm_envelope::encode_pcm_chunk(
-            MediaHeader {
-                track_id,
-                generation,
-                sequence: self.pcm_writes,
-                timestamp_micros: self.pcm_writes * u64::from(format.frame_ms()) * 1_000,
-            },
-            &bytes,
-        )?;
-        if let Err(error) = timeout(
-            WRITE_TIMEOUT,
-            self.socket.send(Message::Binary(packet.into())),
-        )
+pub(super) async fn attach_media(
+    remote: &Remote,
+    control: &Control,
+    call_id: &str,
+    owner_token: &str,
+) -> Result<MediaClient> {
+    MediaClient::attach(&endpoint(remote)?, control, call_id, owner_token)
         .await
-        .context("call media write timed out")
-        .and_then(|result| result.map_err(Into::into))
-        {
-            debug_call(
-                "media",
-                format_args!(
-                    "PCM write failed after {} completed writes: {error:#}",
-                    self.pcm_writes
-                ),
-            );
-            return Err(error);
-        }
-        self.pcm_writes += 1;
-        Ok(())
-    }
-    pub(super) async fn send_video(
-        &mut self,
-        frame: &super::video::CapturedVideoFrame,
-    ) -> Result<()> {
-        let Some(track) = self.video_send_track.as_ref() else {
-            return Ok(());
-        };
-        let Some(expected) = track.video_format() else {
-            return Ok(());
-        };
-        if expected.codec != frame.codec {
-            return Ok(());
-        }
-        let track_id = track.id();
-        let generation = track.generation();
-        if self.video_started_generation != Some(generation) {
-            send_json(
-                &mut self.socket,
-                &CallMediaCommand::TrackStart {
-                    track_id,
-                    generation,
-                },
-            )
-            .await?;
-            self.video_started_generation = Some(generation);
-        }
-        let packet = wechat_core::calls::pcm_envelope::encode_video(
-            MediaPayloadKind::from_video_codec(frame.codec),
-            frame.flags,
-            MediaHeader {
-                track_id,
-                generation,
-                sequence: self.video_writes,
-                timestamp_micros: frame.timestamp_micros,
-            },
-            &frame.bytes,
-        )?;
-        timeout(
-            WRITE_TIMEOUT,
-            self.socket.send(Message::Binary(packet.into())),
-        )
-        .await
-        .context("call video media write timed out")??;
-        self.video_writes += 1;
-        Ok(())
-    }
+        .map_err(map_client_error)
 }
 
-async fn next_media(media: &mut Option<Media>) -> Result<Message> {
+async fn next_media(media: &mut Option<MediaClient>) -> Result<Message> {
     match media {
-        Some(media) => receive(&mut media.socket, "media").await,
+        Some(media) => media.next_message().await,
         None => std::future::pending().await,
     }
 }
@@ -1271,11 +1045,11 @@ enum PendingKind {
     Invite,
 }
 
-fn ensure_video_capture(
+async fn ensure_video_capture(
     capture: &mut Option<super::video::LocalVideoCapture>,
     camera_enabled: &mut bool,
     source: &super::video::CameraSource,
-    media: Option<&Media>,
+    media: Option<&MediaClient>,
     levels: &mut super::levels::CallLevels,
 ) -> bool {
     if !*camera_enabled {
@@ -1298,7 +1072,14 @@ fn ensure_video_capture(
         levels.notice("Outgoing video track unavailable; staying on audio.");
         return true;
     };
-    match super::video::LocalVideoCapture::start(source, format) {
+    let source_owned = source.clone();
+    let started = tokio::task::spawn_blocking(move || {
+        super::video::LocalVideoCapture::start(&source_owned, format)
+    })
+    .await
+    .map_err(|err| anyhow::anyhow!("camera startup worker failed: {err}"))
+    .and_then(|res| res);
+    match started {
         Ok(started) => {
             *capture = Some(started);
             levels.notice(&format!(
@@ -1430,7 +1211,7 @@ async fn owned_call(
         {
             let mut attached = tokio::select! {
                 _=cancellation.wait()=>return Ok(false),
-                result=Media::attach(remote,control,call_id,owner_token)=>result?,
+                result=attach_media(remote,control,call_id,owner_token)=>result?,
             };
             attached.receive_video.set_peer_label(&intent.peer_label);
             if let Some(view) = control.call.as_ref().filter(|view| view.call_id == call_id) {
@@ -1448,7 +1229,8 @@ async fn owned_call(
                 &intent.camera_source,
                 media.as_ref(),
                 &mut levels,
-            );
+            )
+            .await;
             if failed_start {
                 let id = request_id();
                 let _ = send_json(
@@ -1520,7 +1302,8 @@ async fn owned_call(
                                 &intent.camera_source,
                                 media.as_ref(),
                                 &mut levels,
-                            );
+                            )
+                            .await;
                             if failed {
                                 continue;
                             }
@@ -1560,7 +1343,7 @@ async fn owned_call(
                         levels.notice(text.trim_end());
                     }
                     "?"|"help"=>levels.notice(&format!("{CALL_KEYS}\ni searches contacts; invite CONTACT_ID [...] sends selected IDs.\nd lists devices; d input NUMBER / d output NUMBER selects one.")),
-                    _=>match interaction.line(trimmed,remote,control.call.as_ref().filter(|view|view.call_id==call_id),&audio.options,&mut levels) {
+                    _=>match interaction.line(trimmed,remote,control.call.as_ref().filter(|view|view.call_id==call_id),&AudioOptions::from(&audio.options),&mut levels) {
                         Ok(super::interaction::UiAction::None)=>{},
                         Ok(super::interaction::UiAction::Invite(contact_ids))=>{
                             if !control.capabilities.conference_invite {levels.notice("Conference invitations unavailable on this daemon.");continue;}
@@ -1571,7 +1354,8 @@ async fn owned_call(
                         }
                         Ok(super::interaction::UiAction::Devices(options))=>{
                             if device_change.0.is_some(){levels.notice("A device change is already preparing.");continue;}
-                            device_change.0=Some(tokio::spawn(async move{LocalAudio::open(&options).await}));
+                            let opts = AudioDeviceOptions::from(&options);
+                            device_change.0=Some(tokio::spawn(async move{LocalAudio::open(&opts).await}));
                             levels.notice("Preparing new devices; current audio remains active.");
                         }
                         Err(error)=>levels.notice(&error.to_string()),
@@ -1640,7 +1424,8 @@ async fn owned_call(
                                                 &intent.camera_source,
                                                 media.as_ref(),
                                                 &mut levels,
-                                            );
+                                            )
+                                            .await;
                                         }
                                     }
                                     PendingKind::Invite=>{}
@@ -1671,7 +1456,13 @@ async fn owned_call(
                     Message::Binary(bytes)=>{
                         let wire = WireMediaFrame::decode(&bytes)?;
                         if wire.kind == MediaPayloadKind::PcmS16le {
-                            current.receive.wire_frame(&wire,current.attached.elapsed(),&mut levels)?;
+                            current.receive.wire_frame(
+                                &wire,
+                                current.attached_elapsed(),
+                                |track_id, participant_id, samples| {
+                                    levels.participant_audio(track_id, participant_id, samples);
+                                },
+                            )?;
                         } else {
                             let _ = current.receive_video.binary_frame(&wire);
                         }
@@ -1723,7 +1514,7 @@ async fn owned_call(
             _=tick.tick()=>{
                 let samples=audio.frame(format.samples_per_frame(),muted)?;
                 if let Some(current_media) = media.as_mut() {
-                    for mixed in current_media.receive.render_due(current_media.attached.elapsed())? {
+                    for mixed in current_media.receive.render_due(current_media.attached_elapsed())? {
                         if speaker_enabled {
                             let mixed=mixed.iter().map(|s|f32::from(*s)/32768.0).collect::<Vec<_>>();
                             match audio.playback.enqueue(audio.playback_token,&mixed,format.sample_rate()) {
@@ -1734,7 +1525,7 @@ async fn owned_call(
                         }
                     }
                     levels.microphone(&samples,muted);
-                    if let Err(error) = current_media.send(&samples,format).await {
+                    if let Err(error) = current_media.send_pcm(&samples,format).await {
                         *media = None;
                         video_capture.take();
                         media_closed_at.get_or_insert_with(Instant::now);
@@ -1852,193 +1643,6 @@ async fn terminate(control: &mut Control, call_id: &str) -> Result<()> {
     .context("termination outcome unknown; check calls status before retrying")?
 }
 
-/// Elastic microphone capture ring that pre-buffers two 20 ms frames before
-/// starting playout so 10 ms OS capture chunks arriving slightly out of phase
-/// with the 20 ms send tick never inject 10 ms zero-padded notches into speech.
-struct CaptureRing {
-    queued: VecDeque<i16>,
-    primed: bool,
-}
-
-impl CaptureRing {
-    fn new() -> Self {
-        Self {
-            queued: VecDeque::with_capacity(2048),
-            primed: false,
-        }
-    }
-
-    fn clear(&mut self) {
-        self.queued.clear();
-        self.primed = false;
-    }
-
-    fn push_f32(&mut self, samples: &[f32], frame_samples: usize) -> Result<()> {
-        for &sample in samples {
-            if !sample.is_finite() {
-                bail!("invalid microphone sample");
-            }
-            self.queued
-                .push_back((sample.clamp(-1.0, 1.0) * 32767.0).round() as i16);
-        }
-        let max_samples = frame_samples.saturating_mul(6).max(1920);
-        let target_trim = frame_samples.saturating_mul(3).max(960);
-        if self.queued.len() > max_samples {
-            let excess = self.queued.len() - target_trim;
-            self.queued.drain(..excess);
-        }
-        if !self.primed && self.queued.len() >= frame_samples.saturating_mul(2) {
-            self.primed = true;
-        }
-        Ok(())
-    }
-
-    fn pop_frame(&mut self, count: usize, muted: bool) -> Vec<i16> {
-        let mut frame = vec![0i16; count];
-        if self.primed {
-            if self.queued.len() >= count {
-                for sample in &mut frame {
-                    *sample = self.queued.pop_front().expect("checked length");
-                }
-            } else {
-                // Re-prime cleanly instead of splicing partial audio with trailing zeros.
-                self.primed = false;
-            }
-        }
-        if muted {
-            frame.fill(0);
-        }
-        frame
-    }
-}
-
-struct LocalAudio {
-    options: AudioOptions,
-    startup_summary: String,
-    playback: PlaybackHandle,
-    playback_token: PlaybackToken,
-    capture: mpsc::Receiver<Vec<f32>>,
-    ring: CaptureRing,
-    last_capture: Instant,
-    stop: Arc<AtomicBool>,
-    worker: Option<std::thread::JoinHandle<Result<()>>>,
-}
-impl LocalAudio {
-    async fn open(options: &AudioOptions) -> Result<Self> {
-        let config = AudioConfig {
-            input_device: options.input_device.clone(),
-            output_device: options.output_device.clone(),
-            playback_buffer_ms: 300,
-            ..AudioConfig::default()
-        };
-        let session = timeout(
-            Duration::from_secs(12),
-            tokio::task::spawn_blocking(move || -> Result<_> {
-                let mut session = AudioSession::open(config)?;
-                let until = Instant::now() + Duration::from_secs(3);
-                loop {
-                    match session.recv_timeout(Duration::from_millis(100)) {
-                        Ok(samples) if !samples.is_empty() => break,
-                        Ok(_) | Err(AudioError::Timeout) if Instant::now() < until => {}
-                        Ok(_) | Err(AudioError::Timeout) => {
-                            bail!("microphone produced no samples; no call was placed or answered")
-                        }
-                        Err(error) => return Err(error.into()),
-                    }
-                }
-                Ok(session)
-            }),
-        )
-        .await
-        .context("audio device startup timed out; no call was placed or answered")???;
-        let startup_summary = format!(
-            "Microphone: {}\nSpeaker: {}\nAudio AEC status: {:?}; cancellation quality is unmeasured. A headset is recommended.",
-            super::levels::clean_label(options.input_device.as_deref().unwrap_or("OS default"), 96),
-            super::levels::clean_label(options.output_device.as_deref().unwrap_or("OS default"), 96),
-            session.aec_status(),
-        );
-        let playback = session.playback();
-        let playback_token = playback.token()?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let worker_stop = stop.clone();
-        let (sender, capture) = mpsc::channel(32);
-        let worker = std::thread::Builder::new()
-            .name("wx-call-audio".into())
-            .spawn(move || {
-                let mut session = session;
-                while !worker_stop.load(Ordering::Acquire) {
-                    match session.recv_timeout(Duration::from_millis(20)) {
-                        Ok(samples) if !samples.is_empty() => {
-                            let _ = sender.try_send(samples);
-                        }
-                        Ok(_) | Err(AudioError::Timeout) => {}
-                        Err(error) => return Err(error.into()),
-                    }
-                }
-                session.stop()?;
-                Ok(())
-            })?;
-        Ok(Self {
-            options: options.clone(),
-            startup_summary,
-            playback,
-            playback_token,
-            capture,
-            ring: CaptureRing::new(),
-            last_capture: Instant::now(),
-            stop,
-            worker: Some(worker),
-        })
-    }
-    fn request_stop(&self) {
-        if !self.stop.swap(true, Ordering::AcqRel) {
-            let _ = self.playback.clear();
-        }
-    }
-    fn discard_capture(&mut self) {
-        while self.capture.try_recv().is_ok() {}
-        self.ring.clear();
-        self.last_capture = Instant::now();
-    }
-    fn frame(&mut self, count: usize, muted: bool) -> Result<Vec<i16>> {
-        loop {
-            match self.capture.try_recv() {
-                Ok(samples) => {
-                    self.last_capture = Instant::now();
-                    self.ring.push_f32(&samples, count)?;
-                }
-                Err(mpsc::error::TryRecvError::Empty) => break,
-                Err(mpsc::error::TryRecvError::Disconnected) => bail!("microphone disconnected"),
-            }
-        }
-        if self.last_capture.elapsed() > Duration::from_secs(2) {
-            bail!("microphone stopped producing samples");
-        }
-        Ok(self.ring.pop_frame(count, muted))
-    }
-    async fn stop(&mut self) -> Result<()> {
-        self.request_stop();
-        if let Some(worker) = self.worker.take() {
-            timeout(
-                Duration::from_secs(3),
-                tokio::task::spawn_blocking(move || {
-                    worker
-                        .join()
-                        .map_err(|_| anyhow::anyhow!("audio worker panicked"))?
-                }),
-            )
-            .await
-            .context("audio device shutdown timed out")???;
-        }
-        Ok(())
-    }
-}
-impl Drop for LocalAudio {
-    fn drop(&mut self) {
-        self.request_stop();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::tests::{hello, remote};
@@ -2077,30 +1681,6 @@ mod tests {
         assert_eq!(staging.toggle_conference_camera(true), Ok(true));
         assert!(staging.toggle_conference_mic());
         assert!(staging.toggle_conference_camera(false).is_err());
-    }
-
-    #[test]
-    fn capture_ring_absorbs_10ms_chunk_phase_jitter_without_zero_notches() {
-        let mut ring = CaptureRing::new();
-        let chunk_10ms = vec![0.5f32; 160];
-        // Initial 40 ms pre-buffer (four 10 ms chunks).
-        for _ in 0..3 {
-            ring.push_f32(&chunk_10ms, 320).unwrap();
-            assert!(ring.pop_frame(320, false).iter().all(|&s| s == 0));
-        }
-        ring.push_f32(&chunk_10ms, 320).unwrap();
-        // Now alternate 1-chunk (10 ms) and 3-chunk (30 ms) arrivals per 20 ms tick.
-        for cycle in 0..10 {
-            let frame = ring.pop_frame(320, false);
-            assert!(
-                frame.iter().all(|&s| s > 10_000),
-                "unexpected zero notch at cycle {cycle}"
-            );
-            let chunks_this_tick = if cycle % 2 == 0 { 1 } else { 3 };
-            for _ in 0..chunks_this_tick {
-                ring.push_f32(&chunk_10ms, 320).unwrap();
-            }
-        }
     }
 
     #[tokio::test]

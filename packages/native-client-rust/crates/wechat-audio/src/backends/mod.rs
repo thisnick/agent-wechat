@@ -27,22 +27,7 @@ pub(crate) fn devices() -> Result<Vec<crate::AudioDevice>, AudioError> {
     }
     #[cfg(target_os = "macos")]
     {
-        // VoiceProcessingIO follows OS defaults; custom endpoint routing is not
-        // supported by this adapter. Do not advertise unusable endpoint IDs.
-        Ok(vec![
-            crate::AudioDevice {
-                input: true,
-                id: None,
-                name: "System default microphone".into(),
-                is_default: true,
-            },
-            crate::AudioDevice {
-                input: false,
-                id: None,
-                name: "System default speaker".into(),
-                is_default: true,
-            },
-        ])
+        macos::devices()
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     {
@@ -52,6 +37,9 @@ pub(crate) fn devices() -> Result<Vec<crate::AudioDevice>, AudioError> {
 
 trait DeviceBackend {
     fn aec_status(&self) -> AecStatus;
+    fn capture_rate(&self) -> u32 {
+        NATIVE_RATE
+    }
     fn poll(&mut self) -> Result<(), AudioError>;
 }
 
@@ -63,11 +51,6 @@ pub(crate) fn open(config: AudioConfig) -> Result<AudioSession, AudioError> {
     let (capture_tx, capture) = mpsc::sync_channel(16);
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
     let sample_rate = config.sample_rate;
-    let capture_resampler = if sample_rate != NATIVE_RATE {
-        Some(Resampler::new(NATIVE_RATE, sample_rate)?)
-    } else {
-        None
-    };
     let worker = std::thread::Builder::new()
         .name("wechat-audio".into())
         .spawn(move || {
@@ -79,7 +62,7 @@ pub(crate) fn open(config: AudioConfig) -> Result<AudioSession, AudioError> {
                     return Ok(());
                 }
             };
-            let _ = ready_tx.send(Ok(backend.aec_status()));
+            let _ = ready_tx.send(Ok((backend.aec_status(), backend.capture_rate())));
             while !worker_stop.load(Ordering::Acquire) {
                 if let Err(error) = backend.poll() {
                     if worker_stop.load(Ordering::Acquire) {
@@ -94,8 +77,8 @@ pub(crate) fn open(config: AudioConfig) -> Result<AudioSession, AudioError> {
         })
         .map_err(|e| AudioError::Backend(e.to_string()))?;
     let startup = ready_rx.recv_timeout(Duration::from_secs(6));
-    let aec = match startup {
-        Ok(Ok(status)) => status,
+    let (aec, capture_rate) = match startup {
+        Ok(Ok(info)) => info,
         error => {
             stop.store(true, Ordering::Release);
             playback.close();
@@ -105,6 +88,19 @@ pub(crate) fn open(config: AudioConfig) -> Result<AudioSession, AudioError> {
                 _ => AudioError::Timeout,
             });
         }
+    };
+    let capture_resampler = if sample_rate != capture_rate {
+        match Resampler::new(capture_rate, sample_rate) {
+            Ok(resampler) => Some(resampler),
+            Err(error) => {
+                stop.store(true, Ordering::Release);
+                playback.close();
+                let _ = worker.join();
+                return Err(error);
+            }
+        }
+    } else {
+        None
     };
     Ok(AudioSession {
         playback,
@@ -141,6 +137,20 @@ fn create(
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn parse_macos_device_id(raw: &str) -> Result<u32, AudioError> {
+    let trimmed = raw.trim();
+    let parsed: u32 = trimmed
+        .parse()
+        .map_err(|_| AudioError::Backend(format!("CoreAudio: invalid device ID '{trimmed}'")))?;
+    if parsed == 0 {
+        return Err(AudioError::Backend(
+            "CoreAudio: device ID must be greater than zero".into(),
+        ));
+    }
+    Ok(parsed)
+}
+
 #[cfg(target_os = "linux")]
 fn wait_ready(mut poll: impl FnMut() -> Result<bool, AudioError>) -> Result<(), AudioError> {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -152,5 +162,20 @@ fn wait_ready(mut poll: impl FnMut() -> Result<bool, AudioError>) -> Result<(), 
             return Err(AudioError::Timeout);
         }
         std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_macos_device_id;
+
+    #[test]
+    fn macos_device_id_parser_validates_positive_u32_ids() {
+        assert_eq!(parse_macos_device_id("42").unwrap(), 42);
+        assert_eq!(parse_macos_device_id(" 108 ").unwrap(), 108);
+        assert!(parse_macos_device_id("0").is_err());
+        assert!(parse_macos_device_id("").is_err());
+        assert!(parse_macos_device_id("-1").is_err());
+        assert!(parse_macos_device_id("MacBook Pro Microphone").is_err());
     }
 }

@@ -434,7 +434,7 @@ async fn winning_claim_attaches_generated_pcm_without_opening_devices() {
         })
         .await
         .unwrap();
-    let mut media = super::audio::Media::attach(
+    let mut media = super::audio::attach_media(
         &remote,
         &control,
         claim.call_id.as_deref().unwrap(),
@@ -443,7 +443,7 @@ async fn winning_claim_attaches_generated_pcm_without_opening_devices() {
     .await
     .unwrap();
     media
-        .send(&[123; 320], AudioFormat::new(16000, 1, 20).unwrap())
+        .send_pcm(&[123; 320], AudioFormat::new(16000, 1, 20).unwrap())
         .await
         .unwrap();
     control
@@ -463,7 +463,7 @@ async fn winning_claim_attaches_generated_pcm_without_opening_devices() {
         (false, false)
     );
     media
-        .send(&[0; 320], AudioFormat::new(16000, 1, 20).unwrap())
+        .send_pcm(&[0; 320], AudioFormat::new(16000, 1, 20).unwrap())
         .await
         .unwrap();
     let mut owned = super::audio::OwnedCall {
@@ -472,7 +472,7 @@ async fn winning_claim_attaches_generated_pcm_without_opening_devices() {
         media: Some(media),
     };
     let (_cancel, signal) = tokio::sync::watch::channel(true);
-    control.cancellation = Some(Cancellation(signal));
+    control.cancellation = Some(Cancellation::from_receiver(signal));
     owned.finish(&mut control, false).await.unwrap();
     assert!(owned.media.is_none());
     owned.finish(&mut control, false).await.unwrap();
@@ -483,7 +483,7 @@ async fn winning_claim_attaches_generated_pcm_without_opening_devices() {
 #[tokio::test]
 async fn cancellation_stays_latched_across_preparation_and_prevents_a_claim() {
     let (cancel, signal) = tokio::sync::watch::channel(false);
-    let cancellation = Cancellation(signal);
+    let cancellation = Cancellation::from_receiver(signal);
     // Simulate a signal during an await that has no active signal waiter.
     tokio::time::sleep(Duration::from_millis(1)).await;
     cancel.send(true).unwrap();
@@ -735,7 +735,7 @@ async fn quit_after_claim_waits_for_its_exact_state_before_cancelling_once() {
         .unwrap();
     assert!(control.call.is_none());
     let (_cancel, signal) = tokio::sync::watch::channel(true);
-    control.cancellation = Some(Cancellation(signal));
+    control.cancellation = Some(Cancellation::from_receiver(signal));
     super::audio::terminate_owned(&mut control, "exact-call")
         .await
         .unwrap();
@@ -939,7 +939,7 @@ async fn video_media_socket_accepts_large_frames_and_sends_video_track_start() {
     });
     let remote = remote(address);
     let (mut control, _) = Control::connect(&remote).await.unwrap();
-    let mut media = super::audio::Media::attach(&remote, &control, "video-call", "synthetic-owner")
+    let mut media = super::audio::attach_media(&remote, &control, "video-call", "synthetic-owner")
         .await
         .unwrap();
     media
