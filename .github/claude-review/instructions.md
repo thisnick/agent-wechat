@@ -103,16 +103,18 @@ Choose the depth from risk, not only size:
 Measure the source change, excluding tests and generated files. Up to about
 1,500 changed lines, review it yourself. Above that, split it into two to five
 areas that each make sense alone (for example protocol, store and migrations,
-core logic, API and CLI, UI, OpenClaw plugin) and launch one subagent per area
-in parallel. Give each one the title, description and linked issue, its files,
-both checkout paths, sections 3 and 4 of these instructions, and ask for
-candidate findings with file, line, scenario and how sure it is. Keep for
-yourself everything that crosses areas: the overall design, contracts between
-areas and end-to-end behavior.
+core logic, API and CLI, UI, OpenClaw plugin) and launch one foreground
+subagent per area in the same turn so they run concurrently and return before
+you continue (never in the background). Give each one the title, description
+and linked issue, its files, both checkout paths, sections 3 and 4 of these
+instructions, and ask for concise candidate findings with file, line, scenario
+and how sure it is. Keep for yourself everything that crosses areas: the
+overall design, contracts between areas and end-to-end behavior.
 
 **On a later round,** review the commits since the last reviewed commit
-(`git diff <last reviewed>..review/head`) and whether each earlier finding was
-fixed or answered. Look beyond the new commits only where they change how
+(`git diff <last reviewed>..review/head`), whether each earlier finding was
+fixed or answered, and any changed source files an earlier round left
+unchecked. Look beyond those only where the new commits change how
 already-reviewed code behaves. From round 4 on, don't raise new Nit or Design
 findings. If Important problems keep appearing round after round, say in the
 summary that the approach may need rethinking rather than another fix.
@@ -243,7 +245,8 @@ enforces, personal preferences, or speculation without a concrete case.
 Re-read the code for each candidate: trace the call path, look for a caller or
 an earlier check that already prevents it, and look for a test that covers it.
 On a Deep review, and on any review whose source change is over about 500
-lines, launch a fresh subagent for each Bug and Risk, in parallel, whose only
+lines, group cases of the same pattern into one finding first, then launch a
+fresh foreground subagent for each Bug and Risk in the same turn whose only
 job is to disprove it. Give it the finding as stated, the files involved and
 both checkout paths, not your reasoning. Drop findings that don't survive.
 Downgrade a Bug to a Risk when you can't confirm the case.
