@@ -709,9 +709,10 @@ fn spawn_capture(
             }
             #[cfg(target_os = "macos")]
             {
-                // Let AVFoundation open at the camera's native hardware rate (often 30 fps);
+                // Request 30 fps from AVFoundation (omitting `-framerate` falls back to FFmpeg's
+                // 29.97 ntsc default, which some Apple Silicon FaceTime/Continuity cameras reject);
                 // the output `-vf fps={fps}` filter below enforces the negotiated call rate.
-                cmd.args(["-f", "avfoundation", "-i", &device]);
+                cmd.args(["-f", "avfoundation", "-framerate", "30", "-i", &device]);
             }
             #[cfg(target_os = "windows")]
             {

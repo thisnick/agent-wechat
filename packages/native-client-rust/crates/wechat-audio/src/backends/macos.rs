@@ -169,12 +169,15 @@ fn hal_input_unit(device_id: AudioDeviceID) -> Result<(AudioUnit, u32), AudioErr
     .map_err(error)?;
     // AUHAL input requires the client-side output scope sample rate to match the
     // selected hardware device's native rate (e.g. 16 kHz Bluetooth HFP or 44.1 kHz USB).
-    let capture_rate = unit
+    let hw_format = unit
         .stream_format(Scope::Input, Element::Input)
-        .ok()
-        .map(|fmt| fmt.sample_rate.round() as u32)
-        .filter(|rate| (8_000..=192_000).contains(rate))
-        .unwrap_or(NATIVE_RATE);
+        .map_err(error)?;
+    let capture_rate = hw_format.sample_rate.round() as u32;
+    if !crate::resampler::valid_rate(capture_rate) {
+        return Err(AudioError::Backend(format!(
+            "unsupported device sample rate {capture_rate}"
+        )));
+    }
     unit.set_stream_format(stream_format(capture_rate), Scope::Output, Element::Input)
         .map_err(error)?;
     Ok((unit, capture_rate))
