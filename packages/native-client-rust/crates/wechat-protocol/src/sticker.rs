@@ -29,13 +29,37 @@ pub(super) fn public_ip(ip: IpAddr) -> bool {
         }
     }
 }
-/// Sticker bytes come from Tencent CDN hosts. Classic stored and pack emoji
-/// carry a `wxapp.tc.qq.com` source, while shared stickers use
-/// `snsvideo.c2c.wechat.com`; both are reachable directly, unlike the
-/// encrypted attachment channels. Any other host stays refused so a crafted
-/// message cannot turn this into an arbitrary fetch.
+const VWEIXINF_STICKER_HOST: &str = "vweixinf.tc.qq.com";
+
+/// Tencent CDN hosts accepted for received sticker downloads regardless of path.
+/// Callers must use `validate_sticker_url` for the full policy, which also accepts
+/// `vweixinf.tc.qq.com` for its numeric `/stodownload` endpoint.
 pub const STICKER_HOSTS: &[&str] = &["snsvideo.c2c.wechat.com", "wxapp.tc.qq.com"];
 
+/// Restricts the vweixinf CDN to its numeric sticker download endpoint.
+fn allowed_sticker_source(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    if host == VWEIXINF_STICKER_HOST {
+        return url
+            .path()
+            .strip_prefix('/')
+            .and_then(|path| path.strip_suffix("/stodownload"))
+            .and_then(|path| path.split_once('/'))
+            .is_some_and(|(region, id)| {
+                !region.is_empty()
+                    && !id.is_empty()
+                    && region.bytes().all(|byte| byte.is_ascii_digit())
+                    && id.bytes().all(|byte| byte.is_ascii_digit())
+            });
+    }
+    STICKER_HOSTS.contains(&host)
+}
+
+/// Validates a sticker source URL before download: HTTP or HTTPS on `STICKER_HOSTS` or
+/// `vweixinf.tc.qq.com/<region>/<id>/stodownload`, default port only, with no credentials or
+/// fragment.
 pub fn validate_sticker_url(value: &str) -> Result<reqwest::Url> {
     ensure!(
         value.len() <= 8192 && !value.chars().any(|c| c.is_control()),
@@ -45,9 +69,7 @@ pub fn validate_sticker_url(value: &str) -> Result<reqwest::Url> {
         reqwest::Url::parse(value).map_err(|_| anyhow::anyhow!("sticker_source_not_allowed"))?;
     ensure!(
         ["http", "https"].contains(&url.scheme())
-            && url
-                .host_str()
-                .is_some_and(|host| STICKER_HOSTS.contains(&host))
+            && allowed_sticker_source(&url)
             && url.username().is_empty()
             && url.password().is_none()
             && url.fragment().is_none()
@@ -187,6 +209,40 @@ mod tests {
             "http://wxapp.tc.qq.com:8080/x",
         ] {
             assert!(validate_sticker_url(u).is_err(), "{u}");
+        }
+    }
+
+    #[test]
+    fn vweixinf_requires_the_exact_sticker_download_path() {
+        assert!(!STICKER_HOSTS.contains(&VWEIXINF_STICKER_HOST));
+        for url in [
+            "http://vweixinf.tc.qq.com/275/20304/stodownload?m=synthetic&filekey=synthetic",
+            "https://vweixinf.tc.qq.com/1/42/stodownload",
+            "http://vweixinf.tc.qq.com:80/275/20304/stodownload",
+            "https://vweixinf.tc.qq.com:443/275/20304/stodownload",
+        ] {
+            assert!(validate_sticker_url(url).is_ok(), "{url}");
+        }
+        for url in [
+            "http://vweixinf.tc.qq.com.evil/275/20304/stodownload",
+            "http://vweixinf.tc.qq.com/275/20304/other",
+            "http://vweixinf.tc.qq.com/275/20304/STODOWNLOAD",
+            "http://vweixinf.tc.qq.com/275/20304/stodownload/",
+            "http://vweixinf.tc.qq.com/stodownload",
+            "http://vweixinf.tc.qq.com/275/stodownload",
+            "http://vweixinf.tc.qq.com/275/20304/42/stodownload",
+            "http://vweixinf.tc.qq.com//42/stodownload",
+            "http://vweixinf.tc.qq.com/275//stodownload",
+            "http://vweixinf.tc.qq.com/275/abc/stodownload",
+            "http://vweixinf.tc.qq.com/%32/42/stodownload",
+            "http://vweixinf.tc.qq.com/275%2F20304/stodownload",
+            "http://user@vweixinf.tc.qq.com/275/20304/stodownload",
+            "http://vweixinf.tc.qq.com:8080/275/20304/stodownload",
+            "http://vweixinf.tc.qq.com:443/275/20304/stodownload",
+            "https://vweixinf.tc.qq.com:80/275/20304/stodownload",
+            "http://vweixinf.tc.qq.com/275/20304/stodownload#fragment",
+        ] {
+            assert!(validate_sticker_url(url).is_err(), "{url}");
         }
     }
 
