@@ -1,7 +1,7 @@
 ---
 title: 语音与视频通话
 description: CLI 语音与视频通话、群会议控制，以及 OpenClaw 设置。
-sourceHash: "0b22fd3564e0"
+sourceHash: "b7f39e6e1fd2"
 ---
 
 使用 `wx` 通过本机的麦克风、扬声器和摄像头，发起或加入单聊或群会议的语音与视频通话。OpenClaw 设置（仅语音）请参考[设置通话](/openclaw/calling/)。
@@ -51,7 +51,7 @@ sourceHash: "0b22fd3564e0"
 
 ## 音频、视频与通话中控制 \{#audio-video-and-in-call-controls}
 
-先运行 `wx calls devices`，再用 `wx calls dial CONTACT --input-device INPUT_ID --output-device OUTPUT_ID` 选择设备。不指定这些选项时，使用操作系统的默认设备。Linux 接受 PulseAudio 或 PipeWire-Pulse 的名称；Windows 接受设备端点 ID。在 macOS 上，请在系统设置中选择默认设备；不支持自定义端点 ID。
+先运行 `wx calls devices`，再用 `wx calls dial CONTACT --input-device INPUT_ID --output-device OUTPUT_ID` 选择设备。不指定这些选项时，使用操作系统的默认设备。Linux 接受 PulseAudio 或 PipeWire-Pulse 的名称，Windows 接受端点 ID，macOS 接受 `wx calls devices` 显示的数字 CoreAudio 设备 ID（自定义 macOS 设备会绕过系统语音处理，且不进行回声消除）。`wx calls devices` 还会列出 Linux（V4L2）、macOS（`avfoundation`）和 Windows（`dshow`）上的本地摄像头。
 
 交互式通话会显示控制项、电平表；视频通话时还会在终端中以 24 位 TrueColor 预览视频。按键后需要按 Enter。`l` 或 `h` 会离开通话，并在 `monitor` 中返回监听。按 Ctrl-C 会离开通话，并在短暂清理后退出命令。
 
