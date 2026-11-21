@@ -8,7 +8,10 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, VecDeque},
     path::Path,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 use tauri::{Emitter, Manager, State};
@@ -16,10 +19,31 @@ use tauri_plugin_notification::NotificationExt;
 use tokio::sync::{watch, Mutex};
 use tokio_util::sync::CancellationToken;
 
+/// Duration of the one-shot OS notification ringtone clip before the looping
+/// in-app Web Audio ringtone takes over.
+///
+/// macOS and Linux play `AgentWechatSoftRing.wav` (3.0 s MarimbaDouble loop);
+/// Windows plays the shorter system `"Default"` toast chime (~1.5 s).
+#[cfg(windows)]
+const OS_CALL_SOUND_DURATION: Duration = Duration::from_millis(1500);
+#[cfg(not(windows))]
+const OS_CALL_SOUND_DURATION: Duration = Duration::from_secs(3);
+
 struct PostedCallAlert {
+    id: u64,
     alert: crate::notification_sound::ActiveCallAlert,
     call_id: String,
     sounding: bool,
+    sound_timer: Option<tauri::async_runtime::JoinHandle<()>>,
+}
+
+impl PostedCallAlert {
+    fn clear(self) {
+        if let Some(timer) = self.sound_timer {
+            timer.abort();
+        }
+        self.alert.clear();
+    }
 }
 
 pub struct Notifications {
@@ -27,7 +51,8 @@ pub struct Notifications {
     focus: Mutex<Option<Focus>>,
     pending: Mutex<Option<Target>>,
     pending_call: Mutex<Option<CallActionTarget>>,
-    active_call_alerts: Mutex<HashMap<String, PostedCallAlert>>,
+    next_call_alert_id: AtomicU64,
+    active_call_alerts: Arc<Mutex<HashMap<String, PostedCallAlert>>>,
     sounding_call_ids: watch::Sender<HashMap<String, String>>,
     status: Mutex<String>,
     last_sound: Mutex<Option<Instant>>,
@@ -41,7 +66,8 @@ impl Default for Notifications {
             focus: Mutex::new(None),
             pending: Mutex::new(None),
             pending_call: Mutex::new(None),
-            active_call_alerts: Mutex::new(HashMap::new()),
+            next_call_alert_id: AtomicU64::new(0),
+            active_call_alerts: Arc::new(Mutex::new(HashMap::new())),
             sounding_call_ids,
             status: Mutex::new(String::new()),
             last_sound: Mutex::new(None),
@@ -457,6 +483,26 @@ async fn store_call_alert_if_unfocused(
     alert: crate::notification_sound::ActiveCallAlert,
     focused_now: impl FnOnce() -> bool,
 ) -> bool {
+    store_call_alert_with_duration(
+        notifications,
+        account_id,
+        call_id,
+        sounding,
+        OS_CALL_SOUND_DURATION,
+        alert,
+        focused_now,
+    )
+    .await
+}
+async fn store_call_alert_with_duration(
+    notifications: &Notifications,
+    account_id: String,
+    call_id: String,
+    sounding: bool,
+    sound_duration: Duration,
+    alert: crate::notification_sound::ActiveCallAlert,
+    focused_now: impl FnOnce() -> bool,
+) -> bool {
     let replaced = {
         let mut alerts = notifications.active_call_alerts.lock().await;
         if focused_now() {
@@ -464,19 +510,47 @@ async fn store_call_alert_if_unfocused(
             alert.clear();
             return false;
         }
+        let id = notifications
+            .next_call_alert_id
+            .fetch_add(1, Ordering::AcqRel)
+            + 1;
+        let sound_timer = if sounding {
+            let alerts_map = notifications.active_call_alerts.clone();
+            let tx = notifications.sounding_call_ids.clone();
+            let cancel = notifications.cancel.clone();
+            let timer_account = account_id.clone();
+            Some(tauri::async_runtime::spawn(async move {
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    _ = tokio::time::sleep(sound_duration) => {}
+                }
+                let mut guard = alerts_map.lock().await;
+                if let Some(entry) = guard.get_mut(&timer_account) {
+                    if entry.id == id && entry.sounding {
+                        entry.sounding = false;
+                        entry.sound_timer = None;
+                        sync_sounding_calls(&guard, &tx);
+                    }
+                }
+            }))
+        } else {
+            None
+        };
         let replaced = alerts.insert(
             account_id,
             PostedCallAlert {
+                id,
                 alert,
                 call_id,
                 sounding,
+                sound_timer,
             },
         );
         sync_sounding_calls(&alerts, &notifications.sounding_call_ids);
         replaced
     };
     if let Some(old) = replaced {
-        old.alert.clear();
+        old.clear();
     }
     true
 }
@@ -490,20 +564,20 @@ async fn clear_call_alert(desktop: &Desktop, account_id: &str) {
         removed
     };
     if let Some(entry) = removed {
-        entry.alert.clear();
+        entry.clear();
     }
 }
 pub(crate) async fn clear_all_call_alerts(desktop: &Desktop) {
-    let alerts: Vec<_> = {
+    let entries: Vec<_> = {
         let mut guard = desktop.notifications.active_call_alerts.lock().await;
-        let drained: Vec<_> = guard.drain().map(|(_, entry)| entry.alert).collect();
+        let drained: Vec<_> = guard.drain().map(|(_, entry)| entry).collect();
         if !drained.is_empty() {
             sync_sounding_calls(&guard, &desktop.notifications.sounding_call_ids);
         }
         drained
     };
-    for alert in alerts {
-        alert.clear();
+    for entry in entries {
+        entry.clear();
     }
 }
 fn is_window_focused(app: &tauri::AppHandle) -> bool {
@@ -1953,15 +2027,16 @@ mod tests {
     #[tokio::test]
     async fn sounding_call_alerts_sync_watch_channel_and_clear_on_focus_race() {
         let notifications = Notifications::default();
-        let rx = notifications.subscribe_sounding_calls();
+        let mut rx = notifications.subscribe_sounding_calls();
         assert!(rx.borrow().is_empty());
 
         // Focus gained before storing rejects the alert and never publishes a sounding ID.
-        let stored = store_call_alert_if_unfocused(
+        let stored = store_call_alert_with_duration(
             &notifications,
             "acct-1".into(),
             "call-1".into(),
             true,
+            Duration::from_millis(25),
             crate::notification_sound::ActiveCallAlert::dummy_for_test(),
             || true,
         )
@@ -1970,11 +2045,12 @@ mod tests {
         assert!(rx.borrow().is_empty());
 
         // Unfocused silent alert is stored but must not suppress the in-app ringtone.
-        let stored = store_call_alert_if_unfocused(
+        let stored = store_call_alert_with_duration(
             &notifications,
             "acct-1".into(),
             "call-1".into(),
             false,
+            Duration::from_millis(25),
             crate::notification_sound::ActiveCallAlert::dummy_for_test(),
             || false,
         )
@@ -1982,20 +2058,37 @@ mod tests {
         assert!(stored);
         assert!(rx.borrow().is_empty());
 
-        // Unfocused sounding alert publishes the call ID via the watch channel.
-        let stored = store_call_alert_if_unfocused(
+        // Unfocused sounding alert publishes the call ID, then clears sounding after the
+        // one-shot OS clip finishes so the looping in-app ringtone takes over while the
+        // visual OS notification remains tracked for dismissal.
+        let stored = store_call_alert_with_duration(
             &notifications,
             "acct-1".into(),
             "call-2".into(),
             true,
+            Duration::from_millis(25),
             crate::notification_sound::ActiveCallAlert::dummy_for_test(),
             || false,
         )
         .await;
         assert!(stored);
         assert_eq!(
-            rx.borrow().get("acct-1").map(String::as_str),
+            rx.borrow_and_update().get("acct-1").map(String::as_str),
             Some("call-2")
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), rx.changed())
+            .await
+            .expect("sounding timer should fire")
+            .expect("watch sender alive");
+        assert!(rx.borrow().is_empty());
+        assert!(
+            notifications
+                .active_call_alerts
+                .lock()
+                .await
+                .contains_key("acct-1"),
+            "visual alert handle must remain tracked after one-shot sound finishes"
         );
     }
     #[test]

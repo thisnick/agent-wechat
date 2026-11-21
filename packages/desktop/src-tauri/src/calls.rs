@@ -814,6 +814,20 @@ struct PendingKeyframeTask {
     handle: tokio::task::JoinHandle<(LocalVideoCapture, Result<()>)>,
 }
 
+fn keyframe_matches(task: &Option<PendingKeyframeTask>, state: &ActiveMediaState) -> bool {
+    task.as_ref().is_some_and(|pending| {
+        pending.call_id == state.call_id && pending.video_gen == state.video_gen
+    })
+}
+
+async fn drain_keyframe_task(keyframe_task: &mut Option<PendingKeyframeTask>) {
+    if let Some(task) = keyframe_task.take() {
+        if let Ok(Ok((capture, _))) = timeout(TEARDOWN_TIMEOUT, task.handle).await {
+            stop_video_handles(Some(capture), None).await;
+        }
+    }
+}
+
 /// Runs one account's persistent Calls Protocol v3 control socket, pending command
 /// correlations, and optional connected media loop.
 async fn run_account_actor(
@@ -886,6 +900,7 @@ async fn run_account_actor(
                             let _ = reply.send(Ok(()));
                             continue;
                         }
+                        drain_keyframe_task(&mut keyframe_task).await;
                         if let Some(old) = active_media.take() {
                             old.close().await;
                         }
@@ -1036,10 +1051,13 @@ async fn run_account_actor(
                         };
                         state.camera_enabled = enabled && state.call_type == CallType::Video;
                         if !state.camera_enabled {
+                            drain_keyframe_task(&mut keyframe_task).await;
                             state.stop_video().await;
                             let _ = reply.send(Ok(()));
                         } else if state.video_track_is_active() {
-                            if state.local_video.is_some()
+                            let has_capture =
+                                state.local_video.is_some() || keyframe_matches(&keyframe_task, state);
+                            if has_capture
                                 && state.active_video_format
                                     == state
                                         .media
@@ -1050,6 +1068,7 @@ async fn run_account_actor(
                                 let _ = reply.send(Ok(()));
                                 continue;
                             }
+                            drain_keyframe_task(&mut keyframe_task).await;
                             match state.start_camera(ffmpeg.clone()).await {
                                 Ok(()) => {
                                     let _ = reply.send(Ok(()));
@@ -1108,6 +1127,7 @@ async fn run_account_actor(
                             && state.camera_enabled
                             && state.video_track_is_active()
                         {
+                            drain_keyframe_task(&mut keyframe_task).await;
                             if let Err(error) = state.start_camera(ffmpeg.clone()).await {
                                 let _ = channel.send(DesktopCallPacket::MediaError {
                                     code: "camera_unavailable".into(),
@@ -1124,11 +1144,13 @@ async fn run_account_actor(
                         });
                     }
                     ActorRequest::StopLocalMedia => {
+                        drain_keyframe_task(&mut keyframe_task).await;
                         if let Some(state) = active_media.as_mut() {
                             state.stop_local_devices().await;
                         }
                     }
                     ActorRequest::StopMedia => {
+                        drain_keyframe_task(&mut keyframe_task).await;
                         if let Some(old) = active_media.take() {
                             old.close().await;
                         }
@@ -1182,6 +1204,7 @@ async fn run_account_actor(
                                         .as_ref()
                                         .is_some_and(|m| m.call_id == call.call_id)
                                     {
+                                        drain_keyframe_task(&mut keyframe_task).await;
                                         if let Some(old) = active_media.take() {
                                             old.close().await;
                                         }
@@ -1191,6 +1214,7 @@ async fn run_account_actor(
                                         .as_mut()
                                         .filter(|m| m.call_id == call.call_id)
                                     {
+                                        drain_keyframe_task(&mut keyframe_task).await;
                                         state.stop_local_devices().await;
                                     }
                                 }
@@ -1198,6 +1222,7 @@ async fn run_account_actor(
                             CallEvent::Availability { availability } => {
                                 if !availability.busy || !availability.owned_by_this_client {
                                     owner_tokens.clear();
+                                    drain_keyframe_task(&mut keyframe_task).await;
                                     if let Some(old) = active_media.take() {
                                         old.close().await;
                                     }
@@ -1228,6 +1253,7 @@ async fn run_account_actor(
                             if let Ok((_, video_send_changed)) = state.media.synchronize_tracks(&control, &call_id) {
                                 if video_send_changed {
                                     if !state.video_track_is_active() || !state.camera_enabled {
+                                        drain_keyframe_task(&mut keyframe_task).await;
                                         state.stop_video().await;
                                     } else {
                                         let next_fmt = state
@@ -1235,7 +1261,12 @@ async fn run_account_actor(
                                             .video_send_track
                                             .as_ref()
                                             .and_then(|t| t.video_format());
-                                        if state.local_video.is_none() || state.active_video_format != next_fmt {
+                                        let has_capture = state.local_video.is_some()
+                                            || keyframe_matches(&keyframe_task, state);
+                                        if !has_capture || state.active_video_format != next_fmt {
+                                            // Ensure any in-flight keyframe task has released the
+                                            // exclusive camera device before spawning a new FFmpeg.
+                                            drain_keyframe_task(&mut keyframe_task).await;
                                             if let Err(error) = state.start_camera(ffmpeg.clone()).await {
                                                 let _ = channel.send(DesktopCallPacket::MediaError {
                                                     code: "camera_unavailable".into(),
@@ -1345,6 +1376,7 @@ async fn run_account_actor(
                     Ok(_) => {}
                     Err(error) => {
                         debug_call("desktop-media", format_args!("media socket closed: {error:#}"));
+                        drain_keyframe_task(&mut keyframe_task).await;
                         if let Some(old) = active_media.take() {
                             old.close().await;
                         }
@@ -1451,6 +1483,7 @@ async fn run_account_actor(
                     }
                 }
                 if let Some(message) = media_write_failed {
+                    drain_keyframe_task(&mut keyframe_task).await;
                     if let Some(old) = active_media.take() {
                         old.close().await;
                     }
@@ -1518,13 +1551,9 @@ async fn run_account_actor(
         }
     };
 
+    drain_keyframe_task(&mut keyframe_task).await;
     if let Some(old) = active_media.take() {
         old.close().await;
-    }
-    if let Some(task) = keyframe_task.take() {
-        if let Ok(Ok((capture, _))) = timeout(TEARDOWN_TIMEOUT, task.handle).await {
-            stop_video_handles(Some(capture), None).await;
-        }
     }
     for (_, waiter) in pending.drain() {
         let _ = waiter.send(Err("closed".into()));
