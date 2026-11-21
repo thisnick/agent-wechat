@@ -197,7 +197,13 @@ impl DeviceBackend for Backend {
             .min(4_800) as usize;
         if frames > 0 {
             let mut samples = [0.0f32; 4_800];
-            self.playback.drain(&mut samples[..frames])?;
+            let drained_gen = self.playback.drain(&mut samples[..frames])?;
+            if drained_gen != self.generation {
+                self.output.stop_stream().map_err(error)?;
+                self.output.reset_stream().map_err(error)?;
+                self.output.start_stream().map_err(error)?;
+                self.generation = drained_gen;
+            }
             let mut bytes = [0u8; 4_800 * 4];
             for (sample, out) in samples[..frames]
                 .iter()

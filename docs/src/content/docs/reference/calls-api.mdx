@@ -11,15 +11,15 @@ attach the separate [binary `WXCM` v3 media socket](../calls-media/).
 
 All routes require an account-authorized `calls` bearer token in the
 `Authorization` header. WebSocket routes also accept a single-use `?ticket=`
-query parameter minted by `POST /v1/accounts/{account}/calls/socket-ticket`
-(valid for 30 seconds, bound to the exact account, route and call ID) for
+query parameter minted by `POST /v1/accounts/{account}/calls/tickets`
+(valid for 20 seconds, bound to the exact account, route and call ID) for
 clients that cannot set custom upgrade headers. URL-encode identifiers; never
 put bearer tokens in URLs.
 
 | Method | Path | Response |
 | --- | --- | --- |
 | GET | `/v1/accounts/{account}/calls/current` | JSON snapshot |
-| POST | `/v1/accounts/{account}/calls/socket-ticket` | Single-use WebSocket ticket (`target`: `control` or `media`) |
+| POST | `/v1/accounts/{account}/calls/tickets` | Single-use WebSocket ticket (`socket`: `control` or `media`, plus `callId` for `media`) |
 | WebSocket | `/v1/accounts/{account}/calls/socket` | JSON control messages (protocol 3) |
 | WebSocket | `/v1/accounts/{account}/calls/{callId}/media` | JSON track lifecycle + binary `WXCM` v3 audio/video frames |
 
@@ -333,7 +333,7 @@ Mute outgoing audio (`call.mute`), toggle the local camera on a video call
 [stream generations](../calls-media/#mute-camera-toggle-and-interrupt).
 `call.mute` silences this client's outgoing stream in the daemon. For a conference,
 it also requests our room microphone state. `call.camera` requests our camera
-state (`SwitchAV`) and advances the video send track generation. Neither controls
+state and advances the video send track generation. Neither controls
 another participant's devices.
 
 ```json
@@ -370,7 +370,7 @@ calls, and optional `cameraEnabled` / `muted` flags on `call.dial`,
 ## Server messages
 
 These JSON text messages arrive on the **control** socket. Media attachment has
-its own [`media.ready` response](../calls-media/#attach-and-exchange-audio).
+its own [`media.ready` response](../calls-media/#attach-and-exchange-media).
 
 ### Hello
 

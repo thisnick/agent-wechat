@@ -1,7 +1,7 @@
 //! Direct voice and video transport, codec state, packet ordering and pacing.
 use super::{
     connect_relay, DirectAudioFrame, DirectMediaHost, DirectMediaOptions, DirectVideoTx,
-    MediaMetric, TxAudioJitterBuffer,
+    MediaMetric, TxAudioJitterBuffer, TxVideoQueue,
 };
 use crate::{
     audio::{AudioDecoder, AudioEncoder, AudioFormat},
@@ -119,11 +119,14 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
     let mut rx_timeline = DirectRxAudioTimeline::new();
     let mut video_rx = RsmVideoReassembler::new();
     let mut video_tx = RsmVideoPacketizer::new(selected.own_member, 1);
+    let mut tx_video_queue = TxVideoQueue::new();
     let mut tx_video_packets = VecDeque::<(u32, Vec<u8>)>::new();
+    let mut video_tx_exhausted = false;
     let mut last_vf_tx: Option<Instant> = None;
-    let mut last_irequest_tx = Instant::now() - Duration::from_secs(5);
+    let mut last_irequest_tx: Option<Instant> = None;
+    let mut pending_local_irequest: Option<u16> = None;
     let mut irequest_seq = 1u32;
-    let mut last_p2s_tx = Instant::now() - Duration::from_secs(5);
+    let mut last_p2s_tx: Option<Instant> = None;
     let mut p2s_seq = 1u16;
     let mut last_peer_activity = Instant::now();
     let video_enabled = media.video_enabled || video.is_some();
@@ -218,11 +221,12 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                                     }
                                                     host.receive_video(frame)?;
                                                 }
-                                                Ok(RsmIngestOutcome::FrameDroppedNeedKeyframe) => {
+                                                Ok(RsmIngestOutcome::FrameDroppedNeedKeyframe)
+                                                | Err(_) => {
                                                     trace_drops += 1;
                                                     need_keyframe = true;
                                                 }
-                                                Ok(RsmIngestOutcome::Pending) | Err(_) => {}
+                                                Ok(RsmIngestOutcome::Pending) => {}
                                             }
                                             if video_trace
                                                 && trace_last.elapsed() >= Duration::from_secs(2)
@@ -233,8 +237,9 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                                 trace_last = Instant::now();
                                             }
                                             if need_keyframe
-                                                && last_irequest_tx.elapsed()
-                                                    >= Duration::from_millis(1200)
+                                                && last_irequest_tx.is_none_or(|t| {
+                                                    t.elapsed() >= Duration::from_millis(1200)
+                                                })
                                             {
                                                 let req = encode_irequest(
                                                     selected.own_member,
@@ -256,7 +261,7 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                                         &datagram,
                                                         &[],
                                                     );
-                                                    last_irequest_tx = Instant::now();
+                                                    last_irequest_tx = Some(Instant::now());
                                                 }
                                             }
                                         }
@@ -333,8 +338,11 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                 }
             }
             if video_enabled {
-                if let Some(target_member) = host.take_local_keyframe_request() {
-                    if last_irequest_tx.elapsed() >= Duration::from_millis(250) {
+                if pending_local_irequest.is_none() {
+                    pending_local_irequest = host.take_local_keyframe_request();
+                }
+                if last_irequest_tx.is_none_or(|t| t.elapsed() >= Duration::from_millis(250)) {
+                    if let Some(target_member) = pending_local_irequest.take() {
                         let req = encode_irequest(
                             selected.own_member,
                             target_member,
@@ -345,34 +353,31 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                         irequest_seq = irequest_seq.wrapping_add(1);
                         if let Ok(datagram) = channel.seal_video_rtcp(epoch, clock(), 1, &req) {
                             let _ = host.submit(&socket, endpoint, &datagram, &[]);
-                            last_irequest_tx = Instant::now();
+                            last_irequest_tx = Some(Instant::now());
                         }
                     }
                 }
-                if last_p2s_tx.elapsed() >= Duration::from_secs(1) {
+                if last_p2s_tx.is_none_or(|t| t.elapsed() >= Duration::from_secs(1)) {
                     if let Ok(p2s) = encode_p2s(p2s_seq, 1, 0x19, 15) {
                         p2s_seq = p2s_seq.wrapping_add(1);
                         if let Ok(datagram) = channel.seal_qos_p2s(epoch, clock(), &p2s) {
                             let _ = host.submit(&socket, endpoint, &datagram, &[]);
-                            last_p2s_tx = Instant::now();
+                            last_p2s_tx = Some(Instant::now());
                         }
                     }
                 }
                 if let Some(video_rx_ch) = &video {
                     let current_vgen = host.video_generation();
-                    if current_vgen == 0 {
+                    if current_vgen == 0 || video_tx_exhausted {
+                        tx_video_queue.clear();
                         tx_video_packets.clear();
                         last_vf_tx = None;
                     } else {
                         tx_video_packets.retain(|(gen_id, _)| *gen_id == current_vgen);
                         if tx_video_packets.is_empty() {
-                            let mut latest: Option<DirectVideoTx> = None;
-                            while let Ok(frame) = video_rx_ch.try_recv() {
-                                if frame.generation == current_vgen {
-                                    latest = Some(frame);
-                                }
-                            }
-                            if let Some(frame) = latest {
+                            if let Some(frame) =
+                                tx_video_queue.next_frame(video_rx_ch, current_vgen)
+                            {
                                 if last_vf_tx
                                     .is_none_or(|t| t.elapsed() >= Duration::from_millis(500))
                                 {
@@ -407,8 +412,19 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                 tx_video_packets.clear();
                                 break;
                             }
-                            let datagram = channel.seal_video(epoch, clock(), 1, true, &pkt)?;
-                            let _ = host.submit(&socket, endpoint, &datagram, &[])?;
+                            match channel.seal_video(epoch, clock(), 1, true, &pkt) {
+                                Ok(datagram) => {
+                                    let _ = host.submit(&socket, endpoint, &datagram, &[])?;
+                                }
+                                Err(_) => {
+                                    // Stop outgoing video cleanly if the 16-bit video sequence
+                                    // space is exhausted rather than aborting audio.
+                                    tx_video_packets.clear();
+                                    tx_video_queue.clear();
+                                    video_tx_exhausted = true;
+                                    break;
+                                }
+                            }
                         }
                     }
                 }

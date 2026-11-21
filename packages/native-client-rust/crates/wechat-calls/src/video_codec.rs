@@ -113,15 +113,25 @@ pub fn find_ffmpeg() -> Option<PathBuf> {
             return Some(path);
         }
     }
+    let bin_name = if cfg!(windows) {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    };
     if let Ok(path_var) = std::env::var("PATH") {
         for dir in std::env::split_paths(&path_var) {
-            let candidate = dir.join("ffmpeg");
+            let candidate = dir.join(bin_name);
             if candidate.is_file() {
                 return Some(candidate);
             }
         }
     }
-    for fallback in ["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg"] {
+    #[cfg(not(windows))]
+    for fallback in [
+        "/usr/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/opt/homebrew/bin/ffmpeg",
+    ] {
         let path = PathBuf::from(fallback);
         if path.is_file() {
             return Some(path);
@@ -132,11 +142,27 @@ pub fn find_ffmpeg() -> Option<PathBuf> {
 
 /// Probe and cache local FFmpeg encoder/decoder capabilities.
 pub fn probe_video_capabilities() -> VideoCodecCapabilities {
-    static CACHED: OnceLock<VideoCodecCapabilities> = OnceLock::new();
-    if std::env::var_os("WX_FFMPEG_BIN").is_some() {
-        return probe_uncached();
+    use std::collections::BTreeMap;
+    use std::ffi::OsString;
+    use std::sync::Mutex;
+
+    static CACHED: OnceLock<Mutex<BTreeMap<Option<OsString>, VideoCodecCapabilities>>> =
+        OnceLock::new();
+    let key = std::env::var_os("WX_FFMPEG_BIN");
+    let cache = CACHED.get_or_init(|| Mutex::new(BTreeMap::new()));
+    if let Ok(guard) = cache.lock() {
+        if let Some(caps) = guard.get(&key) {
+            return caps.clone();
+        }
     }
-    CACHED.get_or_init(probe_uncached).clone()
+    let probed = probe_uncached();
+    if let Ok(mut guard) = cache.lock() {
+        if guard.len() >= 8 {
+            guard.clear();
+        }
+        guard.insert(key, probed.clone());
+    }
+    probed
 }
 
 fn probe_uncached() -> VideoCodecCapabilities {
@@ -208,6 +234,9 @@ pub struct EncodedVideoFrame {
     pub bytes: Vec<u8>,
 }
 
+const MAX_TRANSCODE_INPUT_BYTES: usize = 2 * 1024 * 1024;
+const MAX_TRANSCODE_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+
 /// Streaming low-latency FFmpeg subprocess transcoder.
 ///
 /// Dropping this handle cleanly closes stdin, terminates the child process and
@@ -217,7 +246,7 @@ pub struct VideoTranscoder {
     config: TranscodeConfig,
     child: Option<Child>,
     stdin: Option<ChildStdin>,
-    rx: Receiver<EncodedVideoFrame>,
+    rx: Option<Receiver<EncodedVideoFrame>>,
     reader: Option<JoinHandle<()>>,
 }
 
@@ -249,14 +278,17 @@ impl VideoTranscoder {
             config,
             child: Some(child),
             stdin: Some(stdin),
-            rx,
+            rx: Some(rx),
             reader: Some(reader),
         })
     }
 
     /// Push one complete input frame (Annex-B access unit or JPEG) into the transcoder.
     pub fn push(&mut self, input: &[u8]) -> Result<()> {
-        ensure!(!input.is_empty(), "Empty video transcode input");
+        ensure!(
+            !input.is_empty() && input.len() <= MAX_TRANSCODE_INPUT_BYTES,
+            "Invalid video transcode input size"
+        );
         let stdin = self
             .stdin
             .as_mut()
@@ -273,12 +305,12 @@ impl VideoTranscoder {
 
     /// Non-blocking poll for the next completed output frame.
     pub fn try_recv(&mut self) -> Option<EncodedVideoFrame> {
-        self.rx.try_recv().ok()
+        self.rx.as_ref().and_then(|rx| rx.try_recv().ok())
     }
 
     /// Blocking receive for the next completed output frame until the stream closes.
     pub fn recv(&mut self) -> Option<EncodedVideoFrame> {
-        self.rx.recv().ok()
+        self.rx.as_ref().and_then(|rx| rx.recv().ok())
     }
 
     /// Restart the underlying encoder so the very next pushed frame emits a fresh keyframe
@@ -288,13 +320,16 @@ impl VideoTranscoder {
         let (child, stdin, rx, reader) = spawn_worker(&self.ffmpeg, self.config)?;
         self.child = Some(child);
         self.stdin = Some(stdin);
-        self.rx = rx;
+        self.rx = Some(rx);
         self.reader = Some(reader);
         Ok(())
     }
 
     fn shutdown_worker(&mut self) {
         self.stdin.take();
+        // Drop the output receiver before joining the stdout reader thread so a full
+        // channel can never deadlock shutdown.
+        self.rx.take();
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -325,6 +360,12 @@ fn spawn_worker(
         "-hide_banner",
         "-loglevel",
         "error",
+        "-max_alloc",
+        "67108864",
+        "-protocol_whitelist",
+        "pipe",
+        "-filter_threads",
+        "1",
         "-fflags",
         "+genpts",
         "-flags",
@@ -336,13 +377,33 @@ fn spawn_worker(
     ]);
     match config.from {
         VideoCodec::H265 => {
-            cmd.args(["-threads", "1", "-f", "hevc", "-i", "pipe:0"]);
+            cmd.args([
+                "-format_whitelist",
+                "hevc",
+                "-threads",
+                "1",
+                "-f",
+                "hevc",
+                "-i",
+                "pipe:0",
+            ]);
         }
         VideoCodec::H264 => {
-            cmd.args(["-threads", "1", "-f", "h264", "-i", "pipe:0"]);
+            cmd.args([
+                "-format_whitelist",
+                "h264",
+                "-threads",
+                "1",
+                "-f",
+                "h264",
+                "-i",
+                "pipe:0",
+            ]);
         }
         VideoCodec::Jpeg => {
             cmd.args([
+                "-format_whitelist",
+                "mjpeg",
                 "-framerate",
                 &config.fps.to_string(),
                 "-f",
@@ -462,10 +523,18 @@ fn spawn_worker(
         .context("Missing FFmpeg transcoder stdout")?;
     let (tx, rx) = mpsc::sync_channel(16);
     let out_codec = config.to;
-    let reader = thread::Builder::new()
+    let reader = match thread::Builder::new()
         .name("wechat-video-transcode".into())
         .spawn(move || read_output_stream(stdout, out_codec, tx))
-        .context("Failed to spawn FFmpeg stdout reader")?;
+    {
+        Ok(reader) => reader,
+        Err(error) => {
+            drop(stdin);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error).context("Failed to spawn FFmpeg stdout reader");
+        }
+    };
     Ok((child, stdin, rx, reader))
 }
 
@@ -487,6 +556,11 @@ fn read_output_stream(
             Ok(n) => n,
             Err(_) => break,
         };
+        if buf.len().saturating_add(n) > MAX_TRANSCODE_BUFFER_BYTES {
+            buf.clear();
+            pending_au.clear();
+            break;
+        }
         buf.extend_from_slice(&chunk[..n]);
         match codec {
             VideoCodec::Jpeg => {
@@ -526,7 +600,7 @@ fn read_output_stream(
             &tx,
         );
         if !pending_au.is_empty() && pending_has_slice {
-            let _ = tx.send(EncodedVideoFrame {
+            let _ = tx.try_send(EncodedVideoFrame {
                 codec,
                 is_keyframe: pending_is_keyframe,
                 has_codec_config: pending_has_config,
@@ -587,6 +661,13 @@ fn drain_annexb_nalus(
             *pending_has_slice = false;
             *pending_is_keyframe = false;
             *pending_has_config = false;
+        }
+        if pending_au.len().saturating_add(nalu.len()) > MAX_TRANSCODE_BUFFER_BYTES {
+            pending_au.clear();
+            *pending_has_slice = false;
+            *pending_is_keyframe = false;
+            *pending_has_config = false;
+            continue;
         }
         pending_au.extend_from_slice(nalu);
         *pending_has_config |= is_param;

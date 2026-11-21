@@ -373,6 +373,7 @@ impl Fixture {
             metrics: MediaMetrics::default(),
 
             mutations_submitted: AtomicBool::new(false),
+            joined_commands_ready: AtomicBool::new(false),
             incoming: None,
             conference: None,
             conference_start: None,

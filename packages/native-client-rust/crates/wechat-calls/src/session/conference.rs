@@ -457,11 +457,11 @@ impl ConferenceSession {
         let room = self.room.as_ref().context("Conference room missing")?;
         ensure!(
             self.video_mode
-                || camera_enabled
-                || room
-                    .av_members
-                    .get(&(room.identity.own_member as u16))
-                    .is_none_or(|flags| flags & !1 == 0),
+                || (!camera_enabled
+                    && room
+                        .av_members
+                        .get(&(room.identity.own_member as u16))
+                        .is_none_or(|flags| flags & !1 == 0)),
             "Nonvoice conference microphone state unsupported"
         );
         let identity = room.identity;

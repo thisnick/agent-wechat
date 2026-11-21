@@ -496,7 +496,12 @@ fn parse_call_socket_ticket_route(
         .strip_prefix("calls/")
         .and_then(|s| s.strip_suffix("/media"))
     {
-        if mid.is_empty() || mid.contains('/') {
+        if mid.is_empty()
+            || mid.len() > 200
+            || !mid
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~'))
+        {
             return None;
         }
         (

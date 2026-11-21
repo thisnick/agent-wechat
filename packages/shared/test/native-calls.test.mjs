@@ -548,3 +548,68 @@ test('ticketProvider authenticates control and media sockets via ?ticket= withou
     assert.equal(seenUrls.length, 2);
   } finally { owner.close(); }
 });
+
+test('default maxBufferedBytes permits legal max PCM and video frames and sendVideo validates inputs', async () => {
+  const videoFmt = { codec: 'h265', mode: 'passthrough', maxWidth: 640, maxHeight: 480, maxFps: 15 };
+  const server = new MockCallServer();
+  server.capabilities = { directAudio: true, directVideo: true };
+  server.tracks = {
+    sendTracks: [
+      { media: 'audio', id: 1, generation: 1, direction: 'send', format: audio },
+      { media: 'video', id: 65537, generation: 1, direction: 'send', format: videoFmt, active: true },
+    ],
+    receiveTracks: [
+      { media: 'audio', id: 2, generation: 1, direction: 'receive', format: audio },
+      { media: 'video', id: 65538, generation: 1, direction: 'receive', format: videoFmt, active: true },
+    ],
+  };
+  const origFactory = server.factory;
+  const mediaFrames = [];
+  server.factory = (url, options) => {
+    if (!url.endsWith('/media')) return origFactory(url, options);
+    let attached = false;
+    const socket = new MockSocket(value => {
+      if (!attached) {
+        attached = true;
+        queueMicrotask(() => socket.receive({ type: 'media.ready', protocolVersion: 3, ...structuredClone(server.tracks) }));
+      } else if (value instanceof Uint8Array) {
+        mediaFrames.push(decodeWxcm(value));
+      }
+    });
+    server.sockets.push(socket); server.media.push(socket); queueMicrotask(() => socket.open());
+    return socket;
+  };
+  // Use default maxBufferedBytes (64 KiB) without overriding it.
+  const owner = client(server);
+  try {
+    await owner.connect();
+    await owner.ready('r-max', true, audio, undefined, { sendCodecs: ['h265'], receiveCodecs: ['h265'] });
+    await owner.dial('d-max', 'alice', { callType: 'video', cameraEnabled: true });
+    const media = await owner.attachMedia('call-1');
+
+    // Full 64 KiB PCM chunk + initial track.start succeeds on an idle socket.
+    media.sendPcm(new Int16Array(32768).fill(1234), 1);
+    assert.equal(mediaFrames.at(-1).payload.byteLength, 65536);
+
+    // Full 512 KiB video frame + initial track.start succeeds on an idle socket.
+    const maxVideo = new Uint8Array(512 * 1024);
+    maxVideo.set([0, 0, 0, 1, 0x26, 0x01], 0);
+    media.sendVideo(maxVideo, 1, { keyframe: true, timestampMicros: 1000 });
+    assert.equal(mediaFrames.at(-1).payload.byteLength, 512 * 1024);
+
+    // Backpressure still triggers when the socket already has buffered bytes past the floor.
+    server.media[0].bufferedAmount = 524 * 1024;
+    assert.throws(() => media.sendVideo(new Uint8Array([0, 0, 0, 1, 0x02, 0x01]), 1), error => error.code === 'media_backpressure');
+    server.media[0].bufferedAmount = 0;
+
+    // Input validation checks on sendVideo.
+    const validNal = new Uint8Array([0, 0, 0, 1, 0x02, 0x01]);
+    assert.throws(() => media.sendVideo(validNal, 2), error => error.code === 'stale');
+    assert.throws(() => media.sendVideo(new Uint8Array(0), 1), error => error.code === 'invalid_media');
+    assert.throws(() => media.sendVideo(new Uint8Array(512 * 1024 + 1), 1), error => error.code === 'invalid_media');
+    assert.throws(() => media.sendVideo(validNal, 1, { codec: 'h264' }), error => error.code === 'invalid_media');
+    assert.throws(() => media.sendVideo(validNal, 1, { timestampMicros: -1 }), error => error.code === 'invalid_media');
+    assert.throws(() => media.sendVideo(validNal, 1, { timestampMicros: Number.MAX_SAFE_INTEGER + 1 }), error => error.code === 'invalid_media');
+    assert.throws(() => media.sendVideo(validNal, 1, { rotationDegrees: 45 }), error => error.code === 'invalid_media');
+  } finally { owner.close(); }
+});

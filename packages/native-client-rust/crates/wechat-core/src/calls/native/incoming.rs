@@ -93,6 +93,7 @@ pub(super) async fn prepare(
         video_generation: AtomicU32::new(1),
         muted: AtomicBool::new(false),
         camera_enabled: AtomicBool::new(false),
+        joined_commands_ready: AtomicBool::new(false),
         submission: SendAdmission::default(),
         metrics: MediaMetrics::default(),
         mutations_submitted: AtomicBool::new(false),
@@ -426,6 +427,9 @@ impl Actor {
                     return self.exit();
                 }
                 if self.worker.call_type == CallType::Video {
+                    self.worker
+                        .joined_commands_ready
+                        .store(true, Ordering::Release);
                     let transport = &self.transport;
                     let state = &mut self.state;
                     let authority = self.authority;

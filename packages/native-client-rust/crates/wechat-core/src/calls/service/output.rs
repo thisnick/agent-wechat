@@ -22,8 +22,13 @@ impl CallService {
                 return Err(error(CallErrorCode::InvalidRequest));
             }
             let current = call.video_send_generation;
-            if generation == 0 || generation != current {
+            if generation == 0 || generation > current {
                 return Err(error(CallErrorCode::Stale));
+            }
+            if generation < current {
+                // Superseded track.start raced with a control-socket camera toggle; absorb
+                // without activating the stale generation or tearing down the active call.
+                return Ok(());
             }
             state
                 .media
@@ -163,7 +168,12 @@ impl CallService {
             let state = self.lock()?;
             let call = self.media_transport(&state, id)?;
             let Some(track) = call.receive_tracks.get(&track_id) else {
-                return Err(error(CallErrorCode::Stale));
+                if track_id < VIDEO_RECEIVE_TRACK_BASE {
+                    return Err(error(CallErrorCode::InvalidRequest));
+                }
+                // In-flight keyframe request for a receive video track that was just removed
+                // (peer toggled camera off or left); ignore instead of tearing down the call.
+                return Ok(());
             };
             if !track.is_video() {
                 return Err(error(CallErrorCode::InvalidRequest));

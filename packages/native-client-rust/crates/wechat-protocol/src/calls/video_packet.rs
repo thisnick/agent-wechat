@@ -745,6 +745,7 @@ struct PendingAssembly {
     groups: Vec<BTreeMap<usize, Vec<u8>>>,
     /// 2D vertical parity packets keyed by `(vert_group_idx, col)` where `col in 0..s`.
     vert_parity: BTreeMap<(usize, usize), Vec<u8>>,
+    fec_recovered: bool,
     arrival_order: u64,
 }
 
@@ -834,13 +835,19 @@ impl PendingAssembly {
     }
 }
 
-/// Reassembles MP/iLink kind-3 RSM video packets (including multi-group and 2D RS FEC)
-/// into complete Annex-B frames.
-pub struct RsmVideoReassembler {
+#[derive(Default)]
+struct StreamReassembler {
     active: BTreeMap<u32, PendingAssembly>,
     last_completed: Option<u32>,
+    last_timestamp_ms: Option<u32>,
     arrival_counter: u64,
     vf_orientation: Option<u8>,
+}
+
+/// Reassembles MP/iLink kind-3 RSM video packets (including multi-group and 2D RS FEC)
+/// into complete Annex-B frames, keeping independent state per `stream_id`.
+pub struct RsmVideoReassembler {
+    streams: BTreeMap<u8, StreamReassembler>,
 }
 
 impl Default for RsmVideoReassembler {
@@ -853,18 +860,13 @@ impl RsmVideoReassembler {
     /// Create a fresh reassembler with empty assembly state.
     pub fn new() -> Self {
         Self {
-            active: BTreeMap::new(),
-            last_completed: None,
-            arrival_counter: 0,
-            vf_orientation: None,
+            streams: BTreeMap::new(),
         }
     }
 
     /// Clear all pending assemblies (for example after a remote camera toggle).
     pub fn reset(&mut self) {
-        self.active.clear();
-        self.last_completed = None;
-        self.vf_orientation = None;
+        self.streams.clear();
     }
 
     /// Feed one decrypted MP/iLink RSM video packet (`[codecType, mid/sid, EncFecHeader, ...]`).
@@ -873,6 +875,20 @@ impl RsmVideoReassembler {
             packet.len() >= 3 + 21,
             "Truncated MP/iLink RSM video packet"
         );
+        let ms = u16::from_le_bytes([packet[1], packet[2]]);
+        let stream_id = ((ms >> 11) & 0x0f) as u8;
+        if !self.streams.contains_key(&stream_id) && self.streams.len() >= 4 {
+            return Ok(RsmIngestOutcome::Pending);
+        }
+        self.streams
+            .entry(stream_id)
+            .or_default()
+            .ingest_stream(packet)
+    }
+}
+
+impl StreamReassembler {
+    fn ingest_stream(&mut self, packet: &[u8]) -> Result<RsmIngestOutcome> {
         let codec = VideoWireCodec::from_wire(packet[0]);
         let ms = u16::from_le_bytes([packet[1], packet[2]]);
         let member_id = ms & 0x7ff;
@@ -1000,12 +1016,28 @@ impl RsmVideoReassembler {
         // Drop trailing FEC parity / late duplicate packets belonging to any already-emitted
         // frame (within a 256-frame modular window) so they never re-emit an older frame
         // out of order via RS recovery or re-insert a zombie assembly that triggers false
-        // frame-drop IRequests. Allow a clean encoder restart (IDR with low frame_idx).
+        // frame-drop IRequests. Allow clean encoder restarts (IDR whose timestamp advanced
+        // or whose index & timestamp reset to 0) and clear pre-restart assemblies so stale
+        // chunks can never splice into post-restart frames.
         if let Some(last) = self.last_completed {
-            let encoder_reset = is_iframe && full_frame_idx <= 4 && last > 32;
+            let ts_advanced = self.last_timestamp_ms.is_some_and(|prev_ts| {
+                let delta = timestamp_ms.wrapping_sub(prev_ts);
+                delta > 0 && delta < 0x8000_0000
+            });
+            let low_idx_reset = full_frame_idx <= 4
+                && last > 32
+                && self.last_timestamp_ms.is_none_or(|prev_ts| {
+                    timestamp_ms < 1000 && prev_ts.saturating_sub(timestamp_ms) > 5000
+                });
+            let encoder_reset = is_iframe && (ts_advanced || low_idx_reset);
             let lag = last.wrapping_sub(full_frame_idx) & 0xffff;
-            if !encoder_reset && lag < 256 {
-                return Ok(RsmIngestOutcome::Pending);
+            if lag < 256 {
+                if encoder_reset {
+                    self.active.clear();
+                    self.last_completed = None;
+                } else {
+                    return Ok(RsmIngestOutcome::Pending);
+                }
             }
         }
 
@@ -1025,6 +1057,16 @@ impl RsmVideoReassembler {
 
         self.arrival_counter = self.arrival_counter.wrapping_add(1);
         let arrival = self.arrival_counter;
+        if let Some(existing) = self.active.get(&full_frame_idx) {
+            if existing.timestamp_ms != timestamp_ms {
+                let newer = timestamp_ms.wrapping_sub(existing.timestamp_ms) < 0x8000_0000;
+                if newer {
+                    self.active.remove(&full_frame_idx);
+                } else {
+                    return Ok(RsmIngestOutcome::Pending);
+                }
+            }
+        }
         let entry = self
             .active
             .entry(full_frame_idx)
@@ -1044,6 +1086,7 @@ impl RsmVideoReassembler {
                 slice_len_hi,
                 groups: (0..x_groups).map(|_| BTreeMap::new()).collect(),
                 vert_parity: BTreeMap::new(),
+                fec_recovered: false,
                 arrival_order: arrival,
             });
         // Reject inconsistent stream/group geometry for the same frame index.
@@ -1066,9 +1109,8 @@ impl RsmVideoReassembler {
                 .or_insert_with(|| payload.to_vec());
         }
 
-        let mut fec_recovered = false;
-        if !entry.source_chunks_complete() {
-            fec_recovered = entry.try_fec_recover();
+        if !entry.source_chunks_complete() && entry.try_fec_recover() {
+            entry.fec_recovered = true;
         }
         if !entry.source_chunks_complete() {
             return Ok(if dropped {
@@ -1080,6 +1122,7 @@ impl RsmVideoReassembler {
 
         let completed = self.active.remove(&full_frame_idx).expect("just inserted");
         self.last_completed = Some(full_frame_idx);
+        self.last_timestamp_ms = Some(completed.timestamp_ms);
         // Drop any strictly older stalled assemblies (16-bit wraparound-safe) so latency
         // never accumulates.
         let before = self.active.len();
@@ -1130,7 +1173,7 @@ impl RsmVideoReassembler {
             timestamp_ms: completed.timestamp_ms,
             orientation: self.vf_orientation.unwrap_or(completed.orientation),
             prior_frames_dropped: dropped || evicted_older,
-            fec_recovered,
+            fec_recovered: completed.fec_recovered,
             is_keyframe: is_keyframe || completed.is_iframe,
             has_codec_config,
             payload: frame_payload,
@@ -2226,5 +2269,136 @@ mod tests {
         };
         assert!(frame.fec_recovered);
         assert_eq!(frame.payload, annexb);
+    }
+
+    #[test]
+    fn encoder_restart_clears_stale_assemblies_even_if_first_idr_missed_and_isolates_streams() {
+        let mut idr = Vec::new();
+        idr.extend_from_slice(&[0, 0, 0, 1, 0x40, 0x01, 0xaa]);
+        idr.extend_from_slice(&[0, 0, 0, 1, 0x42, 0x01, 0xbb]);
+        idr.extend_from_slice(&[0, 0, 0, 1, 0x44, 0x01, 0xcc]);
+        idr.extend_from_slice(&[0, 0, 0, 1, 0x26, 0x01]);
+        idr.extend_from_slice(&[0x55; 180]);
+
+        let mut p_frame = vec![0, 0, 0, 1, 0x02, 0x01];
+        p_frame.extend_from_slice(&[0x77; 160]);
+
+        let mut rx = RsmVideoReassembler::new();
+
+        // Advance stream 1 to frame 40 (ts 4000ms), then leave an incomplete partial assembly
+        // for frame 41 (old epoch) before the remote encoder restarts and we miss its frame-0 IDR.
+        let mut tx1 = RsmVideoPacketizer::new(2, 1).with_chunk_bytes(80).unwrap();
+        for n in 0..41u32 {
+            let pkts = tx1
+                .packetize(VideoWireCodec::H265, &p_frame, 1000 + n * 100, 15, 500)
+                .unwrap();
+            let mut got = false;
+            for pkt in &pkts {
+                if matches!(rx.ingest(pkt).unwrap(), RsmIngestOutcome::Frame(_)) {
+                    got = true;
+                }
+            }
+            assert!(got);
+        }
+        // Feed only packet 0 of frame 41 (stalled incomplete assembly) and frame 2 from old epoch
+        // wouldn't collide, so also simulate partial frame at index 2 from a fresh restart where
+        // frame 0/1 were lost and frame 2 is an IDR with a strictly newer timestamp.
+        let mut tx_restarted = RsmVideoPacketizer::new(2, 1).with_chunk_bytes(80).unwrap();
+        // Skip frame 0 and frame 1 to simulate lost initial post-restart packets.
+        let _lost0 = tx_restarted
+            .packetize(VideoWireCodec::H265, &idr, 9000, 15, 500)
+            .unwrap();
+        let _lost1 = tx_restarted
+            .packetize(VideoWireCodec::H265, &p_frame, 9066, 15, 500)
+            .unwrap();
+        // Frame 2 is an IDR with advanced timestamp (9133 > 5000) and lag = 40 - 2 = 38 < 256.
+        let idr_pkts = tx_restarted
+            .packetize(VideoWireCodec::H265, &idr, 9133, 15, 500)
+            .unwrap();
+        assert!(idr_pkts.len() >= 2);
+        let mut recovered = None;
+        for pkt in &idr_pkts {
+            if let RsmIngestOutcome::Frame(f) = rx.ingest(pkt).unwrap() {
+                recovered = Some(f);
+            }
+        }
+        let f = recovered.expect("post-restart IDR with missed frame 0 must reassemble");
+        assert_eq!(f.frame_index, 2);
+        assert_eq!(f.timestamp_ms, 9133);
+        assert!(f.is_keyframe);
+        assert_eq!(f.payload, idr);
+
+        // Also test timestamp reset back near 0 after a long session (last=40 -> frame 1 @ ts 100ms).
+        let mut tx_reset = RsmVideoPacketizer::new(2, 1).with_chunk_bytes(80).unwrap();
+        for n in 0..41u32 {
+            let pkts = tx_reset
+                .packetize(VideoWireCodec::H265, &p_frame, 10_000 + n * 100, 15, 500)
+                .unwrap();
+            for pkt in &pkts {
+                let _ = rx.ingest(pkt).unwrap();
+            }
+        }
+        // Leave a partial assembly at index 1 in the active map? Build a restarted stream at ts=100.
+        let mut tx_zero = RsmVideoPacketizer::new(2, 1).with_chunk_bytes(80).unwrap();
+        let _skip0 = tx_zero
+            .packetize(VideoWireCodec::H265, &idr, 50, 15, 500)
+            .unwrap();
+        let reset_idr = tx_zero
+            .packetize(VideoWireCodec::H265, &idr, 100, 15, 500)
+            .unwrap();
+        let mut got_reset = None;
+        for pkt in &reset_idr {
+            if let RsmIngestOutcome::Frame(f) = rx.ingest(pkt).unwrap() {
+                got_reset = Some(f);
+            }
+        }
+        assert_eq!(
+            got_reset
+                .expect("encoder reset back near ts=0 must reassemble")
+                .payload,
+            idr
+        );
+
+        // Multi-stream isolation: stream_id 1 and stream_id 2 keep independent frame indices
+        // and virtual-frame orientation state.
+        let mut multi_rx = RsmVideoReassembler::new();
+        let mut s1 = RsmVideoPacketizer::new(2, 1).with_chunk_bytes(80).unwrap();
+        let mut s2 = RsmVideoPacketizer::new(2, 2).with_chunk_bytes(80).unwrap();
+        let s1_pkts = s1
+            .packetize(VideoWireCodec::H265, &idr, 100, 15, 500)
+            .unwrap();
+        let s2_pkts = s2
+            .packetize(VideoWireCodec::H265, &p_frame, 200, 15, 500)
+            .unwrap();
+        assert!(s1_pkts.len() >= 2 && s2_pkts.len() >= 2);
+        // Interleave packets from stream 1 and stream 2 with the exact same frame_index (0).
+        assert_eq!(
+            multi_rx.ingest(&s1_pkts[0]).unwrap(),
+            RsmIngestOutcome::Pending
+        );
+        assert_eq!(
+            multi_rx.ingest(&s2_pkts[0]).unwrap(),
+            RsmIngestOutcome::Pending
+        );
+        let mut out1 = None;
+        let mut out2 = None;
+        for pkt in &s1_pkts[1..] {
+            if let RsmIngestOutcome::Frame(f) = multi_rx.ingest(pkt).unwrap() {
+                out1 = Some(f);
+            }
+        }
+        for pkt in &s2_pkts[1..] {
+            if let RsmIngestOutcome::Frame(f) = multi_rx.ingest(pkt).unwrap() {
+                out2 = Some(f);
+            }
+        }
+        let f1 = out1.expect("stream 1 frame must reassemble");
+        let f2 = out2.expect("stream 2 frame must reassemble");
+        assert_eq!(f1.stream_id, 1);
+        assert_eq!(f1.payload, idr);
+        assert!(!f1.prior_frames_dropped);
+        assert_eq!(f2.stream_id, 2);
+        assert_eq!(f2.payload, p_frame);
+        assert!(!f2.prior_frames_dropped);
     }
 }

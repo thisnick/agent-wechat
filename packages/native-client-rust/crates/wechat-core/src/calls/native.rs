@@ -136,6 +136,7 @@ struct Worker {
     video_generation: AtomicU32,
     muted: AtomicBool,
     camera_enabled: AtomicBool,
+    joined_commands_ready: AtomicBool,
     submission: SendAdmission,
     metrics: MediaMetrics,
     mutations_submitted: AtomicBool,
@@ -318,7 +319,7 @@ impl CallBackend for NativeCallBackend {
                     return Err(service_error(CallErrorCode::Capacity));
                 }
                 commands.push_back(conference::Command {
-                    action: conference::CommandAction::Mute(muted),
+                    action: conference::CommandAction::Mute,
                     reply,
                 });
             }
@@ -367,7 +368,7 @@ impl CallBackend for NativeCallBackend {
                     return Err(service_error(CallErrorCode::Capacity));
                 }
                 commands.push_back(conference::Command {
-                    action: conference::CommandAction::Camera(enabled),
+                    action: conference::CommandAction::Camera,
                     reply,
                 });
             }
@@ -484,6 +485,7 @@ impl CallBackend for NativeCallBackend {
                 video_generation: AtomicU32::new(1),
                 muted: AtomicBool::new(request.muted),
                 camera_enabled: AtomicBool::new(request.camera_enabled),
+                joined_commands_ready: AtomicBool::new(false),
                 submission: SendAdmission::default(),
                 metrics: MediaMetrics::default(),
                 mutations_submitted: AtomicBool::new(false),
@@ -645,7 +647,9 @@ impl CallBackend for NativeCallBackend {
             if generation == 0 {
                 return Err(service_error(CallErrorCode::Stale));
             }
-            worker.video_generation.store(generation, Ordering::Release);
+            worker
+                .video_generation
+                .fetch_max(generation, Ordering::AcqRel);
             Ok(())
         })
     }
@@ -796,7 +800,11 @@ impl FencedTransport {
                     biased;
                     reply = &mut exchange => return reply,
                     _ = stop_check.tick() => {
-                        if !self.worker.current() || self.worker.stop.load(Ordering::Acquire) || self.worker.has_commands() {
+                        if !self.worker.current()
+                            || self.worker.stop.load(Ordering::Acquire)
+                            || (self.worker.joined_commands_ready.load(Ordering::Acquire)
+                                && self.worker.has_commands())
+                        {
                             return Err(CallLiveSyncInterrupted.into());
                         }
                     }
@@ -816,7 +824,11 @@ impl FencedTransport {
                     biased;
                     reply = &mut exchange => return reply,
                     _ = stop_check.tick() => {
-                        if !self.worker.current() || self.worker.stop.load(Ordering::Acquire) || self.worker.has_direct_commands() {
+                        if !self.worker.current()
+                            || self.worker.stop.load(Ordering::Acquire)
+                            || (self.worker.joined_commands_ready.load(Ordering::Acquire)
+                                && self.worker.has_direct_commands())
+                        {
                             return Err(CallLiveSyncInterrupted.into());
                         }
                     }
@@ -1366,6 +1378,7 @@ fn run_control(
         })?;
     let deadline = Instant::now() + inner.config.max_duration;
     let mut last_av_ts = 0u64;
+    worker.joined_commands_ready.store(true, Ordering::Release);
     let control_result = (|| -> Result<()> {
         while !worker.stop.load(Ordering::Acquire)
             && !worker.media_stop.load(Ordering::Acquire)

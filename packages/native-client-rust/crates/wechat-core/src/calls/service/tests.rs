@@ -1286,8 +1286,26 @@ async fn video_negotiation_camera_control_and_binary_frames_work_independently_o
     };
     assert_eq!(protocol_version, CALL_PROTOCOL_VERSION);
     assert!(capabilities.direct_video);
-    // Client advertises H.264 send and JPEG receive -> both negotiate transcoded
-    // against default H.265 wire codec, then H.265 wire codec switch flips to passthrough.
+    let host_caps = wechat_calls::video_codec::probe_video_capabilities();
+    let can_transcode_h264_to_h265 = host_caps.can_transcode(
+        wechat_calls::video_codec::VideoCodec::H264,
+        wechat_calls::video_codec::VideoCodec::H265,
+    );
+    let send_codecs = if can_transcode_h264_to_h265 {
+        vec![CallVideoCodec::H264, CallVideoCodec::Jpeg]
+    } else {
+        vec![CallVideoCodec::H265, CallVideoCodec::H264]
+    };
+    let expected_send_codec = if can_transcode_h264_to_h265 {
+        CallVideoCodec::H264
+    } else {
+        CallVideoCodec::H265
+    };
+    let expected_send_mode = if can_transcode_h264_to_h265 {
+        CallVideoMode::Transcoded
+    } else {
+        CallVideoMode::Passthrough
+    };
     service
         .command(
             &owner.client_id,
@@ -1296,7 +1314,7 @@ async fn video_negotiation_camera_control_and_binary_frames_work_independently_o
                 ready: true,
                 format: CallAudioFormat::default(),
                 video: Some(CallVideoCapabilities {
-                    send_codecs: vec![CallVideoCodec::H264, CallVideoCodec::Jpeg],
+                    send_codecs,
                     receive_codecs: vec![CallVideoCodec::H265, CallVideoCodec::Jpeg],
                     max_width: None,
                     max_height: None,
@@ -1356,12 +1374,12 @@ async fn video_negotiation_camera_control_and_binary_frames_work_independently_o
             id,
             generation: 1,
             format: CallVideoFormat {
-                codec: CallVideoCodec::H264,
-                mode: CallVideoMode::Transcoded,
+                codec,
+                mode,
                 ..
             },
             ..
-        } if *id == VIDEO_SEND_TRACK_ID
+        } if *id == VIDEO_SEND_TRACK_ID && *codec == expected_send_codec && *mode == expected_send_mode
     )));
     assert!(receive_tracks.iter().any(|track| matches!(
         track,
@@ -1403,7 +1421,7 @@ async fn video_negotiation_camera_control_and_binary_frames_work_independently_o
             &media.id,
             VIDEO_SEND_TRACK_ID,
             1,
-            frame::MediaPayloadKind::H264AnnexB,
+            frame::MediaPayloadKind::from_video_codec(expected_send_codec),
             frame::FLAG_KEYFRAME,
             40_000,
             &[0, 0, 0, 1, 0x65, 0xaa],
@@ -1487,4 +1505,23 @@ async fn video_negotiation_camera_control_and_binary_frames_work_independently_o
         2
     );
     assert_eq!(service.media_generation(&media.id).await.unwrap(), 1);
+    // Superseded track.start (gen 1 when current is 2) is absorbed cleanly without failing.
+    service
+        .start_media_track(&media.id, VIDEO_SEND_TRACK_ID, 1)
+        .await
+        .unwrap();
+    // Stale keyframe request for a removed receive video track is a benign no-op,
+    // while non-video track IDs still fail with InvalidRequest.
+    service
+        .request_video_keyframe(&media.id, VIDEO_RECEIVE_TRACK_BASE + 99)
+        .await
+        .unwrap();
+    assert_eq!(
+        service
+            .request_video_keyframe(&media.id, AUDIO_RECEIVE_TRACK_BASE)
+            .await
+            .unwrap_err()
+            .0,
+        CallErrorCode::InvalidRequest
+    );
 }

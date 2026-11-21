@@ -5,9 +5,10 @@ description: Exchange PCM audio and encoded video as binary WXCM v3 frames on an
 
 Send and receive PCM16 little-endian audio and H.265, H.264 or JPEG video in
 binary `WXCM` v3 WebSocket frames alongside JSON track-lifecycle messages. Each
-frame carries a 32-byte header with its track ID, generation, payload kind,
-flags, sequence and timestamp. The daemon clocks outgoing audio, negotiates
-pass-through or transcoded video codecs, and handles the WeChat connection.
+frame carries a 36-byte big-endian header with its track ID, generation, payload
+kind, flags, sequence, timestamp and payload length. The daemon clocks outgoing
+audio, negotiates pass-through or transcoded video codecs, and handles the WeChat
+connection.
 
 Direct and conference calls tolerate authenticated receive nonce reuse for
 legacy peer compatibility. The daemon counts reuse, filters duplicate packets,
@@ -21,8 +22,8 @@ their limits and require a new key generation when exhausted.
    Keep the owning control socket open.
 2. Open `/v1/accounts/{account}/calls/{callId}/media` with either the account's
    `calls` bearer token in the `Authorization` header or a single-use `?ticket=`
-   minted via `POST /v1/accounts/{account}/calls/socket-ticket`. Within five
-   seconds, send:
+   minted via `POST /v1/accounts/{account}/calls/tickets` (`socket: "media"`,
+   `callId`). Within five seconds, send:
 
    ```json
    {
@@ -100,7 +101,8 @@ their limits and require a new key generation when exhausted.
 
 ## Binary `WXCM` v3 frame layout
 
-Every binary WebSocket message starts with a 32-byte little-endian header:
+Every binary WebSocket message starts with a 36-byte big-endian header (PCM16
+samples inside the payload remain little-endian):
 
 | Offset | Size | Field | Meaning |
 | ---: | ---: | --- | --- |
@@ -112,14 +114,15 @@ Every binary WebSocket message starts with a 32-byte little-endian header:
 | `12` | 4 | `generation` | Active track generation |
 | `16` | 8 | `sequence` | Per-track monotonic frame sequence (`0` allowed on client TX) |
 | `24` | 8 | `timestampMicros` | Microseconds on the track timeline (for PCM receive, `sampleOffset * 1_000_000 / 16_000`) |
-| `32` | *N* | `payload` | Raw PCM16LE samples, Annex-B H.265/H.264 access unit, or standalone JPEG |
+| `32` | 4 | `payloadLength` | Byte length of `payload` (must equal remaining frame length) |
+| `36` | *N* | `payload` | Raw PCM16LE samples, Annex-B H.265/H.264 access unit, or standalone JPEG |
 
 | Property | Current value |
 | --- | --- |
 | Audio encoding | PCM16 little-endian, 16,000 Hz mono, 20 ms daemon frames (640 bytes) |
 | Max audio payload | 65,536 bytes (whole samples), at most eight seconds queued |
 | Max video payload | 512 KiB per frame (`524,288` bytes) |
-| Max WebSocket frame | `524,320` bytes (`32` + `512 KiB`) |
+| Max WebSocket frame | `524,324` bytes (`36` + `512 KiB`) |
 | Video codec negotiation | Pass-through first when client and wire codec match; FFmpeg transcoding fallback otherwise |
 
 Audio chunks need not match 20 ms codec frame boundaries; the daemon combines

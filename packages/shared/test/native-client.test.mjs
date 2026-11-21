@@ -709,3 +709,33 @@ test('contact list preserves explicit membership filters and pagination', async 
   await client.contacts('a',{relation:'unknown',query:'person'});
   assert.deepEqual(queries,[{}, {relation:'all',cursor:'next',limit:'2'}, {relation:'unknown',query:'person'}]);
 });
+
+test('issueCallTicket posts to the account ticket endpoint for control and media sockets', async () => {
+  const requests = [];
+  const client = new NativeWeChatClient({ ...options, fetch: async (url, init) => {
+    requests.push({
+      path: new URL(url).pathname,
+      method: init.method,
+      auth: init.headers.get('Authorization'),
+      body: JSON.parse(init.body),
+    });
+    const body = JSON.parse(init.body);
+    return Response.json({
+      ticket: 'a'.repeat(64),
+      expiresAt: 1_900_000_000,
+      expiresInSeconds: 20,
+      socket: body.socket,
+      callId: body.callId ?? null,
+    });
+  } });
+  const control = await client.issueCallTicket('a', { socket: 'control' });
+  const media = await client.issueCallTicket('a', { socket: 'media', callId: 'call-1' });
+  assert.equal(control.socket, 'control');
+  assert.equal(control.callId, null);
+  assert.equal(media.socket, 'media');
+  assert.equal(media.callId, 'call-1');
+  assert.deepEqual(requests, [
+    { path: '/v1/accounts/a/calls/tickets', method: 'POST', auth: 'Bearer fixture-secret', body: { socket: 'control' } },
+    { path: '/v1/accounts/a/calls/tickets', method: 'POST', auth: 'Bearer fixture-secret', body: { socket: 'media', callId: 'call-1' } },
+  ]);
+});

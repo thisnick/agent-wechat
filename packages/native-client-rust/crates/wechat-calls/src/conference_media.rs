@@ -161,10 +161,10 @@ impl ConferenceReceiver {
                             }
                             out.video = Some(frame);
                         }
-                        Ok(RsmIngestOutcome::FrameDroppedNeedKeyframe) => {
+                        Ok(RsmIngestOutcome::FrameDroppedNeedKeyframe) | Err(_) => {
                             out.need_keyframe = true;
                         }
-                        Ok(RsmIngestOutcome::Pending) | Err(_) => {}
+                        Ok(RsmIngestOutcome::Pending) => {}
                     },
                 }
             }
@@ -313,6 +313,7 @@ impl ConferenceReceiver {
     /// New application track incarnation; keep authenticated replay/order state
     /// and the shared presentation clock, while discarding codec history.
     pub fn reset_decoder(&mut self) -> Result<()> {
+        self.video.reset();
         self.decoder.reset().map_err(Into::into)
     }
 }

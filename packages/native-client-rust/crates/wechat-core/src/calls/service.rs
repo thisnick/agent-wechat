@@ -604,6 +604,7 @@ struct LiveCall {
     video_lease: Arc<AtomicU32>,
     camera_enabled: bool,
     video_wire_codec: CallVideoCodec,
+    client_video: Option<CallVideoCapabilities>,
     video_send_format: Option<CallVideoFormat>,
     video_receive_format: Option<CallVideoFormat>,
     offer_until: Option<u64>,
@@ -658,6 +659,7 @@ struct Prepared {
 }
 pub struct CallService {
     state: Mutex<State>,
+    control_serial: tokio::sync::Mutex<()>,
     backend: Arc<dyn CallBackend>,
     started: Instant,
     maintenance_started: AtomicBool,
@@ -749,6 +751,7 @@ impl CallService {
         let (incoming_cancellations, cancellations) = mpsc::channel(8);
         Self {
             state: Mutex::new(State::default()),
+            control_serial: tokio::sync::Mutex::new(()),
             backend,
             started: Instant::now(),
             maintenance_started: AtomicBool::new(false),
@@ -884,6 +887,7 @@ impl CallService {
                 if expired_offer {
                     if let Some(c) = &s.call {
                         c.audio_lease.store(0, Ordering::Release);
+                        c.video_lease.store(0, Ordering::Release);
                         let key = (
                             c.authority.account_id.clone(),
                             c.identity.call_id().to_owned(),
@@ -1141,6 +1145,15 @@ impl CallService {
         })
     }
     fn snapshot(&self, s: &State, account: &str, client: Option<&str>) -> CallSnapshot {
+        self.snapshot_inner(s, account, client, true)
+    }
+    fn snapshot_inner(
+        &self,
+        s: &State,
+        account: &str,
+        client: Option<&str>,
+        include_video_caps: bool,
+    ) -> CallSnapshot {
         let capabilities = self.backend.capabilities(account);
         let mut snap = CallSnapshot {
             conference_invitations: self
@@ -1152,7 +1165,9 @@ impl CallService {
                 owned_by_this_client: false,
             },
             current_pending_offer: self.pending_incoming(s, account),
-            video_capabilities: Self::host_video_capabilities(capabilities),
+            video_capabilities: include_video_caps
+                .then(|| Self::host_video_capabilities(capabilities))
+                .flatten(),
             ..CallSnapshot::default()
         };
         if let Some(call) = s
@@ -1275,7 +1290,7 @@ impl CallService {
         let mut failed = Vec::new();
         let mut invitations = Vec::new();
         for (id, peer) in &s.clients {
-            let snap = self.snapshot(s, &peer.account, Some(id));
+            let snap = self.snapshot_inner(s, &peer.account, Some(id), false);
             let mut events = vec![CallEvent::Availability {
                 availability: snap.availability,
             }];
@@ -1375,6 +1390,7 @@ impl CallService {
             video_lease: Arc::new(AtomicU32::new(1)),
             camera_enabled: false,
             video_wire_codec: CallVideoCodec::H265,
+            client_video: None,
             video_send_format: None,
             video_receive_format: None,
             offer_until: Some(
@@ -1526,6 +1542,7 @@ impl CallService {
                 .checked_add(1)
                 .ok_or_else(|| error(CallErrorCode::Capacity))?;
             call.audio_lease.store(0, Ordering::Release);
+            call.video_lease.store(0, Ordering::Release);
         }
         // Keep the original pending ticket and its possible remote result.
         // The actor must prove no mutation or perform accepted-context cleanup.
@@ -1712,10 +1729,18 @@ impl CallService {
                 return Err(error(CallErrorCode::OutcomeUnknown));
             }
         }
-        if let Some((identity, muted)) = dispatch.muted {
+        if let Some((identity, _muted)) = dispatch.muted {
             let service = self.clone();
             let backend = self.backend.clone();
             tokio::spawn(async move {
+                let _serial = service.control_serial.lock().await;
+                let latest = service.lock().ok().and_then(|s| {
+                    s.call
+                        .as_ref()
+                        .filter(|call| call.identity == identity)
+                        .map(|call| call.muted)
+                });
+                let Some(muted) = latest else { return };
                 if let Err(failure) = backend.set_muted(identity.clone(), muted).await {
                     if matches!(failure.0, CallErrorCode::OutcomeUnknown) {
                         service.mark_uncertain(&identity);
@@ -1723,7 +1748,7 @@ impl CallService {
                 }
             });
         }
-        if let Some((identity, enabled, generation)) = dispatch.camera {
+        if let Some((identity, _enabled, generation)) = dispatch.camera {
             let _ = tokio::time::timeout(
                 std::time::Duration::from_secs(2),
                 self.backend.clear_video(identity.clone(), generation),
@@ -1732,6 +1757,14 @@ impl CallService {
             let service = self.clone();
             let backend = self.backend.clone();
             tokio::spawn(async move {
+                let _serial = service.control_serial.lock().await;
+                let latest = service.lock().ok().and_then(|s| {
+                    s.call
+                        .as_ref()
+                        .filter(|call| call.identity == identity)
+                        .map(|call| call.camera_enabled)
+                });
+                let Some(enabled) = latest else { return };
                 if let Err(failure) = backend.set_camera(identity.clone(), enabled).await {
                     if matches!(failure.0, CallErrorCode::OutcomeUnknown) {
                         service.mark_uncertain(&identity);
@@ -1983,10 +2016,6 @@ impl CallService {
                     .ownership
                     .dial(client, &request_id, &id, &contact_id, self.now())?;
                 if let Decision::Submit(ticket) = &d {
-                    let initial_camera = match call_type {
-                        CallType::Voice => false,
-                        CallType::Video => camera_enabled.unwrap_or(true),
-                    };
                     let video_wire_codec = CallVideoCodec::H265;
                     let (video_send_format, video_receive_format) = if call_type == CallType::Video
                     {
@@ -2004,6 +2033,13 @@ impl CallService {
                         )
                     } else {
                         (None, None)
+                    };
+                    let initial_camera = match call_type {
+                        CallType::Voice => false,
+                        CallType::Video => {
+                            camera_enabled.unwrap_or_else(|| video_send_format.is_some())
+                                && video_send_format.is_some()
+                        }
                     };
                     s.call = Some(LiveCall {
                         identity: ticket.identity(),
@@ -2032,6 +2068,7 @@ impl CallService {
                         video_lease: Arc::new(AtomicU32::new(1)),
                         camera_enabled: initial_camera,
                         video_wire_codec,
+                        client_video: client_video.clone(),
                         video_send_format,
                         video_receive_format,
                         offer_until: None,
@@ -2090,7 +2127,7 @@ impl CallService {
                     {
                         call.muted = muted.unwrap_or(false);
                         if call.call_type == CallType::Video {
-                            call.camera_enabled = camera_enabled.unwrap_or(true);
+                            call.client_video = client_video.clone();
                             call.video_send_format = Self::negotiate_video_format(
                                 call.video_wire_codec,
                                 client_video.as_ref(),
@@ -2101,6 +2138,9 @@ impl CallService {
                                 client_video.as_ref(),
                                 false,
                             );
+                            call.camera_enabled = camera_enabled
+                                .unwrap_or_else(|| call.video_send_format.is_some())
+                                && call.video_send_format.is_some();
                         }
                     }
                 }
@@ -2208,14 +2248,18 @@ impl CallService {
             } => {
                 Self::owner(&s, client, &call_id)?;
                 let call = s.call.as_ref().expect("owner call");
+                if call.state != CallState::Connected {
+                    return Err(error(CallErrorCode::InvalidRequest));
+                }
                 let capabilities = self.backend.capabilities(&call.authority.account_id);
                 let is_conference = call.peer.ends_with("@chatroom");
-                let video_allowed = if is_conference {
-                    capabilities.conference_video
-                } else {
-                    call.call_type == CallType::Video && capabilities.direct_video
-                };
-                if !video_allowed {
+                let video_allowed = call.call_type == CallType::Video
+                    && if is_conference {
+                        capabilities.conference_video
+                    } else {
+                        capabilities.direct_video
+                    };
+                if !video_allowed || (enabled && call.video_send_format.is_none()) {
                     return Err(error(CallErrorCode::Unsupported));
                 }
                 if call.camera_enabled != enabled {
@@ -2824,20 +2868,12 @@ impl CallService {
         if !self.ticket_current(&state, ticket) {
             return Err(error(CallErrorCode::Stale));
         }
-        let owner = state
-            .call
-            .as_ref()
-            .filter(|call| call.identity == ticket.identity())
-            .and_then(|call| call.owner.clone());
-        let client_video = owner
-            .as_deref()
-            .and_then(|id| state.clients.get(id))
-            .and_then(|peer| peer.video.clone());
         let call = state
             .call
             .as_mut()
             .filter(|call| call.identity == ticket.identity())
             .ok_or_else(|| error(CallErrorCode::Stale))?;
+        let client_video = call.client_video.clone();
         if call.video_wire_codec != codec {
             call.video_wire_codec = codec;
             if call.call_type == CallType::Video {

@@ -76,6 +76,7 @@ function videoRotationFlags(degrees: NativeCallVideoRotationDegrees | undefined)
     case 270: return NATIVE_CALL_VIDEO_FLAG_ROTATE_270;
     case 0:
     case undefined: return 0;
+    default: throw new NativeCallError("invalid_media");
   }
 }
 const WXCM_HEADER_BYTES = 36;
@@ -840,7 +841,8 @@ export class NativeCallMediaClient {
     const bytes = new Uint8Array(samples.byteLength); const view = new DataView(bytes.buffer);
     for (let i = 0; i < samples.length; i++) view.setInt16(i * 2, samples[i], true);
     const packet = encodeWxcm(WXCM_PAYLOAD_PCM_S16LE, 0, sendTrack.id, generation, this.sendSequence, 0, bytes);
-    if (this.socket.bufferedAmount + packet.byteLength + (start?.length ?? 0) > (this.options.maxBufferedBytes ?? 65536)) throw new NativeCallError("media_backpressure");
+    const limit = Math.max(this.options.maxBufferedBytes ?? 65536, WXCM_HEADER_BYTES + NATIVE_CALL_MAX_FRAME_BYTES + 128);
+    if (this.socket.bufferedAmount + packet.byteLength + (start?.length ?? 0) > limit) throw new NativeCallError("media_backpressure");
     try {
       if (start) { this.socket.send(start); this.sendGeneration = generation; }
       this.socket.send(packet);
@@ -866,7 +868,7 @@ export class NativeCallMediaClient {
     if (!Number.isSafeInteger(timestampMicros) || timestampMicros < 0) throw new NativeCallError("invalid_media");
     const start = this.videoSendGeneration === generation ? undefined : JSON.stringify({ type: "track.start", trackId: sendTrack.id, generation } satisfies CallMediaCommand);
     const packet = encodeWxcm(videoPayloadKind(codec), flags, sendTrack.id, generation, this.videoSendSequence, timestampMicros, payload);
-    const limit = Math.max(this.options.maxBufferedBytes ?? 65536, MEDIA_BINARY_BYTES);
+    const limit = Math.max(this.options.maxBufferedBytes ?? 65536, MEDIA_BINARY_BYTES + 128);
     if (this.socket.bufferedAmount + packet.byteLength + (start?.length ?? 0) > limit) throw new NativeCallError("media_backpressure");
     try {
       if (start) { this.socket.send(start); this.videoSendGeneration = generation; }

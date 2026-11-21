@@ -1278,4 +1278,195 @@ async fn video_call_negotiates_passthrough_and_roundtrips_binary_video_and_keyfr
     })
     .await;
     assert_eq!(track_upd["track"]["generation"], 2);
+
+    // Superseded track.start (generation 1 < current 2) and stale video.request_keyframe on an
+    // unknown receive track ID >= VIDEO_RECEIVE_TRACK_BASE must not fail or detach the owner.
+    command(
+        &mut media,
+        json!({"type": "track.start", "trackId": VIDEO_SEND_TRACK_ID, "generation": 1}),
+    )
+    .await;
+    command(
+        &mut media,
+        json!({"type": "video.request_keyframe", "trackId": VIDEO_RECEIVE_TRACK_BASE + 9}),
+    )
+    .await;
+    // Current generation 2 still works immediately afterward.
+    command(
+        &mut media,
+        json!({"type": "track.start", "trackId": VIDEO_SEND_TRACK_ID, "generation": 2}),
+    )
+    .await;
+    let packet_g2 = pcm_envelope::encode_video(
+        MediaPayloadKind::H265AnnexB,
+        FLAG_KEYFRAME | FLAG_CODEC_CONFIG,
+        MediaHeader {
+            track_id: VIDEO_SEND_TRACK_ID,
+            generation: 2,
+            sequence: 1,
+            timestamp_micros: 66_666,
+        },
+        &nal,
+    )
+    .unwrap();
+    media
+        .send(ClientMessage::Binary(packet_g2.into()))
+        .await
+        .unwrap();
+    loop {
+        match timeout(Duration::from_secs(2), media.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+        {
+            ClientMessage::Binary(bytes) => {
+                let wire = WireMediaFrame::decode(&bytes).unwrap();
+                assert_eq!(wire.header.timestamp_micros, 66_666);
+                break;
+            }
+            ClientMessage::Ping(_) | ClientMessage::Pong(_) => {}
+            other => panic!("unexpected frame after stale track.start: {other:?}"),
+        }
+    }
+    assert_eq!(f.backend.received_video.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn call_tickets_enforce_ttl_socket_binding_origin_and_account_aliases() {
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    // 1. Direct TTL expiration check on CallSocketTickets.
+    let store = CallSocketTickets::default();
+    let issued = store
+        .issue(
+            "one",
+            Claims { grant: None },
+            CallTicketSocket::Control,
+            None,
+        )
+        .unwrap();
+    {
+        let mut entries = store.entries.lock().unwrap();
+        for item in entries.values_mut() {
+            item.expires_at = Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .unwrap_or_else(Instant::now);
+        }
+    }
+    assert!(store
+        .consume(&issued.ticket, "one", CallTicketSocket::Control, None)
+        .is_none());
+
+    // 2. HTTP + WebSocket end-to-end checks for cross-socket misuse, alias resolution, and Origin.
+    let f = Fixture::new(true).await;
+    f.core.store.set_account_alias("one", "alias-one").unwrap();
+    f.grant("alias-token", &["calls"], &["one"]);
+
+    let post_ticket = |account: &str, body: Value| {
+        let routes = f.routes.clone();
+        let uri = format!("/v1/accounts/{account}/calls/tickets");
+        async move {
+            let resp = routes
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header(header::AUTHORIZATION, "Bearer alias-token")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            serde_json::from_slice::<CallTicketResponse>(&bytes).unwrap()
+        }
+    };
+
+    // Cross-socket: control ticket cannot connect to /media and is burned on mismatch.
+    let ctrl_tkt = post_ticket("one", json!({"socket": "control"})).await;
+    assert!(matches!(
+        connect_async(format!(
+            "ws://{}/v1/accounts/one/calls/call-x/media?ticket={}",
+            f.address, ctrl_tkt.ticket
+        ))
+        .await,
+        Err(tokio_tungstenite::tungstenite::Error::Http(r)) if r.status() == StatusCode::UNAUTHORIZED
+    ));
+    assert!(matches!(
+        connect_async(format!(
+            "ws://{}/v1/accounts/one/calls/socket?ticket={}",
+            f.address, ctrl_tkt.ticket
+        ))
+        .await,
+        Err(tokio_tungstenite::tungstenite::Error::Http(r)) if r.status() == StatusCode::UNAUTHORIZED
+    ));
+
+    // Cross-socket: media ticket cannot connect to /socket and is burned on mismatch.
+    let media_tkt = post_ticket("one", json!({"socket": "media", "callId": "call-x"})).await;
+    assert!(matches!(
+        connect_async(format!(
+            "ws://{}/v1/accounts/one/calls/socket?ticket={}",
+            f.address, media_tkt.ticket
+        ))
+        .await,
+        Err(tokio_tungstenite::tungstenite::Error::Http(r)) if r.status() == StatusCode::UNAUTHORIZED
+    ));
+    assert!(matches!(
+        connect_async(format!(
+            "ws://{}/v1/accounts/one/calls/call-x/media?ticket={}",
+            f.address, media_tkt.ticket
+        ))
+        .await,
+        Err(tokio_tungstenite::tungstenite::Error::Http(r)) if r.status() == StatusCode::UNAUTHORIZED
+    ));
+
+    // Origin check still rejects cross-origin browser upgrades even with a valid ticket.
+    let origin_tkt = post_ticket("one", json!({"socket": "control"})).await;
+    let mut bad_origin_req = format!(
+        "ws://{}/v1/accounts/one/calls/socket?ticket={}",
+        f.address, origin_tkt.ticket
+    )
+    .into_client_request()
+    .unwrap();
+    bad_origin_req
+        .headers_mut()
+        .insert(header::ORIGIN, "https://elsewhere.example".parse().unwrap());
+    assert!(matches!(
+        connect_async(bad_origin_req).await,
+        Err(tokio_tungstenite::tungstenite::Error::Http(r)) if r.status() == StatusCode::FORBIDDEN
+    ));
+
+    // Alias resolution: issue via alias, consume via canonical ID, and vice versa.
+    let from_alias = post_ticket("alias-one", json!({"socket": "control"})).await;
+    let (mut sock_a, _) = connect_async(format!(
+        "ws://{}/v1/accounts/one/calls/socket?ticket={}",
+        f.address, from_alias.ticket
+    ))
+    .await
+    .unwrap();
+    command(
+        &mut sock_a,
+        json!({"type":"call.hello","supportedProtocolVersions":[CALL_PROTOCOL_VERSION]}),
+    )
+    .await;
+    assert_eq!(json_event(&mut sock_a).await["type"], "hello");
+
+    let from_canonical = post_ticket("one", json!({"socket": "control"})).await;
+    let (mut sock_b, _) = connect_async(format!(
+        "ws://{}/v1/accounts/alias-one/calls/socket?ticket={}",
+        f.address, from_canonical.ticket
+    ))
+    .await
+    .unwrap();
+    command(
+        &mut sock_b,
+        json!({"type":"call.hello","supportedProtocolVersions":[CALL_PROTOCOL_VERSION]}),
+    )
+    .await;
+    assert_eq!(json_event(&mut sock_b).await["type"], "hello");
 }

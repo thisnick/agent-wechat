@@ -122,7 +122,9 @@ impl CallService {
                     call.state = CallState::Uncertain;
                     call.revision = call.revision.saturating_add(1);
                     call.audio_lease.store(0, Ordering::Release);
+                    call.video_lease.store(0, Ordering::Release);
                     call.stop_requested = false;
+                    s.media.clear();
                     changed = true;
                 }
             } else {
@@ -343,6 +345,7 @@ impl CallService {
             video_lease: Arc::new(AtomicU32::new(1)),
             camera_enabled: false,
             video_wire_codec: CallVideoCodec::H265,
+            client_video: None,
             video_send_format: None,
             video_receive_format: None,
             offer_until: None,
@@ -600,6 +603,7 @@ impl CallService {
                 call.state = CallState::Uncertain;
                 call.revision = call.revision.saturating_add(1);
                 call.audio_lease.store(0, Ordering::Release);
+                call.video_lease.store(0, Ordering::Release);
                 call.stop_requested = false;
             }
         }
@@ -715,6 +719,7 @@ impl CallService {
             call.revision = call.revision.saturating_add(1);
         }
         call.audio_lease.store(0, Ordering::Release);
+        call.video_lease.store(0, Ordering::Release);
         if changed {
             // The actor preserves its uncertain receipt; maintenance still has
             // to wait for it to stop and close the separate local session.

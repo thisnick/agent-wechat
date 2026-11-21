@@ -642,7 +642,7 @@ async fn monitor(
                         if cancellation.is_cancelled() {
                             return Ok(());
                         }
-                        if completed {
+                        if completed || !control.availability.busy {
                             restore_monitor_readiness(control).await?;
                             renew_after_terminal = false;
                         }
@@ -796,6 +796,7 @@ async fn participate(
         _=cancellation.wait()=>return Err(failure(130,"client_interrupted","device preparation cancelled; no call was placed or answered")),
         audio=LocalAudio::open(options)=>audio?,
     };
+    eprintln!("{}", audio.startup_summary);
     let scope = match &action {
         Participation::Dial { .. }
         | Participation::ConferenceStart { .. }
@@ -870,7 +871,8 @@ async fn participate(
                 header_title: title,
                 peer_label: group.clone(),
                 is_conference: true,
-                video_allowed: control.capabilities.conference_video,
+                video_allowed: call_type == CallType::Video
+                    && control.capabilities.conference_video,
                 initial_camera: camera_enabled,
                 initial_muted: muted,
                 camera_source: camera_source.clone(),
@@ -1283,11 +1285,18 @@ fn ensure_video_capture(
     if capture.is_some() {
         return false;
     }
+    let Some(media) = media else {
+        return false;
+    };
     let Some(format) = media
-        .and_then(|m| m.video_send_track.as_ref())
+        .video_send_track
+        .as_ref()
         .and_then(CallTrack::video_format)
     else {
-        return false;
+        *camera_enabled = false;
+        levels.set_camera(Some(false));
+        levels.notice("Outgoing video track unavailable; staying on audio.");
+        return true;
     };
     match super::video::LocalVideoCapture::start(source, format) {
         Ok(started) => {
@@ -1329,6 +1338,8 @@ async fn owned_call(
     let mut camera_enabled = intent.initial_camera && intent.video_allowed;
     let mut speaker_enabled = true;
     let mut video_capture: Option<super::video::LocalVideoCapture> = None;
+    let mut media_closed_at: Option<Instant> = None;
+    let mut media_closed_err: Option<anyhow::Error> = None;
     let mut pending = std::collections::BTreeMap::<String, (Instant, PendingKind)>::new();
     let mut interaction = super::interaction::Interaction::new();
     let mut device_change = DeviceChange(None);
@@ -1415,6 +1426,7 @@ async fn owned_call(
             .as_ref()
             .is_some_and(|view| view.call_id == call_id && view.state == CallState::Connected)
             && media.is_none()
+            && media_closed_at.is_none()
         {
             let mut attached = tokio::select! {
                 _=cancellation.wait()=>return Ok(false),
@@ -1572,12 +1584,13 @@ async fn owned_call(
                 match replacement {
                     Ok(mut replacement)=>{
                         replacement.discard_capture();
+                        let summary = replacement.startup_summary.replace('\n', "; ");
                         let mut previous=std::mem::replace(audio,replacement);
                         previous.request_stop();
                         tokio::spawn(async move{let _=previous.stop().await;});
                         levels.clear_microphone();
                         levels.clear_speaker();
-                        levels.notice("Local audio devices changed.");
+                        levels.notice(&format!("Local audio devices changed. {summary}"));
                     }
                     Err(error)=>levels.notice(&format!("Device change failed; current devices retained: {error}")),
                 }
@@ -1620,6 +1633,14 @@ async fn owned_call(
                                         levels.set_camera(Some(old));
                                         if !old {
                                             video_capture.take();
+                                        } else {
+                                            ensure_video_capture(
+                                                &mut video_capture,
+                                                &mut camera_enabled,
+                                                &intent.camera_source,
+                                                media.as_ref(),
+                                                &mut levels,
+                                            );
                                         }
                                     }
                                     PendingKind::Invite=>{}
@@ -1633,8 +1654,20 @@ async fn owned_call(
                 }
             }
             message=next_media(media)=>{
+                let message = match message {
+                    Ok(msg) => msg,
+                    Err(error) => {
+                        // A remote hangup closes /media and emits CallState::Ended on /socket
+                        // concurrently; wait briefly for /socket to report the authoritative end.
+                        *media = None;
+                        video_capture.take();
+                        media_closed_at.get_or_insert_with(Instant::now);
+                        media_closed_err.get_or_insert(error);
+                        continue;
+                    }
+                };
                 let current=media.as_mut().context("media detached")?;
-                match message? {
+                match message {
                     Message::Binary(bytes)=>{
                         let wire = WireMediaFrame::decode(&bytes)?;
                         if wire.kind == MediaPayloadKind::PcmS16le {
@@ -1672,6 +1705,11 @@ async fn owned_call(
                 }
             }
             _=meter_tick.tick()=>{
+                if media_closed_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(2)) {
+                    return Err(media_closed_err
+                        .take()
+                        .unwrap_or_else(|| anyhow::anyhow!("call media socket closed")));
+                }
                 if let Some(current) = media.as_mut() {
                     let _ = current.receive_video.poll_decoded();
                 }
@@ -1684,8 +1722,8 @@ async fn owned_call(
             }
             _=tick.tick()=>{
                 let samples=audio.frame(format.samples_per_frame(),muted)?;
-                if let Some(media)=media {
-                    for mixed in media.receive.render_due(media.attached.elapsed())? {
+                if let Some(current_media) = media.as_mut() {
+                    for mixed in current_media.receive.render_due(current_media.attached.elapsed())? {
                         if speaker_enabled {
                             let mixed=mixed.iter().map(|s|f32::from(*s)/32768.0).collect::<Vec<_>>();
                             match audio.playback.enqueue(audio.playback_token,&mixed,format.sample_rate()) {
@@ -1696,16 +1734,31 @@ async fn owned_call(
                         }
                     }
                     levels.microphone(&samples,muted);
-                    media.send(&samples,format).await?;
-                    if camera_enabled {
+                    if let Err(error) = current_media.send(&samples,format).await {
+                        *media = None;
+                        video_capture.take();
+                        media_closed_at.get_or_insert_with(Instant::now);
+                        media_closed_err.get_or_insert(error);
+                        continue;
+                    }
+                    let camera_pending = pending
+                        .values()
+                        .any(|(_, kind)| matches!(kind, PendingKind::Camera(_)));
+                    if camera_enabled && !camera_pending {
                         if let Some(frame) = video_capture.as_mut().and_then(|c| c.try_recv()) {
-                            media.send_video(&frame).await?;
+                            if let Err(error) = current_media.send_video(&frame).await {
+                                *media = None;
+                                video_capture.take();
+                                media_closed_at.get_or_insert_with(Instant::now);
+                                media_closed_err.get_or_insert(error);
+                                continue;
+                            }
                         }
                     }
-                    if media.receive_video.poll_decoded() {
+                    if current_media.receive_video.poll_decoded() {
                         levels.mark_video_dirty();
                     }
-                    levels.draw_video_if_due(&media.receive_video);
+                    levels.draw_video_if_due(&current_media.receive_video);
                 }
             }
         }
@@ -1861,6 +1914,7 @@ impl CaptureRing {
 
 struct LocalAudio {
     options: AudioOptions,
+    startup_summary: String,
     playback: PlaybackHandle,
     playback_token: PlaybackToken,
     capture: mpsc::Receiver<Vec<f32>>,
@@ -1897,14 +1951,11 @@ impl LocalAudio {
         )
         .await
         .context("audio device startup timed out; no call was placed or answered")???;
-        eprintln!(
-            "Microphone: {}\nSpeaker: {}",
-            options.input_device.as_deref().unwrap_or("OS default"),
-            options.output_device.as_deref().unwrap_or("OS default")
-        );
-        eprintln!(
-            "Audio AEC status: {:?}; cancellation quality is unmeasured. A headset is recommended.",
-            session.aec_status()
+        let startup_summary = format!(
+            "Microphone: {}\nSpeaker: {}\nAudio AEC status: {:?}; cancellation quality is unmeasured. A headset is recommended.",
+            super::levels::clean_label(options.input_device.as_deref().unwrap_or("OS default"), 96),
+            super::levels::clean_label(options.output_device.as_deref().unwrap_or("OS default"), 96),
+            session.aec_status(),
         );
         let playback = session.playback();
         let playback_token = playback.token()?;
@@ -1929,6 +1980,7 @@ impl LocalAudio {
             })?;
         Ok(Self {
             options: options.clone(),
+            startup_summary,
             playback,
             playback_token,
             capture,

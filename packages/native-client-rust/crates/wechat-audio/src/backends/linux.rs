@@ -779,7 +779,12 @@ impl DeviceBackend for Backend {
         let max_frames = writable_frames.min(4_800);
         if max_frames > 0 {
             let mut samples = [0.0f32; 4_800];
-            let (available, _) = self.playback.drain_available(&mut samples[..max_frames])?;
+            let (available, drained_gen) =
+                self.playback.drain_available(&mut samples[..max_frames])?;
+            if drained_gen != self.generation {
+                self.output.flush();
+                self.generation = drained_gen;
+            }
             if available > 0 {
                 let mut bytes = [0u8; 4_800 * 4];
                 for (sample, out) in samples[..available]

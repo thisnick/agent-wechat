@@ -174,10 +174,9 @@ impl VideoRxBridge {
         } else {
             VIDEO_RECEIVE_TRACK_BASE + u32::from(frame.member_id)
         };
-        let is_keyframe = frame.is_keyframe;
         if let Ok(guard) = self.frame_tx.lock() {
             if let Some(tx) = guard.as_ref() {
-                if tx.try_send(frame).is_err() && !is_keyframe {
+                if matches!(tx.try_send(frame), Err(mpsc::TrySendError::Full(_))) {
                     let _ = self.self_keyframe_tx.try_send(track_id);
                 }
             }
@@ -456,18 +455,22 @@ pub(super) fn spawn_video_tx_bridge(
                     // client at a bounded cadence so it can respond if needed.
                     let _ = runtime.block_on(sink.peer_keyframe_requested());
                 }
+                let current_gen = worker.video_generation.load(Ordering::Acquire);
+                let camera_on = worker.camera_enabled.load(Ordering::Acquire);
+                if !camera_on || (transcoder.is_some() && current_gen != transcoder_gen) {
+                    transcoder = None;
+                }
                 if let Some(enc) = transcoder.as_mut() {
-                    let current_gen = worker.video_generation.load(Ordering::Acquire);
                     while let Some(out) = enc.try_recv() {
                         if !worker.camera_enabled.load(Ordering::Acquire)
-                            || current_gen != transcoder_gen
+                            || worker.video_generation.load(Ordering::Acquire) != transcoder_gen
                         {
                             break;
                         }
                         let ts_ms =
                             u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
                         let _ = tx.try_send(DirectVideoTx {
-                            generation: current_gen,
+                            generation: transcoder_gen,
                             codec: wire,
                             timestamp_ms: ts_ms,
                             fps: send_format.max_fps,
@@ -487,7 +490,7 @@ pub(super) fn spawn_video_tx_bridge(
                         {
                             continue;
                         }
-                        let ts_ms = if item.request.timestamp_micros > 0 {
+                        let ts_ms = if passthrough && item.request.timestamp_micros > 0 {
                             u32::try_from(item.request.timestamp_micros / 1_000).unwrap_or(u32::MAX)
                         } else {
                             u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX)
@@ -523,10 +526,12 @@ pub(super) fn spawn_video_tx_bridge(
                                 continue;
                             }
                             while let Some(out) = enc.try_recv() {
+                                let out_ts_ms = u32::try_from(started.elapsed().as_millis())
+                                    .unwrap_or(u32::MAX);
                                 let _ = tx.try_send(DirectVideoTx {
                                     generation: current_gen,
                                     codec: wire,
-                                    timestamp_ms: ts_ms,
+                                    timestamp_ms: out_ts_ms,
                                     fps: send_format.max_fps,
                                     kbps: u16::try_from(send_format.bitrate_kbps.unwrap_or(500))
                                         .unwrap_or(500),

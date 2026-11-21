@@ -191,11 +191,81 @@ impl<T> TxAudioJitterBuffer<T> {
             self.primed = true;
         }
         let (_, item) = self.frames.pop_front()?;
-        if self.frames.is_empty() {
-            self.primed = false;
-        }
         Some(item)
     }
+}
+
+/// FIFO outbound video frame buffer that preserves inter-frame H.265/H.264
+/// reference chains and only skips ahead to a newer self-contained IDR keyframe.
+pub(super) struct TxVideoQueue {
+    buffered: VecDeque<DirectVideoTx>,
+}
+
+impl TxVideoQueue {
+    pub(super) fn new() -> Self {
+        Self {
+            buffered: VecDeque::with_capacity(16),
+        }
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.buffered.clear();
+    }
+
+    pub(super) fn next_frame(
+        &mut self,
+        rx: &Receiver<DirectVideoTx>,
+        generation: u32,
+    ) -> Option<DirectVideoTx> {
+        self.buffered.retain(|frame| frame.generation == generation);
+        while let Ok(frame) = rx.try_recv() {
+            if frame.generation != generation {
+                continue;
+            }
+            if is_annexb_keyframe(frame.codec, &frame.annexb) {
+                self.buffered.clear();
+            } else if self.buffered.len() >= 16 {
+                // Keep buffered chain bounded until the next keyframe refreshes it.
+                continue;
+            }
+            self.buffered.push_back(frame);
+        }
+        self.buffered.pop_front()
+    }
+}
+
+fn is_annexb_keyframe(codec: VideoWireCodec, data: &[u8]) -> bool {
+    let mut i = 0usize;
+    while i + 3 < data.len() {
+        let sc_len = if i + 4 <= data.len() && data[i..i + 4] == [0, 0, 0, 1] {
+            4
+        } else if data[i..i + 3] == [0, 0, 1] {
+            3
+        } else {
+            i += 1;
+            continue;
+        };
+        let hdr_pos = i + sc_len;
+        if hdr_pos < data.len() {
+            let hdr = data[hdr_pos];
+            match codec {
+                VideoWireCodec::H265 => {
+                    let nal_type = (hdr >> 1) & 0x3f;
+                    if matches!(nal_type, 19..=21) {
+                        return true;
+                    }
+                }
+                VideoWireCodec::H264 => {
+                    if (hdr & 0x1f) == 5 {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        i = hdr_pos;
+    }
+    false
 }
 
 #[cfg(test)]

@@ -86,7 +86,11 @@ impl CallSocketTickets {
                 return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_request"));
             }
             (CallTicketSocket::Media, Some(id))
-                if id.is_empty() || id.len() > 200 || id.chars().any(char::is_control) =>
+                if id.is_empty()
+                    || id.len() > 200
+                    || !id.bytes().all(|b| {
+                        b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~')
+                    }) =>
             {
                 return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_request"));
             }
@@ -755,12 +759,17 @@ async fn write_media(
                 let frame = match frame {
                     Ok(MediaDelivery::Audio(frame)) => frame,
                     Ok(MediaDelivery::Control(event)) => {
-                        if ensure_current(scope.app, scope.claims).await.is_err()
-                            || !matches!(scope.service.media_delivery_allowed(scope.id).await, Ok(true)) {
+                        if ensure_current(scope.app, scope.claims).await.is_err() {
                             return "media-track-event-fenced";
                         }
-                        let Ok(text) = serde_json::to_string(&event) else { return "media-track-encode-failed"; };
-                        if !send(sink, Message::Text(text.into())).await { return "media-track-send-failed"; }
+                        match scope.service.media_delivery_allowed(scope.id).await {
+                            Ok(true) => {
+                                let Ok(text) = serde_json::to_string(&event) else { return "media-track-encode-failed"; };
+                                if !send(sink, Message::Text(text.into())).await { return "media-track-send-failed"; }
+                            }
+                            Ok(false) => {}
+                            Err(_) => return "media-track-event-fenced",
+                        }
                         continue;
                     }
                     Err(RecvError::Lagged(dropped)) => {

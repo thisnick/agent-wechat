@@ -102,6 +102,7 @@ pub(super) fn run(
                 ProbeOptions {
                     multi_speaker,
                     transmit_grouping,
+                    video_enabled: is_video,
                     application,
                 },
             );
@@ -137,6 +138,10 @@ pub(super) fn run(
             } else {
                 48
             });
+        transport
+            .worker
+            .joined_commands_ready
+            .store(true, Ordering::Release);
         while transport.worker.current()
             && !transport.worker.stop.load(Ordering::Acquire)
             && !done.load(Ordering::Acquire)
@@ -179,7 +184,7 @@ pub(super) fn run(
                                 ))
                             })
                     }
-                    CommandAction::Mute(muted) => {
+                    CommandAction::Mute => {
                         let now = u64::try_from(
                             SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros(),
                         )?;
@@ -187,20 +192,21 @@ pub(super) fn run(
                             .checked_add(1)
                             .context("Conference microphone clock exhausted")?
                             .max(now);
+                        let mic = !transport.worker.muted.load(Ordering::Acquire);
                         let camera = transport.worker.camera_enabled.load(Ordering::Acquire);
                         session
                             .set_av(
                                 transport,
                                 state,
                                 authority,
-                                !muted,
+                                mic,
                                 camera,
                                 last_microphone,
                                 tasks.next()?,
                             )
                             .map(|()| CommandResult::Muted)
                     }
-                    CommandAction::Camera(enabled) => {
+                    CommandAction::Camera => {
                         let now = u64::try_from(
                             SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros(),
                         )?;
@@ -209,13 +215,14 @@ pub(super) fn run(
                             .context("Conference AV clock exhausted")?
                             .max(now);
                         let mic = !transport.worker.muted.load(Ordering::Acquire);
+                        let camera = transport.worker.camera_enabled.load(Ordering::Acquire);
                         session
                             .set_av(
                                 transport,
                                 state,
                                 authority,
                                 mic,
-                                enabled,
+                                camera,
                                 last_microphone,
                                 tasks.next()?,
                             )
@@ -291,6 +298,7 @@ pub(super) fn run(
         Ok(())
     })();
     stop.store(true, Ordering::Release);
+    transport.worker.media_stop.store(true, Ordering::Release);
     let mut report = thread
         .join()
         .map_err(|_| anyhow::anyhow!("Conference receive worker failed"))?;
@@ -442,6 +450,7 @@ struct Application {
 struct ProbeOptions {
     multi_speaker: bool,
     transmit_grouping: Option<u8>,
+    video_enabled: bool,
     application: Option<Application>,
 }
 fn observe(
@@ -489,6 +498,7 @@ fn observe(
         },
         multi_speaker: options.multi_speaker,
         transmit_grouping: options.transmit_grouping,
+        video_enabled: options.video_enabled,
     };
     let report = run_conference_media_with_video(
         &host,
@@ -499,6 +509,9 @@ fn observe(
         audio,
         direct_video_rx,
     );
+    // Signal worker.media_stop before joining wechat-video-tx so remote-end/all-remotes-left
+    // exits never deadlock waiting for Worker.video to disconnect.
+    worker.media_stop.store(true, Ordering::Release);
     if let Some(handle) = tx_handle {
         let _ = handle.join();
     }

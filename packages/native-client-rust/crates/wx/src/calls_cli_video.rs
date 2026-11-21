@@ -73,6 +73,15 @@ impl CameraSource {
             ensure!(!path.trim().is_empty(), "camera file path is required");
             return Ok(Self::File(PathBuf::from(path)));
         }
+        ensure!(
+            !trimmed.starts_with('-'),
+            "camera device name cannot start with '-'"
+        );
+        #[cfg(target_os = "windows")]
+        ensure!(
+            !trimmed.contains(':'),
+            "camera device name cannot contain ':'"
+        );
         Ok(Self::Device(trimmed.to_owned()))
     }
 
@@ -207,6 +216,7 @@ pub(super) struct LocalVideoCapture {
     stop: Arc<AtomicBool>,
     reader: Option<JoinHandle<()>>,
     frames: mpsc::Receiver<CapturedVideoFrame>,
+    buffered: std::collections::VecDeque<CapturedVideoFrame>,
     started_at: Instant,
 }
 
@@ -225,17 +235,34 @@ impl LocalVideoCapture {
             stop: worker.stop,
             reader: Some(worker.reader),
             frames: worker.frames,
+            buffered: std::collections::VecDeque::with_capacity(8),
             started_at,
         })
     }
 
     pub(super) fn try_recv(&mut self) -> Option<CapturedVideoFrame> {
-        // Always keep the freshest encoded frame when a consumer lags slightly.
-        let mut latest = None;
-        while let Ok(frame) = self.frames.try_recv() {
-            latest = Some(frame);
+        if self.format.codec == CallVideoCodec::Jpeg {
+            // Standalone JPEG frames are independent; always keep the freshest frame.
+            let mut latest = None;
+            while let Ok(frame) = self.frames.try_recv() {
+                latest = Some(frame);
+            }
+            return latest;
         }
-        latest
+        // Inter-frame H.265/H.264 must deliver FIFO so IDR keyframes and reference
+        // P-frames are never dropped; only skip ahead when a newer self-contained
+        // keyframe (IDR + inline parameter sets) is already ready.
+        while let Ok(frame) = self.frames.try_recv() {
+            if frame.flags & (FLAG_KEYFRAME | FLAG_CODEC_CONFIG)
+                == (FLAG_KEYFRAME | FLAG_CODEC_CONFIG)
+            {
+                self.buffered.clear();
+            } else if self.buffered.len() >= 16 {
+                continue;
+            }
+            self.buffered.push_back(frame);
+        }
+        self.buffered.pop_front()
     }
 
     pub(super) fn request_keyframe(&mut self) -> Result<()> {
@@ -332,8 +359,12 @@ fn spawn_capture(
         }
         CameraSource::File(path) => {
             ensure!(path.is_file(), "camera file not found: {}", path.display());
+            let canonical = std::fs::canonicalize(path)
+                .with_context(|| format!("failed to resolve camera file: {}", path.display()))?;
+            let mut input = std::ffi::OsString::from("file:");
+            input.push(canonical.as_os_str());
             cmd.args(["-re", "-stream_loop", "-1", "-i"]);
-            cmd.arg(path);
+            cmd.arg(input);
         }
         CameraSource::Auto | CameraSource::Device(_) => {
             let device = resolve_device_input(source)?;
@@ -475,10 +506,17 @@ fn spawn_capture(
     let worker_stop = stop.clone();
     let (tx, rx) = mpsc::channel(4);
     let codec = format.codec;
-    let reader = thread::Builder::new()
+    let reader = match thread::Builder::new()
         .name("wx-call-video-cap".into())
         .spawn(move || read_captured_stream(stdout, codec, worker_stop, started_at, tx))
-        .context("failed to spawn video capture reader")?;
+    {
+        Ok(reader) => reader,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error).context("failed to spawn video capture reader");
+        }
+    };
     Ok(CaptureWorker {
         child,
         stop,

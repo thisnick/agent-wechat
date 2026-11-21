@@ -269,8 +269,8 @@ pub(super) struct Command {
 
 pub(super) enum CommandAction {
     Invite(Vec<String>),
-    Mute(bool),
-    Camera(bool),
+    Mute,
+    Camera,
 }
 pub(super) enum CommandResult {
     Invitations(Vec<CallInvitationResult>),
