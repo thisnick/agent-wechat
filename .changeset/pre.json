@@ -1,0 +1,14 @@
+{
+  "mode": "pre",
+  "tag": "beta",
+  "initialVersions": {
+    "@agent-wechat/docs": "0.0.1",
+    "@agent-wechat/cli": "2.9.0",
+    "@agent-wechat/client-ui": "0.6.1",
+    "@agent-wechat/desktop": "2.9.0",
+    "@agent-wechat/agent-wechat": "2.9.0",
+    "@agent-wechat/rust-crates": "2.9.0",
+    "@agent-wechat/shared": "2.2.0"
+  },
+  "changesets": []
+}
