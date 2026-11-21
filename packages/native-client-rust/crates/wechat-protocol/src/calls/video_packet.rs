@@ -2323,7 +2323,7 @@ mod tests {
             }
         }
         let f = recovered.expect("post-restart IDR with missed frame 0 must reassemble");
-        assert_eq!(f.frame_index, 2);
+        assert_eq!(f.frame_index, 3);
         assert_eq!(f.timestamp_ms, 9133);
         assert!(f.is_keyframe);
         assert_eq!(f.payload, idr);

@@ -1291,18 +1291,34 @@ async fn video_call_negotiates_passthrough_and_roundtrips_binary_video_and_keyfr
         json!({"type": "video.request_keyframe", "trackId": VIDEO_RECEIVE_TRACK_BASE + 9}),
     )
     .await;
-    // Current generation 2 still works immediately afterward.
+    // Toggle camera back on (generation 3) and confirm video delivery still works afterward.
     command(
-        &mut media,
-        json!({"type": "track.start", "trackId": VIDEO_SEND_TRACK_ID, "generation": 2}),
+        &mut control,
+        json!({"type": "call.camera", "requestId": "cam-toggle-on", "callId": call_id, "enabled": true}),
     )
     .await;
-    let packet_g2 = pcm_envelope::encode_video(
+    assert_eq!(
+        until(&mut control, |e| e["requestId"] == "cam-toggle-on").await["status"],
+        "accepted"
+    );
+    let track_upd_on = until(&mut media, |e| {
+        e["type"] == "track.updated"
+            && e["track"]["id"] == VIDEO_SEND_TRACK_ID
+            && e["track"]["generation"] == 3
+    })
+    .await;
+    assert_eq!(track_upd_on["track"]["active"], true);
+    command(
+        &mut media,
+        json!({"type": "track.start", "trackId": VIDEO_SEND_TRACK_ID, "generation": 3}),
+    )
+    .await;
+    let packet_g3 = pcm_envelope::encode_video(
         MediaPayloadKind::H265AnnexB,
         FLAG_KEYFRAME | FLAG_CODEC_CONFIG,
         MediaHeader {
             track_id: VIDEO_SEND_TRACK_ID,
-            generation: 2,
+            generation: 3,
             sequence: 1,
             timestamp_micros: 66_666,
         },
@@ -1310,7 +1326,7 @@ async fn video_call_negotiates_passthrough_and_roundtrips_binary_video_and_keyfr
     )
     .unwrap();
     media
-        .send(ClientMessage::Binary(packet_g2.into()))
+        .send(ClientMessage::Binary(packet_g3.into()))
         .await
         .unwrap();
     loop {

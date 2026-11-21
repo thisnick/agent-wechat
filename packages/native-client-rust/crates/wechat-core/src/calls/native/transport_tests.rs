@@ -245,6 +245,16 @@ async fn direct_poll_wait_stops_when_direct_command_queued() {
         .lock()
         .unwrap()
         .push_back(DirectCommand { reply });
+    // Before joined_commands_ready is enabled (e.g. while ringing), queued commands must not
+    // interrupt LiveSync into a tight poll spin.
+    f.transport.worker.notify.notify_waiters();
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert!(!waiting.is_finished());
+    // Once connected and draining commands, wait_for_direct_sync wakes immediately.
+    f.transport
+        .worker
+        .joined_commands_ready
+        .store(true, Ordering::Release);
     f.transport.worker.notify.notify_waiters();
     let result = tokio::time::timeout(Duration::from_secs(1), waiting)
         .await
