@@ -1,5 +1,6 @@
 import {
   NativeWeChatClient,
+  type NativeCallWebSocketFactory,
   type NativeOperation,
   type NativeMessage,
   type NativeStatus,
@@ -16,7 +17,16 @@ import { GroupMutations, validGroupReceipt } from "./group-creation.ts";
 import { ThreadPinning, ThreadMuting } from "./thread-pinning.ts";
 import { validQuoteReference } from "./reply.ts";
 import { validMentionReceipt } from "./mentions.ts";
-import { previewFetch } from "./preview-transport.ts";
+import { previewFetch, previewWebSocketFactory } from "./preview-transport.ts";
+import { BrowserCallTransport, CallController } from "./calls/call-controller.ts";
+import type { CallSessionTransport } from "./calls/media-backend.ts";
+
+export type ConnectOptions = {
+  webSocketFactory?: NativeCallWebSocketFactory;
+  callTransportFactory?: (account: string) => CallSessionTransport;
+  callsDisabled?: boolean;
+};
+
 export type Connection = {
   desktopId?: string;
   session: HubSession;
@@ -38,6 +48,7 @@ export type Connection = {
   groupCreation: (account: string, target?: string) => GroupMutations;
   threadPinning: (account: string, target: string) => ThreadPinning;
   threadMuting: (account: string, target: string) => ThreadMuting;
+  calls: (account: string) => CallController;
 };
 export async function connect(
   endpoint: string,
@@ -45,6 +56,7 @@ export async function connect(
   simulator = false,
   transport: typeof fetch = globalThis.fetch.bind(globalThis),
   initialStatus?: NativeStatus,
+  options?: ConnectOptions,
 ): Promise<Connection> {
   let cache: BrowserCache | undefined;
   const client = new NativeWeChatClient({
@@ -196,12 +208,15 @@ export async function connect(
   const groups = new Map<string, GroupMutations>();
   const pins = new Map<string, ThreadPinning>();
   const mutes = new Map<string, ThreadMuting>();
+  const callControllers = new Map<string, CallController>();
   const stopSignOut = session.onSignedOut((account) => {
     attachmentDrafts.clear(account);
     incomingMedia.clear(account);
     avatars.clear(account);
     media.get(account)?.close();
     media.delete(account);
+    callControllers.get(account)?.close();
+    callControllers.delete(account);
     for (const [key, recall] of recalls)
       if ((JSON.parse(key) as string[])[0] === account) {
         recall.close();
@@ -297,6 +312,24 @@ export async function connect(
       for (const pin of pins.values()) pin.close();
       for (const mute of mutes.values()) mute.close();
       for (const group of groups.values()) group.close();
+      for (const call of callControllers.values()) call.close();
+      callControllers.clear();
+    },
+    calls(account) {
+      let controller = callControllers.get(account);
+      if (!controller) {
+        const disabled = options?.callsDisabled === true;
+        const callTransport = disabled
+          ? null
+          : options?.callTransportFactory
+            ? options.callTransportFactory(account)
+            : new BrowserCallTransport(client, account, {
+                webSocketFactory: options?.webSocketFactory,
+              });
+        controller = new CallController({ transport: callTransport, disabled });
+        callControllers.set(account, controller);
+      }
+      return controller;
     },
     avatars,
     incomingMedia,
@@ -489,10 +522,23 @@ export async function bootstrap(
     return null;
   const data = await response.json();
   let transport: typeof fetch | undefined;
+  let webSocketFactory: NativeCallWebSocketFactory | undefined;
   if (data.proxyPath !== undefined) {
     transport = previewFetch(data.endpoint, location.origin, data.proxyPath);
+    webSocketFactory = previewWebSocketFactory(
+      data.endpoint,
+      location.origin,
+      data.proxyPath,
+    );
   }
-  const connection = await connect(data.endpoint, data.token, data.simulator === true, transport);
+  const connection = await connect(
+    data.endpoint,
+    data.token,
+    data.simulator === true,
+    transport,
+    undefined,
+    webSocketFactory ? { webSocketFactory } : undefined,
+  );
   if (typeof data.hub === "string") try { localStorage.setItem("agentwechat-preview-hub", data.hub); } catch {}
   return connection;
 }

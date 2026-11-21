@@ -1756,3 +1756,479 @@ for (const mode of ['picker', 'edit', 'dragging', 'packs', 'pack-detail', 'impor
     },
   });
 }
+
+// Synthetic Calls Protocol v3 scenes using page.route + page.routeWebSocket so
+// every scene exercises NativeCallsClient, CallController and the real UI offline.
+const CALL_SCENE_CAPABILITIES = {
+  directAudio: true,
+  directVideo: true,
+  conferenceCreate: true,
+  conferenceJoin: true,
+  conferenceVideo: true,
+};
+const CALL_SCENE_AUDIO_FORMAT = { sampleRate: 16000, channels: 1, frameMs: 20 };
+
+function encodeWxcmJpeg(trackId, generation, jpegBytes, rotationFlag = 0) {
+  const buf = Buffer.alloc(36 + jpegBytes.length);
+  buf.write("WXCM", 0, "ascii");
+  buf[4] = 3; // protocol version
+  buf[5] = 4; // WXCM_PAYLOAD_JPEG
+  buf.writeUInt16BE(0x0001 | rotationFlag, 6); // keyframe + rotation
+  buf.writeUInt32BE(trackId, 8);
+  buf.writeUInt32BE(generation, 12);
+  buf.writeBigUInt64BE(1n, 16);
+  buf.writeBigUInt64BE(1_000_000n, 24);
+  buf.writeUInt32BE(jpegBytes.length, 32);
+  Buffer.from(jpegBytes).copy(buf, 36);
+  return buf;
+}
+
+async function prepareCallScene(page, options = {}) {
+  const {
+    availability = { busy: false, ownedByThisClient: false },
+    currentOffer = null,
+    currentCall = null,
+    conferenceInvitations = [],
+    videoTracks = [],
+    onDial = null,
+    onAnswer = null,
+    onConferenceStart = null,
+    mediaFrames = [],
+  } = options;
+  const ticket = "b".repeat(64);
+
+  // Provide deterministic headless mediaDevices so camera preview & device pickers never error.
+  await page.addInitScript(() => {
+    const fakeDevices = [
+      { deviceId: "mic-1", kind: "audioinput", label: "Built-in Microphone", groupId: "g1" },
+      { deviceId: "spk-1", kind: "audiooutput", label: "Studio Speakers", groupId: "g1" },
+      { deviceId: "cam-1", kind: "videoinput", label: "FaceTime HD Camera", groupId: "g2" },
+    ];
+    const makeCanvasStream = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 320;
+      canvas.height = 240;
+      const ctx = canvas.getContext("2d");
+      if (ctx) {
+        const grad = ctx.createLinearGradient(0, 0, 320, 240);
+        grad.addColorStop(0, "#243b55");
+        grad.addColorStop(1, "#141e30");
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, 320, 240);
+        ctx.fillStyle = "#e2e8f0";
+        ctx.beginPath();
+        ctx.arc(160, 102, 34, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(160, 198, 56, Math.PI, 0);
+        ctx.fill();
+      }
+      return typeof canvas.captureStream === "function" ? canvas.captureStream(1) : new MediaStream();
+    };
+    const makeSilentAudioStream = () => {
+      try {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (AudioCtx) {
+          const ctx = new AudioCtx();
+          const dest = ctx.createMediaStreamDestination();
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          gain.gain.value = 0;
+          osc.connect(gain);
+          gain.connect(dest);
+          osc.start();
+          return dest.stream;
+        }
+      } catch {}
+      return new MediaStream();
+    };
+    const mediaDevices = {
+      enumerateDevices: async () => fakeDevices,
+      getUserMedia: async (constraints) => {
+        if (constraints && constraints.video) return makeCanvasStream();
+        if (constraints && constraints.audio) return makeSilentAudioStream();
+        return new MediaStream();
+      },
+      addEventListener() {},
+      removeEventListener() {},
+    };
+    Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: mediaDevices });
+  });
+
+  await page.route("**/v1/accounts/*/calls/current", (route) =>
+    route.fulfill({
+      json: {
+        capabilities: CALL_SCENE_CAPABILITIES,
+        availability,
+        currentOffer,
+        currentPendingOffer: null,
+        currentCall,
+        audioFormat: CALL_SCENE_AUDIO_FORMAT,
+        videoCapabilities: {
+          sendCodecs: ["jpeg"],
+          receiveCodecs: ["jpeg"],
+          maxWidth: 640,
+          maxHeight: 480,
+          maxFps: 15,
+        },
+        conferenceInvitations,
+      },
+    }),
+  );
+
+  await page.route("**/v1/accounts/*/calls/tickets", (route) => {
+    const body = route.request().postDataJSON();
+    return route.fulfill({
+      json: {
+        ticket,
+        expiresAt: 1700003600,
+        expiresInSeconds: 20,
+        socket: body.socket,
+        callId: body.callId ?? null,
+      },
+    });
+  });
+
+  await page.routeWebSocket(/\/v1\/accounts\/[^/]+\/calls\/socket(?:\?.*)?$/, (ws) => {
+    ws.onMessage((raw) => {
+      const msg = JSON.parse(String(raw));
+      if (msg.type === "call.hello") {
+        ws.send(
+          JSON.stringify({
+            type: "hello",
+            protocolVersion: 3,
+            clientId: "scene-client",
+            capabilities: CALL_SCENE_CAPABILITIES,
+            availability,
+            currentOffer,
+            currentPendingOffer: null,
+            currentCall,
+            audioFormat: CALL_SCENE_AUDIO_FORMAT,
+            videoCapabilities: {
+              sendCodecs: ["jpeg"],
+              receiveCodecs: ["jpeg"],
+              maxWidth: 640,
+              maxHeight: 480,
+              maxFps: 15,
+            },
+            conferenceInvitations,
+          }),
+        );
+      } else if (msg.type === "call.ready") {
+        ws.send(
+          JSON.stringify({
+            type: "command.result",
+            requestId: msg.requestId,
+            status: "accepted",
+            callId: null,
+            ownerToken: null,
+            code: null,
+          }),
+        );
+      } else if (msg.type === "call.dial") {
+        const next = msg.target.kind === "conference"
+          ? onConferenceStart?.(msg)
+          : onDial?.(msg);
+        const callId = next?.callId ?? "scene-call-1";
+        ws.send(
+          JSON.stringify({
+            type: "command.result",
+            requestId: msg.requestId,
+            status: "accepted",
+            callId,
+            ownerToken: "scene-owner-token",
+            code: null,
+          }),
+        );
+        if (next) {
+          ws.send(
+            JSON.stringify({
+              type: "calls.availability",
+              availability: { busy: true, ownedByThisClient: true },
+            }),
+          );
+          ws.send(JSON.stringify({ type: "call.state", call: next }));
+          for (const tr of videoTracks) {
+            ws.send(JSON.stringify({ type: "track.added", callId, track: tr }));
+          }
+        }
+      } else if (msg.type === "call.answer") {
+        const next = onAnswer?.(msg);
+        ws.send(
+          JSON.stringify({
+            type: "command.result",
+            requestId: msg.requestId,
+            status: "accepted",
+            callId: msg.callId,
+            ownerToken: "scene-owner-token",
+            code: null,
+          }),
+        );
+        if (next) {
+          ws.send(
+            JSON.stringify({
+              type: "calls.availability",
+              availability: { busy: true, ownedByThisClient: true },
+            }),
+          );
+          ws.send(JSON.stringify({ type: "call.state", call: next }));
+          for (const tr of videoTracks) {
+            ws.send(JSON.stringify({ type: "track.added", callId: msg.callId, track: tr }));
+          }
+        }
+      } else if (msg.type === "call.mute" || msg.type === "call.camera") {
+        ws.send(
+          JSON.stringify({
+            type: "command.result",
+            requestId: msg.requestId,
+            status: "accepted",
+            callId: msg.callId,
+            ownerToken: null,
+            code: null,
+          }),
+        );
+      }
+    });
+  });
+
+  await page.routeWebSocket(/\/v1\/accounts\/[^/]+\/calls\/[^/]+\/media(?:\?.*)?$/, (ws) => {
+    ws.onMessage((raw) => {
+      if (typeof raw !== "string") return;
+      const msg = JSON.parse(raw);
+      if (msg.type === "media.attach") {
+        ws.send(
+          JSON.stringify({
+            type: "media.ready",
+            protocolVersion: 3,
+            sendTracks: [
+              { id: 1, generation: 1, media: "audio", direction: "send", format: CALL_SCENE_AUDIO_FORMAT },
+              {
+                id: 2,
+                generation: 1,
+                media: "video",
+                direction: "send",
+                format: { codec: "jpeg", mode: "transcoded", maxWidth: 640, maxHeight: 480, maxFps: 15 },
+                active: true,
+              },
+            ],
+            receiveTracks: [
+              { id: 10, generation: 1, media: "audio", direction: "receive", format: CALL_SCENE_AUDIO_FORMAT },
+              ...videoTracks,
+            ],
+          }),
+        );
+        for (const frame of mediaFrames) {
+          ws.send(frame);
+        }
+      }
+    });
+  });
+}
+
+scenes.push(
+  {
+    name: "call-incoming-offer",
+    route: "chat",
+    description: "An incoming video call toast above a direct conversation with Answer video, Audio only, Decline and ringtone mute.",
+    viewports: ["desktop", "narrow"],
+    setup: standardWorld,
+    target: (world) => ({ account: ACCOUNT.id, thread: world.mei }),
+    prepare: async ({ page }) => {
+      await prepareCallScene(page, {
+        currentOffer: {
+          callId: "offer-scene-1",
+          revision: 1,
+          kind: "direct",
+          callType: "video",
+          callerId: "sim_mei",
+        },
+      });
+    },
+    ready: async ({ page, expect }) => {
+      await expect(page.getByRole("region", { name: "Incoming call from Mei Chen" })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Answer video" })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Audio only" })).toBeVisible();
+    },
+  },
+  {
+    name: "call-voice-strip",
+    route: "chat",
+    description: "An active direct voice call docked in the compact voice strip above the conversation with a live sidebar badge.",
+    viewports: ["desktop", "compact"],
+    setup: standardWorld,
+    target: (world) => ({ account: ACCOUNT.id, thread: world.mei }),
+    prepare: async ({ page }) => {
+      await prepareCallScene(page, {
+        onDial: () => ({
+          callId: "voice-scene-1",
+          revision: 2,
+          kind: "direct",
+          callType: "voice",
+          direction: "outgoing",
+          state: "connected",
+          ownedByThisClient: true,
+          participants: [{ participantId: "p-mei", contactId: "sim_mei", membership: "joined", microphoneEnabled: true }],
+          controls: [],
+        }),
+      });
+    },
+    ready: async ({ page, expect }) => {
+      await expect(page.getByRole("button", { name: "Voice call", exact: true })).toBeEnabled();
+    },
+    actions: async ({ page, expect }) => {
+      await page.getByRole("button", { name: "Voice call", exact: true }).click();
+      const strip = page.getByRole("region", { name: "Active voice call" });
+      await expect(strip).toBeVisible();
+      await expect(strip.getByText("00:00")).toBeVisible();
+    },
+  },
+  {
+    name: "call-video-theater",
+    route: "chat",
+    description: "An active direct video call in the Theater dialog overlay showing decoded remote video, corner self-view and media controls.",
+    viewports: ["desktop", "narrow"],
+    setup: standardWorld,
+    target: (world) => ({ account: ACCOUNT.id, thread: world.mei }),
+    prepare: async ({ page }) => {
+      const cover = await readFile(new URL("../../../docs/demo/gallery/fixtures/media/afternoon-walk.jpg", import.meta.url));
+      const remoteTrack = {
+        id: 21,
+        generation: 1,
+        media: "video",
+        direction: "receive",
+        participantId: "p-mei",
+        format: { codec: "jpeg", mode: "transcoded", maxWidth: 640, maxHeight: 480, maxFps: 15 },
+        active: true,
+      };
+      await prepareCallScene(page, {
+        videoTracks: [remoteTrack],
+        mediaFrames: [encodeWxcmJpeg(21, 1, cover)],
+        onDial: () => ({
+          callId: "video-scene-1",
+          revision: 2,
+          kind: "direct",
+          callType: "video",
+          direction: "outgoing",
+          state: "connected",
+          ownedByThisClient: true,
+          participants: [{ participantId: "p-mei", contactId: "sim_mei", membership: "joined", microphoneEnabled: true, cameraEnabled: true }],
+          controls: [],
+        }),
+      });
+    },
+    ready: async ({ page, expect }) => {
+      await expect(page.getByRole("button", { name: "Video call", exact: true })).toBeEnabled();
+    },
+    actions: async ({ page, expect }) => {
+      await page.getByRole("button", { name: "Video call", exact: true }).click();
+      await expect(page.getByRole("dialog", { name: "Video call with Mei Chen" })).toBeVisible();
+      await page.getByRole("button", { name: "Start video call" }).click();
+      const dialog = page.getByRole("dialog", { name: "Call with Mei Chen" });
+      await expect(dialog).toBeVisible();
+      await expect(dialog.locator("canvas.call-video-canvas")).toBeVisible();
+    },
+  },
+  {
+    name: "call-conference-grid",
+    route: "chat",
+    description: "An active group video conference in the Theater overlay with multi-participant tiles, mute/unknown indicators and Invite action.",
+    viewports: ["desktop"],
+    setup: standardWorld,
+    target: (world) => ({ account: ACCOUNT.id, thread: world.group }),
+    prepare: async ({ page }) => {
+      const cover = await readFile(new URL("../../../docs/demo/gallery/fixtures/media/afternoon-walk.jpg", import.meta.url));
+      const remoteTrack = {
+        id: 31,
+        generation: 1,
+        media: "video",
+        direction: "receive",
+        participantId: "p-mei",
+        format: { codec: "jpeg", mode: "transcoded", maxWidth: 640, maxHeight: 480, maxFps: 15 },
+        active: true,
+      };
+      await prepareCallScene(page, {
+        videoTracks: [remoteTrack],
+        mediaFrames: [encodeWxcmJpeg(31, 1, cover)],
+        onConferenceStart: (msg) => ({
+          callId: "conf-scene-1",
+          revision: 2,
+          kind: "conference",
+          callType: "video",
+          direction: "outgoing",
+          state: "connected",
+          ownedByThisClient: true,
+          groupId: msg.target.groupId,
+          participants: [
+            { participantId: "p-mei", contactId: "sim_mei", membership: "joined", microphoneEnabled: true, cameraEnabled: true },
+            { participantId: "p-daniel", contactId: "sim_daniel", membership: "joined", microphoneEnabled: false, cameraEnabled: false },
+            { participantId: "p-guest", contactId: "sim_guest", membership: "invited" },
+          ],
+          controls: [],
+        }),
+      });
+    },
+    ready: async ({ page, expect }) => {
+      await expect(page.getByRole("button", { name: "Start group video call" })).toBeEnabled();
+    },
+    actions: async ({ page, expect }) => {
+      await page.getByRole("button", { name: "Start group video call" }).click();
+      const picker = page.getByRole("dialog", { name: "Call Weekend trip" });
+      await expect(picker).toBeVisible();
+      await picker.getByRole("checkbox", { name: "Select Mei Chen" }).check();
+      await picker.getByRole("checkbox", { name: "Select Daniel Park" }).check();
+      await picker.getByRole("button", { name: "Start group video call" }).click();
+      const dialog = page.getByRole("dialog", { name: "Call with Weekend trip" });
+      await expect(dialog).toBeVisible();
+      await expect(dialog.locator(".call-tile")).toHaveCount(3);
+      await expect(dialog.getByRole("button", { name: "Invite people" })).toBeVisible();
+    },
+  },
+  {
+    name: "call-group-picker",
+    route: "chat",
+    description: "A group chat with an active conference join bar below the header and the group call invitee picker modal open.",
+    viewports: ["desktop"],
+    setup: standardWorld,
+    target: (world) => ({ account: ACCOUNT.id, thread: world.group }),
+    prepare: async ({ page, world }) => {
+      await prepareCallScene(page, {
+        conferenceInvitations: [
+          {
+            invitationId: "inv-scene-1",
+            revision: 1,
+            groupId: world.group,
+            callerId: "sim_mei",
+          },
+        ],
+      });
+    },
+    ready: async ({ page, expect }) => {
+      await expect(page.getByRole("region", { name: "Group call in progress" })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Join audio" })).toBeVisible();
+    },
+    actions: async ({ page, expect }) => {
+      await page.getByRole("button", { name: "Start group voice call" }).click();
+      const picker = page.getByRole("dialog", { name: "Call Weekend trip" });
+      await expect(picker).toBeVisible();
+      await picker.getByRole("checkbox", { name: "Select Mei Chen" }).check();
+    },
+  },
+  {
+    name: "call-passive-observer",
+    route: "chat",
+    description: "A direct chat while another client owns an active call on the account, showing the passive notice and disabled call buttons.",
+    viewports: ["desktop"],
+    setup: standardWorld,
+    target: (world) => ({ account: ACCOUNT.id, thread: world.mei }),
+    prepare: async ({ page }) => {
+      await prepareCallScene(page, {
+        availability: { busy: true, ownedByThisClient: false },
+      });
+    },
+    ready: async ({ page, expect }) => {
+      await expect(page.getByText("Call active in another client")).toBeVisible();
+      await expect(page.getByRole("button", { name: "Voice call", exact: true })).toBeDisabled();
+      await expect(page.getByRole("button", { name: "Video call", exact: true })).toBeDisabled();
+    },
+  },
+);

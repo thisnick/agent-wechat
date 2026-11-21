@@ -24,6 +24,7 @@ export function ConversationRow({
   select,
   heading,
   divider,
+  liveCall,
 }: {
   connection: Connection;
   account: string;
@@ -33,6 +34,7 @@ export function ConversationRow({
   select: () => void;
   heading?: boolean;
   divider?: boolean;
+  liveCall?: "active" | "invitation";
 }) {
   const model = connection.threadPinning(account, thread.id);
   const pin = useSyncExternalStore(model.subscribe, model.snapshot);
@@ -221,6 +223,14 @@ export function ConversationRow({
           <div className="chat-copy">
             <div className="chat-top">
               <span className="chat-name">{name}</span>
+              {liveCall && (
+                <span className="thread-call-pill">
+                  <span className="call-live-dot" aria-hidden="true" />
+                  {liveCall === "active"
+                    ? t("calls.liveBadge")
+                    : t("calls.joinBadge")}
+                </span>
+              )}
             </div>
             <div className="preview-row">
               <span className="preview">{threadPreview(thread)}</span>

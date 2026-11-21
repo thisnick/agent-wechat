@@ -35,6 +35,7 @@ export async function desktopConnect(
     false,
     desktopFetch(session),
     session.status,
+    { callsDisabled: true },
   );
   connection.desktopId = session.id;
   return connection;

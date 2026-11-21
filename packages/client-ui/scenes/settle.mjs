@@ -5,8 +5,10 @@ import { expect } from "@playwright/test";
 /** Resolves once nothing the UI asked the hub for is still in flight. Open event streams do not count. */
 export function trackRequests(page) {
   const open = new Set();
-  const relevant = (request) =>
-    new URL(request.url()).pathname.startsWith("/v1/") && !(request.headers().accept ?? "").includes("text/event-stream");
+  const relevant = (request) => {
+    const url = new URL(request.url());
+    return ["http:", "https:"].includes(url.protocol) && url.pathname.startsWith("/v1/") && !(request.headers().accept ?? "").includes("text/event-stream");
+  };
   page.on("request", (request) => relevant(request) && open.add(request));
   page.on("requestfinished", (request) => open.delete(request));
   page.on("requestfailed", (request) => open.delete(request));

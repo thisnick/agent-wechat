@@ -12,6 +12,21 @@ import {
   AtSign,
   Info,
   CircleAlert,
+  Phone,
+  PhoneOff,
+  PhoneIncoming,
+  Video,
+  VideoOff,
+  Mic,
+  MicOff,
+  Volume2,
+  VolumeX,
+  Maximize2,
+  Minimize2,
+  PictureInPicture2,
+  UserPlus,
+  SlidersHorizontal,
+  MessageSquare,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { languages, t, useLanguage, type LanguagePreference } from "./i18n.ts";
@@ -62,6 +77,21 @@ export function Icon({ name }: { name: string }) {
       mention: AtSign,
       info: Info,
       alert: CircleAlert,
+      phone: Phone,
+      "phone-off": PhoneOff,
+      "phone-incoming": PhoneIncoming,
+      video: Video,
+      "video-off": VideoOff,
+      mic: Mic,
+      "mic-off": MicOff,
+      volume: Volume2,
+      "volume-off": VolumeX,
+      maximize: Maximize2,
+      minimize: Minimize2,
+      pip: PictureInPicture2,
+      "user-plus": UserPlus,
+      sliders: SlidersHorizontal,
+      "message-square": MessageSquare,
     } as Record<string, typeof MessageSquareX>
   )[name];
   if (component) {

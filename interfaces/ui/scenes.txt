@@ -4,6 +4,12 @@
 # Format: ITEM | ATTRIBUTES | DESCRIPTION
 scene account-list | route /{server}/accounts, viewports desktop+narrow | The accounts on a hub: one signed in and one that still needs a QR code.
 scene add-contact | route /{server}/{account}/contacts, viewports desktop+narrow+compact | The shared contact card with a greeting and privacy choices before sending a friend request.
+scene call-conference-grid | route /{server}/{account}/chats/{thread}, viewports desktop | An active group video conference in the Theater overlay with multi-participant tiles, mute/unknown indicators and Invite action.
+scene call-group-picker | route /{server}/{account}/chats/{thread}, viewports desktop | A group chat with an active conference join bar below the header and the group call invitee picker modal open.
+scene call-incoming-offer | route /{server}/{account}/chats/{thread}, viewports desktop+narrow | An incoming video call toast above a direct conversation with Answer video, Audio only, Decline and ringtone mute.
+scene call-passive-observer | route /{server}/{account}/chats/{thread}, viewports desktop | A direct chat while another client owns an active call on the account, showing the passive notice and disabled call buttons.
+scene call-video-theater | route /{server}/{account}/chats/{thread}, viewports desktop+narrow | An active direct video call in the Theater dialog overlay showing decoded remote video, corner self-view and media controls.
+scene call-voice-strip | route /{server}/{account}/chats/{thread}, viewports desktop+compact | An active direct voice call docked in the compact voice strip above the conversation with a live sidebar badge.
 scene channels-video-cards | route /{server}/{account}/chats/{thread}, viewports desktop+narrow | Received WeChat Channels cards with their cover, play button, publisher and length.
 scene chat-filters | route /{server}/{account}/chats, viewports desktop+compact | The conversation filter bar with All pinned beside the scrolling categories and unread badges for categories with new messages.
 scene chat-info | route /{server}/{account}/chats/{thread}/info, viewports desktop+narrow | Details of a group conversation with its pin, mute and group settings.
