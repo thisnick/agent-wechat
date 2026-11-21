@@ -92,6 +92,16 @@ import {
 import "./style.css";
 import "./onboarding.css";
 import "./client.css";
+import "./calls/calls.css";
+import {
+  CallDetailActions,
+  CallHeaderActions,
+  CallInlineBanners,
+  CallWorkspaceChrome,
+} from "./calls/call-stage.tsx";
+import type { CallControllerState } from "./calls/call-controller.ts";
+const NOOP_SUBSCRIBE = () => () => {};
+const NULL_CALL_SNAPSHOT = (): CallControllerState | null => null;
 import { SharedLink } from "./shared-link.tsx";
 import { LocationMessage } from "./location-message.tsx";
 import { SystemNotice } from "./system-notice.tsx";
@@ -1077,8 +1087,24 @@ function Chats({
   const [omniScope,setOmniScope]=useState<string|null>(null);
   const [requestSelection,setRequestSelection]=useState<RequestSelection|null>(null);
   const requests=useContactRequests(connection,state.account!);
+  const callController = state.account ? connection.calls(state.account) : null;
+  const callState = useSyncExternalStore(
+    callController ? callController.subscribe : NOOP_SUBSCRIBE,
+    callController ? callController.snapshot : NULL_CALL_SNAPSHOT,
+  );
+  const [groupCallPicker, setGroupCallPicker] = useState<{
+    groupId: string;
+    groupName: string;
+    callType: "voice" | "video";
+  } | null>(null);
+  useEffect(() => {
+    callController?.start();
+    return () => {
+      callController?.pause();
+    };
+  }, [callController]);
   useEffect(()=>{const handler=(event:KeyboardEvent)=>{if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==="k"){event.preventDefault();setOmniScope("all");}};window.addEventListener("keydown",handler);return()=>window.removeEventListener("keydown",handler);},[]);
-  useEffect(()=>{setOmniScope(null);setRequestSelection(null);},[state.account,connection]);
+  useEffect(()=>{setOmniScope(null);setRequestSelection(null);setGroupCallPicker(null);},[state.account,connection]);
   const [categories, setCategories] = useState(() =>
     savedConversationCategories(state.account ? connection.cache.view(state.account) : {}),
   );
@@ -1480,19 +1506,32 @@ function Chats({
         {section==="contacts" && <button className="friend-request-link" onClick={()=>router.push({name:"friend-requests",...here})}><span>{t("contactsUi.requests")}</span>{requests.count>0&&<span className="contact-request-badge">{requests.count}</span>}</button>}
         <div className="chat-list">
           {section === "chats"
-            ? threads.map((t, index) => (
-                <ConversationRow
-                  key={t.id}
-                  connection={connection}
-                  account={state.account!}
-                  thread={t}
-                  name={name(t.id)}
-                  selected={state.selected === t.id}
-                  select={() => select(t.id)}
-                  heading={t.id === firstPinned}
-                  divider={index > 0 && threads[index - 1].pinned === true && t.pinned !== true}
-                />
-              ))
+            ? threads.map((t, index) => {
+                const liveCall =
+                  callState?.currentCall?.ownedByThisClient &&
+                  (callState.currentCall.groupId === t.id ||
+                    callState.activePeerId === t.id)
+                    ? "active"
+                    : callState?.conferenceInvitations.some(
+                          (inv) => inv.groupId === t.id,
+                        )
+                      ? "invitation"
+                      : undefined;
+                return (
+                  <ConversationRow
+                    key={t.id}
+                    connection={connection}
+                    account={state.account!}
+                    thread={t}
+                    name={name(t.id)}
+                    selected={state.selected === t.id}
+                    select={() => select(t.id)}
+                    heading={t.id === firstPinned}
+                    divider={index > 0 && threads[index - 1].pinned === true && t.pinned !== true}
+                    liveCall={liveCall}
+                  />
+                );
+              })
             : state.contacts
                 .filter((c) =>
                   c.relation === "friend" && (c.displayName || c.id)
@@ -1569,6 +1608,21 @@ function Chats({
             </p>
           </div>
           <div className="header-actions">
+            {callController && state.selected && (
+              <CallHeaderActions
+                controller={callController}
+                threadId={state.selected}
+                threadName={selectedName}
+                ownUsername={account?.ownUsername}
+                onOpenGroupPicker={(callType) =>
+                  setGroupCallPicker({
+                    groupId: state.selected!,
+                    groupName: selectedName,
+                    callType,
+                  })
+                }
+              />
+            )}
             <Button
               icon="search"
               label={t("main.findConversation")}
@@ -1606,6 +1660,15 @@ function Chats({
             </label>
           )}
         </header>
+        {callController && state.account && (
+          <CallInlineBanners
+            connection={connection}
+            account={state.account}
+            controller={callController}
+            selectedThreadId={state.selected}
+            resolveName={name}
+          />
+        )}
         {state.error && (
           <div className="banner" role="alert">
             {state.error}
@@ -1998,6 +2061,13 @@ function Chats({
                     connection={connection}
                     threadId={state.selected}
                     name={selectedName}
+                    onOpenGroupCallPicker={(callType) =>
+                      setGroupCallPicker({
+                        groupId: state.selected!,
+                        groupName: selectedName,
+                        callType,
+                      })
+                    }
                   />
                 )}
               </div>
@@ -2005,6 +2075,16 @@ function Chats({
           </ReplyContext.Provider>
         </ConversationNavigation>
       </main>}
+      {callController && state.account && (
+        <CallWorkspaceChrome
+          connection={connection}
+          account={state.account}
+          controller={callController}
+          resolveName={name}
+          groupPicker={groupCallPicker}
+          onCloseGroupPicker={() => setGroupCallPicker(null)}
+        />
+      )}
       {omniScope!==null && <OmniSearch key={state.account} connection={connection} account={state.account!} initialScope={omniScope} suspended={requestSelection!==null} requests={requests.items} close={()=>setOmniScope(null)} review={setRequestSelection} open={(thread,message)=>{if(message)router.push({name:"message",...here,thread,message});else select(thread);}}/>}
       {requestSelection && <ContactDetailDialog key={contactSelectionKey(requestSelection)} connection={connection} account={state.account!} review={setRequestSelection} selection={"request" in requestSelection ? { request: requests.items.find(item => item.id === requestSelection.request.id) ?? requestSelection.request } : requestSelection} close={()=>setRequestSelection(null)} changed={()=>{requests.refresh();void session.refresh().catch(()=>{});}} open={select} remove={contact=>setRequestSelection({removeContact:contact})}/>}
 
@@ -2492,12 +2572,16 @@ function Details({
   connection,
   threadId,
   name,
+  onOpenGroupCallPicker,
 }: {
   connection: Connection;
   threadId: string;
   name: string;
+  onOpenGroupCallPicker: (callType: "voice" | "video") => void;
 }) {
   const state = connection.session.snapshot();
+  const callController = state.account ? connection.calls(state.account) : null;
+  const ownUsername = state.accounts.find((a) => a.id === state.account)?.ownUsername;
   return (
     <aside
       className="detail-panel"
@@ -2523,6 +2607,15 @@ function Details({
             : t("main.wechatContact")}
         </p>
       </div>
+      {callController && (
+        <CallDetailActions
+          controller={callController}
+          threadId={threadId}
+          threadName={name}
+          ownUsername={ownUsername}
+          onOpenGroupPicker={onOpenGroupCallPicker}
+        />
+      )}
       <div className="detail-section">
         <div className="section-head">{t("main.conversation")}</div>
         <p className="peer-id" title={t("main.internalId")}>

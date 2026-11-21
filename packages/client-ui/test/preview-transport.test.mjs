@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { previewFetch } from "../src/preview-transport.ts";
+import { previewFetch, previewWebSocketUrl } from "../src/preview-transport.ts";
 
 test("preview routes preserve API bodies, keys, queries, streaming and cancellation without cross-origin browser requests", async () => {
   const calls = [];
@@ -42,4 +42,37 @@ test("preview preserves multipart boundaries and Request input bodies without st
   await transport(new Request("https://hub.example/v1/accounts/a/contact-requests", { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": "original-key" }, body: '{"message":"hello"}', signal: abort.signal }));
   assert.equal(await calls[1].text(), '{"message":"hello"}'); assert.equal(calls[1].headers.get("Idempotency-Key"), "original-key");
   abort.abort(); assert.equal(calls[1].signal.aborted, true);
+});
+
+test("preview WebSocket URLs rewrite only matching hub calls paths onto the UI origin", () => {
+  const rewritten = previewWebSocketUrl(
+    "wss://hub.example:6174/v1/accounts/a/calls/socket?ticket=" + "a".repeat(64),
+    "https://hub.example:6174",
+    "http://127.0.0.1:5173",
+    "/__hubs/work",
+  );
+  assert.equal(
+    rewritten,
+    `ws://127.0.0.1:5173/__hubs/work/v1/accounts/a/calls/socket?ticket=${"a".repeat(64)}`,
+  );
+  assert.throws(
+    () =>
+      previewWebSocketUrl(
+        "wss://other.example/v1/accounts/a/calls/socket?ticket=" + "a".repeat(64),
+        "https://hub.example:6174",
+        "http://127.0.0.1:5173",
+        "/__hubs/work",
+      ),
+    /Unexpected preview hub websocket/,
+  );
+  assert.throws(
+    () =>
+      previewWebSocketUrl(
+        "wss://hub.example:6174/v1/accounts/a/calls/socket",
+        "https://hub.example:6174",
+        "http://127.0.0.1:5173",
+        "/__hubs/../evil",
+      ),
+    /Invalid preview proxy/,
+  );
 });

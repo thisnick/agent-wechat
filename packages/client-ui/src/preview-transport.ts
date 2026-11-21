@@ -1,3 +1,5 @@
+import type { NativeCallWebSocketFactory } from "@agent-wechat/shared";
+
 /** Only configured preview routes receive credentials; the browser stays on its UI origin. */
 export function previewFetch(endpoint: string, origin: string, proxyPath: string, transport: typeof fetch = globalThis.fetch.bind(globalThis)): typeof fetch {
   if (!/^\/__hubs\/[a-z0-9-]{1,48}$/.test(proxyPath)) throw Error("Invalid preview proxy");
@@ -20,4 +22,27 @@ export function previewFetch(endpoint: string, origin: string, proxyPath: string
       referrerPolicy: request.referrerPolicy,
     })));
   };
+}
+
+/** Rewrites call WebSocket URLs to stay on the preview UI origin via the selected hub proxy. */
+export function previewWebSocketUrl(rawUrl: string, endpoint: string, origin: string, proxyPath: string): string {
+  if (!/^\/__hubs\/[a-z0-9-]{1,48}$/.test(proxyPath)) throw Error("Invalid preview proxy");
+  const expected = new URL(endpoint);
+  const preview = new URL(origin);
+  const url = new URL(rawUrl);
+  const expectedProtocol = expected.protocol === "https:" ? "wss:" : "ws:";
+  if (url.protocol !== expectedProtocol || url.host !== expected.host || !url.pathname.startsWith("/v1/")) {
+    throw Error("Unexpected preview hub websocket");
+  }
+  const wsOrigin = `${preview.protocol === "https:" ? "wss:" : "ws:"}//${preview.host}`;
+  return `${wsOrigin}${proxyPath}${url.pathname}${url.search}`;
+}
+
+export function previewWebSocketFactory(
+  endpoint: string,
+  origin: string,
+  proxyPath: string,
+  create: (url: string) => WebSocket = (url) => new WebSocket(url),
+): NativeCallWebSocketFactory {
+  return (url) => create(previewWebSocketUrl(url, endpoint, origin, proxyPath)) as unknown as ReturnType<NativeCallWebSocketFactory>;
 }

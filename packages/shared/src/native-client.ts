@@ -119,6 +119,10 @@ export class NativeWeChatClient {
   calls(accountId: string, webSocketFactory: NativeCallWebSocketFactory, options: Pick<NativeCallsClientOptions, "handshakeTimeoutMs" | "commandTimeoutMs" | "maxEvents" | "maxBufferedBytes" | "ticketProvider"> = {}): NativeCallsClient {
     return new NativeCallsClient({ baseUrl: this.baseUrl.toString(), token: this.token, accountId, webSocketFactory, ...options });
   }
+  /** Read the current call snapshot and calling capabilities for an account. */
+  callSnapshot(accountId: string, signal?: AbortSignal): Promise<import("./native.generated.js").CallSnapshot> {
+    return this.request(`v1/accounts/${id(accountId)}/calls/current`, { signal });
+  }
   /** Issue a short-lived single-use browser WebSocket ticket for a calls socket. */
   issueCallTicket(accountId: string, request: import("./native.generated.js").CallTicketRequest, signal?: AbortSignal): Promise<import("./native.generated.js").CallTicketResponse> {
     return this.request(`v1/accounts/${id(accountId)}/calls/tickets`, { method: "POST", body: JSON.stringify(request), signal });

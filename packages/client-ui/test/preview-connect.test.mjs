@@ -1,16 +1,55 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import { connect as netConnect } from "node:net";
 import { spawn } from "node:child_process";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+function rawUpgrade(port, path, extraHeaders = {}) {
+  return new Promise((resolve, reject) => {
+    const socket = netConnect(port, "127.0.0.1");
+    let response = "";
+    const headers = {
+      Host: `127.0.0.1:${port}`,
+      Upgrade: "websocket",
+      Connection: "Upgrade",
+      "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+      "Sec-WebSocket-Version": "13",
+      ...extraHeaders,
+    };
+    socket.once("error", reject);
+    socket.on("data", (chunk) => {
+      response += chunk.toString("latin1");
+      if (response.includes("\r\n\r\n")) {
+        const statusLine = response.split("\r\n")[0] ?? "";
+        const match = statusLine.match(/^HTTP\/\d\.\d (\d{3})/);
+        socket.destroy();
+        resolve({ status: match ? Number(match[1]) : 0, raw: response });
+      }
+    });
+    socket.on("end", () => {
+      const statusLine = response.split("\r\n")[0] ?? "";
+      const match = statusLine.match(/^HTTP\/\d\.\d (\d{3})/);
+      resolve({ status: match ? Number(match[1]) : 0, raw: response });
+    });
+    const req = [
+      `GET ${path} HTTP/1.1`,
+      ...Object.entries(headers).map(([k, v]) => `${k}: ${v}`),
+      "",
+      "",
+    ].join("\r\n");
+    socket.write(req);
+  });
+}
+
 test("two private preview hubs keep credentials separate and remain selectable when one is offline", { timeout: 25000 }, async t => {
   const directory = await mkdtemp(join(tmpdir(), "preview-hubs-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const requests = [];
+  const upgrades = [];
   const servers = [];
   const targets = [];
   for (const id of ["one", "two"]) {
@@ -28,6 +67,18 @@ test("two private preview hubs keep credentials separate and remain selectable w
         return res.end(JSON.stringify({ id, body: JSON.parse(body) }));
       }
       res.end(JSON.stringify({ serverId: id, version: { backend: "native" } }));
+    });
+    server.on("upgrade", (req, socket) => {
+      upgrades.push({
+        id,
+        url: req.url,
+        auth: req.headers.authorization,
+        origin: req.headers.origin,
+        cookie: req.headers.cookie,
+      });
+      socket.end(
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n",
+      );
     });
     await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
     servers.push(server);
@@ -81,6 +132,44 @@ test("two private preview hubs keep credentials separate and remain selectable w
   }
   assert.equal((await fetch(`${ready.origin}/__hubs/unknown/v1/status`, { headers })).status, 404);
   assert.ok(requests.filter(item => item.key).every(item => item.key === "stable-key"));
+
+  // WebSocket upgrades allow only ticket-authenticated calls sockets from the preview origin.
+  const ticket = "a".repeat(64);
+  const okControl = await rawUpgrade(port, `/__hubs/one/v1/accounts/a/calls/socket?ticket=${ticket}`, {
+    Origin: ready.origin,
+    Cookie: "agentwechat-connect=secret-cookie",
+  });
+  assert.equal(okControl.status, 101);
+  const okMedia = await rawUpgrade(port, `/__hubs/two/v1/accounts/a/calls/call-1/media?ticket=${ticket}`, {
+    Origin: ready.origin,
+  });
+  assert.equal(okMedia.status, 101);
+  assert.equal(upgrades.length, 2);
+  assert.equal(upgrades[0].id, "one");
+  assert.equal(upgrades[0].url, `/v1/accounts/a/calls/socket?ticket=${ticket}`);
+  assert.equal(upgrades[0].auth, undefined);
+  assert.equal(upgrades[0].origin, undefined);
+  assert.equal(upgrades[0].cookie, undefined);
+  assert.equal(upgrades[1].id, "two");
+  assert.equal(upgrades[1].url, `/v1/accounts/a/calls/call-1/media?ticket=${ticket}`);
+
+  const beforeBlocked = upgrades.length;
+  for (const [badPath, badHeaders, expectedStatus] of [
+    [`/__hubs/one/v1/accounts/a/calls/socket`, { Origin: ready.origin }, 403],
+    [`/__hubs/one/v1/accounts/a/calls/socket?ticket=short`, { Origin: ready.origin }, 403],
+    [`/__hubs/one/v1/accounts/a/calls/socket?ticket=${ticket}`, {}, 403],
+    [`/__hubs/one/v1/accounts/a/calls/socket?ticket=${ticket}`, { Origin: "" }, 403],
+    [`/__hubs/one/v1/accounts/a/calls/socket?ticket=${ticket}`, { Origin: "https://untrusted.example" }, 403],
+    [`/__hubs/one/v1/accounts/../a/calls/socket?ticket=${ticket}`, { Origin: ready.origin }, 403],
+    [`/__hubs/one/v1/accounts//calls/socket?ticket=${ticket}`, { Origin: ready.origin }, 403],
+    [`/__hubs/one/v1/status?ticket=${ticket}`, { Origin: ready.origin }, 403],
+    [`/__hubs/unknown/v1/accounts/a/calls/socket?ticket=${ticket}`, { Origin: ready.origin }, 404],
+  ]) {
+    const res = await rawUpgrade(port, badPath, badHeaders);
+    assert.equal(res.status, expectedStatus, `expected ${expectedStatus} for ${badPath}`);
+  }
+  assert.equal(upgrades.length, beforeBlocked);
+
   servers[1].closeAllConnections(); await new Promise(resolve => servers[1].close(resolve));
   assert.equal((await fetch(`${ready.origin}/__hubs/two/v1/status`, { headers })).status, 500);
   assert.equal((await (await fetch(`${ready.origin}/__hubs/one/v1/status`, { headers })).json()).serverId, "one");

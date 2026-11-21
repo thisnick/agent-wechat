@@ -105,9 +105,9 @@ try {
           }
         : undefined,
       proxy: {
-        "/v1": { target: first.client.baseUrl.origin, changeOrigin: false },
+        "/v1": { target: first.client.baseUrl.origin, changeOrigin: false, ws: true },
         ...Object.fromEntries([...hubs].map(([id, hub]) => [`/__hubs/${id}/v1`, {
-          target: hub.client.baseUrl.origin, changeOrigin: false,
+          target: hub.client.baseUrl.origin, changeOrigin: false, ws: true,
           rewrite: (path) => path.slice(`/__hubs/${id}`.length),
         }])),
       },
@@ -116,6 +116,83 @@ try {
       {
         name: "explicit-native-hub",
         configureServer(server) {
+          const rejectUpgrade = (socket, status, text) => {
+            try {
+              socket.end(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+            } catch {
+              socket.destroy();
+            }
+          };
+          const validateUpgrade = (req, socket) => {
+            const rawUrl = req.url ?? "";
+            const path = rawUrl.split("?")[0] ?? "";
+            const route = /^\/__hubs\/([a-z0-9-]+)(\/v1(?:\/.*)?$)/.exec(path);
+            if (path.startsWith("/__hubs/") && (!route || !hubs.has(route[1]))) {
+              rejectUpgrade(socket, 404, "Not Found");
+              return false;
+            }
+            if (!path.startsWith("/v1") && !route) return true;
+            const apiPath = route ? route[2] : path;
+            if (
+              !origin ||
+              req.headers.host !== new URL(origin).host ||
+              req.headers.origin !== origin
+            ) {
+              rejectUpgrade(socket, 403, "Forbidden");
+              return false;
+            }
+            let parsed;
+            let parts;
+            try {
+              parsed = new URL(rawUrl, origin);
+              parts = apiPath.split("/").map(decodeURIComponent);
+            } catch {
+              rejectUpgrade(socket, 400, "Bad Request");
+              return false;
+            }
+            const safe = !parts.some(
+              (part) => part === "." || part === ".." || /[\\/\u0000]/.test(part),
+            );
+            const isControlSocket =
+              parts.length === 6 &&
+              parts[1] === "v1" &&
+              parts[2] === "accounts" &&
+              !!parts[3] &&
+              parts[4] === "calls" &&
+              parts[5] === "socket";
+            const isMediaSocket =
+              parts.length === 7 &&
+              parts[1] === "v1" &&
+              parts[2] === "accounts" &&
+              !!parts[3] &&
+              parts[4] === "calls" &&
+              !!parts[5] &&
+              parts[6] === "media";
+            const ticket = parsed.searchParams.get("ticket");
+            const validTicket = typeof ticket === "string" && /^[0-9a-f]{64}$/i.test(ticket);
+            if (!safe || (!isControlSocket && !isMediaSocket) || !validTicket) {
+              rejectUpgrade(socket, 403, "Forbidden");
+              return false;
+            }
+            // Preview proxy already verified Host and Origin; strip Origin, Authorization,
+            // and Cookie headers so browser preview credentials or host cookies never cross hops.
+            delete req.headers.origin;
+            delete req.headers.authorization;
+            delete req.headers.cookie;
+            return true;
+          };
+          // Wrap the httpServer upgrade emit so rejected proxy upgrades never reach Vite's proxy listeners.
+          const httpServer = server.httpServer;
+          if (httpServer) {
+            const originalEmit = httpServer.emit.bind(httpServer);
+            httpServer.emit = (event, ...args) => {
+              if (event === "upgrade") {
+                const [req, socket] = args;
+                if (!validateUpgrade(req, socket)) return true;
+              }
+              return originalEmit(event, ...args);
+            };
+          }
           server.middlewares.use((req, res, next) => {
             const path = req.url?.split("?")[0] ?? "";
             if (path.startsWith("/__dev/")) {
