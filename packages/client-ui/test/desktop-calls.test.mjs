@@ -40,7 +40,7 @@ test("DesktopCallTransport bridges Tauri IPC commands, channels, base64 JPEG fra
     calls.push({ cmd, args });
     if (cmd === "call_connect") {
       activeChannel = args.channel;
-      return HELLO;
+      return { sessionId: 7, hello: HELLO };
     }
     if (cmd === "call_dial") return { callId: "call-99" };
     if (cmd === "call_preview_start") {
@@ -157,7 +157,15 @@ test("DesktopCallTransport bridges Tauri IPC commands, channels, base64 JPEG fra
   const dial = await transport.dialDirect("req-1", "alice", { callType: "video" });
   assert.equal(dial.callId, "call-99");
   transport.disconnect();
-  assert.ok(calls.some((c) => c.cmd === "call_disconnect"));
+  assert.ok(
+    calls.some(
+      (c) =>
+        c.cmd === "call_disconnect" &&
+        c.args.connectionId === "conn-1" &&
+        c.args.accountId === "acct-1" &&
+        c.args.sessionId === 7,
+    ),
+  );
 });
 
 test("DesktopCallTransport maps forbidden and outcome_unknown errors into NativeCallError", async () => {

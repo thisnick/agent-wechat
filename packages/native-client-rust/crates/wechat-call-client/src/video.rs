@@ -644,7 +644,7 @@ fn resolve_device_input(source: &CameraSource, ffmpeg: &Path) -> Result<String> 
             }
             #[cfg(target_os = "macos")]
             {
-                Ok("0".into())
+                bail!("no local camera found; connect a camera, pass --camera test, or pass --camera-off")
             }
             #[cfg(target_os = "linux")]
             {

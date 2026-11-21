@@ -403,7 +403,7 @@ async fn clear_call_alert(desktop: &Desktop, account_id: &str) {
         alert.clear();
     }
 }
-async fn clear_all_call_alerts(desktop: &Desktop) {
+pub(crate) async fn clear_all_call_alerts(desktop: &Desktop) {
     let alerts: Vec<_> = desktop
         .notifications
         .active_call_alerts
@@ -461,13 +461,19 @@ impl ConferenceTracker {
         fresh
     }
 }
-async fn cached_thread_name(active: &Active, account: &str, thread_id: &str) -> Option<String> {
-    let url = api(active, &["v1", "accounts", account, "threads", thread_id]).ok()?;
-    let thread = tokio::time::timeout(Duration::from_secs(1), get(active, url))
-        .await
-        .ok()?
-        .ok()?;
-    thread["displayName"]
+async fn cached_thread_info(
+    active: &Active,
+    account: &str,
+    thread_id: &str,
+) -> (Option<String>, Option<bool>) {
+    let Ok(url) = api(active, &["v1", "accounts", account, "threads", thread_id]) else {
+        return (None, None);
+    };
+    let Ok(Ok(thread)) = tokio::time::timeout(Duration::from_secs(1), get(active, url)).await
+    else {
+        return (None, None);
+    };
+    let name = thread["displayName"]
         .as_str()
         .map(|name| {
             name.split_whitespace()
@@ -478,7 +484,11 @@ async fn cached_thread_name(active: &Active, account: &str, thread_id: &str) -> 
                 .take(100)
                 .collect::<String>()
         })
-        .filter(|name| !name.is_empty())
+        .filter(|name| !name.is_empty());
+    (name, thread["muted"].as_bool())
+}
+async fn cached_thread_name(active: &Active, account: &str, thread_id: &str) -> Option<String> {
+    cached_thread_info(active, account, thread_id).await.0
 }
 fn has_any_call_capability(caps: &wechat_call_contracts::call_types::CallCapabilities) -> bool {
     caps.direct_audio
@@ -519,7 +529,9 @@ async fn listen_calls(app: tauri::AppHandle, active: Arc<Active>, account: Strin
                     error.downcast_ref::<CallClientError>()
                 {
                     if matches!(*status, 401 | 403 | 404 | 501) {
-                        return;
+                        // Stay parked until cancelled (hub change / sign-out) instead of
+                        // finishing and being respawned every 15 s by `coordinate()`.
+                        std::future::pending::<()>().await;
                     }
                 }
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -529,7 +541,7 @@ async fn listen_calls(app: tauri::AppHandle, active: Arc<Active>, account: Strin
 
         if !has_any_call_capability(&control.capabilities) {
             control.close().await;
-            return;
+            std::future::pending::<()>().await;
         }
         // Seed existing conference invitations on connect so reconnects do not re-alert.
         conferences.seed(&control.conference_invitations);
@@ -691,12 +703,13 @@ async fn listen_calls(app: tauri::AppHandle, active: Arc<Active>, account: Strin
                                 if !should_post_call_alert(enabled, is_window_focused(&app)) {
                                     continue;
                                 }
-                                let group_name =
-                                    cached_thread_name(&active, &account, &inv.group_id)
-                                        .await
-                                        .unwrap_or_else(|| {
-                                            crate::i18n::text("callConferenceActive")
-                                        });
+                                let (cached_group_name, group_muted) =
+                                    cached_thread_info(&active, &account, &inv.group_id).await;
+                                if group_muted != Some(false) {
+                                    continue;
+                                }
+                                let group_name = cached_group_name
+                                    .unwrap_or_else(|| crate::i18n::text("callConferenceActive"));
                                 let caller_name =
                                     cached_thread_name(&active, &account, &inv.caller_id).await;
                                 let body = match caller_name {
@@ -830,14 +843,19 @@ async fn coordinate(app: tauri::AppHandle) {
                         !task.inner().is_finished()
                     }
                 });
+                let mut removed_call_accounts = Vec::new();
                 call_tasks.retain(|id, task| {
                     if !accounts.contains(id) {
                         task.abort();
+                        removed_call_accounts.push(id.clone());
                         false
                     } else {
                         !task.inner().is_finished()
                     }
                 });
+                for id in removed_call_accounts {
+                    clear_call_alert(&desktop, &id).await;
+                }
                 for account in accounts {
                     if !tasks.contains_key(&account) {
                         let active = active.clone();
@@ -1375,10 +1393,13 @@ fn install_macos(app: &tauri::AppHandle) {
 }
 /// Declines an incoming call in the background from a macOS notification without
 /// bringing the app forward or advertising `call.ready`.
+///
+/// Keeps the control socket open until the daemon emits a terminal state for the
+/// rejected call so admission is never revoked mid-RPC.
 #[cfg(target_os = "macos")]
 async fn decline_call(app: &tauri::AppHandle, target: &CallActionTarget) -> Result<()> {
     use wechat_call_client::transport::{CallEndpoint, ControlClient};
-    use wechat_call_contracts::call_types::CallCommand;
+    use wechat_call_contracts::call_types::{CallCommand, CallEvent, CallState};
 
     let dummy_target = Target {
         connection_id: target.connection_id.clone(),
@@ -1402,6 +1423,35 @@ async fn decline_call(app: &tauri::AppHandle, target: &CallActionTarget) -> Resu
             expected_revision: target.revision,
         })
         .await;
+    if result.is_ok() {
+        let already_terminal = control.call.as_ref().is_some_and(|call| {
+            call.call_id == target.call_id
+                && matches!(call.state, CallState::Ended | CallState::Uncertain)
+        }) || !control.availability.busy;
+        if !already_terminal {
+            let _ = tokio::time::timeout(Duration::from_secs(15), async {
+                while let Ok(event) = control.next_event().await {
+                    control.update(&event);
+                    match &event {
+                        CallEvent::State { call }
+                            if call.call_id == target.call_id
+                                && matches!(
+                                    call.state,
+                                    CallState::Ended | CallState::Uncertain
+                                ) =>
+                        {
+                            break;
+                        }
+                        CallEvent::Availability { availability } if !availability.busy => {
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await;
+        }
+    }
     control.close().await;
     clear_call_alert(&app.state::<Desktop>(), &target.account_id).await;
     result.map(|_| ())
@@ -1677,6 +1727,38 @@ mod tests {
         assert!(tracker.take_fresh(&[inv1.clone(), inv2.clone()]).is_empty());
         // A bumped revision is treated as fresh.
         assert_eq!(tracker.take_fresh(&[inv1, inv2_rev2]).len(), 1);
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_payload_deserializes_both_legacy_messages_and_call_actions() {
+        let legacy = json!({
+            "target": {
+                "connectionId": "local",
+                "serverId": "srv-1",
+                "accountId": "acct-1",
+                "threadId": "alice",
+                "messageId": "msg-1"
+            },
+            "serverId": "wx-msg-9"
+        });
+        assert!(matches!(
+            serde_json::from_value::<MacPayload>(legacy).unwrap(),
+            MacPayload::Message(p) if p.server_id.as_deref() == Some("wx-msg-9")
+        ));
+        let call = json!({
+            "connectionId": "local",
+            "serverId": "srv-1",
+            "accountId": "acct-1",
+            "peerId": "alice",
+            "callId": "call-7",
+            "revision": 2,
+            "callType": "video",
+            "action": "open"
+        });
+        assert!(matches!(
+            serde_json::from_value::<MacPayload>(call).unwrap(),
+            MacPayload::Call(c) if c.call_id == "call-7" && c.revision == 2
+        ));
     }
     #[test]
     fn face_aliases_are_displayed_before_notification_truncation() {

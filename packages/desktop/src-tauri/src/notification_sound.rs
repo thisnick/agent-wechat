@@ -20,6 +20,10 @@ const SOUND_NAME: &str = "Default";
 
 /// Handle to a posted incoming-call OS alert so it can be dismissed as soon as
 /// the offer expires, is answered, is declined, or the main window is focused.
+///
+/// On macOS this removes the delivered request via `UNUserNotificationCenter`;
+/// on Linux it invokes D-Bus `CloseNotification`; on Windows toast dismissal is
+/// handled by Action Center / user interaction.
 pub struct ActiveCallAlert {
     #[cfg(target_os = "macos")]
     request_id: Option<String>,
@@ -399,14 +403,19 @@ pub async fn show_call(
     let watch_cancel = alert_cancel.clone();
     let clicked = app.clone();
     tauri::async_runtime::spawn(async move {
-        tokio::select! {
-            _ = app_cancel.cancelled() => {},
-            _ = watch_cancel.cancelled() => {},
+        let should_close = tokio::select! {
+            _ = app_cancel.cancelled() => true,
+            _ = watch_cancel.cancelled() => true,
             _ = handle.wait_for_action_async(move |response| {
                 if matches!(response, notify_rust::NotificationResponse::Default) {
                     crate::notifications::open_call_action(clicked, target);
                 }
-            }) => {}
+            }) => false,
+        };
+        if should_close {
+            // Send explicit D-Bus CloseNotification so non-GNOME desktops (KDE, XFCE,
+            // dunst, mako) dismiss stale incoming-call alerts immediately.
+            let _ = tokio::task::spawn_blocking(move || handle.close()).await;
         }
     });
     Ok(ActiveCallAlert {

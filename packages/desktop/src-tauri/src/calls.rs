@@ -40,8 +40,8 @@ use wechat_call_client::{
 };
 use wechat_call_contracts::{
     call_types::{
-        CallCommand, CallCommandStatus, CallEvent, CallReadyScope, CallTarget, CallTrack, CallType,
-        CallVideoCodec,
+        CallCommand, CallCommandStatus, CallEvent, CallReadyScope, CallState, CallTarget,
+        CallTrack, CallType, CallVideoCodec, CallVideoFormat,
     },
     pcm_envelope::{
         MediaPayloadKind, WireMediaFrame, FLAG_CODEC_CONFIG, FLAG_KEYFRAME, MAX_VIDEO_PAYLOAD_BYTES,
@@ -54,6 +54,8 @@ const MAX_REQUEST_ID_LEN: usize = 128;
 const MAX_CAMERA_ID_LEN: usize = 256;
 const MAX_INVITEES: usize = 100;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+const ATTACH_TIMEOUT: Duration = Duration::from_secs(30);
+const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const SELF_VIEW_MIN_INTERVAL: Duration = Duration::from_millis(80);
 const PREVIEW_POLL_INTERVAL: Duration = Duration::from_millis(66);
 const LEVEL_INTERVAL: Duration = Duration::from_millis(80);
@@ -142,6 +144,13 @@ pub struct CallDevicesSnapshotDto {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CallConnectResponse {
+    pub session_id: u64,
+    pub hello: Value,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CallStartResponse {
     pub call_id: String,
 }
@@ -177,6 +186,8 @@ pub struct AnswerOptions {
 #[derive(Default)]
 pub struct CallManager {
     next_session: AtomicU64,
+    preview_gen: AtomicU64,
+    root_cancel: CancellationToken,
     accounts: Mutex<HashMap<String, AccountHandle>>,
     preview: Mutex<Option<PreviewSession>>,
 }
@@ -228,21 +239,39 @@ enum ActorRequest {
 
 impl CallManager {
     pub async fn stop_preview(&self) {
+        self.preview_gen.fetch_add(1, Ordering::AcqRel);
         if let Some(preview) = self.preview.lock().await.take() {
             preview.cancel.cancel();
-            let _ = timeout(Duration::from_secs(3), preview.task).await;
+            let _ = timeout(TEARDOWN_TIMEOUT, preview.task).await;
         }
     }
 
-    pub async fn disconnect_account(&self, account_id: &str) {
-        if let Some(handle) = self.accounts.lock().await.remove(account_id) {
+    pub async fn disconnect_account(
+        &self,
+        connection_id: &str,
+        account_id: &str,
+        session_id: Option<u64>,
+    ) {
+        let removed = {
+            let mut accounts = self.accounts.lock().await;
+            let matches = accounts.get(account_id).is_some_and(|handle| {
+                handle.connection_id == connection_id
+                    && session_id.is_none_or(|expected| handle.session_id == expected)
+            });
+            if matches {
+                accounts.remove(account_id)
+            } else {
+                None
+            }
+        };
+        if let Some(handle) = removed {
             handle.cancel.cancel();
             let _ = timeout(Duration::from_secs(4), handle.task).await;
         }
     }
 
     /// Tear down all active call sessions and camera previews (called on hub switch,
-    /// disconnect, or app shutdown so audio/camera hardware is never left open).
+    /// disconnect, local hub reconfiguration, or app shutdown).
     pub async fn shutdown_all(&self) {
         self.stop_preview().await;
         let drained: Vec<AccountHandle> = {
@@ -255,6 +284,13 @@ impl CallManager {
         for handle in drained {
             let _ = timeout(Duration::from_secs(4), handle.task).await;
         }
+    }
+
+    /// Lock-free immediate cancellation for `RunEvent::Exit` (macOS Dock Quit / OS shutdown)
+    /// so active FFmpeg capture/self-view subprocesses are signalled to exit immediately.
+    pub fn cancel_now(&self) {
+        self.preview_gen.fetch_add(1, Ordering::AcqRel);
+        self.root_cancel.cancel();
     }
 
     async fn sender(
@@ -296,9 +332,9 @@ fn validate_non_empty_id(value: &str, label: &str, max_len: usize) -> Result<(),
     Ok(())
 }
 
-/// Convert an IPC camera device ID into a safe `CameraSource`.
-/// Never allows `file:` or `test` synthetic sources from WebView IPC.
-fn camera_source_from_ipc(camera_id: Option<&str>) -> Result<CameraSource, String> {
+/// Strictly validate an IPC camera device identifier syntactically per target OS.
+/// Never allows `file:`, `test`, flags, arbitrary paths, or AVFoundation audio/screen syntax.
+fn validate_camera_id_syntax(camera_id: Option<&str>) -> Result<CameraSource, String> {
     let Some(raw) = camera_id.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(CameraSource::Auto);
     };
@@ -312,11 +348,44 @@ fn camera_source_from_ipc(camera_id: Option<&str>) -> Result<CameraSource, Strin
     {
         return Err("Invalid camera device".into());
     }
+    #[cfg(target_os = "linux")]
+    {
+        let Some(suffix) = raw.strip_prefix("/dev/video") else {
+            return Err("Invalid camera device".into());
+        };
+        if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err("Invalid camera device".into());
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err("Invalid camera device".into());
+        }
+    }
     #[cfg(target_os = "windows")]
-    if raw.contains(':') {
-        return Err("Invalid camera device".into());
+    {
+        if raw.contains(':') || raw.contains('"') || raw.contains('\\') || raw.contains('/') {
+            return Err("Invalid camera device".into());
+        }
     }
     Ok(CameraSource::Device(raw.to_owned()))
+}
+
+/// Validate a camera identifier against the OS camera enumeration before spawning FFmpeg
+/// (critical on macOS where AVFoundation screen-capture sources also have numeric indices).
+fn resolve_verified_camera_source(
+    camera_id: Option<&str>,
+    ffmpeg: Option<&Path>,
+) -> Result<CameraSource, String> {
+    let source = validate_camera_id_syntax(camera_id)?;
+    if let CameraSource::Device(ref id) = source {
+        let cameras = video::list_cameras_with_ffmpeg(ffmpeg);
+        if !cameras.iter().any(|camera| camera.id == *id) {
+            return Err("camera_unavailable".into());
+        }
+    }
+    Ok(source)
 }
 
 fn sanitize_device_id(value: Option<&str>) -> Option<String> {
@@ -364,6 +433,21 @@ fn all_media_tracks(media: &MediaClient) -> Vec<CallTrack> {
             .map(|entry| entry.track.clone()),
     );
     tracks
+}
+
+/// Drop blocking video subprocesses (`LocalVideoCapture` / `SelfViewDecoder`) off Tokio worker threads.
+async fn stop_video_handles(video: Option<LocalVideoCapture>, self_view: Option<SelfViewDecoder>) {
+    if video.is_none() && self_view.is_none() {
+        return;
+    }
+    let _ = timeout(
+        TEARDOWN_TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            drop(self_view);
+            drop(video);
+        }),
+    )
+    .await;
 }
 
 /// Optional secondary FFmpeg decoder that turns outgoing Annex-B H.264/H.265 frames
@@ -419,14 +503,24 @@ impl SelfViewDecoder {
             cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
         }
         let mut child = cmd.spawn().ok()?;
-        let mut stdin = child.stdin.take()?;
-        let mut stdout = child.stdout.take()?;
+        let kill_child = |mut c: Child| {
+            let _ = c.kill();
+            let _ = c.wait();
+        };
+        let Some(mut stdin) = child.stdin.take() else {
+            kill_child(child);
+            return None;
+        };
+        let Some(mut stdout) = child.stdout.take() else {
+            kill_child(child);
+            return None;
+        };
         let stop = Arc::new(AtomicBool::new(false));
         let (input_tx, input_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
         let (output_tx, output_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(2);
 
         let writer_stop = stop.clone();
-        let writer = std::thread::Builder::new()
+        let Ok(writer) = std::thread::Builder::new()
             .name("desktop-selfview-in".into())
             .spawn(move || {
                 while !writer_stop.load(Ordering::Acquire) {
@@ -438,10 +532,13 @@ impl SelfViewDecoder {
                     }
                 }
             })
-            .ok()?;
+        else {
+            kill_child(child);
+            return None;
+        };
 
         let reader_stop = stop.clone();
-        let reader = std::thread::Builder::new()
+        let Ok(reader) = std::thread::Builder::new()
             .name("desktop-selfview-out".into())
             .spawn(move || {
                 let mut buf = Vec::with_capacity(32 * 1024);
@@ -459,7 +556,13 @@ impl SelfViewDecoder {
                     }
                 }
             })
-            .ok()?;
+        else {
+            stop.store(true, Ordering::Release);
+            drop(input_tx);
+            kill_child(child);
+            let _ = writer.join();
+            return None;
+        };
 
         Some(Self {
             child: Some(child),
@@ -525,21 +628,30 @@ struct ActiveMediaState {
     audio_format: AudioFormat,
     local_audio: Option<LocalAudio>,
     local_video: Option<LocalVideoCapture>,
+    active_video_format: Option<CallVideoFormat>,
     self_view: Option<SelfViewDecoder>,
     devices: DeviceSelection,
     muted: bool,
     camera_enabled: bool,
     speaker_muted: bool,
+    local_media_stopped: bool,
     mic_level: SignalLevel,
     speaker_level: SignalLevel,
     track_levels: BTreeMap<u32, SignalLevel>,
-    last_local_jpeg: Instant,
+    last_local_jpeg: Option<Instant>,
 }
 
 impl ActiveMediaState {
+    async fn stop_video(&mut self) {
+        self.active_video_format = None;
+        let video = self.local_video.take();
+        let self_view = self.self_view.take();
+        stop_video_handles(video, self_view).await;
+    }
+
     async fn stop_local_devices(&mut self) {
-        self.self_view = None;
-        self.local_video = None;
+        self.local_media_stopped = true;
+        self.stop_video().await;
         if let Some(mut audio) = self.local_audio.take() {
             let _ = audio.stop().await;
         }
@@ -548,38 +660,52 @@ impl ActiveMediaState {
     }
 
     async fn start_camera(&mut self, ffmpeg: Option<PathBuf>) -> Result<()> {
-        self.self_view = None;
-        self.local_video = None;
-        let Some(video_format) = self
-            .media
-            .video_send_track
-            .as_ref()
-            .and_then(|track| track.video_format())
-        else {
+        self.stop_video().await;
+        if self.local_media_stopped {
+            return Ok(());
+        }
+        let Some(video_track) = self.media.video_send_track.as_ref() else {
             return Ok(());
         };
-        let source = camera_source_from_ipc(self.devices.camera_device_id.as_deref())
-            .map_err(|message| anyhow::anyhow!(message))?;
+        if matches!(video_track, CallTrack::Video { active: false, .. }) {
+            return Ok(());
+        }
+        let Some(video_format) = video_track.video_format() else {
+            return Ok(());
+        };
+        let camera_id = self.devices.camera_device_id.clone();
         let ffmpeg_for_capture = ffmpeg.clone();
-        let capture = tokio::task::spawn_blocking(move || {
-            LocalVideoCapture::start_with_ffmpeg(
+        let (capture, self_view) = tokio::task::spawn_blocking(move || -> Result<_> {
+            let source =
+                resolve_verified_camera_source(camera_id.as_deref(), ffmpeg_for_capture.as_deref())
+                    .map_err(|message| anyhow::anyhow!(message))?;
+            let capture = LocalVideoCapture::start_with_ffmpeg(
                 &source,
                 video_format,
                 ffmpeg_for_capture.as_deref(),
-            )
+            )?;
+            let self_view = if video_format.codec != CallVideoCodec::Jpeg {
+                ffmpeg_for_capture
+                    .as_deref()
+                    .and_then(|path| SelfViewDecoder::start(path, video_format.codec))
+            } else {
+                None
+            };
+            Ok((capture, self_view))
         })
         .await
         .context("camera capture task panicked")??;
-        let self_view = if video_format.codec != CallVideoCodec::Jpeg {
-            ffmpeg
-                .as_deref()
-                .and_then(|path| SelfViewDecoder::start(path, video_format.codec))
-        } else {
-            None
-        };
         self.local_video = Some(capture);
+        self.active_video_format = Some(video_format);
         self.self_view = self_view;
         Ok(())
+    }
+
+    fn video_track_is_active(&self) -> bool {
+        matches!(
+            self.media.video_send_track.as_ref(),
+            Some(CallTrack::Video { active: true, .. })
+        )
     }
 
     async fn close(mut self) {
@@ -650,9 +776,9 @@ async fn run_account_actor(
 
     let disconnect_code = loop {
         let has_media = active_media.is_some();
-        let has_local_audio = active_media
+        let should_tick_media = active_media
             .as_ref()
-            .is_some_and(|state| state.local_audio.is_some());
+            .is_some_and(|state| !state.local_media_stopped);
 
         tokio::select! {
             _ = cancel.cancelled() => {
@@ -693,23 +819,28 @@ async fn run_account_actor(
                         }
                         let Some(owner_token) = owner_tokens.get(&call_id).cloned() else {
                             let _ = channel.send(DesktopCallPacket::MediaError {
-                                code: "missing_owner_token".into(),
-                                message: None,
+                                code: "media_attach_failed".into(),
+                                message: Some("missing_owner_token".into()),
                             });
                             let _ = reply.send(Err("missing_owner_token".into()));
                             continue;
                         };
                         let client_id = control.client_id.clone();
                         let control_format = control.format;
-                        match MediaClient::attach_passthrough_parts(
-                            &endpoint,
-                            &client_id,
-                            control_format,
-                            &call_id,
-                            &owner_token,
-                        )
-                        .await
-                        {
+                        let attached = tokio::select! {
+                            _ = cancel.cancelled() => {
+                                let _ = reply.send(Err("closed".into()));
+                                break None;
+                            }
+                            res = MediaClient::attach_passthrough_parts(
+                                &endpoint,
+                                &client_id,
+                                control_format,
+                                &call_id,
+                                &owner_token,
+                            ) => res,
+                        };
+                        match attached {
                             Ok(mut media) => {
                                 let _ = media.synchronize_tracks(&control, &call_id);
                                 if let Some(call) = control.call.as_ref().filter(|c| c.call_id == call_id) {
@@ -728,10 +859,10 @@ async fn run_account_actor(
                                     Err(error) => {
                                         let _ = timeout(Duration::from_secs(2), media.socket.close(None)).await;
                                         let _ = channel.send(DesktopCallPacket::MediaError {
-                                            code: "unsupported_audio_format".into(),
+                                            code: "unsupported".into(),
                                             message: Some(error.to_string()),
                                         });
-                                        let _ = reply.send(Err("unsupported_audio_format".into()));
+                                        let _ = reply.send(Err("unsupported".into()));
                                         continue;
                                     }
                                 };
@@ -739,11 +870,19 @@ async fn run_account_actor(
                                     input_device: sanitize_device_id(devices.input_device_id.as_deref()),
                                     output_device: sanitize_device_id(devices.output_device_id.as_deref()),
                                 };
-                                let local_audio = match LocalAudio::open(&audio_opts).await {
+                                let opened_audio = tokio::select! {
+                                    _ = cancel.cancelled() => {
+                                        let _ = timeout(Duration::from_secs(2), media.socket.close(None)).await;
+                                        let _ = reply.send(Err("closed".into()));
+                                        break None;
+                                    }
+                                    res = LocalAudio::open(&audio_opts) => res,
+                                };
+                                let local_audio = match opened_audio {
                                     Ok(audio) => Some(audio),
                                     Err(error) => {
                                         let _ = channel.send(DesktopCallPacket::MediaError {
-                                            code: "audio_open_failed".into(),
+                                            code: "microphone_unavailable".into(),
                                             message: Some(error.to_string()),
                                         });
                                         None
@@ -756,20 +895,30 @@ async fn run_account_actor(
                                     audio_format,
                                     local_audio,
                                     local_video: None,
+                                    active_video_format: None,
                                     self_view: None,
                                     devices,
                                     muted: initial_muted,
                                     camera_enabled: initial_camera_enabled && call_type == CallType::Video,
                                     speaker_muted,
+                                    local_media_stopped: false,
                                     mic_level: SignalLevel::default(),
                                     speaker_level: SignalLevel::default(),
                                     track_levels: BTreeMap::new(),
-                                    last_local_jpeg: Instant::now() - SELF_VIEW_MIN_INTERVAL,
+                                    last_local_jpeg: None,
                                 };
-                                if state.camera_enabled && state.media.video_send_track.is_some() {
-                                    if let Err(error) = state.start_camera(ffmpeg.clone()).await {
+                                if state.camera_enabled && state.video_track_is_active() {
+                                    let cam_res = tokio::select! {
+                                        _ = cancel.cancelled() => {
+                                            state.close().await;
+                                            let _ = reply.send(Err("closed".into()));
+                                            break None;
+                                        }
+                                        res = state.start_camera(ffmpeg.clone()) => res,
+                                    };
+                                    if let Err(error) = cam_res {
                                         let _ = channel.send(DesktopCallPacket::MediaError {
-                                            code: "camera_failed".into(),
+                                            code: "camera_unavailable".into(),
                                             message: Some(error.to_string()),
                                         });
                                     }
@@ -782,7 +931,7 @@ async fn run_account_actor(
                                     code: "media_attach_failed".into(),
                                     message: Some(error.to_string()),
                                 });
-                                let _ = reply.send(Err(error.to_string()));
+                                let _ = reply.send(Err("media_attach_failed".into()));
                             }
                         }
                     }
@@ -814,20 +963,30 @@ async fn run_account_actor(
                         };
                         state.camera_enabled = enabled && state.call_type == CallType::Video;
                         if !state.camera_enabled {
-                            state.self_view = None;
-                            state.local_video = None;
+                            state.stop_video().await;
                             let _ = reply.send(Ok(()));
-                        } else if state.media.video_send_track.is_some() {
+                        } else if state.video_track_is_active() {
+                            if state.local_video.is_some()
+                                && state.active_video_format
+                                    == state
+                                        .media
+                                        .video_send_track
+                                        .as_ref()
+                                        .and_then(|t| t.video_format())
+                            {
+                                let _ = reply.send(Ok(()));
+                                continue;
+                            }
                             match state.start_camera(ffmpeg.clone()).await {
                                 Ok(()) => {
                                     let _ = reply.send(Ok(()));
                                 }
                                 Err(error) => {
                                     let _ = channel.send(DesktopCallPacket::MediaError {
-                                        code: "camera_failed".into(),
+                                        code: "camera_unavailable".into(),
                                         message: Some(error.to_string()),
                                     });
-                                    let _ = reply.send(Err(error.to_string()));
+                                    let _ = reply.send(Err("camera_unavailable".into()));
                                 }
                             }
                         } else {
@@ -845,7 +1004,7 @@ async fn run_account_actor(
                         state.devices = selection;
                         let mut first_err: Option<String> = None;
 
-                        if audio_changed && state.local_audio.is_some() {
+                        if audio_changed && !state.local_media_stopped {
                             if let Some(mut old) = state.local_audio.take() {
                                 let _ = old.stop().await;
                             }
@@ -853,27 +1012,36 @@ async fn run_account_actor(
                                 input_device: sanitize_device_id(state.devices.input_device_id.as_deref()),
                                 output_device: sanitize_device_id(state.devices.output_device_id.as_deref()),
                             };
-                            match LocalAudio::open(&audio_opts).await {
+                            let reopened = tokio::select! {
+                                _ = cancel.cancelled() => {
+                                    let _ = reply.send(Err("closed".into()));
+                                    break None;
+                                }
+                                res = LocalAudio::open(&audio_opts) => res,
+                            };
+                            match reopened {
                                 Ok(audio) => state.local_audio = Some(audio),
                                 Err(error) => {
-                                    let message = error.to_string();
                                     let _ = channel.send(DesktopCallPacket::MediaError {
-                                        code: "audio_switch_failed".into(),
-                                        message: Some(message.clone()),
+                                        code: "microphone_unavailable".into(),
+                                        message: Some(error.to_string()),
                                     });
-                                    first_err = Some(message);
+                                    first_err = Some("microphone_unavailable".into());
                                 }
                             }
                         }
-                        if camera_changed && state.camera_enabled && state.media.video_send_track.is_some() {
+                        if camera_changed
+                            && !state.local_media_stopped
+                            && state.camera_enabled
+                            && state.video_track_is_active()
+                        {
                             if let Err(error) = state.start_camera(ffmpeg.clone()).await {
-                                let message = error.to_string();
                                 let _ = channel.send(DesktopCallPacket::MediaError {
-                                    code: "camera_switch_failed".into(),
-                                    message: Some(message.clone()),
+                                    code: "camera_unavailable".into(),
+                                    message: Some(error.to_string()),
                                 });
                                 if first_err.is_none() {
-                                    first_err = Some(message);
+                                    first_err = Some("camera_unavailable".into());
                                 }
                             }
                         }
@@ -929,14 +1097,40 @@ async fn run_account_actor(
                                 }
                             }
                         }
-                        if let CallEvent::State { call } = &event {
-                            if matches!(
-                                call.state,
-                                wechat_call_contracts::call_types::CallState::Ended
-                                    | wechat_call_contracts::call_types::CallState::Uncertain
-                            ) {
-                                owner_tokens.remove(&call.call_id);
+                        // Enforce hardware and media teardown directly in Rust so a throttled or
+                        // reloading WebView never leaves mic/camera open on a dead or unowned call.
+                        match &event {
+                            CallEvent::State { call } => {
+                                if matches!(call.state, CallState::Ended | CallState::Uncertain)
+                                    || !call.owned_by_this_client
+                                {
+                                    owner_tokens.remove(&call.call_id);
+                                    if active_media
+                                        .as_ref()
+                                        .is_some_and(|m| m.call_id == call.call_id)
+                                    {
+                                        if let Some(old) = active_media.take() {
+                                            old.close().await;
+                                        }
+                                    }
+                                } else if call.state == CallState::Ending {
+                                    if let Some(state) = active_media
+                                        .as_mut()
+                                        .filter(|m| m.call_id == call.call_id)
+                                    {
+                                        state.stop_local_devices().await;
+                                    }
+                                }
                             }
+                            CallEvent::Availability { availability } => {
+                                if !availability.busy || !availability.owned_by_this_client {
+                                    owner_tokens.clear();
+                                    if let Some(old) = active_media.take() {
+                                        old.close().await;
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                         if let Some(state) = active_media.as_mut() {
                             let call_id = state.call_id.clone();
@@ -959,12 +1153,23 @@ async fn run_account_actor(
                                 }
                             }
                             if let Ok((_, video_send_changed)) = state.media.synchronize_tracks(&control, &call_id) {
-                                if video_send_changed && state.camera_enabled && state.media.video_send_track.is_some() {
-                                    if let Err(error) = state.start_camera(ffmpeg.clone()).await {
-                                        let _ = channel.send(DesktopCallPacket::MediaError {
-                                            code: "camera_failed".into(),
-                                            message: Some(error.to_string()),
-                                        });
+                                if video_send_changed {
+                                    if !state.video_track_is_active() || !state.camera_enabled {
+                                        state.stop_video().await;
+                                    } else {
+                                        let next_fmt = state
+                                            .media
+                                            .video_send_track
+                                            .as_ref()
+                                            .and_then(|t| t.video_format());
+                                        if state.local_video.is_none() || state.active_video_format != next_fmt {
+                                            if let Err(error) = state.start_camera(ffmpeg.clone()).await {
+                                                let _ = channel.send(DesktopCallPacket::MediaError {
+                                                    code: "camera_unavailable".into(),
+                                                    message: Some(error.to_string()),
+                                                });
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1061,91 +1266,109 @@ async fn run_account_actor(
                     }
                 }
             }
-            _ = audio_tick.tick(), if has_local_audio => {
+            _ = audio_tick.tick(), if should_tick_media => {
+                let mut media_write_failed: Option<String> = None;
                 if let Some(state) = active_media.as_mut() {
                     let frame_samples = state.audio_format.samples_per_frame();
-                    let send_result = if let Some(audio) = state.local_audio.as_mut() {
+                    if let Some(audio) = state.local_audio.as_mut() {
                         match audio.frame(frame_samples, state.muted) {
                             Ok(samples) => {
                                 if !state.muted {
                                     state.mic_level.observe_i16(&samples);
                                 }
-                                state.media.send_pcm(&samples, state.audio_format).await
+                                if let Err(error) = state.media.send_pcm(&samples, state.audio_format).await {
+                                    debug_call("desktop-media", format_args!("pcm send failed: {error:#}"));
+                                    media_write_failed = Some(error.to_string());
+                                }
                             }
                             Err(error) => {
                                 let _ = channel.send(DesktopCallPacket::MediaError {
-                                    code: "microphone_failed".into(),
+                                    code: "microphone_unavailable".into(),
                                     message: Some(error.to_string()),
                                 });
                                 if let Some(mut failed) = state.local_audio.take() {
                                     let _ = failed.stop().await;
                                 }
-                                Ok(())
-                            }
-                        }
-                    } else {
-                        Ok(())
-                    };
-                    if let Err(error) = send_result {
-                        debug_call("desktop-media", format_args!("pcm send failed: {error:#}"));
-                    }
-
-                    // Render due receive audio frames into native playback.
-                    let elapsed = state.media.attached_elapsed();
-                    if let Ok(frames) = state.media.receive.render_due(elapsed) {
-                        for frame in frames {
-                            if state.speaker_muted {
-                                continue;
-                            }
-                            state.speaker_level.observe_i16(&frame);
-                            if let Some(audio) = &state.local_audio {
-                                let floats: Vec<f32> = frame
-                                    .iter()
-                                    .map(|&sample| f32::from(sample) / 32768.0)
-                                    .collect();
-                                let _ = audio.playback.enqueue(
-                                    audio.playback_token,
-                                    &floats,
-                                    state.audio_format.sample_rate(),
-                                );
                             }
                         }
                     }
 
-                    // Pump outgoing video frames (capped per audio tick so audio never starves).
-                    for _ in 0..4 {
-                        let next_frame = state
-                            .local_video
-                            .as_mut()
-                            .and_then(LocalVideoCapture::try_recv);
-                        let Some(frame) = next_frame else {
-                            break;
-                        };
-                        if let Err(error) = state.media.send_video(&frame).await {
-                            debug_call("desktop-media", format_args!("video send failed: {error:#}"));
-                            break;
-                        }
-                        if frame.codec == CallVideoCodec::Jpeg {
-                            if state.last_local_jpeg.elapsed() >= SELF_VIEW_MIN_INTERVAL {
-                                state.last_local_jpeg = Instant::now();
-                                let _ = channel.send(DesktopCallPacket::LocalJpeg {
-                                    jpeg: STANDARD.encode(&frame.bytes),
-                                });
-                            }
-                        } else if let Some(decoder) = state.self_view.as_mut() {
-                            decoder.feed(&frame);
-                        }
-                    }
-                    if let Some(decoder) = state.self_view.as_mut() {
-                        if let Some(jpeg) = decoder.drain_latest() {
-                            if state.last_local_jpeg.elapsed() >= SELF_VIEW_MIN_INTERVAL {
-                                state.last_local_jpeg = Instant::now();
-                                let _ = channel.send(DesktopCallPacket::LocalJpeg {
-                                    jpeg: STANDARD.encode(&jpeg),
-                                });
+                    if media_write_failed.is_none() {
+                        // Advance receive mixer monotonically even when local audio is absent.
+                        let elapsed = state.media.attached_elapsed();
+                        if let Ok(frames) = state.media.receive.render_due(elapsed) {
+                            for frame in frames {
+                                if state.speaker_muted {
+                                    continue;
+                                }
+                                state.speaker_level.observe_i16(&frame);
+                                if let Some(audio) = &state.local_audio {
+                                    let floats: Vec<f32> = frame
+                                        .iter()
+                                        .map(|&sample| f32::from(sample) / 32768.0)
+                                        .collect();
+                                    let _ = audio.playback.enqueue(
+                                        audio.playback_token,
+                                        &floats,
+                                        state.audio_format.sample_rate(),
+                                    );
+                                }
                             }
                         }
+
+                        // Pump outgoing video frames (capped per tick so audio never starves).
+                        for _ in 0..4 {
+                            let next_frame = state
+                                .local_video
+                                .as_mut()
+                                .and_then(LocalVideoCapture::try_recv);
+                            let Some(frame) = next_frame else {
+                                break;
+                            };
+                            if let Err(error) = state.media.send_video(&frame).await {
+                                debug_call("desktop-media", format_args!("video send failed: {error:#}"));
+                                media_write_failed = Some(error.to_string());
+                                break;
+                            }
+                            if frame.codec == CallVideoCodec::Jpeg {
+                                let due = state
+                                    .last_local_jpeg
+                                    .is_none_or(|prev| prev.elapsed() >= SELF_VIEW_MIN_INTERVAL);
+                                if due {
+                                    state.last_local_jpeg = Some(Instant::now());
+                                    let _ = channel.send(DesktopCallPacket::LocalJpeg {
+                                        jpeg: STANDARD.encode(&frame.bytes),
+                                    });
+                                }
+                            } else if let Some(decoder) = state.self_view.as_mut() {
+                                decoder.feed(&frame);
+                            }
+                        }
+                        if media_write_failed.is_none() {
+                            if let Some(decoder) = state.self_view.as_mut() {
+                                if let Some(jpeg) = decoder.drain_latest() {
+                                    let due = state
+                                        .last_local_jpeg
+                                        .is_none_or(|prev| prev.elapsed() >= SELF_VIEW_MIN_INTERVAL);
+                                    if due {
+                                        state.last_local_jpeg = Some(Instant::now());
+                                        let _ = channel.send(DesktopCallPacket::LocalJpeg {
+                                            jpeg: STANDARD.encode(&jpeg),
+                                        });
+                                    }
+                                }
+                            }
+                        }
                     }
+                }
+                if let Some(message) = media_write_failed {
+                    if let Some(old) = active_media.take() {
+                        old.close().await;
+                    }
+                    let _ = channel.send(DesktopCallPacket::MediaError {
+                        code: "media_closed".into(),
+                        message: Some(message),
+                    });
                 }
             }
             _ = level_tick.tick(), if has_media => {
@@ -1185,43 +1408,37 @@ pub async fn call_connect(
     connection_id: String,
     account_id: String,
     channel: Channel<DesktopCallPacket>,
-) -> Result<Value, String> {
+) -> Result<CallConnectResponse, String> {
     let endpoint = resolve_active_endpoint(&state, &connection_id, &account_id).await?;
     let ffmpeg = resolve_ffmpeg(&state.binaries);
 
-    let (mut control, hello_event) = ControlClient::connect(&endpoint)
+    // Warm the FFmpeg encoder capability cache before opening the control socket so no
+    // socket events sit unread during probing.
+    let ffmpeg_for_probe = ffmpeg.clone();
+    let probed_video_caps = tokio::task::spawn_blocking(move || {
+        video::client_video_capabilities(true, ffmpeg_for_probe.as_deref())
+    })
+    .await
+    .ok()
+    .flatten();
+
+    let (control, hello_event) = ControlClient::connect(&endpoint)
         .await
         .map_err(|error| map_connect_error(&error))?;
 
     let daemon_supports_video = control.capabilities.direct_video
         || control.capabilities.conference_video
         || control.video_capabilities.is_some();
-    let ffmpeg_for_probe = ffmpeg.clone();
-    let client_video_caps = tokio::task::spawn_blocking(move || {
-        video::client_video_capabilities(daemon_supports_video, ffmpeg_for_probe.as_deref())
-    })
-    .await
-    .ok()
-    .flatten();
-
-    let ready_cmd = CallCommand::Ready {
-        request_id: uuid::Uuid::new_v4().to_string(),
-        ready: true,
-        format: control.format,
-        scope: Some(CallReadyScope::All),
-        video: client_video_caps,
+    let client_video_caps = if daemon_supports_video {
+        probed_video_caps
+    } else {
+        None
     };
-    if let Err(error) = control.command(ready_cmd).await {
-        debug_call(
-            "desktop-control",
-            format_args!("call.ready rejected or failed (staying connected): {error:#}"),
-        );
-    }
-
+    let control_format = control.format;
     let hello_json = sanitized_event_value(&hello_event).map_err(|error| error.to_string())?;
 
     let session_id = state.calls.next_session.fetch_add(1, Ordering::AcqRel) + 1;
-    let cancel = CancellationToken::new();
+    let cancel = state.calls.root_cancel.child_token();
     let (tx, rx) = mpsc::unbounded_channel();
     let actor_cancel = cancel.clone();
     let task = tauri::async_runtime::spawn(run_account_actor(
@@ -1241,24 +1458,50 @@ pub async fn call_connect(
                 session_id,
                 connection_id,
                 cancel,
-                tx,
+                tx: tx.clone(),
                 task,
             },
         )
     };
     if let Some(old) = previous {
-        let _ = old.session_id;
         old.cancel.cancel();
         let _ = timeout(Duration::from_secs(4), old.task).await;
     }
 
-    Ok(hello_json)
+    // Send `call.ready` through the live actor so interleaved offers/state updates are
+    // forwarded to the WebView in order rather than swallowed.
+    let ready_cmd = CallCommand::Ready {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        ready: true,
+        format: control_format,
+        scope: Some(CallReadyScope::All),
+        video: client_video_caps,
+    };
+    if let Err(error) = send_actor_command(&tx, ready_cmd).await {
+        debug_call(
+            "desktop-control",
+            format_args!("call.ready rejected or failed (staying connected): {error}"),
+        );
+    }
+
+    Ok(CallConnectResponse {
+        session_id,
+        hello: hello_json,
+    })
 }
 
 #[tauri::command]
-pub async fn call_disconnect(state: State<'_, Desktop>, account_id: String) -> Result<(), String> {
+pub async fn call_disconnect(
+    state: State<'_, Desktop>,
+    connection_id: String,
+    account_id: String,
+    session_id: Option<u64>,
+) -> Result<(), String> {
     validate_account_id(&account_id)?;
-    state.calls.disconnect_account(&account_id).await;
+    state
+        .calls
+        .disconnect_account(&connection_id, &account_id, session_id)
+        .await;
     Ok(())
 }
 
@@ -1268,25 +1511,32 @@ pub async fn call_devices(state: State<'_, Desktop>) -> Result<CallDevicesSnapsh
     tokio::task::spawn_blocking(move || {
         let mut audio_inputs = Vec::new();
         let mut audio_outputs = Vec::new();
-        if let Ok(list) = wechat_audio::AudioSession::devices() {
-            for dev in list {
-                let dto = CallDeviceDto {
-                    id: dev.id.unwrap_or_default(),
-                    label: dev.name,
-                    kind: if dev.input {
-                        "audioinput"
+        let permission_state = match wechat_audio::AudioSession::devices() {
+            Ok(list) => {
+                for dev in list {
+                    let Some(id) = dev.id.filter(|id| !id.trim().is_empty()) else {
+                        continue;
+                    };
+                    let dto = CallDeviceDto {
+                        id,
+                        label: dev.name,
+                        kind: if dev.input {
+                            "audioinput"
+                        } else {
+                            "audiooutput"
+                        },
+                        is_default: dev.is_default,
+                    };
+                    if dev.input {
+                        audio_inputs.push(dto);
                     } else {
-                        "audiooutput"
-                    },
-                    is_default: dev.is_default,
-                };
-                if dev.input {
-                    audio_inputs.push(dto);
-                } else {
-                    audio_outputs.push(dto);
+                        audio_outputs.push(dto);
+                    }
                 }
+                "granted"
             }
-        }
+            Err(_) => "unknown",
+        };
         let video_inputs = video::list_cameras_with_ffmpeg(ffmpeg.as_deref())
             .into_iter()
             .map(|cam| CallDeviceDto {
@@ -1300,7 +1550,7 @@ pub async fn call_devices(state: State<'_, Desktop>) -> Result<CallDevicesSnapsh
             audio_inputs,
             audio_outputs,
             video_inputs,
-            permission_state: "granted",
+            permission_state,
             supports_output_selection: true,
         }
     })
@@ -1314,18 +1564,27 @@ pub async fn call_preview_start(
     camera_id: Option<String>,
     channel: Channel<DesktopPreviewPacket>,
 ) -> Result<(), String> {
-    let source = camera_source_from_ipc(camera_id.as_deref())?;
+    let _ = validate_camera_id_syntax(camera_id.as_deref())?;
     let ffmpeg = resolve_ffmpeg(&state.binaries);
     state.calls.stop_preview().await;
+    let gen = state.calls.preview_gen.fetch_add(1, Ordering::AcqRel) + 1;
 
-    let capture = tokio::task::spawn_blocking(move || {
+    let capture = tokio::task::spawn_blocking(move || -> Result<LocalVideoCapture, String> {
+        let source = resolve_verified_camera_source(camera_id.as_deref(), ffmpeg.as_deref())?;
         LocalVideoCapture::start_preview(&source, 640, 480, 15, ffmpeg.as_deref())
+            .map_err(|error| error.to_string())
     })
     .await
-    .map_err(|_| "Camera preview task failed".to_string())?
-    .map_err(|error| error.to_string())?;
+    .map_err(|_| "Camera preview task failed".to_string())??;
 
-    let cancel = CancellationToken::new();
+    // If another preview start/stop or call start arrived while FFmpeg was booting,
+    // immediately dispose this superseded capture off the Tokio worker thread.
+    if state.calls.preview_gen.load(Ordering::Acquire) != gen {
+        stop_video_handles(Some(capture), None).await;
+        return Ok(());
+    }
+
+    let cancel = state.calls.root_cancel.child_token();
     let loop_cancel = cancel.clone();
     let task = tauri::async_runtime::spawn(async move {
         let mut capture = capture;
@@ -1348,11 +1607,24 @@ pub async fn call_preview_start(
                 }
             }
         }
-        drop(capture);
+        stop_video_handles(Some(capture), None).await;
         let _ = channel.send(DesktopPreviewPacket::Ended);
     });
 
-    *state.calls.preview.lock().await = Some(PreviewSession { cancel, task });
+    let replaced = {
+        let mut guard = state.calls.preview.lock().await;
+        if state.calls.preview_gen.load(Ordering::Acquire) != gen {
+            cancel.cancel();
+            drop(guard);
+            let _ = timeout(TEARDOWN_TIMEOUT, task).await;
+            return Ok(());
+        }
+        guard.replace(PreviewSession { cancel, task })
+    };
+    if let Some(old) = replaced {
+        old.cancel.cancel();
+        let _ = timeout(TEARDOWN_TIMEOUT, old.task).await;
+    }
     Ok(())
 }
 
@@ -1588,6 +1860,17 @@ pub async fn call_set_camera(
     validate_non_empty_id(&request_id, "requestId", MAX_REQUEST_ID_LEN)?;
     validate_non_empty_id(&call_id, "callId", MAX_ID_LEN)?;
     let tx = state.calls.sender(&connection_id, &account_id).await?;
+    if !enabled {
+        // Stop local camera eagerly before sending `call.camera(false)` so the daemon's
+        // interleaved `track.updated(active: false)` never respawns FFmpeg.
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(ActorRequest::SetLocalCamera {
+            enabled: false,
+            reply: reply_tx,
+        })
+        .map_err(|_| "not_connected".to_string())?;
+        let _ = reply_rx.await;
+    }
     send_actor_command(
         &tx,
         CallCommand::Camera {
@@ -1597,13 +1880,16 @@ pub async fn call_set_camera(
         },
     )
     .await?;
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(ActorRequest::SetLocalCamera {
-        enabled,
-        reply: reply_tx,
-    })
-    .map_err(|_| "not_connected".to_string())?;
-    reply_rx.await.map_err(|_| "closed".to_string())?
+    if enabled {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(ActorRequest::SetLocalCamera {
+            enabled: true,
+            reply: reply_tx,
+        })
+        .map_err(|_| "not_connected".to_string())?;
+        reply_rx.await.map_err(|_| "closed".to_string())??;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1629,7 +1915,7 @@ pub async fn call_switch_devices(
 ) -> Result<(), String> {
     validate_account_id(&account_id)?;
     if let Some(camera_id) = selection.camera_device_id.as_deref() {
-        let _ = camera_source_from_ipc(Some(camera_id))?;
+        let _ = validate_camera_id_syntax(Some(camera_id))?;
     }
     let Ok(tx) = state.calls.sender(&connection_id, &account_id).await else {
         return Ok(());
@@ -1691,7 +1977,7 @@ pub async fn call_attach_media(
     validate_account_id(&account_id)?;
     validate_non_empty_id(&call_id, "callId", MAX_ID_LEN)?;
     if let Some(camera_id) = devices.camera_device_id.as_deref() {
-        let _ = camera_source_from_ipc(Some(camera_id))?;
+        let _ = validate_camera_id_syntax(Some(camera_id))?;
     }
     state.calls.stop_preview().await;
     let tx = state.calls.sender(&connection_id, &account_id).await?;
@@ -1706,9 +1992,9 @@ pub async fn call_attach_media(
         reply: reply_tx,
     })
     .map_err(|_| "not_connected".to_string())?;
-    timeout(Duration::from_secs(20), reply_rx)
+    timeout(ATTACH_TIMEOUT, reply_rx)
         .await
-        .map_err(|_| "media_attach_timeout".to_string())?
+        .map_err(|_| "media_attach_failed".to_string())?
         .map_err(|_| "closed".to_string())?
 }
 
@@ -1756,16 +2042,58 @@ mod tests {
     };
 
     #[test]
-    fn ipc_camera_validation_rejects_file_test_flags_and_control_chars() {
-        assert_eq!(camera_source_from_ipc(None).unwrap(), CameraSource::Auto);
+    fn ipc_camera_validation_enforces_strict_platform_rules() {
+        assert_eq!(validate_camera_id_syntax(None).unwrap(), CameraSource::Auto);
         assert_eq!(
-            camera_source_from_ipc(Some("  ")).unwrap(),
+            validate_camera_id_syntax(Some("  ")).unwrap(),
             CameraSource::Auto
         );
-        assert_eq!(
-            camera_source_from_ipc(Some("/dev/video0")).unwrap(),
-            CameraSource::Device("/dev/video0".into())
-        );
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(
+                validate_camera_id_syntax(Some("/dev/video0")).unwrap(),
+                CameraSource::Device("/dev/video0".into())
+            );
+            for bad in [
+                "/etc/passwd",
+                "/dev/sda",
+                "/dev/video",
+                "/dev/video0/../sda",
+                "http://127.0.0.1/x",
+                "0",
+            ] {
+                assert!(
+                    validate_camera_id_syntax(Some(bad)).is_err(),
+                    "expected {bad:?} to be rejected on Linux"
+                );
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(
+                validate_camera_id_syntax(Some("0")).unwrap(),
+                CameraSource::Device("0".into())
+            );
+            for bad in ["0:0", ":0", "Capture screen 0", "/dev/video0"] {
+                assert!(
+                    validate_camera_id_syntax(Some(bad)).is_err(),
+                    "expected {bad:?} to be rejected on macOS"
+                );
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(
+                validate_camera_id_syntax(Some("Integrated Camera")).unwrap(),
+                CameraSource::Device("Integrated Camera".into())
+            );
+            for bad in ["video=cam:0", "C:\\Windows\\cmd.exe", "cam\"name"] {
+                assert!(
+                    validate_camera_id_syntax(Some(bad)).is_err(),
+                    "expected {bad:?} to be rejected on Windows"
+                );
+            }
+        }
         for bad in [
             "file:/etc/passwd",
             "FILE:/tmp/a.mp4",
@@ -1777,7 +2105,7 @@ mod tests {
             &"a".repeat(MAX_CAMERA_ID_LEN + 1),
         ] {
             assert!(
-                camera_source_from_ipc(Some(bad)).is_err(),
+                validate_camera_id_syntax(Some(bad)).is_err(),
                 "expected {bad:?} to be rejected"
             );
         }
@@ -1802,7 +2130,6 @@ mod tests {
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
-            // Receive call.hello
             let _ = ws.next().await.unwrap().unwrap();
             let hello = CallEvent::Hello {
                 protocol_version: CALL_PROTOCOL_VERSION,
@@ -1824,7 +2151,6 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Receive call.dial
             let Message::Text(cmd_text) = ws.next().await.unwrap().unwrap() else {
                 panic!("expected text command");
             };
@@ -1832,7 +2158,7 @@ mod tests {
             assert_eq!(cmd["type"], "call.dial");
             let req_id = cmd["requestId"].as_str().unwrap().to_owned();
 
-            // Send interleaved call.state BEFORE command.result!
+            // Interleaved call.state arrives BEFORE command.result.
             let state_evt = CallEvent::State {
                 call: CallView {
                     call_id: "call-42".into(),
@@ -1853,7 +2179,7 @@ mod tests {
             .await
             .unwrap();
 
-            // Send command.result carrying a secret ownerToken.
+            // command.result carries secret ownerToken.
             let result_evt = CallEvent::CommandResult {
                 request_id: req_id,
                 status: CallCommandStatus::Accepted,
@@ -1920,7 +2246,6 @@ mod tests {
             Some("secret-owner-token-never-expose")
         );
 
-        // Give channel delivery a moment, then stop cleanly.
         tokio::time::sleep(Duration::from_millis(20)).await;
         cancel.cancel();
         actor_task.await.unwrap();

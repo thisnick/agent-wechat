@@ -438,17 +438,32 @@ function Client({
         account: action.accountId,
         thread: action.peerId,
       });
+      const isAuthenticated = connection.session
+        .snapshot()
+        .accounts.some((item) => item.id === action.accountId && item.authenticated);
+      if (!isAuthenticated) return;
       const controller = connection.calls(action.accountId);
       controller.start();
       if (action.action === "answer") {
         const answerOptions = { cameraEnabled: action.callType === "video" };
         const tryAnswer = (): boolean => {
           const snap = controller.snapshot();
-          if (snap.currentOffer?.callId === action.callId) {
+          if (
+            snap.currentCall ||
+            snap.status === "disabled" ||
+            snap.status === "unavailable"
+          ) {
+            return true;
+          }
+          if (
+            snap.status === "ready" &&
+            !snap.actionPending &&
+            snap.currentOffer?.callId === action.callId
+          ) {
             void controller.answerOffer(answerOptions);
             return true;
           }
-          return !!snap.currentCall;
+          return false;
         };
         if (!tryAnswer()) {
           const unsub = controller.subscribe(() => {

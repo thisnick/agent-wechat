@@ -307,7 +307,6 @@ impl Desktop {
         self.stop_local(&mut inner).await
     }
     async fn stop(&self) -> Result<()> {
-        self.calls.shutdown_all().await;
         self.stop_hub().await?;
         self.inner.lock().await.active = None;
         self.notifications.cancel.cancel();
@@ -497,6 +496,9 @@ async fn desktop_save_local(
         if next.network_enabled {
             hub::tls_files(&state.data)?;
         }
+        drop(inner);
+        state.calls.shutdown_all().await;
+        let mut inner = state.inner.lock().await;
         state.stop_local(&mut inner).await?;
         inner.active = None;
         inner.config = next;
@@ -757,6 +759,10 @@ fn request_quit(app: tauri::AppHandle) {
     });
 }
 fn show_main_window(app: &tauri::AppHandle) {
+    let app_for_clear = app.clone();
+    tauri::async_runtime::spawn(async move {
+        notifications::clear_all_call_alerts(&app_for_clear.state::<Desktop>()).await;
+    });
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
@@ -852,11 +858,18 @@ fn main() {
                 .build(app)?;
             Ok(())
         })
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 let _ = window.hide();
             }
+            tauri::WindowEvent::Focused(true) => {
+                let app = window.app_handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    notifications::clear_all_call_alerts(&app.state::<Desktop>()).await;
+                });
+            }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             desktop_bootstrap,
@@ -924,7 +937,11 @@ fn main() {
             }
             // Reached without ExitRequested when the system ends the app, as
             // macOS does for Quit from the Dock, logging out or shutting down.
-            tauri::RunEvent::Exit => app.state::<Desktop>().stop_hub_now(),
+            tauri::RunEvent::Exit => {
+                let desktop = app.state::<Desktop>();
+                desktop.calls.cancel_now();
+                desktop.stop_hub_now();
+            }
             _ => {}
         });
 }

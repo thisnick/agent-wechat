@@ -82,6 +82,7 @@ export class DesktopCallTransport implements CallSessionTransport {
   private readonly createPreviewChannel: DesktopChannelFactory<DesktopPreviewPacket>;
   private sessionSeq = 0;
   private activeSession = 0;
+  private nativeSessionId: number | null = null;
   private callbacks: CallTransportCallbacks | null = null;
   private hostFullscreenActive = false;
 
@@ -150,6 +151,7 @@ export class DesktopCallTransport implements CallSessionTransport {
           break;
         case "disconnected":
           this.activeSession = 0;
+          this.nativeSessionId = null;
           this.callbacks = null;
           this.exitHostFullscreenIfOwned();
           callbacks.onDisconnected(packet.code);
@@ -158,19 +160,28 @@ export class DesktopCallTransport implements CallSessionTransport {
     };
 
     try {
-      const hello = await this.invokeFn<Extract<CallEvent, { type: "hello" }>>("call_connect", {
+      const response = await this.invokeFn<{
+        sessionId: number;
+        hello: Extract<CallEvent, { type: "hello" }>;
+      }>("call_connect", {
         connectionId: this.connectionId,
         accountId: this.account,
         channel,
       });
       if (this.activeSession !== session) {
-        void this.invokeFn("call_disconnect", { accountId: this.account }).catch(() => {});
+        void this.invokeFn("call_disconnect", {
+          connectionId: this.connectionId,
+          accountId: this.account,
+          sessionId: response.sessionId,
+        }).catch(() => {});
         throw new NativeCallError("closed");
       }
-      return hello;
+      this.nativeSessionId = response.sessionId;
+      return response.hello;
     } catch (error) {
       if (this.activeSession === session) {
         this.activeSession = 0;
+        this.nativeSessionId = null;
         this.callbacks = null;
       }
       throw toCallError(error);
@@ -179,11 +190,17 @@ export class DesktopCallTransport implements CallSessionTransport {
 
   disconnect(): void {
     const wasActive = this.activeSession !== 0;
+    const sessionId = this.nativeSessionId;
     this.activeSession = 0;
+    this.nativeSessionId = null;
     this.callbacks = null;
     this.exitHostFullscreenIfOwned();
-    if (wasActive) {
-      void this.invokeFn("call_disconnect", { accountId: this.account }).catch(() => {});
+    if (wasActive && sessionId !== null) {
+      void this.invokeFn("call_disconnect", {
+        connectionId: this.connectionId,
+        accountId: this.account,
+        sessionId,
+      }).catch(() => {});
     }
   }
 
@@ -336,8 +353,16 @@ export class DesktopCallTransport implements CallSessionTransport {
         speakerMuted,
       });
     } catch (error) {
+      // Rust emits a structured `mediaError` packet before rejecting AttachMedia; only
+      // emit a fallback here for IPC/pre-actor rejections so we don't clobber the code.
       const callError = toCallError(error);
-      this.callbacks?.onMediaError(callError.code);
+      if (
+        callError.code !== "media_attach_failed" &&
+        callError.code !== "missing_owner_token" &&
+        callError.code !== "unsupported"
+      ) {
+        this.callbacks?.onMediaError(callError.code);
+      }
     }
   }
 
