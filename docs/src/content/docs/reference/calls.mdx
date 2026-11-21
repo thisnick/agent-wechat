@@ -67,8 +67,11 @@ start/join exits. JSON monitoring never answers or joins automatically.
 Run `wx calls devices` first, then select endpoints with
 `wx calls dial CONTACT --input-device INPUT_ID --output-device OUTPUT_ID`.
 Without those options, OS defaults are used. Linux accepts PulseAudio or
-PipeWire-Pulse names; Windows accepts endpoint IDs. On macOS, select defaults in
-System Settings; custom endpoint IDs are unsupported.
+PipeWire-Pulse names, Windows accepts endpoint IDs, and macOS accepts the
+numeric CoreAudio device IDs shown by `wx calls devices` (custom macOS devices
+bypass system voice processing and run without echo cancellation).
+`wx calls devices` also lists local cameras on Linux (V4L2), macOS
+(`avfoundation`), and Windows (`dshow`).
 
 Interactive calls show the controls, meters and (when video is active) a 24-bit
 TrueColor terminal video preview. Press Enter after a key; `l` or `h` leaves the
