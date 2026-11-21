@@ -123,13 +123,17 @@ pub fn probe_ffmpeg_capabilities(override_path: Option<&Path>) -> FfmpegVideoCap
 }
 
 fn run_ffmpeg_text(ffmpeg: &Path, args: &[&str]) -> String {
-    let Ok(mut child) = Command::new(ffmpeg)
-        .args(args)
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    else {
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    let Ok(mut child) = cmd.spawn() else {
         return String::new();
     };
     let read_capped = |stream: Option<Box<dyn Read + Send>>| {
@@ -640,7 +644,7 @@ fn resolve_device_input(source: &CameraSource, ffmpeg: &Path) -> Result<String> 
             }
             #[cfg(target_os = "macos")]
             {
-                Ok("0".into())
+                bail!("no local camera found; connect a camera, pass --camera test, or pass --camera-off")
             }
             #[cfg(target_os = "linux")]
             {
@@ -811,6 +815,11 @@ fn spawn_capture(
         }
     }
 
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -898,7 +907,7 @@ fn read_captured_stream(
 /// Extract one complete JPEG image (`SOI .. EOI`), skipping length-prefixed header
 /// segments (`APPn`, `DQT`, `DHT`, `COM`, etc.) before `SOS` so embedded thumbnails
 /// containing `0xff 0xd9` never split a frame prematurely.
-fn extract_jpeg_frame(buf: &mut Vec<u8>) -> Option<Vec<u8>> {
+pub fn extract_jpeg_frame(buf: &mut Vec<u8>) -> Option<Vec<u8>> {
     loop {
         let Some(start) = buf.windows(2).position(|w| w == [0xff, 0xd8]) else {
             // Retain only a trailing 0xff byte in case SOI straddles a read boundary.

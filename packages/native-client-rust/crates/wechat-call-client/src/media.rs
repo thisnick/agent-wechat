@@ -15,7 +15,8 @@ use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message;
 use wechat_call_contracts::{
     call_types::{
-        CallEvent, CallMediaCommand, CallTrack, CallTrackDirection, CALL_PROTOCOL_VERSION,
+        CallAudioFormat, CallEvent, CallMediaCommand, CallTrack, CallTrackDirection,
+        CALL_PROTOCOL_VERSION,
     },
     pcm_envelope::{encode_pcm_chunk, encode_video, MediaHeader, MediaPayloadKind},
 };
@@ -43,7 +44,36 @@ impl MediaClient {
         call_id: &str,
         owner_token: &str,
     ) -> Result<Self> {
-        Self::attach_inner(endpoint, control, call_id, owner_token, false).await
+        Self::attach_inner(
+            endpoint,
+            &control.client_id,
+            control.format,
+            call_id,
+            owner_token,
+            false,
+        )
+        .await
+    }
+
+    /// Attach to `/calls/{callId}/media` with raw JPEG passthrough (used by Desktop WebView).
+    /// Takes `client_id` and `audio_format` directly so the returned future is `Send` for
+    /// spawned multi-threaded tasks (holding `&ControlClient` across `.await` is `!Send`).
+    pub async fn attach_passthrough_parts(
+        endpoint: &CallEndpoint,
+        client_id: &str,
+        audio_format: CallAudioFormat,
+        call_id: &str,
+        owner_token: &str,
+    ) -> Result<Self> {
+        Self::attach_inner(
+            endpoint,
+            client_id,
+            audio_format,
+            call_id,
+            owner_token,
+            true,
+        )
+        .await
     }
 
     /// Attach to `/calls/{callId}/media` with raw JPEG passthrough (used by Desktop WebView).
@@ -53,12 +83,21 @@ impl MediaClient {
         call_id: &str,
         owner_token: &str,
     ) -> Result<Self> {
-        Self::attach_inner(endpoint, control, call_id, owner_token, true).await
+        Self::attach_inner(
+            endpoint,
+            &control.client_id,
+            control.format,
+            call_id,
+            owner_token,
+            true,
+        )
+        .await
     }
 
     async fn attach_inner(
         endpoint: &CallEndpoint,
-        control: &ControlClient,
+        client_id: &str,
+        audio_format: CallAudioFormat,
         call_id: &str,
         owner_token: &str,
         passthrough_video: bool,
@@ -69,7 +108,7 @@ impl MediaClient {
             &mut socket,
             &CallMediaCommand::Attach {
                 supported_protocol_versions: vec![CALL_PROTOCOL_VERSION],
-                client_id: control.client_id.clone(),
+                client_id: client_id.to_owned(),
                 owner_token: owner_token.into(),
             },
         )
@@ -101,7 +140,7 @@ impl MediaClient {
             .into_iter()
             .find(|track| track.is_video() && track.direction() == CallTrackDirection::Send);
         ensure!(
-            send_track.audio_format() == Some(control.format)
+            send_track.audio_format() == Some(audio_format)
                 && send_track.direction() == CallTrackDirection::Send
                 && send_track.id() != 0
                 && send_track.generation() != 0,
@@ -114,9 +153,9 @@ impl MediaClient {
             "overlapping send and receive tracks"
         );
         let format = AudioFormat::new(
-            control.format.sample_rate,
-            control.format.channels,
-            control.format.frame_ms,
+            audio_format.sample_rate,
+            audio_format.channels,
+            audio_format.frame_ms,
         )?;
         let receive_video = if passthrough_video {
             ReceiveVideo::new_passthrough(receive_tracks.clone())

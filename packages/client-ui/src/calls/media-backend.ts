@@ -125,6 +125,8 @@ export type CallTransportCallbacks = {
   onTrackCleared: (trackId: number) => void;
   onLevels: (levels: CallAudioLevels) => void;
   onMediaError: (code: string, message?: string) => void;
+  /** Desktop host reports the call ID whose OS notification is currently sounding, or null. */
+  onOsCallAlert?: (callId: string | null) => void;
 };
 
 /**

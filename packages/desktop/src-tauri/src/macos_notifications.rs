@@ -26,16 +26,33 @@ use std::sync::{Mutex, Once, OnceLock};
 pub const REPLY_ACTION: &str = "reply";
 /// Identifier of the Mark as Read action.
 pub const MARK_READ_ACTION: &str = "mark-read";
+/// Identifier of the foreground Answer Call action.
+pub const CALL_ANSWER_ACTION: &str = "call-answer";
+/// Identifier of the background Decline Call action.
+pub const CALL_DECLINE_ACTION: &str = "call-decline";
 /// Category of alerts that offer Mark as Read only.
 const CATEGORY: &str = "message";
 /// Category of alerts that offer Reply and Mark as Read.
 const REPLY_CATEGORY: &str = "message-reply";
+/// Category of incoming-call alerts that offer Answer and Decline.
+const CALL_CATEGORY: &str = "call-incoming";
 /// `userInfo` key holding the alert's JSON payload.
 const PAYLOAD_KEY: &str = "agentWechat";
 
+/// Action set presented on a macOS notification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AlertCategory {
+    /// Standard message alert with Mark as Read.
+    Message,
+    /// Quotable message alert with inline Reply and Mark as Read.
+    MessageReply,
+    /// Incoming call alert with foreground Answer and background Decline.
+    CallIncoming,
+}
+
 /// One alert to show.
 pub struct Alert<'a> {
-    /// Unique per message; posting the same identifier again replaces the alert.
+    /// Unique per message or call offer; posting the same identifier again replaces the alert.
     pub request_id: &'a str,
     /// Alerts with the same key are grouped together in Notification Center.
     pub thread_key: &'a str,
@@ -46,8 +63,8 @@ pub struct Alert<'a> {
     pub sound: Option<&'a str>,
     /// Opaque JSON handed back with the response.
     pub payload: &'a str,
-    /// Whether to offer the inline Reply action.
-    pub reply: bool,
+    /// Which macOS notification category (action buttons) to attach.
+    pub category: AlertCategory,
 }
 
 /// What the user did with an alert.
@@ -59,6 +76,10 @@ pub enum Action {
     Reply(String),
     /// Chose Mark as Read.
     MarkRead,
+    /// Chose Answer on an incoming call alert.
+    CallAnswer,
+    /// Chose Decline on an incoming call alert.
+    CallDecline,
     /// Anything else, such as a dismissal.
     Other,
 }
@@ -124,7 +145,7 @@ pub fn post(alert: &Alert) {
         ))));
     }
     content.setThreadIdentifier(&NSString::from_str(alert.thread_key));
-    content.setCategoryIdentifier(&NSString::from_str(category(alert.reply)));
+    content.setCategoryIdentifier(&NSString::from_str(category(alert.category)));
     let info = NSDictionary::<NSString, NSString>::from_slices(
         &[&*NSString::from_str(PAYLOAD_KEY)],
         &[&*NSString::from_str(alert.payload)],
@@ -170,6 +191,14 @@ pub fn clear_thread(thread_key: &str) {
         .getDeliveredNotificationsWithCompletionHandler(&found);
 }
 
+/// Removes one delivered notification by request ID, such as when an incoming
+/// call offer expires, is answered, or is rejected elsewhere.
+pub fn remove_request(request_id: &str) {
+    let id = NSString::from_str(request_id);
+    UNUserNotificationCenter::currentNotificationCenter()
+        .removeDeliveredNotificationsWithIdentifiers(&NSArray::from_retained_slice(&[id]));
+}
+
 /// Whether the user allowed alerts, once the permission request has been answered.
 pub fn permitted() -> Option<bool> {
     match PERMISSION.load(Ordering::Relaxed) {
@@ -190,11 +219,11 @@ fn record(error: String) {
     }
 }
 
-fn category(reply: bool) -> &'static str {
-    if reply {
-        REPLY_CATEGORY
-    } else {
-        CATEGORY
+fn category(kind: AlertCategory) -> &'static str {
+    match kind {
+        AlertCategory::Message => CATEGORY,
+        AlertCategory::MessageReply => REPLY_CATEGORY,
+        AlertCategory::CallIncoming => CALL_CATEGORY,
     }
 }
 
@@ -205,6 +234,8 @@ fn action(identifier: &str, default: &str, text: Option<String>) -> Action {
         (id, _) if id == default => Action::Open,
         (REPLY_ACTION, Some(text)) => Action::Reply(text),
         (MARK_READ_ACTION, _) => Action::MarkRead,
+        (CALL_ANSWER_ACTION, _) => Action::CallAnswer,
+        (CALL_DECLINE_ACTION, _) => Action::CallDecline,
         _ => Action::Other,
     }
 }
@@ -226,6 +257,16 @@ fn categories() -> Retained<NSSet<UNNotificationCategory>> {
             UNNotificationActionOptions::empty(),
         )
     };
+    let answer = UNNotificationAction::actionWithIdentifier_title_options(
+        &NSString::from_str(CALL_ANSWER_ACTION),
+        &NSString::from_str(&crate::i18n::text("actionAnswer")),
+        UNNotificationActionOptions::Foreground,
+    );
+    let decline = UNNotificationAction::actionWithIdentifier_title_options(
+        &NSString::from_str(CALL_DECLINE_ACTION),
+        &NSString::from_str(&crate::i18n::text("actionDecline")),
+        UNNotificationActionOptions::Destructive,
+    );
     let plain = UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
         &NSString::from_str(CATEGORY),
         &NSArray::from_retained_slice(&[mark_read()]),
@@ -238,7 +279,14 @@ fn categories() -> Retained<NSSet<UNNotificationCategory>> {
         &none,
         UNNotificationCategoryOptions::empty(),
     );
-    NSSet::from_retained_slice(&[plain, replying])
+    let call_incoming =
+        UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
+            &NSString::from_str(CALL_CATEGORY),
+            &NSArray::from_retained_slice(&[answer, decline]),
+            &none,
+            UNNotificationCategoryOptions::empty(),
+        );
+    NSSet::from_retained_slice(&[plain, replying, call_incoming])
 }
 
 fn payload(content: &UNNotificationContent) -> Option<String> {
@@ -314,13 +362,14 @@ impl Delegate {
 #[cfg(test)]
 mod tests {
     use super::{
-        action, category, Action, CATEGORY, MARK_READ_ACTION, REPLY_ACTION, REPLY_CATEGORY,
+        action, category, Action, AlertCategory, CALL_ANSWER_ACTION, CALL_CATEGORY,
+        CALL_DECLINE_ACTION, CATEGORY, MARK_READ_ACTION, REPLY_ACTION, REPLY_CATEGORY,
     };
 
     const DEFAULT: &str = "com.apple.UNNotificationDefaultActionIdentifier";
 
     #[test]
-    fn clicks_open_reply_text_replies_and_mark_read_marks_read() {
+    fn clicks_open_reply_text_replies_and_call_actions_map() {
         assert_eq!(action(DEFAULT, DEFAULT, None), Action::Open);
         assert_eq!(
             action(REPLY_ACTION, DEFAULT, Some("On my way".into())),
@@ -328,6 +377,14 @@ mod tests {
         );
         assert_eq!(action(REPLY_ACTION, DEFAULT, None), Action::Other);
         assert_eq!(action(MARK_READ_ACTION, DEFAULT, None), Action::MarkRead);
+        assert_eq!(
+            action(CALL_ANSWER_ACTION, DEFAULT, None),
+            Action::CallAnswer
+        );
+        assert_eq!(
+            action(CALL_DECLINE_ACTION, DEFAULT, None),
+            Action::CallDecline
+        );
         assert_eq!(
             action(
                 "com.apple.UNNotificationDismissActionIdentifier",
@@ -339,8 +396,9 @@ mod tests {
     }
 
     #[test]
-    fn only_quotable_alerts_offer_reply() {
-        assert_eq!(category(true), REPLY_CATEGORY);
-        assert_eq!(category(false), CATEGORY);
+    fn alert_categories_match_expected_identifiers() {
+        assert_eq!(category(AlertCategory::MessageReply), REPLY_CATEGORY);
+        assert_eq!(category(AlertCategory::Message), CATEGORY);
+        assert_eq!(category(AlertCategory::CallIncoming), CALL_CATEGORY);
     }
 }

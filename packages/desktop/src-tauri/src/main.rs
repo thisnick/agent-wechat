@@ -1,4 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod calls;
 mod config;
 mod credentials;
 mod emoji;
@@ -59,6 +60,7 @@ pub struct Desktop {
     /// read without the `inner` lock when the app ends.
     hub_pid: AtomicU32,
     notifications: notifications::Notifications,
+    calls: calls::CallManager,
     updates: updates::Updates,
 }
 /// How long an ending app waits for its hub to stop.
@@ -278,18 +280,26 @@ impl Desktop {
         let mut session = Session::from(&connection);
         session.status = Some(identity);
         let local = connection.local;
+        let switching_hub = inner
+            .active
+            .as_ref()
+            .is_some_and(|prior| prior.connection.id != id);
         inner.config.connections.retain(|value| value.id != id);
         inner.config.connections.push(connection);
         inner.config.active = Some(id.into());
         inner.config.save(&self.config_file)?;
         inner.active = Some(active);
         drop(inner);
+        if switching_hub {
+            self.calls.shutdown_all().await;
+        }
         if !local {
             self.stop_unused_local().await;
         }
         Ok(session)
     }
     async fn stop_hub(&self) -> Result<()> {
+        self.calls.shutdown_all().await;
         for control in self.requests.lock().await.values() {
             control.cancel.cancel();
         }
@@ -486,6 +496,9 @@ async fn desktop_save_local(
         if next.network_enabled {
             hub::tls_files(&state.data)?;
         }
+        drop(inner);
+        state.calls.shutdown_all().await;
+        let mut inner = state.inner.lock().await;
         state.stop_local(&mut inner).await?;
         inner.active = None;
         inner.config = next;
@@ -546,14 +559,21 @@ async fn desktop_forget(state: State<'_, Desktop>, id: String) -> Result<(), Str
     }
     credentials::remove(&inner.config.installation_id, &id).map_err(|error| error.to_string())?;
     inner.config.connections.retain(|value| value.id != id);
+    let mut cleared_active = false;
     if inner.config.active.as_ref() == Some(&id) {
         inner.config.active = None;
         inner.active = None;
+        cleared_active = true;
     }
-    inner
+    let saved = inner
         .config
         .save(&state.config_file)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string());
+    drop(inner);
+    if cleared_active {
+        state.calls.shutdown_all().await;
+    }
+    saved
 }
 #[tauri::command]
 fn desktop_install_cli(state: State<'_, Desktop>) -> Result<String, String> {
@@ -739,6 +759,10 @@ fn request_quit(app: tauri::AppHandle) {
     });
 }
 fn show_main_window(app: &tauri::AppHandle) {
+    let app_for_clear = app.clone();
+    tauri::async_runtime::spawn(async move {
+        notifications::clear_all_call_alerts(&app_for_clear.state::<Desktop>()).await;
+    });
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
@@ -784,6 +808,7 @@ fn main() {
                 quit: AtomicU8::new(0),
                 hub_pid: AtomicU32::new(0),
                 notifications: notifications::Notifications::default(),
+                calls: calls::CallManager::default(),
                 updates: updates::Updates::default(),
             });
             notifications::start(app.handle().clone())?;
@@ -833,11 +858,18 @@ fn main() {
                 .build(app)?;
             Ok(())
         })
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 let _ = window.hide();
             }
+            tauri::WindowEvent::Focused(true) => {
+                let app = window.app_handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    notifications::clear_all_call_alerts(&app.state::<Desktop>()).await;
+                });
+            }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             desktop_bootstrap,
@@ -856,9 +888,30 @@ fn main() {
             desktop_quit,
             notifications::notifications_context,
             notifications::notifications_take_target,
+            notifications::notifications_take_call_action,
             notifications::notifications_enabled,
             notifications::notifications_account_settings,
             notifications::notifications_sound_enabled,
+            calls::call_connect,
+            calls::call_disconnect,
+            calls::call_devices,
+            calls::call_preview_start,
+            calls::call_preview_stop,
+            calls::call_dial,
+            calls::call_conference_start,
+            calls::call_conference_join,
+            calls::call_answer,
+            calls::call_reject,
+            calls::call_invite,
+            calls::call_set_mute,
+            calls::call_set_camera,
+            calls::call_set_speaker_muted,
+            calls::call_switch_devices,
+            calls::call_end,
+            calls::call_attach_media,
+            calls::call_stop_local_media,
+            calls::call_stop_media,
+            calls::call_set_fullscreen,
             updates::updates_status,
             updates::updates_preferences,
             updates::updates_check,
@@ -884,7 +937,11 @@ fn main() {
             }
             // Reached without ExitRequested when the system ends the app, as
             // macOS does for Quit from the Dock, logging out or shutting down.
-            tauri::RunEvent::Exit => app.state::<Desktop>().stop_hub_now(),
+            tauri::RunEvent::Exit => {
+                let desktop = app.state::<Desktop>();
+                desktop.calls.cancel_now();
+                desktop.stop_hub_now();
+            }
             _ => {}
         });
 }
@@ -909,6 +966,7 @@ mod tests {
             quit: AtomicU8::new(0),
             hub_pid: AtomicU32::new(0),
             notifications: notifications::Notifications::default(),
+            calls: calls::CallManager::default(),
             updates: updates::Updates::default(),
         }
     }
@@ -1017,6 +1075,7 @@ mod tests {
                 quit: AtomicU8::new(quit),
                 hub_pid: AtomicU32::new(0),
                 notifications: notifications::Notifications::default(),
+                calls: calls::CallManager::default(),
                 updates: updates::Updates::default(),
             };
             let mut inner = desktop.inner.lock().await;
@@ -1077,6 +1136,7 @@ mod tests {
             quit: AtomicU8::new(0),
             hub_pid: AtomicU32::new(0),
             notifications: notifications::Notifications::default(),
+            calls: calls::CallManager::default(),
             updates: updates::Updates::default(),
         };
         // Off by default: the local hub runs only while it is selected.

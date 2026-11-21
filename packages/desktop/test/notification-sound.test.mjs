@@ -24,3 +24,25 @@ test("desktop bundles Soft pair at the native platform resource paths", async ()
   assert.equal(audio.readUInt16LE(34), 16);
   assert.equal(audio.length - 44, 48000 * 0.36 * 2);
 });
+test("desktop bundles Soft ring at the native platform resource paths", async () => {
+  const config = JSON.parse(await readFile(new URL("tauri.conf.json", root)));
+  const linux = JSON.parse(
+    await readFile(new URL("tauri.linux.conf.json", root)),
+  );
+  assert.equal(
+    config.bundle.resources["sounds/AgentWechatSoftRing.wav"],
+    "AgentWechatSoftRing.wav",
+  );
+  assert.equal(
+    linux.bundle.resources["sounds/AgentWechatSoftRing.wav"],
+    "sounds/AgentWechatSoftRing.wav",
+  );
+  const audio = await readFile(new URL("sounds/AgentWechatSoftRing.wav", root));
+  assert.equal(audio.toString("ascii", 0, 4), "RIFF");
+  assert.equal(audio.toString("ascii", 8, 12), "WAVE");
+  assert.equal(audio.readUInt16LE(20), 1);
+  assert.equal(audio.readUInt16LE(22), 1);
+  assert.equal(audio.readUInt32LE(24), 48000);
+  assert.equal(audio.readUInt16LE(34), 16);
+  assert.equal(audio.length - 44, 48000 * 3 * 2);
+});

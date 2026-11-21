@@ -1,5 +1,5 @@
 //! Route sound through the OS notification service so system quiet settings apply.
-use crate::notifications::Target;
+use crate::notifications::{CallActionTarget, Target};
 use anyhow::Result;
 
 #[cfg(windows)]
@@ -7,11 +7,52 @@ use tauri_plugin_notification::NotificationExt;
 
 #[cfg(target_os = "macos")]
 const SOUND_NAME: &str = "AgentWechatSoftPair";
-/// The bundled sound's file name, as the UserNotifications framework looks it up.
+/// The bundled message sound's file name, as the UserNotifications framework looks it up.
 #[cfg(target_os = "macos")]
 const SOUND_FILE: &str = "AgentWechatSoftPair.wav";
+#[cfg(target_os = "macos")]
+const RING_SOUND_NAME: &str = "AgentWechatSoftRing";
+/// The bundled incoming-call ringtone's file name, as UserNotifications looks it up.
+#[cfg(target_os = "macos")]
+const RING_SOUND_FILE: &str = "AgentWechatSoftRing.wav";
 #[cfg(windows)]
 const SOUND_NAME: &str = "Default";
+
+/// Handle to a posted incoming-call OS alert so it can be dismissed as soon as
+/// the offer expires, is answered, is declined, or the main window is focused.
+///
+/// On macOS this removes the delivered request via `UNUserNotificationCenter`;
+/// on Linux it invokes D-Bus `CloseNotification`; on Windows toast dismissal is
+/// handled by Action Center / user interaction.
+pub struct ActiveCallAlert {
+    #[cfg(target_os = "macos")]
+    request_id: Option<String>,
+    #[cfg(target_os = "linux")]
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+impl ActiveCallAlert {
+    #[cfg(test)]
+    pub(crate) fn dummy_for_test() -> Self {
+        Self {
+            #[cfg(target_os = "macos")]
+            request_id: None,
+            #[cfg(target_os = "linux")]
+            cancel: tokio_util::sync::CancellationToken::new(),
+        }
+    }
+
+    pub fn clear(self) {
+        #[cfg(target_os = "macos")]
+        if let Some(request_id) = self.request_id {
+            if crate::macos_notifications::available() {
+                crate::macos_notifications::remove_request(&request_id);
+            }
+        }
+        #[cfg(target_os = "linux")]
+        self.cancel.cancel();
+    }
+}
 
 #[cfg(windows)]
 pub async fn show(
@@ -35,6 +76,28 @@ pub async fn show(
     }
     notification.show()?;
     Ok(())
+}
+
+#[cfg(windows)]
+pub async fn show_call(
+    app: &tauri::AppHandle,
+    _request_id: &str,
+    title: &str,
+    body: &str,
+    target: CallActionTarget,
+    sound: bool,
+) -> Result<ActiveCallAlert> {
+    let mut notification = app
+        .notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .extra("callTarget", target);
+    if sound {
+        notification = notification.sound(SOUND_NAME);
+    }
+    notification.show()?;
+    Ok(ActiveCallAlert {})
 }
 
 #[cfg(windows)]
@@ -118,6 +181,11 @@ pub async fn show(
             target: target.clone(),
             server_id,
         };
+        let category = if payload.quotable() {
+            crate::macos_notifications::AlertCategory::MessageReply
+        } else {
+            crate::macos_notifications::AlertCategory::Message
+        };
         crate::macos_notifications::post(&crate::macos_notifications::Alert {
             request_id: &target.request_id(),
             thread_key: &target.thread_key(),
@@ -126,21 +194,67 @@ pub async fn show(
             body,
             sound: sound.then_some(SOUND_FILE),
             payload: &serde_json::to_string(&payload)?,
-            reply: payload.quotable(),
+            category,
         });
         return Ok(());
     }
     show_fallback(app, title, subtitle, body, target, sound)
 }
 
+/// Shows an incoming-call alert using the bundled ringtone and Answer/Decline actions.
+#[cfg(target_os = "macos")]
+pub async fn show_call(
+    app: &tauri::AppHandle,
+    request_id: &str,
+    title: &str,
+    body: &str,
+    target: CallActionTarget,
+    sound: bool,
+) -> Result<ActiveCallAlert> {
+    if crate::macos_notifications::available() {
+        let thread_key = format!("call|{}|{}", target.connection_id, target.account_id);
+        let payload = crate::notifications::MacPayload::Call(target);
+        crate::macos_notifications::post(&crate::macos_notifications::Alert {
+            request_id,
+            thread_key: &thread_key,
+            title,
+            subtitle: None,
+            body,
+            sound: sound.then_some(RING_SOUND_FILE),
+            payload: &serde_json::to_string(&payload)?,
+            category: crate::macos_notifications::AlertCategory::CallIncoming,
+        });
+        return Ok(ActiveCallAlert {
+            request_id: Some(request_id.to_owned()),
+        });
+    }
+    let _ = mac_notification_sys::set_application(if tauri::is_dev() {
+        "com.apple.Terminal"
+    } else {
+        &app.config().identifier
+    });
+    let (title, body) = (title.to_owned(), body.to_owned());
+    let clicked = app.clone();
+    std::thread::Builder::new()
+        .name("call-notification".into())
+        .spawn(move || {
+            let mut notification = mac_notification_sys::Notification::new();
+            notification
+                .title(&title)
+                .message(&body)
+                .wait_for_click(true);
+            if sound {
+                notification.sound(RING_SOUND_NAME);
+            }
+            if opens_target(&notification.send()) {
+                crate::notifications::open_call_action(clicked, target);
+            }
+        })?;
+    Ok(ActiveCallAlert { request_id: None })
+}
+
 /// Shows the alert outside a bundle and opens `target` on a click, including one
 /// later in Notification Center.
-///
-/// `notify-rust`'s macOS `wait_for_response`, which the Tauri notification plugin
-/// also uses, returns as soon as an alert without buttons is delivered, so a click
-/// that comes after it is lost. `mac-notification-sys` is told to wait for the click
-/// instead: `send` blocks on a thread of its own until the alert is clicked or
-/// dismissed, while the delegate callbacks arrive on Tauri's main run loop.
 #[cfg(target_os = "macos")]
 fn show_fallback(
     app: &tauri::AppHandle,
@@ -272,6 +386,53 @@ pub async fn show(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+pub async fn show_call(
+    app: &tauri::AppHandle,
+    _request_id: &str,
+    title: &str,
+    body: &str,
+    target: CallActionTarget,
+    sound: bool,
+) -> Result<ActiveCallAlert> {
+    use tauri::Manager;
+    let path = app
+        .path()
+        .resource_dir()?
+        .join("sounds/AgentWechatSoftRing.wav");
+    let escaped_body = body
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    let mut notification =
+        linux_notification(title, None, &escaped_body, sound.then_some(path.as_path()));
+    notification.action("default", "");
+    let handle = notification.show_async().await?;
+    let app_cancel = app.state::<crate::Desktop>().notifications.cancel.clone();
+    let alert_cancel = tokio_util::sync::CancellationToken::new();
+    let watch_cancel = alert_cancel.clone();
+    let clicked = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let should_close = tokio::select! {
+            _ = app_cancel.cancelled() => true,
+            _ = watch_cancel.cancelled() => true,
+            _ = handle.wait_for_action_async(move |response| {
+                if matches!(response, notify_rust::NotificationResponse::Default) {
+                    crate::notifications::open_call_action(clicked, target);
+                }
+            }) => false,
+        };
+        if should_close {
+            // Send explicit D-Bus CloseNotification so non-GNOME desktops (KDE, XFCE,
+            // dunst, mako) dismiss stale incoming-call alerts immediately.
+            let _ = tokio::task::spawn_blocking(move || handle.close()).await;
+        }
+    });
+    Ok(ActiveCallAlert {
+        cancel: alert_cancel,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -292,6 +453,26 @@ mod tests {
         )
         .unsigned_abs()
             <= 7_210));
+    }
+
+    #[test]
+    fn soft_ring_asset_is_3s_pcm_without_clipping() {
+        let bytes = include_bytes!("../sounds/AgentWechatSoftRing.wav");
+        assert_eq!(&bytes[..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WAVE");
+        assert_eq!(u16::from_le_bytes(bytes[20..22].try_into().unwrap()), 1);
+        assert_eq!(u16::from_le_bytes(bytes[22..24].try_into().unwrap()), 1);
+        assert_eq!(
+            u32::from_le_bytes(bytes[24..28].try_into().unwrap()),
+            48_000
+        );
+        assert_eq!(u16::from_le_bytes(bytes[34..36].try_into().unwrap()), 16);
+        assert_eq!(bytes.len() - 44, 48_000 * 3 * 2);
+        assert!(bytes[44..].chunks_exact(2).all(|sample| i16::from_le_bytes(
+            sample.try_into().unwrap()
+        )
+        .unsigned_abs()
+            <= 8_000));
     }
 
     #[cfg(target_os = "linux")]
@@ -335,8 +516,9 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_uses_the_bundled_sound_name() {
+    fn macos_uses_the_bundled_sound_names() {
         assert_eq!(super::SOUND_NAME, "AgentWechatSoftPair");
+        assert_eq!(super::RING_SOUND_NAME, "AgentWechatSoftRing");
     }
 
     #[cfg(target_os = "macos")]

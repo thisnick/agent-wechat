@@ -541,6 +541,7 @@ export class CallController {
   private started = false;
   private probedOnce = false;
   private disposed = false;
+  private osSoundingCallId: string | null = null;
   private probeAbort: AbortController | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectDelayMs = 1000;
@@ -639,6 +640,7 @@ export class CallController {
     this.ringtone.stop();
     if (this.state.currentCall?.ownedByThisClient) return;
     this.started = false;
+    this.osSoundingCallId = null;
     this.probeAbort?.abort();
     this.probeAbort = null;
     if (this.reconnectTimer) {
@@ -656,6 +658,7 @@ export class CallController {
   close(): void {
     this.disposed = true;
     this.started = false;
+    this.osSoundingCallId = null;
     this.probeAbort?.abort();
     this.probeAbort = null;
     if (this.reconnectTimer) {
@@ -1024,6 +1027,10 @@ export class CallController {
         onMediaError: (code) => {
           if (!this.disposed) this.update({ mediaWarning: code });
         },
+        onOsCallAlert: (callId) => {
+          this.osSoundingCallId = callId;
+          if (!this.disposed) this.syncRingtone();
+        },
       });
       if (this.disposed || !this.started) {
         this.transport.disconnect();
@@ -1276,6 +1283,7 @@ export class CallController {
 
   private handleDisconnect(code: string): void {
     if (this.disposed || !this.started) return;
+    this.osSoundingCallId = null;
     this.ringtone.stop();
     this.stopDurationTimer();
     const hadOwnedCall = this.state.currentCall?.ownedByThisClient === true;
@@ -1327,9 +1335,13 @@ export class CallController {
   private syncRingtone(): void {
     const offer = this.state.currentOffer;
     const key = offerKey(offer);
+    // On Desktop, suppress the in-app Web Audio ringtone only when Rust confirms a
+    // sounding OS call notification is currently active for this offer's call ID.
+    const osAlertRinging = !!offer && this.osSoundingCallId === offer.callId;
     const shouldRing =
       this.started &&
       !!offer &&
+      !osAlertRinging &&
       key !== this.state.dismissedOfferKey &&
       !this.state.currentCall?.ownedByThisClient;
     if (shouldRing) {

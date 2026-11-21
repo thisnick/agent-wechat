@@ -2,6 +2,7 @@ import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { connect, type Connection } from "./connection.ts";
 import type { NativeStatus } from "@agent-wechat/shared";
+import { DesktopCallTransport } from "./calls/desktop-transport.ts";
 import { desktopMultipart } from "./desktop-multipart.ts";
 import type { Route } from "./routes.ts";
 import { t } from "./i18n.ts";
@@ -35,10 +36,51 @@ export async function desktopConnect(
     false,
     desktopFetch(session),
     session.status,
-    { callsDisabled: true },
+    {
+      callTransportFactory: (account, client) =>
+        new DesktopCallTransport(session.id, account, client),
+    },
   );
   connection.desktopId = session.id;
   return connection;
+}
+export type DesktopCallAction = {
+  connectionId: string;
+  serverId: string;
+  accountId: string;
+  peerId: string;
+  callId: string;
+  revision: number;
+  callType: "voice" | "video";
+  action: "open" | "answer";
+};
+/** Calls `onAction` for each incoming-call OS notification click or Answer action on this hub. */
+export function desktopCallActions(
+  connection: Connection,
+  onAction: (action: DesktopCallAction) => void,
+): () => void {
+  let stopped = false;
+  const take = async () => {
+    if (!connection.desktopId) return;
+    const action = await invoke<DesktopCallAction | null>("notifications_take_call_action", {
+      connectionId: connection.desktopId,
+    });
+    if (!action || stopped || action.connectionId !== connection.desktopId) return;
+    onAction(action);
+  };
+  const listening = listen("desktop-call-action", () => {
+    void take().catch(() => {});
+  });
+  const focus = () => {
+    void take().catch(() => {});
+  };
+  window.addEventListener("focus", focus);
+  focus();
+  return () => {
+    stopped = true;
+    window.removeEventListener("focus", focus);
+    void listening.then((unlisten) => unlisten());
+  };
 }
 export type NotificationTarget = {
   connectionId: string;

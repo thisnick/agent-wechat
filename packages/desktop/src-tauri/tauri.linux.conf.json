@@ -4,7 +4,8 @@
     "resources": {
       "resources/": "licenses/",
       "binaries/linux/": "bin/",
-      "sounds/AgentWechatSoftPair.wav": "sounds/AgentWechatSoftPair.wav"
+      "sounds/AgentWechatSoftPair.wav": "sounds/AgentWechatSoftPair.wav",
+      "sounds/AgentWechatSoftRing.wav": "sounds/AgentWechatSoftRing.wav"
     }
   }
 }

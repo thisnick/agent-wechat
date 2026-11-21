@@ -23,7 +23,9 @@ for (const helper of ['wx', 'ffmpeg', 'ffprobe']) {
   assert.ok(names.some((name) => name.endsWith(`/usr/lib/AgentWechat/bin/${helper}`) || name === `usr/lib/AgentWechat/bin/${helper}`));
   assert.ok(!names.some((name) => name.endsWith(`/usr/bin/${helper}`) || name === `usr/bin/${helper}`), 'Helpers must not replace system commands');
 }
-const soundEntry = names.find(name => name.endsWith('/usr/lib/AgentWechat/sounds/AgentWechatSoftPair.wav') || name === 'usr/lib/AgentWechat/sounds/AgentWechatSoftPair.wav');
-assert.ok(soundEntry, 'Missing bundled notification sound');
-assert.deepEqual(execFileSync('tar', ['-xOf', '-', soundEntry], { input: files }), readFileSync(new URL('../src-tauri/sounds/AgentWechatSoftPair.wav', import.meta.url)));
-console.log('Desktop DEB contains private helpers and the notification sound without replacing system commands');
+for (const sound of ['AgentWechatSoftPair.wav', 'AgentWechatSoftRing.wav']) {
+  const soundEntry = names.find(name => name.endsWith(`/usr/lib/AgentWechat/sounds/${sound}`) || name === `usr/lib/AgentWechat/sounds/${sound}`);
+  assert.ok(soundEntry, `Missing bundled notification sound: ${sound}`);
+  assert.deepEqual(execFileSync('tar', ['-xOf', '-', soundEntry], { input: files }), readFileSync(new URL(`../src-tauri/sounds/${sound}`, import.meta.url)));
+}
+console.log('Desktop DEB contains private helpers and notification/ringtone sounds without replacing system commands');

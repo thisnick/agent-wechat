@@ -74,8 +74,6 @@ pub fn text(key: &str) -> String {
 }
 
 /// `desktopShell.<key>` in the current language with `{{name}}` placeholders filled in.
-// Only macOS failure alerts use it so far.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn text_with(key: &str, values: &[(&str, &str)]) -> String {
     values.iter().fold(text(key), |text, (name, value)| {
         text.replace(&format!("{{{{{name}}}}}"), value)
