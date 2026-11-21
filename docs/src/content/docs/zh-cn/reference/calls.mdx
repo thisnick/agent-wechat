@@ -1,81 +1,86 @@
 ---
-title: 语音通话
-description: CLI 语音通话、群语音会议控制与 OpenClaw 接入配置。
-sourceHash: fde01712b53e
+title: 语音与视频通话
+description: CLI 语音与视频通话、群会议控制，以及 OpenClaw 设置。
+sourceHash: "0b22fd3564e0"
 ---
 
-使用 `wx` 通过本机的麦克风和扬声器进行单聊语音呼叫或群语音会议通话。OpenClaw 的接入配置请参考[配置语音通话](/openclaw/calling/)。
+使用 `wx` 通过本机的麦克风、扬声器和摄像头，发起或加入单聊或群会议的语音与视频通话。OpenClaw 设置（仅语音）请参考[设置通话](/openclaw/calling/)。
 
 ## 检查可用性 \{#check-availability}
 
-1. 选择目标守护进程和账号，然后运行 `wx calls status`。当前尚未通过认证会话的账号会汇报 `capabilities: {}`。执行所需操作前必须确认服务端具备对应声明的能力。
-2. 运行 `wx calls devices` 列出本地的麦克风与扬声器设备。
-3. 按照下方说明发起或应答通话。在清理流程完成前请保持持有通话的终端打开；第二个客户端无法中途接管。
+1. 选择守护进程和账号，然后运行 `wx calls status`。没有当前已认证会话的账号会报告 `capabilities: {}`。执行某项操作前，需要确认对应的能力已经可用（`directAudio`、`directVideo`、`conferenceAudio`、`conferenceVideo`）。
+2. 运行 `wx calls devices`，列出本地的麦克风、扬声器和摄像头。
+3. 按下文发起或应答通话。清理完成前请保持拥有通话的终端打开；其他客户端无法接管。
 
-## 单聊呼叫与通话监听 \{#direct-calls-and-monitoring}
+## 单聊通话与监听 \{#direct-calls-and-monitoring}
 
-| 命令 | 行为说明 |
+| 命令 | 行为 |
 | --- | --- |
-| `wx calls monitor --json` | 仅监听通话事件，不打开本地音频设备 |
-| `wx calls monitor` | 等待来电邀请；在确认接听时打开本地音频 |
-| `wx calls dial 联系人` | 使用本机的麦克风和扬声器参与通话 |
-| `wx calls answer [CALL_ID]` | 使用本地音频应答当前匹配的来电邀请 |
+| `wx calls monitor --json` | 只观察事件，不打开音频或摄像头设备 |
+| `wx calls monitor` | 等待邀请；接受时打开音频（视频通话时还会打开摄像头） |
+| `wx calls dial CONTACT` | 使用本地麦克风和扬声器发起单聊语音通话 |
+| `wx calls dial CONTACT --video` | 发起单聊视频通话，采集摄像头画面并在终端中预览 |
+| `wx calls answer [CALL_ID]` | 应答当前匹配的语音或视频来电 |
 
-在守护进程确认振铃后，监听终端会显示单聊来电提示。对于群语音会议邀请，输入 `j 序号` 即可加入。退出通话后会返回监听状态；独立的发起/加入命令在通话结束后直接退出。JSON 监听模式绝不会自动应答或自动加入。
+使用 `--camera <source>` 选择摄像头（`auto`、`off`、用于 FFmpeg 动画测试图案的 `test`、用于循环播放媒体文件的 `file:<path>`，或设备路径或名称）。使用 `--camera-off` 可以加入视频通话但不发送摄像头画面。使用 `--muted` 可以静音启动。
 
-## 群语音会议通话 \{#conference-calls}
+守护进程确认振铃后，监听界面会显示单聊来电。对于会议邀请，输入 `j NUMBER`。离开后会回到监听状态；单独执行的发起或加入命令会直接退出。JSON 监听不会自动应答或加入。
 
-1. 发起群聊通话需要具备 `conferenceCreate` 与 `conferenceAudio` 能力；加入已有群聊通话需要具备 `conferenceJoin` 与 `conferenceAudio` 能力。
-2. 在既有群聊中携带联系人 ID 发起会议：
+## 群会议通话 \{#conference-calls}
+
+1. 发起需要 `conferenceCreate` 和 `conferenceAudio`；加入需要 `conferenceJoin` 和 `conferenceAudio`。使用 `--video` 时还需要 `conferenceVideo`。
+2. 在已有群中，带上联系人 ID 发起通话：
 
    ```sh
    wx calls conference start GROUP_ID --invite CONTACT_A --invite CONTACT_B
+   wx calls conference start GROUP_ID --invite CONTACT_A --video
    ```
 
-   或者加入当前的群聊通话邀请：
+   或加入当前邀请：
 
    ```sh
    wx calls conference join GROUP_ID
    ```
 
-   若当前群内无通话邀请，则加入操作失败；该命令绝不会擅自新建会议房间。
-3. 连接成功后即可开始讲话。接收到的所有音轨会自动混音后输出播放：
+   如果没有当前邀请，加入会失败；命令不会创建房间。
+3. 连接后即可开始说话。接收到的音频会混音播放，接收到的视频会在终端中显示：
 
    ```text
-   Connected. Microphone and mixed speakers active; 2 receive tracks.
+   Connected. Audio tracks: 1, video tracks: 1.
    ```
 
-## 音频与通话中控制 \{#audio-and-in-call-controls}
+## 音频、视频与通话中控制 \{#audio-video-and-in-call-controls}
 
-建议先运行 `wx calls devices`，然后通过选项指定端点设备：
-`wx calls dial CONTACT --input-device INPUT_ID --output-device OUTPUT_ID`。
-若省略这些选项，将默认使用操作系统设备。Linux 支持 PulseAudio 或 PipeWire-Pulse 设备名；Windows 支持端点 ID。在 macOS 上，请在“系统设置”中选择默认设备；当前适配器不支持自定义端点 ID。
+先运行 `wx calls devices`，再用 `wx calls dial CONTACT --input-device INPUT_ID --output-device OUTPUT_ID` 选择设备。不指定这些选项时，使用操作系统的默认设备。Linux 接受 PulseAudio 或 PipeWire-Pulse 的名称；Windows 接受设备端点 ID。在 macOS 上，请在系统设置中选择默认设备；不支持自定义端点 ID。
 
-交互式通话会在下方展示控制指令与音频电平表。按下按键后请按回车确认；输入 `l` 或 `h` 可退出通话并在 `monitor` 模式下返回监听。Ctrl-C 会在短暂等待清理后退出通话并结束命令。
+交互式通话会显示控制项、电平表；视频通话时还会在终端中以 24 位 TrueColor 预览视频。按键后需要按 Enter。`l` 或 `h` 会离开通话，并在 `monitor` 中返回监听。按 Ctrl-C 会离开通话，并在短暂清理后退出命令。
 
 ```text
-m + Enter    麦克风控制          s + Enter    扬声器控制
-i + Enter    邀请参会人          p + Enter    参会人列表
-d + Enter    音频设备选择        ? + Enter    帮助说明
-l/h + Enter  退出当前通话        Ctrl-C       退出通话并结束
+m + Enter    Microphone          v + Enter    Camera (video calls)
+s + Enter    Speaker             i + Enter    Invite
+p + Enter    Participants        d + Enter    Devices
+l/h + Enter  Leave call          ? + Enter    Help
+Ctrl-C       Leave and exit
 Mic [#######...] -18dB  Speaker [########..] -10dB
-Alice [######....] -24dB joined mic on
+Alice [######....] -24dB joined mic on cam on
 Bob   [..........] -60dB joined mic off
 >
 ```
 
-电平柱状图测量的是数字 PCM 信号；`0 dB` 为满幅失真线，`!` 标记近期接近削波的瞬时峰值。Mic 电平反映外发信号；Speaker 电平测量的是送入播放的混音后数据，而非硬件物理旋钮音量。各参会人电平表在混音前测量各自音源，即使关闭本地播放也会测量。静音并不等同于挂断离开。未关联身份的音源显示为音轨标签。JSON 模式或重定向输出时不会输出电平表；按 `p` 可查看完整的参会人名单。
+电平表测量的是数字 PCM；`0 dB` 为满量程，`!` 表示近期出现接近削波的峰值。Mic 测量外发信号；Speaker 测量混音后的播放信号，而不是硬件音量。即使关闭播放，各参与人的电平也会在混音前测量各自的音源。静音或安静并不能证明对方已静音或已离开。无法归属到具体参与人的音源会显示音轨标签。电平表和终端视频不会出现在 JSON 或重定向输出中；按 `p` 可查看完整名单。
 
-使用 `i` 可搜索联系人或直接输入 `invite CONTACT_ID OTHER_ID` 发送邀请。提交邀请并不代表对方一定会加入。邀请仅在群语音会议中有效；无法将单聊通话升级为会议。输入 `d` 后，可输入 `d input 序号`、`d output 序号` 或 `d default` 切换设备。设备准备过程会保持当前音频持续运行，但在实际切换瞬间可能会有短暂静音。输入 `cancel` 可关闭选择菜单。
+使用 `i` 搜索联系人，或输入 `invite CONTACT_ID OTHER_ID` 发出邀请。提交邀请并不代表对方已经加入。邀请只能在会议中使用；无法把单聊升级为会议。按 `d` 后，可用 `d input NUMBER`、`d output NUMBER` 或 `d default` 切换设备。准备设备时当前音频会继续运行，但切换时可能会短暂中断。输入 `cancel` 可关闭选择器。
 
-关于鉴权认证、所有权模型与 PCM 载荷规范，请参考[通话控制 API](../calls-api/) 与[媒体参考规范](../calls-media/)。
+鉴权、所有权、二进制 `WXCM` 音视频帧和编解码器协商，请参考[通话 API](../calls-api/)与[媒体参考](../calls-media/)。
 
 :::note[使用提示]
-当前构建将原生通话时长限制为 20 分钟；更长时间的通话仍需进一步验证。视频通话与单聊转群聊升级功能暂不可用。退出通话仅代表本机离会，不会解散整个会议房间。若通话以未决状态结束，在发起下一通呼叫前请先核实状态。
+当前版本将原生通话限制为 20 分钟；更长的通话仍需验证。直接升级为会议和屏幕共享暂不可用。离开只会结束你自己的参与，不会结束房间。通话以未确定状态结束时，请先核实，再发起下一次通话。
 
-旧版微信中继节点可能会跨发送方复用音频 Nonce 随机数。为了兼容性，守护进程会继续保持通话，这在一定程度上削弱了音频的机密性与完整性。
+外发摄像头采集和守护进程端的视频转码需要 `ffmpeg` 位于 `PATH` 中（或设置 `WX_FFMPEG_BIN`），并支持 HEVC（`hevc`/`libx265`）、H.264（`h264`/`libx264`）或 MJPEG 编解码器。CLI 使用独立的 JPEG 帧显示接收到的视频；对方改变方向时，CLI 会在本地旋转画面。
 
-源码构建与正式发布版构建均内置了音频支持；参见[构建先决条件](../build/#included-features)。Linux 本地音频需要 `libpulse0` 以及正常运行的 PulseAudio 或 PipeWire-Pulse。守护进程、帮助文档与 JSON 监控无需本地音频硬件或声音服务。运行 `wx calls --help` 不会发起网络连接或执行登录。
+旧版微信中继可能会在不同发送方之间复用音频 Nonce 随机数。为了兼容，守护进程会继续通话，但这会削弱音频的机密性和完整性。
 
-执行 `WX_CALL_DEBUG=1 wx calls monitor` 可以在 stderr 打印带时间戳的事件跟踪日志（已剔除媒体所有者令牌）、首帧音频写入详情以及 WebSocket 关闭状态。
+源码构建和正式发布构建都包含音频支持；参见[构建前提](../build/#included-features)。Linux 本地音频需要 `libpulse0`，以及 PulseAudio 或 PipeWire-Pulse。守护进程、帮助信息和 JSON 监听不需要本地设备或声音服务。`wx calls --help` 不会连接或登录。
+
+`WX_CALL_DEBUG=1 wx calls monitor` 会在 stderr 输出带时间戳的事件，但不包括媒体所有者令牌、首帧提交和 WebSocket 关闭的详细信息。
 :::
