@@ -48,6 +48,7 @@ jobs:
         with:
           filters: |
             helpers:
+              - 'packages/skills/**'
               - 'scripts/ci/**'
               - 'scripts/smoke/media-assertions*.mjs'
               - 'scripts/release/build*'
@@ -178,6 +179,7 @@ jobs:
           python3 scripts/release/build.test.py
           node --test scripts/ci/artifact.test.mjs scripts/ci/wait-artifact.test.mjs scripts/ci/claude-review-comment.test.mjs scripts/ci/ui-videos-comment.test.mjs scripts/smoke/media-assertions.test.mjs scripts/release/preflight.test.mjs scripts/release/merge.test.mjs
           node --test scripts/release/image.test.mjs
+          bash packages/skills/agent-wechat/scripts/test-skill.sh
 
   docs:
     needs: changes

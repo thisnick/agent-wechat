@@ -1,0 +1,50 @@
+---
+title: Agent skills
+description: Give an agent instructions for using the native wx CLI and inspecting asynchronous work.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The `agent-wechat` skill helps an agent resolve contacts, send requested messages and files, retrieve attachments, and inspect existing jobs through the native `wx` CLI.
+
+## Install
+
+1. Copy [`packages/skills/agent-wechat`](https://github.com/thisnick/agent-wechat/tree/main/packages/skills/agent-wechat) from the repository into the skill directory supported by your agent. Include its `references`, `examples`, and `scripts` directories.
+
+2. Configure the native CLI using the [setup guide](/setup/install/). The skill uses the selected server and account; it does not start or reconfigure a daemon automatically.
+
+3. Run the package's offline helper checks in a source checkout:
+
+   ```sh
+   bash packages/skills/agent-wechat/scripts/test-skill.sh
+   ```
+
+   ```text
+   Skill package checks passed.
+   ```
+
+4. Ask the agent to perform a task:
+
+   ```text
+   Find Mira in my work account and send her the report at ./report.pdf.
+   ```
+
+The agent resolves the intended recipient and uses one idempotency key for that send. If the result needs review, it inspects the existing operation rather than submitting again.
+
+## What the skill knows
+
+| Task | Guidance |
+| --- | --- |
+| Account and contact lookup | Select the intended account and use stable returned IDs |
+| Messages and attachments | Use supported command flags and the requested content |
+| Jobs and receipts | Distinguish pending, accepted, failed, and uncertain results |
+| Files on different machines | Upload sources and output paths belong to the CLI host |
+| Login and profile maintenance | Preserve existing sessions and verify profile ownership |
+
+The optional Bash helper locates a configured native CLI and preserves arguments, including filenames with spaces. Its `--doctor` checks CLI availability and the configured hub's status.
+
+<Aside title="Good to know">
+- The installed CLI's `--help` and account capabilities are authoritative; the skill is not a frozen catalog of every command.
+- A CLI upload reads a file on the machine running the command. Official profile paths supplied to `--official` belong to the daemon's machine.
+- The package checks use temporary files and fake commands. They do not log in, send messages, contact WeChat, or require a global skill installation.
+</Aside>
