@@ -10,5 +10,7 @@
     "@agent-wechat/rust-crates": "2.9.0",
     "@agent-wechat/shared": "2.2.0"
   },
-  "changesets": []
+  "changesets": [
+    "native-video-calls-protocol-v3"
+  ]
 }
