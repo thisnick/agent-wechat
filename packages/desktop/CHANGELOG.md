@@ -1,5 +1,18 @@
 # @agent-wechat/desktop
 
+## 3.0.0-beta.0
+
+### Minor Changes
+
+- [#648](https://github.com/thisnick/agent-wechat/pull/648) [`3c7803d`](https://github.com/thisnick/agent-wechat/commit/3c7803d82c7f0c5156543c358b370c5f1aedbe7f) Thanks [@thisnick](https://github.com/thisnick)! - Add native Desktop voice and video calling backed by `wechat-call-client`, `wechat-audio`, and the bundled `ffmpeg` binary, including Tauri IPC media channels, live camera preview and self-view, bundled `AgentWechatSoftRing.wav` ringtone, macOS camera/microphone entitlements and usage descriptions, and passive OS incoming-call and group-call notification coordination. Also fail closed on macOS when no camera is reported by FFmpeg instead of falling back to AVFoundation index `0` (which can be a screen capture device), and suppress Windows console windows for FFmpeg subprocesses in both Desktop and `wx`.
+
+### Patch Changes
+
+- [#650](https://github.com/thisnick/agent-wechat/pull/650) [`514baf5`](https://github.com/thisnick/agent-wechat/commit/514baf59fc2bc9c08c33ad90719e1a99a623f57c) Thanks [@thisnick](https://github.com/thisnick)! - Open received stickers served by the Tencent `vweixinf.tc.qq.com` sticker download endpoint.
+
+- Updated dependencies [[`3c7803d`](https://github.com/thisnick/agent-wechat/commit/3c7803d82c7f0c5156543c358b370c5f1aedbe7f), [`2169084`](https://github.com/thisnick/agent-wechat/commit/2169084b5938fc04e7b667135ed0ac80aff3c10d)]:
+  - @agent-wechat/client-ui@0.7.0-beta.0
+
 ## 2.9.0
 
 ### Patch Changes

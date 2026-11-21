@@ -1,5 +1,18 @@
 # @agent-wechat/client-ui
 
+## 0.7.0-beta.0
+
+### Minor Changes
+
+- [#644](https://github.com/thisnick/agent-wechat/pull/644) [`2169084`](https://github.com/thisnick/agent-wechat/commit/2169084b5938fc04e7b667135ed0ac80aff3c10d) Thanks [@thisnick](https://github.com/thisnick)! - Add direct and group voice and video calling to the browser client UI. Conversations now expose voice and video call triggers in the chat header and details panel, an anchored pre-call camera preview popover, a group member call picker, an in-chat active conference join bar, a non-blocking incoming call toast with a looping synthesized ringtone, a docked voice strip, draggable picture-in-picture, and a Theater and full-screen video stage with an in-call chat and participant drawer. Also adds ticket-authenticated WebSocket upgrade proxying in the preview launcher (`connect.mjs`) and visual review scenes covering the calling screens. Desktop keeps calling disabled until the native Tauri bridge lands.
+
+### Patch Changes
+
+- [#648](https://github.com/thisnick/agent-wechat/pull/648) [`3c7803d`](https://github.com/thisnick/agent-wechat/commit/3c7803d82c7f0c5156543c358b370c5f1aedbe7f) Thanks [@thisnick](https://github.com/thisnick)! - Add native Desktop voice and video calling backed by `wechat-call-client`, `wechat-audio`, and the bundled `ffmpeg` binary, including Tauri IPC media channels, live camera preview and self-view, bundled `AgentWechatSoftRing.wav` ringtone, macOS camera/microphone entitlements and usage descriptions, and passive OS incoming-call and group-call notification coordination. Also fail closed on macOS when no camera is reported by FFmpeg instead of falling back to AVFoundation index `0` (which can be a screen capture device), and suppress Windows console windows for FFmpeg subprocesses in both Desktop and `wx`.
+
+- Updated dependencies [[`d74e89f`](https://github.com/thisnick/agent-wechat/commit/d74e89f2f5ed5258eba62aa2288059a911edf0d7)]:
+  - @agent-wechat/shared@3.0.0-beta.0
+
 ## 0.6.1
 
 ### Patch Changes
