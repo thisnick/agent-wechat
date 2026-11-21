@@ -1,0 +1,87 @@
+{
+  "passed": true,
+  "durationSeconds": 19.88,
+  "capturedFrames": 297,
+  "speakerAudioPeak": 15795,
+  "directStats": {
+    "active": false,
+    "answer": 0,
+    "audioFrames": 501,
+    "audioSamples": 160320,
+    "cameraEnabled": true,
+    "cameraToggles": 2,
+    "cancel": 0,
+    "clearCompleted": 2,
+    "clearRequested": 2,
+    "dial": 1,
+    "hangup": 1,
+    "invitations": 0,
+    "keyframeRequests": 0,
+    "lastTxGeneration": 3,
+    "lastTxPeak": 0,
+    "lastVideoGeneration": 3,
+    "muteToggles": 2,
+    "muted": false,
+    "nonzeroFrames": 195,
+    "reject": 0,
+    "stop": 0,
+    "videoBytes": 507832,
+    "videoClearRequested": 2,
+    "videoFrames": 141,
+    "videoKeyframes": 11
+  },
+  "finalStats": {
+    "active": false,
+    "answer": 0,
+    "audioFrames": 710,
+    "audioSamples": 227200,
+    "cameraEnabled": true,
+    "cameraToggles": 2,
+    "cancel": 0,
+    "clearCompleted": 2,
+    "clearRequested": 2,
+    "dial": 2,
+    "hangup": 2,
+    "invitations": 0,
+    "keyframeRequests": 0,
+    "lastTxGeneration": 1,
+    "lastTxPeak": 4525,
+    "lastVideoGeneration": 1,
+    "muteToggles": 2,
+    "muted": false,
+    "nonzeroFrames": 296,
+    "reject": 0,
+    "stop": 0,
+    "videoBytes": 749426,
+    "videoClearRequested": 2,
+    "videoFrames": 209,
+    "videoKeyframes": 16
+  },
+  "chapters": [
+    {
+      "title": "Devices & status",
+      "at": 0.0
+    },
+    {
+      "title": "Direct video + audio call",
+      "at": 2.18
+    },
+    {
+      "title": "Mute, camera toggle & 90\u00b0 rotation",
+      "at": 6.19
+    },
+    {
+      "title": "Conference 2-tile video & mixed audio",
+      "at": 12.9
+    },
+    {
+      "title": "Summary PASS",
+      "at": 17.74
+    }
+  ],
+  "files": {
+    "mp4": "/home/nick/.t3/userdata/providers/antigravity/ac0a3dfd6dddb20962cecff6ee5fe65e19d3923be20e52c5ab52ff877f7e4c32/antigravity-acp/brain/534558e3-a24b-4a3b-b88f-3faffbc74e36/scratch/cli-regression-demo/cli-synthetic-calls.mp4",
+    "gif": "/home/nick/.t3/userdata/providers/antigravity/ac0a3dfd6dddb20962cecff6ee5fe65e19d3923be20e52c5ab52ff877f7e4c32/antigravity-acp/brain/534558e3-a24b-4a3b-b88f-3faffbc74e36/scratch/cli-regression-demo/cli-synthetic-calls.gif",
+    "frames": "/home/nick/.t3/userdata/providers/antigravity/ac0a3dfd6dddb20962cecff6ee5fe65e19d3923be20e52c5ab52ff877f7e4c32/antigravity-acp/brain/534558e3-a24b-4a3b-b88f-3faffbc74e36/scratch/cli-regression-demo/cli-synthetic-calls-frames.png"
+  }
+}
