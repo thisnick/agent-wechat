@@ -16,8 +16,10 @@ Local changes:
   run time rather than linked, so executables start without PulseAudio installed. Playback fills the
   complete server write request, avoiding cumulative per-request polling delay. Explicit configured
   source/sink names are supported; global defaults and modules are never changed.
-- macOS uses VoiceProcessingIO with paired render/capture callbacks. Custom device
-  selection is rejected until implemented instead of silently using a default.
+- macOS uses VoiceProcessingIO with paired render/capture callbacks for OS default
+  devices, enumerates CoreAudio devices via aligned `AudioBufferList` inspection, and
+  supports explicit CoreAudio device IDs via dedicated AUHAL units (reporting
+  `AecStatus::Unavailable` when custom devices bypass VoiceProcessingIO).
 - Windows configures shared f32 mono streams and reports whether AEC was requested,
   unavailable, or unknown. Setup failure is not presented as successful AEC.
 - Mobile backends and push-to-talk helpers are outside this fork's current scope.

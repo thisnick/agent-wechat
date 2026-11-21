@@ -33,12 +33,14 @@ queued audio; it cannot retract samples already played. OS buffering adds delay.
 Applications should cancel the old producer too. Playback queues reject overflow
 rather than accumulating seconds of stale audio.
 
-Linux accepts PulseAudio source/sink names; Windows accepts device endpoint IDs.
-`AudioSession::devices()` lists usable endpoint metadata without starting capture
-or playback. macOS currently accepts the system defaults only and reports those
-defaults without advertising custom endpoint IDs. Inspect `aec_status()`; a value
-of `Requested` records backend selection, not measured cancellation quality. Linux
-requires a separately configured echo-cancel source/sink for speakerphone use.
+Linux accepts PulseAudio source/sink names; Windows accepts device endpoint IDs;
+macOS accepts numeric CoreAudio `AudioDeviceID` strings. `AudioSession::devices()`
+lists usable endpoint metadata without starting capture or playback. On macOS,
+OS-default selections use `VoiceProcessingIO` (`AecStatus::Requested`), while
+custom non-default device selections use dedicated HAL units (`AecStatus::Unavailable`).
+Inspect `aec_status()`; a value of `Requested` records backend selection, not
+measured cancellation quality. Linux requires a separately configured echo-cancel
+source/sink for speakerphone use.
 
 See [THIRD-PARTY.md](THIRD-PARTY.md) for source pins and local changes.
 

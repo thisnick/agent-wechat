@@ -13,6 +13,7 @@ native-calls = []
 
 [dependencies]
 wechat-platform = { path = "../wechat-platform" }
+wechat-call-contracts = { path = "../wechat-call-contracts" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

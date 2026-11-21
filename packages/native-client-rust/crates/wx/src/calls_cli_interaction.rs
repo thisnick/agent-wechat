@@ -1,9 +1,10 @@
 //! Contact and device pickers run separately from media polling.
 use super::*;
+use anyhow::Context;
 use std::collections::BTreeSet;
-use tokio::task::JoinHandle;
+use tokio::{task::JoinHandle, time::timeout};
 use wechat_audio::{AudioDevice, AudioSession};
-use wechat_core::call_types::CallKind;
+use wechat_core::call_types::{CallKind, CallView};
 
 struct Candidate {
     id: String,

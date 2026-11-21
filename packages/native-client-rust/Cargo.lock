@@ -2873,6 +2873,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "wechat-call-client"
+version = "2.9.0"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "image",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "uuid",
+ "wechat-audio",
+ "wechat-call-contracts",
+ "wechat-calls",
+]
+
+[[package]]
+name = "wechat-call-contracts"
+version = "2.9.0"
+dependencies = [
+ "schemars",
+ "serde",
+ "ts-rs",
+ "wechat-calls",
+]
+
+[[package]]
 name = "wechat-calls"
 version = "2.9.0"
 dependencies = [
@@ -2906,6 +2934,7 @@ dependencies = [
  "tokio",
  "ts-rs",
  "uuid",
+ "wechat-call-contracts",
  "wechat-calls",
  "wechat-media",
  "wechat-platform",
@@ -3320,6 +3349,7 @@ dependencies = [
  "uuid",
  "wechat-api",
  "wechat-audio",
+ "wechat-call-client",
  "wechat-calls",
  "wechat-core",
  "wechat-media",

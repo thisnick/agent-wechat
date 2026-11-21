@@ -1,29 +1,32 @@
 //! Call control on the CLI's machine. Merely observing never opens audio devices.
 use super::{failure, Remote};
-use anyhow::{bail, Context, Result};
+use anyhow::Result;
 use clap::{Args, Subcommand};
+#[cfg(test)]
 use futures_util::{SinkExt, StreamExt};
+#[cfg(test)]
 use reqwest::header;
 use std::{
-    fmt,
-    sync::OnceLock,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    ops::{Deref, DerefMut},
+    time::Duration,
 };
+#[cfg(test)]
 use tokio::time::timeout;
-use tokio_tungstenite::{
-    tungstenite::{
-        handshake::{client::generate_key, derive_accept_key},
-        protocol::{Role, WebSocketConfig},
-        Message,
+#[cfg(test)]
+use tokio_tungstenite::tungstenite::{
+    handshake::{client::generate_key, derive_accept_key},
+    Message,
+};
+#[cfg(test)]
+use wechat_call_client::transport::{self, verify_upgrade};
+use wechat_call_client::{
+    audio::AudioDeviceOptions,
+    transport::{
+        debug_call, event_json, send_json, CallClientError, CallEndpoint, Cancellation,
+        ControlClient, OwnerResult,
     },
-    WebSocketStream,
 };
-use wechat_core::call_types::CallEvent;
-
-use wechat_core::call_types::{
-    CallAudioFormat, CallCapabilities, CallCommand, CallOffer, CallPendingOffer, CallView,
-    CallsAvailability,
-};
+use wechat_core::call_types::{CallAudioFormat, CallCommand, CallEvent, CallOffer};
 
 #[path = "calls_cli_audio.rs"]
 mod audio;
@@ -39,26 +42,6 @@ mod levels;
 
 #[path = "calls_cli_video.rs"]
 mod video;
-
-type Socket = WebSocketStream<reqwest::Upgraded>;
-const CONTROL_SOCKET_LIMIT: usize = (64_usize * 1024).div_ceil(3) * 4 + 1024;
-const MEDIA_SOCKET_LIMIT: usize = wechat_core::calls::pcm_envelope::MAX_FRAME_BYTES + 4096;
-const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
-
-fn call_debug_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("WX_CALL_DEBUG").as_deref() == Ok("1"))
-}
-
-fn debug_call(socket: &str, detail: fmt::Arguments<'_>) {
-    if call_debug_enabled() {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default();
-        eprintln!("[call-debug {}] {socket} {detail}", now.as_millis());
-    }
-}
 
 #[derive(Subcommand)]
 pub(crate) enum CallsCommand {
@@ -131,6 +114,24 @@ pub(crate) struct AudioOptions {
     /// Local backend sink name or endpoint ID; defaults to the OS speakers.
     #[arg(long)]
     output_device: Option<String>,
+}
+
+impl From<&AudioOptions> for AudioDeviceOptions {
+    fn from(options: &AudioOptions) -> Self {
+        Self {
+            input_device: options.input_device.clone(),
+            output_device: options.output_device.clone(),
+        }
+    }
+}
+
+impl From<&AudioDeviceOptions> for AudioOptions {
+    fn from(options: &AudioDeviceOptions) -> Self {
+        Self {
+            input_device: options.input_device.clone(),
+            output_device: options.output_device.clone(),
+        }
+    }
 }
 
 #[derive(Args, Clone, Default)]
@@ -243,431 +244,77 @@ pub(crate) async fn devices(json: bool) -> Result<()> {
     }
 }
 
-/// Keep the existing HTTP client's verified TLS, custom CA, proxy and redirect
-/// policy. Only WebSocket framing is added after a validated HTTP/1.1 upgrade.
-async fn open_socket(remote: &Remote, suffix: &str) -> Result<Socket> {
-    open_socket_with_limit(remote, suffix, CONTROL_SOCKET_LIMIT).await
+fn endpoint(remote: &Remote) -> Result<CallEndpoint> {
+    Ok(CallEndpoint {
+        http: remote.http.clone(),
+        base: remote.base.clone(),
+        token: remote.token.clone(),
+        account: remote.account()?.to_owned(),
+    })
 }
 
-async fn open_socket_with_limit(remote: &Remote, suffix: &str, limit: usize) -> Result<Socket> {
-    let key = generate_key();
-    let response = remote
-        .http
-        .get(remote.base.join(&remote.path(suffix)?)?)
-        .version(reqwest::Version::HTTP_11)
-        .bearer_auth(&remote.token)
-        .header(header::CONNECTION, "Upgrade")
-        .header(header::UPGRADE, "websocket")
-        .header(header::SEC_WEBSOCKET_VERSION, "13")
-        .header(header::SEC_WEBSOCKET_KEY, &key)
-        .timeout(STARTUP_TIMEOUT)
-        .send()
-        .await
-        .context("call socket connection failed")?;
-    if response.status() != reqwest::StatusCode::SWITCHING_PROTOCOLS {
-        let status = response.status();
-        return Err(failure(
-            if matches!(status.as_u16(), 401 | 403) {
-                4
-            } else {
-                3
-            },
-            "call_socket_rejected",
-            &format!("call socket upgrade rejected ({status})"),
-        ));
-    }
-    verify_upgrade(response.headers(), &key)?;
-    let stream = timeout(STARTUP_TIMEOUT, response.upgrade())
-        .await
-        .context("call socket upgrade timed out")??;
-    let config = WebSocketConfig::default()
-        .read_buffer_size(64 * 1024)
-        .write_buffer_size(0)
-        .max_write_buffer_size(limit * 2)
-        .max_message_size(Some(limit))
-        .max_frame_size(Some(limit));
-    Ok(WebSocketStream::from_raw_socket(stream, Role::Client, Some(config)).await)
-}
-
-fn verify_upgrade(headers: &header::HeaderMap, key: &str) -> Result<()> {
-    let one = |name: header::HeaderName| {
-        let mut values = headers.get_all(name).iter();
-        let value = values.next()?.to_str().ok()?;
-        values.next().is_none().then_some(value)
-    };
-    if !one(header::UPGRADE).is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
-        || !one(header::CONNECTION).is_some_and(|v| {
-            v.split(',')
-                .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
-        })
-        || one(header::SEC_WEBSOCKET_ACCEPT) != Some(derive_accept_key(key.as_bytes()).as_str())
-        || headers.contains_key(header::SEC_WEBSOCKET_EXTENSIONS)
-        || headers.contains_key(header::SEC_WEBSOCKET_PROTOCOL)
-    {
-        bail!("invalid call socket upgrade response");
-    }
-    Ok(())
-}
-
-async fn send_json(socket: &mut Socket, value: &impl serde::Serialize) -> Result<()> {
-    let text = serde_json::to_string(value)?;
-    if text.len() > 16 * 1024 {
-        bail!("call command exceeds the message limit");
-    }
-    timeout(WRITE_TIMEOUT, socket.send(Message::Text(text.into())))
-        .await
-        .context("call socket write timed out")??;
-    Ok(())
-}
-
-async fn receive(socket: &mut Socket, label: &str) -> Result<Message> {
-    loop {
-        let message = match socket.next().await {
-            Some(Ok(message)) => message,
-            Some(Err(error)) => {
-                debug_call(label, format_args!("read error: {error}"));
-                return Err(error.into());
+fn map_client_error(error: anyhow::Error) -> anyhow::Error {
+    if let Some(client_error) = error.downcast_ref::<CallClientError>() {
+        return match client_error {
+            CallClientError::SocketRejected { status } => {
+                let display = reqwest::StatusCode::from_u16(*status)
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|_| status.to_string());
+                failure(
+                    if matches!(status, 401 | 403) { 4 } else { 3 },
+                    "call_socket_rejected",
+                    &format!("call socket upgrade rejected ({display})"),
+                )
             }
-            None => {
-                debug_call(label, format_args!("read reached end of stream"));
-                bail!("call socket closed");
-            }
+            CallClientError::Interrupted { message } => failure(130, "client_interrupted", message),
         };
-        match message {
-            Message::Ping(data) => {
-                if let Err(error) = timeout(WRITE_TIMEOUT, socket.send(Message::Pong(data)))
-                    .await
-                    .context("call socket pong timed out")
-                    .and_then(|result| result.map_err(Into::into))
-                {
-                    debug_call(label, format_args!("pong write failed: {error:#}"));
-                    return Err(error);
-                }
-            }
-            Message::Pong(_) => {}
-            Message::Close(frame) => {
-                if let Some(frame) = frame {
-                    let code = u16::from(frame.code);
-                    debug_call(
-                        label,
-                        format_args!(
-                            "received close frame code={code} reason={:?}",
-                            frame.reason.as_str()
-                        ),
-                    );
-                } else {
-                    debug_call(
-                        label,
-                        format_args!("received close frame without a code or reason"),
-                    );
-                }
-                bail!("call socket closed");
-            }
-            message => return Ok(message),
-        }
+    }
+    error
+}
+
+#[cfg(test)]
+async fn open_socket(remote: &Remote, suffix: &str) -> Result<transport::Socket> {
+    transport::open_socket(&endpoint(remote)?, suffix)
+        .await
+        .map_err(map_client_error)
+}
+
+struct Control(ControlClient);
+
+impl Deref for Control {
+    type Target = ControlClient;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
-async fn receive_event(socket: &mut Socket, label: &str) -> Result<CallEvent> {
-    let Message::Text(text) = receive(socket, label).await? else {
-        bail!("unexpected binary control message");
-    };
-    if text.len() > 16 * 1024 {
-        bail!("call event exceeds the message limit");
+impl DerefMut for Control {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
-    let value: serde_json::Value = serde_json::from_str(&text).context("invalid call event")?;
-    if value["type"] == "protocol.error" {
-        let CallEvent::ProtocolError {
-            client_versions,
-            server_versions,
-            code,
-        } = serde_json::from_value(value).context("invalid call protocol error")?
-        else {
-            bail!("invalid call protocol error");
-        };
-        bail!(
-            "call protocol negotiation failed: client versions {client_versions:?}, daemon versions {server_versions:?} ({})",
-            serde_json::to_value(code)?
-        );
-    }
-    if value["type"] == "hello"
-        && value["protocolVersion"].as_u64().unwrap_or(1)
-            != u64::from(wechat_core::call_types::CALL_PROTOCOL_VERSION)
-    {
-        bail!(
-            "unsupported call protocol version: client [{}], daemon [{}]",
-            wechat_core::call_types::CALL_PROTOCOL_VERSION,
-            value["protocolVersion"].as_u64().unwrap_or(1)
-        );
-    }
-    let event = serde_json::from_value(value).context("invalid call event")?;
-    if call_debug_enabled() {
-        match event_json(&event) {
-            Ok(line) => debug_call(label, format_args!("<- {line}")),
-            Err(error) => debug_call(label, format_args!("could not format event: {error}")),
-        }
-    }
-    Ok(event)
 }
 
-struct Control {
-    socket: Socket,
-
-    cancellation: Option<Cancellation>,
-
-    client_id: String,
-
-    capabilities: CallCapabilities,
-    conference_invitations: Vec<wechat_core::call_types::CallConferenceInvitation>,
-    invitation_results:
-        std::collections::VecDeque<(String, Vec<wechat_core::call_types::CallInvitationResult>)>,
-
-    availability: CallsAvailability,
-
-    offer: Option<CallOffer>,
-
-    pending_offer: Option<CallPendingOffer>,
-
-    tracks: std::collections::BTreeMap<(String, u32), wechat_core::call_types::CallTrack>,
-
-    call: Option<CallView>,
-
-    format: CallAudioFormat,
-}
 impl Control {
     async fn connect(remote: &Remote) -> Result<(Self, CallEvent)> {
-        let mut socket = open_socket(remote, "calls/socket").await?;
-        send_json(
-            &mut socket,
-            &wechat_core::call_types::CallClientHello::Hello {
-                supported_protocol_versions: vec![wechat_core::call_types::CALL_PROTOCOL_VERSION],
-            },
-        )
-        .await?;
-        let event = timeout(STARTUP_TIMEOUT, receive_event(&mut socket, "control"))
+        let (inner, hello) = ControlClient::connect(&endpoint(remote)?)
             .await
-            .context("call socket hello timed out")??;
-        let CallEvent::Hello {
-            protocol_version: wechat_core::call_types::CALL_PROTOCOL_VERSION,
-            conference_invitations,
-            client_id: _client_id,
-            capabilities: _capabilities,
-            availability: _availability,
-            current_offer: _current_offer,
-            current_pending_offer: _current_pending_offer,
-            current_call: _current_call,
-            audio_format: _audio_format,
-            ..
-        } = &event
-        else {
-            bail!("unsupported call socket hello");
-        };
-        Ok((
-            Self {
-                socket,
-
-                cancellation: None,
-
-                client_id: _client_id.clone(),
-
-                capabilities: *_capabilities,
-                conference_invitations: conference_invitations.clone(),
-                invitation_results: Default::default(),
-
-                availability: *_availability,
-
-                offer: _current_offer.clone(),
-
-                pending_offer: _current_pending_offer.clone(),
-
-                tracks: Default::default(),
-
-                call: _current_call.clone(),
-
-                format: *_audio_format,
-            },
-            event,
-        ))
-    }
-
-    async fn next_event(&mut self) -> Result<CallEvent> {
-        receive_event(&mut self.socket, "control").await
-    }
-
-    fn update(&mut self, event: &CallEvent) {
-        match event {
-            CallEvent::InvitationResult {
-                call_id, results, ..
-            } => {
-                if self.invitation_results.len() < 128 {
-                    self.invitation_results
-                        .push_back((call_id.clone(), results.clone()));
-                }
-            }
-            CallEvent::ConferenceInvitations { invitations } => {
-                self.conference_invitations = invitations.clone()
-            }
-            CallEvent::ParticipantUpdated {
-                call_id,
-                revision,
-                participant,
-            } => {
-                if let Some(call) = self
-                    .call
-                    .as_mut()
-                    .filter(|call| call.call_id == *call_id && *revision >= call.revision)
-                {
-                    call.revision = *revision;
-                    call.participants
-                        .retain(|current| current.participant_id != participant.participant_id);
-                    call.participants.push(participant.clone());
-                }
-            }
-            CallEvent::TrackRemoved {
-                call_id,
-                track_id,
-                generation,
-                ..
-            } => {
-                let key = (call_id.clone(), *track_id);
-                if self
-                    .tracks
-                    .get(&key)
-                    .is_some_and(|track| track.generation() <= *generation)
-                {
-                    self.tracks.remove(&key);
-                }
-            }
-            CallEvent::Offered { offer } => self.offer = Some(offer.clone()),
-            CallEvent::Pending { offer } => self.pending_offer = offer.clone(),
-            CallEvent::TrackAdded { call_id, track }
-            | CallEvent::TrackUpdated { call_id, track } => {
-                let key = (call_id.clone(), track.id());
-                if self
-                    .tracks
-                    .get(&key)
-                    .is_none_or(|current| track.generation() >= current.generation())
-                {
-                    self.tracks.insert(key, track.clone());
-                }
-            }
-            CallEvent::State { call } => {
-                if self
-                    .call
-                    .as_ref()
-                    .is_none_or(|old| old.call_id != call.call_id || old.revision <= call.revision)
-                {
-                    self.call = Some(call.clone());
-                }
-            }
-            CallEvent::Control {
-                call_id,
-                participant_id,
-                control,
-            } => {
-                if let Some(call) = self.call.as_mut().filter(|call| call.call_id == *call_id) {
-                    call.controls
-                        .retain(|item| item.participant_id != *participant_id);
-                    call.controls
-                        .push(wechat_core::call_types::CallParticipantControl {
-                            participant_id: participant_id.clone(),
-                            control: control.clone(),
-                        });
-                }
-            }
-            CallEvent::Availability { availability } => {
-                self.availability = *availability;
-                // Availability begins each new snapshot batch; a still-current
-                // offer is supplied immediately after it. Never retain an old offer.
-                self.offer = None;
-            }
-            _ => {}
-        }
+            .map_err(map_client_error)?;
+        Ok((Self(inner), hello))
     }
 
     async fn command(&mut self, command: CallCommand) -> Result<OwnerResult> {
-        let cancellation = self.cancellation.clone();
-        if cancellation
-            .as_ref()
-            .is_some_and(Cancellation::is_cancelled)
-        {
-            return Err(failure(
-                130,
-                "client_interrupted",
-                "call command cancelled before submission",
-            ));
-        }
-        let id = command.request_id().to_owned();
-        if let Err(error) = send_json(&mut self.socket, &command).await {
-            debug_call("control", format_args!("command write failed: {error:#}"));
-            return Err(error);
-        }
-        let response = async {
-            loop {
-                let event = self.next_event().await?;
-                self.update(&event);
-                match event {
-                    CallEvent::CommandResult {
-                        request_id,
-                        status,
-                        call_id,
-                        owner_token,
-                        code,
-                    } if request_id == id => {
-                        if status == wechat_core::call_types::CallCommandStatus::Error {
-                            bail!("call command rejected: {}", serde_json::to_value(code)?);
-                        }
-                        return Ok(OwnerResult {
-                            call_id,
-                            owner_token,
-                        });
-                    }
-                    CallEvent::Error { code } => {
-                        bail!("call error: {}", serde_json::to_value(code)?)
-                    }
-                    _ => {}
-                }
-            }
-        };
-        let interrupted = async {
-            match cancellation {
-                Some(cancellation) => cancellation.wait().await,
-                None => std::future::pending::<()>().await,
-            }
-        };
-        tokio::select! {
-            _ = interrupted => Err(failure(130,"client_interrupted","call command interrupted; outcome unknown; check calls status before retrying")),
-            response = timeout(Duration::from_secs(30),response) => response.context("call command outcome unknown; check calls status before retrying")?,
-        }
-    }
-    async fn close(&mut self) {
-        debug_call("control", format_args!("local close requested"));
-        let result = timeout(WRITE_TIMEOUT, self.socket.close(None)).await;
-        debug_call("control", format_args!("local close result: {result:?}"));
+        self.0.command(command).await.map_err(map_client_error)
     }
 }
 
-/// A signal stays latched across device preparation, attachment and socket
-/// awaits. A new waiter cannot miss a signal consumed by an earlier phase.
-#[derive(Clone)]
-struct Cancellation(tokio::sync::watch::Receiver<bool>);
-
-impl Cancellation {
-    fn listen() -> (Self, SignalWatcher) {
-        let (sender, receiver) = tokio::sync::watch::channel(false);
-        let task = tokio::spawn(async move {
-            let _ = tokio::signal::ctrl_c().await;
-            let _ = sender.send(true);
-        });
-        (Self(receiver), SignalWatcher(task))
-    }
-    fn is_cancelled(&self) -> bool {
-        *self.0.borrow()
-    }
-    async fn wait(&self) {
-        let mut receiver = self.0.clone();
-        let _ = receiver.wait_for(|cancelled| *cancelled).await;
-    }
+fn listen_cancellation() -> (Cancellation, SignalWatcher) {
+    let (sender, cancellation) = Cancellation::channel();
+    let task = tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        let _ = sender.send(true);
+    });
+    (cancellation, SignalWatcher(task))
 }
 
 struct SignalWatcher(tokio::task::JoinHandle<()>);
@@ -676,20 +323,6 @@ impl Drop for SignalWatcher {
     fn drop(&mut self) {
         self.0.abort();
     }
-}
-
-struct OwnerResult {
-    call_id: Option<String>,
-    owner_token: Option<String>,
-}
-
-fn event_json(event: &CallEvent) -> Result<String> {
-    let mut value = serde_json::to_value(event)?;
-    // Owner tokens authorize media attachment and must stay out of CLI output.
-    if let Some(object) = value.as_object_mut() {
-        object.remove("ownerToken");
-    }
-    Ok(serde_json::to_string(&value)?)
 }
 
 async fn observe(remote: &Remote) -> Result<()> {
@@ -707,7 +340,7 @@ async fn observe_until(remote: &Remote, stop: impl std::future::Future<Output = 
         tokio::select! {
             _ = &mut stop => break Ok(()),
             event = control.next_event() => match event {
-                Ok(event) => { println!("{}",event_json(&event)?); }
+                Ok(event) => { println!("{}", event_json(&event)?); }
                 Err(error) => break Err(error),
             }
         }

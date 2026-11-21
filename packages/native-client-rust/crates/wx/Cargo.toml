@@ -33,6 +33,7 @@ wechat-media = { path = "../wechat-media" }
 wechat-profile = { path = "../wechat-profile" }
 wechat-calls = { path = "../wechat-calls", features = ["native-opus"] }
 wechat-audio = { path = "../wechat-audio", features = ["native-audio"] }
+wechat-call-client = { path = "../wechat-call-client" }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "multipart"] }
 futures-util = "0.3"

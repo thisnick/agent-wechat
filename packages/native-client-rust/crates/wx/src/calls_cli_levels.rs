@@ -6,78 +6,32 @@ use std::{
     time::{Duration, Instant},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use wechat_call_client::audio::SignalLevel;
+#[cfg(test)]
+use wechat_call_client::audio::LEVEL_FLOOR_DB;
 use wechat_core::call_types::{
     CallMembership, CallParticipantStatus, CallParticipantStatusKind, CallView,
 };
 
-const FLOOR_DB: f64 = -60.0;
+#[cfg(test)]
+const FLOOR_DB: f64 = LEVEL_FLOOR_DB;
 const MAX_NOTICES: usize = 4;
 
-struct Level {
-    squares: f64,
-    count: usize,
-    peak: f64,
-    db: f64,
-    clip_ticks: u8,
-}
-impl Default for Level {
-    fn default() -> Self {
-        Self {
-            squares: 0.0,
-            count: 0,
-            peak: 0.0,
-            db: FLOOR_DB,
-            clip_ticks: 0,
-        }
-    }
-}
-impl Level {
-    fn observe(&mut self, samples: impl Iterator<Item = f64>) {
-        for sample in samples {
-            let value = sample.clamp(-1.0, 1.0);
-            self.squares += value * value;
-            self.peak = self.peak.max(value.abs());
-            self.count += 1;
-        }
-    }
-    fn advance(&mut self) {
-        let rms = if self.count == 0 {
-            0.0
-        } else {
-            (self.squares / self.count as f64).sqrt()
-        };
-        let db = if rms > 0.0 {
-            (20.0 * rms.log10()).max(FLOOR_DB)
-        } else {
-            FLOOR_DB
-        };
-        // Immediate attack; a quiet signal falls 8 dB per refresh tick.
-        self.db = db.max(self.db - 8.0);
-        self.clip_ticks = if self.peak >= 0.999 {
-            10
-        } else {
-            self.clip_ticks.saturating_sub(1)
-        };
-        self.squares = 0.0;
-        self.count = 0;
-        self.peak = 0.0;
-    }
-    fn text(&self) -> String {
-        let count = (((self.db - FLOOR_DB) / -FLOOR_DB) * 10.0)
-            .round()
-            .clamp(0.0, 10.0) as usize;
-        format!(
-            "[{}{}] {:>3.0}dB{}",
-            "#".repeat(count),
-            ".".repeat(10 - count),
-            self.db,
-            if self.clip_ticks > 0 { "!" } else { " " }
-        )
-    }
+fn level_text(level: &SignalLevel) -> String {
+    let count = (f64::from(level.normalized()) * 10.0)
+        .round()
+        .clamp(0.0, 10.0) as usize;
+    format!(
+        "[{}{}] {:>3.0}dB{}",
+        "#".repeat(count),
+        ".".repeat(10 - count),
+        level.db(),
+        if level.is_clipping() { "!" } else { " " }
+    )
 }
 
 struct ParticipantLevel {
-    level: Level,
+    level: SignalLevel,
     label: String,
     membership: CallMembership,
     status: Option<CallParticipantStatus>,
@@ -100,8 +54,8 @@ pub(super) fn clean_label(text: &str, width: usize) -> String {
 }
 
 pub(super) struct CallLevels {
-    mic: Level,
-    speaker: Level,
+    mic: SignalLevel,
+    speaker: SignalLevel,
     muted: bool,
     enabled: bool,
     alt_screen: bool,
@@ -143,8 +97,8 @@ impl CallLevels {
     }
     fn with_terminal(enabled: bool) -> Self {
         Self {
-            mic: Level::default(),
-            speaker: Level::default(),
+            mic: SignalLevel::default(),
+            speaker: SignalLevel::default(),
             muted: false,
             enabled,
             alt_screen: false,
@@ -184,28 +138,27 @@ impl CallLevels {
     pub(super) fn microphone(&mut self, samples: &[i16], muted: bool) {
         self.muted = muted;
         if muted {
-            self.mic = Level::default();
+            self.mic.reset();
         } else {
-            self.mic
-                .observe(samples.iter().map(|v| f64::from(*v) / 32768.0));
+            self.mic.observe_i16(samples);
         }
     }
     pub(super) fn speaker(&mut self, samples: &[f32]) {
-        self.speaker.observe(samples.iter().map(|v| f64::from(*v)));
+        self.speaker.observe_f32(samples);
     }
     pub(super) fn clear_microphone(&mut self) {
-        self.mic = Level::default();
+        self.mic.reset();
     }
     pub(super) fn clear_speaker(&mut self) {
-        self.speaker = Level::default();
+        self.speaker.reset();
     }
     fn line(&self) -> String {
         format!(
             "Mic{} {} Speaker{} {}",
             if self.muted { "(muted)" } else { "" },
-            self.mic.text(),
+            level_text(&self.mic),
             if self.speaker_enabled { "" } else { "(off)" },
-            self.speaker.text()
+            level_text(&self.speaker)
         )
     }
     pub(super) fn roster(&mut self, call: &CallView) {
@@ -215,7 +168,7 @@ impl CallLevels {
                 .participants
                 .entry(participant.participant_id.clone())
                 .or_insert_with(|| ParticipantLevel {
-                    level: Level::default(),
+                    level: SignalLevel::default(),
                     label: String::new(),
                     membership: CallMembership::Unknown,
                     status: None,
@@ -230,7 +183,7 @@ impl CallLevels {
             if participant.membership == CallMembership::Left
                 || participant.microphone_enabled == Some(false)
             {
-                row.level = Level::default();
+                row.level.reset();
             }
         }
     }
@@ -253,7 +206,7 @@ impl CallLevels {
             .participants
             .entry(id.clone())
             .or_insert_with(|| ParticipantLevel {
-                level: Level::default(),
+                level: SignalLevel::default(),
                 label: if participant.is_some() {
                     clean_label(&id, 64)
                 } else {
@@ -265,8 +218,7 @@ impl CallLevels {
                 camera: None,
             });
         if row.microphone != Some(false) && row.membership != CallMembership::Left {
-            row.level
-                .observe(samples.iter().map(|s| f64::from(*s) / 32768.0));
+            row.level.observe_i16(samples);
         }
     }
     pub(super) fn playback_enabled(&mut self, enabled: bool) {
@@ -281,7 +233,7 @@ impl CallLevels {
     }
     #[cfg(test)]
     pub(super) fn participant_level(&self, id: &str) -> f64 {
-        self.participants.get(id).unwrap().level.db
+        self.participants.get(id).unwrap().level.db()
     }
     fn lines(&self, width: usize, rows: usize) -> Vec<String> {
         let mut lines = vec![clean_label(&self.line(), width.saturating_sub(1))];
@@ -318,7 +270,7 @@ impl CallLevels {
                 Some(false) => " cam off",
                 None => "",
             };
-            let tail = format!(" {} {status} {mic}{cam}", row.level.text());
+            let tail = format!(" {} {status} {mic}{cam}", level_text(&row.level));
             let label = clean_label(&row.label, width.saturating_sub(tail.width() + 2));
             lines.push(clean_label(
                 &format!("{label}{tail}"),
@@ -390,7 +342,7 @@ impl CallLevels {
         frame.push(self.header_bar(width));
 
         if let Some(video) = video.filter(|v| v.has_visible_video()) {
-            let vrows = video.render_rows(width, video_budget);
+            let vrows = super::video::render_rows(video, width, video_budget);
             if !vrows.is_empty() {
                 frame.extend(vrows);
             }
@@ -665,29 +617,29 @@ mod tests {
         meter.microphone(&[16384; 320], false);
         meter.speaker(&[0.25; 320]);
         meter.refresh();
-        assert!((meter.mic.db + 6.02).abs() < 0.1);
-        assert!((meter.speaker.db + 12.04).abs() < 0.1);
+        assert!((meter.mic.db() + 6.02).abs() < 0.1);
+        assert!((meter.speaker.db() + 12.04).abs() < 0.1);
         assert!(meter.line().contains("-6dB"));
         assert!(!meter.alt_screen);
         meter.speaker(&[1.0; 320]);
         meter.refresh();
-        assert_eq!(meter.speaker.clip_ticks, 10);
+        assert_eq!(meter.speaker.clip_ticks(), 10);
         meter.microphone(&[32767; 320], true);
         meter.refresh();
-        assert_eq!(meter.mic.db, FLOOR_DB);
+        assert_eq!(meter.mic.db(), FLOOR_DB);
         assert!(meter.line().contains("Mic(muted)"));
         for _ in 0..10 {
             meter.refresh();
         }
-        assert_eq!(meter.speaker.db, FLOOR_DB);
-        assert_eq!(meter.speaker.clip_ticks, 0);
+        assert_eq!(meter.speaker.db(), FLOOR_DB);
+        assert_eq!(meter.speaker.clip_ticks(), 0);
         meter.microphone(&[-32768; 320], false);
         meter.refresh();
-        assert_eq!(meter.mic.db, 0.0);
+        assert_eq!(meter.mic.db(), 0.0);
         meter.clear_microphone();
         meter.clear_speaker();
-        assert_eq!(meter.mic.db, FLOOR_DB);
-        assert_eq!(meter.speaker.db, FLOOR_DB);
+        assert_eq!(meter.mic.db(), FLOOR_DB);
+        assert_eq!(meter.speaker.db(), FLOOR_DB);
         assert!(terminal_enabled(true, true, Some("xterm-256color")));
         assert!(!terminal_enabled(true, true, Some("dumb")));
         assert!(!terminal_enabled(false, true, None));
@@ -709,7 +661,7 @@ mod participant_tests {
         levels.participants.insert(
             "pending".into(),
             ParticipantLevel {
-                level: Level::default(),
+                level: SignalLevel::default(),
                 label: "Contact".into(),
                 membership: CallMembership::Invited,
                 status: Some(CallParticipantStatus {
