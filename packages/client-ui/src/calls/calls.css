@@ -1236,35 +1236,29 @@ dialog.call-theater-dialog:fullscreen {
   }
 }
 
-@media (max-width: 420px) {
-  .chat-header {
+@media (max-width: 380px) {
+  .chat-header:has(.call-header-actions) {
     padding: 0 8px;
     gap: 5px;
   }
 
-  .chat-header .avatar {
-    width: 32px;
-    height: 32px;
-    font-size: 12px;
-  }
-
-  .chat-header .icon-btn {
+  .chat-header:has(.call-header-actions) .icon-btn {
     width: 30px;
     height: 30px;
   }
 
-  .chat-header .icon-btn svg.icon {
+  .chat-header:has(.call-header-actions) .icon-btn svg.icon {
     width: 17px;
     height: 17px;
   }
 
-  .chat-heading {
+  .chat-header:has(.call-header-actions) .chat-heading {
     min-width: 0;
     overflow: hidden;
   }
 
-  .chat-heading h2,
-  .chat-heading p {
+  .chat-header:has(.call-header-actions) .chat-heading h2,
+  .chat-header:has(.call-header-actions) .chat-heading p {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
