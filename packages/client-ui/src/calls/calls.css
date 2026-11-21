@@ -292,6 +292,45 @@
   padding: 0 22px 10px;
 }
 
+dialog.call-picker-dialog {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  max-width: min(460px, calc(100vw - 24px));
+  width: 100%;
+  overflow: visible;
+}
+
+dialog.call-picker-dialog::backdrop {
+  background: #0000005c;
+  backdrop-filter: blur(4px);
+}
+
+.call-direct-stage {
+  position: relative;
+}
+
+.call-direct-status-badges {
+  position: absolute;
+  left: 14px;
+  bottom: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #00000099;
+  color: #f4f4f6;
+  font-size: 12px;
+}
+
+.call-drawer-error {
+  margin: 0;
+  padding: 6px 12px 0;
+  color: #ff9c9f;
+  font-size: 11px;
+}
+
 /* Non-blocking incoming call toast */
 .call-incoming-toast {
   position: fixed;

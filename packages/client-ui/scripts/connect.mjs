@@ -136,7 +136,7 @@ try {
             if (
               !origin ||
               req.headers.host !== new URL(origin).host ||
-              (req.headers.origin && req.headers.origin !== origin)
+              req.headers.origin !== origin
             ) {
               rejectUpgrade(socket, 403, "Forbidden");
               return false;
@@ -174,11 +174,11 @@ try {
               rejectUpgrade(socket, 403, "Forbidden");
               return false;
             }
-            // Preview proxy already verified Host and Origin; strip Origin so upstream
-            // check_origin does not fail if host/origin headers differ across hops, and
-            // never forward browser preview credentials on ticket-authenticated upgrades.
+            // Preview proxy already verified Host and Origin; strip Origin, Authorization,
+            // and Cookie headers so browser preview credentials or host cookies never cross hops.
             delete req.headers.origin;
             delete req.headers.authorization;
+            delete req.headers.cookie;
             return true;
           };
           // Wrap the httpServer upgrade emit so rejected proxy upgrades never reach Vite's proxy listeners.

@@ -55,6 +55,7 @@ function makeFakeTransport(overrides = {}) {
       directVideo: true,
       conferenceCreate: true,
       conferenceJoin: true,
+      conferenceInvite: true,
       conferenceVideo: true,
     },
     availability: { busy: false, ownedByThisClient: false },
@@ -69,6 +70,9 @@ function makeFakeTransport(overrides = {}) {
     actions,
     emit(event) {
       callbacks?.onEvent(event);
+    },
+    syncTracks(tracks) {
+      callbacks?.onTracksSynced(tracks);
     },
     triggerDisconnect(code = "closed") {
       callbacks?.onDisconnected(code);
@@ -112,6 +116,9 @@ function makeFakeTransport(overrides = {}) {
     async answer(requestId, callId, expectedRevision, callType, options) {
       actions.push({ type: "answer", requestId, callId, expectedRevision, callType, options });
     },
+    async attachConnectedMedia(callId, callType, muted, cameraEnabled) {
+      actions.push({ type: "attachConnectedMedia", callId, callType, muted, cameraEnabled });
+    },
     async reject(requestId, callId, expectedRevision) {
       actions.push({ type: "reject", requestId, callId, expectedRevision });
     },
@@ -131,7 +138,10 @@ function makeFakeTransport(overrides = {}) {
       actions.push({ type: "switchDevices", selection });
     },
     async end(type, requestId, callId, expectedRevision) {
-      actions.push({ type, requestId, callId, expectedRevision });
+      actions.push({ type: "end", action: type, requestId, callId, expectedRevision });
+    },
+    stopLocalMedia() {
+      actions.push({ type: "stopLocalMedia" });
     },
     stopMedia() {
       actions.push({ type: "stopMedia" });
@@ -335,14 +345,34 @@ test("dial distinguishes cancel vs hangup, preserves sibling controls, and flags
     },
   });
   await controller.hangupOrCancel();
-  assert.equal(transport.actions.at(-1).type, "call.cancel");
+  assert.equal(transport.actions.at(-1).action, "call.cancel");
 
-  // Connected call uses call.hangup and preserves both microphone + camera controls.
+  // Outgoing connecting (e.g. conference dialing phase) also sends call.cancel and does not attach media yet.
   transport.emit({
     type: "call.state",
     call: {
       callId: "call-1",
       revision: 3,
+      kind: "conference",
+      callType: "voice",
+      direction: "outgoing",
+      state: "connecting",
+      ownedByThisClient: true,
+      groupId: "123@chatroom",
+      participants: [{ participantId: "p1", contactId: "sim_mei", membership: "joined" }],
+      controls: [],
+    },
+  });
+  assert.equal(transport.actions.filter((a) => a.type === "attachConnectedMedia").length, 0);
+  await controller.hangupOrCancel();
+  assert.equal(transport.actions.at(-1).action, "call.cancel");
+
+  // Connected call attaches media, uses call.hangup, and preserves both microphone + camera controls.
+  transport.emit({
+    type: "call.state",
+    call: {
+      callId: "call-1",
+      revision: 4,
       kind: "direct",
       callType: "voice",
       direction: "outgoing",
@@ -352,6 +382,31 @@ test("dial distinguishes cancel vs hangup, preserves sibling controls, and flags
       controls: [],
     },
   });
+  assert.equal(transport.actions.filter((a) => a.type === "attachConnectedMedia").length, 1);
+  // Stale call.state revision is ignored.
+  transport.emit({
+    type: "call.state",
+    call: {
+      callId: "call-1",
+      revision: 2,
+      kind: "direct",
+      callType: "voice",
+      direction: "outgoing",
+      state: "ringing",
+      ownedByThisClient: true,
+    },
+  });
+  assert.equal(controller.snapshot().currentCall.revision, 4);
+  assert.equal(controller.snapshot().currentCall.state, "connected");
+  // Stale participant.updated revision is ignored.
+  transport.emit({
+    type: "participant.updated",
+    callId: "call-1",
+    revision: 3,
+    participant: { participantId: "p1", contactId: "sim_mei", membership: "left" },
+  });
+  assert.equal(controller.snapshot().currentCall.participants[0].membership, "joined");
+
   transport.emit({
     type: "call.control",
     callId: "call-1",
@@ -370,19 +425,47 @@ test("dial distinguishes cancel vs hangup, preserves sibling controls, and flags
   assert.equal(controller.snapshot().currentCall.participants[0].cameraEnabled, false);
 
   await controller.hangupOrCancel();
-  assert.equal(transport.actions.at(-1).type, "call.hangup");
+  assert.equal(transport.actions.at(-1).action, "call.hangup");
 
-  // Advance clock past 18:30 cap threshold and wait one timer tick.
-  clockMs += CALL_CAP_WARNING_SECONDS * 1000;
-  await new Promise((r) => setTimeout(r, 1100));
-  assert.equal(controller.snapshot().capWarning, true);
-
-  // Uncertain terminal state records honest notice and stops media.
+  // Ending state stops local capture/audio without dropping the media socket prematurely.
   transport.emit({
     type: "call.state",
     call: {
       callId: "call-1",
-      revision: 4,
+      revision: 5,
+      kind: "direct",
+      callType: "voice",
+      direction: "outgoing",
+      state: "ending",
+      ownedByThisClient: true,
+    },
+  });
+  assert.equal(transport.actions.filter((a) => a.type === "stopLocalMedia").length, 1);
+  assert.equal(transport.actions.filter((a) => a.type === "stopMedia").length, 0);
+
+  // Advance clock past 18:30 cap threshold while connected (test on fresh connected state).
+  transport.emit({
+    type: "call.state",
+    call: {
+      callId: "call-1",
+      revision: 6,
+      kind: "direct",
+      callType: "voice",
+      direction: "outgoing",
+      state: "connected",
+      ownedByThisClient: true,
+    },
+  });
+  clockMs += CALL_CAP_WARNING_SECONDS * 1000;
+  await new Promise((r) => setTimeout(r, 1100));
+  assert.equal(controller.snapshot().capWarning, true);
+
+  // Uncertain terminal state records honest notice and tears down media socket.
+  transport.emit({
+    type: "call.state",
+    call: {
+      callId: "call-1",
+      revision: 7,
       kind: "direct",
       callType: "voice",
       direction: "outgoing",
@@ -392,6 +475,61 @@ test("dial distinguishes cancel vs hangup, preserves sibling controls, and flags
   });
   assert.equal(controller.snapshot().currentCall, null);
   assert.equal(controller.snapshot().notice?.kind, "uncertain");
+  assert.ok(transport.actions.some((a) => a.type === "stopMedia"));
+});
+
+test("media.ready track sync, ownership loss while busy, and pause on account switch", async (t) => {
+  const ringtone = makeRingtoneSpy();
+  const transport = makeFakeTransport();
+  const controller = new CallController({ transport, ringtone });
+  t.after(() => controller.close());
+  controller.start();
+  await new Promise((r) => setTimeout(r, 15));
+
+  transport.emit({
+    type: "call.state",
+    call: {
+      callId: "vid-1",
+      revision: 2,
+      kind: "direct",
+      callType: "video",
+      direction: "outgoing",
+      state: "connected",
+      ownedByThisClient: true,
+    },
+  });
+  transport.syncTracks([
+    {
+      id: 20,
+      generation: 2,
+      media: "video",
+      direction: "receive",
+      format: { codec: "jpeg", mode: "transcoded", maxWidth: 640, maxHeight: 480, maxFps: 15 },
+      active: true,
+    },
+  ]);
+  assert.equal(controller.snapshot().tracks.length, 1);
+  // Stale track.removed generation is ignored.
+  transport.emit({ type: "track.removed", callId: "vid-1", trackId: 20, generation: 1, reason: "old" });
+  assert.equal(controller.snapshot().tracks.length, 1);
+  // Ownership loss while another client stays busy clears active call UI cleanly.
+  transport.emit({
+    type: "calls.availability",
+    availability: { busy: true, ownedByThisClient: false },
+  });
+  assert.equal(controller.snapshot().currentCall, null);
+  assert.equal(controller.snapshot().tracks.length, 0);
+
+  // Incoming offer on active account stops ringing and disconnects when account switches (pause).
+  transport.emit({
+    type: "call.offered",
+    offer: { callId: "bg-1", revision: 1, kind: "direct", callType: "voice", callerId: "sim_mei" },
+  });
+  assert.equal(ringtone.isPlaying(), true);
+  controller.pause();
+  assert.equal(ringtone.isPlaying(), false);
+  assert.equal(controller.snapshot().status, "idle");
+  assert.equal(controller.snapshot().currentOffer, null);
 });
 
 test("outcome_unknown command failure surfaces honest uncertain notice", async (t) => {

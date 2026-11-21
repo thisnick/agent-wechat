@@ -27,6 +27,7 @@ import {
 import {
   canCallThread,
   formatCallDuration,
+  isCancellableCall,
   type CallController,
   type CallView,
 } from "./call-controller.ts";
@@ -96,6 +97,7 @@ export function CallHeaderActions({
 }) {
   const callState = useSyncExternalStore(controller.subscribe, controller.snapshot);
   const [previewOpen, setPreviewOpen] = useState(false);
+  const videoTriggerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setPreviewOpen(false);
@@ -127,7 +129,7 @@ export function CallHeaderActions({
         />
       )}
       {eligibility.video && (
-        <div className="call-video-trigger-wrap">
+        <div ref={videoTriggerRef} className="call-video-trigger-wrap">
           <Button
             icon="video"
             label={eligibility.isGroup ? t("calls.startGroupVideoCall") : t("calls.videoCall")}
@@ -147,6 +149,7 @@ export function CallHeaderActions({
             <CallPreviewPopover
               controller={controller}
               peerName={threadName}
+              triggerRef={videoTriggerRef}
               onClose={() => setPreviewOpen(false)}
               onStart={({ muted, cameraEnabled }) => {
                 setPreviewOpen(false);
@@ -168,15 +171,22 @@ export function CallHeaderActions({
 export function CallDetailActions({
   controller,
   threadId,
+  threadName,
   ownUsername,
   onOpenGroupPicker,
 }: {
   controller: CallController;
   threadId: string;
+  threadName?: string;
   ownUsername: string | null | undefined;
   onOpenGroupPicker: (callType: "voice" | "video") => void;
 }) {
   const callState = useSyncExternalStore(controller.subscribe, controller.snapshot);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const triggerRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    setPreviewOpen(false);
+  }, [threadId]);
   const eligibility = canCallThread(threadId, ownUsername, callState.capabilities);
   if (!eligibility.voice && !eligibility.video) return null;
   const busy = callState.availability.busy || callState.actionPending;
@@ -184,7 +194,7 @@ export function CallDetailActions({
   return (
     <div className="detail-section call-detail-actions">
       <div className="section-head">{t("calls.sectionTitle")}</div>
-      <div className="call-detail-buttons">
+      <div ref={triggerRef} className="call-detail-buttons call-video-trigger-wrap">
         {eligibility.voice && (
           <button
             type="button"
@@ -207,15 +217,35 @@ export function CallDetailActions({
             className="secondary call-detail-btn"
             disabled={busy}
             title={busy ? t("calls.busyTooltip") : undefined}
-            onClick={() =>
-              eligibility.isGroup
-                ? onOpenGroupPicker("video")
-                : void controller.dialDirect(threadId, { callType: "video", cameraEnabled: true })
-            }
+            onClick={() => {
+              if (eligibility.isGroup) {
+                onOpenGroupPicker("video");
+              } else if (callState.skipVideoPreview) {
+                void controller.dialDirect(threadId, { callType: "video", cameraEnabled: true });
+              } else {
+                setPreviewOpen((v) => !v);
+              }
+            }}
           >
             <Icon name="video" />
             {t("calls.videoCall")}
           </button>
+        )}
+        {previewOpen && !eligibility.isGroup && (
+          <CallPreviewPopover
+            controller={controller}
+            peerName={threadName ?? threadId}
+            triggerRef={triggerRef}
+            onClose={() => setPreviewOpen(false)}
+            onStart={({ muted, cameraEnabled }) => {
+              setPreviewOpen(false);
+              void controller.dialDirect(threadId, {
+                callType: "video",
+                muted,
+                cameraEnabled,
+              });
+            }}
+          />
         )}
       </div>
     </div>
@@ -345,11 +375,7 @@ function VoiceCallStrip({
         <button
           type="button"
           className="call-strip-hangup"
-          aria-label={
-            call.direction === "outgoing" && (call.state === "dialing" || call.state === "ringing")
-              ? t("calls.cancelCall")
-              : t("calls.hangUp")
-          }
+          aria-label={isCancellableCall(call) ? t("calls.cancelCall") : t("calls.hangUp")}
           disabled={callState.actionPending}
           onClick={() => void controller.hangupOrCancel()}
         >
@@ -406,7 +432,7 @@ function CallPipCard({
     setPos({ right: nextRight, bottom: nextBottom });
   };
 
-  const onPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+  const endDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (dragRef.current?.id === event.pointerId) {
       dragRef.current = null;
     }
@@ -420,7 +446,11 @@ function CallPipCard({
       style={{ right: `${pos.right}px`, bottom: `${pos.bottom}px` }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
-      onPointerUp={onPointerUp}
+      onPointerUp={endDrag}
+      onPointerCancel={endDrag}
+      onLostPointerCapture={() => {
+        dragRef.current = null;
+      }}
     >
       <div className="call-pip-stage" onDoubleClick={() => controller.setPresentationMode("theater")}>
         {primaryVideoTrack && callState.remoteTrackFrames[primaryVideoTrack.id] ? (
@@ -455,7 +485,7 @@ function CallPipCard({
         <button
           type="button"
           className="call-strip-hangup"
-          aria-label={t("calls.hangUp")}
+          aria-label={isCancellableCall(call) ? t("calls.cancelCall") : t("calls.hangUp")}
           disabled={callState.actionPending}
           onClick={() => void controller.hangupOrCancel()}
         >
@@ -497,6 +527,8 @@ function CallTheaterDialog({
   const [drawerTab, setDrawerTab] = useState<"chat" | "roster" | null>(null);
   const [chromeHidden, setChromeHidden] = useState(false);
   const [quickDraft, setQuickDraft] = useState("");
+  const [quickSending, setQuickSending] = useState(false);
+  const [quickError, setQuickError] = useState(false);
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isFullscreen = callState.presentationMode === "fullscreen";
 
@@ -605,17 +637,45 @@ function CallTheaterDialog({
 
   const isConference = call.kind === "conference";
   const singleRemoteVideo = !isConference ? videoReceiveTracks[0] ?? null : null;
-  const chatTargetId = call.groupId ?? peerId;
-  const recentMessages = useMemo(() => {
-    if (!chatTargetId || sessionState.selected !== chatTargetId) return [];
-    return sessionState.messages.slice(-20);
-  }, [chatTargetId, sessionState.selected, sessionState.messages]);
+  const directRemoteState = useMemo(() => {
+    if (isConference) return { muted: undefined as boolean | undefined, cameraEnabled: undefined as boolean | undefined };
+    let muted: boolean | undefined;
+    let cameraEnabled: boolean | undefined;
+    for (const item of call.controls ?? []) {
+      if (item.control.kind === "microphone") muted = item.control.muted;
+      else if (item.control.kind === "camera") cameraEnabled = item.control.enabled;
+    }
+    return { muted, cameraEnabled };
+  }, [isConference, call.controls]);
 
-  const sendQuickReply = () => {
+  const chatTargetId = call.groupId ?? peerId;
+  const chatMatchesSelected = !!chatTargetId && sessionState.selected === chatTargetId;
+  const recentMessages = useMemo(() => {
+    if (!chatMatchesSelected) return [];
+    return sessionState.messages.slice(-20);
+  }, [chatMatchesSelected, sessionState.messages]);
+
+  const sendQuickReply = async () => {
     const trimmed = quickDraft.trim();
-    if (!trimmed || !chatTargetId) return;
-    setQuickDraft("");
-    void connection.session.send(trimmed);
+    if (!trimmed || !chatTargetId || quickSending) return;
+    if (connection.session.snapshot().selected !== chatTargetId) {
+      setQuickError(true);
+      return;
+    }
+    setQuickSending(true);
+    setQuickError(false);
+    try {
+      const ok = await connection.session.send(trimmed);
+      if (ok) {
+        setQuickDraft("");
+      } else {
+        setQuickError(true);
+      }
+    } catch {
+      setQuickError(true);
+    } finally {
+      setQuickSending(false);
+    }
   };
 
   const subscribeLocalJpeg = useCallback(
@@ -641,12 +701,20 @@ function CallTheaterDialog({
           controller.setPresentationMode(call.callType === "voice" && !isConference ? "strip" : "pip");
         }
       }}
+      onClose={() => {
+        // Recover gracefully if the browser's CloseWatcher force-closes <dialog> on rapid Esc presses.
+        const currentMode = controller.snapshot().presentationMode;
+        if (currentMode === "theater" || currentMode === "fullscreen") {
+          controller.setPresentationMode(call.callType === "voice" && !isConference ? "strip" : "pip");
+        }
+      }}
       onPointerMove={wakeChrome}
       onPointerDown={wakeChrome}
       onKeyDown={(event) => {
         wakeChrome();
-        const tag = (event.target as HTMLElement | null)?.tagName;
-        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+        const target = event.target as HTMLElement | null;
+        const tag = target?.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target?.isContentEditable) return;
         if (event.key.toLowerCase() === "f" && !event.ctrlKey && !event.metaKey && !event.altKey) {
           event.preventDefault();
           toggleFullscreen();
@@ -670,10 +738,11 @@ function CallTheaterDialog({
             </div>
           </div>
           <div className="call-theater-top-actions">
-            {isConference && (
+            {isConference && callState.capabilities.conferenceInvite && (
               <Button
                 icon="user-plus"
                 label={t("calls.invitePeople")}
+                disabled={call.state !== "connected"}
                 onClick={onOpenInvite}
               />
             )}
@@ -862,6 +931,21 @@ function CallTheaterDialog({
                     <span>{callStateLabel(call, callState.elapsedSeconds)}</span>
                   </div>
                 )}
+                {(directRemoteState.muted === true || directRemoteState.cameraEnabled === false) && (
+                  <div className="call-direct-status-badges" aria-live="polite">
+                    {directRemoteState.muted === true && (
+                      <span className="call-badge is-muted" title={t("calls.muted")}>
+                        <Icon name="mic-off" />
+                      </span>
+                    )}
+                    {call.callType === "video" && directRemoteState.cameraEnabled === false && (
+                      <span className="call-badge is-muted" title={t("calls.cameraOff")}>
+                        <Icon name="video-off" />
+                      </span>
+                    )}
+                    <span>{peerName}</span>
+                  </div>
+                )}
               </div>
             )}
 
@@ -904,6 +988,18 @@ function CallTheaterDialog({
                       {callState.localMuted ? t("calls.muted") : t("calls.microphoneOn")}
                     </span>
                   </li>
+                  {!isConference && joinedParticipants.length === 0 && (
+                    <li className="call-roster-row">
+                      <span>{peerName}</span>
+                      <span className="call-roster-status">
+                        {directRemoteState.muted === true
+                          ? t("calls.muted")
+                          : directRemoteState.muted === false
+                            ? t("calls.microphoneOn")
+                            : t("calls.joined")}
+                      </span>
+                    </li>
+                  )}
                   {joinedParticipants.map((p) => (
                     <li key={p.participantId} className="call-roster-row">
                       <span>{resolveName(p.contactId)}</span>
@@ -922,7 +1018,9 @@ function CallTheaterDialog({
               ) : (
                 <div className="call-drawer-chat">
                   <div className="call-drawer-messages">
-                    {recentMessages.length === 0 ? (
+                    {!chatMatchesSelected ? (
+                      <p className="call-drawer-empty">{t("calls.openChatToMessage")}</p>
+                    ) : recentMessages.length === 0 ? (
                       <p className="call-drawer-empty">{t("calls.noRecentMessages")}</p>
                     ) : (
                       recentMessages.map((msg) => (
@@ -940,21 +1038,30 @@ function CallTheaterDialog({
                       ))
                     )}
                   </div>
-                  {chatTargetId && sessionState.selected === chatTargetId && (
+                  {quickError && (
+                    <p className="call-drawer-error" role="alert">
+                      {t("calls.inCallMessageFailed")}
+                    </p>
+                  )}
+                  {chatMatchesSelected && (
                     <form
                       className="call-drawer-composer"
                       onSubmit={(e) => {
                         e.preventDefault();
-                        sendQuickReply();
+                        void sendQuickReply();
                       }}
                     >
                       <input
                         aria-label={t("calls.sendInCallMessage")}
                         placeholder={t("calls.sendInCallMessage")}
+                        disabled={quickSending}
                         value={quickDraft}
-                        onChange={(e) => setQuickDraft(e.target.value)}
+                        onChange={(e) => {
+                          setQuickError(false);
+                          setQuickDraft(e.target.value);
+                        }}
                       />
-                      <button type="submit" disabled={!quickDraft.trim()}>
+                      <button type="submit" disabled={!quickDraft.trim() || quickSending}>
                         <Icon name="send" />
                       </button>
                     </form>
@@ -983,6 +1090,8 @@ function CallTheaterDialog({
                 type="button"
                 className={`call-control-btn ${!callState.localCamera ? "is-off" : ""}`}
                 aria-pressed={callState.localCamera}
+                disabled={call.state !== "connected"}
+                title={call.state !== "connected" ? t("calls.cameraToggleWaitConnected") : undefined}
                 onClick={() => void controller.toggleCamera()}
               >
                 <Icon name={callState.localCamera ? "video" : "video-off"} />
@@ -1107,12 +1216,7 @@ function CallTheaterDialog({
               onClick={() => void controller.hangupOrCancel()}
             >
               <Icon name="phone-off" />
-              <span>
-                {call.direction === "outgoing" &&
-                (call.state === "dialing" || call.state === "ringing")
-                  ? t("calls.cancelCall")
-                  : t("calls.hangUp")}
-              </span>
+              <span>{isCancellableCall(call) ? t("calls.cancelCall") : t("calls.hangUp")}</span>
             </button>
           </div>
         </footer>
@@ -1155,6 +1259,10 @@ export function CallInlineBanners({
   const peerId = ownedCall?.groupId ?? callState.activePeerId;
   const peerName = peerId ? resolveName(peerId) : t("calls.activeCallFallback");
 
+  const isTheaterOpen =
+    !!ownedCall &&
+    (callState.presentationMode === "theater" || callState.presentationMode === "fullscreen");
+
   return (
     <>
       {matchingInvitation && (
@@ -1170,6 +1278,30 @@ export function CallInlineBanners({
           <Notice tone="neutral">
             <NoticeTitle>{t("calls.passiveBusyTitle")}</NoticeTitle>
             <NoticeDescription>{t("calls.passiveBusyDescription")}</NoticeDescription>
+          </Notice>
+        </div>
+      )}
+
+      {!isTheaterOpen && callState.capWarning && ownedCall && (
+        <div className="call-passive-banner">
+          <Notice tone="neutral">
+            <NoticeTitle>{t("calls.capWarningTitle")}</NoticeTitle>
+            <NoticeDescription>{t("calls.capWarningDescription")}</NoticeDescription>
+          </Notice>
+        </div>
+      )}
+
+      {!isTheaterOpen && (callState.mediaWarning || callState.lastError) && (
+        <div className="call-passive-banner">
+          <Notice tone="error">
+            <NoticeDescription>
+              {callErrorText(callState.mediaWarning ?? callState.lastError!)}
+            </NoticeDescription>
+            <NoticeAction>
+              <button type="button" onClick={() => controller.clearNotice()}>
+                {t("calls.dismiss")}
+              </button>
+            </NoticeAction>
           </Notice>
         </div>
       )}
@@ -1289,6 +1421,7 @@ export function CallWorkspaceChrome({
 
       {groupPicker && (
         <GroupCallPickerModal
+          key={`start:${account}:${groupPicker.groupId}:${groupPicker.callType}`}
           connection={connection}
           account={account}
           groupId={groupPicker.groupId}
@@ -1296,6 +1429,7 @@ export function CallWorkspaceChrome({
           mode="start"
           initialCallType={groupPicker.callType}
           allowVideo={callState.capabilities.conferenceVideo}
+          busy={callState.availability.busy || callState.actionPending}
           onClose={onCloseGroupPicker}
           onSubmit={({ invitees, callType, muted, cameraEnabled }) => {
             onCloseGroupPicker();
@@ -1310,12 +1444,14 @@ export function CallWorkspaceChrome({
 
       {inviteOpen && ownedCall?.groupId && (
         <GroupCallPickerModal
+          key={`invite:${account}:${ownedCall.callId}`}
           connection={connection}
           account={account}
           groupId={ownedCall.groupId}
           groupName={peerName}
           mode="invite"
           allowVideo={false}
+          busy={callState.actionPending || ownedCall.state !== "connected"}
           excludeIds={(ownedCall.participants ?? [])
             .filter((p) => p.membership !== "left")
             .map((p) => p.contactId)}

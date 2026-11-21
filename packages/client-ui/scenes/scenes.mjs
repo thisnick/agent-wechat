@@ -1764,6 +1764,7 @@ const CALL_SCENE_CAPABILITIES = {
   directVideo: true,
   conferenceCreate: true,
   conferenceJoin: true,
+  conferenceInvite: true,
   conferenceVideo: true,
 };
 const CALL_SCENE_AUDIO_FORMAT = { sampleRate: 16000, channels: 1, frameMs: 20 };
@@ -1947,10 +1948,22 @@ async function prepareCallScene(page, options = {}) {
               availability: { busy: true, ownedByThisClient: true },
             }),
           );
-          ws.send(JSON.stringify({ type: "call.state", call: next }));
-          for (const tr of videoTracks) {
-            ws.send(JSON.stringify({ type: "track.added", callId, track: tr }));
-          }
+          // Match the real daemon: emit dialing first, then connected so media attaches on connected.
+          ws.send(
+            JSON.stringify({
+              type: "call.state",
+              call: { ...next, revision: 1, state: "dialing" },
+            }),
+          );
+          setTimeout(() => {
+            ws.send(JSON.stringify({ type: "call.state", call: next }));
+            // Only conferences emit control-socket track.added; direct calls deliver tracks via media.ready.
+            if (next.kind === "conference") {
+              for (const tr of videoTracks) {
+                ws.send(JSON.stringify({ type: "track.added", callId, track: tr }));
+              }
+            }
+          }, 10);
         }
       } else if (msg.type === "call.answer") {
         const next = onAnswer?.(msg);
@@ -1971,10 +1984,10 @@ async function prepareCallScene(page, options = {}) {
               availability: { busy: true, ownedByThisClient: true },
             }),
           );
-          ws.send(JSON.stringify({ type: "call.state", call: next }));
-          for (const tr of videoTracks) {
-            ws.send(JSON.stringify({ type: "track.added", callId: msg.callId, track: tr }));
-          }
+          ws.send(JSON.stringify({ type: "call.state", call: { ...next, revision: 1, state: "connecting" } }));
+          setTimeout(() => {
+            ws.send(JSON.stringify({ type: "call.state", call: next }));
+          }, 10);
         }
       } else if (msg.type === "call.mute" || msg.type === "call.camera") {
         ws.send(
@@ -2067,7 +2080,6 @@ scenes.push(
           direction: "outgoing",
           state: "connected",
           ownedByThisClient: true,
-          participants: [{ participantId: "p-mei", contactId: "sim_mei", membership: "joined", microphoneEnabled: true }],
           controls: [],
         }),
       });
@@ -2111,7 +2123,6 @@ scenes.push(
           direction: "outgoing",
           state: "connected",
           ownedByThisClient: true,
-          participants: [{ participantId: "p-mei", contactId: "sim_mei", membership: "joined", microphoneEnabled: true, cameraEnabled: true }],
           controls: [],
         }),
       });
@@ -2126,6 +2137,12 @@ scenes.push(
       const dialog = page.getByRole("dialog", { name: "Call with Mei Chen" });
       await expect(dialog).toBeVisible();
       await expect(dialog.locator("canvas.call-video-canvas")).toBeVisible();
+      await expect
+        .poll(() => dialog.locator("canvas.call-video-canvas").evaluate((el) => el.width))
+        .toBeGreaterThan(0);
+      await expect
+        .poll(() => dialog.locator("video.call-local-video").evaluate((v) => v.readyState))
+        .toBeGreaterThanOrEqual(2);
     },
   },
   {
@@ -2181,6 +2198,13 @@ scenes.push(
       await expect(dialog).toBeVisible();
       await expect(dialog.locator(".call-tile")).toHaveCount(3);
       await expect(dialog.getByRole("button", { name: "Invite people" })).toBeVisible();
+      await expect(dialog.locator("canvas.call-video-canvas")).toBeVisible();
+      await expect
+        .poll(() => dialog.locator("canvas.call-video-canvas").evaluate((el) => el.width))
+        .toBeGreaterThan(0);
+      await expect
+        .poll(() => dialog.locator("video.call-local-video").evaluate((v) => v.readyState))
+        .toBeGreaterThanOrEqual(2);
     },
   },
   {

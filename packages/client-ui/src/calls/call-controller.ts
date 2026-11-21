@@ -49,6 +49,7 @@ export type CallCapabilities = {
   directVideo: boolean;
   conferenceCreate: boolean;
   conferenceJoin: boolean;
+  conferenceInvite: boolean;
   conferenceVideo: boolean;
 };
 
@@ -97,6 +98,7 @@ export const EMPTY_CAPABILITIES: CallCapabilities = {
   directVideo: false,
   conferenceCreate: false,
   conferenceJoin: false,
+  conferenceInvite: false,
   conferenceVideo: false,
 };
 
@@ -106,6 +108,7 @@ export function normalizeCapabilities(raw: Record<string, boolean> | undefined):
     directVideo: raw?.directVideo === true,
     conferenceCreate: raw?.conferenceCreate === true,
     conferenceJoin: raw?.conferenceJoin === true,
+    conferenceInvite: raw?.conferenceInvite === true,
     conferenceVideo: raw?.conferenceVideo === true,
   };
 }
@@ -116,6 +119,7 @@ export function hasAnyCallCapability(caps: CallCapabilities): boolean {
     caps.directVideo ||
     caps.conferenceCreate ||
     caps.conferenceJoin ||
+    caps.conferenceInvite ||
     caps.conferenceVideo
   );
 }
@@ -126,6 +130,14 @@ export function offerKey(offer: { callId: string; revision: number } | null | un
 
 export function isTerminalCallState(state: CallView["state"] | undefined): boolean {
   return state === "ended" || state === "uncertain";
+}
+
+/** Outgoing calls remain in admission Phase::Dialing across dialing/ringing/connecting (including conferences) and accept only `call.cancel`. */
+export function isCancellableCall(call: Pick<CallView, "direction" | "state">): boolean {
+  return (
+    call.direction === "outgoing" &&
+    (call.state === "dialing" || call.state === "ringing" || call.state === "connecting")
+  );
 }
 
 export function formatCallDuration(seconds: number): string {
@@ -156,6 +168,18 @@ export function canCallThread(
     video: capabilities.directVideo,
     isGroup: false,
   };
+}
+
+function mergeTrackList(existing: CallTrack[], incoming: CallTrack[]): CallTrack[] {
+  const byId = new Map<number, CallTrack>();
+  for (const track of existing) byId.set(track.id, track);
+  for (const track of incoming) {
+    const prior = byId.get(track.id);
+    if (!prior || track.generation >= prior.generation) {
+      byId.set(track.id, track);
+    }
+  }
+  return [...byId.values()];
 }
 
 function readSkipPreview(): boolean {
@@ -194,6 +218,8 @@ export class BrowserCallTransport implements CallSessionTransport {
   private callsClient: NativeCallsClient | null = null;
   private mediaClient: NativeCallMediaClient | null = null;
   private mediaHandle: CallMediaHandle | null = null;
+  private attachedMediaCallId: string | null = null;
+  private attachingCallId: string | null = null;
   private audioFormat: CallAudioFormat = { sampleRate: 16000, channels: 1, frameMs: 20 };
   private callbacks: CallTransportCallbacks | null = null;
   private tracks: CallTrack[] = [];
@@ -224,11 +250,18 @@ export class BrowserCallTransport implements CallSessionTransport {
     }
     const calls = this.client.calls(this.account, this.webSocketFactory, {
       ticketProvider: async (socket, callId) => {
-        const ticket = await this.client.issueCallTicket(this.account, {
-          socket,
-          ...(callId ? { callId } : {}),
-        });
-        return ticket.ticket;
+        try {
+          const ticket = await this.client.issueCallTicket(this.account, {
+            socket,
+            ...(callId ? { callId } : {}),
+          });
+          return ticket.ticket;
+        } catch (error) {
+          if (error instanceof NativeApiError && [401, 403].includes(error.status)) {
+            throw new NativeCallError("forbidden");
+          }
+          throw error;
+        }
       },
     });
     this.callsClient = calls;
@@ -244,8 +277,11 @@ export class BrowserCallTransport implements CallSessionTransport {
           if (event.type === "track.added" || event.type === "track.updated") {
             this.upsertTrack(event.track);
           } else if (event.type === "track.removed") {
-            this.tracks = this.tracks.filter((item) => item.id !== event.trackId);
-            this.syncMediaTracks();
+            const existing = this.tracks.find((item) => item.id === event.trackId);
+            if (existing && existing.generation === event.generation) {
+              this.tracks = this.tracks.filter((item) => item.id !== event.trackId);
+              this.syncMediaTracks();
+            }
           }
           callbacks.onEvent(event);
         }
@@ -263,7 +299,13 @@ export class BrowserCallTransport implements CallSessionTransport {
     try {
       await calls.ready(crypto.randomUUID(), true, hello.audioFormat, { kind: "all" }, videoCaps);
     } catch {
-      // If ready fails due to older daemon or scope edge case, stay connected for outgoing actions.
+      if (this.callsClient !== calls) {
+        throw new NativeCallError("closed");
+      }
+      // If ready fails while the socket stays open (e.g. older daemon), stay connected for outgoing calls.
+    }
+    if (this.callsClient !== calls) {
+      throw new NativeCallError("closed");
     }
     return hello;
   }
@@ -288,21 +330,11 @@ export class BrowserCallTransport implements CallSessionTransport {
     requestId: string,
     contactId: string,
     options: NativeCallDialOptions,
-    devices: CallDeviceSelection,
-    speakerMuted: boolean,
   ): Promise<{ callId: string }> {
     const calls = this.requireConnected();
     const res = await calls.dial(requestId, contactId, options);
     const callId = res.callId;
     if (!callId) throw new NativeCallError("invalid_event");
-    await this.attachMediaForCall(
-      callId,
-      options.callType ?? "voice",
-      options.muted === true,
-      options.callType === "video" && options.cameraEnabled !== false,
-      devices,
-      speakerMuted,
-    );
     return { callId };
   }
 
@@ -311,21 +343,11 @@ export class BrowserCallTransport implements CallSessionTransport {
     groupId: string,
     invitees: string[],
     options: NativeCallDialOptions,
-    devices: CallDeviceSelection,
-    speakerMuted: boolean,
   ): Promise<{ callId: string }> {
     const calls = this.requireConnected();
     const res = await calls.startConference(requestId, groupId, invitees, options);
     const callId = res.callId;
     if (!callId) throw new NativeCallError("invalid_event");
-    await this.attachMediaForCall(
-      callId,
-      options.callType ?? "voice",
-      options.muted === true,
-      options.callType === "video" && options.cameraEnabled !== false,
-      devices,
-      speakerMuted,
-    );
     return { callId };
   }
 
@@ -334,21 +356,11 @@ export class BrowserCallTransport implements CallSessionTransport {
     invitationId: string,
     invitationRevision: number,
     options: NativeCallJoinOptions,
-    devices: CallDeviceSelection,
-    speakerMuted: boolean,
   ): Promise<{ callId: string }> {
     const calls = this.requireConnected();
     const res = await calls.joinConference(requestId, invitationId, invitationRevision, options);
     const callId = res.callId;
     if (!callId) throw new NativeCallError("invalid_event");
-    await this.attachMediaForCall(
-      callId,
-      options.cameraEnabled ? "video" : "voice",
-      options.muted === true,
-      options.cameraEnabled === true,
-      devices,
-      speakerMuted,
-    );
     return { callId };
   }
 
@@ -356,21 +368,73 @@ export class BrowserCallTransport implements CallSessionTransport {
     requestId: string,
     callId: string,
     expectedRevision: number,
-    callType: CallType,
+    _callType: CallType,
     options: NativeCallAnswerOptions,
-    devices: CallDeviceSelection,
-    speakerMuted: boolean,
   ): Promise<void> {
     const calls = this.requireConnected();
     await calls.answer(requestId, callId, expectedRevision, options);
-    await this.attachMediaForCall(
-      callId,
-      callType,
-      options.muted === true,
-      callType === "video" && options.cameraEnabled !== false,
-      devices,
-      speakerMuted,
-    );
+  }
+
+  async attachConnectedMedia(
+    callId: string,
+    callType: CallType,
+    initialMuted: boolean,
+    initialCameraEnabled: boolean,
+    devices: CallDeviceSelection,
+    speakerMuted: boolean,
+  ): Promise<void> {
+    const calls = this.callsClient;
+    const callbacks = this.callbacks;
+    if (!calls || !callbacks) return;
+    if (this.attachedMediaCallId === callId || this.attachingCallId === callId) return;
+
+    this.stopMedia();
+    this.attachingCallId = callId;
+    try {
+      const media = await calls.attachMedia(callId);
+      if (this.callsClient !== calls || this.attachingCallId !== callId) {
+        media.close();
+        return;
+      }
+      this.mediaClient = media;
+      this.attachedMediaCallId = callId;
+      const audioTracks = media.tracks();
+      const videoTracks = media.videoTracks();
+      this.tracks = mergeTrackList(this.tracks, [
+        audioTracks.sendTrack,
+        ...audioTracks.receiveTracks,
+        ...(videoTracks.sendTrack ? [videoTracks.sendTrack] : []),
+        ...videoTracks.receiveTracks,
+      ]);
+      callbacks.onTracksSynced([...this.tracks]);
+      const handle = await this.backend.attach({
+        media,
+        audioFormat: this.audioFormat,
+        callType,
+        initialMuted,
+        initialCameraEnabled,
+        devices,
+        speakerMuted,
+        onLocalStream: callbacks.onLocalStream,
+        onLocalJpeg: callbacks.onLocalJpeg,
+        onRemoteFrame: callbacks.onRemoteFrame,
+        onTrackCleared: callbacks.onTrackCleared,
+        onLevels: callbacks.onLevels,
+        onError: callbacks.onMediaError,
+      });
+      if (this.mediaClient !== media || this.attachingCallId !== callId) {
+        handle.stop();
+        return;
+      }
+      this.mediaHandle = handle;
+      this.attachingCallId = null;
+      this.syncMediaTracks();
+    } catch (error) {
+      if (this.attachingCallId === callId) {
+        this.attachingCallId = null;
+      }
+      callbacks.onMediaError(error instanceof NativeCallError ? error.code : "media_attach_failed");
+    }
   }
 
   async reject(requestId: string, callId: string, expectedRevision: number): Promise<void> {
@@ -385,8 +449,13 @@ export class BrowserCallTransport implements CallSessionTransport {
 
   async setMute(requestId: string, callId: string, muted: boolean): Promise<void> {
     this.mediaHandle?.setMuted(muted);
-    const calls = this.requireConnected();
-    await calls.setMute(requestId, callId, muted);
+    try {
+      const calls = this.requireConnected();
+      await calls.setMute(requestId, callId, muted);
+    } catch (error) {
+      this.mediaHandle?.setMuted(!muted);
+      throw error;
+    }
   }
 
   async setCamera(requestId: string, callId: string, enabled: boolean): Promise<void> {
@@ -413,10 +482,17 @@ export class BrowserCallTransport implements CallSessionTransport {
     await calls.end(type, requestId, callId, expectedRevision);
   }
 
-  stopMedia(): void {
-    this.tracks = [];
+  stopLocalMedia(): void {
+    this.attachingCallId = null;
     this.mediaHandle?.stop();
     this.mediaHandle = null;
+    this.mediaClient?.stopAudio();
+  }
+
+  stopMedia(): void {
+    this.stopLocalMedia();
+    this.tracks = [];
+    this.attachedMediaCallId = null;
     this.mediaClient?.close();
     this.mediaClient = null;
   }
@@ -426,63 +502,10 @@ export class BrowserCallTransport implements CallSessionTransport {
     return this.callsClient;
   }
 
-  private async attachMediaForCall(
-    callId: string,
-    callType: CallType,
-    initialMuted: boolean,
-    initialCameraEnabled: boolean,
-    devices: CallDeviceSelection,
-    speakerMuted: boolean,
-  ): Promise<void> {
-    const calls = this.callsClient;
-    const callbacks = this.callbacks;
-    if (!calls || !callbacks) return;
-    this.stopMedia();
-    try {
-      const media = await calls.attachMedia(callId);
-      if (this.callsClient !== calls) {
-        media.close();
-        return;
-      }
-      this.mediaClient = media;
-      const audioTracks = media.tracks();
-      const videoTracks = media.videoTracks();
-      this.tracks = [
-        audioTracks.sendTrack,
-        ...audioTracks.receiveTracks,
-        ...(videoTracks.sendTrack ? [videoTracks.sendTrack] : []),
-        ...videoTracks.receiveTracks,
-      ];
-      const handle = await this.backend.attach({
-        media,
-        audioFormat: this.audioFormat,
-        callType,
-        initialMuted,
-        initialCameraEnabled,
-        devices,
-        speakerMuted,
-        onLocalStream: callbacks.onLocalStream,
-        onLocalJpeg: callbacks.onLocalJpeg,
-        onRemoteFrame: callbacks.onRemoteFrame,
-        onTrackCleared: callbacks.onTrackCleared,
-        onLevels: callbacks.onLevels,
-        onError: callbacks.onMediaError,
-      });
-      if (this.mediaClient !== media) {
-        handle.stop();
-        return;
-      }
-      this.mediaHandle = handle;
-      this.syncMediaTracks();
-    } catch (error) {
-      callbacks.onMediaError(error instanceof NativeCallError ? error.code : "media_attach_failed");
-    }
-  }
-
   private upsertTrack(track: CallTrack): void {
-    const idx = this.tracks.findIndex((item) => item.id === track.id);
-    if (idx >= 0) this.tracks[idx] = track;
-    else this.tracks.push(track);
+    const prior = this.tracks.find((item) => item.id === track.id);
+    if (prior && track.generation < prior.generation) return;
+    this.tracks = mergeTrackList(this.tracks, [track]);
     this.syncMediaTracks();
   }
 
@@ -516,6 +539,7 @@ export class CallController {
 
   private state: CallControllerState;
   private started = false;
+  private probedOnce = false;
   private disposed = false;
   private probeAbort: AbortController | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -606,8 +630,32 @@ export class CallController {
     void this.probeAndConnect();
   }
 
+  /**
+   * Pause a background account's call signaling when switching accounts so an
+   * unseen account never keeps `call.ready` armed or rings invisibly.
+   */
+  pause(): void {
+    if (this.disposed || !this.started) return;
+    this.ringtone.stop();
+    if (this.state.currentCall?.ownedByThisClient) return;
+    this.started = false;
+    this.probeAbort?.abort();
+    this.probeAbort = null;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.transport?.disconnect();
+    this.update({
+      status: "idle",
+      currentOffer: null,
+      currentPendingOffer: null,
+    });
+  }
+
   close(): void {
     this.disposed = true;
+    this.started = false;
     this.probeAbort?.abort();
     this.probeAbort = null;
     if (this.reconnectTimer) {
@@ -810,7 +858,13 @@ export class CallController {
     this.update({ actionPending: true, lastError: null });
     try {
       await this.transport.reject(crypto.randomUUID(), offer.callId, offer.revision);
-      this.update({ actionPending: false, currentOffer: null });
+      const stillSame =
+        this.state.currentOffer?.callId === offer.callId &&
+        this.state.currentOffer.revision === offer.revision;
+      this.update({
+        actionPending: false,
+        ...(stillSame ? { currentOffer: null } : {}),
+      });
     } catch (error) {
       this.handleActionFailure(error);
     }
@@ -818,7 +872,16 @@ export class CallController {
 
   async inviteMembers(contactIds: string[]): Promise<void> {
     const call = this.state.currentCall;
-    if (!this.transport || !call || !call.ownedByThisClient || call.kind !== "conference") return;
+    if (
+      !this.transport ||
+      !call ||
+      !call.ownedByThisClient ||
+      call.kind !== "conference" ||
+      call.state !== "connected" ||
+      !this.state.capabilities.conferenceInvite
+    ) {
+      return;
+    }
     this.update({ actionPending: true, lastError: null });
     try {
       await this.transport.invite(crypto.randomUUID(), call.callId, contactIds);
@@ -843,7 +906,15 @@ export class CallController {
 
   async toggleCamera(): Promise<void> {
     const call = this.state.currentCall;
-    if (!this.transport || !call || !call.ownedByThisClient || call.callType !== "video") return;
+    if (
+      !this.transport ||
+      !call ||
+      !call.ownedByThisClient ||
+      call.callType !== "video" ||
+      call.state !== "connected"
+    ) {
+      return;
+    }
     const next = !this.state.localCamera;
     this.update({ localCamera: next, lastError: null, mediaWarning: null });
     try {
@@ -863,10 +934,9 @@ export class CallController {
   async hangupOrCancel(): Promise<void> {
     const call = this.state.currentCall;
     if (!this.transport || !call || !call.ownedByThisClient) return;
-    const action: "call.cancel" | "call.hangup" =
-      call.direction === "outgoing" && (call.state === "dialing" || call.state === "ringing")
-        ? "call.cancel"
-        : "call.hangup";
+    const action: "call.cancel" | "call.hangup" = isCancellableCall(call)
+      ? "call.cancel"
+      : "call.hangup";
     this.update({ actionPending: true, lastError: null });
     try {
       await this.transport.end(action, crypto.randomUUID(), call.callId, call.revision);
@@ -888,14 +958,15 @@ export class CallController {
   }
 
   private async probeAndConnect(): Promise<void> {
-    if (!this.transport || this.disposed) return;
+    if (!this.transport || this.disposed || !this.started) return;
     this.probeAbort?.abort();
     const abort = new AbortController();
     this.probeAbort = abort;
     this.update({ status: "checking" });
     try {
       const snap = await this.transport.probe(abort.signal);
-      if (this.disposed || abort.signal.aborted) return;
+      if (this.disposed || !this.started || abort.signal.aborted) return;
+      this.probedOnce = true;
       const caps = normalizeCapabilities(snap.capabilities);
       if (!hasAnyCallCapability(caps)) {
         this.update({
@@ -917,7 +988,7 @@ export class CallController {
       });
       await this.connectSocket();
     } catch (error) {
-      if (this.disposed || abort.signal.aborted) return;
+      if (this.disposed || !this.started || abort.signal.aborted) return;
       if (error instanceof NativeApiError && [401, 403, 404, 501].includes(error.status)) {
         // Missing `calls` scope or unsupported backend: stay silent with no error banners.
         this.update({ status: "unavailable", capabilities: { ...EMPTY_CAPABILITIES } });
@@ -929,11 +1000,16 @@ export class CallController {
   }
 
   private async connectSocket(): Promise<void> {
-    if (!this.transport || this.disposed) return;
+    if (!this.transport || this.disposed || !this.started) return;
     try {
       const hello = await this.transport.connect({
         onEvent: (event) => this.applyEvent(event),
         onDisconnected: (code) => this.handleDisconnect(code),
+        onTracksSynced: (tracks) => {
+          if (!this.disposed) {
+            this.update({ tracks: mergeTrackList(this.state.tracks, tracks) });
+          }
+        },
         onLocalStream: (stream) => {
           if (!this.disposed) this.update({ localStream: stream });
         },
@@ -949,7 +1025,7 @@ export class CallController {
           if (!this.disposed) this.update({ mediaWarning: code });
         },
       });
-      if (this.disposed) {
+      if (this.disposed || !this.started) {
         this.transport.disconnect();
         return;
       }
@@ -975,7 +1051,7 @@ export class CallController {
       this.syncDurationTimer(nextCall);
       this.syncRingtone();
     } catch (error) {
-      if (this.disposed) return;
+      if (this.disposed || !this.started) return;
       if (error instanceof NativeApiError && [401, 403, 404, 501].includes(error.status)) {
         this.update({ status: "unavailable", capabilities: { ...EMPTY_CAPABILITIES } });
         return;
@@ -1001,20 +1077,23 @@ export class CallController {
           this.clearAllRemoteFrames();
           this.stopDurationTimer();
         }
+        const clearActiveCall = !event.availability.busy || lostOwnership;
         this.update({
           availability: event.availability,
-          ...(!event.availability.busy
+          ...(clearActiveCall
             ? {
                 currentCall: null,
-                currentOffer: null,
                 tracks: [],
                 localStream: null,
                 levels: { ...EMPTY_CALL_LEVELS },
                 connectedAtMs: null,
                 elapsedSeconds: 0,
                 capWarning: false,
+                invitationResults: null,
+                mediaWarning: null,
               }
             : {}),
+          ...(!event.availability.busy ? { currentOffer: null } : {}),
         });
         this.syncRingtone();
         break;
@@ -1046,9 +1125,19 @@ export class CallController {
       }
       case "call.state": {
         const call = event.call;
+        if (
+          this.state.currentCall?.callId === call.callId &&
+          call.revision < this.state.currentCall.revision
+        ) {
+          break;
+        }
         const terminal = isTerminalCallState(call.state);
         if (terminal || !call.ownedByThisClient) {
           this.transport?.stopMedia();
+          this.clearAllRemoteFrames();
+        } else if (call.state === "ending") {
+          // Stop local capture/playout immediately while retaining the media socket until terminal state.
+          this.transport?.stopLocalMedia();
           this.clearAllRemoteFrames();
         }
         let notice = this.state.notice;
@@ -1066,6 +1155,12 @@ export class CallController {
             this.state.currentOffer?.callId === call.callId ? null : this.state.currentOffer,
           tracks: nextTracks,
           activePeerId: nextCall ? peerId : null,
+          ...(call.state === "ending"
+            ? {
+                localStream: null,
+                levels: { ...EMPTY_CALL_LEVELS },
+              }
+            : {}),
           ...(terminal
             ? {
                 localStream: null,
@@ -1081,13 +1176,23 @@ export class CallController {
               }),
           notice,
         });
+        if (call.state === "connected" && call.ownedByThisClient) {
+          void this.transport?.attachConnectedMedia(
+            call.callId,
+            call.callType,
+            this.state.localMuted,
+            this.state.localCamera,
+            this.state.selectedDevices,
+            this.state.speakerMuted,
+          );
+        }
         this.syncDurationTimer(nextCall);
         this.syncRingtone();
         break;
       }
       case "participant.updated": {
         const current = this.state.currentCall;
-        if (!current || current.callId !== event.callId) break;
+        if (!current || current.callId !== event.callId || event.revision < current.revision) break;
         const participants = [...(current.participants ?? [])];
         const idx = participants.findIndex(
           (item) => item.participantId === event.participant.participantId,
@@ -1134,13 +1239,15 @@ export class CallController {
       case "track.added":
       case "track.updated": {
         if (this.state.currentCall && event.callId !== this.state.currentCall.callId) break;
-        const next = this.state.tracks.filter((t) => t.id !== event.track.id);
-        next.push(event.track);
-        this.update({ tracks: next });
+        const prior = this.state.tracks.find((t) => t.id === event.track.id);
+        if (prior && event.track.generation < prior.generation) break;
+        this.update({ tracks: mergeTrackList(this.state.tracks, [event.track]) });
         break;
       }
       case "track.removed": {
         if (this.state.currentCall && event.callId !== this.state.currentCall.callId) break;
+        const existing = this.state.tracks.find((t) => t.id === event.trackId);
+        if (!existing || existing.generation !== event.generation) break;
         const next = this.state.tracks.filter((t) => t.id !== event.trackId);
         this.clearRemoteFrame(event.trackId);
         this.update({ tracks: next });
@@ -1168,7 +1275,7 @@ export class CallController {
   }
 
   private handleDisconnect(code: string): void {
-    if (this.disposed) return;
+    if (this.disposed || !this.started) return;
     this.ringtone.stop();
     this.stopDurationTimer();
     const hadOwnedCall = this.state.currentCall?.ownedByThisClient === true;
@@ -1190,12 +1297,15 @@ export class CallController {
   }
 
   private scheduleReconnect(): void {
-    if (this.disposed || this.reconnectTimer) return;
+    if (this.disposed || !this.started || this.reconnectTimer) return;
     const delay = this.reconnectDelayMs;
     this.reconnectDelayMs = Math.min(15000, this.reconnectDelayMs * 2);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      if (!this.disposed) void this.connectSocket();
+      if (!this.disposed && this.started) {
+        if (this.probedOnce) void this.connectSocket();
+        else void this.probeAndConnect();
+      }
     }, delay);
   }
 
@@ -1218,6 +1328,7 @@ export class CallController {
     const offer = this.state.currentOffer;
     const key = offerKey(offer);
     const shouldRing =
+      this.started &&
       !!offer &&
       key !== this.state.dismissedOfferKey &&
       !this.state.currentCall?.ownedByThisClient;

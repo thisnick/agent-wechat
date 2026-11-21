@@ -4,7 +4,9 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
+  type RefObject,
 } from "react";
+import { createPortal } from "react-dom";
 import { isNativeTombstone, type NativeGroupMember } from "@agent-wechat/shared";
 import type { Connection } from "../connection.ts";
 import { HubAvatar } from "../avatars.tsx";
@@ -70,15 +72,18 @@ export function RemoteVideoCanvas({
 
   useEffect(() => {
     let disposed = false;
+    let loadSeq = 0;
     const renderFrame = (frame: RemoteVideoFrame | null) => {
       const canvas = canvasRef.current;
       if (!canvas || disposed) return;
       if (!frame) {
+        loadSeq += 1;
         const ctx = canvas.getContext("2d");
         ctx?.clearRect(0, 0, canvas.width, canvas.height);
         return;
       }
       if (frame.bitmap) {
+        loadSeq += 1;
         drawRotatedFrame(
           canvas,
           frame.bitmap,
@@ -87,6 +92,7 @@ export function RemoteVideoCanvas({
           frame.rotationDegrees,
         );
       } else if (frame.jpegBytes) {
+        const seq = ++loadSeq;
         const bytes = new Uint8Array(frame.jpegBytes.byteLength);
         bytes.set(frame.jpegBytes);
         const blob = new Blob([bytes], { type: "image/jpeg" });
@@ -94,7 +100,7 @@ export function RemoteVideoCanvas({
         const img = new Image();
         img.onload = () => {
           URL.revokeObjectURL(url);
-          if (!disposed && canvasRef.current) {
+          if (!disposed && seq === loadSeq && canvasRef.current) {
             drawRotatedFrame(
               canvasRef.current,
               img,
@@ -110,7 +116,12 @@ export function RemoteVideoCanvas({
     };
 
     renderFrame(controller.getRemoteFrame(trackId));
-    return controller.subscribeRemoteFrame(trackId, renderFrame);
+    const unsubscribe = controller.subscribeRemoteFrame(trackId, renderFrame);
+    return () => {
+      disposed = true;
+      loadSeq += 1;
+      unsubscribe();
+    };
   }, [controller, trackId]);
 
   return (
@@ -152,9 +163,11 @@ export function LocalVideoSurface({
   useEffect(() => {
     if (!subscribeJpeg || stream) return;
     let disposed = false;
-    return subscribeJpeg((jpegBytes) => {
+    let loadSeq = 0;
+    const unsubscribe = subscribeJpeg((jpegBytes) => {
       const canvas = canvasRef.current;
       if (!canvas || disposed) return;
+      const seq = ++loadSeq;
       const bytes = new Uint8Array(jpegBytes.byteLength);
       bytes.set(jpegBytes);
       const blob = new Blob([bytes], { type: "image/jpeg" });
@@ -162,13 +175,18 @@ export function LocalVideoSurface({
       const img = new Image();
       img.onload = () => {
         URL.revokeObjectURL(url);
-        if (!disposed && canvasRef.current) {
+        if (!disposed && seq === loadSeq && canvasRef.current) {
           drawRotatedFrame(canvasRef.current, img, img.naturalWidth, img.naturalHeight, 0);
         }
       };
       img.onerror = () => URL.revokeObjectURL(url);
       img.src = url;
     });
+    return () => {
+      disposed = true;
+      loadSeq += 1;
+      unsubscribe();
+    };
   }, [subscribeJpeg, stream]);
 
   if (stream) {
@@ -196,11 +214,13 @@ export function LocalVideoSurface({
 export function CallPreviewPopover({
   controller,
   peerName,
+  triggerRef,
   onStart,
   onClose,
 }: {
   controller: CallController;
   peerName: string;
+  triggerRef?: RefObject<HTMLElement | null>;
   onStart: (options: { muted: boolean; cameraEnabled: boolean }) => void;
   onClose: () => void;
 }) {
@@ -208,6 +228,7 @@ export function CallPreviewPopover({
   const [cameraEnabled, setCameraEnabled] = useState(true);
   const [muted, setMuted] = useState(false);
   const [preview, setPreview] = useState<LocalPreviewSurface | null>(null);
+  const previewRef = useRef<LocalPreviewSurface | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
 
@@ -223,9 +244,11 @@ export function CallPreviewPopover({
       }
     };
     const onPointerDown = (event: PointerEvent) => {
-      if (popoverRef.current && !popoverRef.current.contains(event.target as Node)) {
-        onClose();
-      }
+      const target = event.target as Node | null;
+      if (!target) return;
+      if (popoverRef.current?.contains(target)) return;
+      if (triggerRef?.current?.contains(target)) return;
+      onClose();
     };
     window.addEventListener("keydown", onKeyDown);
     document.addEventListener("pointerdown", onPointerDown);
@@ -233,14 +256,13 @@ export function CallPreviewPopover({
       window.removeEventListener("keydown", onKeyDown);
       document.removeEventListener("pointerdown", onPointerDown);
     };
-  }, [onClose]);
+  }, [onClose, triggerRef]);
 
   useEffect(() => {
     if (!cameraEnabled) {
-      setPreview((prev) => {
-        prev?.stop();
-        return null;
-      });
+      previewRef.current?.stop();
+      previewRef.current = null;
+      setPreview(null);
       setPreviewError(null);
       return;
     }
@@ -256,11 +278,13 @@ export function CallPreviewPopover({
             return;
           }
           activeSurface = surface;
+          previewRef.current = surface;
           setPreview(surface);
           void controller.refreshDevices();
         },
         () => {
           if (!cancelled) {
+            previewRef.current = null;
             setPreview(null);
             setPreviewError(t("calls.cameraPreviewUnavailable"));
           }
@@ -269,6 +293,7 @@ export function CallPreviewPopover({
     return () => {
       cancelled = true;
       activeSurface?.stop();
+      if (previewRef.current === activeSurface) previewRef.current = null;
       setPreview(null);
     };
   }, [controller, cameraEnabled, callState.selectedDevices.cameraDeviceId]);
@@ -393,7 +418,13 @@ export function CallPreviewPopover({
           type="button"
           className="primary call-start-btn"
           disabled={callState.availability.busy || callState.actionPending}
-          onClick={() => onStart({ muted, cameraEnabled })}
+          onClick={() => {
+            // Release single-consumer hardware cameras (V4L2/Windows) before dialing.
+            previewRef.current?.stop();
+            previewRef.current = null;
+            setPreview(null);
+            onStart({ muted, cameraEnabled });
+          }}
         >
           <Icon name="video" />
           {t("calls.startVideoCall")}
@@ -403,7 +434,7 @@ export function CallPreviewPopover({
   );
 }
 
-/** NewChat-style 1-100 member picker modal for starting a group call or inviting mid-call. */
+/** NewChat-style 1-100 member picker modal (native top-layer <dialog> so it stacks above Theater). */
 export function GroupCallPickerModal({
   connection,
   account,
@@ -413,6 +444,7 @@ export function GroupCallPickerModal({
   initialCallType = "voice",
   allowVideo,
   excludeIds = [],
+  busy = false,
   onSubmit,
   onClose,
 }: {
@@ -424,6 +456,7 @@ export function GroupCallPickerModal({
   initialCallType?: "voice" | "video";
   allowVideo: boolean;
   excludeIds?: string[];
+  busy?: boolean;
   onSubmit: (payload: {
     invitees: string[];
     callType: "voice" | "video";
@@ -434,6 +467,7 @@ export function GroupCallPickerModal({
 }) {
   const session = connection.session;
   const sessionState = useSyncExternalStore(session.subscribe, session.snapshot);
+  const dialogRef = useRef<HTMLDialogElement>(null);
   const [members, setMembers] = useState<NativeGroupMember[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -448,11 +482,33 @@ export function GroupCallPickerModal({
   );
 
   const ownUsername = sessionState.accounts.find((a) => a.id === account)?.ownUsername;
+  const excludeKey = excludeIds.join("\0");
   const excluded = useMemo(() => {
     const set = new Set(excludeIds);
     if (ownUsername) set.add(ownUsername);
     return set;
-  }, [excludeIds, ownUsername]);
+  }, [excludeKey, ownUsername]);
+
+  // Prune any selected members that join the call while the invite picker is open.
+  useEffect(() => {
+    setSelected((prev) => {
+      const next = prev.filter((id) => !excluded.has(id));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [excluded]);
+
+  useEffect(() => {
+    const el = dialogRef.current;
+    if (!el) return;
+    if (!el.open) {
+      try {
+        el.showModal();
+      } catch {}
+    }
+    return () => {
+      if (el.open) el.close();
+    };
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -476,17 +532,6 @@ export function GroupCallPickerModal({
     );
     return () => controller.abort();
   }, [session.client, account, groupId]);
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose]);
 
   const candidates = useMemo(() => {
     const contactNames = new Map(
@@ -513,17 +558,25 @@ export function GroupCallPickerModal({
     );
   };
 
-  return (
-    <div className="overlay-backdrop" onClick={onClose}>
+  return createPortal(
+    <dialog
+      ref={dialogRef}
+      className="call-picker-dialog"
+      aria-label={
+        mode === "start"
+          ? t("calls.startGroupCallTitle", { name: groupName })
+          : t("calls.inviteMembersTitle")
+      }
+      onCancel={(event) => {
+        event.preventDefault();
+        onClose();
+      }}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
       <section
         className="modal new-chat call-picker-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-label={
-          mode === "start"
-            ? t("calls.startGroupCallTitle", { name: groupName })
-            : t("calls.inviteMembersTitle")
-        }
         onClick={(event) => event.stopPropagation()}
       >
         <div className="modal-head">
@@ -639,7 +692,7 @@ export function GroupCallPickerModal({
           <button
             type="button"
             className="primary call-start-btn"
-            disabled={selected.length === 0}
+            disabled={selected.length === 0 || busy}
             onClick={() =>
               onSubmit({
                 invitees: selected,
@@ -658,7 +711,8 @@ export function GroupCallPickerModal({
           </button>
         </div>
       </section>
-    </div>
+    </dialog>,
+    document.body,
   );
 }
 

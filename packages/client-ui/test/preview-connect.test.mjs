@@ -69,7 +69,13 @@ test("two private preview hubs keep credentials separate and remain selectable w
       res.end(JSON.stringify({ serverId: id, version: { backend: "native" } }));
     });
     server.on("upgrade", (req, socket) => {
-      upgrades.push({ id, url: req.url, auth: req.headers.authorization, origin: req.headers.origin });
+      upgrades.push({
+        id,
+        url: req.url,
+        auth: req.headers.authorization,
+        origin: req.headers.origin,
+        cookie: req.headers.cookie,
+      });
       socket.end(
         "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n",
       );
@@ -129,15 +135,21 @@ test("two private preview hubs keep credentials separate and remain selectable w
 
   // WebSocket upgrades allow only ticket-authenticated calls sockets from the preview origin.
   const ticket = "a".repeat(64);
-  const okControl = await rawUpgrade(port, `/__hubs/one/v1/accounts/a/calls/socket?ticket=${ticket}`, { Origin: ready.origin });
+  const okControl = await rawUpgrade(port, `/__hubs/one/v1/accounts/a/calls/socket?ticket=${ticket}`, {
+    Origin: ready.origin,
+    Cookie: "agentwechat-connect=secret-cookie",
+  });
   assert.equal(okControl.status, 101);
-  const okMedia = await rawUpgrade(port, `/__hubs/two/v1/accounts/a/calls/call-1/media?ticket=${ticket}`, { Origin: ready.origin });
+  const okMedia = await rawUpgrade(port, `/__hubs/two/v1/accounts/a/calls/call-1/media?ticket=${ticket}`, {
+    Origin: ready.origin,
+  });
   assert.equal(okMedia.status, 101);
   assert.equal(upgrades.length, 2);
   assert.equal(upgrades[0].id, "one");
   assert.equal(upgrades[0].url, `/v1/accounts/a/calls/socket?ticket=${ticket}`);
   assert.equal(upgrades[0].auth, undefined);
   assert.equal(upgrades[0].origin, undefined);
+  assert.equal(upgrades[0].cookie, undefined);
   assert.equal(upgrades[1].id, "two");
   assert.equal(upgrades[1].url, `/v1/accounts/a/calls/call-1/media?ticket=${ticket}`);
 
@@ -145,7 +157,11 @@ test("two private preview hubs keep credentials separate and remain selectable w
   for (const [badPath, badHeaders, expectedStatus] of [
     [`/__hubs/one/v1/accounts/a/calls/socket`, { Origin: ready.origin }, 403],
     [`/__hubs/one/v1/accounts/a/calls/socket?ticket=short`, { Origin: ready.origin }, 403],
+    [`/__hubs/one/v1/accounts/a/calls/socket?ticket=${ticket}`, {}, 403],
+    [`/__hubs/one/v1/accounts/a/calls/socket?ticket=${ticket}`, { Origin: "" }, 403],
     [`/__hubs/one/v1/accounts/a/calls/socket?ticket=${ticket}`, { Origin: "https://untrusted.example" }, 403],
+    [`/__hubs/one/v1/accounts/../a/calls/socket?ticket=${ticket}`, { Origin: ready.origin }, 403],
+    [`/__hubs/one/v1/accounts//calls/socket?ticket=${ticket}`, { Origin: ready.origin }, 403],
     [`/__hubs/one/v1/status?ticket=${ticket}`, { Origin: ready.origin }, 403],
     [`/__hubs/unknown/v1/accounts/a/calls/socket?ticket=${ticket}`, { Origin: ready.origin }, 404],
   ]) {

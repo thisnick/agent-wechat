@@ -118,6 +118,7 @@ export interface CallMediaBackend {
 export type CallTransportCallbacks = {
   onEvent: (event: CallEvent) => void;
   onDisconnected: (code: string) => void;
+  onTracksSynced: (tracks: CallTrack[]) => void;
   onLocalStream: (stream: MediaStream | null) => void;
   onLocalJpeg: (jpegBytes: Uint8Array) => void;
   onRemoteFrame: (frame: RemoteVideoFrame) => void;
@@ -142,6 +143,15 @@ export interface CallSessionTransport {
   startConference(requestId: string, groupId: string, invitees: string[], options: NativeCallDialOptions, devices: CallDeviceSelection, speakerMuted: boolean): Promise<{ callId: string }>;
   joinConference(requestId: string, invitationId: string, invitationRevision: number, options: NativeCallJoinOptions, devices: CallDeviceSelection, speakerMuted: boolean): Promise<{ callId: string }>;
   answer(requestId: string, callId: string, expectedRevision: number, callType: CallType, options: NativeCallAnswerOptions, devices: CallDeviceSelection, speakerMuted: boolean): Promise<void>;
+  /** Attach owner media once the call reaches the `connected` state. */
+  attachConnectedMedia(
+    callId: string,
+    callType: CallType,
+    initialMuted: boolean,
+    initialCameraEnabled: boolean,
+    devices: CallDeviceSelection,
+    speakerMuted: boolean,
+  ): Promise<void>;
   reject(requestId: string, callId: string, expectedRevision: number): Promise<void>;
   invite(requestId: string, callId: string, contactIds: string[]): Promise<void>;
   setMute(requestId: string, callId: string, muted: boolean): Promise<void>;
@@ -149,6 +159,9 @@ export interface CallSessionTransport {
   setSpeakerMuted(muted: boolean): void;
   switchDevices(selection: CallDeviceSelection): Promise<void>;
   end(type: "call.cancel" | "call.hangup", requestId: string, callId: string, expectedRevision: number): Promise<void>;
+  /** Stop local devices/audio on `ending` while retaining the media socket until terminal state. */
+  stopLocalMedia(): void;
+  /** Tear down local media and close the media socket on terminal state or ownership loss. */
   stopMedia(): void;
   /** Optional host fullscreen toggle (e.g. Tauri window fullscreen fallback). */
   setFullscreen?(enabled: boolean): Promise<boolean>;

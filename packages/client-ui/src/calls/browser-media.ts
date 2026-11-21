@@ -157,8 +157,9 @@ class AgentWechatCallAudioProcessor extends AudioWorkletProcessor {
         for (const track of this.tracks.values()) {
           sum += this.sampleTrack(track);
         }
-        // Soft-clip multi-participant mix to [-1, 1]
-        const mixed = sum > 0.9 || sum < -0.9 ? Math.tanh(sum) : sum;
+        // C1 continuous soft-clip knee at +/-0.9 to avoid step distortion on multi-speaker peaks
+        const abs = Math.abs(sum);
+        const mixed = abs > 0.9 ? Math.sign(sum) * (0.9 + 0.1 * Math.tanh((abs - 0.9) / 0.1)) : sum;
         const value = this.speakerMuted ? 0 : mixed;
         this.speakerSumSq += value * value;
         this.speakerCount += 1;
@@ -357,11 +358,14 @@ class BrowserCallMediaSession implements CallMediaHandle {
   private captureTimer: ReturnType<typeof setTimeout> | null = null;
   private videoSendTrack: CallVideoTrack | null = null;
   private videoEncoder: VideoEncoder | null = null;
+  private encoderDims: { w: number; h: number } | null = null;
+  private cameraGen = 0;
   private forceNextKeyframe = true;
   private captureBusy = false;
 
-  // Remote video tracks & decoders
-  private readonly receiveTrackParticipants = new Map<number, string | undefined>();
+  // Remote tracks & decoders (audio and video receive IDs tracked separately)
+  private readonly audioReceiveTrackIds = new Set<number>();
+  private readonly videoReceiveTrackParticipants = new Map<number, string | undefined>();
   private readonly decoders = new Map<number, { decoder: VideoDecoder; awaitingKeyframe: boolean; codec: string }>();
   private readonly lastKeyframeRequestAt = new Map<number, number>();
   private readonly decodingJpegTracks = new Set<number>();
@@ -380,10 +384,13 @@ class BrowserCallMediaSession implements CallMediaHandle {
     try {
       const at = this.media.tracks();
       this.audioSendGeneration = at.sendTrack.generation;
+      for (const track of at.receiveTracks) {
+        this.audioReceiveTrackIds.add(track.id);
+      }
       const vt = this.media.videoTracks();
       this.videoSendTrack = vt.sendTrack;
       for (const track of vt.receiveTracks) {
-        this.receiveTrackParticipants.set(track.id, track.participantId);
+        this.videoReceiveTrackParticipants.set(track.id, track.participantId);
       }
     } catch {
       // Media tracks may update shortly after attach.
@@ -547,7 +554,10 @@ class BrowserCallMediaSession implements CallMediaHandle {
   }
 
   private handleIncomingVideoFrame(frame: NativeCallVideoFrame): void {
-    const participantId = this.receiveTrackParticipants.get(frame.trackId);
+    if (!this.videoReceiveTrackParticipants.has(frame.trackId)) {
+      this.videoReceiveTrackParticipants.set(frame.trackId, undefined);
+    }
+    const participantId = this.videoReceiveTrackParticipants.get(frame.trackId);
     if (frame.codec === "jpeg") {
       if (typeof createImageBitmap === "function" && typeof Blob !== "undefined") {
         // Drop intermediate frames if a previous JPEG decode on this track is still in flight.
@@ -559,13 +569,13 @@ class BrowserCallMediaSession implements CallMediaHandle {
         void createImageBitmap(blob).then(
           (bitmap) => {
             this.decodingJpegTracks.delete(frame.trackId);
-            if (this.stopped) {
+            if (this.stopped || !this.videoReceiveTrackParticipants.has(frame.trackId)) {
               bitmap.close();
               return;
             }
             this.options.onRemoteFrame({
               trackId: frame.trackId,
-              participantId,
+              participantId: this.videoReceiveTrackParticipants.get(frame.trackId),
               rotationDegrees: frame.rotationDegrees,
               bitmap,
               width: bitmap.width,
@@ -574,10 +584,10 @@ class BrowserCallMediaSession implements CallMediaHandle {
           },
           () => {
             this.decodingJpegTracks.delete(frame.trackId);
-            if (!this.stopped) {
+            if (!this.stopped && this.videoReceiveTrackParticipants.has(frame.trackId)) {
               this.options.onRemoteFrame({
                 trackId: frame.trackId,
-                participantId,
+                participantId: this.videoReceiveTrackParticipants.get(frame.trackId),
                 rotationDegrees: frame.rotationDegrees,
                 jpegBytes: bytes,
               });
@@ -611,21 +621,20 @@ class BrowserCallMediaSession implements CallMediaHandle {
       const rotationRef = { value: frame.rotationDegrees };
       const decoder = new VideoDecoder({
         output: (videoFrame) => {
-          if (this.stopped) {
+          if (this.stopped || !this.videoReceiveTrackParticipants.has(trackId)) {
             videoFrame.close();
             return;
           }
-          const participant = this.receiveTrackParticipants.get(trackId);
           void createImageBitmap(videoFrame)
             .then((bitmap) => {
               videoFrame.close();
-              if (this.stopped) {
+              if (this.stopped || !this.videoReceiveTrackParticipants.has(trackId)) {
                 bitmap.close();
                 return;
               }
               this.options.onRemoteFrame({
                 trackId,
-                participantId: participant,
+                participantId: this.videoReceiveTrackParticipants.get(trackId),
                 rotationDegrees: rotationRef.value,
                 bitmap,
                 width: bitmap.width,
@@ -683,6 +692,62 @@ class BrowserCallMediaSession implements CallMediaHandle {
     } catch {}
   }
 
+  private ensureH264Encoder(width: number, height: number, fps: number, bitrateKbps: number): void {
+    if (typeof VideoEncoder !== "function" || typeof VideoFrame !== "function") return;
+    if (
+      this.videoEncoder &&
+      this.videoEncoder.state === "configured" &&
+      this.encoderDims?.w === width &&
+      this.encoderDims?.h === height
+    ) {
+      return;
+    }
+    if (this.videoEncoder) {
+      try {
+        this.videoEncoder.close();
+      } catch {}
+      this.videoEncoder = null;
+      this.encoderDims = null;
+    }
+    try {
+      const encoder = new VideoEncoder({
+        output: (chunk) => {
+          if (this.stopped || !this.cameraEnabled || !this.videoSendTrack) return;
+          const bytes = new Uint8Array(chunk.byteLength);
+          chunk.copyTo(bytes);
+          try {
+            this.media.sendVideo(bytes, this.videoSendTrack.generation, {
+              codec: "h264",
+              keyframe: chunk.type === "key",
+              timestampMicros: chunk.timestamp,
+            });
+          } catch {}
+        },
+        error: () => {
+          try {
+            this.videoEncoder?.close();
+          } catch {}
+          this.videoEncoder = null;
+          this.encoderDims = null;
+        },
+      });
+      encoder.configure({
+        codec: "avc1.42001e",
+        width,
+        height,
+        bitrate: bitrateKbps * 1000,
+        framerate: fps,
+        avc: { format: "annexb" },
+      } as VideoEncoderConfig);
+      this.videoEncoder = encoder;
+      this.encoderDims = { w: width, h: height };
+      this.forceNextKeyframe = true;
+    } catch {
+      this.videoEncoder = null;
+      this.encoderDims = null;
+    }
+  }
+
   private async startCameraCapture(): Promise<void> {
     if (this.stopped) return;
     if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
@@ -690,6 +755,7 @@ class BrowserCallMediaSession implements CallMediaHandle {
       return;
     }
     this.stopCameraCapture();
+    const gen = ++this.cameraGen;
     const format = this.videoSendTrack?.format;
     const targetW = Math.min(format?.maxWidth ?? 640, 640);
     const targetH = Math.min(format?.maxHeight ?? 480, 480);
@@ -707,10 +773,12 @@ class BrowserCallMediaSession implements CallMediaHandle {
         audio: false,
       });
     } catch {
-      this.options.onError("camera_unavailable");
+      if (gen === this.cameraGen && !this.stopped) {
+        this.options.onError("camera_unavailable");
+      }
       return;
     }
-    if (this.stopped || !this.cameraEnabled) {
+    if (this.stopped || !this.cameraEnabled || gen !== this.cameraGen) {
       stopStream(stream);
       return;
     }
@@ -728,8 +796,14 @@ class BrowserCallMediaSession implements CallMediaHandle {
     } catch {
       // Headless or paused tab; wait for frames when ready.
     }
-    if (this.stopped || !this.cameraEnabled) {
-      this.stopCameraCapture();
+    if (this.stopped || !this.cameraEnabled || gen !== this.cameraGen) {
+      if (gen !== this.cameraGen) {
+        video.pause();
+        video.srcObject = null;
+        stopStream(stream);
+      } else {
+        this.stopCameraCapture();
+      }
       return;
     }
 
@@ -738,75 +812,61 @@ class BrowserCallMediaSession implements CallMediaHandle {
     const intervalMs = Math.round(1000 / targetFps);
     this.forceNextKeyframe = true;
 
-    const sendCodec = this.videoSendTrack?.format.codec ?? "jpeg";
-    if (sendCodec === "h264" && typeof VideoEncoder === "function" && typeof VideoFrame === "function") {
-      try {
-        const encoder = new VideoEncoder({
-          output: (chunk) => {
-            if (this.stopped || !this.cameraEnabled || !this.videoSendTrack) return;
-            const bytes = new Uint8Array(chunk.byteLength);
-            chunk.copyTo(bytes);
-            try {
-              this.media.sendVideo(bytes, this.videoSendTrack.generation, {
-                codec: "h264",
-                keyframe: chunk.type === "key",
-                timestampMicros: chunk.timestamp,
-              });
-            } catch {}
-          },
-          error: () => {
-            // Fall back cleanly if hardware encoder fails mid-call.
-            try {
-              this.videoEncoder?.close();
-            } catch {}
-            this.videoEncoder = null;
-          },
-        });
-        encoder.configure({
-          codec: "avc1.42001e",
-          width: targetW,
-          height: targetH,
-          bitrate: (format?.bitrateKbps ?? 600) * 1000,
-          framerate: targetFps,
-          avc: { format: "annexb" },
-        } as VideoEncoderConfig);
-        this.videoEncoder = encoder;
-      } catch {
-        this.videoEncoder = null;
-      }
-    }
-
     const tick = () => {
-      if (this.stopped || !this.cameraEnabled || !this.videoElement) return;
-      if (this.videoElement.readyState >= 2 && this.videoElement.videoWidth > 0 && !this.captureBusy) {
+      if (this.stopped || !this.cameraEnabled || gen !== this.cameraGen || !this.videoElement) return;
+      const activeTrack = this.videoSendTrack;
+      if (
+        activeTrack &&
+        this.videoElement.readyState >= 2 &&
+        this.videoElement.videoWidth > 0 &&
+        !this.captureBusy
+      ) {
         const vw = this.videoElement.videoWidth;
         const vh = this.videoElement.videoHeight;
-        const scale = Math.min(1, targetW / vw, targetH / vh);
+        const maxW = Math.min(activeTrack.format.maxWidth, 640);
+        const maxH = Math.min(activeTrack.format.maxHeight, 480);
+        const scale = Math.min(1, maxW / vw, maxH / vh);
         const w = Math.max(16, Math.round((vw * scale) / 2) * 2);
         const h = Math.max(16, Math.round((vh * scale) / 2) * 2);
-        const activeTrack = this.videoSendTrack;
-        if (this.videoEncoder && this.videoEncoder.state === "configured" && activeTrack?.format.codec === "h264") {
-          try {
-            const vf = new VideoFrame(this.videoElement, { timestamp: Math.round(performance.now() * 1000) });
-            const keyFrame = this.forceNextKeyframe;
-            this.forceNextKeyframe = false;
-            this.videoEncoder.encode(vf, { keyFrame });
-            vf.close();
-          } catch {}
-        } else if (ctx2d && (!activeTrack || activeTrack.format.codec === "jpeg")) {
+        if (activeTrack.format.codec === "h264" && typeof VideoEncoder === "function" && typeof VideoFrame === "function") {
+          this.ensureH264Encoder(
+            w,
+            h,
+            Math.max(5, Math.min(activeTrack.format.maxFps, 15)),
+            activeTrack.format.bitrateKbps ?? 600,
+          );
+          if (this.videoEncoder && this.videoEncoder.state === "configured" && this.videoEncoder.encodeQueueSize <= 2) {
+            let vf: VideoFrame | null = null;
+            try {
+              if (canvas.width !== w || canvas.height !== h) {
+                canvas.width = w;
+                canvas.height = h;
+              }
+              ctx2d?.drawImage(this.videoElement, 0, 0, w, h);
+              vf = new VideoFrame(ctx2d ? canvas : this.videoElement, {
+                timestamp: Math.round(performance.now() * 1000),
+              });
+              const keyFrame = this.forceNextKeyframe;
+              this.forceNextKeyframe = false;
+              this.videoEncoder.encode(vf, { keyFrame });
+            } catch {} finally {
+              vf?.close();
+            }
+          }
+        } else if (ctx2d && activeTrack.format.codec === "jpeg") {
           if (canvas.width !== w || canvas.height !== h) {
             canvas.width = w;
             canvas.height = h;
           }
           ctx2d.drawImage(this.videoElement, 0, 0, w, h);
           this.captureBusy = true;
-          const sendGeneration = activeTrack?.generation ?? 1;
+          const sendGeneration = activeTrack.generation;
           canvas.toBlob(
             (blob) => {
               this.captureBusy = false;
-              if (!blob || this.stopped || !this.cameraEnabled) return;
+              if (!blob || this.stopped || !this.cameraEnabled || gen !== this.cameraGen) return;
               void blob.arrayBuffer().then((buf) => {
-                if (this.stopped || !this.cameraEnabled) return;
+                if (this.stopped || !this.cameraEnabled || gen !== this.cameraGen) return;
                 try {
                   this.media.sendVideo(new Uint8Array(buf), sendGeneration, {
                     codec: "jpeg",
@@ -827,6 +887,7 @@ class BrowserCallMediaSession implements CallMediaHandle {
   }
 
   private stopCameraCapture(): void {
+    this.cameraGen += 1;
     if (this.captureTimer) {
       clearTimeout(this.captureTimer);
       this.captureTimer = null;
@@ -837,6 +898,7 @@ class BrowserCallMediaSession implements CallMediaHandle {
         this.videoEncoder.close();
       } catch {}
       this.videoEncoder = null;
+      this.encoderDims = null;
     }
     if (this.videoElement) {
       this.videoElement.pause();
@@ -899,21 +961,30 @@ class BrowserCallMediaSession implements CallMediaHandle {
     const codecChanged =
       nextVideoSend?.format.codec !== this.videoSendTrack?.format.codec;
     this.videoSendTrack = nextVideoSend;
-    if (codecChanged && this.cameraEnabled) {
+    if (codecChanged && this.cameraEnabled && nextVideoSend) {
       void this.startCameraCapture();
     }
 
-    const activeReceiveIds = new Set<number>();
+    const activeAudioReceiveIds = new Set<number>();
+    const activeVideoReceiveIds = new Set<number>();
     for (const track of receiveTracks) {
-      activeReceiveIds.add(track.id);
-      if (track.media === "video") {
-        this.receiveTrackParticipants.set(track.id, track.participantId);
+      if (track.media === "audio") {
+        activeAudioReceiveIds.add(track.id);
+        this.audioReceiveTrackIds.add(track.id);
+      } else if (track.media === "video") {
+        activeVideoReceiveIds.add(track.id);
+        this.videoReceiveTrackParticipants.set(track.id, track.participantId);
       }
     }
-    for (const id of [...this.receiveTrackParticipants.keys()]) {
-      if (!activeReceiveIds.has(id)) {
-        this.receiveTrackParticipants.delete(id);
+    for (const id of [...this.audioReceiveTrackIds]) {
+      if (!activeAudioReceiveIds.has(id)) {
+        this.audioReceiveTrackIds.delete(id);
         this.workletNode?.port.postMessage({ type: "clearTrack", trackId: id });
+      }
+    }
+    for (const id of [...this.videoReceiveTrackParticipants.keys()]) {
+      if (!activeVideoReceiveIds.has(id)) {
+        this.videoReceiveTrackParticipants.delete(id);
         const dec = this.decoders.get(id);
         if (dec) {
           try {
@@ -936,7 +1007,8 @@ class BrowserCallMediaSession implements CallMediaHandle {
       } catch {}
     }
     this.decoders.clear();
-    this.receiveTrackParticipants.clear();
+    this.audioReceiveTrackIds.clear();
+    this.videoReceiveTrackParticipants.clear();
     this.decodingJpegTracks.clear();
     try {
       this.micSource?.disconnect();

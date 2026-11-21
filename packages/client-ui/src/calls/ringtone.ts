@@ -202,6 +202,7 @@ export class CallRingtone {
       if (ctx.state === "suspended") {
         void ctx.resume().then(
           () => {
+            this.clearUnlock();
             if (this.active) this.setBlocked(false);
           },
           () => {

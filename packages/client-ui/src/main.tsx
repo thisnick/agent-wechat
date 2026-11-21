@@ -1099,6 +1099,9 @@ function Chats({
   } | null>(null);
   useEffect(() => {
     callController?.start();
+    return () => {
+      callController?.pause();
+    };
   }, [callController]);
   useEffect(()=>{const handler=(event:KeyboardEvent)=>{if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==="k"){event.preventDefault();setOmniScope("all");}};window.addEventListener("keydown",handler);return()=>window.removeEventListener("keydown",handler);},[]);
   useEffect(()=>{setOmniScope(null);setRequestSelection(null);setGroupCallPicker(null);},[state.account,connection]);
@@ -2608,6 +2611,7 @@ function Details({
         <CallDetailActions
           controller={callController}
           threadId={threadId}
+          threadName={name}
           ownUsername={ownUsername}
           onOpenGroupPicker={onOpenGroupCallPicker}
         />
