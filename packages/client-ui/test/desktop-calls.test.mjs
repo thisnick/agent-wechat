@@ -382,3 +382,98 @@ test("CallController suppresses Web Audio ringtone on Desktop only while Rust co
 
   controller.close();
 });
+
+test("DesktopCallTransport coalesces video frame acks per animation frame and cancels on stopMedia", async () => {
+  const invoked = [];
+  let activeChannel = null;
+  let nextRafId = 1;
+  const rafQueue = new Map();
+  const prevRaf = globalThis.requestAnimationFrame;
+  const prevCancelRaf = globalThis.cancelAnimationFrame;
+  globalThis.requestAnimationFrame = (cb) => {
+    const id = nextRafId++;
+    rafQueue.set(id, cb);
+    return id;
+  };
+  globalThis.cancelAnimationFrame = (id) => {
+    rafQueue.delete(id);
+  };
+
+  try {
+    const transport = new DesktopCallTransport(
+      "conn-ack",
+      "acct-ack",
+      { async callSnapshot() { return {}; } },
+      {
+        invoke: async (cmd, args = {}) => {
+          invoked.push({ cmd, args });
+          if (cmd === "call_connect") {
+            activeChannel = args.channel;
+            return { sessionId: 1, hello: HELLO };
+          }
+          return null;
+        },
+        createCallChannel: () => new FakeChannel(),
+        createPreviewChannel: () => new FakeChannel(),
+      },
+    );
+
+    await transport.connect({
+      onEvent: () => {},
+      onDisconnected: () => {},
+      onTracksSynced: () => {},
+      onLocalStream: () => {},
+      onLocalJpeg: () => {},
+      onRemoteFrame: () => {},
+      onTrackCleared: () => {},
+      onLevels: () => {},
+      onMediaError: () => {},
+    });
+
+    const sampleJpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9]).toString("base64");
+    activeChannel.onmessage({
+      type: "remoteFrame",
+      trackId: 65538,
+      participantId: "peer-1",
+      rotationDegrees: 0,
+      jpeg: sampleJpeg,
+    });
+    activeChannel.onmessage({
+      type: "remoteFrame",
+      trackId: 65539,
+      participantId: "peer-2",
+      rotationDegrees: 0,
+      jpeg: sampleJpeg,
+    });
+    activeChannel.onmessage({ type: "localJpeg", jpeg: sampleJpeg });
+
+    assert.equal(rafQueue.size, 1, "multiple video packets in one paint frame schedule a single rAF ack");
+    assert.equal(invoked.filter((c) => c.cmd === "call_video_ack").length, 0);
+
+    for (const [id, cb] of [...rafQueue.entries()]) {
+      rafQueue.delete(id);
+      cb(16);
+    }
+    const acks = invoked.filter((c) => c.cmd === "call_video_ack");
+    assert.equal(acks.length, 1);
+    assert.deepEqual(acks[0].args, { connectionId: "conn-ack", accountId: "acct-ack" });
+
+    // A pending ack scheduled right before stopMedia must be cancelled.
+    activeChannel.onmessage({ type: "localJpeg", jpeg: sampleJpeg });
+    assert.equal(rafQueue.size, 1);
+    transport.stopMedia();
+    assert.equal(rafQueue.size, 0);
+    assert.equal(invoked.filter((c) => c.cmd === "call_video_ack").length, 1);
+
+    // Without requestAnimationFrame (microtask fallback), stopMedia also cancels the pending ack.
+    globalThis.requestAnimationFrame = undefined;
+    globalThis.cancelAnimationFrame = undefined;
+    activeChannel.onmessage({ type: "localJpeg", jpeg: sampleJpeg });
+    transport.stopMedia();
+    await Promise.resolve();
+    assert.equal(invoked.filter((c) => c.cmd === "call_video_ack").length, 1);
+  } finally {
+    globalThis.requestAnimationFrame = prevRaf;
+    globalThis.cancelAnimationFrame = prevCancelRaf;
+  }
+});

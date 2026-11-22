@@ -818,14 +818,13 @@ fn spawn_capture(
     // (which apply +90° CW display rotation). Keep JPEG unrotated for local pre-call previews
     // and daemon-side transcoded TX.
     let pre_rotate_ccw = matches!(format.codec, CallVideoCodec::H265 | CallVideoCodec::H264);
-    let scale = if pre_rotate_ccw {
-        format!(
+    let scale = match format.codec {
+        CallVideoCodec::H265 | CallVideoCodec::H264 => format!(
             "fps={fps},scale=w='min(iw,{width})':h='min(ih,{height})':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2,transpose=2"
-        )
-    } else {
-        format!(
-            "fps={fps},scale=w='min(iw,{width})':h='min(ih,{height})':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2"
-        )
+        ),
+        CallVideoCodec::Jpeg => format!(
+            "fps={fps},scale=w='min(iw,{width})':h='min(ih,{height})':force_original_aspect_ratio=decrease:out_range=full,scale=trunc(iw/2)*2:trunc(ih/2)*2:out_range=full"
+        ),
     };
     cmd.args(["-vf", &scale, "-an", "-sn", "-dn"]);
 
@@ -899,8 +898,14 @@ fn spawn_capture(
         }
         CallVideoCodec::Jpeg => {
             cmd.args([
+                "-strict",
+                "unofficial",
                 "-c:v",
                 "mjpeg",
+                "-pix_fmt",
+                "yuv420p",
+                "-color_range",
+                "pc",
                 "-q:v",
                 "7",
                 "-flush_packets",
@@ -1394,7 +1399,7 @@ pub struct ReceiveVideo {
     peer_camera_off: bool,
     decode_rgb: bool,
     mailbox: Arc<DecodeMailbox>,
-    decoded_rx: Option<std::sync::mpsc::Receiver<DecodedJob>>,
+    decoded_latest: Option<Arc<Mutex<BTreeMap<u32, DecodedJob>>>>,
     decoder: Option<JoinHandle<()>>,
     raw_pending: BTreeMap<u32, RawVideoFrame>,
     raw_order: VecDeque<u32>,
@@ -1404,7 +1409,8 @@ impl ReceiveVideo {
     pub fn new(tracks: Vec<CallTrack>) -> Self {
         let mailbox = Arc::new(DecodeMailbox::new());
         let worker_mailbox = mailbox.clone();
-        let (decoded_tx, decoded_rx) = std::sync::mpsc::sync_channel::<DecodedJob>(8);
+        let decoded_latest = Arc::new(Mutex::new(BTreeMap::<u32, DecodedJob>::new()));
+        let worker_decoded = decoded_latest.clone();
         let decoder = thread::Builder::new()
             .name("wx-call-video-dec".into())
             .spawn(move || {
@@ -1418,8 +1424,19 @@ impl ReceiveVideo {
                     limits.max_image_height = Some(MAX_DECODE_DIMENSION);
                     limits.max_alloc = Some(MAX_DECODE_ALLOC_BYTES);
                     reader.limits(limits);
-                    let Ok(img) = reader.decode() else {
-                        continue;
+                    let img = match reader.decode() {
+                        Ok(img) => img,
+                        Err(error) => {
+                            crate::transport::debug_call(
+                                "video",
+                                format_args!(
+                                    "dropped undecodable JPEG track={} bytes={}: {error}",
+                                    job.track_id,
+                                    job.jpeg.len()
+                                ),
+                            );
+                            continue;
+                        }
                     };
                     let img = match job.rotation_degrees {
                         90 => img.rotate90(),
@@ -1432,15 +1449,20 @@ impl ReceiveVideo {
                     if width == 0 || height == 0 {
                         continue;
                     }
-                    let _ = decoded_tx.try_send(DecodedJob {
-                        track_id: job.track_id,
-                        generation: job.generation,
-                        frame: DecodedFrame {
-                            width,
-                            height,
-                            rgb: rgb.into_raw(),
-                        },
-                    });
+                    if let Ok(mut guard) = worker_decoded.lock() {
+                        guard.insert(
+                            job.track_id,
+                            DecodedJob {
+                                track_id: job.track_id,
+                                generation: job.generation,
+                                frame: DecodedFrame {
+                                    width,
+                                    height,
+                                    rgb: rgb.into_raw(),
+                                },
+                            },
+                        );
+                    }
                 }
             })
             .ok();
@@ -1451,7 +1473,7 @@ impl ReceiveVideo {
             peer_camera_off: false,
             decode_rgb: true,
             mailbox,
-            decoded_rx: Some(decoded_rx),
+            decoded_latest: Some(decoded_latest),
             decoder,
             raw_pending: BTreeMap::new(),
             raw_order: VecDeque::new(),
@@ -1472,7 +1494,7 @@ impl ReceiveVideo {
             peer_camera_off: false,
             decode_rgb: false,
             mailbox: Arc::new(DecodeMailbox::new()),
-            decoded_rx: None,
+            decoded_latest: None,
             decoder: None,
             raw_pending: BTreeMap::new(),
             raw_order: VecDeque::new(),
@@ -1660,11 +1682,15 @@ impl ReceiveVideo {
 
     /// Drain frames completed by the background JPEG decoder (RGB mode).
     pub fn poll_decoded(&mut self) -> bool {
-        let Some(rx) = &self.decoded_rx else {
+        let Some(latest) = &self.decoded_latest else {
             return false;
         };
+        let pending = match latest.lock() {
+            Ok(mut guard) => std::mem::take(&mut *guard),
+            Err(_) => return false,
+        };
         let mut updated = false;
-        while let Ok(done) = rx.try_recv() {
+        for (_, done) in pending {
             if self
                 .retired
                 .get(&done.track_id)

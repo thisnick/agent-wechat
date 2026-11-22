@@ -170,6 +170,40 @@ export function canCallThread(
   };
 }
 
+export function isSelfParticipant(
+  participant: { contactId?: string | null },
+  ownUsername: string | null | undefined,
+): boolean {
+  return Boolean(ownUsername && participant.contactId === ownUsername);
+}
+
+const LEVEL_CHANGE_EPSILON = 0.01;
+
+export function levelsMeaningfullyChanged(
+  prev: CallAudioLevels,
+  next: CallAudioLevels,
+): boolean {
+  if (
+    Math.abs(prev.micLevel - next.micLevel) >= LEVEL_CHANGE_EPSILON ||
+    Math.abs(prev.speakerLevel - next.speakerLevel) >= LEVEL_CHANGE_EPSILON
+  ) {
+    return true;
+  }
+  const prevKeys = Object.keys(prev.trackLevels);
+  const nextKeys = Object.keys(next.trackLevels);
+  if (prevKeys.length !== nextKeys.length) {
+    return true;
+  }
+  for (const key of nextKeys) {
+    const id = Number(key);
+    if (!(key in prev.trackLevels)) return true;
+    if (Math.abs((prev.trackLevels[id] ?? 0) - (next.trackLevels[id] ?? 0)) >= LEVEL_CHANGE_EPSILON) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function mergeTrackList(existing: CallTrack[], incoming: CallTrack[]): CallTrack[] {
   const byId = new Map<number, CallTrack>();
   for (const track of existing) byId.set(track.id, track);
@@ -1022,7 +1056,9 @@ export class CallController {
         onRemoteFrame: (frame) => this.handleRemoteFrame(frame),
         onTrackCleared: (trackId) => this.clearRemoteFrame(trackId),
         onLevels: (levels) => {
-          if (!this.disposed) this.update({ levels });
+          if (this.disposed) return;
+          if (!levelsMeaningfullyChanged(this.state.levels, levels)) return;
+          this.update({ levels });
         },
         onMediaError: (code) => {
           if (!this.disposed) this.update({ mediaWarning: code });
