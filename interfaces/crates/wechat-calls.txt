@@ -15,6 +15,7 @@ field wechat_calls::conference_media::ConferenceConsumeOutput::audio | alloc::ve
 field wechat_calls::conference_media::ConferenceConsumeOutput::need_keyframe | bool | True when a video frame assembly dropped and the local side should send `0x66 IRequest`.
 field wechat_calls::conference_media::ConferenceConsumeOutput::peer_requested_keyframe | bool | True when the remote peer requested a keyframe (`0x66 IRequest`).
 field wechat_calls::conference_media::ConferenceConsumeOutput::video | core::option::Option<wechat_protocol::calls::video_packet::ReassembledVideoFrame> | Reassembled video frame completed by this datagram, if any.
+field wechat_calls::conference_media::ConferenceConsumeOutput::video_stream_id | core::option::Option<u8> | Video stream ID (`packed_kind & 0x0f`) observed on an inbound video datagram.
 field wechat_calls::conference_media::ConferenceReceiver::report | wechat_calls::conference_media::StreamReport | MISSING DOC
 field wechat_calls::conference_media::DecodedAudio::sample_offset | u64 | MISSING DOC
 field wechat_calls::conference_media::DecodedAudio::samples | alloc::vec::Vec<i16> | MISSING DOC
@@ -152,6 +153,7 @@ fn wechat_calls::video_codec::VideoTranscoder::recv | fn(&mut self) -> core::opt
 fn wechat_calls::video_codec::VideoTranscoder::request_keyframe | fn(&mut self) -> anyhow::Result<()> | Restart the underlying encoder so the very next pushed frame emits a fresh keyframe with inline parameter sets (`VPS`/`SPS`/`PPS` + `IDR`).
 fn wechat_calls::video_codec::VideoTranscoder::start | fn(config: wechat_calls::video_codec::TranscodeConfig) -> anyhow::Result<Self> | Start a streaming transcoder for `config`.
 fn wechat_calls::video_codec::VideoTranscoder::try_recv | fn(&mut self) -> core::option::Option<wechat_calls::video_codec::EncodedVideoFrame> | Non-blocking poll for the next completed output frame.
+fn wechat_calls::video_codec::VideoTranscoder::try_recv_checked | fn(&mut self) -> core::result::Result<wechat_calls::video_codec::EncodedVideoFrame, std::sync::mpsc::TryRecvError> | Non-blocking poll that distinguishes an empty queue (`Err(TryRecvError::Empty)`) from an exited or disconnected transcoder (`Err(TryRecvError::Disconnected)`).
 fn wechat_calls::video_codec::find_ffmpeg | fn() -> core::option::Option<std::path::PathBuf> | Locate the `ffmpeg` binary via `WX_FFMPEG_BIN` or `PATH`.
 fn wechat_calls::video_codec::negotiate_video_codec | fn(wire: wechat_calls::video_codec::VideoCodec, client_codecs: &[wechat_calls::video_codec::VideoCodec], caps: &wechat_calls::video_codec::VideoCodecCapabilities, is_send: bool) -> core::option::Option<(wechat_calls::video_codec::VideoCodec, bool)> | Choose the local client codec and mode (`passthrough = true` when matching WeChat's active wire codec, otherwise transcoding to the client's first supported codec).
 fn wechat_calls::video_codec::probe_video_capabilities | fn() -> wechat_calls::video_codec::VideoCodecCapabilities | Probe and cache local FFmpeg encoder/decoder capabilities.

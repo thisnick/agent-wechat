@@ -10,6 +10,8 @@ use wechat_protocol::{
     crypto,
 };
 
+const RELAY_RETRANSMIT_INTERVAL: Duration = Duration::from_millis(400);
+
 /// Run on an embedding worker. `submit` must recheck account authority at the
 /// physical handoff; the earlier `current` check alone does not authorize a send.
 /// Callbacks must not hold an account-state lock across this function's waits.
@@ -30,17 +32,22 @@ pub fn connect_relay(
     let room = RoomInputs::initial(selected, 0, clock() as u32, clock() as u32);
     let mut checkin = TwoRttRelay::new(room, selected.room_key, endpoint, relay_epoch, 15_000)?;
     let random = crypto::random::<10>()?;
-    let packet = checkin.prepare_initial(
+    let mut active_packet = checkin.prepare_initial(
         relay_epoch,
         clock(),
         &random[..checkin.random_bytes_needed()?],
     )?;
-    submit(&socket, endpoint, &packet)?;
+    submit(&socket, endpoint, &active_packet)?;
+    let mut last_tx = Instant::now();
     // One extra byte distinguishes a maximum-size datagram from truncation.
     let mut buffer = [0u8; 8198];
     while !checkin.is_ready() {
         ensure!(current(), "Call stopped during relay setup");
         ensure!(clock() < 15_000, "Call relay deadline exceeded");
+        if last_tx.elapsed() >= RELAY_RETRANSMIT_INTERVAL {
+            submit(&socket, endpoint, &active_packet)?;
+            last_tx = Instant::now();
+        }
         match socket.recv_from(&mut buffer) {
             Ok((n, SocketAddr::V4(source)))
                 if source == endpoint && n <= 8197 && buffer[..n].first() == Some(&0xd5) =>
@@ -51,14 +58,15 @@ pub fn connect_relay(
                         let body = clock() as u32;
                         let random = crypto::random::<10>()?;
                         let n = checkin.continuation_random_bytes_needed(header, body)?;
-                        let continuation = checkin.prepare_continuation(
+                        active_packet = checkin.prepare_continuation(
                             relay_epoch,
                             clock(),
                             header,
                             body,
                             &random[..n],
                         )?;
-                        submit(&socket, endpoint, &continuation)?;
+                        submit(&socket, endpoint, &active_packet)?;
+                        last_tx = Instant::now();
                     }
                     RelayProgress::Ready
                     | RelayProgress::Opaque

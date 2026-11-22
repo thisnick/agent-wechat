@@ -543,22 +543,34 @@ impl RsmVideoPacketizer {
         fps: u8,
     ) -> Result<Vec<u8>> {
         self.total_pkg_seq = self.total_pkg_seq.wrapping_add(1);
-        self.pkg_seq = self.pkg_seq.wrapping_add(1);
         let bw_seq = self.bw_est_seq;
         self.bw_est_seq = if bw_seq == 255 { 1 } else { bw_seq + 1 };
 
         let frame_idx_lo = ((self.frame_idx & 0x1f) ^ 0x10) as u8;
+        let frame_idx_hi = ((self.frame_idx >> 5) & 0x07ff) as u16;
         let mp_member_stream =
             (self.local_member & 0x7ff) | (u16::from(self.stream_id & 0x0f) << 11);
         let proto = p::message(&[
             p::uint(1, u64::from(fps.max(1))),
-            p::uint(2, 10),
+            p::uint(2, 0),
             p::uint(3, u64::from(self.orientation & 0x07)),
             p::uint(4, u64::from(self.frame_idx)),
+            p::uint(5, 0),
+            p::uint(6, 0),
+            p::uint(7, 0),
+            p::uint(8, 0),
+            p::uint(9, 0),
+            p::uint(16, 0),
         ])?;
 
-        // 5-byte TLV extension matching official virtual-frame header (`ext_mask = 0x004c`).
-        let ext: [u8; 5] = [0x00, 0x4c, 0x00, 0x08, bw_seq];
+        // 5-byte TLV extension matching the kind-3 virtual-frame header (`ext_mask = 0x004c`).
+        let ext: [u8; 5] = [
+            0x00,
+            0x4c,
+            (frame_idx_hi & 0xff) as u8,
+            (((frame_idx_hi >> 8) & 0x07) as u8) | 0x08,
+            bw_seq,
+        ];
         let mut pkt = Vec::with_capacity(3 + 21 + ext.len() + 0x80 + proto.len());
         pkt.push(codec.wire());
         pkt.extend_from_slice(&mp_member_stream.to_le_bytes());
@@ -566,14 +578,14 @@ impl RsmVideoPacketizer {
         pkt.push(3 | (frame_idx_lo << 3)); // hkind = 3, is_iframe = 0
         pkt.push(3 << 2); // pkg_idx_lo6 = 3, r_lo2 = 0 (virtual frame marker)
         pkt.extend_from_slice(&self.total_pkg_seq.to_be_bytes());
-        pkt.extend_from_slice(&self.pkg_seq.to_be_bytes());
+        pkt.extend_from_slice(&0u16.to_be_bytes()); // virtual frames do not advance pkg_seq
         pkt.extend_from_slice(&timestamp_ms.to_be_bytes());
         pkt.push(0);
         pkt.push(0);
-        pkt.push(1 << 2); // s_lo6 = 1, frame_count - 1 = 0
+        pkt.push((1 << 2) | 3); // s_lo6 = 1, frame_count = 0 -> (0 - 1) & 3 = 3
         pkt.push(5 << 5); // workMode = 3 virtual-frame header code
         pkt.push(0x00);
-        pkt.push(1); // x = 1
+        pkt.push(0x00); // x_groups = 0 in virtual-frame metadata packets
         pkt.extend_from_slice(&[0, 0, 0, 0]); // s_ovf = 0, pkg_ovf = 0, f_pkt = 0, f_tot = 0
         pkt.push(ext.len() as u8);
         pkt.extend_from_slice(&ext);
@@ -1592,6 +1604,50 @@ mod tests {
             VideoRotation::from_wire(frame2.orientation, false),
             VideoRotation::Deg0
         );
+    }
+
+    #[test]
+    fn virtual_frame_header_and_protobuf_match_workmode3_layout() {
+        let mut p_frame = vec![0, 0, 0, 1, 0x02, 0x01];
+        p_frame.extend_from_slice(&[0x44; 24]);
+
+        let mut tx = RsmVideoPacketizer::new(7, 1).with_orientation(2);
+        let frame1 = tx
+            .packetize(VideoWireCodec::H265, &p_frame, 1000, 15, 350)
+            .unwrap();
+        assert_eq!(u16::from_be_bytes([frame1[0][7], frame1[0][8]]), 1);
+
+        let vf = tx
+            .build_orientation_metadata_packet(VideoWireCodec::H265, 1000, 15)
+            .unwrap();
+        let hdr = &vf[3..];
+        assert_eq!(hdr[0] & 0x03, 3);
+        assert_eq!(hdr[0] & 0x04, 0);
+        assert_eq!(hdr[0] >> 3, (1 ^ 0x10) as u8);
+        assert_eq!(hdr[1], 3 << 2);
+        assert_eq!(u16::from_be_bytes([hdr[2], hdr[3]]), 2); // total_pkg_seq advanced
+        assert_eq!(u16::from_be_bytes([hdr[4], hdr[5]]), 0); // pkg_seq is 0 on virtual frames
+        assert_eq!(hdr[12], (1 << 2) | 3);
+        assert_eq!(hdr[13], 5 << 5);
+        assert_eq!(hdr[15], 0);
+        assert_eq!(hdr[20], 5);
+        assert_eq!(&hdr[21..25], &[0x00, 0x4c, 0x00, 0x08]);
+
+        let proto = p::decode(&hdr[26 + 0x80..]).unwrap();
+        assert_eq!(opt_u32(&proto, 1).unwrap(), Some(15));
+        assert_eq!(opt_u32(&proto, 2).unwrap(), Some(0));
+        assert_eq!(opt_u32(&proto, 3).unwrap(), Some(2));
+        assert_eq!(opt_u32(&proto, 4).unwrap(), Some(1));
+        for field in [5, 6, 7, 8, 9, 16] {
+            assert_eq!(opt_u32(&proto, field).unwrap(), Some(0));
+        }
+
+        // Media pkg_seq stays contiguous across an intervening virtual frame.
+        let frame2 = tx
+            .packetize(VideoWireCodec::H265, &p_frame, 1066, 15, 350)
+            .unwrap();
+        assert_eq!(u16::from_be_bytes([frame2[0][5], frame2[0][6]]), 3); // total_pkg_seq
+        assert_eq!(u16::from_be_bytes([frame2[0][7], frame2[0][8]]), 2); // pkg_seq
     }
 
     #[test]

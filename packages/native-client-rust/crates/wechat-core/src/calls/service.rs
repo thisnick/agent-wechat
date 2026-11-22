@@ -2396,7 +2396,14 @@ impl CallService {
             return Err(error(CallErrorCode::Stale));
         }
         s.ownership.result(ticket, phase)?;
+        let mut changed = false;
         if let Some(c) = s.call.as_mut().filter(|c| c.identity == ticket.identity()) {
+            // Media readiness (`connected()`) can legitimately race ahead of the
+            // actor's `Admitted` callback for the same ticket; never regress
+            // `Connected` back to `Ringing`/`Connecting`.
+            if matches!(outcome, BackendOutcome::Admitted) && c.state == CallState::Connected {
+                return Ok(());
+            }
             if matches!(outcome, BackendOutcome::Connected) && !c.peer.ends_with("@chatroom") {
                 c.receive_tracks.insert(
                     AUDIO_RECEIVE_TRACK_BASE,
@@ -2444,8 +2451,11 @@ impl CallService {
                 .revision
                 .checked_add(1)
                 .ok_or_else(|| error(CallErrorCode::Capacity))?;
+            changed = true;
         }
-        self.broadcast(&mut s);
+        if changed || matches!(outcome, BackendOutcome::Ended) {
+            self.broadcast(&mut s);
+        }
         if matches!(outcome, BackendOutcome::Ended) {
             s.call = None;
             s.media.clear();

@@ -22,6 +22,7 @@ struct ConferenceRoom {
     members: BTreeMap<u16, ConferenceMember>,
     member_sequence: u32,
     av_sequence: u32,
+    av_initialized: bool,
     av_members: BTreeMap<u16, u32>,
     cap_sequence: u32,
     engine: Vec<u8>,
@@ -876,6 +877,7 @@ fn empty_room(identity: VoiceRoom, group_id: &str, cloud_group: &[u8]) -> Result
         members: BTreeMap::new(),
         member_sequence: 0,
         av_sequence: 0,
+        av_initialized: false,
         av_members: BTreeMap::new(),
         cap_sequence: 0,
         engine: vec![],
@@ -1015,17 +1017,20 @@ fn install_av(room: &mut ConferenceRoom, values: &[Field]) -> Result<()> {
     let mut members = BTreeMap::new();
     for entry in repeated(values, 4, 128)? {
         let entry = fields(entry)?;
-        let member = u16::try_from(number(&entry, 1, None)?)?;
-        let flags = u32::try_from(number(&entry, 2, None)?)?;
+        // Proto3 omits zero-valued scalar fields (`member_id == 0` or `flags == 0`
+        // when both microphone and camera are off).
+        let member = u16::try_from(number(&entry, 1, Some(0))?)?;
+        let flags = u32::try_from(number(&entry, 2, Some(0))?)?;
         ensure!(
             members.insert(member, flags).is_none(),
             "Duplicate conference AV member"
         );
         p::optional_data(&entry, 3)?;
     }
-    if sequence > room.av_sequence {
+    if !room.av_initialized || sequence > room.av_sequence {
         room.av_members = members;
         room.av_sequence = sequence;
+        room.av_initialized = true;
     }
     Ok(())
 }
@@ -2074,5 +2079,46 @@ mod tests {
         ] {
             assert!(join_request(&parameters, &target, false).is_err());
         }
+    }
+
+    #[test]
+    fn install_av_accepts_initial_sequence_zero_and_omitted_proto3_zeros() {
+        let mut room = empty_room(
+            VoiceRoom {
+                room: 1,
+                room_key: 2,
+                own_member: 1,
+            },
+            "test@chatroom",
+            b"synthetic-conference",
+        )
+        .unwrap();
+        // Proto3 omits zero-valued member_id (field 1) and flags (field 2), and
+        // initial AV snapshots can carry sequence 0.
+        let av_seq0 = p::message(&[
+            p::bytes(4, &p::message(&[p::uint(2, 3)]).unwrap()), // member 0 omitted, mic+cam on
+            p::bytes(4, &p::message(&[p::uint(1, 1)]).unwrap()), // member 1, flags 0 omitted
+        ])
+        .unwrap();
+        install_av(&mut room, &fields(&av_seq0).unwrap()).unwrap();
+        assert!(room.av_initialized);
+        assert_eq!(room.av_sequence, 0);
+        assert_eq!(room.av_members.get(&0), Some(&3));
+        assert_eq!(room.av_members.get(&1), Some(&0));
+
+        // Duplicate sequence 0 after initialization is ignored; higher sequence replaces.
+        let av_dup0 = p::message(&[p::bytes(4, &p::message(&[p::uint(1, 0)]).unwrap())]).unwrap();
+        install_av(&mut room, &fields(&av_dup0).unwrap()).unwrap();
+        assert_eq!(room.av_members.get(&0), Some(&3));
+
+        let av_seq1 = p::message(&[
+            p::uint(3, 1),
+            p::bytes(4, &p::message(&[p::uint(1, 0), p::uint(2, 1)]).unwrap()),
+        ])
+        .unwrap();
+        install_av(&mut room, &fields(&av_seq1).unwrap()).unwrap();
+        assert_eq!(room.av_sequence, 1);
+        assert_eq!(room.av_members.get(&0), Some(&1));
+        assert_eq!(room.av_members.get(&1), None);
     }
 }

@@ -24,6 +24,8 @@ pub struct ConferenceConsumeOutput {
     pub audio: Vec<DecodedAudio>,
     /// Reassembled video frame completed by this datagram, if any.
     pub video: Option<ReassembledVideoFrame>,
+    /// Video stream ID (`packed_kind & 0x0f`) observed on an inbound video datagram.
+    pub video_stream_id: Option<u8>,
     /// True when the remote peer requested a keyframe (`0x66 IRequest`).
     pub peer_requested_keyframe: bool,
     /// True when a video frame assembly dropped and the local side should send `0x66 IRequest`.
@@ -146,6 +148,7 @@ impl ConferenceReceiver {
         };
         self.report.authenticated_packets += 1;
         if (opened.packed_kind & 0xf0) == 0x20 {
+            out.video_stream_id = Some(opened.packed_kind & 0x0f);
             if let Ok(kind) = classify_video_channel_payload(opened.payload()) {
                 match kind {
                     VideoChannelPayload::IRequest(_) => {

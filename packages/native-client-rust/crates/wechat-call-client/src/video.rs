@@ -17,7 +17,7 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use wechat_call_contracts::{
     call_types::{
         CallControl, CallEvent, CallTrack, CallTrackDirection, CallVideoCapabilities,
@@ -486,11 +486,64 @@ pub struct CapturedVideoFrame {
     pub bytes: Vec<u8>,
 }
 
+/// Latest-frame drop-oldest slot for independent MJPEG frames so slow UI consumers
+/// always receive the freshest camera frame without polling jitter or queue lag.
+struct LatestJpegSlot {
+    state: Mutex<(Option<CapturedVideoFrame>, bool)>,
+    notify: Notify,
+}
+
+impl LatestJpegSlot {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new((None, false)),
+            notify: Notify::new(),
+        }
+    }
+
+    fn publish(&self, frame: CapturedVideoFrame) {
+        if let Ok(mut guard) = self.state.lock() {
+            guard.0 = Some(frame);
+        }
+        self.notify.notify_one();
+    }
+
+    fn close(&self) {
+        if let Ok(mut guard) = self.state.lock() {
+            guard.1 = true;
+        }
+        self.notify.notify_waiters();
+    }
+
+    fn try_take(&self) -> Option<CapturedVideoFrame> {
+        self.state.lock().ok().and_then(|mut guard| guard.0.take())
+    }
+
+    async fn recv_latest(&self) -> Option<CapturedVideoFrame> {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let mut guard = self.state.lock().ok()?;
+                if let Some(frame) = guard.0.take() {
+                    return Some(frame);
+                }
+                if guard.1 {
+                    return None;
+                }
+            }
+            notified.await;
+        }
+    }
+}
+
 struct CaptureWorker {
     child: Child,
     stop: Arc<AtomicBool>,
     reader: JoinHandle<()>,
     frames: mpsc::Receiver<CapturedVideoFrame>,
+    latest_jpeg: Option<Arc<LatestJpegSlot>>,
 }
 
 /// Live FFmpeg camera capture and encoder subprocess.
@@ -505,6 +558,7 @@ pub struct LocalVideoCapture {
     stop: Arc<AtomicBool>,
     reader: Option<JoinHandle<()>>,
     frames: mpsc::Receiver<CapturedVideoFrame>,
+    latest_jpeg: Option<Arc<LatestJpegSlot>>,
     buffered: VecDeque<CapturedVideoFrame>,
     wait_for_keyframe: bool,
     started_at: Instant,
@@ -534,6 +588,7 @@ impl LocalVideoCapture {
             stop: worker.stop,
             reader: Some(worker.reader),
             frames: worker.frames,
+            latest_jpeg: worker.latest_jpeg,
             buffered: VecDeque::with_capacity(16),
             wait_for_keyframe: false,
             started_at,
@@ -559,7 +614,31 @@ impl LocalVideoCapture {
         Self::start_with_ffmpeg(source, format, override_ffmpeg)
     }
 
+    /// Await the freshest available captured frame without fixed-interval polling.
+    /// Returns `None` once the capture worker exits.
+    pub async fn recv_latest(&mut self) -> Option<CapturedVideoFrame> {
+        if let Some(slot) = self.latest_jpeg.clone() {
+            return slot.recv_latest().await;
+        }
+        if let Some(frame) = self.try_recv() {
+            return Some(frame);
+        }
+        let first = self.frames.recv().await?;
+        let mut latest = first;
+        if self.format.codec == CallVideoCodec::Jpeg {
+            while let Ok(frame) = self.frames.try_recv() {
+                latest = frame;
+            }
+            return Some(latest);
+        }
+        self.buffered.push_back(latest);
+        self.try_recv()
+    }
+
     pub fn try_recv(&mut self) -> Option<CapturedVideoFrame> {
+        if let Some(slot) = &self.latest_jpeg {
+            return slot.try_take();
+        }
         if self.format.codec == CallVideoCodec::Jpeg {
             // Standalone JPEG frames are independent; always keep the freshest frame.
             let mut latest = None;
@@ -613,6 +692,7 @@ impl LocalVideoCapture {
         self.stop = worker.stop;
         self.reader = Some(worker.reader);
         self.frames = worker.frames;
+        self.latest_jpeg = worker.latest_jpeg;
         Ok(())
     }
 
@@ -673,7 +753,12 @@ fn spawn_capture(
 ) -> Result<CaptureWorker> {
     let width = format.max_width.clamp(160, 640) & !1;
     let height = format.max_height.clamp(120, 480) & !1;
-    let fps = format.max_fps.clamp(1, 15);
+    let max_fps = if format.codec == CallVideoCodec::Jpeg {
+        30
+    } else {
+        15
+    };
+    let fps = format.max_fps.clamp(1, max_fps);
     let mut cmd = Command::new(ffmpeg);
     cmd.args(["-hide_banner", "-loglevel", "error"]);
 
@@ -698,6 +783,7 @@ fn spawn_capture(
         }
         CameraSource::Auto | CameraSource::Device(_) => {
             let device = resolve_device_input(source, ffmpeg)?;
+            cmd.args(["-fflags", "nobuffer", "-flags", "low_delay"]);
             #[cfg(target_os = "linux")]
             {
                 cmd.args([
@@ -830,12 +916,15 @@ fn spawn_capture(
     let stop = Arc::new(AtomicBool::new(false));
     let worker_stop = stop.clone();
     let codec = format.codec;
-    let channel_cap = if codec == CallVideoCodec::Jpeg { 4 } else { 32 };
+    let latest_jpeg = (codec == CallVideoCodec::Jpeg).then(|| Arc::new(LatestJpegSlot::new()));
+    let worker_jpeg = latest_jpeg.clone();
+    let channel_cap = if codec == CallVideoCodec::Jpeg { 1 } else { 32 };
     let (tx, rx) = mpsc::channel(channel_cap);
     let reader = match thread::Builder::new()
         .name("wx-call-video-cap".into())
-        .spawn(move || read_captured_stream(stdout, codec, worker_stop, started_at, tx))
-    {
+        .spawn(move || {
+            read_captured_stream(stdout, codec, worker_stop, started_at, tx, worker_jpeg)
+        }) {
         Ok(reader) => reader,
         Err(error) => {
             let _ = child.kill();
@@ -848,6 +937,7 @@ fn spawn_capture(
         stop,
         reader,
         frames: rx,
+        latest_jpeg,
     })
 }
 
@@ -857,6 +947,7 @@ fn read_captured_stream(
     stop: Arc<AtomicBool>,
     started_at: Instant,
     tx: mpsc::Sender<CapturedVideoFrame>,
+    latest_jpeg: Option<Arc<LatestJpegSlot>>,
 ) {
     let mut buf = Vec::with_capacity(64 * 1024);
     let mut chunk = [0u8; 8192];
@@ -878,12 +969,17 @@ fn read_captured_stream(
             CallVideoCodec::Jpeg => {
                 while let Some(frame) = extract_jpeg_frame(&mut buf) {
                     if frame.len() <= MAX_VIDEO_PAYLOAD_BYTES {
-                        let _ = tx.try_send(CapturedVideoFrame {
+                        let captured = CapturedVideoFrame {
                             codec: CallVideoCodec::Jpeg,
                             flags: FLAG_KEYFRAME,
                             timestamp_micros: ts,
                             bytes: frame,
-                        });
+                        };
+                        if let Some(slot) = &latest_jpeg {
+                            slot.publish(captured);
+                        } else {
+                            let _ = tx.try_send(captured);
+                        }
                     }
                 }
             }
@@ -901,6 +997,9 @@ fn read_captured_stream(
                 );
             }
         }
+    }
+    if let Some(slot) = &latest_jpeg {
+        slot.close();
     }
 }
 

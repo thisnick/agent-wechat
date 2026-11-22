@@ -1221,7 +1221,10 @@ fn run_control(
             VoiceOffer::from_owned_random_video(
                 state.device.client_version,
                 crypto::random::<32>()?,
-                VideoOfferOptions::default(),
+                VideoOfferOptions {
+                    video_flags: if worker.is_conference() { 100 } else { 178 },
+                    ..VideoOfferOptions::default()
+                },
             )?,
             independent_video_parameters(worker.is_conference())?,
         )

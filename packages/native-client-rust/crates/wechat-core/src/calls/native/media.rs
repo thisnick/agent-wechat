@@ -63,14 +63,18 @@ fn call_to_wire_codec(codec: CallVideoCodec) -> Option<VideoWireCodec> {
     }
 }
 
+const MAX_STALLED_RX_TRANSCODE_FRAMES: u32 = 30;
+
 struct RxTrackBridge {
     generation: u32,
     sequence: u64,
     started_keyframe: bool,
     source_codec: Option<VideoCodec>,
+    cached_codec_config: Option<Vec<u8>>,
     rotation: VideoRotation,
     transcoder: Option<VideoTranscoder>,
     pending_meta: VecDeque<(u64, VideoRotation)>,
+    frames_pushed_since_output: u32,
     last_timestamp_us: u64,
 }
 
@@ -81,12 +85,62 @@ impl RxTrackBridge {
             sequence: 0,
             started_keyframe: false,
             source_codec: None,
+            cached_codec_config: None,
             rotation: VideoRotation::Deg0,
             transcoder: None,
             pending_meta: VecDeque::with_capacity(16),
+            frames_pushed_since_output: 0,
             last_timestamp_us: 0,
         }
     }
+
+    fn reset_transcoder(&mut self) {
+        self.transcoder = None;
+        self.pending_meta.clear();
+        self.started_keyframe = false;
+        self.frames_pushed_since_output = 0;
+    }
+}
+
+/// Extract codec parameter-set NALUs (`VPS`/`SPS`/`PPS` for H.265, `SPS`/`PPS` for H.264)
+/// from an Annex-B access unit so later IDR keyframes without inline headers can still
+/// initialize the FFmpeg decoder.
+fn extract_codec_config_nalus(codec: VideoCodec, annexb: &[u8]) -> Option<Vec<u8>> {
+    let mut starts = Vec::new();
+    let mut i = 0usize;
+    while i + 3 <= annexb.len() {
+        if annexb[i] == 0 && annexb[i + 1] == 0 {
+            if annexb[i + 2] == 1 {
+                starts.push((i, 3usize));
+                i += 3;
+                continue;
+            }
+            if i + 4 < annexb.len() && annexb[i + 2] == 0 && annexb[i + 3] == 1 {
+                starts.push((i, 4usize));
+                i += 4;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    let mut out = Vec::new();
+    for idx in 0..starts.len() {
+        let (start, sc_len) = starts[idx];
+        let end = starts.get(idx + 1).map_or(annexb.len(), |&(next, _)| next);
+        if start + sc_len >= end {
+            continue;
+        }
+        let header = annexb[start + sc_len];
+        let is_param = match codec {
+            VideoCodec::H265 => matches!((header >> 1) & 0x3f, 32..=34),
+            VideoCodec::H264 => matches!(header & 0x1f, 7 | 8),
+            VideoCodec::Jpeg => false,
+        };
+        if is_param {
+            out.extend_from_slice(&annexb[start..end]);
+        }
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 type ConferenceTrackUpdate = Arc<Mutex<Option<Vec<(u16, u32)>>>>;
@@ -271,33 +325,51 @@ fn run_video_rx_worker(
         // Continuously drain all ready transcoded output frames from FFmpeg stdout
         // without waiting for another inbound H.265/H.264 frame to arrive.
         for (&track_id, state) in &mut tracks {
-            let Some(transcoder) = state.transcoder.as_mut() else {
-                continue;
-            };
             let generation = state.generation;
-            while let Some(encoded) = transcoder.try_recv() {
-                let (ts_us, rot) = state
-                    .pending_meta
-                    .pop_front()
-                    .unwrap_or((state.last_timestamp_us, state.rotation));
-                let mut flags = video_rotation_flags(rot);
-                if encoded.is_keyframe {
-                    flags |= FLAG_KEYFRAME;
+            let mut failed = false;
+            while let Some(transcoder) = state.transcoder.as_mut() {
+                match transcoder.try_recv_checked() {
+                    Ok(encoded) => {
+                        state.frames_pushed_since_output = 0;
+                        let (ts_us, rot) = state
+                            .pending_meta
+                            .pop_front()
+                            .unwrap_or((state.last_timestamp_us, state.rotation));
+                        let mut flags = video_rotation_flags(rot);
+                        if encoded.is_keyframe {
+                            flags |= FLAG_KEYFRAME;
+                        }
+                        if encoded.has_codec_config {
+                            flags |= FLAG_CODEC_CONFIG;
+                        }
+                        let seq = state.sequence;
+                        state.sequence = state.sequence.saturating_add(1);
+                        let _ = runtime.block_on(sink.video_frame(
+                            track_id,
+                            generation,
+                            target_format.codec,
+                            flags,
+                            seq,
+                            ts_us,
+                            &encoded.bytes,
+                        ));
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        failed = true;
+                        break;
+                    }
                 }
-                if encoded.has_codec_config {
-                    flags |= FLAG_CODEC_CONFIG;
+            }
+            if failed || state.frames_pushed_since_output >= MAX_STALLED_RX_TRANSCODE_FRAMES {
+                if std::env::var("WX_CALL_VIDEO_TRACE").as_deref() == Ok("1") {
+                    eprintln!(
+                        "[wechat-call-video] rx transcoder reset track={track_id} failed={failed} stalled_pushes={}",
+                        state.frames_pushed_since_output
+                    );
                 }
-                let seq = state.sequence;
-                state.sequence = state.sequence.saturating_add(1);
-                let _ = runtime.block_on(sink.video_frame(
-                    track_id,
-                    generation,
-                    target_format.codec,
-                    flags,
-                    seq,
-                    ts_us,
-                    &encoded.bytes,
-                ));
+                state.reset_transcoder();
+                let _ = self_keyframe_tx.try_send(track_id);
             }
         }
     }
@@ -314,6 +386,12 @@ fn process_rx_video_frame(
 ) {
     let Some(wire_call_codec) = wire_to_call_codec(frame.codec) else {
         // Proprietary codec (e.g. Vcodec1): ignore without breaking the call.
+        if std::env::var("WX_CALL_VIDEO_TRACE").as_deref() == Ok("1") {
+            eprintln!(
+                "[wechat-call-video] rx unsupported wire codec={:?} member={} stream={}",
+                frame.codec, frame.member_id, frame.stream_id
+            );
+        }
         return;
     };
     let track_id = if !is_conference {
@@ -360,17 +438,17 @@ fn process_rx_video_frame(
     if state.source_codec != Some(src_codec) {
         if std::env::var("WX_CALL_VIDEO_TRACE").as_deref() == Ok("1") {
             eprintln!(
-                "[wechat-call-video] rx stream codec={:?} orient={} rot={}deg kf={}",
+                "[wechat-call-video] rx stream codec={:?} orient={} rot={}deg kf={} cfg={}",
                 src_codec,
                 frame.orientation,
                 rotation.degrees(),
-                frame.is_keyframe
+                frame.is_keyframe,
+                frame.has_codec_config
             );
         }
-        state.transcoder = None;
-        state.pending_meta.clear();
+        state.reset_transcoder();
+        state.cached_codec_config = None;
         state.source_codec = Some(src_codec);
-        state.started_keyframe = false;
     } else if state.rotation != rotation
         && std::env::var("WX_CALL_VIDEO_TRACE").as_deref() == Ok("1")
     {
@@ -381,10 +459,28 @@ fn process_rx_video_frame(
         );
     }
     state.rotation = rotation;
+    if frame.has_codec_config {
+        if let Some(params) = extract_codec_config_nalus(src_codec, &frame.payload) {
+            state.cached_codec_config = Some(params);
+        }
+    }
+    let mut prepended: Option<Vec<u8>> = None;
     if !state.started_keyframe {
         if !frame.is_keyframe {
             let _ = self_keyframe_tx.try_send(track_id);
             return;
+        }
+        if !frame.has_codec_config {
+            let Some(params) = state.cached_codec_config.as_deref() else {
+                // An IDR without inline VPS/SPS/PPS (and no prior parameter sets)
+                // cannot initialize FFmpeg's raw elementary-stream decoder.
+                let _ = self_keyframe_tx.try_send(track_id);
+                return;
+            };
+            let mut combined = Vec::with_capacity(params.len() + frame.payload.len());
+            combined.extend_from_slice(params);
+            combined.extend_from_slice(&frame.payload);
+            prepended = Some(combined);
         }
         state.started_keyframe = true;
     }
@@ -398,6 +494,7 @@ fn process_rx_video_frame(
             bitrate_kbps: target_format.bitrate_kbps.unwrap_or(500),
             rotation: VideoRotation::Deg0,
         }) else {
+            state.started_keyframe = false;
             return;
         };
         state.transcoder = Some(transcoder);
@@ -405,13 +502,13 @@ fn process_rx_video_frame(
     let Some(transcoder) = state.transcoder.as_mut() else {
         return;
     };
-    if transcoder.push(&frame.payload).is_err() {
-        state.transcoder = None;
-        state.pending_meta.clear();
-        state.started_keyframe = false;
+    let push_bytes = prepended.as_deref().unwrap_or(&frame.payload);
+    if transcoder.push(push_bytes).is_err() {
+        state.reset_transcoder();
         let _ = self_keyframe_tx.try_send(track_id);
         return;
     }
+    state.frames_pushed_since_output = state.frames_pushed_since_output.saturating_add(1);
     if state.pending_meta.len() >= 16 {
         state.pending_meta.pop_front();
     }
@@ -764,5 +861,40 @@ impl ConferenceMediaHost for Host<'_> {
             frames,
             Some(generation),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_codec_config_nalus_separates_parameter_sets_from_slices() {
+        let h265 = [
+            0, 0, 0, 1, 0x40, 0x01, 0xaa, // VPS (nal type 32)
+            0, 0, 0, 1, 0x42, 0x01, 0xbb, // SPS (nal type 33)
+            0, 0, 0, 1, 0x44, 0x01, 0xcc, // PPS (nal type 34)
+            0, 0, 0, 1, 0x26, 0x01, 0xdd, // IDR slice (nal type 19)
+        ];
+        assert_eq!(
+            extract_codec_config_nalus(VideoCodec::H265, &h265),
+            Some(h265[..21].to_vec())
+        );
+
+        let h264 = [
+            0, 0, 0, 1, 0x67, 0x42, // SPS (nal type 7)
+            0, 0, 0, 1, 0x68, 0xce, // PPS (nal type 8)
+            0, 0, 0, 1, 0x65, 0x88, // IDR slice (nal type 5)
+        ];
+        assert_eq!(
+            extract_codec_config_nalus(VideoCodec::H264, &h264),
+            Some(h264[..12].to_vec())
+        );
+
+        let bare_idr = [0, 0, 0, 1, 0x26, 0x01, 0xdd];
+        assert_eq!(
+            extract_codec_config_nalus(VideoCodec::H265, &bare_idr),
+            None
+        );
     }
 }

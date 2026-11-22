@@ -140,3 +140,36 @@ fn replaced_account_authority_cannot_adopt_a_late_start_result() {
     );
     assert_eq!(next.authority(), &replacement);
 }
+
+#[test]
+fn connected_before_admitted_outcome_succeeds_without_regressing_phase() {
+    let mut admission = Ownership::default();
+    admission
+        .connect("owner", authority("a"), "caller")
+        .unwrap();
+    admission.ready("owner", true).unwrap();
+    let ticket = submit(
+        admission
+            .dial("owner", "dial-req", "conf-call", "digest", 0)
+            .unwrap(),
+    );
+    // Media worker reports readiness before the actor's Admitted callback runs.
+    admission.connected(&ticket).unwrap();
+    assert_eq!(admission.session.as_ref().unwrap().phase, Phase::Connected);
+    assert!(admission.session.as_ref().unwrap().pending.is_none());
+    // Late Admitted callback is idempotent and does not regress Connected to Dialing.
+    admission.result(&ticket, Some(Phase::Dialing)).unwrap();
+    assert_eq!(admission.session.as_ref().unwrap().phase, Phase::Connected);
+
+    // If the owner already disconnected before connected() raced ahead, fail closed.
+    admission
+        .terminal(&authority("a"), &ticket.identity())
+        .unwrap();
+    let second = submit(
+        admission
+            .dial("owner", "dial-req-2", "conf-call-2", "digest", 1)
+            .unwrap(),
+    );
+    admission.disconnect("owner", 2);
+    assert_eq!(admission.connected(&second), Err(Error::Stale));
+}

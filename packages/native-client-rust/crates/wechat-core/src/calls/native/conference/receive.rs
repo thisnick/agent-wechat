@@ -386,23 +386,45 @@ fn sync_conference_video_subscriptions(
         return Ok(());
     }
     let targets: Vec<(u32, u32)> = desired.iter().map(|&id| (u32::from(id), 640)).collect();
-    let now = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
-    *last_subscribe = last_subscribe
-        .checked_add(1)
-        .context("Conference subscribe clock exhausted")?
-        .max(now);
-    // Best-effort subscribe: tolerate transient failure without tearing down audio.
-    if session
-        .subscribe_video(
+    // Best-effort subscribe with one quick bounded retry so a transient RPC error
+    // does not leave remote video unsubscribed for an entire LiveSync poll interval.
+    let mut subscribed_ok = false;
+    for attempt in 0..2 {
+        let now = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
+        *last_subscribe = last_subscribe
+            .checked_add(1)
+            .context("Conference subscribe clock exhausted")?
+            .max(now);
+        match session.subscribe_video(
             transport,
             state,
             authority,
             &targets,
             *last_subscribe,
             tasks.next()?,
-        )
-        .is_ok()
-    {
+        ) {
+            Ok(()) => {
+                subscribed_ok = true;
+                break;
+            }
+            Err(error) => {
+                if std::env::var("WX_CALL_VIDEO_TRACE").as_deref() == Ok("1") {
+                    eprintln!(
+                        "[wechat-call-video] conference subscribe attempt={} targets={:?} failed: {error:#}",
+                        attempt + 1,
+                        desired
+                    );
+                }
+                if attempt == 0
+                    && transport.worker.current()
+                    && !transport.worker.stop.load(Ordering::Acquire)
+                {
+                    thread::sleep(Duration::from_millis(250));
+                }
+            }
+        }
+    }
+    if subscribed_ok {
         for &member in &desired {
             if !subscribed_video.contains(&member) {
                 let entry = video_track_gens.entry(member).or_insert(0);

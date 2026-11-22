@@ -46,6 +46,11 @@ export type DesktopPreviewPacket =
   | { type: "ended" };
 
 export function decodeBase64Bytes(base64: string): Uint8Array {
+  const fromBase64 = (Uint8Array as unknown as { fromBase64?: (input: string) => Uint8Array })
+    .fromBase64;
+  if (typeof fromBase64 === "function") {
+    return fromBase64(base64);
+  }
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i += 1) {

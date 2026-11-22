@@ -56,8 +56,7 @@ const MAX_INVITEES: usize = 100;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const ATTACH_TIMEOUT: Duration = Duration::from_secs(30);
 const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(3);
-const SELF_VIEW_MIN_INTERVAL: Duration = Duration::from_millis(80);
-const PREVIEW_POLL_INTERVAL: Duration = Duration::from_millis(66);
+const SELF_VIEW_MIN_INTERVAL: Duration = Duration::from_millis(40);
 const LEVEL_INTERVAL: Duration = Duration::from_millis(80);
 
 /// Packet pushed from an account's native call actor to the WebView.
@@ -507,7 +506,7 @@ struct SelfViewDecoder {
     child: Option<Child>,
     stop: Arc<AtomicBool>,
     input_tx: Option<std::sync::mpsc::SyncSender<Vec<u8>>>,
-    output_rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    latest_output: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
     writer: Option<JoinHandle<()>>,
     reader: Option<JoinHandle<()>>,
     wait_for_keyframe: bool,
@@ -529,16 +528,22 @@ impl SelfViewDecoder {
             "nobuffer",
             "-flags",
             "low_delay",
+            "-probesize",
+            "32",
+            "-analyzeduration",
+            "0",
+            "-threads",
+            "1",
             "-f",
             input_fmt,
             "-i",
             "pipe:0",
             "-vf",
-            "fps=10,scale=w='min(iw,320)':h='min(ih,240)':force_original_aspect_ratio=decrease",
+            "scale=w='min(iw,320)':h='min(ih,240)':force_original_aspect_ratio=decrease",
             "-c:v",
             "mjpeg",
             "-q:v",
-            "8",
+            "7",
             "-flush_packets",
             "1",
             "-f",
@@ -568,7 +573,8 @@ impl SelfViewDecoder {
         };
         let stop = Arc::new(AtomicBool::new(false));
         let (input_tx, input_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
-        let (output_tx, output_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(2);
+        let latest_output = Arc::new(std::sync::Mutex::new(None));
+        let reader_output = latest_output.clone();
 
         let writer_stop = stop.clone();
         let Ok(writer) = std::thread::Builder::new()
@@ -602,7 +608,9 @@ impl SelfViewDecoder {
                     buf.extend_from_slice(&chunk[..n]);
                     while let Some(frame) = extract_jpeg_frame(&mut buf) {
                         if frame.len() <= MAX_VIDEO_PAYLOAD_BYTES {
-                            let _ = output_tx.try_send(frame);
+                            if let Ok(mut guard) = reader_output.lock() {
+                                *guard = Some(frame);
+                            }
                         }
                     }
                 }
@@ -619,7 +627,7 @@ impl SelfViewDecoder {
             child: Some(child),
             stop,
             input_tx: Some(input_tx),
-            output_rx,
+            latest_output,
             writer: Some(writer),
             reader: Some(reader),
             wait_for_keyframe: true,
@@ -647,11 +655,10 @@ impl SelfViewDecoder {
     }
 
     fn drain_latest(&mut self) -> Option<Vec<u8>> {
-        let mut latest = None;
-        while let Ok(frame) = self.output_rx.try_recv() {
-            latest = Some(frame);
-        }
-        latest
+        self.latest_output
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take())
     }
 }
 
@@ -1743,7 +1750,7 @@ pub async fn call_preview_start(
 
     let capture = tokio::task::spawn_blocking(move || -> Result<LocalVideoCapture, String> {
         let source = resolve_verified_camera_source(camera_id.as_deref(), ffmpeg.as_deref())?;
-        LocalVideoCapture::start_preview(&source, 640, 480, 15, ffmpeg.as_deref())
+        LocalVideoCapture::start_preview(&source, 480, 360, 24, ffmpeg.as_deref())
             .map_err(|error| error.to_string())
     })
     .await
@@ -1761,21 +1768,18 @@ pub async fn call_preview_start(
     let loop_cancel = cancel.clone();
     let task = tauri::async_runtime::spawn(async move {
         let mut capture = capture;
-        let mut ticker = interval(PREVIEW_POLL_INTERVAL);
-        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 _ = loop_cancel.cancelled() => break,
-                _ = ticker.tick() => {
-                    if let Some(frame) = capture.try_recv() {
-                        if channel
-                            .send(DesktopPreviewPacket::Frame {
-                                jpeg: STANDARD.encode(&frame.bytes),
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
+                frame = capture.recv_latest() => {
+                    let Some(frame) = frame else { break };
+                    if channel
+                        .send(DesktopPreviewPacket::Frame {
+                            jpeg: STANDARD.encode(&frame.bytes),
+                        })
+                        .is_err()
+                    {
+                        break;
                     }
                 }
             }

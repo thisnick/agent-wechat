@@ -949,8 +949,8 @@ function CallTheaterDialog({
               </div>
             )}
 
-            {/* Self-view corner tile for active video calls */}
-            {call.callType === "video" && callState.localCamera && (
+            {/* Self-view corner tile for active connected video calls */}
+            {call.callType === "video" && callState.localCamera && call.state === "connected" && (
               <div className="call-self-view" aria-label={t("calls.selfView")}>
                 <LocalVideoSurface
                   stream={callState.localStream}
