@@ -1,5 +1,34 @@
 # @agent-wechat/client-ui
 
+## 0.7.0-beta.1
+
+### Minor Changes
+
+- [#659](https://github.com/thisnick/agent-wechat/pull/659) [`7e7e3ba`](https://github.com/thisnick/agent-wechat/commit/7e7e3bab2f4b4921cd5e7c32bb4b4ee7c8fd84e4) Thanks [@thisnick](https://github.com/thisnick)! - Add a non-intrusive two-step feedback and GitHub star prompt in the client UI after 3 distinct active days and 15 sent messages once the window is idle, along with permanent Star on GitHub and Report an issue links in Settings. The issue link opens the bug report template pre-filled with the app version and platform only.
+
+### Patch Changes
+
+- [#653](https://github.com/thisnick/agent-wechat/pull/653) [`e70b27a`](https://github.com/thisnick/agent-wechat/commit/e70b27ae1286fcdae13a79cce1b54908e8acacf1) Thanks [@thisnick](https://github.com/thisnick)! - Expand oversized merged-forward chat history cards arriving as app message subtype `40` (`49:40`) in place, and show an explicit unavailable fallback when expansion cannot complete.
+
+  - Add CGI `221` (`downloadappattach`) chunked download support to `wechat-protocol` (`AppAttachRequest`, `AppAttachChunk`, `download_app_attach_chunk`, `Service::AppAttachment`) and in-place subtype-`40` expansion updates to `wechat-profile` (`AppMessageExpansion`, `apply_app_message_expansion`).
+  - Automatically download and expand incoming `49:40` messages in `wechat-core`, rewriting the official `Msg_*` row to its inner subtype (such as `49:19`) and emitting `message.updated` if a later retry succeeds after an initial failure.
+  - Render unexpanded `49:40` forwarded cards with an explicit `[Chat History unavailable]` fallback instead of `body: null` across the daemon API, OpenClaw extension, and browser client UI, and allow quoting expanded `49:19` cards up to the 1 MiB forwarded-XML limit.
+
+- [#654](https://github.com/thisnick/agent-wechat/pull/654) [`cb66b2f`](https://github.com/thisnick/agent-wechat/commit/cb66b2f41cc87b195d3b0a5266c8f30a7fa3668e) Thanks [@thisnick](https://github.com/thisnick)! - Match the gap between the voice and video call buttons in the chat header to the rest of the header toolbar across desktop, narrow, and compact layouts. Also drain all ready nonblocking PulseAudio mainloop events per audio poll on Linux so multiplexed capture and playback do not stall into playback queue overflows.
+
+- [#656](https://github.com/thisnick/agent-wechat/pull/656) [`69b4718`](https://github.com/thisnick/agent-wechat/commit/69b47185d9980ef1a9fb40c722727a2d11048ef0) Thanks [@thisnick](https://github.com/thisnick)! - Chinese: use state wording (`麦克风已开`, `摄像头已开`, `摄像头已关`, `扬声器已关`) for call device toggles and status labels instead of action verbs (`开启…`/`关闭…`), and translate the contact/search `Message` action button as `发消息`.
+
+- [#661](https://github.com/thisnick/agent-wechat/pull/661) [`c38356d`](https://github.com/thisnick/agent-wechat/commit/c38356da36129e6dc5fc8323d1afc5c81575d00c) Thanks [@thisnick](https://github.com/thisnick)! - Fix video calling orientation, conference join/create reliability, local preview smoothness, incoming CLI/transcoded video recovery, and OpenClaw call-end media teardown:
+
+  - Pre-rotate outgoing call video 90° CCW across native capture (`LocalVideoCapture`), browser WebCodecs H.264, and daemon TX transcoding while signaling wire `orientation = 1` (+90° CW) in both `EncFecHeader` and `workMode = 3` virtual-frame metadata packets (`pkg_seq = 0`, `hdr[12] = 0x07`, `hdr[15] = 0x00`, `VideoPktExtHeader` fields `1..=9` and `16` with `f2 = 0`), with desktop `SelfViewDecoder` undoing the rotation for upright local self-view so outgoing video displays upright on Android, iOS/iPadOS, Official Linux, and native clients.
+  - Fix conference media mutex starvation by releasing the conference roster lock before media encoding/decoding and UDP reads, allow `connected()` to race ahead of `Admitted` without regressing state, accept initial `sequence = 0` and proto3-omitted zero values in `AVMemberList`, preserve conference `video_flags = 100`, add periodic UDP relay check-in retransmits and bounded `SubscribeVideo` retries, and hide the desktop self-view corner tile until the call is connected.
+  - Reduce desktop camera preview and in-call self-view lag with event-driven drop-oldest MJPEG capture (`480x360 @ 24 fps`, `-fflags nobuffer -flags low_delay`), low-latency single-threaded `SelfViewDecoder` without `fps=10` rate-conversion buffering, and single-in-flight `createImageBitmap` canvas coalescing.
+  - Prevent incoming transcoded video (`wx calls monitor` / JPEG clients) from stalling on `Waiting for video...` by caching codec parameter sets (`VPS`/`SPS`/`PPS`), requiring parameter sets before latching the keyframe gate, resetting exited or stalled FFmpeg transcoders, upgrading `wechat-calls` JPEG extraction to segment-aware marker scanning, tracking the peer's observed `stream_id` for `IRequest`, and sending bounded initial keyframe requests.
+  - Avoid spurious `needs_review` escalation in OpenClaw `CallsService` when `media_closed` races slightly ahead of a concurrent `call.state(ended)` control event.
+
+- Updated dependencies [[`e70b27a`](https://github.com/thisnick/agent-wechat/commit/e70b27ae1286fcdae13a79cce1b54908e8acacf1)]:
+  - @agent-wechat/shared@3.0.0-beta.1
+
 ## 0.7.0-beta.0
 
 ### Minor Changes
