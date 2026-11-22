@@ -1,5 +1,7 @@
 # @agent-wechat/wechat
 
+## 3.0.0-beta.2
+
 ## 3.0.0-beta.1
 
 ### Patch Changes
