@@ -18,6 +18,7 @@ const wechat_protocol::media::MAX_LINK_THUMBNAIL_BYTES | usize | MISSING DOC
 const wechat_protocol::media::MAX_NATIVE_UPLOAD_BYTES | usize | MISSING DOC
 const wechat_protocol::media::MAX_VIDEO_DOWNLOAD_BYTES | usize | Incoming video plaintext limit, matching the ordinary-file download and automatic-download ceiling. Every such transfer stays bound to the advertised length and MD5. Outgoing preparation keeps the separate `wechat_media::MAX_VIDEO_SOURCE_BYTES` source limit.
 const wechat_protocol::media::STICKER_HOSTS | &[&str] | Tencent CDN hosts accepted for received sticker downloads regardless of path. Callers must use `validate_sticker_url` for the full policy, which also accepts `vweixinf.tc.qq.com` for its numeric `/stodownload` endpoint.
+const wechat_protocol::media::TP_MEDIA_HOSTS | &[&str] | Approved Enterprise WeChat (WeCom) media download hosts.
 const wechat_protocol::media_send::VOICE_UPLOAD_CHUNK_BYTES | usize | Encoded SILK bytes carried by one `uploadvoice` request. A short-link request travels in one MMTLS record of at most 65,519 plaintext bytes, including the route, packet header and envelope, so a 60-second note (about 126-131 KB from the bundled 16 kbit/s profile) cannot use one request. 32 KiB matches the `downloadvoice` range size and leaves room for that overhead.
 const wechat_protocol::mmtls::VERSION | u16 | MISSING DOC
 const wechat_protocol::quote_send::MAX_QUOTE_CONTENT_BYTES | usize | MISSING DOC
@@ -648,6 +649,14 @@ field wechat_protocol::media::StickerDescriptor::expected_bytes | u64 | MISSING 
 field wechat_protocol::media::StickerDescriptor::expected_md5 | alloc::string::String | MISSING DOC
 field wechat_protocol::media::StickerDescriptor::expires_at | core::option::Option<u64> | MISSING DOC
 field wechat_protocol::media::StickerDescriptor::url | alloc::string::String | MISSING DOC
+field wechat_protocol::media::TpMediaDescriptor::aes_key | alloc::vec::Vec<u8> | 16-byte AES-128-ECB decryption key (`aeskey` or `tpthumbaeskey`).
+field wechat_protocol::media::TpMediaDescriptor::auth_key | alloc::string::String | Transfer authorization key (`tpauthkey`) sent in the `authkey` request header.
+field wechat_protocol::media::TpMediaDescriptor::expected_bytes | core::option::Option<u64> | Advertised plaintext byte length, when present.
+field wechat_protocol::media::TpMediaDescriptor::expected_md5 | core::option::Option<alloc::string::String> | Advertised plaintext MD5 hex digest, when present.
+field wechat_protocol::media::TpMediaDescriptor::expires_at | core::option::Option<u64> | Optional Unix expiry timestamp from message metadata.
+field wechat_protocol::media::TpMediaDescriptor::quality | wechat_protocol::media::MediaQuality | Requested media quality used to enforce size bounds.
+field wechat_protocol::media::TpMediaDescriptor::strict_size | bool | Whether a mismatch with `expected_bytes` fails the download.
+field wechat_protocol::media::TpMediaDescriptor::url | alloc::string::String | HTTPS download URL from message metadata (`tpurl`, `tphdurl`, `tpthumburl`, or `tpvideourl`).
 field wechat_protocol::media::UploadedImage::original | core::option::Option<wechat_protocol::media::UploadedMedia> | Original copy to offer alongside the previews; `None` offers only standard and thumbnail.
 field wechat_protocol::media::UploadedImage::standard | wechat_protocol::media::UploadedMedia | Compressed main image copy.
 field wechat_protocol::media::UploadedImage::thumbnail | wechat_protocol::media::UploadedMedia | Small preview image copy.
@@ -1251,12 +1260,16 @@ fn wechat_protocol::media::fetch_channels_video | fn(media: &wechat_protocol::cl
 fn wechat_protocol::media::fetch_link_thumbnail | fn(value: &str, progress: impl core::ops::function::FnMut(u64, core::option::Option<u64>) -> anyhow::Result<()>) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
 fn wechat_protocol::media::fetch_sticker | fn(descriptor: &wechat_protocol::media::sticker::StickerDescriptor, progress: impl core::ops::function::FnMut(u64, core::option::Option<u64>) -> anyhow::Result<()>) -> anyhow::Result<(alloc::vec::Vec<u8>, wechat_media::image::ImageInspection)> | MISSING DOC
 fn wechat_protocol::media::fetch_sticker_original | fn(url: &str, expected_md5: &str, progress: impl core::ops::function::FnMut(u64, core::option::Option<u64>) -> anyhow::Result<()>) -> anyhow::Result<(alloc::vec::Vec<u8>, wechat_media::image::ImageInspection)> | Fetch an original whose metadata has no advertised length. Enforces the same host, DNS, stream-size, MD5 and image checks without inventing a source length.
+fn wechat_protocol::media::fetch_tp_media | fn(descriptor: &wechat_protocol::media::tp_media::TpMediaDescriptor, progress: impl core::ops::function::FnMut(u64, core::option::Option<u64>) -> anyhow::Result<()>) -> anyhow::Result<wechat_protocol::media::DownloadedMedia> | Download and decrypt an Enterprise WeChat media object into memory.
+fn wechat_protocol::media::fetch_tp_media_to | fn(descriptor: &wechat_protocol::media::tp_media::TpMediaDescriptor, progress: impl core::ops::function::FnMut(u64, core::option::Option<u64>) -> anyhow::Result<()>, sink: &mut dyn std::io::Write) -> anyhow::Result<wechat_protocol::media::DownloadReceipt> | Download and decrypt an Enterprise WeChat media object directly into `sink`, verifying range framing, PKCS#7 padding, size limits, and any advertised length or MD5 digest. Until this returns `Ok`, bytes written to `sink` are unverified and must be discarded on error.
 fn wechat_protocol::media::pack_cdn | fn(fields: &wechat_protocol::media::CdnFields) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
 fn wechat_protocol::media::unpack_cdn | fn(input: &[u8]) -> anyhow::Result<wechat_protocol::media::CdnFields> | MISSING DOC
 fn wechat_protocol::media::validate_avatar_url | fn(value: &str) -> anyhow::Result<url::Url> | MISSING DOC
 fn wechat_protocol::media::validate_link_thumbnail_url | fn(value: &str) -> anyhow::Result<url::Url> | MISSING DOC
 fn wechat_protocol::media::validate_shared_link_url | fn(value: &str) -> anyhow::Result<url::Url> | MISSING DOC
 fn wechat_protocol::media::validate_sticker_url | fn(value: &str) -> anyhow::Result<url::Url> | Validates a sticker source URL before download: HTTP or HTTPS on `STICKER_HOSTS` or `vweixinf.tc.qq.com/<region>/<id>/stodownload`, default port only, with no credentials or fragment.
+fn wechat_protocol::media::validate_tp_auth_key | fn(value: &str) -> anyhow::Result<()> | Validate an Enterprise WeChat transfer auth key (`tpauthkey`) before placing it in an HTTP request header.
+fn wechat_protocol::media::validate_tp_media_url | fn(value: &str) -> anyhow::Result<url::Url> | Validate an Enterprise WeChat media URL: HTTPS on an approved host, default port 443, with no credentials, control characters, or fragment.
 fn wechat_protocol::media_send::VoiceUpload::accept_reply | fn(&mut self, input: &[u8]) -> anyhow::Result<core::option::Option<wechat_protocol::media_send::MediaSendResult>> | Apply the reply for the request built last. Returns the note's result after the final range, or `None` when the next range must be sent. A rejection after an earlier range was accepted needs review, because the server already holds part of the note under this client message ID.
 fn wechat_protocol::media_send::VoiceUpload::is_final | fn(&self) -> bool | Whether the next request carries the last range and the end flag.
 fn wechat_protocol::media_send::VoiceUpload::new | fn(destination: &'a str, client_id: &'a str, created_at: u32, duration_ms: u32, encoded: &'a [u8]) -> anyhow::Result<Self> | MISSING DOC
@@ -1476,6 +1489,7 @@ impl core::clone::Clone for wechat_protocol::media::PreparedVariant | impl | -
 impl core::clone::Clone for wechat_protocol::media::PreparedVideoUpload | impl | -
 impl core::clone::Clone for wechat_protocol::media::SourceEvidence | impl | -
 impl core::clone::Clone for wechat_protocol::media::StickerDescriptor | impl | -
+impl core::clone::Clone for wechat_protocol::media::TpMediaDescriptor | impl | -
 impl core::clone::Clone for wechat_protocol::media::UploadedImage | impl | -
 impl core::clone::Clone for wechat_protocol::media::UploadedMedia | impl | -
 impl core::clone::Clone for wechat_protocol::media::UploadedVideo | impl | -
@@ -1749,6 +1763,7 @@ impl core::fmt::Debug for wechat_protocol::media::MediaQuality | impl | -
 impl core::fmt::Debug for wechat_protocol::media::PreparedFileUpload | impl | -
 impl core::fmt::Debug for wechat_protocol::media::PreparedUpload | impl | -
 impl core::fmt::Debug for wechat_protocol::media::SourceEvidence | impl | -
+impl core::fmt::Debug for wechat_protocol::media::TpMediaDescriptor | impl | -
 impl core::fmt::Debug for wechat_protocol::media::VideoRepresentationMismatch | impl | -
 impl core::fmt::Debug for wechat_protocol::media_send::MediaSendResult | impl | -
 impl core::fmt::Debug for wechat_protocol::media_send::SendStatus | impl | -
@@ -1893,6 +1908,7 @@ impl core::ops::drop::Drop for wechat_protocol::media::CdnConfig | impl | -
 impl core::ops::drop::Drop for wechat_protocol::media::MediaDescriptor | impl | -
 impl core::ops::drop::Drop for wechat_protocol::media::PreparedFileUpload | impl | -
 impl core::ops::drop::Drop for wechat_protocol::media::PreparedUpload | impl | -
+impl core::ops::drop::Drop for wechat_protocol::media::TpMediaDescriptor | impl | -
 impl core::ops::drop::Drop for wechat_protocol::mmtls::ShortSession | impl | -
 impl core::str::traits::FromStr for wechat_protocol::StickerId | impl | -
 impl core::str::traits::FromStr for wechat_protocol::StickerPackId | impl | -
@@ -1952,6 +1968,7 @@ impl serde_core::de::Deserialize<'de> for wechat_protocol::media::PreparedUpload
 impl serde_core::de::Deserialize<'de> for wechat_protocol::media::PreparedVariant | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::media::PreparedVideoUpload | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::media::StickerDescriptor | impl<'de> | -
+impl serde_core::de::Deserialize<'de> for wechat_protocol::media::TpMediaDescriptor | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::media::UploadedImage | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::media::UploadedMedia | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::media::UploadedVideo | impl<'de> | -
@@ -2037,6 +2054,7 @@ impl serde_core::ser::Serialize for wechat_protocol::media::PreparedUpload | imp
 impl serde_core::ser::Serialize for wechat_protocol::media::PreparedVariant | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::media::PreparedVideoUpload | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::media::StickerDescriptor | impl | -
+impl serde_core::ser::Serialize for wechat_protocol::media::TpMediaDescriptor | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::media::UploadedImage | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::media::UploadedMedia | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::media::UploadedVideo | impl | -
@@ -2225,6 +2243,7 @@ struct wechat_protocol::media::PreparedVariant | struct { public fields } | MISS
 struct wechat_protocol::media::PreparedVideoUpload | struct { public fields } | MISSING DOC
 struct wechat_protocol::media::SourceEvidence | struct { public fields } | How an optional reply value relates to the selected message tuple and to the bytes actually delivered. Values are compared, never retained.
 struct wechat_protocol::media::StickerDescriptor | struct { public fields } | MISSING DOC
+struct wechat_protocol::media::TpMediaDescriptor | struct { public fields } | Descriptor for an Enterprise WeChat (WeCom) encrypted HTTP media download.
 struct wechat_protocol::media::UploadedImage | struct { public fields } | Uploaded copies offered by an image message, with an optional original.
 struct wechat_protocol::media::UploadedMedia | struct { public fields } | MISSING DOC
 struct wechat_protocol::media::UploadedVideo | struct { public fields } | MISSING DOC

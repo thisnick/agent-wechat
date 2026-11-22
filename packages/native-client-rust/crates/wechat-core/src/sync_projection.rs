@@ -65,11 +65,15 @@ pub(super) const ENTRY_EXCLUDED_PEERS: [&str; 13] = [
     "appbrandcustomerservicemsg",
     "service_officialaccounts",
 ];
+fn is_group_chat_id(peer: &str) -> bool {
+    peer.ends_with("@chatroom") || peer.ends_with("@im.chatroom")
+}
+
 /// A diagnostic label for a control's peer, never its identity: `group`,
 /// `excluded` (a built-in session holder or endpoint with its own handling),
 /// `classified` (the shipped account classifier's set) or `ordinary`.
 pub(super) fn peer_kind(peer: &str) -> &'static str {
-    if peer.ends_with("@chatroom") {
+    if is_group_chat_id(peer) {
         "group"
     } else if ENTRY_EXCLUDED_PEERS.contains(&peer)
         || matches!(peer, "notifymessage" | "notification_messages" | "fmessage")
@@ -140,7 +144,7 @@ fn message_blocker(message: &AddMessage) -> ProjectionBlocked {
         // before its XML; classify the XML, never the sender. Without a valid
         // envelope the whole content is tried.
         let body = if message.message_type == 10002
-            && message.from.ends_with("@chatroom")
+            && is_group_chat_id(&message.from)
             && !message.outgoing
         {
             envelope(message)
@@ -245,7 +249,7 @@ fn identity(value: &str) -> Result<()> {
     Ok(())
 }
 fn envelope(message: &AddMessage) -> Result<(String, &[u8])> {
-    if message.from.ends_with("@chatroom") && !message.outgoing && message.message_type != 10000 {
+    if is_group_chat_id(&message.from) && !message.outgoing && message.message_type != 10000 {
         let end = message
             .content
             .windows(2)
@@ -254,7 +258,7 @@ fn envelope(message: &AddMessage) -> Result<(String, &[u8])> {
             .context("unsupported_group_sender_envelope")?;
         let sender = std::str::from_utf8(&message.content[..end])?;
         identity(sender)?;
-        if sender.ends_with("@chatroom") {
+        if is_group_chat_id(sender) {
             bail!("invalid_group_sender_envelope")
         }
         Ok((sender.into(), &message.content[end + 2..]))

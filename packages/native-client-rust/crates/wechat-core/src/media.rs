@@ -14,8 +14,8 @@ use wechat_protocol::{
     file_upload::FileUploadReservation,
     media::{
         CdnClient, LargeCdnRoute, MediaDescriptor, MediaQuality, PreparedFileUpload,
-        PreparedImageUpload, PreparedVideoUpload, StickerDescriptor, UploadedImage, UploadedMedia,
-        UploadedVideo,
+        PreparedImageUpload, PreparedVideoUpload, StickerDescriptor, TpMediaDescriptor,
+        UploadedImage, UploadedMedia, UploadedVideo,
     },
 };
 use wechat_store::{MediaAssetRecord, MediaJobRecord, OwnedMediaSource};
@@ -125,6 +125,10 @@ enum DownloadPlan {
     },
     Cdn {
         descriptor: MediaDescriptor,
+    },
+    /// Enterprise WeChat (WeCom) encrypted HTTP media (`tpurl`/`tphdurl`/`tpthumburl`/`tpvideourl`).
+    TpHttp {
+        descriptor: TpMediaDescriptor,
     },
     /// A Channels post's video. Only the post identity is kept; playback material is resolved
     /// fresh for each transfer and never stored.
@@ -1103,6 +1107,7 @@ impl Core {
             let id = format!("asset_{}", &identity[..40]);
             let expires = match &plan {
                 DownloadPlan::Cdn { descriptor } => descriptor.expires_at,
+                DownloadPlan::TpHttp { descriptor } => descriptor.expires_at,
                 DownloadPlan::Sticker { descriptor } => descriptor.expires_at,
                 _ => None,
             };
@@ -1202,49 +1207,52 @@ impl Core {
                 }
             }
             if asset.state != "available" && matches!(kind, MediaKind::File | MediaKind::Video) {
-                if let DownloadPlan::Cdn { descriptor } = &plan {
-                    if let Some(md5) = descriptor.expected_md5.as_deref() {
-                        let cache_kind = if kind == MediaKind::File {
-                            wechat_profile::HardlinkKind::File
-                        } else {
-                            wechat_profile::HardlinkKind::Video
-                        };
-                        if variant == MediaVariant::Thumbnail {
-                            // A video thumbnail is a small JPEG, checked in memory.
-                            if let Ok(cached) = reader.cached_hardlink_file(cache_kind, md5) {
-                                if let Ok((mime, frames)) =
-                                    validate_asset_bytes(kind, variant, &cached.bytes)
-                                {
-                                    asset = self.cache_asset(
-                                        account,
-                                        &id,
-                                        &cached.bytes,
-                                        &mime,
-                                        Some(variant),
-                                        frames,
-                                    )?;
-                                }
-                            }
-                        } else if let Ok(cached) = reader.verified_hardlink_file(cache_kind, md5) {
-                            // The profile already holds these bytes, for example after
-                            // the same file was sent or received before. They are
-                            // checked and sealed from the profile file in steps.
-                            let file = PlainFile::existing(
-                                cached.path,
-                                cached.byte_length,
-                                cached.md5,
-                                cached.sha256,
-                            );
-                            if let Ok((mime, frames)) = validate_asset_file(kind, &file) {
-                                asset = self.cache_asset_payload(
+                let expected_md5 = match &plan {
+                    DownloadPlan::Cdn { descriptor } => descriptor.expected_md5.as_deref(),
+                    DownloadPlan::TpHttp { descriptor } => descriptor.expected_md5.as_deref(),
+                    _ => None,
+                };
+                if let Some(md5) = expected_md5 {
+                    let cache_kind = if kind == MediaKind::File {
+                        wechat_profile::HardlinkKind::File
+                    } else {
+                        wechat_profile::HardlinkKind::Video
+                    };
+                    if variant == MediaVariant::Thumbnail {
+                        // A video thumbnail is a small JPEG, checked in memory.
+                        if let Ok(cached) = reader.cached_hardlink_file(cache_kind, md5) {
+                            if let Ok((mime, frames)) =
+                                validate_asset_bytes(kind, variant, &cached.bytes)
+                            {
+                                asset = self.cache_asset(
                                     account,
                                     &id,
-                                    Payload::File(&file),
+                                    &cached.bytes,
                                     &mime,
                                     Some(variant),
                                     frames,
                                 )?;
                             }
+                        }
+                    } else if let Ok(cached) = reader.verified_hardlink_file(cache_kind, md5) {
+                        // The profile already holds these bytes, for example after
+                        // the same file was sent or received before. They are
+                        // checked and sealed from the profile file in steps.
+                        let file = PlainFile::existing(
+                            cached.path,
+                            cached.byte_length,
+                            cached.md5,
+                            cached.sha256,
+                        );
+                        if let Ok((mime, frames)) = validate_asset_file(kind, &file) {
+                            asset = self.cache_asset_payload(
+                                account,
+                                &id,
+                                Payload::File(&file),
+                                &mime,
+                                Some(variant),
+                                frames,
+                            )?;
                         }
                     }
                 }
@@ -2029,6 +2037,80 @@ impl Core {
                 };
                 (payload, mime, actual, frames)
             }
+            DownloadPlan::TpHttp { descriptor } => {
+                let unlocked = permit.is_some();
+                let fence = unlocked
+                    .then(|| self.media_authorization_fence(account))
+                    .transpose()?;
+                let streamed = matches!(asset.kind, MediaKind::File | MediaKind::Video)
+                    && asset.variant != MediaVariant::Thumbnail;
+                let (payload, media, mime, frames) = cdn_transfer(
+                    if unlocked {
+                        permit.as_deref_mut()
+                    } else {
+                        None
+                    },
+                    self,
+                    account,
+                    || {
+                        if streamed {
+                            let mut receipt = None;
+                            let file = PlainFile::write_with("wechat-media-download-", |output| {
+                                receipt = Some(self.upstream.download_tp_media_to(
+                                    &descriptor,
+                                    &progress,
+                                    output,
+                                )?);
+                                Ok(())
+                            })?;
+                            let receipt = receipt.context("media_integrity_failed")?;
+                            ensure!(
+                                file.byte_length == receipt.byte_length
+                                    && file.sha256 == receipt.sha256,
+                                "media_integrity_failed"
+                            );
+                            let (mime, frames) = validate_asset_file(asset.kind, &file)?;
+                            return Ok((OwnedPayload::File(file), receipt, mime, frames));
+                        }
+                        let (bytes, receipt) = self
+                            .upstream
+                            .download_tp_media(&descriptor, &progress)?
+                            .into_parts();
+                        let (mime, frames) =
+                            validate_asset_bytes(asset.kind, asset.variant, &bytes)?;
+                        if mime == "image/x-wxgf" {
+                            self.cache_wxgf_preview(account, asset_id, &bytes)?;
+                        }
+                        Ok((OwnedPayload::Bytes(bytes), receipt, mime, frames))
+                    },
+                )?;
+                if let Some(fence) = fence {
+                    self.resume_media_state(account, id, &fence)?;
+                }
+                ensure!(
+                    asset.variant != MediaVariant::Original
+                        || (media.advertised_size_matches != Some(false)
+                            && descriptor
+                                .expected_md5
+                                .as_ref()
+                                .is_none_or(|v| v.eq_ignore_ascii_case(&media.md5))),
+                    "unsupported_media_variant"
+                );
+                official_writeback = if asset.official_writeback == "unsupported" {
+                    None
+                } else {
+                    match (asset.kind, payload.as_payload()) {
+                        (MediaKind::Image, Payload::Bytes(bytes)) => {
+                            Some(self.project_received_image(account, id, &asset, bytes))
+                        }
+                        (MediaKind::File | MediaKind::Video, payload) => Some(
+                            self.project_received_hardlink_payload(account, id, &asset, payload),
+                        ),
+                        _ => None,
+                    }
+                };
+                (payload, mime, Some(asset.variant), frames)
+            }
             DownloadPlan::LinkThumbnail {
                 source: crate::links::LinkThumbnail::Http(url),
             } => {
@@ -2735,6 +2817,7 @@ pub(crate) fn classify_error(error: &anyhow::Error) -> String {
         "media_expired",
         "media_worker_stopping",
         "media_integrity_failed",
+        "media_metadata_invalid",
         "source_integrity_failed",
         "unsupported_media_transport",
         "voice_duration_limit",
@@ -2746,6 +2829,10 @@ pub(crate) fn classify_error(error: &anyhow::Error) -> String {
         "link_thumbnail_size_limit",
         "link_thumbnail_encoding_refused",
         "link_source_not_allowed",
+        "tp_media_source_not_allowed",
+        "tp_media_dns_not_public",
+        "tp_media_size_limit",
+        "tp_media_encoding_refused",
     ] {
         if message.contains(code) {
             return code.into();
@@ -2885,7 +2972,12 @@ type DiscoveredMedia = (MediaKind, MediaVariant, DownloadPlan, Option<String>);
 fn discover(msg: &wechat_profile::Message, content: &str) -> Result<Vec<DiscoveredMedia>> {
     ensure!(content.len() <= 1024 * 1024, "media_metadata_limit");
     let mut xml = content.trim_start();
-    if !xml.starts_with('<') && msg.peer.as_ref().is_some_and(|p| p.ends_with("@chatroom")) {
+    if !xml.starts_with('<')
+        && msg
+            .peer
+            .as_ref()
+            .is_some_and(|p| p.ends_with("@chatroom") || p.ends_with("@im.chatroom"))
+    {
         if let Some((prefix, rest)) = xml.split_once(":\n") {
             ensure!(
                 !prefix.is_empty()
@@ -2926,18 +3018,33 @@ fn discover(msg: &wechat_profile::Message, content: &str) -> Result<Vec<Discover
         ensure!(k.len() == 16, "media_metadata_invalid");
         Ok(k)
     };
+    let md5_attr = |v: Option<&str>| -> Result<Option<String>> {
+        match v.filter(|s| !s.is_empty()) {
+            None => Ok(None),
+            Some(s) => {
+                ensure!(
+                    s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit()),
+                    "media_metadata_invalid"
+                );
+                Ok(Some(s.to_string()))
+            }
+        }
+    };
     let mut out = vec![];
     match msg.message_type {
         3 => {
             let n = element("img")?;
             let expiry =
                 number(n.attribute("expiretime")).or_else(|| number(n.attribute("expire")));
-            for (variant, url, aes, size, quality) in [
+            for (variant, cdn_url, cdn_aes, cdn_size, tp_url, tp_aes, tp_size, quality) in [
                 (
                     MediaVariant::Original,
                     "cdnbigimgurl",
                     "aeskey",
                     "hdlength",
+                    "tphdurl",
+                    "aeskey",
+                    "tphdlength",
                     MediaQuality::Original,
                 ),
                 (
@@ -2945,6 +3052,9 @@ fn discover(msg: &wechat_profile::Message, content: &str) -> Result<Vec<Discover
                     "cdnmidimgurl",
                     "aeskey",
                     "length",
+                    "tpurl",
+                    "aeskey",
+                    "tplength",
                     MediaQuality::Standard,
                 ),
                 (
@@ -2952,16 +3062,21 @@ fn discover(msg: &wechat_profile::Message, content: &str) -> Result<Vec<Discover
                     "cdnthumburl",
                     "cdnthumbaeskey",
                     "cdnthumblength",
+                    "tpthumburl",
+                    "tpthumbaeskey",
+                    "tpthumblength",
                     MediaQuality::Thumbnail,
                 ),
             ] {
-                if let Some(file_id) = n.attribute(url).filter(|v| !v.is_empty()) {
-                    let bytes = number(n.attribute(size));
+                if let Some(file_id) = n.attribute(cdn_url).filter(|v| !v.is_empty()) {
+                    let bytes = number(n.attribute(cdn_size));
                     if bytes == Some(0) {
                         continue;
                     }
                     let md5 = if variant == MediaVariant::Original {
-                        n.attribute("md5").map(str::to_string)
+                        n.attribute("md5")
+                            .filter(|v| !v.is_empty())
+                            .map(str::to_string)
                     } else {
                         None
                     };
@@ -2971,7 +3086,45 @@ fn discover(msg: &wechat_profile::Message, content: &str) -> Result<Vec<Discover
                         DownloadPlan::Cdn {
                             descriptor: MediaDescriptor {
                                 file_id: file_id.into(),
-                                aes_key: key(n.attribute(aes))?,
+                                aes_key: key(n.attribute(cdn_aes))?,
+                                quality,
+                                expected_bytes: bytes,
+                                expected_md5: md5,
+                                strict_size: variant == MediaVariant::Original,
+                                expires_at: expiry,
+                            },
+                        },
+                        None,
+                    ));
+                } else if let Some(url) = n.attribute(tp_url).filter(|v| !v.is_empty()) {
+                    let bytes = number(n.attribute(tp_size));
+                    if bytes == Some(0) {
+                        continue;
+                    }
+                    wechat_protocol::media::validate_tp_media_url(url)?;
+                    let auth_key = n
+                        .attribute("tpauthkey")
+                        .filter(|v| !v.is_empty())
+                        .context("media_metadata_invalid")?;
+                    wechat_protocol::media::validate_tp_auth_key(auth_key)?;
+                    let aes_attr = n.attribute(tp_aes).filter(|v| !v.is_empty()).or_else(|| {
+                        (tp_aes == "tpthumbaeskey")
+                            .then(|| n.attribute("aeskey").filter(|v| !v.is_empty()))
+                            .flatten()
+                    });
+                    let md5 = if variant == MediaVariant::Original {
+                        md5_attr(n.attribute("md5"))?
+                    } else {
+                        None
+                    };
+                    out.push((
+                        MediaKind::Image,
+                        variant,
+                        DownloadPlan::TpHttp {
+                            descriptor: TpMediaDescriptor {
+                                url: url.into(),
+                                auth_key: auth_key.into(),
+                                aes_key: key(aes_attr)?,
                                 quality,
                                 expected_bytes: bytes,
                                 expected_md5: md5,
@@ -2986,13 +3139,29 @@ fn discover(msg: &wechat_profile::Message, content: &str) -> Result<Vec<Discover
         }
         43 => {
             let n = element("videomsg")?;
-            for (variant, url, aes, size, md5, quality) in [
+            let expiry = number(n.attribute("expiretime"));
+            for (
+                variant,
+                cdn_url,
+                cdn_aes,
+                cdn_size,
+                cdn_md5,
+                tp_url,
+                tp_aes,
+                tp_size,
+                tp_md5,
+                quality,
+            ) in [
                 (
                     MediaVariant::Normal,
                     "cdnvideourl",
                     "aeskey",
                     "length",
                     "md5",
+                    Some("tpvideourl"),
+                    "aeskey",
+                    "length",
+                    Some("md5"),
                     MediaQuality::Video,
                 ),
                 (
@@ -3001,6 +3170,10 @@ fn discover(msg: &wechat_profile::Message, content: &str) -> Result<Vec<Discover
                     "cdnrawvideoaeskey",
                     "rawlength",
                     "rawmd5",
+                    None,
+                    "",
+                    "",
+                    None,
                     MediaQuality::Video,
                 ),
                 (
@@ -3009,34 +3182,77 @@ fn discover(msg: &wechat_profile::Message, content: &str) -> Result<Vec<Discover
                     "cdnthumbaeskey",
                     "cdnthumblength",
                     "cdnthumbmd5",
+                    Some("tpthumburl"),
+                    "tpthumbaeskey",
+                    "tpthumblength",
+                    None,
                     MediaQuality::Thumbnail,
                 ),
             ] {
-                if let Some(id) = n.attribute(url).filter(|s| !s.is_empty()) {
+                let filename = Some(
+                    if variant == MediaVariant::Original {
+                        "original.mp4"
+                    } else if variant == MediaVariant::Thumbnail {
+                        "video-thumbnail.jpg"
+                    } else {
+                        "video.mp4"
+                    }
+                    .into(),
+                );
+                if let Some(id) = n.attribute(cdn_url).filter(|s| !s.is_empty()) {
                     out.push((
                         MediaKind::Video,
                         variant,
                         DownloadPlan::Cdn {
                             descriptor: MediaDescriptor {
                                 file_id: id.into(),
-                                aes_key: key(n.attribute(aes))?,
+                                aes_key: key(n.attribute(cdn_aes))?,
                                 quality,
-                                expected_bytes: number(n.attribute(size)),
-                                expected_md5: n.attribute(md5).map(str::to_string),
+                                expected_bytes: number(n.attribute(cdn_size)),
+                                expected_md5: n
+                                    .attribute(cdn_md5)
+                                    .filter(|s| !s.is_empty())
+                                    .map(str::to_string),
                                 strict_size: true,
-                                expires_at: number(n.attribute("expiretime")),
+                                expires_at: expiry,
                             },
                         },
-                        Some(
-                            if variant == MediaVariant::Original {
-                                "original.mp4"
-                            } else if variant == MediaVariant::Thumbnail {
-                                "video-thumbnail.jpg"
-                            } else {
-                                "video.mp4"
-                            }
-                            .into(),
-                        ),
+                        filename,
+                    ));
+                } else if let Some(url) =
+                    tp_url.and_then(|attr| n.attribute(attr).filter(|s| !s.is_empty()))
+                {
+                    let bytes = number(n.attribute(tp_size));
+                    if bytes == Some(0) {
+                        continue;
+                    }
+                    wechat_protocol::media::validate_tp_media_url(url)?;
+                    let auth_key = n
+                        .attribute("tpauthkey")
+                        .filter(|v| !v.is_empty())
+                        .context("media_metadata_invalid")?;
+                    wechat_protocol::media::validate_tp_auth_key(auth_key)?;
+                    let aes_attr = n.attribute(tp_aes).filter(|v| !v.is_empty()).or_else(|| {
+                        (tp_aes == "tpthumbaeskey")
+                            .then(|| n.attribute("aeskey").filter(|v| !v.is_empty()))
+                            .flatten()
+                    });
+                    out.push((
+                        MediaKind::Video,
+                        variant,
+                        DownloadPlan::TpHttp {
+                            descriptor: TpMediaDescriptor {
+                                url: url.into(),
+                                auth_key: auth_key.into(),
+                                aes_key: key(aes_attr)?,
+                                quality,
+                                expected_bytes: bytes,
+                                expected_md5: md5_attr(tp_md5.and_then(|attr| n.attribute(attr)))?,
+                                strict_size: true,
+                                expires_at: expiry,
+                            },
+                        },
+                        filename,
                     ));
                 }
             }
@@ -3078,6 +3294,7 @@ fn discover(msg: &wechat_profile::Message, content: &str) -> Result<Vec<Discover
                     .children()
                     .find(|n| n.is_element() && n.tag_name().name() == name)
                     .and_then(|n| n.text())
+                    .filter(|s| !s.is_empty())
             };
             let encryption = match attach
                 .children()
@@ -3098,26 +3315,46 @@ fn discover(msg: &wechat_profile::Message, content: &str) -> Result<Vec<Discover
                     s.len() <= 255 && !s.contains(['/', '\\']) && !s.chars().any(|c| c.is_control())
                 })
                 .map(str::to_string);
-            out.push((
-                MediaKind::File,
-                MediaVariant::Original,
+            let expected_bytes = number(value("totallen"));
+            let quality = file_upload_quality(usize::try_from(expected_bytes.unwrap_or(0))?);
+            let expected_md5 = child("md5")
+                .and_then(|n| n.text())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let expires_at = number(value("expiretime"));
+            let plan = if let Some(file_id) = value("cdnattachurl") {
                 DownloadPlan::Cdn {
                     descriptor: MediaDescriptor {
-                        file_id: value("cdnattachurl")
-                            .context("unsupported_attachment_transport")?
-                            .into(),
+                        file_id: file_id.into(),
                         aes_key: key(value("aeskey"))?,
-                        quality: file_upload_quality(usize::try_from(
-                            number(value("totallen")).unwrap_or(0),
-                        )?),
-                        expected_bytes: number(value("totallen")),
-                        expected_md5: child("md5").and_then(|n| n.text()).map(str::to_string),
+                        quality,
+                        expected_bytes,
+                        expected_md5,
                         strict_size: true,
-                        expires_at: number(value("expiretime")),
+                        expires_at,
                     },
-                },
-                filename,
-            ));
+                }
+            } else if let Some(url) = value("tpurl") {
+                wechat_protocol::media::validate_tp_media_url(url)?;
+                let auth_key = value("tpauthkey").context("unsupported_attachment_transport")?;
+                wechat_protocol::media::validate_tp_auth_key(auth_key)?;
+                let expected_md5 = md5_attr(expected_md5.as_deref())?;
+                DownloadPlan::TpHttp {
+                    descriptor: TpMediaDescriptor {
+                        url: url.into(),
+                        auth_key: auth_key.into(),
+                        aes_key: key(value("aeskey"))?,
+                        quality,
+                        expected_bytes,
+                        expected_md5,
+                        strict_size: true,
+                        expires_at,
+                    },
+                }
+            } else {
+                bail!("unsupported_attachment_transport");
+            };
+            out.push((MediaKind::File, MediaVariant::Original, plan, filename));
         }
         34 => {
             let n = element("voicemsg")?;
@@ -3151,23 +3388,58 @@ fn discover(msg: &wechat_profile::Message, content: &str) -> Result<Vec<Discover
         47 => {
             let n = element("emoji")?;
             let length = number(n.attribute("len")).context("media_metadata_invalid")?;
-            let url = n
-                .attribute("cdnurl")
-                .context("unsupported_sticker_source")?;
-            wechat_protocol::media::validate_sticker_url(url)?;
-            out.push((
-                MediaKind::Sticker,
-                MediaVariant::Original,
-                DownloadPlan::Sticker {
-                    descriptor: StickerDescriptor {
-                        url: url.into(),
-                        expected_bytes: length,
-                        expected_md5: n.attribute("md5").context("media_metadata_invalid")?.into(),
-                        expires_at: number(n.attribute("expiretime")),
+            let md5 = n
+                .attribute("md5")
+                .filter(|v| !v.is_empty())
+                .context("media_metadata_invalid")?;
+            let expires_at = number(n.attribute("expiretime"));
+            if let Some(url) = n.attribute("cdnurl").filter(|v| !v.is_empty()) {
+                wechat_protocol::media::validate_sticker_url(url)?;
+                out.push((
+                    MediaKind::Sticker,
+                    MediaVariant::Original,
+                    DownloadPlan::Sticker {
+                        descriptor: StickerDescriptor {
+                            url: url.into(),
+                            expected_bytes: length,
+                            expected_md5: md5.into(),
+                            expires_at,
+                        },
                     },
-                },
-                None,
-            ));
+                    None,
+                ));
+            } else if let Some(url) = n.attribute("tpurl").filter(|v| !v.is_empty()) {
+                ensure!(
+                    length > 0 && length <= 16 * 1024 * 1024,
+                    "media_metadata_invalid"
+                );
+                let md5 = md5_attr(Some(md5))?.context("media_metadata_invalid")?;
+                wechat_protocol::media::validate_tp_media_url(url)?;
+                let auth_key = n
+                    .attribute("tpauthkey")
+                    .filter(|v| !v.is_empty())
+                    .context("media_metadata_invalid")?;
+                wechat_protocol::media::validate_tp_auth_key(auth_key)?;
+                out.push((
+                    MediaKind::Sticker,
+                    MediaVariant::Original,
+                    DownloadPlan::TpHttp {
+                        descriptor: TpMediaDescriptor {
+                            url: url.into(),
+                            auth_key: auth_key.into(),
+                            aes_key: key(n.attribute("aeskey").filter(|v| !v.is_empty()))?,
+                            quality: MediaQuality::Thumbnail,
+                            expected_bytes: Some(length),
+                            expected_md5: Some(md5),
+                            strict_size: true,
+                            expires_at,
+                        },
+                    },
+                    None,
+                ));
+            } else {
+                bail!("unsupported_sticker_source");
+            }
         }
         _ => bail!("unsupported_media"),
     };
@@ -7178,6 +7450,500 @@ mod tests {
             let pcm = audio_pcm(&source, || Ok(())).unwrap_or_else(|e| panic!("{name}: {e:#}"));
             assert!(pcm.len().abs_diff(16000) <= 800, "{name}: {}", pcm.len());
         }
+    }
+
+    #[test]
+    fn wecom_tp_media_discovery_supports_images_files_videos_stickers_and_im_chatroom() {
+        let mut msg = message(3);
+        msg.peer = Some("100001@im.chatroom".into());
+        msg.sender = Some("200001@openim".into());
+        let image_xml = concat!(
+            "200001@openim:\n",
+            "<msg><img aeskey=\"01010101010101010101010101010101\" encryver=\"0\" ",
+            "cdnthumbaeskey=\"\" cdnthumburl=\"\" cdnthumblength=\"0\" cdnmidimgurl=\"\" length=\"0\" ",
+            "tphdurl=\"https://wwfile.work.weixin.qq.com/cgi-bin/download?f=hd&amp;t=tok&amp;p=1\" tphdlength=\"500\" ",
+            "tpurl=\"https://wwfile.work.weixin.qq.com/cgi-bin/download?f=std&amp;t=tok&amp;p=2\" tplength=\"300\" ",
+            "tpthumburl=\"https://wwfile.work.weixin.qq.com/cgi-bin/download?f=th&amp;t=tok&amp;p=3\" tpthumblength=\"100\" ",
+            "tpthumbaeskey=\"02020202020202020202020202020202\" ",
+            "tpauthkey=\"3044020100043d\" md5=\"0123456789abcdef0123456789abcdef\"/></msg>"
+        );
+        let plans = discover(&msg, image_xml).unwrap();
+        assert_eq!(plans.len(), 3);
+        for (
+            (kind, variant, plan, _),
+            expected_variant,
+            expected_len,
+            expected_key,
+            expected_strict,
+            expected_md5,
+        ) in plans
+            .into_iter()
+            .zip([
+                (
+                    MediaVariant::Original,
+                    500,
+                    1u8,
+                    true,
+                    Some("0123456789abcdef0123456789abcdef"),
+                ),
+                (MediaVariant::Standard, 300, 1u8, false, None),
+                (MediaVariant::Thumbnail, 100, 2u8, false, None),
+            ])
+            .map(|(p, (v, l, k, s, m))| (p, v, l, k, s, m))
+        {
+            assert_eq!(kind, MediaKind::Image);
+            assert_eq!(variant, expected_variant);
+            let DownloadPlan::TpHttp { descriptor } = plan else {
+                panic!("expected TpHttp plan");
+            };
+            assert_eq!(descriptor.expected_bytes, Some(expected_len));
+            assert_eq!(descriptor.aes_key, vec![expected_key; 16]);
+            assert_eq!(descriptor.auth_key, "3044020100043d");
+            assert_eq!(descriptor.strict_size, expected_strict);
+            assert_eq!(descriptor.expected_md5.as_deref(), expected_md5);
+            assert_eq!(
+                automatic::advertised_length(&DownloadPlan::TpHttp { descriptor }),
+                Some(expected_len)
+            );
+        }
+
+        // Empty tpthumbaeskey falls back to aeskey.
+        let fallback_thumb = image_xml.replace("02020202020202020202020202020202", "");
+        let plans = discover(&msg, &fallback_thumb).unwrap();
+        let DownloadPlan::TpHttp { descriptor } = &plans[2].2 else {
+            panic!("expected TpHttp thumbnail");
+        };
+        assert_eq!(descriptor.aes_key, vec![1u8; 16]);
+
+        // WeCom file (type 49 subtype 6) with empty cdnattachurl + tpurl + tpauthkey + encryver=0.
+        let mut file_msg = message(49);
+        file_msg.peer = Some("100001@im.chatroom".into());
+        file_msg.sender = Some("200001@openim".into());
+        let file_xml = concat!(
+            "200001@openim:\n",
+            "<msg><appmsg><title><![CDATA[report.xlsx]]></title><type>6</type>",
+            "<md5><![CDATA[0123456789abcdef0123456789abcdef]]></md5>",
+            "<appattach><totallen><![CDATA[65124]]></totallen><attachid /><fileext><![CDATA[xlsx]]></fileext>",
+            "<cdnattachurl /><aeskey><![CDATA[03030303030303030303030303030303]]></aeskey><encryver>0</encryver>",
+            "<tpurl><![CDATA[https://wwfile.work.weixin.qq.com/cgi-bin/download?f=doc&t=tok&p=5]]></tpurl>",
+            "<tpauthkey><![CDATA[3044020100043d]]></tpauthkey></appattach></appmsg></msg>"
+        );
+        let plans = discover(&file_msg, file_xml).unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].0, MediaKind::File);
+        assert_eq!(plans[0].1, MediaVariant::Original);
+        assert_eq!(plans[0].3.as_deref(), Some("report.xlsx"));
+        let DownloadPlan::TpHttp { descriptor } = &plans[0].2 else {
+            panic!("expected TpHttp file plan");
+        };
+        assert_eq!(descriptor.quality, MediaQuality::File);
+        assert_eq!(descriptor.expected_bytes, Some(65124));
+        assert_eq!(descriptor.aes_key, vec![3u8; 16]);
+        assert_eq!(
+            descriptor.expected_md5.as_deref(),
+            Some("0123456789abcdef0123456789abcdef")
+        );
+        assert!(descriptor.strict_size);
+
+        // Large WeCom file selects LargeFile quality.
+        let big_len = wechat_protocol::media::MAX_CDN_TRANSFER_BYTES + 1;
+        let big_file_xml = file_xml.replace("65124", &big_len.to_string());
+        let big_plans = discover(&file_msg, &big_file_xml).unwrap();
+        let DownloadPlan::TpHttp { descriptor } = &big_plans[0].2 else {
+            panic!("expected TpHttp large file plan");
+        };
+        assert_eq!(descriptor.quality, MediaQuality::LargeFile);
+
+        // Untrusted host or missing tpauthkey fails closed.
+        let bad_host = file_xml.replace("wwfile.work.weixin.qq.com", "127.0.0.1");
+        assert_eq!(
+            discover(&file_msg, &bad_host).err().unwrap().to_string(),
+            "tp_media_source_not_allowed"
+        );
+        let no_auth = file_xml.replace("<tpauthkey><![CDATA[3044020100043d]]></tpauthkey>", "");
+        assert_eq!(
+            discover(&file_msg, &no_auth).err().unwrap().to_string(),
+            "unsupported_attachment_transport"
+        );
+
+        // WeCom video (type 43).
+        let video_xml = concat!(
+            "<msg><videomsg length=\"4096\" md5=\"0123456789abcdef0123456789abcdef\" ",
+            "aeskey=\"04040404040404040404040404040404\" ",
+            "tpvideourl=\"https://wwfile.work.weixin.qq.com/cgi-bin/download?f=v&amp;t=tok&amp;p=4\" ",
+            "tpthumburl=\"https://wwfile.work.weixin.qq.com/cgi-bin/download?f=vt&amp;t=tok&amp;p=3\" ",
+            "tpthumblength=\"512\" tpthumbaeskey=\"05050505050505050505050505050505\" ",
+            "tpauthkey=\"3044020100043d\"/></msg>"
+        );
+        let vplans = discover(&message(43), video_xml).unwrap();
+        assert_eq!(vplans.len(), 2);
+        assert_eq!(vplans[0].1, MediaVariant::Normal);
+        assert_eq!(vplans[1].1, MediaVariant::Thumbnail);
+
+        // WeCom sticker (type 47).
+        let sticker_xml = concat!(
+            "<msg><emoji len=\"1024\" md5=\"0123456789abcdef0123456789abcdef\" ",
+            "aeskey=\"06060606060606060606060606060606\" ",
+            "tpurl=\"https://wwfile.work.weixin.qq.com/cgi-bin/download?f=e&amp;t=tok&amp;p=19\" ",
+            "tpauthkey=\"3044020100043d\"/></msg>"
+        );
+        let splans = discover(&message(47), sticker_xml).unwrap();
+        assert_eq!(splans.len(), 1);
+        assert_eq!(splans[0].0, MediaKind::Sticker);
+    }
+
+    #[test]
+    fn wecom_tp_download_writes_back_to_official_profile_and_redacts_secrets() {
+        use md5::Digest;
+        use std::collections::BTreeMap;
+
+        struct MockTpUpstream {
+            payloads: BTreeMap<String, Result<Vec<u8>, String>>,
+        }
+        impl crate::upstream::Upstream for MockTpUpstream {
+            fn kind(&self) -> crate::upstream::UpstreamKind {
+                crate::upstream::UpstreamKind::Native
+            }
+            fn download_tp_media(
+                &self,
+                descriptor: &TpMediaDescriptor,
+                _progress: crate::upstream::media::Progress<'_>,
+            ) -> Result<wechat_protocol::media::DownloadedMedia> {
+                let bytes = match self
+                    .payloads
+                    .get(&descriptor.url)
+                    .context("missing_mock_payload")?
+                {
+                    Ok(bytes) => bytes.clone(),
+                    Err(err) => bail!("{err}"),
+                };
+                if let Some(expected) = descriptor.expected_md5.as_deref() {
+                    let actual = format!("{:x}", md5::Md5::digest(&bytes));
+                    ensure!(
+                        actual.eq_ignore_ascii_case(expected),
+                        "Advertised media checksum mismatch"
+                    );
+                }
+                let md5 = format!("{:x}", md5::Md5::digest(&bytes));
+                let sha256 = digest(&bytes);
+                let size_matches = descriptor.expected_bytes.map(|n| n == bytes.len() as u64);
+                Ok(wechat_protocol::media::DownloadedMedia {
+                    bytes,
+                    requested_quality: descriptor.quality,
+                    substituted_filetype: None,
+                    picture_format: None,
+                    md5,
+                    sha256,
+                    advertised_size_matches: size_matches,
+                })
+            }
+            fn download_tp_media_to(
+                &self,
+                descriptor: &TpMediaDescriptor,
+                progress: crate::upstream::media::Progress<'_>,
+                sink: &mut dyn std::io::Write,
+            ) -> Result<wechat_protocol::media::DownloadReceipt> {
+                let (bytes, receipt) = self.download_tp_media(descriptor, progress)?.into_parts();
+                sink.write_all(&bytes)?;
+                Ok(receipt)
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(wechat_store::Store::open(&temp.path().join("data")).unwrap());
+        store.create_account("a").unwrap();
+
+        let make_jpeg = |dim: u32, salt: u32| {
+            let mut jpeg = std::io::Cursor::new(Vec::new());
+            let img = image::RgbImage::from_fn(dim, dim, |x, y| {
+                image::Rgb([
+                    ((x * 3 + salt) & 0xff) as u8,
+                    ((y * 5 + salt) & 0xff) as u8,
+                    (((x ^ y) * 7 + salt) & 0xff) as u8,
+                ])
+            });
+            image::DynamicImage::ImageRgb8(img)
+                .write_to(&mut jpeg, image::ImageFormat::Jpeg)
+                .unwrap();
+            jpeg.into_inner()
+        };
+        let make_mp4 = |payload: &[u8]| {
+            let atom = |kind: &[u8; 4], data: &[u8]| {
+                let mut b = ((data.len() + 8) as u32).to_be_bytes().to_vec();
+                b.extend_from_slice(kind);
+                b.extend_from_slice(data);
+                b
+            };
+            let mut out = Vec::new();
+            out.extend(atom(b"ftyp", b"isom\0\0\0\0"));
+            out.extend(atom(b"moov", &[0; 8]));
+            out.extend(atom(b"mdat", payload));
+            out
+        };
+        let orig_jpeg = make_jpeg(128, 1);
+        let std_jpeg = make_jpeg(96, 2);
+        let thumb_jpeg = make_jpeg(64, 3);
+        let orig_md5 = format!("{:x}", md5::Md5::digest(&orig_jpeg));
+        let file_bytes = b"synthetic-xlsx-payload-bytes".to_vec();
+        let file_md5 = format!("{:x}", md5::Md5::digest(&file_bytes));
+        let video_bytes = make_mp4(b"synthetic-wecom-video-stream");
+        let video_md5 = format!("{:x}", md5::Md5::digest(&video_bytes));
+        let vthumb_bytes = make_jpeg(48, 4);
+        let sticker_bytes = make_jpeg(64, 5);
+        let sticker_md5 = format!("{:x}", md5::Md5::digest(&sticker_bytes));
+
+        let orig_url = "https://wwfile.work.weixin.qq.com/cgi-bin/download?f=img_hd&t=secret&p=1";
+        let img_url = "https://wwfile.work.weixin.qq.com/cgi-bin/download?f=img&t=secret&p=2";
+        let thumb_url = "https://wwfile.work.weixin.qq.com/cgi-bin/download?f=img_th&t=secret&p=3";
+        let file_url = "https://wwfile.work.weixin.qq.com/cgi-bin/download?f=doc&t=secret&p=5";
+        let video_url = "https://wwfile.work.weixin.qq.com/cgi-bin/download?f=vid&t=secret&p=4";
+        let vthumb_url = "https://wwfile.work.weixin.qq.com/cgi-bin/download?f=vth&t=secret&p=4";
+        let sticker_url = "https://wwfile.work.weixin.qq.com/cgi-bin/download?f=stk&t=secret&p=2";
+        let forbidden_url = "https://wwfile.work.weixin.qq.com/cgi-bin/download?f=403&t=secret&p=5";
+        let room = "490001@im.chatroom";
+        let sender = "250001@openim";
+
+        let mut payloads = BTreeMap::new();
+        payloads.insert(orig_url.to_string(), Ok(orig_jpeg.clone()));
+        payloads.insert(img_url.to_string(), Ok(std_jpeg.clone()));
+        payloads.insert(thumb_url.to_string(), Ok(thumb_jpeg.clone()));
+        payloads.insert(file_url.to_string(), Ok(file_bytes.clone()));
+        payloads.insert(video_url.to_string(), Ok(video_bytes.clone()));
+        payloads.insert(vthumb_url.to_string(), Ok(vthumb_bytes.clone()));
+        payloads.insert(sticker_url.to_string(), Ok(sticker_bytes.clone()));
+        payloads.insert(forbidden_url.to_string(), Err("CDN HTTP status 403".into()));
+        let core = Core::with_upstream(store.clone(), None, Arc::new(MockTpUpstream { payloads }))
+            .unwrap();
+
+        let password = [42u8; 32];
+        let state = wechat_protocol::AccountState {
+            schema: 1,
+            device: wechat_protocol::DeviceProfile {
+                device_id: vec![b'A'; 16],
+                device_type: "UnifiedPCLinux x86_64".into(),
+                client_version: -227271398,
+            },
+            uin: 7,
+            own_username: "synthetic_self".into(),
+            cookie: vec![1; 15],
+            session_key: vec![1; 16],
+            request_key: vec![2; 24],
+            response_key: vec![3; 24],
+            auto_auth_key: wechat_protocol::protobuf::message(&[
+                wechat_protocol::protobuf::bytes(
+                    1,
+                    &wechat_protocol::protobuf::buffer(b"synthetic-a"),
+                ),
+                wechat_protocol::protobuf::bytes(
+                    2,
+                    &wechat_protocol::protobuf::buffer(b"synthetic-b"),
+                ),
+            ])
+            .unwrap(),
+            key_info: vec![4; 180],
+            database_password: password.to_vec(),
+            auth_snapshot: Default::default(),
+            long_host: "long.weixin.qq.com".into(),
+            short_host: "short.weixin.qq.com".into(),
+        };
+        core.test_managed_profile("a", &state).unwrap();
+
+        let img_xml = format!(
+            "{sender}:\n<msg><img aeskey=\"01010101010101010101010101010101\" encryver=\"0\" cdnmidimgurl=\"\" length=\"0\" tphdurl=\"{}\" tphdlength=\"{}\" tpurl=\"{}\" tplength=\"{}\" tpthumburl=\"{}\" tpthumblength=\"{}\" tpauthkey=\"3044020100043d\" md5=\"{orig_md5}\"/></msg>",
+            orig_url.replace('&', "&amp;"),
+            orig_jpeg.len(),
+            img_url.replace('&', "&amp;"),
+            std_jpeg.len(),
+            thumb_url.replace('&', "&amp;"),
+            thumb_jpeg.len(),
+        );
+        let file_xml = format!(
+            "{sender}:\n<msg><appmsg><title><![CDATA[summary.xlsx]]></title><type>6</type><md5><![CDATA[{file_md5}]]></md5><appattach><totallen><![CDATA[{}]]></totallen><fileext><![CDATA[xlsx]]></fileext><cdnattachurl /><aeskey><![CDATA[02020202020202020202020202020202]]></aeskey><encryver>0</encryver><tpurl><![CDATA[{file_url}]]></tpurl><tpauthkey><![CDATA[3044020100043d]]></tpauthkey></appattach></appmsg></msg>",
+            file_bytes.len()
+        );
+        let video_xml = format!(
+            "{sender}:\n<msg><videomsg aeskey=\"03030303030303030303030303030303\" length=\"{}\" md5=\"{video_md5}\" cdnthumblength=\"0\" tpvideourl=\"{}\" tpthumburl=\"{}\" tpthumblength=\"{}\" tpauthkey=\"3044020100043d\"/></msg>",
+            video_bytes.len(),
+            video_url.replace('&', "&amp;"),
+            vthumb_url.replace('&', "&amp;"),
+            vthumb_bytes.len(),
+        );
+        let sticker_inner = format!(
+            "<msg><emoji len=\"{}\" md5=\"{sticker_md5}\" aeskey=\"04040404040404040404040404040404\" tpurl=\"{}\" tpauthkey=\"3044020100043d\"/></msg>",
+            sticker_bytes.len(),
+            sticker_url.replace('&', "&amp;"),
+        );
+        let sticker_xml = format!("{sender}:\n{sticker_inner}");
+        let quoted_sticker_xml = format!(
+            "{sender}:\n<msg><appmsg><type>57</type><title>nice sticker</title><refermsg><type>47</type><svrid>103</svrid><fromusr>{room}</fromusr><chatusr>{sender}</chatusr><content><![CDATA[{sender}:\n{sticker_inner}]]></content></refermsg></appmsg></msg>"
+        );
+        let expired_cached_file_xml = format!(
+            "{sender}:\n<msg><appmsg><title><![CDATA[cached-expired.xlsx]]></title><type>6</type><md5><![CDATA[{file_md5}]]></md5><appattach><totallen><![CDATA[{}]]></totallen><fileext><![CDATA[xlsx]]></fileext><cdnattachurl /><aeskey><![CDATA[02020202020202020202020202020202]]></aeskey><encryver>0</encryver><expiretime>1</expiretime><tpurl><![CDATA[{forbidden_url}]]></tpurl><tpauthkey><![CDATA[3044020100043d]]></tpauthkey></appattach></appmsg></msg>",
+            file_bytes.len()
+        );
+        let forbidden_file_xml = format!(
+            "{sender}:\n<msg><appmsg><title><![CDATA[rejected.xlsx]]></title><type>6</type><md5><![CDATA[aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]]></md5><appattach><totallen><![CDATA[128]]></totallen><fileext><![CDATA[xlsx]]></fileext><cdnattachurl /><aeskey><![CDATA[02020202020202020202020202020202]]></aeskey><encryver>0</encryver><tpurl><![CDATA[{forbidden_url}]]></tpurl><tpauthkey><![CDATA[3044020100043d]]></tpauthkey></appattach></appmsg></msg>"
+        );
+        let add_cmd = |kind: u32, body: &str, sid: u64, time: u32| wechat_protocol::SyncCommand {
+            id: 5,
+            payload: wechat_protocol::protobuf::message(&[
+                wechat_protocol::protobuf::uint(1, 1),
+                wechat_protocol::protobuf::bytes(
+                    2,
+                    &wechat_protocol::protobuf::bytes(1, room.as_bytes()),
+                ),
+                wechat_protocol::protobuf::bytes(
+                    3,
+                    &wechat_protocol::protobuf::bytes(1, b"synthetic_self"),
+                ),
+                wechat_protocol::protobuf::uint(4, u64::from(kind)),
+                wechat_protocol::protobuf::bytes(
+                    5,
+                    &wechat_protocol::protobuf::bytes(1, body.as_bytes()),
+                ),
+                wechat_protocol::protobuf::uint(6, 0),
+                wechat_protocol::protobuf::uint(7, 0),
+                wechat_protocol::protobuf::bytes(8, &wechat_protocol::protobuf::buffer(b"")),
+                wechat_protocol::protobuf::uint(9, u64::from(time)),
+                wechat_protocol::protobuf::bytes(10, b"<msgsource/>"),
+                wechat_protocol::protobuf::uint(12, sid),
+                wechat_protocol::protobuf::uint(13, 9),
+            ])
+            .unwrap(),
+        };
+        for (idx, (kind, body, sid, time)) in [
+            (3u32, img_xml.as_str(), 100u64, 1_700_000_000u32),
+            (49, file_xml.as_str(), 101, 1_700_000_001),
+            (43, video_xml.as_str(), 102, 1_700_000_002),
+            (47, sticker_xml.as_str(), 103, 1_700_000_003),
+            (49, quoted_sticker_xml.as_str(), 104, 1_700_000_004),
+            (49, expired_cached_file_xml.as_str(), 105, 1_700_000_005),
+            (49, forbidden_file_xml.as_str(), 106, 1_700_000_006),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            core.apply_received_sync_command(
+                "a",
+                &add_cmd(kind, body, sid, time),
+                &format!("tp-sync-{idx}"),
+                "live",
+            )
+            .unwrap();
+        }
+
+        let messages = core.messages("a", room, Some(20), None).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let find_msg = |sid: &str| {
+            messages
+                .iter()
+                .find(|m| m["serverId"].as_str() == Some(sid))
+                .unwrap()
+                .clone()
+        };
+        // Every synced @im.chatroom message strips the group envelope and attributes @openim sender.
+        for sid in ["100", "101", "102", "103", "104", "105", "106"] {
+            assert_eq!(
+                find_msg(sid)["senderId"].as_str(),
+                Some(sender),
+                "sid={sid}"
+            );
+        }
+        assert_eq!(find_msg("104")["quote"]["state"].as_str(), Some("embedded"));
+        assert_eq!(
+            find_msg("104")["quote"]["embeddedSticker"].as_bool(),
+            Some(true)
+        );
+
+        let run_download = |asset_id: &str, job_id: &str| {
+            let hash = digest(asset_id.as_bytes());
+            core.store
+                .create_media_job(
+                    "a",
+                    job_id,
+                    &format!("download:{asset_id}"),
+                    &hash,
+                    "download",
+                    &json!({"assetId": asset_id, "completedBytes": 0}),
+                    b"",
+                )
+                .unwrap();
+            core.perform_download("a", job_id)
+        };
+
+        // 1. Image (Original + Standard + Thumbnail), File, Video (Normal + Thumbnail via tpthumblength), Sticker.
+        for (sid, expected_variants) in [
+            (
+                "100",
+                vec![
+                    (MediaVariant::Original, orig_jpeg.as_slice(), true),
+                    (MediaVariant::Standard, std_jpeg.as_slice(), true),
+                    (MediaVariant::Thumbnail, thumb_jpeg.as_slice(), true),
+                ],
+            ),
+            (
+                "101",
+                vec![(MediaVariant::Original, file_bytes.as_slice(), true)],
+            ),
+            (
+                "102",
+                vec![
+                    (MediaVariant::Normal, video_bytes.as_slice(), true),
+                    (MediaVariant::Thumbnail, vthumb_bytes.as_slice(), true),
+                ],
+            ),
+            (
+                "103",
+                vec![(MediaVariant::Original, sticker_bytes.as_slice(), false)],
+            ),
+            (
+                "104",
+                vec![(MediaVariant::Original, sticker_bytes.as_slice(), false)],
+            ),
+        ] {
+            let id = find_msg(sid)["id"].as_str().unwrap().to_string();
+            let assets = core.media_assets("a", &id).unwrap();
+            assert_eq!(assets.len(), expected_variants.len(), "sid={sid}");
+            let serialized = serde_json::to_string(&assets).unwrap();
+            assert!(!serialized.contains("wwfile.work.weixin.qq.com"));
+            assert!(!serialized.contains("3044020100043d"));
+            for (variant, expected_bytes, expect_writeback) in expected_variants {
+                let asset = assets.iter().find(|a| a.variant == variant).unwrap();
+                run_download(&asset.id, &format!("job_tp_{sid}_{variant:?}")).unwrap();
+                let done = core.media_asset("a", &asset.id).unwrap();
+                assert_eq!(done.state, "available", "sid={sid} variant={variant:?}");
+                if expect_writeback {
+                    assert_eq!(
+                        done.official_writeback, "complete",
+                        "sid={sid} variant={variant:?}"
+                    );
+                }
+                assert_eq!(done.byte_length, Some(expected_bytes.len() as u64));
+                let content = core.media_content("a", &asset.id).unwrap();
+                assert_eq!(content.bytes, expected_bytes);
+            }
+        }
+
+        // 2. Cached verified hardlink bytes precede expiry check for TpHttp (sid=105 shares MD5 with sid=101, expiretime=1).
+        let cached_expired_id = find_msg("105")["id"].as_str().unwrap().to_string();
+        let cached_expired_assets = core.media_assets("a", &cached_expired_id).unwrap();
+        assert_eq!(cached_expired_assets.len(), 1);
+        assert_eq!(cached_expired_assets[0].state, "available");
+        assert_eq!(
+            core.media_content("a", &cached_expired_assets[0].id)
+                .unwrap()
+                .bytes,
+            file_bytes
+        );
+
+        // 3. HTTP 403/404 from TP host classifies as media_service_rejected, never media_expired.
+        let rejected_id = find_msg("106")["id"].as_str().unwrap().to_string();
+        let rejected_assets = core.media_assets("a", &rejected_id).unwrap();
+        assert_eq!(rejected_assets.len(), 1);
+        let err = run_download(&rejected_assets[0].id, "job_tp_106_403").unwrap_err();
+        assert_eq!(classify_error(&err), "media_service_rejected");
     }
 }
 #[test]

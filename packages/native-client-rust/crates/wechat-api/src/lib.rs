@@ -244,6 +244,7 @@ impl From<anyhow::Error> for ApiError {
             "media_key_missing",
             "sticker_metadata_invalid",
             "sticker_source_not_allowed",
+            "tp_media_source_not_allowed",
         ] {
             if error.chain().any(|cause| cause.to_string() == code) {
                 return Self(StatusCode::CONFLICT, code);
@@ -1612,6 +1613,7 @@ mod tests {
             "media_key_missing",
             "sticker_metadata_invalid",
             "sticker_source_not_allowed",
+            "tp_media_source_not_allowed",
         ] {
             let ApiError(status, actual) =
                 ApiError::from(anyhow::anyhow!("{code}").context("bounded media discovery"));

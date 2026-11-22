@@ -1316,6 +1316,7 @@ fn attachment_xml(
                             "rawmd5",
                             "cdnthumblength",
                             "cdnthumbmd5",
+                            "tpthumblength",
                         ]
                         .contains(&name)
                         {
@@ -1811,14 +1812,20 @@ pub fn cache_video_projection_payload(
     let xml = attachment_xml(location, keys, source, &binding, options)?;
     let attrs = xml.video.as_ref().ok_or(ProfileError::InvalidMetadata)?;
     let (size, digest) = match quality {
-        VideoQuality::Normal => ("length", "md5"),
-        VideoQuality::Original => ("rawlength", "rawmd5"),
-        VideoQuality::Thumbnail => ("cdnthumblength", "cdnthumbmd5"),
+        VideoQuality::Normal => (attrs.get("length"), attrs.get("md5")),
+        VideoQuality::Original => (attrs.get("rawlength"), attrs.get("rawmd5")),
+        VideoQuality::Thumbnail => (
+            attrs
+                .get("cdnthumblength")
+                .filter(|s| !s.is_empty() && s.as_str() != "0")
+                .or_else(|| attrs.get("tpthumblength").filter(|s| !s.is_empty())),
+            attrs.get("cdnthumbmd5"),
+        ),
     };
     let digests = bytes_match_metadata(
         plaintext,
-        attrs.get(size).ok_or(ProfileError::InvalidMetadata)?,
-        attrs.get(digest).map(String::as_str),
+        size.ok_or(ProfileError::InvalidMetadata)?,
+        digest.map(String::as_str),
         quality != VideoQuality::Thumbnail,
         MAX_CACHED_MEDIA_BYTES,
     )?;

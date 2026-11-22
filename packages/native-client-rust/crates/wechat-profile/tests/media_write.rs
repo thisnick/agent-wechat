@@ -1200,3 +1200,64 @@ fn exact_completed_resource_aliases_are_replays_and_divergent_aliases_stay_block
         ids
     );
 }
+
+#[test]
+fn wecom_video_thumbnail_writeback_uses_tpthumblength_when_cdnthumblength_is_zero() {
+    let d = fixture();
+    let location = ProfileLocation::new(d.path().join("account")).unwrap();
+    let keys = KeyFile::empty("account");
+    let o = options();
+    let mut jpeg = Cursor::new(vec![]);
+    image::DynamicImage::new_rgb8(4, 3)
+        .write_to(&mut jpeg, image::ImageFormat::Jpeg)
+        .unwrap();
+    let jpeg = jpeg.into_inner();
+    let mut message = row(43);
+    message.fields.insert(
+        "message_content".into(),
+        SqlValue::Text(format!(
+            "<msg><videomsg length=\"128\" md5=\"{:x}\" cdnthumblength=\"0\" tpthumblength=\"{}\" tpthumburl=\"https://wwfile.work.weixin.qq.com/cgi-bin/download?f=vt\" tpauthkey=\"3044020100\"/></msg>",
+            Md5::digest(b"synthetic-video"),
+            jpeg.len()
+        )),
+    );
+    let source = apply_message_projection(&location, &keys, &message, &o)
+        .unwrap()
+        .source_id;
+    let applied = cache_video_projection(
+        &location,
+        &keys,
+        &source,
+        "peer",
+        VideoQuality::Thumbnail,
+        &jpeg,
+        &o,
+    )
+    .unwrap();
+    assert!(applied.changed);
+    assert_eq!(
+        fs::read(d.path().join("account").join(&applied.relative_path)).unwrap(),
+        jpeg
+    );
+    let mut wrong_jpeg = Cursor::new(vec![]);
+    let wrong_img = image::RgbImage::from_fn(32, 32, |x, y| {
+        image::Rgb([(x * 7) as u8, (y * 11) as u8, ((x ^ y) * 13) as u8])
+    });
+    image::DynamicImage::ImageRgb8(wrong_img)
+        .write_to(&mut wrong_jpeg, image::ImageFormat::Jpeg)
+        .unwrap();
+    let wrong_jpeg = wrong_jpeg.into_inner();
+    assert_ne!(wrong_jpeg.len(), jpeg.len());
+    assert!(matches!(
+        cache_video_projection(
+            &location,
+            &keys,
+            &source,
+            "peer",
+            VideoQuality::Thumbnail,
+            &wrong_jpeg,
+            &o,
+        ),
+        Err(ProfileError::InvalidMetadata)
+    ));
+}

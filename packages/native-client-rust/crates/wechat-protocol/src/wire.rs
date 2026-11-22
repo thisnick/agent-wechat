@@ -361,6 +361,10 @@ pub struct AddMessage {
     pub server_sequence: Option<u32>,
     pub raw: Vec<u8>,
 }
+fn is_group_chat_id(value: &str) -> bool {
+    value.ends_with("@chatroom") || value.ends_with("@im.chatroom")
+}
+
 /// Decode AddMsg command 5. Fields 6/7 remain numbered. Present field 13 has a
 /// bounded official server_seq correlation; this does not enable every message
 /// class for official writes. A room's actual sender requires separate, validated
@@ -390,7 +394,7 @@ pub fn decode_add_message(input: &[u8], own_username: &str) -> Result<AddMessage
         from.clone()
     };
     ensure!(
-        from == own_username || to == own_username || peer.ends_with("@chatroom"),
+        from == own_username || to == own_username || is_group_chat_id(&peer),
         "Message does not match account"
     );
     let content = sk(5)?;
@@ -412,7 +416,7 @@ pub fn decode_add_message(input: &[u8], own_username: &str) -> Result<AddMessage
         _ => bail!("Invalid numbered field13"),
     };
     Ok(AddMessage {
-        sender_id: (!from.ends_with("@chatroom")).then(|| from.clone()),
+        sender_id: (!is_group_chat_id(&from)).then(|| from.clone()),
         outgoing: from == own_username,
         from,
         to,

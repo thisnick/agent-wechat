@@ -8,6 +8,7 @@ const MEDIA_PREFIX: &str = "received-media:";
 pub(super) fn advertised_length(plan: &DownloadPlan) -> Option<u64> {
     match plan {
         DownloadPlan::Cdn { descriptor } => descriptor.expected_bytes,
+        DownloadPlan::TpHttp { descriptor } => descriptor.expected_bytes,
         DownloadPlan::Voice { length, .. } => Some(u64::from(*length)),
         DownloadPlan::Sticker { descriptor } => Some(descriptor.expected_bytes),
         _ => None,
