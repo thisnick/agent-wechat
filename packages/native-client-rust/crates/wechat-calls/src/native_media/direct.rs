@@ -196,7 +196,6 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                     host.submit(&socket, endpoint, &reply, &[])?;
                                 }
                             } else if (opened.packed_kind & 0xf0) == 0x20 {
-                                last_rx_video_stream_id = opened.packed_kind & 0x0f;
                                 if let Ok(kind) = classify_video_channel_payload(opened.payload()) {
                                     match kind {
                                         VideoChannelPayload::IRequest(_) => {
@@ -204,6 +203,7 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                         }
                                         VideoChannelPayload::Nack(_) => {}
                                         VideoChannelPayload::RsmVideo(raw) => {
+                                            last_rx_video_stream_id = opened.packed_kind & 0x0f;
                                             trace_rx_pkts += 1;
                                             if video_trace
                                                 && !trace_vf_logged
@@ -226,6 +226,7 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                                         host.current(),
                                                         "Call authority revoked before video delivery"
                                                     );
+                                                    last_rx_video_stream_id = frame.stream_id;
                                                     rx_video_seen = true;
                                                     trace_frames_ok += 1;
                                                     if frame.fec_recovered {

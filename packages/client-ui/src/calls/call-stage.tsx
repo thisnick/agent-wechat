@@ -678,8 +678,24 @@ function CallTheaterDialog({
     }
   };
 
+  const [hasLocalJpeg, setHasLocalJpeg] = useState(false);
+  const latestLocalJpegRef = useRef<Uint8Array | null>(null);
+
+  useEffect(() => {
+    latestLocalJpegRef.current = null;
+    setHasLocalJpeg(false);
+    if (call.callType !== "video" || !callState.localCamera || callState.localStream) return;
+    return controller.subscribeLocalJpeg((bytes) => {
+      latestLocalJpegRef.current = bytes;
+      setHasLocalJpeg(true);
+    });
+  }, [controller, call.callId, call.callType, callState.localCamera, callState.localStream]);
+
   const subscribeLocalJpeg = useCallback(
-    (cb: (bytes: Uint8Array) => void) => controller.subscribeLocalJpeg(cb),
+    (cb: (bytes: Uint8Array) => void) => {
+      if (latestLocalJpegRef.current) cb(latestLocalJpegRef.current);
+      return controller.subscribeLocalJpeg(cb);
+    },
     [controller],
   );
 
@@ -949,9 +965,11 @@ function CallTheaterDialog({
               </div>
             )}
 
-            {/* Self-view corner tile for active connected video calls */}
-            {call.callType === "video" && callState.localCamera && call.state === "connected" && (
-              <div className="call-self-view" aria-label={t("calls.selfView")}>
+            {/* Self-view corner tile once a local video stream or first JPEG frame is available */}
+            {call.callType === "video" &&
+              callState.localCamera &&
+              (Boolean(callState.localStream) || hasLocalJpeg) && (
+                <div className="call-self-view" aria-label={t("calls.selfView")}>
                 <LocalVideoSurface
                   stream={callState.localStream}
                   subscribeJpeg={subscribeLocalJpeg}
