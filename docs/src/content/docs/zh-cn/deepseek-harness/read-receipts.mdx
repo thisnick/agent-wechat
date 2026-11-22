@@ -1,0 +1,21 @@
+---
+title: 已读回执
+description: 为什么 DeepSeek Harness 插件中已读回执是保留设置，以及当前配置了什么。
+sourceHash: "42a86dd43f62"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+OpenClaw 插件可以用 `native.readPolicy` 把聊天标记为已读——该行为参见[OpenClaw 已读回执](/openclaw/read-receipts/)。DeepSeek Harness 插件为了配置兼容也接受同样的 `readPolicy` 设置，但**当前它没有效果**。
+
+| `readPolicy` | DSH 插件中的行为 |
+| --- | --- |
+| `on_inbound`（默认） | 接受；无效果 |
+| `on_model_dispatch` | 接受；无效果 |
+| `never` | 接受；无效果 |
+
+<Aside type="caution" title="保留设置">
+原生守护进程没有暴露已读回执 API，所以插件无法把聊天标记为已读。这个设置是保留的，以便未来的守护进程版本无需配置迁移就能支持它。在那之前，聊天在你的手机和其他设备上仍保持未读，也不需要任何 read-state scope。
+</Aside>
+
+如果你现在就需要智能体使用已读回执，请用 [OpenClaw 插件](/openclaw/read-receipts/)，它的守护进程和运行时确实支持该功能。

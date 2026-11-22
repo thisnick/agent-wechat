@@ -1,0 +1,147 @@
+---
+title: Set up calling
+description: Configure voice calling, conversation modes, credentials and agent consultation in DeepSeek Harness.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Configure calling under the `calls` key. Voice defaults to disabled. Voice
+supports direct calls and separately configured conferences. Both support
+[realtime speech or agent-and-TTS conversation](#models-and-behavior).
+
+## Connect the daemon
+
+1. Finish [Quick setup](/deepseek-harness/setup/) and check that the daemon
+   advertises call capability (`wx --json version` / `wx calls status`). The
+   daemon token must include the `calls` scope; a token without it cannot use
+   the call endpoints.
+2. Store an OpenAI API key in the credential store under a reference name
+   (default `OPENAI_API_KEY`) if you use the OpenAI speech provider. The daemon
+   token and the speech API key are separate credentials.
+
+## Configure speech and access
+
+Merge this agent-mode example into your config. Replace the example IDs.
+
+```yaml
+calls:
+  voice:
+    enabled: true
+    mode: agent
+    agentId: assistant              # harness Agent id carrying calls
+    inboundPolicy: allowlist
+    inboundAllowFrom:
+      - wxid_friend
+    outboundPolicy: allowlist
+    outboundAllowTo:
+      - wxid_friend
+    outboundToolAllowFrom:
+      - wxid_owner                  # owner DMs allowed to use wechat_call
+    toolPolicy: none
+    allowConsultSessionPersistence: true
+    maxDurationSeconds: 3600
+    realtime:
+      provider: openai
+      apiKeyCredentialRef: OPENAI_API_KEY
+```
+
+`wechat_call` is an optional seventeenth tool: the grant above lets an owner DM
+check status, place allowed outbound calls and hang up. Automatic inbound
+answering does not require the tool. The call itself always runs as the Agent
+named by `calls.voice.agentId`.
+
+An enabled, prepared voice service reports `available` when the daemon is free;
+provider or capability failure reports `unavailable` and leaves calls
+unanswered. Without a resolvable speech API key the coordinator stays offline
+(fail closed).
+
+For incoming direct voice calls, `inboundAllowFrom: ["*"]` accepts any caller
+when `inboundPolicy` is `allowlist`. An empty list accepts none. This setting
+does not grant owner tools.
+
+## Conference calls
+
+Add group IDs under `calls.voice.conferences.groups`. Use `"*"` as a fallback
+for other groups:
+
+```yaml
+calls:
+  voice:
+    conferences:
+      groups:
+        test-group@chatroom:
+          autoJoin: true
+          autoJoinAllowFrom:
+            - wxid_trusted_inverter
+          toolPolicy: safe-read-only
+        "*":
+          autoJoin: true
+          autoJoinAllowFrom:
+            - wxid_trusted_inverter
+          toolPolicy: safe-read-only
+        quiet-group@chatroom:
+          autoJoin: false
+```
+
+An exact group rule replaces the wildcard rule, including `autoJoin: false`;
+the rules are not merged. `autoJoin` defaults to `false`; when enabled, the
+plugin prepares speech before joining a current invitation.
+`autoJoinAllowFrom` lists eligible inviters:
+
+| Value | Eligible invitations |
+| --- | --- |
+| `["wxid_trusted_inverter"]` | Only that contact |
+| `["*"]` | Any inviter |
+| `[]` | None |
+| Omitted | Any inviter for an exact rule; invalid for wildcard auto-join |
+
+These conference rules are separate from normal group-chat access. See
+[Who the bot answers](/deepseek-harness/access/) for chat replies.
+
+The optional `wechat_call` tool supports `conference_start` (`groupId`,
+`contactIds`) and `invite` (`callId`, `contactIds`). Tool requesters still need
+owner DM authorization and `outboundToolAllowFrom`. Starting or inviting also
+requires `outboundPolicy: allowlist` and every invitee in `outboundAllowTo`.
+Submission is not a delivery receipt; check `status` for the roster.
+
+## Models and behavior
+
+All paths below are relative to `calls.voice`.
+
+| Setting | Behavior / default |
+| --- | --- |
+| `mode` | `bidi` (default) for OpenAI Realtime speech, or `agent` for transcription, normal agent turns and TTS. |
+| `transcription` | Agent-mode provider/model/language (`openai`). |
+| `realtime.provider` | `openai` is the supported adapter. |
+| `realtime.model`, `realtime.voice` | Optional speech model/voice overrides. |
+| `realtime.instructions` | Optional conversation guidance, up to 4,000 characters. |
+| `realtime.apiKeyCredentialRef` | Credential name holding the speech provider API key. |
+| `conferences.groups` | Per-group calling rules (see above). |
+| `maxDurationSeconds` | Hard cap, 30–3600 (default 3600). |
+| `consultation.timeoutMs` | Per-turn consultation timeout, 1000–120000 (default 30000). |
+| `sessionScope` | `per-contact` (default) or `per-call` call sessions. |
+| `toolPolicy` | `none` (default), `safe-read-only` or `owner`. |
+
+In `agent` mode each utterance is transcribed, sent as a consultation turn to
+the harness Agent, and the reply is synthesized to speech and played back.
+Input is VAD-gated; a caller can barge in and interrupt playback. A failed turn
+is not retried — the input stays open for the next utterance.
+
+In `bidi` mode the plugin bridges audio directly to OpenAI Realtime. Chat-time
+voice transcription is separate and currently unavailable; see
+[Known limitations](/deepseek-harness/setup/#settings-ui).
+
+Consultation tool scope is derived from the call policy and can only be
+**downgraded** during a call. Owner scope requires an exact
+`agent-wechat:<wxid>` owner entry. A call with `toolPolicy: none` runs no tools.
+Non-`none` policies require `allowConsultSessionPersistence: true`.
+
+<Aside title="Good to know">
+- Calls are opt-in: `calls.voice.enabled: true` is required, plus a resolvable
+  speech key. Otherwise the coordinator stays offline.
+- Video is not implemented.
+- Call sessions are keyed per contact by default
+  (`agent:<agentId>:wechat-call:<contact>[:read-only]`).
+- See [Remember earlier calls](/deepseek-harness/call-memory/) for per-contact
+  call memory and recaps.
+</Aside>

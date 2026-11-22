@@ -1,0 +1,83 @@
+---
+title: 智能体工具
+description: DeepSeek Harness 智能体可以调用的微信工具，以及三级权限如何运作。
+sourceHash: "9cdd2797d306"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+除了回复之外，智能体还获得三个层级的工具。可见性通过工具注册表的 activation 钩子**在每一步从模型侧强制执行**：未被授予某工具的智能体永远看不到它的声明，而每次执行都会重新校验实时路由和授权。
+
+## 当前聊天
+
+对正在处理某个聊天的任何准入智能体可用。历史工具无法读取其他聊天或其他账号。
+
+| 工具 | 功能 |
+| --- | --- |
+| `wechat_history` | 本聊天更早的消息，最新的在前 |
+| `wechat_search` | 本聊天中包含指定文本的消息 |
+| `wechat_message` | 本聊天中按 ID 查一条消息 |
+| `wechat_media` | 下载一条消息的图片、文件、视频或语音并交给智能体；图片也会展示给模型 |
+| `wechat_recall` | 撤回你的账号在本聊天发出的一条消息 |
+| `wechat_send_share` | 发送链接卡片（标题、URL、可选描述和缩略图） |
+
+## 仅 owner 单聊
+
+这些工具跨已配置的账号工作，需要 **owner 私聊**——即发送者在 `tools.ownerAllowFrom` 中的单聊。它们在群聊或其他人的聊天里永远不会出现。
+
+| 工具 | 功能 |
+| --- | --- |
+| `wechat_stickers` | 收藏表情列表、元数据、准备、添加/移动/删除 |
+| `wechat_login` | 登录状态、二维码开始/等待、断开连接、登出、忘记 |
+| `wechat_contacts` | 联系人列表/获取/查找/lookup/搜索/移除 |
+| `wechat_contact_request` | 好友请求列表/获取/发送/接受/删除、操作状态 |
+| `wechat_group_info` | 一个群的信息和缓存成员的单页列表 |
+
+```yaml
+tools:
+  ownerAllowFrom:
+    - wxid_owner
+```
+
+`wechat_stickers` 是仅 owner 可用的收藏表情管理。它的动作包括 `list`、`get`、`prepare`、`add`、`move` 和 `remove`；原始字节下载和可视化预览不通过这个工具提供。官方表情包浏览在桌面应用和 CLI 中可用。未知或缺失的缓存成员会报告为 `unconfirmed`，而不是"不在群里"。
+
+## 可选的 archive（默认拒绝）
+
+这五个工具跨账号上**所有**聊天工作，除非授予否则关闭：
+
+| 工具 | 功能 |
+| --- | --- |
+| `wechat_archive_threads` | 列出聊天，含未读数 |
+| `wechat_archive_search` | 搜索所有聊天，或指定一个 |
+| `wechat_archive_history` | 读取任意聊天 |
+| `wechat_archive_message` | 从任意聊天取一条消息 |
+| `wechat_archive_media` | 仅元数据——永不下载字节 |
+
+通过在 `tools.grants.archive` 中扩展 archive scope 来授予它们：
+
+```yaml
+tools:
+  grants:
+    archive:
+      - wechat_archive_threads
+      - wechat_archive_search
+      - wechat_archive_history
+      - wechat_archive_message
+      - wechat_archive_media
+```
+
+<Aside type="caution" title="archive 工具能看到一切">
+拥有 archive 工具的智能体可以读取你的整个微信账号，无论谁在跟它对话。只把它们授予只有你才会交谈的智能体。
+</Aside>
+
+## 通话
+
+可选的 `wechat_call` 是第十七个工具：检查状态、发起允许的单聊语音通话、开始或加入已配置的会议、邀请允许的联系人，或结束插件持有的通话。它需要 owner 单聊授权加上 `outboundToolAllowFrom`；仅有消息权限不会授予它。参见[设置通话](/deepseek-harness/calling/)。
+
+<Aside title="小提示">
+- **搜索是本地的。** 它覆盖你的 profile 里存储的内容，绝不会从微信拉取更早的历史。
+- **pending 状态的媒体按原样报告。** 已缓存的附件按需交付；pending 或过期的附件绝不会被伪造。
+- **发送和撤回使用稳定 key**，因此在响应丢失后重试也绝不会重复发送。不确定的结果返回为 `needs_review`，而不是被重试。
+- **完整的生成参数目录**在仓库的 `interfaces/dsh/tools.txt`。
+- 通过 owner 工具 `wechat_stickers` 到达[收藏表情](/deepseek-harness/stickers/)。
+</Aside>

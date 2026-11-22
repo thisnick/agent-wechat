@@ -1,0 +1,57 @@
+---
+title: Remember earlier calls
+description: Keep one agent session per contact, summarize each call and start the next call with a short recap.
+---
+
+The voice agent can remember earlier calls with the same contact: with the
+default `per-contact` session scope, consultations share one harness Agent
+session, the agent summarizes each answered call there, and a recap can be
+added to the next call's instructions. All paths below are relative to
+`calls.voice`.
+
+## Turn on a recap
+
+Add `recentContext` to the realtime settings:
+
+```yaml
+calls:
+  voice:
+    realtime:
+      recentContext:
+        enabled: true
+        maxMessages: 10
+```
+
+Then call the bot. The speech model starts the call with a short recap like
+this in its instructions:
+
+```text
+Recent calls with this caller, for continuity. Use it when it helps; don't read it out, and it may be out of date.
+
+Earlier calls, newest first:
+- yesterday, they called (4 min 10 s): They asked to move Friday's dinner to 7 pm; you confirmed.
+```
+
+## What each setting does
+
+| Setting | Default | Behavior |
+| --- | --- | --- |
+| `sessionScope` | `per-contact` | `per-contact` keeps one session per contact so calls remember earlier conversations. `per-call` starts every call in a new session. |
+| `consultation.summary` | `true` | After an answered call, the agent receives the call transcript in the call's session and writes a short summary. |
+| `consultation.recentMessages` | `10` | How many recent chat messages the first consultation in a call gets as context, 0–50. `0` turns this off. |
+| `realtime.recentContext.enabled` | `false` | Adds recent call summaries to the speech model's instructions. |
+| `realtime.recentContext.maxMessages` | `10` | How many chat messages to include, 1–50. |
+
+Calls you place with the `wechat_call` tool report their summary to the session
+that placed them, so the agent there can tell you how the call went.
+
+:::note[Good to know]
+- Owners and other callers never share a session: a non-owner contact gets a
+  read-only session (`agent:<agentId>:wechat-call:<contact>:read-only`).
+- Call summaries persist in a dedicated storage domain (`agent_wechat_calls`),
+  capped at three per contact and 500 contacts. No recordings or full
+  transcripts are stored there.
+- Transcripts come from speech recognition and can contain errors.
+- Recaps are only included when `realtime.recentContext` is enabled; they may
+  be out of date and should not be read aloud.
+:::

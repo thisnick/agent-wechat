@@ -1,0 +1,105 @@
+---
+title: DeepSeek Harness quick setup
+description: Add WeChat as a channel in a DeepSeek Harness host so your agent can read and reply to chats.
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+The `@agent-wechat/deepseek-harness-extension` bundle connects DeepSeek Harness
+(DSH) to a running native WeChat daemon. Your agent receives WeChat messages and
+replies from your account. It is the DSH counterpart of the
+[OpenClaw plugin](/openclaw/setup/).
+
+You need a daemon that is running and logged in. If you haven't set one up, see
+[Connect your account](/setup/connect/). The daemon may be the one managed by the
+AgentWechat desktop app (commonly on `http://127.0.0.1:6174`) or one you run
+yourself.
+
+<Steps>
+
+1. **Store the daemon token as a credential.**
+
+   The token never goes in the plugin config. Put it in the host credential
+   store under a reference name (default `WECHAT_DAEMON_TOKEN`), for example in
+   `~/.dsh/.credentials.yaml`:
+
+   ```yaml
+   refs:
+     WECHAT_DAEMON_TOKEN: <your-daemon-token>
+   ```
+
+   Use the same token the daemon was started with. For the desktop-managed hub
+   you can read it from the OS keychain; ask the assistant to help if needed.
+
+2. **Install the bundle.**
+
+   Ask the assistant in DSH to install the bundle at the package directory, or
+   run the plugin-manager install for
+   `packages/deepseek-harness-extension`. The bundle is registered under the
+   entry id `deepseek-harness-extension`.
+
+3. **Add a config patch** for that entry. This example lets one friend message
+   the agent and marks that friend as the owner:
+
+   ```yaml
+   - id: deepseek-harness-extension
+     name: '@agent-wechat/deepseek-harness-extension'
+     config:
+       native:
+         endpoint: 'http://127.0.0.1:6174'
+         accountId: 'ACCOUNT_ID'
+       dmPolicy: allowlist
+       dmAllowFrom:
+         - wxid_friend
+       tools:
+         ownerAllowFrom:
+           - wxid_friend
+   ```
+
+   Find a friend's ID with `wx contacts find NAME`, and a group's (ending in
+   `@chatroom`) with `wx chats find NAME`. Use the returned ID rather than a
+   nickname or a changeable WeChat alias. Your own ID is the `senderId` on any
+   message you sent.
+
+4. **Use the settings page.** Open **Settings → 微信通道** (or the bundle's page
+   under Plugins) to edit the hub address and admission rules without touching
+   YAML. The page shows a live connection status so you can confirm the channel
+   reached the daemon. See [Settings UI](#settings-ui).
+
+5. **Restart if needed, then test.** Have your friend send you a message. The
+   agent should reply in the same chat. If the status strip stays red, check the
+   token and endpoint; a missing daemon never crashes the host — the channel
+   parks and retries in the background.
+
+</Steps>
+
+Next: decide [who the bot answers](/deepseek-harness/access/), which
+[tools](/deepseek-harness/tools/) it gets, and whether to enable
+[calling](/deepseek-harness/calling/).
+
+## Settings UI \{#settings-ui}
+
+The bundle renders a visual form for the most relevant config fields — hub
+address (`native.endpoint`), run mode, DM/group admission, owner allowlist, tool
+grants and the calls block. Edits go through the host settings service and land
+in the profile patch, so the UI and a manual patch edit stay equivalent. Secrets
+are never shown; only credential *names* such as `native.tokenCredentialRef`
+appear. After installing or upgrading the bundle, refresh the browser once.
+
+A read-only status route (`GET /plugins/wechat-channel/status`) reports
+`running`, `serverId`, retry count and any error. The settings page polls it
+every 5 seconds and shows a colored dot: green connected, amber connecting,
+red parked, gray stopped/unknown.
+
+<Aside title="Good to know">
+- **Everything is off by default.** With no `dmPolicy` or `groupPolicy`, the
+  agent answers nobody.
+- **The agent replies as you.** Replies go out from your WeChat account.
+- **The token lives in the credential store**, referenced by
+  `native.tokenCredentialRef`. Keep it out of config and out of version control.
+- **Fail-soft by design.** An unreachable daemon or unresolved credential parks
+  the channel and retries with exponential backoff; it never throws into the
+  host's plugin loader.
+- **Voice calls are opt-in** and need a `calls` block plus a resolvable speech
+  API key; see [Set up calling](/deepseek-harness/calling/).
+</Aside>

@@ -96,6 +96,16 @@ export default defineConfig({
             { label: 'Manage Saved stickers', slug: 'openclaw/stickers' },
             { label: 'Read receipts', translations: { 'zh-CN': '已读回执' }, slug: 'openclaw/read-receipts' },
           ] },
+          { label: 'DeepSeek Harness', translations: { 'zh-CN': 'DeepSeek Harness' }, items: [
+            { label: 'Quick setup', translations: { 'zh-CN': '快速接入' }, slug: 'deepseek-harness/setup' },
+            { label: 'Managed or external', translations: { 'zh-CN': '托管与外部模式' }, slug: 'deepseek-harness/modes' },
+            { label: 'Calling', translations: { 'zh-CN': '语音通话' }, slug: 'deepseek-harness/calling' },
+            { label: 'Remember earlier calls', translations: { 'zh-CN': '记忆过往通话' }, slug: 'deepseek-harness/call-memory' },
+            { label: 'Who the bot answers', translations: { 'zh-CN': '响应权限控制' }, slug: 'deepseek-harness/access' },
+            { label: 'Agent tools', translations: { 'zh-CN': '智能体工具' }, slug: 'deepseek-harness/tools' },
+            { label: 'Manage Saved stickers', translations: { 'zh-CN': '管理收藏表情' }, slug: 'deepseek-harness/stickers' },
+            { label: 'Read receipts', translations: { 'zh-CN': '已读回执' }, slug: 'deepseek-harness/read-receipts' },
+          ] },
           { label: 'HTTP API', translations: { 'zh-CN': 'HTTP API' }, slug: 'use/api' },
         ] },
         { label: 'How it works', translations: { 'zh-CN': '工作原理' }, items: [

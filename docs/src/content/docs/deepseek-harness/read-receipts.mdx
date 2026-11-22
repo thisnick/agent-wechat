@@ -1,0 +1,28 @@
+---
+title: Read receipts
+description: Why read receipts are reserved in the DeepSeek Harness plugin, and what is configured today.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The OpenClaw plugin can mark chats read with `native.readPolicy` — see
+[OpenClaw read receipts](/openclaw/read-receipts/) for that behavior. The
+DeepSeek Harness plugin accepts the same `readPolicy` setting for configuration
+compatibility, but **it has no effect today**.
+
+| `readPolicy` | Behavior in the DSH plugin |
+| --- | --- |
+| `on_inbound` (default) | Accepted; no effect |
+| `on_model_dispatch` | Accepted; no effect |
+| `never` | Accepted; no effect |
+
+<Aside type="caution" title="Reserved setting">
+The native daemon exposes no read-receipt API, so the plugin cannot mark a chat
+as read. The setting is reserved so a future daemon release can honor it without
+a config migration. Until then, chats stay unread on your phone and other
+devices, and no read-state scope is required.
+</Aside>
+
+If you need read receipts with your agent today, use the
+[OpenClaw plugin](/openclaw/read-receipts/), whose daemon and runtime do support
+them.

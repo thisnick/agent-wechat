@@ -1,0 +1,55 @@
+---
+title: 管理收藏表情
+description: 通过仅 owner 可用的 DeepSeek Harness 工具准备媒体并管理收藏表情。
+sourceHash: "a6c759658519"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+用仅 owner 可用的 `wechat_stickers` 工具管理已配置账号的收藏表情。它只在 owner 私聊中可用（参见[智能体工具](/deepseek-harness/tools/#仅-owner-单聊)）。
+
+1. 列出账号的收藏表情。
+
+   ```json
+   {"action":"list"}
+   ```
+
+   结果包含有序的 `items` 和 `revision`。在移动或删除时保留这个 revision；过期的 revision 会失败，而不是覆盖你在手机上的修改。
+
+2. 查看某个表情的元数据。
+
+   ```json
+   {"action":"get","stickerId":"STICKER_ID"}
+   ```
+
+   `get` 返回元数据和媒体引用。可视化预览和原始字节下载不通过这个工具提供；预览请用桌面应用或 CLI。
+
+3. 准备一个要保存的文件。
+
+   ```json
+   {"action":"prepare","file":"stickers/clip.mp4","startMs":1000,"durationMs":2000,"maxEdge":360,"fps":12,"idempotencyKey":"clip-prepare-1"}
+   ```
+
+   准备本身既不会保存也不会发送。用 preparation ID 保存它：
+
+   ```json
+   {"action":"add","preparationId":"PREPARATION_ID","idempotencyKey":"clip-save-1"}
+   ```
+
+4. 按消息 ID 保存别人发来的表情。
+
+   ```json
+   {"action":"add","messageId":"MESSAGE_ID","idempotencyKey":"received-save-1"}
+   ```
+
+| 动作 | 必需的选择 |
+| --- | --- |
+| `move` | `stickerId`、当前 `revision`、`afterId`（null 表示放到最前）、稳定的 `idempotencyKey` |
+| `remove` | `stickerId`、当前 `revision`、稳定的 `idempotencyKey` |
+| 保存已准备的项 | `preparationId` 或 `messageId`、稳定的 `idempotencyKey` |
+
+所有变更都需要稳定的 `idempotencyKey`。结果不确定时，检查原始状态，而不是再提交一次变更。
+
+<Aside type="note" title="小提示">
+收藏是一个集合。没有可编辑的自定义名称或文件夹，官方表情包也不在这个工具范围内。参见[CLI 与 composer 工作流](/use/stickers/)了解官方表情包和可视化管理。
+</Aside>

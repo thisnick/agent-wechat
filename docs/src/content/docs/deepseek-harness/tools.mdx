@@ -1,0 +1,104 @@
+---
+title: Agent tools
+description: The WeChat tools your DeepSeek Harness agent can call, and how the three access tiers work.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Besides replying, the agent gets tools in three tiers. Visibility is enforced
+**model-side per step** through the tool registry's activation hook: an agent
+that isn't granted a tool never sees its declaration, and every execution
+re-validates the live route and grant.
+
+## Current chat
+
+Available to any admitted agent for the chat it is currently handling. History
+tools cannot read other chats or accounts.
+
+| Tool | What it does |
+| --- | --- |
+| `wechat_history` | Earlier messages in this chat, newest first |
+| `wechat_search` | Messages in this chat containing some text |
+| `wechat_message` | One message by ID in this chat |
+| `wechat_media` | Downloads a message's image, file, video or voice and hands it to the agent; images are also shown to the model |
+| `wechat_recall` | Recalls a message your account sent in this chat |
+| `wechat_send_share` | Sends a link card (title, URL, optional description and thumbnail) |
+
+## Owner DM only
+
+These works across the configured account and require an **owner private DM** —
+a direct chat whose sender is listed in `tools.ownerAllowFrom`. They never
+appear in groups or in other people's chats.
+
+| Tool | What it does |
+| --- | --- |
+| `wechat_stickers` | Saved sticker list, metadata, preparation, add/move/remove |
+| `wechat_login` | Login status, QR start/wait, disconnect, logout, forget |
+| `wechat_contacts` | List/get/find/lookup/search/remove contacts |
+| `wechat_contact_request` | List/get/send/accept/delete friend requests, operation status |
+| `wechat_group_info` | A group and one page of cached members |
+
+```yaml
+tools:
+  ownerAllowFrom:
+    - wxid_owner
+```
+
+`wechat_stickers` is owner-only Saved sticker management. Its actions include
+`list`, `get`, `prepare`, `add`, `move` and `remove`; original-byte download and
+visual preview are not staged through this tool. Official-pack browsing is
+available in the desktop app and CLI. Unknown or missing cached members are
+reported as `unconfirmed` rather than "not in group".
+
+## Opt-in archive (default deny)
+
+These five tools work across **every** chat on the account and are off unless
+granted:
+
+| Tool | What it does |
+| --- | --- |
+| `wechat_archive_threads` | Lists chats, with unread counts |
+| `wechat_archive_search` | Searches all chats, or one |
+| `wechat_archive_history` | Reads any chat |
+| `wechat_archive_message` | One message from any chat |
+| `wechat_archive_media` | Metadata only — never downloads bytes |
+
+Grant them by extending the archive scope in `tools.grants.archive`:
+
+```yaml
+tools:
+  grants:
+    archive:
+      - wechat_archive_threads
+      - wechat_archive_search
+      - wechat_archive_history
+      - wechat_archive_message
+      - wechat_archive_media
+```
+
+<Aside type="caution" title="Archive tools see everything">
+An agent with archive tools can read your whole WeChat account, whoever is
+talking to it. Only grant them to agents that only you talk to.
+</Aside>
+
+## Calling
+
+The optional `wechat_call` tool checks status, places an allowed direct voice
+call, starts or joins a configured conference, invites allowed contacts, or
+ends the call the plugin owns. It requires owner DM authorization plus
+`outboundToolAllowFrom`; messaging permission alone doesn't grant it. See
+[Set up calling](/deepseek-harness/calling/).
+
+<Aside title="Good to know">
+- **Search is local.** It covers what's stored in your profile and never
+  fetches older history from WeChat.
+- **Pending media states are reported verbatim.** A cached attachment is
+  delivered on demand; a pending or expired one is never fabricated.
+- **Sends and recalls use a stable key**, so a retry after a lost response never
+  sends twice. An uncertain result comes back as `needs_review` rather than
+  being retried.
+- **The full, generated parameter catalog** is in the repository at
+  `interfaces/dsh/tools.txt`.
+- Reach [saved stickers](/deepseek-harness/stickers/) through the owner tool
+  `wechat_stickers`.
+</Aside>

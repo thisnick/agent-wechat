@@ -1,0 +1,69 @@
+---
+title: DeepSeek Harness 快速上手
+description: 在 DeepSeek Harness 宿主中把微信添加为一个通道，让你的智能体读取并回复聊天消息。
+sourceHash: "87793b957984"
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+`@agent-wechat/deepseek-harness-extension` 这个 bundle 把 DeepSeek Harness（DSH）连接到一个正在运行的原生微信守护进程。你的智能体接收微信消息，并以你的账号身份回复。它是 [OpenClaw 插件](/openclaw/setup/) 在 DSH 上的对应实现。
+
+你需要一个正在运行且已登录的守护进程。如果还没有，参见[连接你的账号](/setup/connect/)。这个守护进程可以是 AgentWechat 桌面应用管理的那个（通常在 `http://127.0.0.1:6174`），也可以是你自己运行的。
+
+<Steps>
+
+1. **把守护进程 token 存为凭据。**
+
+   token 绝不写进插件配置。把它放进宿主凭据存储，用一个引用名（默认 `WECHAT_DAEMON_TOKEN`），例如在 `~/.dsh/.credentials.yaml` 中：
+
+   ```yaml
+   refs:
+     WECHAT_DAEMON_TOKEN: <你的-daemon-token>
+   ```
+
+   使用与守护进程启动时相同的 token。对于桌面应用管理的 hub，你可以从系统钥匙串读取；需要的话让助手帮忙。
+
+2. **安装 bundle。**
+
+   在 DSH 中让助手安装包目录下的这个 bundle，或对 `packages/deepseek-harness-extension` 运行插件管理器安装命令。该 bundle 以条目 id `deepseek-harness-extension` 注册。
+
+3. **为该条目添加配置补丁。** 下面这个例子允许一位好友给智能体发消息，并把这位好友标记为 owner：
+
+   ```yaml
+   - id: deepseek-harness-extension
+     name: '@agent-wechat/deepseek-harness-extension'
+     config:
+       native:
+         endpoint: 'http://127.0.0.1:6174'
+         accountId: 'ACCOUNT_ID'
+       dmPolicy: allowlist
+       dmAllowFrom:
+         - wxid_friend
+       tools:
+         ownerAllowFrom:
+           - wxid_friend
+   ```
+
+   用 `wx contacts find NAME` 查找好友 ID，用 `wx chats find NAME` 查找群 ID（以 `@chatroom` 结尾）。使用返回的 ID，而不是昵称或可变的微信号。你自己的 ID 是你发出的任意消息上的 `senderId`。
+
+4. **使用设置页面。** 打开**设置 → 微信通道**（或插件页面下该 bundle 的页面），无需碰 YAML 就能编辑 hub 地址和准入规则。页面会显示实时连接状态，方便你确认通道已连上守护进程。参见[设置界面](#settings-ui)。
+
+5. **必要时重启，然后测试。** 让好友给你发一条消息。智能体应该在同一个聊天中回复。如果状态条一直是红色，检查 token 和 endpoint；守护进程不可用不会让宿主崩溃——通道会进入 park 状态并在后台重试。
+
+</Steps>
+
+接下来：决定[谁能得到回复](/deepseek-harness/access/)、智能体获得哪些[工具](/deepseek-harness/tools/)，以及是否启用[通话](/deepseek-harness/calling/)。
+
+## 设置界面 \{#settings-ui}
+
+这个 bundle 为最关键的配置字段渲染了可视化表单——hub 地址（`native.endpoint`）、运行模式、单聊/群聊准入、owner 白名单、工具授权和 calls 配置块。编辑经由宿主设置服务写入 profile 补丁，因此 UI 与手工修改补丁是等价的。密钥永不显示；只显示诸如 `native.tokenCredentialRef` 这样的凭据*名称*。安装或升级 bundle 后，刷新一次浏览器。
+
+一个只读状态路由（`GET /plugins/wechat-channel/status`）报告 `running`、`serverId`、重试次数和任何错误。设置页面每 5 秒轮询一次，用彩色圆点显示：绿色=已连接，琥珀色=连接中，红色=已 park，灰色=已停止/未知。
+
+<Aside title="小提示">
+- **默认全部关闭。** 没有设置 `dmPolicy` 或 `groupPolicy` 时，智能体不会回复任何人。
+- **智能体以你本人身份回复。** 消息从你的微信账号发出。
+- **token 放在凭据存储里**，通过 `native.tokenCredentialRef` 引用。不要写进配置，也不要提交到版本控制。
+- **fail-soft 设计。** 守护进程不可达或凭据无法解析时，通道进入 park 并按指数退避重试；绝不会把异常抛给宿主的插件加载器。
+- **语音通话是可选的**，需要一个 `calls` 配置块和可解析的语音 API key；参见[设置通话](/deepseek-harness/calling/)。
+</Aside>

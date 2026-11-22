@@ -1,0 +1,48 @@
+---
+title: 记住此前的通话
+description: 让每个联系人共享一个智能体会话，为每次通话生成摘要，并在下次通话开头加入简短回顾。
+sourceHash: "2f8b63a95c8e"
+---
+
+语音智能体可以记住与同一联系人的此前通话：使用默认的 `per-contact` 会话 scope 时，咨询共享同一个 harness Agent 会话，智能体在每次接听的通话里生成简短摘要，下次通话的指引里可以加入回顾。下面所有路径都相对于 `calls.voice`。
+
+## 启用回顾
+
+在 realtime 设置中加入 `recentContext`：
+
+```yaml
+calls:
+  voice:
+    realtime:
+      recentContext:
+        enabled: true
+        maxMessages: 10
+```
+
+然后给机器人打电话。语音模型会在通话开始时的指引里带上一段简短回顾，例如：
+
+```text
+Recent calls with this caller, for continuity. Use it when it helps; don't read it out, and it may be out of date.
+
+Earlier calls, newest first:
+- yesterday, they called (4 min 10 s): They asked to move Friday's dinner to 7 pm; you confirmed.
+```
+
+## 各设置的作用
+
+| 设置 | 默认值 | 行为 |
+| --- | --- | --- |
+| `sessionScope` | `per-contact` | `per-contact` 让每个联系人共享一个会话，从而记住此前对话。`per-call` 每次通话都用新会话。 |
+| `consultation.summary` | `true` | 接听的通话结束后，智能体在该通话的会话中收到通话记录，并写下简短摘要。 |
+| `consultation.recentMessages` | `10` | 通话中第一次咨询获得多少条近期聊天消息作为上下文，0–50。`0` 关闭此功能。 |
+| `realtime.recentContext.enabled` | `false` | 把近期通话摘要加入语音模型的指引。 |
+| `realtime.recentContext.maxMessages` | `10` | 包含多少条聊天消息，1–50。 |
+
+你用 `wechat_call` 工具发起的通话会把摘要报告给发起它的会话，这样那边的智能体就能告诉你通话情况。
+
+:::note[小提示]
+- owner 和其他来电者不会共享会话：非 owner 联系人得到的是只读会话（`agent:<agentId>:wechat-call:<contact>:read-only`）。
+- 通话摘要持久化在独立存储域（`agent_wechat_calls`）中，每个联系人最多三条、最多 500 个联系人。那里不存储录音或完整记录。
+- 通话记录来自语音识别，可能有误。
+- 回顾只有在启用 `realtime.recentContext` 时才包含；它可能已过时，不应被朗读出来。
+:::

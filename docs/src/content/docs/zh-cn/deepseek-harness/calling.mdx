@@ -1,0 +1,113 @@
+---
+title: 设置通话
+description: 在 DeepSeek Harness 中配置语音通话、对话模式、凭据和智能体咨询。
+sourceHash: "5738e5c57dde"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+在 `calls` 键下配置通话。语音默认禁用。语音支持单聊通话和单独配置的会议。两者都支持[实时语音或智能体加 TTS 对话](#模型与行为)。
+
+## 连接守护进程
+
+1. 完成[快速上手](/deepseek-harness/setup/)，并确认守护进程声明了通话能力（`wx --json version` / `wx calls status`）。守护进程 token 必须包含 `calls` scope；没有它的 token 无法使用通话端点。
+2. 如果你使用 OpenAI 语音服务，把 OpenAI API key 以引用名（默认 `OPENAI_API_KEY`）存入凭据存储。守护进程 token 和语音 API key 是两套独立的凭据。
+
+## 配置语音与访问
+
+把下面这个 agent 模式示例合并进你的配置。替换示例中的 ID。
+
+```yaml
+calls:
+  voice:
+    enabled: true
+    mode: agent
+    agentId: assistant              # 承载通话的 harness Agent id
+    inboundPolicy: allowlist
+    inboundAllowFrom:
+      - wxid_friend
+    outboundPolicy: allowlist
+    outboundAllowTo:
+      - wxid_friend
+    outboundToolAllowFrom:
+      - wxid_owner                  # 允许使用 wechat_call 的 owner 单聊
+    toolPolicy: none
+    allowConsultSessionPersistence: true
+    maxDurationSeconds: 3600
+    realtime:
+      provider: openai
+      apiKeyCredentialRef: OPENAI_API_KEY
+```
+
+`wechat_call` 是可选的第十七个工具：上面的授权让 owner 单聊可以检查状态、发起允许的呼出通话和挂断。自动接听来电不需要这个工具。通话本身始终以 `calls.voice.agentId` 指定的 Agent 身份运行。
+
+已启用且就绪的语音服务在守护进程空闲时报告 `available`；provider 或能力失败时报告 `unavailable`，来电保持未接。如果语音 API key 无法解析，协调器保持离线（fail closed）。
+
+对于呼入的单聊语音通话，当 `inboundPolicy` 为 `allowlist` 时，`inboundAllowFrom: ["*"]` 接受任何来电。空列表则不接受任何人。这个设置不授予 owner 工具。
+
+## 会议通话
+
+在 `calls.voice.conferences.groups` 下添加群 ID。用 `"*"` 作为其他群的兜底规则：
+
+```yaml
+calls:
+  voice:
+    conferences:
+      groups:
+        test-group@chatroom:
+          autoJoin: true
+          autoJoinAllowFrom:
+            - wxid_trusted_inverter
+          toolPolicy: safe-read-only
+        "*":
+          autoJoin: true
+          autoJoinAllowFrom:
+            - wxid_trusted_inverter
+          toolPolicy: safe-read-only
+        quiet-group@chatroom:
+          autoJoin: false
+```
+
+精确的群规则会替换通配规则，包括 `autoJoin: false`；规则不会合并。`autoJoin` 默认为 `false`；启用时，插件会在加入当前邀请前准备好语音。`autoJoinAllowFrom` 列出符合条件的邀请者：
+
+| 取值 | 符合条件的邀请 |
+| --- | --- |
+| `["wxid_trusted_inverter"]` | 仅该联系人 |
+| `["*"]` | 任何邀请者 |
+| `[]` | 无 |
+| 省略 | 精确规则下任何邀请者；通配自动加入时无效 |
+
+这些会议规则与普通的群聊准入是分开的。聊天回复参见[谁会得到回复](/deepseek-harness/access/)。
+
+可选的 `wechat_call` 工具支持 `conference_start`（`groupId`、`contactIds`）和 `invite`（`callId`、`contactIds`）。工具请求者仍需要 owner 单聊授权和 `outboundToolAllowFrom`。发起或邀请还要求 `outboundPolicy: allowlist` 且每个被邀请者都在 `outboundAllowTo` 中。提交不是送达凭证；用 `status` 查看成员名单。
+
+## 模型与行为
+
+下面所有路径都相对于 `calls.voice`。
+
+| 设置 | 行为 / 默认值 |
+| --- | --- |
+| `mode` | `bidi`（默认）使用 OpenAI Realtime 实时语音，或 `agent` 使用转写、普通智能体轮次和 TTS。 |
+| `transcription` | agent 模式的 provider/model/language（`openai`）。 |
+| `realtime.provider` | 支持的适配器是 `openai`。 |
+| `realtime.model`、`realtime.voice` | 可选的语音模型/音色覆盖。 |
+| `realtime.instructions` | 可选的对话指引，最多 4,000 字符。 |
+| `realtime.apiKeyCredentialRef` | 存放语音服务 API key 的凭据名。 |
+| `conferences.groups` | 每群通话规则（见上）。 |
+| `maxDurationSeconds` | 硬性上限，30–3600（默认 3600）。 |
+| `consultation.timeoutMs` | 每轮咨询超时，1000–120000（默认 30000）。 |
+| `sessionScope` | `per-contact`（默认）或 `per-call` 通话会话。 |
+| `toolPolicy` | `none`（默认）、`safe-read-only` 或 `owner`。 |
+
+在 `agent` 模式下，每句话语被转写，作为一次咨询轮次发给 harness Agent，回复被合成为语音并播放。输入经过 VAD 门控；来电者可以插话打断播放。失败的轮次不会重试——输入保持开放，等待下一句话语。
+
+在 `bidi` 模式下，插件把音频直接桥接到 OpenAI Realtime。聊天时的语音转写是另一回事，当前不可用；参见[已知限制](/deepseek-harness/setup/#settings-ui)。
+
+咨询工具权限由通话政策派生，通话期间只能**降级**。owner 权限要求 `agent-wechat:<wxid>` 精确匹配 owner 条目。`toolPolicy: none` 的通话不运行任何工具。非 `none` 政策要求 `allowConsultSessionPersistence: true`。
+
+<Aside title="小提示">
+- 通话是选择启用的：需要 `calls.voice.enabled: true`，加上可解析的语音 key。否则协调器保持离线。
+- 视频尚未实现。
+- 通话会话默认按联系人键控（`agent:<agentId>:wechat-call:<contact>[:read-only]`）。
+- 参见[记住此前的通话](/deepseek-harness/call-memory/)，了解按联系人的通话记忆和回顾。
+</Aside>

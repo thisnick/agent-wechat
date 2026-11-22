@@ -1,0 +1,63 @@
+---
+title: Manage Saved stickers
+description: Prepare media and manage Saved stickers through the owner-only DeepSeek Harness tool.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Use the owner-only `wechat_stickers` tool to manage the configured account's
+Saved stickers. It is available only in an owner private DM (see
+[Agent tools](/deepseek-harness/tools/#owner-dm-only)).
+
+1. List the account's Saved stickers.
+
+   ```json
+   {"action":"list"}
+   ```
+
+   The result includes ordered `items` and a `revision`. Keep that revision for
+   placement or removal; a stale revision fails instead of overwriting phone
+   edits.
+
+2. Inspect one sticker's metadata.
+
+   ```json
+   {"action":"get","stickerId":"STICKER_ID"}
+   ```
+
+   `get` returns metadata and media references. Visual preview and original-byte
+   download are not staged through this tool; use the desktop app or CLI for
+   previews.
+
+3. Prepare a file for saving.
+
+   ```json
+   {"action":"prepare","file":"stickers/clip.mp4","startMs":1000,"durationMs":2000,"maxEdge":360,"fps":12,"idempotencyKey":"clip-prepare-1"}
+   ```
+
+   Preparation alone neither saves nor sends. Save it by preparation ID:
+
+   ```json
+   {"action":"add","preparationId":"PREPARATION_ID","idempotencyKey":"clip-save-1"}
+   ```
+
+4. Save a sticker someone sent you by its message ID.
+
+   ```json
+   {"action":"add","messageId":"MESSAGE_ID","idempotencyKey":"received-save-1"}
+   ```
+
+| Action | Required selection |
+| --- | --- |
+| `move` | `stickerId`, current `revision`, `afterId` (null for first), stable `idempotencyKey` |
+| `remove` | `stickerId`, current `revision`, stable `idempotencyKey` |
+| Prepared save | `preparationId` or `messageId`, stable `idempotencyKey` |
+
+All mutations require a stable `idempotencyKey`. After an uncertain result,
+inspect the original state rather than submitting another mutation.
+
+<Aside type="note" title="Good to know">
+Saved is one collection. There are no editable custom names or folders, and
+official packs are outside this tool. See [the CLI and composer
+workflow](/use/stickers/) for official packs and visual management.
+</Aside>
