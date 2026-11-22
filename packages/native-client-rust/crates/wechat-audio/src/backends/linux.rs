@@ -257,9 +257,18 @@ impl Mainloop {
     }
 
     fn iterate(&mut self) -> Result<(), AudioError> {
-        // SAFETY: `raw` is a live mainloop; a null retval pointer is allowed.
-        if unsafe { (self.pa.mainloop_iterate)(self.raw, 0, ptr::null_mut()) } < 0 {
-            return Err(error("PulseAudio mainloop stopped"));
+        // Drain all ready nonblocking mainloop events so capture fragments,
+        // playback write requests, and queued writes do not stall behind one
+        // poll tick. Cap iterations so an always-ready event cannot spin.
+        for _ in 0..32 {
+            // SAFETY: `raw` is a live mainloop; a null retval pointer is allowed.
+            let dispatched = unsafe { (self.pa.mainloop_iterate)(self.raw, 0, ptr::null_mut()) };
+            if dispatched < 0 {
+                return Err(error("PulseAudio mainloop stopped"));
+            }
+            if dispatched == 0 {
+                break;
+            }
         }
         Ok(())
     }
@@ -744,12 +753,14 @@ impl DeviceBackend for Backend {
         {
             return Err(error("PulseAudio device disconnected"));
         }
+        let mut needs_flush = false;
         // Clear is checked before reading any queued output. No old producer can
         // enqueue after the generation change, and the server buffer is flushed.
         let generation = self.playback.generation()?;
         if generation != self.generation {
             self.output.flush();
             self.generation = generation;
+            needs_flush = true;
         }
         for _ in 0..8 {
             let samples = match self.record.peek()? {
@@ -784,6 +795,7 @@ impl DeviceBackend for Backend {
             if drained_gen != self.generation {
                 self.output.flush();
                 self.generation = drained_gen;
+                needs_flush = true;
             }
             if available > 0 {
                 let mut bytes = [0u8; 4_800 * 4];
@@ -794,7 +806,11 @@ impl DeviceBackend for Backend {
                     out.copy_from_slice(&sample.to_le_bytes());
                 }
                 self.output.write(&bytes[..available * 4])?;
+                needs_flush = true;
             }
+        }
+        if needs_flush {
+            self.mainloop.iterate()?;
         }
         Ok(())
     }

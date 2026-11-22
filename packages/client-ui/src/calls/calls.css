@@ -4,7 +4,7 @@
 .call-header-actions {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: inherit;
   position: relative;
 }
 
