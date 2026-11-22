@@ -3,8 +3,9 @@
 use crate::{
     audio::ReceiveAudio,
     transport::{
-        debug_call, encode_segment, open_socket_with_limit, receive, receive_event, send_json,
-        CallEndpoint, ControlClient, Socket, MEDIA_SOCKET_LIMIT, STARTUP_TIMEOUT, WRITE_TIMEOUT,
+        debug_call, encode_segment, map_ws_send_error, open_socket_with_limit, receive,
+        receive_event, send_json, CallEndpoint, ControlClient, Socket, MEDIA_SOCKET_LIMIT,
+        STARTUP_TIMEOUT, WRITE_TIMEOUT,
     },
     video::{CapturedVideoFrame, ReceiveVideo},
 };
@@ -270,7 +271,7 @@ impl MediaClient {
         )
         .await
         .context("call media write timed out")
-        .and_then(|result| result.map_err(Into::into))
+        .and_then(|result| result.map_err(map_ws_send_error))
         {
             debug_call(
                 "media",
@@ -336,7 +337,8 @@ impl MediaClient {
             self.socket.send(Message::Binary(packet.into())),
         )
         .await
-        .context("call video media write timed out")??;
+        .context("call video media write timed out")?
+        .map_err(map_ws_send_error)?;
         self.video_writes += 1;
         Ok(())
     }

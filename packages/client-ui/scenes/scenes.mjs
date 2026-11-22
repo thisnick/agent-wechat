@@ -2190,6 +2190,7 @@ scenes.push(
           ownedByThisClient: true,
           groupId: msg.target.groupId,
           participants: [
+            { participantId: "p-self", contactId: "sim_main", membership: "joined", microphoneEnabled: true, cameraEnabled: true },
             { participantId: "p-mei", contactId: "sim_mei", membership: "joined", microphoneEnabled: true, cameraEnabled: true },
             { participantId: "p-daniel", contactId: "sim_daniel", membership: "joined", microphoneEnabled: false, cameraEnabled: false },
             { participantId: "p-guest", contactId: "sim_guest", membership: "invited" },
@@ -2210,14 +2211,15 @@ scenes.push(
       await picker.getByRole("button", { name: "Start group video call" }).click();
       const dialog = page.getByRole("dialog", { name: "Call with Weekend trip" });
       await expect(dialog).toBeVisible();
-      await expect(dialog.locator(".call-tile")).toHaveCount(3);
+      await expect(dialog.locator(".call-tile")).toHaveCount(4);
+      await expect(dialog.locator(".call-self-view")).toHaveCount(0);
       await expect(dialog.getByRole("button", { name: "Invite people" })).toBeVisible();
       await expect(dialog.locator("canvas.call-video-canvas")).toBeVisible();
       await expect
         .poll(() => dialog.locator("canvas.call-video-canvas").evaluate((el) => el.width))
         .toBeGreaterThan(0);
       await expect
-        .poll(() => dialog.locator("video.call-local-video").evaluate((v) => v.readyState))
+        .poll(() => dialog.locator(".call-tile.is-self video.call-local-video").evaluate((v) => v.readyState))
         .toBeGreaterThanOrEqual(2);
     },
   },

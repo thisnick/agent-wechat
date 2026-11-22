@@ -56,8 +56,11 @@ const MAX_INVITEES: usize = 100;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const ATTACH_TIMEOUT: Duration = Duration::from_secs(30);
 const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(3);
-const SELF_VIEW_MIN_INTERVAL: Duration = Duration::from_millis(40);
+const SELF_VIEW_MIN_INTERVAL: Duration = Duration::from_millis(66);
+const VIDEO_ACK_TIMEOUT: Duration = Duration::from_millis(200);
 const LEVEL_INTERVAL: Duration = Duration::from_millis(80);
+const HEVC_AUD_NALU: &[u8] = &[0, 0, 0, 1, 0x46, 0x01, 0x50];
+const H264_AUD_NALU: &[u8] = &[0, 0, 0, 1, 0x09, 0xf0];
 
 /// Packet pushed from an account's native call actor to the WebView.
 #[derive(Clone, Serialize)]
@@ -239,6 +242,7 @@ enum ActorRequest {
     },
     StopLocalMedia,
     StopMedia,
+    VideoFrameAck,
 }
 
 impl CallManager {
@@ -514,9 +518,9 @@ struct SelfViewDecoder {
 
 impl SelfViewDecoder {
     fn start(ffmpeg: &Path, codec: CallVideoCodec) -> Option<Self> {
-        let input_fmt = match codec {
-            CallVideoCodec::H264 => "h264",
-            CallVideoCodec::H265 => "hevc",
+        let (input_fmt, aud_nalu) = match codec {
+            CallVideoCodec::H264 => ("h264", H264_AUD_NALU),
+            CallVideoCodec::H265 => ("hevc", HEVC_AUD_NALU),
             CallVideoCodec::Jpeg => return None,
         };
         let mut cmd = Command::new(ffmpeg);
@@ -525,7 +529,7 @@ impl SelfViewDecoder {
             "-loglevel",
             "error",
             "-fflags",
-            "nobuffer",
+            "+genpts",
             "-flags",
             "low_delay",
             "-probesize",
@@ -540,12 +544,19 @@ impl SelfViewDecoder {
             "pipe:0",
             "-vf",
             // Outgoing H.264/H.265 frames from LocalVideoCapture are pre-rotated 90° CCW
-            // for mobile/conference WeChat wire compatibility; undo that (+90° CW) for self-view.
-            "transpose=1,scale=w='min(iw,320)':h='min(ih,240)':force_original_aspect_ratio=decrease",
+            // for mobile/conference WeChat wire compatibility; undo that (+90° CW) for self-view
+            // and convert to full-range YUV so FFmpeg 7.1/8.0 strict MJPEG accepts every frame.
+            "transpose=1,scale=w='min(iw,640)':h='min(ih,480)':force_original_aspect_ratio=decrease:out_range=full,scale=trunc(iw/2)*2:trunc(ih/2)*2:out_range=full",
+            "-strict",
+            "unofficial",
             "-c:v",
             "mjpeg",
+            "-pix_fmt",
+            "yuv420p",
+            "-color_range",
+            "pc",
             "-q:v",
-            "7",
+            "6",
             "-flush_packets",
             "1",
             "-f",
@@ -586,7 +597,10 @@ impl SelfViewDecoder {
                     let Ok(bytes) = input_rx.recv() else {
                         break;
                     };
-                    if stdin.write_all(&bytes).is_err() || stdin.flush().is_err() {
+                    if stdin.write_all(&bytes).is_err()
+                        || stdin.write_all(aud_nalu).is_err()
+                        || stdin.flush().is_err()
+                    {
                         break;
                     }
                 }
@@ -681,6 +695,28 @@ impl Drop for SelfViewDecoder {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct QuantizedLevels {
+    mic: u8,
+    speaker: u8,
+    tracks: BTreeMap<u32, u8>,
+}
+
+impl QuantizedLevels {
+    fn from_normalized(mic: f32, speaker: f32, tracks: &BTreeMap<u32, f32>) -> Self {
+        let q = |v: f32| (v.clamp(0.0, 1.0) * 50.0).round() as u8;
+        Self {
+            mic: q(mic),
+            speaker: q(speaker),
+            tracks: tracks.iter().map(|(&id, &v)| (id, q(v))).collect(),
+        }
+    }
+}
+
+fn can_dispatch_video_batch(in_flight_since: Option<Instant>, now: Instant) -> bool {
+    in_flight_since.is_none_or(|since| now.saturating_duration_since(since) >= VIDEO_ACK_TIMEOUT)
+}
+
 struct ActiveMediaState {
     call_id: String,
     call_type: CallType,
@@ -699,16 +735,55 @@ struct ActiveMediaState {
     mic_level: SignalLevel,
     speaker_level: SignalLevel,
     track_levels: BTreeMap<u32, SignalLevel>,
+    last_sent_levels: Option<QuantizedLevels>,
     last_local_jpeg: Option<Instant>,
+    pending_local_jpeg: Option<Vec<u8>>,
+    video_in_flight_since: Option<Instant>,
 }
 
 impl ActiveMediaState {
     async fn stop_video(&mut self) {
         self.video_gen = self.video_gen.wrapping_add(1);
         self.active_video_format = None;
+        self.pending_local_jpeg = None;
         let video = self.local_video.take();
         let self_view = self.self_view.take();
         stop_video_handles(video, self_view).await;
+    }
+
+    fn flush_video_frames(&mut self, channel: &Channel<DesktopCallPacket>) {
+        let now = Instant::now();
+        if !can_dispatch_video_batch(self.video_in_flight_since, now) {
+            return;
+        }
+        let remote_frames = self.media.receive_video.drain_raw_frames();
+        let local_jpeg = if self.pending_local_jpeg.is_some()
+            && self
+                .last_local_jpeg
+                .is_none_or(|prev| now.saturating_duration_since(prev) >= SELF_VIEW_MIN_INTERVAL)
+        {
+            self.last_local_jpeg = Some(now);
+            self.pending_local_jpeg.take()
+        } else {
+            None
+        };
+        if remote_frames.is_empty() && local_jpeg.is_none() {
+            return;
+        }
+        self.video_in_flight_since = Some(now);
+        for frame in remote_frames {
+            let _ = channel.send(DesktopCallPacket::RemoteFrame {
+                track_id: frame.track_id,
+                participant_id: frame.participant_id,
+                rotation_degrees: frame.rotation_degrees,
+                jpeg: STANDARD.encode(&frame.jpeg),
+            });
+        }
+        if let Some(jpeg) = local_jpeg {
+            let _ = channel.send(DesktopCallPacket::LocalJpeg {
+                jpeg: STANDARD.encode(&jpeg),
+            });
+        }
     }
 
     async fn stop_local_devices(&mut self) {
@@ -1002,7 +1077,10 @@ async fn run_account_actor(
                                     mic_level: SignalLevel::default(),
                                     speaker_level: SignalLevel::default(),
                                     track_levels: BTreeMap::new(),
+                                    last_sent_levels: None,
                                     last_local_jpeg: None,
+                                    pending_local_jpeg: None,
+                                    video_in_flight_since: None,
                                 };
                                 if state.camera_enabled && state.video_track_is_active() {
                                     let cam_res = tokio::select! {
@@ -1162,6 +1240,12 @@ async fn run_account_actor(
                         drain_keyframe_task(&mut keyframe_task).await;
                         if let Some(old) = active_media.take() {
                             old.close().await;
+                        }
+                    }
+                    ActorRequest::VideoFrameAck => {
+                        if let Some(state) = active_media.as_mut() {
+                            state.video_in_flight_since = None;
+                            state.flush_video_frames(&channel);
                         }
                     }
                 }
@@ -1326,14 +1410,7 @@ async fn run_account_actor(
                                     }
                                     MediaPayloadKind::Jpeg => {
                                         if state.media.receive_video.binary_frame(&wire) {
-                                            for frame in state.media.receive_video.drain_raw_frames() {
-                                                let _ = channel.send(DesktopCallPacket::RemoteFrame {
-                                                    track_id: frame.track_id,
-                                                    participant_id: frame.participant_id,
-                                                    rotation_degrees: frame.rotation_degrees,
-                                                    jpeg: STANDARD.encode(&frame.jpeg),
-                                                });
-                                            }
+                                            state.flush_video_frames(&channel);
                                         }
                                     }
                                     MediaPayloadKind::H265AnnexB | MediaPayloadKind::H264AnnexB => {}
@@ -1461,15 +1538,7 @@ async fn run_account_actor(
                                 break;
                             }
                             if frame.codec == CallVideoCodec::Jpeg {
-                                let due = state
-                                    .last_local_jpeg
-                                    .is_none_or(|prev| prev.elapsed() >= SELF_VIEW_MIN_INTERVAL);
-                                if due {
-                                    state.last_local_jpeg = Some(Instant::now());
-                                    let _ = channel.send(DesktopCallPacket::LocalJpeg {
-                                        jpeg: STANDARD.encode(&frame.bytes),
-                                    });
-                                }
+                                state.pending_local_jpeg = Some(frame.bytes);
                             } else if let Some(decoder) = state.self_view.as_mut() {
                                 decoder.feed(&frame);
                             }
@@ -1477,17 +1546,10 @@ async fn run_account_actor(
                         if media_write_failed.is_none() {
                             if let Some(decoder) = state.self_view.as_mut() {
                                 if let Some(jpeg) = decoder.drain_latest() {
-                                    let due = state
-                                        .last_local_jpeg
-                                        .is_none_or(|prev| prev.elapsed() >= SELF_VIEW_MIN_INTERVAL);
-                                    if due {
-                                        state.last_local_jpeg = Some(Instant::now());
-                                        let _ = channel.send(DesktopCallPacket::LocalJpeg {
-                                            jpeg: STANDARD.encode(&jpeg),
-                                        });
-                                    }
+                                    state.pending_local_jpeg = Some(jpeg);
                                 }
                             }
+                            state.flush_video_frames(&channel);
                         }
                     }
                 }
@@ -1550,11 +1612,18 @@ async fn run_account_actor(
                         level.advance();
                         track_levels.insert(track_id, level.normalized());
                     }
-                    let _ = channel.send(DesktopCallPacket::Levels {
-                        mic_level: state.mic_level.normalized(),
-                        speaker_level: state.speaker_level.normalized(),
-                        track_levels,
-                    });
+                    let mic_level = state.mic_level.normalized();
+                    let speaker_level = state.speaker_level.normalized();
+                    let quantized =
+                        QuantizedLevels::from_normalized(mic_level, speaker_level, &track_levels);
+                    if state.last_sent_levels.as_ref() != Some(&quantized) {
+                        state.last_sent_levels = Some(quantized);
+                        let _ = channel.send(DesktopCallPacket::Levels {
+                            mic_level,
+                            speaker_level,
+                            track_levels,
+                        });
+                    }
                 }
             }
         }
@@ -2211,6 +2280,19 @@ pub async fn call_stop_media(
 }
 
 #[tauri::command]
+pub async fn call_video_ack(
+    state: State<'_, Desktop>,
+    connection_id: String,
+    account_id: String,
+) -> Result<(), String> {
+    validate_account_id(&account_id)?;
+    if let Ok(tx) = state.calls.sender(&connection_id, &account_id).await {
+        let _ = tx.send(ActorRequest::VideoFrameAck);
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub fn call_set_fullscreen(window: tauri::WebviewWindow, enabled: bool) -> Result<bool, String> {
     window
         .set_fullscreen(enabled)
@@ -2495,5 +2577,36 @@ mod tests {
         manager.stop_preview_if(Some(gen2)).await;
         assert!(cancel.is_cancelled());
         assert!(manager.preview.lock().await.is_none());
+    }
+
+    #[test]
+    fn quantized_levels_deduplicate_idle_noise_and_detect_track_changes() {
+        let mut tracks_a = BTreeMap::new();
+        tracks_a.insert(10, 0.002);
+        let q1 = QuantizedLevels::from_normalized(0.0, 0.0, &tracks_a);
+        let mut tracks_b = BTreeMap::new();
+        tracks_b.insert(10, 0.004);
+        let q2 = QuantizedLevels::from_normalized(0.003, 0.004, &tracks_b);
+        assert_eq!(q1, q2, "sub-step fluctuations should not resend Levels IPC");
+
+        let mut tracks_c = BTreeMap::new();
+        tracks_c.insert(10, 0.12);
+        let q3 = QuantizedLevels::from_normalized(0.0, 0.0, &tracks_c);
+        assert_ne!(q1, q3, "meaningful track speech must trigger Levels IPC");
+
+        let tracks_empty = BTreeMap::new();
+        let q4 = QuantizedLevels::from_normalized(0.0, 0.0, &tracks_empty);
+        assert_ne!(q1, q4, "removing a track must trigger Levels IPC");
+    }
+
+    #[test]
+    fn video_batch_pacing_gates_while_in_flight_until_ack_or_timeout() {
+        let t0 = Instant::now();
+        assert!(can_dispatch_video_batch(None, t0));
+        assert!(!can_dispatch_video_batch(
+            Some(t0),
+            t0 + Duration::from_millis(50)
+        ));
+        assert!(can_dispatch_video_batch(Some(t0), t0 + VIDEO_ACK_TIMEOUT));
     }
 }

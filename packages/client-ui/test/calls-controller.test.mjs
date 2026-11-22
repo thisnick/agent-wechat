@@ -6,6 +6,8 @@ import {
   CallController,
   canCallThread,
   formatCallDuration,
+  isSelfParticipant,
+  levelsMeaningfullyChanged,
 } from "../src/calls/call-controller.ts";
 import { EMPTY_CALL_DEVICES } from "../src/calls/media-backend.ts";
 import {
@@ -545,4 +547,81 @@ test("outcome_unknown command failure surfaces honest uncertain notice", async (
   await controller.dialDirect("sim_mei", { callType: "voice" });
   assert.equal(controller.snapshot().lastError, "outcome_unknown");
   assert.equal(controller.snapshot().notice?.kind, "uncertain");
+});
+
+test("isSelfParticipant matches ownUsername without false positives", () => {
+  assert.equal(isSelfParticipant({ contactId: "sim_main" }, "sim_main"), true);
+  assert.equal(isSelfParticipant({ contactId: "sim_mei" }, "sim_main"), false);
+  assert.equal(isSelfParticipant({ contactId: "sim_main" }, null), false);
+  assert.equal(isSelfParticipant({ contactId: "sim_main" }, ""), false);
+});
+
+test("levelsMeaningfullyChanged and CallController skip redundant steady-state level updates", async (t) => {
+  assert.equal(
+    levelsMeaningfullyChanged(
+      { micLevel: 0, speakerLevel: 0, trackLevels: { 10: 0 } },
+      { micLevel: 0.004, speakerLevel: 0.002, trackLevels: { 10: 0.005 } },
+    ),
+    false,
+  );
+  assert.equal(
+    levelsMeaningfullyChanged(
+      { micLevel: 0, speakerLevel: 0, trackLevels: { 10: 0 } },
+      { micLevel: 0.12, speakerLevel: 0, trackLevels: { 10: 0 } },
+    ),
+    true,
+  );
+  assert.equal(
+    levelsMeaningfullyChanged(
+      { micLevel: 0, speakerLevel: 0, trackLevels: { 10: 0 } },
+      { micLevel: 0, speakerLevel: 0, trackLevels: {} },
+    ),
+    true,
+  );
+
+  let levelCallback = null;
+  const transport = makeFakeTransport({
+    async connect(cb) {
+      levelCallback = cb.onLevels;
+      return {
+        type: "hello",
+        protocolVersion: 3,
+        clientId: "client-levels",
+        capabilities: {
+          directAudio: true,
+          directVideo: true,
+          conferenceCreate: true,
+          conferenceJoin: true,
+          conferenceInvite: true,
+          conferenceVideo: true,
+        },
+        availability: { busy: false, ownedByThisClient: false },
+        currentOffer: null,
+        currentPendingOffer: null,
+        currentCall: null,
+        audioFormat: { sampleRate: 16000, channels: 1, frameMs: 20 },
+        conferenceInvitations: [],
+      };
+    },
+  });
+  const controller = new CallController({ transport, ringtone: makeRingtoneSpy() });
+  t.after(() => controller.close());
+  controller.start();
+  await new Promise((r) => setTimeout(r, 15));
+
+  let notifications = 0;
+  const unsub = controller.subscribe(() => {
+    notifications += 1;
+  });
+  t.after(unsub);
+
+  levelCallback({ micLevel: 0, speakerLevel: 0, trackLevels: {} });
+  levelCallback({ micLevel: 0.002, speakerLevel: 0.001, trackLevels: {} });
+  assert.equal(notifications, 0, "sub-epsilon idle levels must not trigger UI re-renders");
+
+  levelCallback({ micLevel: 0.25, speakerLevel: 0, trackLevels: { 1: 0.3 } });
+  assert.equal(notifications, 1);
+
+  levelCallback({ micLevel: 0.252, speakerLevel: 0, trackLevels: { 1: 0.301 } });
+  assert.equal(notifications, 1, "repeated unchanged active levels must not re-render");
 });

@@ -74,9 +74,18 @@ function createJpegCanvasRenderer(getCanvas: () => HTMLCanvasElement | null) {
     pending = null;
     decoding = true;
     const gen = generation;
-    const bytes = new Uint8Array(next.jpegBytes.byteLength);
-    bytes.set(next.jpegBytes);
-    const blob = new Blob([bytes], { type: "image/jpeg" });
+    const isStandaloneArrayBuffer =
+      next.jpegBytes.buffer instanceof ArrayBuffer &&
+      next.jpegBytes.byteOffset === 0 &&
+      next.jpegBytes.byteLength === next.jpegBytes.buffer.byteLength;
+    const blobPart: BlobPart = isStandaloneArrayBuffer
+      ? (next.jpegBytes as Uint8Array<ArrayBuffer>)
+      : (() => {
+          const copy = new Uint8Array(next.jpegBytes.byteLength);
+          copy.set(next.jpegBytes);
+          return copy;
+        })();
+    const blob = new Blob([blobPart], { type: "image/jpeg" });
 
     const finish = () => {
       decoding = false;

@@ -343,6 +343,9 @@ async fn ensure_current(app: &App, claims: &Claims) -> ApiResult<()> {
     if app.core.stopping.load(std::sync::atomic::Ordering::Acquire) {
         return Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, "daemon_stopping"));
     }
+    if claims.grant.is_none() {
+        return Ok(());
+    }
     let store = app.core.store.clone();
     let claims = claims.clone();
     let valid = tokio::task::spawn_blocking(move || claims.valid(&store))

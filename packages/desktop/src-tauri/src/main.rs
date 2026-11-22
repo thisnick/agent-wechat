@@ -911,6 +911,7 @@ fn main() {
             calls::call_attach_media,
             calls::call_stop_local_media,
             calls::call_stop_media,
+            calls::call_video_ack,
             calls::call_set_fullscreen,
             updates::updates_status,
             updates::updates_preferences,
