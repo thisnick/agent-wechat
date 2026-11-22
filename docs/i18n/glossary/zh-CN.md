@@ -28,6 +28,8 @@ WeChat client's Simplified Chinese so the app reads like WeChat.
 | my alias in this group | 我在本群的昵称 | |
 | sign in, sign out | 登录, 退出登录 | |
 | QR code | 二维码 | |
+| Message (verb, open a chat with someone) | 发消息 | Action button on search results and contact cards. Not 消息 (the noun) |
+| Mic on, Camera on, Camera off, Speaker off (state) | 麦克风已开, 摄像头已开, 摄像头已关, 扬声器已关 | Current state on call toggles, badges and placeholders. Not action verbs 开启… / 关闭… |
 
 ## agent-wechat terms
 
