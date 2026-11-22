@@ -3074,7 +3074,9 @@ fn discover(msg: &wechat_profile::Message, content: &str) -> Result<Vec<Discover
                         continue;
                     }
                     let md5 = if variant == MediaVariant::Original {
-                        md5_attr(n.attribute("md5"))?
+                        n.attribute("md5")
+                            .filter(|v| !v.is_empty())
+                            .map(str::to_string)
                     } else {
                         None
                     };

@@ -16,12 +16,7 @@ use openssl::{
     symm::{Cipher, Crypter, Mode},
 };
 use serde::{Deserialize, Serialize};
-use std::{
-    fmt,
-    io::Read,
-    net::SocketAddr,
-    time::{Duration, Instant},
-};
+use std::{fmt, io::Read, net::SocketAddr, time::Duration};
 use zeroize::{Zeroize, Zeroizing};
 
 /// Approved Enterprise WeChat (WeCom) media download hosts.
@@ -144,11 +139,6 @@ fn plaintext_limit(quality: MediaQuality) -> usize {
     }
 }
 
-fn timeout_for(expected: Option<u64>) -> Duration {
-    let seconds = expected.map_or(0, |bytes| bytes / (1024 * 1024));
-    Duration::from_secs((60 + seconds).min(30 * 60))
-}
-
 fn parse_content_range(value: &str) -> Result<(usize, usize, usize)> {
     let trimmed = value.trim();
     let rest = trimmed
@@ -228,7 +218,6 @@ fn fetch_tp_media_at(
         .host_str()
         .ok_or_else(|| anyhow::anyhow!("tp_media_source_not_allowed"))?
         .to_owned();
-    let deadline = Instant::now() + timeout_for(descriptor.expected_bytes);
     let client = reqwest::blocking::Client::builder()
         .timeout(TP_CHUNK_TIMEOUT)
         .connect_timeout(Duration::from_secs(10))
@@ -260,10 +249,6 @@ fn fetch_tp_media_at(
             position as u64,
             if total == 0 { None } else { Some(total as u64) },
         )?;
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .filter(|d| !d.is_zero())
-            .ok_or_else(|| anyhow::anyhow!("tp_media_fetch_failed"))?;
         let requested_end = if total == 0 {
             TP_CHUNK_BYTES - 1
         } else {
@@ -271,7 +256,6 @@ fn fetch_tp_media_at(
         };
         let mut response = client
             .get(url.clone())
-            .timeout(remaining.min(TP_CHUNK_TIMEOUT))
             .header("Accept-Encoding", "identity")
             .header("User-Agent", TP_USER_AGENT)
             .header("authkey", &descriptor.auth_key)
@@ -345,7 +329,6 @@ fn fetch_tp_media_at(
 
         let mut chunk_received = 0usize;
         loop {
-            ensure!(Instant::now() < deadline, "tp_media_fetch_failed");
             let n = response
                 .read(&mut buf)
                 .map_err(|_| anyhow::anyhow!("tp_media_fetch_failed"))?;
