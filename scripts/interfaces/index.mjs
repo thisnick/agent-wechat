@@ -48,6 +48,9 @@ export const steps = [
     'docs/src/content/docs/openclaw/tools.mdx', 'pnpm-lock.yaml'],
     commands: check => [['pnpm', ['turbo', 'run', 'build', '--filter=@agent-wechat/agent-wechat', '--output-logs=errors-only']],
       ['node', ['packages/openclaw-extension/scripts/interface-listing.mjs', ...(check ? ['--check'] : [])]]] },
+  { name: 'dsh', label: 'DSH plugin', sources: ['packages/deepseek-harness-extension/', 'interfaces/dsh/', 'pnpm-lock.yaml'],
+    commands: check => [['pnpm', ['turbo', 'run', 'build', '--filter=@agent-wechat/deepseek-harness-extension', '--output-logs=errors-only']],
+      ['node', ['packages/deepseek-harness-extension/scripts/interface-listing.mjs', ...(check ? ['--check'] : [])]]] },
 ];
 // A change to the runner, the generators or the CI job that runs them can affect every listing.
 const everything = ['scripts/interfaces/', 'package.json', '.github/workflows/interfaces.yml'];

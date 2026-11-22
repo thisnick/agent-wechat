@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
-export const publicPackages = [['packages/cli', '@agent-wechat/cli'], ['packages/openclaw-extension', '@agent-wechat/agent-wechat']];
+export const publicPackages = [['packages/cli', '@agent-wechat/cli'], ['packages/openclaw-extension', '@agent-wechat/agent-wechat'], ['packages/deepseek-harness-extension', '@agent-wechat/deepseek-harness-extension']];
 const semver = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
 
 export function releaseChannel(version, preState) {

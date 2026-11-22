@@ -1,0 +1,4 @@
+- insert:
+    - id: deepseek-harness-extension
+      name: '@agent-wechat/deepseek-harness-extension'
+      config: {}

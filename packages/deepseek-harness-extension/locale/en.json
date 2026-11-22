@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "WeChat channel",
+    "description": "Bridges a WeChat native daemon into this Harness: per-thread agent sessions, WeChat tools, media, and calls."
+  }
+}

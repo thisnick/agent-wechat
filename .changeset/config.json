@@ -12,7 +12,8 @@
       "@agent-wechat/cli",
       "@agent-wechat/agent-wechat",
       "@agent-wechat/desktop",
-      "@agent-wechat/rust-crates"
+      "@agent-wechat/rust-crates",
+      "@agent-wechat/deepseek-harness-extension"
     ]
   ],
   "linked": [],
