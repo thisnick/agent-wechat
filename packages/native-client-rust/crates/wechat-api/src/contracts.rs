@@ -575,8 +575,8 @@ pub struct NativeEvent {
     /// Position of the event in the log, a decimal number written as a string that only increases.
     /// Pass the last one you handled as `after` to resume.
     pub cursor: String,
-    /// Kind of event, such as `message.committed`, `thread.updated`, `group.updated`,
-    /// `operation.updated` or `send.updated`.
+    /// Kind of event, such as `message.committed`, `message.updated`, `thread.updated`,
+    /// `group.updated`, `operation.updated` or `send.updated`.
     pub kind: String,
     /// Details of the event. The fields depend on `kind`; for example `message.committed` carries
     /// `messageId` and `threadId`.

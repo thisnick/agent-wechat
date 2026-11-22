@@ -374,7 +374,7 @@ pub(crate) fn message_app(msg: &wechat_profile::Message) -> Option<AppMessage> {
     (stored == 0 || stored == parsed.subtype as u64).then_some(parsed)
 }
 
-pub(crate) fn forwarded_body(msg: &wechat_profile::Message) -> Option<String> {
+pub(crate) fn forwarded_body(msg: &wechat_profile::Message) -> Option<(u64, String)> {
     if msg.message_type != 49 {
         return None;
     }
@@ -392,10 +392,14 @@ pub(crate) fn forwarded_body(msg: &wechat_profile::Message) -> Option<String> {
         content
     };
     let stored = msg.local_type.parse::<u64>().ok()? >> 32;
-    if stored != 0 && stored != 19 {
-        return None;
+    match stored {
+        19 => crate::forwarded::render(content).map(|body| (19, body)),
+        40 => crate::forwarded::render_big_xml(content).map(|body| (40, body)),
+        0 => crate::forwarded::render(content)
+            .map(|body| (19, body))
+            .or_else(|| crate::forwarded::render_big_xml(content).map(|body| (40, body))),
+        _ => None,
     }
-    crate::forwarded::render(content)
 }
 
 #[cfg(test)]

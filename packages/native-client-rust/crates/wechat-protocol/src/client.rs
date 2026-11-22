@@ -25,8 +25,9 @@ mod revoke;
 mod status_notify;
 use crate::errors::{Service, ServiceRejected};
 pub use crate::wire::{
-    AddMessage, AvatarBytes, ContactLookup, ContactRecord, Heartbeat, InitContactPage, RoomMember,
-    RoomRoster, SyncBatch, SyncCommand, TextSendResult, VoiceChunk,
+    AddMessage, AppAttachChunk, AppAttachRequest, AvatarBytes, ContactLookup, ContactRecord,
+    Heartbeat, InitContactPage, RoomMember, RoomRoster, SyncBatch, SyncCommand, TextSendResult,
+    VoiceChunk,
 };
 use crate::{
     business::{self, AuthenticatedPacket, Prelogin},
@@ -1248,6 +1249,23 @@ impl NativeClient {
             server_message_id,
             total_length,
             offset,
+        )
+    }
+    #[doc(hidden)]
+    pub(crate) fn download_app_attach_chunk_snapshot(
+        &self,
+        state: &mut AccountState,
+        request: &AppAttachRequest,
+    ) -> Result<AppAttachChunk> {
+        let payload = wire::app_attach_request(state, request)?;
+        wire::decode_app_attach(
+            &self.authenticated_rpc(
+                state,
+                221,
+                "/cgi-bin/micromsg-bin/downloadappattach",
+                &payload,
+            )?,
+            request,
         )
     }
     #[doc(hidden)]

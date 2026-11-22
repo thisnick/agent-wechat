@@ -621,8 +621,9 @@ pub fn aged_runtime(key: &str) -> RuntimeRetention {
         "friend-attention-stage:projected:",
     ];
     // Once-only event receipts for one message, command, operation or minute.
-    const EVENT: [&str; 30] = [
+    const EVENT: [&str; 31] = [
         "message:",
+        "message-expanded:",
         "remote-thread-read:",
         "control-observed:",
         "control-no-local-effect:",
@@ -2577,6 +2578,7 @@ mod tests {
             ("contact-fields:legacy-mute", Keep),
             ("contact-pinning:r:u", Keep),
             ("event:message:id", Remove(RECEIPT_DAYS)),
+            ("event:message-expanded:id", Remove(RECEIPT_DAYS)),
             ("event:blocked-v2:b", Remove(RECEIPT_DAYS)),
             ("event:control-skipped:projected:b:1", Remove(RECEIPT_DAYS)),
             // Kept as long as the raw bytes under `sync-control:`.

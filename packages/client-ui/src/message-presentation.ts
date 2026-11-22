@@ -31,7 +31,11 @@ export function messagePresentation(message: NativeMessage) {
     )
       return "text";
     if (message.appMessageType === 57 || message.quote) return "reply";
-    if (message.appMessageType === 19) return "forwarded";
+    if (
+      message.appMessageType === 19 ||
+      (message.appMessageType === 40 && message.body?.trim())
+    )
+      return "forwarded";
     if (message.link) return "link";
     return [6, 8].includes(message.appMessageType ?? 0)
       ? "media"

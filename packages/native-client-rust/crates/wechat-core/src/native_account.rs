@@ -308,6 +308,7 @@ impl crate::upstream::Upstream for BoundUpstream {
     forward!(lookup_openim_contact_raw(username: &str, room: Option<&str>, ticket: Option<&str>) -> Vec<u8> => lookup_openim_contact_raw);
     forward!(contact_sync(cursor: &[u8], message_cursor: &[u8], continuation: bool) -> wechat_protocol::contact_sync::ContactSyncBatch => contact_sync);
     forward!(download_voice(server_id: u64, length: u32, offset: u32) -> wechat_protocol::VoiceChunk => download_voice_chunk);
+    forward!(download_app_attach(request: &wechat_protocol::AppAttachRequest) -> wechat_protocol::AppAttachChunk => download_app_attach_chunk);
     forward!(notify_read(request: &wechat_protocol::SessionReadNotification) -> wechat_protocol::SessionReadReply => notify_read_session);
     forward!(send_share(destination: &str, client_id: &str, created_at: u32, content: &str) -> wechat_protocol::media_send::MediaSendResult => send_share);
     forward!(send_quote(destination: &str, client_id: &str, created_at: u32, content: &str, source: Option<&str>) -> wechat_protocol::media_send::MediaSendResult => send_quote);

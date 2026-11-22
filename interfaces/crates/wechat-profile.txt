@@ -3,6 +3,7 @@
 const wechat_profile::MAX_CACHED_FILE_BYTES | usize | MISSING DOC
 const wechat_profile::MAX_CACHED_MEDIA_BYTES | usize | MISSING DOC
 const wechat_profile::MAX_DAT_PLAINTEXT_BYTES | usize | MISSING DOC
+enum wechat_profile::AppMessageExpansion | enum | Replacement payload or terminal failure status for an unexpanded subtype-40 app message.
 enum wechat_profile::DatabaseState | enum | MISSING DOC
 enum wechat_profile::DecodeState | enum | MISSING DOC
 enum wechat_profile::HardlinkKind | enum | MISSING DOC
@@ -16,6 +17,9 @@ enum wechat_profile::StickerPackCacheKind | enum | Persisted aggregate or icon f
 enum wechat_profile::ThreadExitReadOutcome | enum | MISSING DOC
 enum wechat_profile::VerifiedImageQuality | enum | MISSING DOC
 enum wechat_profile::VideoQuality | enum | MISSING DOC
+field wechat_profile::AppMessageExpansion::Expanded::content | alloc::string::String | Complete official `message_content` XML, including `<sender>:\n` for incoming group rows.
+field wechat_profile::AppMessageExpansion::Expanded::subtype | u32 | Positive inner application-message subtype (must not be `40`).
+field wechat_profile::AppMessageExpansion::Expanded::summary | alloc::string::String | Summary text written to `SessionTable` when this row is still the thread's latest message.
 field wechat_profile::AppliedContact::changed | bool | MISSING DOC
 field wechat_profile::AppliedContact::local_id | i64 | MISSING DOC
 field wechat_profile::AppliedContactPin::changed | bool | MISSING DOC
@@ -475,6 +479,7 @@ fn wechat_profile::StagedMmkv::metadata | fn(&self) -> &[u8] | MISSING DOC
 fn wechat_profile::account_contact_sync_store_path | fn(location: &wechat_profile::snapshot::ProfileLocation, identity: &wechat_profile::mmkv::ProfileIdentity) -> wechat_profile::Result<std::path::PathBuf> | The inspected contact drain stores its independent SyncKeyBuffer here. It does not use `mmkv_key_byp_sync_key` from the login store.
 fn wechat_profile::account_mmkv_key | fn(username: &str) -> wechat_profile::Result<zeroize::Zeroizing<alloc::vec::Vec<u8>>> | The inspected per-account v2 store derives its CFB key from the account name, independently of global format keys, database passwords and login credentials. This is a format derivation, not a means of authenticating an account.
 fn wechat_profile::account_sync_store_path | fn(location: &wechat_profile::snapshot::ProfileLocation, identity: &wechat_profile::mmkv::ProfileIdentity) -> wechat_profile::Result<std::path::PathBuf> | Select the observed account login store only after exact username/UIN binding.
+fn wechat_profile::apply_app_message_expansion | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, peer: &str, server_id: &str, update: &wechat_profile::big_xml::AppMessageExpansion, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<core::option::Option<wechat_profile::model::SourceMessageId>> | Update an existing subtype-40 message row in place after BigXml download completes or fails.
 fn wechat_profile::apply_avatar_projection | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, input: &wechat_profile::media::AvatarProjection<'_>, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<bool> | MISSING DOC
 fn wechat_profile::apply_contact_business_patch | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, input: &wechat_profile::projection::ContactProjection, business: &wechat_profile::projection::business_projection::BusinessContactProjection, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<wechat_profile::projection::AppliedContact> | Apply a received business contact and its ordinary extra metadata in one transaction. This performs no refresh or other account operation.
 fn wechat_profile::apply_contact_mute_patch | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, username: &str, muted: bool, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<core::option::Option<wechat_profile::projection::AppliedContact>> | Apply only a received direct-contact mute bit. Missing or incomplete contact identities cannot establish the other flag bits and are left untouched.
@@ -563,6 +568,7 @@ fn wechat_profile::stage_mmkv_sync_key | fn(data: &[u8], metadata: &[u8], key: &
 fn wechat_profile::stage_mmkv_values | fn(data: &[u8], metadata: &[u8], key: &[u8], updates: &[(alloc::string::String, core::option::Option<alloc::vec::Vec<u8>>)]) -> wechat_profile::Result<wechat_profile::mmkv::StagedMmkv> | Append while preserving IV/sequence/flags and the complete old ciphertext prefix. A full data file grows to the next 4096-byte page, at most 4 MiB; records are never compacted or discarded. Identical values are byte-idempotent. Values are already MMKV-encoded; None is a tombstone. Unknown keys survive.
 fn wechat_profile::stage_saved_login_projection | fn(data: &[u8], metadata: &[u8], format_key: &[u8], username: &str, input: &wechat_profile::login_storage::SavedLoginProjection<'_>) -> wechat_profile::Result<wechat_profile::mmkv::StagedMmkv> | Stage accepted saved credentials against an already bound identity store. No filesystem mutation occurs, so a coordinator can journal the complete sealed generation before publishing the MMKV pair and legacy key-info file.
 fn wechat_profile::verify_profile_password | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, password: &[u8]) -> wechat_profile::Result<usize> | Confirm a server-issued account database password against every actual DB header and the already authorized page-key map. Only 4096-byte headers are read; SQLite never opens these files, and no key/password bytes are returned. The caller must hold exclusive profile ownership or supply a stopped copy. Missing coverage, a different salt generation or one mismatched key fails closed. This does not rekey, repair, replace or switch the attached profile.
+impl core::clone::Clone for wechat_profile::AppMessageExpansion | impl | -
 impl core::clone::Clone for wechat_profile::AppliedContact | impl | -
 impl core::clone::Clone for wechat_profile::AppliedContactPin | impl | -
 impl core::clone::Clone for wechat_profile::AppliedHardlink | impl | -
@@ -649,6 +655,7 @@ impl core::clone::Clone for wechat_profile::VerifiedImageQuality | impl | -
 impl core::clone::Clone for wechat_profile::VideoQuality | impl | -
 impl core::clone::Clone for wechat_profile::WalConversionReport | impl | -
 impl core::clone::Clone for wechat_profile::WriteOptions | impl | -
+impl core::cmp::Eq for wechat_profile::AppMessageExpansion | impl | -
 impl core::cmp::Eq for wechat_profile::ColumnSchema | impl | -
 impl core::cmp::Eq for wechat_profile::DatLayout | impl | -
 impl core::cmp::Eq for wechat_profile::DatabaseState | impl | -
@@ -665,6 +672,7 @@ impl core::cmp::Eq for wechat_profile::VerifiedImageQuality | impl | -
 impl core::cmp::Eq for wechat_profile::VideoQuality | impl | -
 impl core::cmp::Eq for wechat_profile::WalConversionReport | impl | -
 impl core::cmp::Ord for wechat_profile::SourceMessageId | impl | -
+impl core::cmp::PartialEq for wechat_profile::AppMessageExpansion | impl | -
 impl core::cmp::PartialEq for wechat_profile::ColumnSchema | impl | -
 impl core::cmp::PartialEq for wechat_profile::DatLayout | impl | -
 impl core::cmp::PartialEq for wechat_profile::DatabaseState | impl | -
@@ -694,6 +702,7 @@ impl core::default::Default for wechat_profile::SavedStickerRecord | impl | -
 impl core::default::Default for wechat_profile::StickerPackRecord | impl | -
 impl core::default::Default for wechat_profile::WalConversionReport | impl | -
 impl core::error::Error for wechat_profile::ProfileError | impl | -
+impl core::fmt::Debug for wechat_profile::AppMessageExpansion | impl | -
 impl core::fmt::Debug for wechat_profile::AppliedContact | impl | -
 impl core::fmt::Debug for wechat_profile::AppliedContactPin | impl | -
 impl core::fmt::Debug for wechat_profile::AppliedHardlink | impl | -
@@ -783,6 +792,7 @@ impl core::marker::Copy for wechat_profile::SavedKeyInfoPublication | impl | -
 impl core::marker::Copy for wechat_profile::StickerPackCacheKind | impl | -
 impl core::marker::Copy for wechat_profile::VerifiedImageQuality | impl | -
 impl core::marker::Copy for wechat_profile::VideoQuality | impl | -
+impl core::marker::StructuralPartialEq for wechat_profile::AppMessageExpansion | impl | -
 impl core::marker::StructuralPartialEq for wechat_profile::ColumnSchema | impl | -
 impl core::marker::StructuralPartialEq for wechat_profile::DatLayout | impl | -
 impl core::marker::StructuralPartialEq for wechat_profile::DatabaseState | impl | -
@@ -988,6 +998,8 @@ struct wechat_profile::WalConversionReport | struct { public fields } | Outcome 
 struct wechat_profile::WriteOptions | struct { public fields } | MISSING DOC
 type wechat_profile::RawFields | type = alloc::collections::btree::map::BTreeMap<alloc::string::String, wechat_profile::model::SqlValue> | MISSING DOC
 type wechat_profile::Result | type<T> = core::result::Result<T, wechat_profile::ProfileError> | MISSING DOC
+variant wechat_profile::AppMessageExpansion::Expanded | { public fields } | Replace the subtype-40 stub with its downloaded inner application-message XML.
+variant wechat_profile::AppMessageExpansion::Failed | - | Record terminal download failure (`download_status = 3`) while keeping the stub intact.
 variant wechat_profile::DatabaseState::KeyMismatch | - | MISSING DOC
 variant wechat_profile::DatabaseState::KeyUnavailable | - | MISSING DOC
 variant wechat_profile::DatabaseState::Readable | - | MISSING DOC

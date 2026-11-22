@@ -101,6 +101,19 @@ field wechat_protocol::AddMessage::sender_id | core::option::Option<alloc::strin
 field wechat_protocol::AddMessage::server_message_id | core::option::Option<alloc::string::String> | MISSING DOC
 field wechat_protocol::AddMessage::server_sequence | core::option::Option<u32> | Present field 13 correlated to official server_seq on the supported profile (319 exact joined records). Missing remains unsupported for official-store projection, never a fabricated sequence zero.
 field wechat_protocol::AddMessage::to | alloc::string::String | MISSING DOC
+field wechat_protocol::AppAttachChunk::bytes | alloc::vec::Vec<u8> | Raw downloaded payload bytes for this chunk.
+field wechat_protocol::AppAttachChunk::complete | bool | Whether `next_pos == total_length`.
+field wechat_protocol::AppAttachChunk::next_pos | u32 | Byte offset for the following chunk request (`start_pos + bytes.len()`).
+field wechat_protocol::AppAttachChunk::start_pos | u32 | Requested byte offset for this chunk.
+field wechat_protocol::AppAttachChunk::total_length | u32 | Authoritative total byte length reported by the server.
+field wechat_protocol::AppAttachRequest::app_id | alloc::string::String | Application ID from `<appmsg appid="...">`, empty when absent.
+field wechat_protocol::AppAttachRequest::app_type | u32 | Application message subtype (`40` for oversized-XML stubs).
+field wechat_protocol::AppAttachRequest::media_id | alloc::string::String | Media/attachment ID from `<appattach><attachid>`, empty for stubs without `<appattach>`.
+field wechat_protocol::AppAttachRequest::sdk_version | u32 | SDK version from `<appmsg sdkver="...">`, `0` when absent.
+field wechat_protocol::AppAttachRequest::server_message_id | u64 | Server message ID (`NewMsgId`).
+field wechat_protocol::AppAttachRequest::start_pos | u32 | Byte offset to fetch next, starting at `0`.
+field wechat_protocol::AppAttachRequest::total_length | u32 | Advertised or previously reported total byte length (`0` on the first request when omitted).
+field wechat_protocol::AppAttachRequest::username | alloc::string::String | Conversation peer (`talker`), including `...@chatroom` for group messages.
 field wechat_protocol::AuthSnapshot::account | alloc::vec::Vec<u8> | MISSING DOC
 field wechat_protocol::AuthSnapshot::auth | alloc::vec::Vec<u8> | MISSING DOC
 field wechat_protocol::AuthSnapshot::ax_auth | alloc::vec::Vec<u8> | MISSING DOC
@@ -752,6 +765,19 @@ field wechat_protocol::wire::AddMessage::sender_id | core::option::Option<alloc:
 field wechat_protocol::wire::AddMessage::server_message_id | core::option::Option<alloc::string::String> | MISSING DOC
 field wechat_protocol::wire::AddMessage::server_sequence | core::option::Option<u32> | Present field 13 correlated to official server_seq on the supported profile (319 exact joined records). Missing remains unsupported for official-store projection, never a fabricated sequence zero.
 field wechat_protocol::wire::AddMessage::to | alloc::string::String | MISSING DOC
+field wechat_protocol::wire::AppAttachChunk::bytes | alloc::vec::Vec<u8> | Raw downloaded payload bytes for this chunk.
+field wechat_protocol::wire::AppAttachChunk::complete | bool | Whether `next_pos == total_length`.
+field wechat_protocol::wire::AppAttachChunk::next_pos | u32 | Byte offset for the following chunk request (`start_pos + bytes.len()`).
+field wechat_protocol::wire::AppAttachChunk::start_pos | u32 | Requested byte offset for this chunk.
+field wechat_protocol::wire::AppAttachChunk::total_length | u32 | Authoritative total byte length reported by the server.
+field wechat_protocol::wire::AppAttachRequest::app_id | alloc::string::String | Application ID from `<appmsg appid="...">`, empty when absent.
+field wechat_protocol::wire::AppAttachRequest::app_type | u32 | Application message subtype (`40` for oversized-XML stubs).
+field wechat_protocol::wire::AppAttachRequest::media_id | alloc::string::String | Media/attachment ID from `<appattach><attachid>`, empty for stubs without `<appattach>`.
+field wechat_protocol::wire::AppAttachRequest::sdk_version | u32 | SDK version from `<appmsg sdkver="...">`, `0` when absent.
+field wechat_protocol::wire::AppAttachRequest::server_message_id | u64 | Server message ID (`NewMsgId`).
+field wechat_protocol::wire::AppAttachRequest::start_pos | u32 | Byte offset to fetch next, starting at `0`.
+field wechat_protocol::wire::AppAttachRequest::total_length | u32 | Advertised or previously reported total byte length (`0` on the first request when omitted).
+field wechat_protocol::wire::AppAttachRequest::username | alloc::string::String | Conversation peer (`talker`), including `...@chatroom` for group messages.
 field wechat_protocol::wire::AvatarBytes::bytes | alloc::vec::Vec<u8> | MISSING DOC
 field wechat_protocol::wire::AvatarBytes::username | alloc::string::String | MISSING DOC
 field wechat_protocol::wire::ContactLookup::contacts | alloc::vec::Vec<wechat_protocol::wire::ContactRecord> | MISSING DOC
@@ -828,6 +854,7 @@ fn wechat_protocol::AccountRequest::channels_ticket | fn(&mut self) -> anyhow::R
 fn wechat_protocol::AccountRequest::contact_rpc_raw | fn(&mut self, request: &wechat_protocol::client::contact_requests::ContactRpc) -> anyhow::Result<alloc::vec::Vec<u8>> | Return protected authenticated contact reply bytes before interpretation.
 fn wechat_protocol::AccountRequest::contact_sync | fn(&mut self, cursor: &[u8], message_cursor: &[u8], continuation: bool) -> anyhow::Result<wechat_protocol::contact_sync::ContactSyncBatch> | MISSING DOC
 fn wechat_protocol::AccountRequest::custom_stickers_raw | fn(&mut self, request: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Return one custom-list or metadata reply for caller-owned receipt retention. The request must come from the bounded custom-sticker builders.
+fn wechat_protocol::AccountRequest::download_app_attach_chunk | fn(&mut self, request: &wechat_protocol::wire::AppAttachRequest) -> anyhow::Result<wechat_protocol::wire::AppAttachChunk> | Fetch one chunk of an oversized application-message attachment through CGI 221.
 fn wechat_protocol::AccountRequest::download_avatars | fn(&mut self, ids: &[alloc::string::String]) -> anyhow::Result<alloc::vec::Vec<wechat_protocol::wire::AvatarBytes>> | MISSING DOC
 fn wechat_protocol::AccountRequest::download_voice_chunk | fn(&mut self, server_id: u64, length: u32, offset: u32) -> anyhow::Result<wechat_protocol::wire::VoiceChunk> | MISSING DOC
 fn wechat_protocol::AccountRequest::group_detail_raw | fn(&mut self, group: &str) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
@@ -903,6 +930,7 @@ fn wechat_protocol::NativeClient::contact_rpc_raw | async fn(&self, request: &we
 fn wechat_protocol::NativeClient::contact_sync | async fn(&self, cursor: &[u8], message_cursor: &[u8], continuation: bool) -> anyhow::Result<wechat_protocol::contact_sync::ContactSyncBatch> | MISSING DOC
 fn wechat_protocol::NativeClient::custom_sticker_metadata | async fn(&self, ids: &[alloc::string::String]) -> anyhow::Result<wechat_protocol::custom_stickers::CustomStickerPage> | Read transport metadata for known custom sticker identities.
 fn wechat_protocol::NativeClient::custom_sticker_page | async fn(&self, index: u32, data: &[u8]) -> anyhow::Result<wechat_protocol::custom_stickers::CustomStickerPage> | Read one custom-list page. The caller checks advancing cursors, retains the receipt and reconciles official-profile state after a complete list.
+fn wechat_protocol::NativeClient::download_app_attach_chunk | async fn(&self, request: &wechat_protocol::wire::AppAttachRequest) -> anyhow::Result<wechat_protocol::wire::AppAttachChunk> | Fetch one chunk of an oversized application-message attachment through CGI 221.
 fn wechat_protocol::NativeClient::download_avatars | async fn(&self, usernames: &[alloc::string::String]) -> anyhow::Result<alloc::vec::Vec<wechat_protocol::wire::AvatarBytes>> | MISSING DOC
 fn wechat_protocol::NativeClient::download_voice_chunk | async fn(&self, server_message_id: u64, total_length: u32, offset: u32) -> anyhow::Result<wechat_protocol::wire::VoiceChunk> | MISSING DOC
 fn wechat_protocol::NativeClient::export_account_state | fn(&self) -> anyhow::Result<wechat_protocol::client::AccountState> | Export secret state for persistence. This snapshot does not transfer ownership or authorize another writer; use quiesce_and_export for handoff.
@@ -1311,6 +1339,7 @@ fn wechat_protocol::sticker_send::decode_sticker_send_acknowledgement | fn(raw: 
 fn wechat_protocol::sticker_send::sticker_send_request | fn(state: &wechat_protocol::client::AccountState, chunk: &wechat_protocol::sticker_send::StickerSendChunk<'_>) -> anyhow::Result<alloc::vec::Vec<u8>> | Encode a type-2 send after the caller validates the complete GIF and MD5. Field4 is a nested buffer, not raw bytes; no source rehash occurs per chunk.
 fn wechat_protocol::sticker_upload::decode_sticker_upload | fn(raw: &[u8], offset: u32, total: u32, expected_md5: &str) -> anyhow::Result<wechat_protocol::sticker_upload::StickerUploadAcknowledgement> | Validate chunk progress or identity-bound completion of an existing upload. Rejected, stale, nonadvancing and mismatched replies never grant a resend.
 fn wechat_protocol::sticker_upload::sticker_upload_request | fn(source: &[u8], offset: u32) -> anyhow::Result<alloc::vec::Vec<u8>> | Encode one direct upload chunk from an owned source. Unlike chat sticker sends this request carries raw bytes immediately, without a BaseRequest or a nested builtin buffer. Offsets are bounded signed-32-bit wire scalars.
+fn wechat_protocol::wire::app_attach_request | fn(state: &wechat_protocol::client::AccountState, request: &wechat_protocol::wire::AppAttachRequest) -> anyhow::Result<alloc::vec::Vec<u8>> | Encode a `DownloadAppAttachRequest` protobuf for CGI `221`.
 fn wechat_protocol::wire::apply_cursor | fn(prior: &[u8], incoming: &[u8], code: i32) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
 fn wechat_protocol::wire::auto_auth | fn(state: &wechat_protocol::client::AccountState, point: &[u8], computer_name: &str) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
 fn wechat_protocol::wire::avatar_request | fn(state: &wechat_protocol::client::AccountState, usernames: &[alloc::string::String]) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
@@ -1318,6 +1347,7 @@ fn wechat_protocol::wire::base_request | fn(profile: &wechat_protocol::client::D
 fn wechat_protocol::wire::client_message_id | fn(data: &[u8]) -> u32 | Native SuperFastHash of the persisted task client-ID string. Tail bytes have signed int8 semantics in the supported AMD64 profile. This is not a hash of message content and is not a server idempotency guarantee.
 fn wechat_protocol::wire::contact_request | fn(state: &wechat_protocol::client::AccountState, usernames: &[alloc::string::String]) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
 fn wechat_protocol::wire::decode_add_message | fn(input: &[u8], own_username: &str) -> anyhow::Result<wechat_protocol::wire::AddMessage> | Decode AddMsg command 5. Fields 6/7 remain numbered. Present field 13 has a bounded official server_seq correlation; this does not enable every message class for official writes. A room's actual sender requires separate, validated group-envelope/member resolution and is deliberately unresolved here.
+fn wechat_protocol::wire::decode_app_attach | fn(input: &[u8], request: &wechat_protocol::wire::AppAttachRequest) -> anyhow::Result<wechat_protocol::wire::AppAttachChunk> | Decode and validate a `DownloadAppAttachResponse` protobuf from CGI `221`.
 fn wechat_protocol::wire::decode_avatars | fn(input: &[u8], requested: &[alloc::string::String]) -> anyhow::Result<alloc::vec::Vec<wechat_protocol::wire::AvatarBytes>> | Returns exact bounded bytes. The service must fully decode the image before treating this response as a displayable avatar or storing an image mime type.
 fn wechat_protocol::wire::decode_contact_record | fn(raw: &[u8]) -> anyhow::Result<wechat_protocol::wire::ContactRecord> | MISSING DOC
 fn wechat_protocol::wire::decode_contacts | fn(input: &[u8], requested: &[alloc::string::String]) -> anyhow::Result<wechat_protocol::wire::ContactLookup> | MISSING DOC
@@ -1351,6 +1381,8 @@ impl core::clone::Clone for wechat_protocol::AccountLifecycle | impl | -
 impl core::clone::Clone for wechat_protocol::AccountState | impl | -
 impl core::clone::Clone for wechat_protocol::AccountStatus | impl | -
 impl core::clone::Clone for wechat_protocol::AddMessage | impl | -
+impl core::clone::Clone for wechat_protocol::AppAttachChunk | impl | -
+impl core::clone::Clone for wechat_protocol::AppAttachRequest | impl | -
 impl core::clone::Clone for wechat_protocol::AuthSnapshot | impl | -
 impl core::clone::Clone for wechat_protocol::AvatarBytes | impl | -
 impl core::clone::Clone for wechat_protocol::ChannelsPost | impl | -
@@ -1468,6 +1500,8 @@ impl core::clone::Clone for wechat_protocol::sticker_packs::StickerPackPage | im
 impl core::clone::Clone for wechat_protocol::sticker_packs::StickerPackSummary | impl | -
 impl core::clone::Clone for wechat_protocol::sticker_upload::StickerUploadAcknowledgement | impl | -
 impl core::clone::Clone for wechat_protocol::wire::AddMessage | impl | -
+impl core::clone::Clone for wechat_protocol::wire::AppAttachChunk | impl | -
+impl core::clone::Clone for wechat_protocol::wire::AppAttachRequest | impl | -
 impl core::clone::Clone for wechat_protocol::wire::AvatarBytes | impl | -
 impl core::clone::Clone for wechat_protocol::wire::ContactLookup | impl | -
 impl core::clone::Clone for wechat_protocol::wire::ContactRecord | impl | -
@@ -1483,6 +1517,8 @@ impl core::cmp::Eq for wechat_protocol::AccountIdentity | impl | -
 impl core::cmp::Eq for wechat_protocol::AccountInterrupted | impl | -
 impl core::cmp::Eq for wechat_protocol::AccountLifecycle | impl | -
 impl core::cmp::Eq for wechat_protocol::AccountStatus | impl | -
+impl core::cmp::Eq for wechat_protocol::AppAttachChunk | impl | -
+impl core::cmp::Eq for wechat_protocol::AppAttachRequest | impl | -
 impl core::cmp::Eq for wechat_protocol::ChannelsPost | impl | -
 impl core::cmp::Eq for wechat_protocol::ContactPrivacyReply | impl | -
 impl core::cmp::Eq for wechat_protocol::ContactPrivacySettings | impl | -
@@ -1539,12 +1575,16 @@ impl core::cmp::Eq for wechat_protocol::protobuf::Field | impl | -
 impl core::cmp::Eq for wechat_protocol::protobuf::Value | impl | -
 impl core::cmp::Eq for wechat_protocol::push::Notification | impl | -
 impl core::cmp::Eq for wechat_protocol::quote_send::QuoteReference | impl | -
+impl core::cmp::Eq for wechat_protocol::wire::AppAttachChunk | impl | -
+impl core::cmp::Eq for wechat_protocol::wire::AppAttachRequest | impl | -
 impl core::cmp::Ord for wechat_protocol::StickerId | impl | -
 impl core::cmp::Ord for wechat_protocol::StickerPackId | impl | -
 impl core::cmp::PartialEq for wechat_protocol::AccountIdentity | impl | -
 impl core::cmp::PartialEq for wechat_protocol::AccountInterrupted | impl | -
 impl core::cmp::PartialEq for wechat_protocol::AccountLifecycle | impl | -
 impl core::cmp::PartialEq for wechat_protocol::AccountStatus | impl | -
+impl core::cmp::PartialEq for wechat_protocol::AppAttachChunk | impl | -
+impl core::cmp::PartialEq for wechat_protocol::AppAttachRequest | impl | -
 impl core::cmp::PartialEq for wechat_protocol::ChannelsPost | impl | -
 impl core::cmp::PartialEq for wechat_protocol::ContactPrivacyReply | impl | -
 impl core::cmp::PartialEq for wechat_protocol::ContactPrivacySettings | impl | -
@@ -1601,6 +1641,8 @@ impl core::cmp::PartialEq for wechat_protocol::protobuf::Field | impl | -
 impl core::cmp::PartialEq for wechat_protocol::protobuf::Value | impl | -
 impl core::cmp::PartialEq for wechat_protocol::push::Notification | impl | -
 impl core::cmp::PartialEq for wechat_protocol::quote_send::QuoteReference | impl | -
+impl core::cmp::PartialEq for wechat_protocol::wire::AppAttachChunk | impl | -
+impl core::cmp::PartialEq for wechat_protocol::wire::AppAttachRequest | impl | -
 impl core::cmp::PartialOrd for wechat_protocol::StickerId | impl | -
 impl core::cmp::PartialOrd for wechat_protocol::StickerPackId | impl | -
 impl core::convert::AsRef<str> for wechat_protocol::StickerId | impl | -
@@ -1640,6 +1682,8 @@ impl core::fmt::Debug for wechat_protocol::AccountLifecycle | impl | -
 impl core::fmt::Debug for wechat_protocol::AccountPersistenceFailed | impl | -
 impl core::fmt::Debug for wechat_protocol::AccountState | impl | -
 impl core::fmt::Debug for wechat_protocol::AccountStatus | impl | -
+impl core::fmt::Debug for wechat_protocol::AppAttachChunk | impl | -
+impl core::fmt::Debug for wechat_protocol::AppAttachRequest | impl | -
 impl core::fmt::Debug for wechat_protocol::AuthSnapshot | impl | -
 impl core::fmt::Debug for wechat_protocol::ChannelsMedia | impl | -
 impl core::fmt::Debug for wechat_protocol::ChannelsPage | impl | -
@@ -1714,6 +1758,8 @@ impl core::fmt::Debug for wechat_protocol::push::Notification | impl | -
 impl core::fmt::Debug for wechat_protocol::quote_send::QuoteReference | impl | -
 impl core::fmt::Debug for wechat_protocol::sticker_packs::StickerPackFeed | impl | -
 impl core::fmt::Debug for wechat_protocol::sticker_upload::StickerUploadAcknowledgement | impl | -
+impl core::fmt::Debug for wechat_protocol::wire::AppAttachChunk | impl | -
+impl core::fmt::Debug for wechat_protocol::wire::AppAttachRequest | impl | -
 impl core::fmt::Debug for wechat_protocol::wire::Heartbeat | impl | -
 impl core::fmt::Debug for wechat_protocol::wire::TextSendResult | impl | -
 impl core::fmt::Display for wechat_protocol::AccountInterrupted | impl | -
@@ -1774,6 +1820,8 @@ impl core::marker::StructuralPartialEq for wechat_protocol::AccountIdentity | im
 impl core::marker::StructuralPartialEq for wechat_protocol::AccountInterrupted | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::AccountLifecycle | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::AccountStatus | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::AppAttachChunk | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::AppAttachRequest | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::ChannelsPost | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::ContactPrivacyReply | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::ContactPrivacySettings | impl | -
@@ -1830,6 +1878,8 @@ impl core::marker::StructuralPartialEq for wechat_protocol::protobuf::Field | im
 impl core::marker::StructuralPartialEq for wechat_protocol::protobuf::Value | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::push::Notification | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::quote_send::QuoteReference | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::wire::AppAttachChunk | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::wire::AppAttachRequest | impl | -
 impl core::ops::deref::Deref for wechat_protocol::StickerId | impl | -
 impl core::ops::deref::Deref for wechat_protocol::StickerPackId | impl | -
 impl core::ops::drop::Drop for wechat_protocol::AccountState | impl | -
@@ -1851,6 +1901,8 @@ impl serde_core::de::Deserialize<'de> for wechat_protocol::AccountLifecycle | im
 impl serde_core::de::Deserialize<'de> for wechat_protocol::AccountState | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::AccountStatus | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::AddMessage | impl<'de> | -
+impl serde_core::de::Deserialize<'de> for wechat_protocol::AppAttachChunk | impl<'de> | -
+impl serde_core::de::Deserialize<'de> for wechat_protocol::AppAttachRequest | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::AuthSnapshot | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::AvatarBytes | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::ContactLookup | impl<'de> | -
@@ -1916,6 +1968,8 @@ impl serde_core::de::Deserialize<'de> for wechat_protocol::sticker_packs::Sticke
 impl serde_core::de::Deserialize<'de> for wechat_protocol::sticker_packs::StickerPackPage | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::sticker_packs::StickerPackSummary | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::wire::AddMessage | impl<'de> | -
+impl serde_core::de::Deserialize<'de> for wechat_protocol::wire::AppAttachChunk | impl<'de> | -
+impl serde_core::de::Deserialize<'de> for wechat_protocol::wire::AppAttachRequest | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::wire::AvatarBytes | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::wire::ContactLookup | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::wire::ContactRecord | impl<'de> | -
@@ -1932,6 +1986,8 @@ impl serde_core::ser::Serialize for wechat_protocol::AccountLifecycle | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::AccountState | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::AccountStatus | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::AddMessage | impl | -
+impl serde_core::ser::Serialize for wechat_protocol::AppAttachChunk | impl | -
+impl serde_core::ser::Serialize for wechat_protocol::AppAttachRequest | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::AuthSnapshot | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::AvatarBytes | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::ContactLookup | impl | -
@@ -1997,6 +2053,8 @@ impl serde_core::ser::Serialize for wechat_protocol::sticker_packs::StickerPackI
 impl serde_core::ser::Serialize for wechat_protocol::sticker_packs::StickerPackPage | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::sticker_packs::StickerPackSummary | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::wire::AddMessage | impl | -
+impl serde_core::ser::Serialize for wechat_protocol::wire::AppAttachChunk | impl | -
+impl serde_core::ser::Serialize for wechat_protocol::wire::AppAttachRequest | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::wire::AvatarBytes | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::wire::ContactLookup | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::wire::ContactRecord | impl | -
@@ -2048,6 +2106,8 @@ struct wechat_protocol::AccountRequest | struct<'a> { private fields } | A singl
 struct wechat_protocol::AccountState | struct { public fields } | Accepted credentials. Serialize only into the service's encrypted state vault.
 struct wechat_protocol::AccountStatus | struct { public fields } | Non-secret account lifecycle information. Credentials require an explicit export; status/debug output must never contain an AccountState.
 struct wechat_protocol::AddMessage | struct { public fields } | MISSING DOC
+struct wechat_protocol::AppAttachChunk | struct { public fields } | One verified chunk returned by `/cgi-bin/micromsg-bin/downloadappattach`.
+struct wechat_protocol::AppAttachRequest | struct { public fields } | Parameters for one `/cgi-bin/micromsg-bin/downloadappattach` chunk request.
 struct wechat_protocol::AuthSnapshot | struct { public fields } | Raw accepted auth sections, retained only inside the encrypted account state. The update mask describes native application gates; presence alone does not mean an optional section changed active account credentials.
 struct wechat_protocol::AvatarBytes | struct { public fields } | MISSING DOC
 struct wechat_protocol::ChannelsMedia | struct { private fields } | Fresh playback material for a post's single video, kept together as returned.
@@ -2192,6 +2252,8 @@ struct wechat_protocol::sticker_send::StickerSendAcknowledgement | struct { publ
 struct wechat_protocol::sticker_send::StickerSendChunk | struct<'a> { public fields } | Journaled request identity and bytes, shared by the probe and all continuations.
 struct wechat_protocol::sticker_upload::StickerUploadAcknowledgement | struct { public fields } | A validated acknowledgement for one direct upload chunk.
 struct wechat_protocol::wire::AddMessage | struct { public fields } | MISSING DOC
+struct wechat_protocol::wire::AppAttachChunk | struct { public fields } | One verified chunk returned by `/cgi-bin/micromsg-bin/downloadappattach`.
+struct wechat_protocol::wire::AppAttachRequest | struct { public fields } | Parameters for one `/cgi-bin/micromsg-bin/downloadappattach` chunk request.
 struct wechat_protocol::wire::AvatarBytes | struct { public fields } | MISSING DOC
 struct wechat_protocol::wire::ContactLookup | struct { public fields } | MISSING DOC
 struct wechat_protocol::wire::ContactRecord | struct { public fields } | MISSING DOC
@@ -2232,6 +2294,7 @@ variant wechat_protocol::LoginStatus::Pending | - | MISSING DOC
 variant wechat_protocol::LoginStatus::Rejected | - | MISSING DOC
 variant wechat_protocol::LoginStatus::Scanned | - | MISSING DOC
 variant wechat_protocol::Service::AccountAuthentication | - | Credential exchange that completes a login.
+variant wechat_protocol::Service::AppAttachment | - | Application attachment chunk download.
 variant wechat_protocol::Service::AutomaticAuthentication | - | Session renewal with saved credentials.
 variant wechat_protocol::Service::Avatar | - | Avatar lookup.
 variant wechat_protocol::Service::CdnBootstrap | - | CDN credential bootstrap.

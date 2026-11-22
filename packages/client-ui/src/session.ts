@@ -602,7 +602,9 @@ export class HubSession {
               // stream; consuming them here would skip their sidebar updates.
               if (BigInt(event.cursor) > BigInt(boundary)) break;
               if (
-                ["message.committed", "message.recalled"].includes(event.kind)
+                ["message.committed", "message.updated", "message.recalled"].includes(
+                  event.kind,
+                )
               ) {
                 if (
                   event.kind === "message.recalled" &&
@@ -1413,6 +1415,7 @@ export class HubSession {
     }
     if (
       (event.kind === "message.committed" ||
+        event.kind === "message.updated" ||
         event.kind === "message.recalled") &&
       typeof event.data.messageId === "string"
     ) {
@@ -1538,6 +1541,7 @@ export class HubSession {
             if (
               [
                 "message.committed",
+                "message.updated",
                 "message.recalled",
                 "group.updated",
                 "sync.completed",

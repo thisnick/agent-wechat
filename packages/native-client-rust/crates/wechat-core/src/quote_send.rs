@@ -86,7 +86,7 @@ fn sticker_identity(content: &str, shared: bool) -> Option<()> {
 fn forwarded_reference_content(content: &str) -> Result<String> {
     fn parse(value: &str) -> Result<roxmltree::Document<'_>> {
         ensure!(
-            value.len() <= 128 * 1024
+            value.len() <= 1024 * 1024
                 && !value.to_ascii_uppercase().contains("<!DOCTYPE")
                 && !value.to_ascii_uppercase().contains("<!ENTITY"),
             "quote_content_unavailable"
@@ -95,7 +95,7 @@ fn forwarded_reference_content(content: &str) -> Result<String> {
             value,
             roxmltree::ParsingOptions {
                 allow_dtd: false,
-                nodes_limit: 4096,
+                nodes_limit: 20_000,
                 ..Default::default()
             },
         )
@@ -127,8 +127,18 @@ fn forwarded_reference_content(content: &str) -> Result<String> {
         Ok(value)
     }
     let doc = parse(content)?;
-    let app =
-        crate::quotes::child(doc.root_element(), "appmsg").context("quote_content_unavailable")?;
+    let root = doc.root_element();
+    ensure!(
+        root.tag_name().name() == "msg" && root.tag_name().namespace().is_none(),
+        "quote_content_unavailable"
+    );
+    let app = crate::quotes::child(root, "appmsg").context("quote_content_unavailable")?;
+    ensure!(
+        crate::quotes::child(app, "type")
+            .and_then(crate::quotes::leaf)
+            .is_some_and(|t| t.trim() == "19"),
+        "quote_content_unavailable"
+    );
     let title = field(app, "title")?;
     let description = field(app, "des")?;
     let record = crate::quotes::child(app, "recorditem").context("quote_content_unavailable")?;
@@ -171,8 +181,14 @@ fn source_content(message: &Message) -> Result<String> {
         .text
         .as_deref()
         .context("quote_content_unavailable")?;
+    let stored_subtype = message.local_type.parse::<u64>().ok().map(|v| v >> 32);
+    let max_bytes = if message.message_type == 49 && stored_subtype == Some(19) {
+        1024 * 1024
+    } else {
+        128 * 1024
+    };
     ensure!(
-        content.len() <= 128 * 1024 && !content.contains('\0'),
+        content.len() <= max_bytes && !content.contains('\0'),
         "quote_content_unavailable"
     );
     let group = message
@@ -199,6 +215,9 @@ fn source_content(message: &Message) -> Result<String> {
         return Ok(content.into());
     }
     if message.message_type == 49 {
+        if stored_subtype == Some(19) {
+            return forwarded_reference_content(content);
+        }
         let app = crate::quotes::message_app(message).context("unsupported_quote_type")?;
         match app.subtype {
             19 => return forwarded_reference_content(content),
@@ -601,5 +620,19 @@ mod tests {
         ] {
             assert!(source_content(&message(49, 19, &invalid)).is_err());
         }
+    }
+
+    #[test]
+    fn expanded_large_forwarded_cards_over_128kib_can_be_quoted_and_reject_mismatched_subtypes() {
+        let padding = "A".repeat(140 * 1024);
+        let large_19 = format!(
+            "<msg><appmsg><type>19</type><title>Large Chat History</title><des>Alice: summary</des><recorditem>&lt;recordinfo&gt;&lt;title&gt;Large Chat History&lt;/title&gt;&lt;desc&gt;Alice: summary&lt;/desc&gt;&lt;datalist count='1'&gt;&lt;dataitem datatype='1'&gt;&lt;datadesc&gt;{padding}&lt;/datadesc&gt;&lt;/dataitem&gt;&lt;/datalist&gt;&lt;/recordinfo&gt;</recorditem></appmsg></msg>"
+        );
+        let pruned = source_content(&message(49, 19, &large_19)).unwrap();
+        assert!(pruned.contains("Large Chat History"));
+        assert!(!pruned.contains(&padding));
+        let wrong_subtype = large_19.replace("<type>19</type>", "<type>40</type>");
+        assert!(source_content(&message(49, 19, &wrong_subtype)).is_err());
+        assert!(source_content(&message(49, 40, &wrong_subtype)).is_err());
     }
 }

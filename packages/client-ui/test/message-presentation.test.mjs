@@ -87,6 +87,22 @@ test("quoted replies and forwarded history never enter the media download flow",
   assert.equal(
     messagePresentation({
       type: 49,
+      appMessageType: 40,
+      body: "[Chat History] Chat History\n[Chat History unavailable]",
+    }),
+    "forwarded"
+  );
+  assert.equal(
+    messagePresentation({
+      type: 49,
+      appMessageType: 40,
+      body: null,
+    }),
+    "unsupported"
+  );
+  assert.equal(
+    messagePresentation({
+      type: 49,
       appMessageType: 5,
       link: { title: "Shared page" },
     }),

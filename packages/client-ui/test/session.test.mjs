@@ -2075,3 +2075,37 @@ test("activating an account opens the preferred conversation when it is listed, 
   await plain.activate("a");
   assert.equal(plain.snapshot().selected, "peer");
 });
+
+test("message.updated refreshes an expanded forwarded card in place", async (t) => {
+  const initial = {
+    ...message("bigxml"),
+    type: 49,
+    appMessageType: 40,
+    body: "[Chat History] Shared chat\n[Chat History unavailable]",
+  };
+  const expanded = {
+    ...initial,
+    appMessageType: 19,
+    body: "[Chat History] Shared chat\nAlice: Full entry",
+  };
+  let reads = 0;
+  const hub = session(t, {
+    threads: async () =>
+      page([{ id: "peer", unreadCount: 0, lastMessage: { id: "bigxml", text: "Chat history", createdAt: "10", type: 49 } }]),
+    messages: async (_account, thread) =>
+      page(thread === "peer" ? [initial] : []),
+    message: async () => {
+      reads++;
+      return expanded;
+    },
+  });
+  await hub.activate("a");
+  assert.equal(hub.snapshot().messages[0].appMessageType, 40);
+  await hub.consume(
+    { kind: "message.updated", data: { messageId: "bigxml" } },
+    "a"
+  );
+  assert.equal(reads, 1);
+  assert.equal(hub.snapshot().messages[0].appMessageType, 19);
+  assert.equal(hub.snapshot().messages[0].body, expanded.body);
+});

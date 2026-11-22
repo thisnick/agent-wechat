@@ -28,6 +28,8 @@ mod sync_projection;
 pub use metadata::MetadataAction;
 #[path = "actions.rs"]
 mod actions;
+#[path = "big_xml.rs"]
+pub(crate) mod big_xml;
 #[path = "bootstrap.rs"]
 mod bootstrap;
 #[path = "identity.rs"]
@@ -437,6 +439,7 @@ impl Core {
             let _ = core.repair_group_mutations(&account.id);
             let _ = core.repair_contact_mutations(&account.id);
             let _ = core.refresh_incoming_groups(&account.id, false);
+            let _ = core.refresh_big_xml(&account.id, false);
         }
         Ok(core)
     }
@@ -1308,7 +1311,6 @@ impl Core {
         let core = self.clone();
         let account = account.to_owned();
         blocking(move || {
-            let _replay = replay;
             let mut permit = crate::account_network::AccountNetworkPermit {
                 guard: Some(guard),
                 runtime: tokio::runtime::Handle::current(),
@@ -1332,7 +1334,7 @@ impl Core {
             core.bind_call_authorization(&account, &state)?;
             // A sync response can rotate credentials. Fence replay against the accepted state.
             let replay_fence = core.session_fence(&account)?;
-            core.commit_sync_batch_with_yield(
+            let result = core.commit_sync_batch_with_yield(
                 &account,
                 batch,
                 "shortlink",
@@ -1340,7 +1342,22 @@ impl Core {
                 Some(&mut || {
                     core.yield_sync_writer(&account, &mut permit, &replay_fence, desired.as_deref())
                 }),
-            )
+            )?;
+            drop(replay);
+            match core.refresh_big_xml_with_permit(
+                &account,
+                true,
+                Some(&mut permit),
+                Some(&replay_fence),
+                desired.as_deref(),
+            ) {
+                Ok(_) => {}
+                Err(error) if session_auth::authentication_required(&error) => {
+                    return Err(error);
+                }
+                Err(_) => {}
+            }
+            Ok(result)
         })
         .await
     }
@@ -2022,6 +2039,7 @@ impl Core {
         self.repair_group_mutations(account)?;
         self.repair_contact_mutations(account)?;
         self.refresh_incoming_groups(account, false)?;
+        self.refresh_big_xml(account, false)?;
         if self.store.pending_sync(account)?.is_empty() {
             self.store.retry_blocked(account)?;
         }
@@ -2439,7 +2457,6 @@ impl Core {
             let core = self.clone();
             let owned = account.to_owned();
             blocking(move || {
-                let _replay = replay;
                 let mut permit = crate::account_network::AccountNetworkPermit {
                     guard: Some(guard),
                     runtime: tokio::runtime::Handle::current(),
@@ -2457,6 +2474,18 @@ impl Core {
                 }
                 core.refresh_contact_remarks(&owned, true)?;
                 if core.store.pending_sync_count(&owned)? == 0 {
+                    core.publish_profile_checkpoint(&owned)?;
+                }
+                drop(replay);
+                if core.refresh_big_xml_with_permit(
+                    &owned,
+                    true,
+                    Some(&mut permit),
+                    Some(&fence),
+                    Some(b"connected"),
+                )? > 0
+                    && core.store.pending_sync_count(&owned)? == 0
+                {
                     core.publish_profile_checkpoint(&owned)?;
                 }
                 Ok(())
@@ -2495,8 +2524,19 @@ impl Core {
                 if core.store.pending_sync_count(&account)? == 0 {
                     let _ = core.publish_profile_checkpoint(&account);
                 }
-                // The heartbeat does not advance the replay journal, so release the replay lock before I/O.
+                // BigXml expansion and heartbeat do not advance the replay journal; release the replay lock before I/O.
                 drop(replay);
+                if core.refresh_big_xml_with_permit(
+                    &account,
+                    true,
+                    Some(&mut permit),
+                    Some(&fence),
+                    Some(b"connected"),
+                )? > 0
+                    && core.store.pending_sync_count(&account)? == 0
+                {
+                    let _ = core.publish_profile_checkpoint(&account);
+                }
                 let expected = core
                     .store
                     .runtime(&account, "account-state")?

@@ -117,6 +117,13 @@ fn message_summary(message: &Value, sender_name: Option<&str>) -> Value {
             (48, _) => "Location",
             (49, Some(6)) => "File",
             (49, Some(19)) => "Chat history",
+            (49, Some(40))
+                if message["body"]
+                    .as_str()
+                    .is_some_and(|body| body.starts_with("[Chat History")) =>
+            {
+                "Chat history"
+            }
             (49, _) if message["link"].is_object() => message["link"]["title"]
                 .as_str()
                 .filter(|s| !s.is_empty())
@@ -158,6 +165,20 @@ mod tests {
         let summary = message_summary(&message, Some("Transport peer"));
         assert_eq!(summary["text"], "Location sharing has ended.");
         assert!(summary["senderId"].is_null() && summary["senderName"].is_null());
+    }
+
+    #[test]
+    fn unexpanded_big_xml_forwarded_stub_summarizes_as_chat_history() {
+        let message = json!({
+            "id": "m40",
+            "type": 49,
+            "appMessageType": 40,
+            "body": "[Chat History] Team\n[Chat History unavailable]",
+            "senderId": "wxid_alice",
+            "direction": "incoming"
+        });
+        let summary = message_summary(&message, Some("Alice"));
+        assert_eq!(summary["text"], "Chat history");
     }
     #[test]
     fn list_and_detail_derive_pin_state_and_unresolved_work_does_not_replace_saved_flags() {

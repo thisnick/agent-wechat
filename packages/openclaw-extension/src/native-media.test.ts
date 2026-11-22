@@ -647,12 +647,16 @@ test("cached quote-owned image bytes remain usable after CDN expiry", async () =
   assert.deepEqual(f.calls, ["assets:m", "bytes", "assets:m", "bytes"]);
 });
 test("forwarded bundles render stored text and unsupported cards never enter the file pipeline", async () => {
-  for (const type of [19, 3, 4, 33, 2000]) {
+  for (const type of [19, 40, 3, 4, 33, 2000]) {
     const result = await prepareNativeAttachment({ client: {} as NativeWeChatClient, account,
       message: { ...quoteMessage, appMessageType: type, body: "[Chat History] Alice: forwarded text" }, core: {} });
     assert.equal(result.pending, false); assert.equal(result.attachment, undefined);
-    if (type === 19) assert.match(result.body, /Alice: forwarded text/); else assert.match(result.body, /Unsupported/);
+    if (type === 19 || type === 40) assert.match(result.body, /Alice: forwarded text/); else assert.match(result.body, /Unsupported/);
   }
+  const empty40 = await prepareNativeAttachment({ client: {} as NativeWeChatClient, account,
+    message: { ...quoteMessage, appMessageType: 40, body: null }, core: {} });
+  assert.equal(empty40.pending, false); assert.equal(empty40.attachment, undefined);
+  assert.match(empty40.body, /Unsupported WeChat app message subtype 40/);
 });
 
 const linkMessage = { ...message, type: 49, appMessageType: 5, body: "[Link] Shared title\nShared description\nhttps://example.invalid/article",
