@@ -536,7 +536,7 @@ response NativeEvent | object | An entry in the account's event log, which keeps
 response NativeEvent.createdAt | string, required | When the event was recorded, as an RFC 3339 time.
 response NativeEvent.cursor | string, required | Position of the event in the log, a decimal number written as a string that only increases. Pass the last one you handled as `after` to resume.
 response NativeEvent.data | any, required | Details of the event. The fields depend on `kind`; for example `message.committed` carries `messageId` and `threadId`.
-response NativeEvent.kind | string, required | Kind of event, such as `message.committed`, `thread.updated`, `group.updated`, `operation.updated` or `send.updated`.
+response NativeEvent.kind | string, required | Kind of event, such as `message.committed`, `message.updated`, `thread.updated`, `group.updated`, `operation.updated` or `send.updated`.
 response NativeGroup | object | A group chat saved in the account's profile.
 response NativeGroup.administratorIds | array of string, required, nullable | IDs of the group's administrators. The owner is not listed unless WeChat lists them too, and the field is null when the saved data cannot say.
 response NativeGroup.announcement | string, required, nullable | Text of the group's current announcement. Null when there is none.

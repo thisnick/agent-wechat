@@ -9,6 +9,7 @@ const MAX_ITEMS: usize = 500;
 const MAX_DEPTH: usize = 4;
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 const TRUNCATED: &str = "\n[Chat History truncated]";
+const UNAVAILABLE: &str = "[Chat History unavailable]";
 
 fn parse(xml: &str) -> Option<Document<'_>> {
     if xml.len() > MAX_XML_BYTES {
@@ -217,6 +218,78 @@ pub(super) fn render(content: &str) -> Option<String> {
         return Some(fallback_title(&title));
     }
     Some(renderer.output)
+}
+
+fn unavailable_stub_body(title: &str, description: Option<&str>) -> String {
+    let title = title.trim();
+    let description = description
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != title);
+    if title.is_empty() && description.is_none() {
+        return UNAVAILABLE.into();
+    }
+    let mut prefix = if title.is_empty() {
+        "[Chat History]".to_owned()
+    } else {
+        format!("[Chat History] {title}")
+    };
+    if let Some(des) = description {
+        prefix.push('\n');
+        prefix.push_str(des);
+    }
+    let trailer = format!("\n{UNAVAILABLE}");
+    let budget = MAX_OUTPUT_BYTES.saturating_sub(trailer.len());
+    if prefix.len() > budget {
+        prefix = utf8_prefix(&prefix, budget).to_owned();
+    }
+    format!("{prefix}{trailer}")
+}
+
+/// Render an unexpanded subtype-40 ("BigXml") forwarded chat-history stub.
+///
+/// Only handles subtype-40 messages whose `<realinnertype>` is `19` (or that
+/// carry an inline `<recorditem>` without a conflicting `<realinnertype>`).
+/// When an inline `<recorditem>` is present and valid, its entries are rendered
+/// identically to subtype 19; otherwise an explicit unavailable marker is
+/// returned so callers can distinguish an unexpanded card from empty content.
+pub(super) fn render_big_xml(content: &str) -> Option<String> {
+    let document = parse(content)?;
+    let root = document.root_element();
+    if !root.has_tag_name("msg") || root.tag_name().namespace().is_some() {
+        return None;
+    }
+    let app = child(root, "appmsg")?;
+    if field(app, "type")?.parse::<i32>().ok()? != 40 {
+        return None;
+    }
+    let real_inner_type = field(app, "realinnertype").and_then(|v| v.parse::<i32>().ok());
+    let record = child(app, "recorditem");
+    match real_inner_type {
+        Some(19) => {}
+        None if record.is_some() => {}
+        _ => return None,
+    }
+    let title = field(app, "title").unwrap_or_default();
+    let description = field(app, "des");
+    if let Some(record) = record {
+        let mut renderer = Renderer {
+            parsed_bytes: content.len(),
+            ..Default::default()
+        };
+        renderer.line(
+            0,
+            &if title.is_empty() {
+                "[Chat History]".into()
+            } else {
+                format!("[Chat History] {title}")
+            },
+        );
+        let valid = renderer.embedded_record(record, 0);
+        if renderer.truncated || (valid && renderer.items > 0) {
+            return Some(renderer.output);
+        }
+    }
+    Some(unavailable_stub_body(&title, description.as_deref()))
 }
 
 #[cfg(test)]

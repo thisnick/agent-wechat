@@ -1082,6 +1082,147 @@ pub fn decode_voice(input: &[u8], server_id: u64, total: u32, offset: u32) -> Re
     })
 }
 
+const MAX_APP_ATTACH_BYTES: usize = 1024 * 1024;
+
+/// Parameters for one `/cgi-bin/micromsg-bin/downloadappattach` chunk request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppAttachRequest {
+    /// Application ID from `<appmsg appid="...">`, empty when absent.
+    pub app_id: String,
+    /// SDK version from `<appmsg sdkver="...">`, `0` when absent.
+    pub sdk_version: u32,
+    /// Media/attachment ID from `<appattach><attachid>`, empty for stubs without `<appattach>`.
+    pub media_id: String,
+    /// Conversation peer (`talker`), including `...@chatroom` for group messages.
+    pub username: String,
+    /// Advertised or previously reported total byte length (`0` on the first request when omitted).
+    pub total_length: u32,
+    /// Byte offset to fetch next, starting at `0`.
+    pub start_pos: u32,
+    /// Application message subtype (`40` for oversized-XML stubs).
+    pub app_type: u32,
+    /// Server message ID (`NewMsgId`).
+    pub server_message_id: u64,
+}
+
+/// One verified chunk returned by `/cgi-bin/micromsg-bin/downloadappattach`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppAttachChunk {
+    /// Requested byte offset for this chunk.
+    pub start_pos: u32,
+    /// Byte offset for the following chunk request (`start_pos + bytes.len()`).
+    pub next_pos: u32,
+    /// Authoritative total byte length reported by the server.
+    pub total_length: u32,
+    /// Whether `next_pos == total_length`.
+    pub complete: bool,
+    /// Raw downloaded payload bytes for this chunk.
+    pub bytes: Vec<u8>,
+}
+
+/// Encode a `DownloadAppAttachRequest` protobuf for CGI `221`.
+pub fn app_attach_request(state: &AccountState, request: &AppAttachRequest) -> Result<Vec<u8>> {
+    ensure!(
+        request.server_message_id != 0,
+        "Missing app attachment server ID"
+    );
+    ensure!(
+        !request.username.is_empty()
+            && request.username.len() <= 512
+            && !request.username.contains('\0'),
+        "Invalid app attachment peer"
+    );
+    ensure!(
+        request.app_id.len() <= 512
+            && !request.app_id.contains('\0')
+            && request.media_id.len() <= 2048
+            && !request.media_id.contains('\0'),
+        "Invalid app attachment metadata"
+    );
+    ensure!(
+        (request.total_length as usize) <= MAX_APP_ATTACH_BYTES
+            && (request.total_length == 0 || request.start_pos < request.total_length),
+        "Invalid app attachment range"
+    );
+    ensure!(
+        request.total_length != 0 || request.start_pos == 0,
+        "Invalid app attachment start position"
+    );
+    p::message(&[
+        p::bytes(1, &base_request(&state.device, state.uin, 0)?),
+        p::bytes(2, request.app_id.as_bytes()),
+        p::uint(3, request.sdk_version as u64),
+        p::bytes(4, request.media_id.as_bytes()),
+        p::bytes(5, request.username.as_bytes()),
+        p::uint(6, request.total_length as u64),
+        p::uint(7, request.start_pos as u64),
+        p::uint(8, 0),
+        p::uint(11, request.app_type as u64),
+        p::uint(13, request.server_message_id),
+    ])
+}
+
+/// Decode and validate a `DownloadAppAttachResponse` protobuf from CGI `221`.
+pub fn decode_app_attach(input: &[u8], request: &AppAttachRequest) -> Result<AppAttachChunk> {
+    let f = p::decode(input)?;
+    let code = p::base_code(&f)?;
+    ServiceRejected::check(Service::AppAttachment, code)?;
+    let total_length = u32::try_from(p::scalar(&f, 5)?)?;
+    ensure!(
+        total_length > 0 && (total_length as usize) <= MAX_APP_ATTACH_BYTES,
+        "App attachment total length invalid ({total_length})"
+    );
+    if request.start_pos > 0 && request.total_length > 0 {
+        ensure!(
+            total_length == request.total_length,
+            "App attachment total length changed ({total_length} != {})",
+            request.total_length
+        );
+    }
+    match p::optional(&f, 6)? {
+        Some(p::Value::Varint(start)) => {
+            let echoed_start = u32::try_from(*start)?;
+            ensure!(
+                echoed_start == request.start_pos,
+                "App attachment start position mismatch ({echoed_start} != {})",
+                request.start_pos
+            );
+        }
+        Some(_) => bail!("Invalid app attachment start position"),
+        None => {}
+    }
+    let bytes = p::unbuffer(p::data(&f, 8)?)?;
+    ensure!(
+        !bytes.is_empty() && bytes.len() <= MAX_APP_ATTACH_BYTES,
+        "App attachment chunk length invalid ({})",
+        bytes.len()
+    );
+    match p::optional(&f, 7)? {
+        Some(p::Value::Varint(data_len)) => {
+            ensure!(
+                *data_len == bytes.len() as u64,
+                "App attachment data length mismatch ({data_len} != {})",
+                bytes.len()
+            );
+        }
+        Some(_) => bail!("Invalid app attachment data length"),
+        None => {}
+    }
+    let chunk_len = u32::try_from(bytes.len())?;
+    let next_pos = request
+        .start_pos
+        .checked_add(chunk_len)
+        .ok_or_else(|| anyhow::anyhow!("App attachment offset overflow"))?;
+    ensure!(next_pos <= total_length, "App attachment chunk overflow");
+    Ok(AppAttachChunk {
+        start_pos: request.start_pos,
+        next_pos,
+        total_length,
+        complete: next_pos == total_length,
+        bytes,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1448,5 +1589,154 @@ mod tests {
         assert_eq!(decoded.numbered13, Some(789));
         assert_eq!(decoded.opaque11, Some(vec![255, 0]));
         assert_eq!(decoded.raw, payload);
+    }
+
+    #[test]
+    fn app_attach_request_and_response_validate_fields_and_chunks() {
+        let state = AccountState {
+            schema: 1,
+            device: crate::DeviceProfile::generate("linux".into()).unwrap(),
+            uin: 42,
+            own_username: "wxid_self".into(),
+            cookie: vec![],
+            session_key: vec![2; 16],
+            request_key: vec![],
+            response_key: vec![],
+            auto_auth_key: vec![],
+            key_info: vec![],
+            database_password: vec![],
+            auth_snapshot: Default::default(),
+            long_host: "long.example".into(),
+            short_host: "short.example".into(),
+        };
+        let req = AppAttachRequest {
+            app_id: String::new(),
+            sdk_version: 0,
+            media_id: String::new(),
+            username: "room@chatroom".into(),
+            total_length: 0,
+            start_pos: 0,
+            app_type: 40,
+            server_message_id: 9_007_199_254_740_993,
+        };
+        let encoded = app_attach_request(&state, &req).unwrap();
+        let fields = p::decode(&encoded).unwrap();
+        assert_eq!(p::data(&fields, 2).unwrap(), b"");
+        assert_eq!(p::scalar(&fields, 3).unwrap(), 0);
+        assert_eq!(p::data(&fields, 4).unwrap(), b"");
+        assert_eq!(p::data(&fields, 5).unwrap(), b"room@chatroom");
+        assert_eq!(p::scalar(&fields, 6).unwrap(), 0);
+        assert_eq!(p::scalar(&fields, 7).unwrap(), 0);
+        assert_eq!(p::scalar(&fields, 8).unwrap(), 0);
+        assert_eq!(p::scalar(&fields, 11).unwrap(), 40);
+        assert_eq!(p::scalar(&fields, 13).unwrap(), 9_007_199_254_740_993);
+
+        let chunk1_reply = p::message(&[
+            p::bytes(1, &p::int32(1, 0)),
+            p::uint(5, 10),
+            p::uint(6, 0),
+            p::uint(7, 4),
+            p::bytes(8, &p::buffer(b"<app")),
+        ])
+        .unwrap();
+        let chunk1 = decode_app_attach(&chunk1_reply, &req).unwrap();
+        assert_eq!(chunk1.start_pos, 0);
+        assert_eq!(chunk1.next_pos, 4);
+        assert_eq!(chunk1.total_length, 10);
+        assert!(!chunk1.complete);
+        assert_eq!(chunk1.bytes, b"<app");
+
+        let req2 = AppAttachRequest {
+            total_length: chunk1.total_length,
+            start_pos: chunk1.next_pos,
+            ..req.clone()
+        };
+        let chunk2_reply = p::message(&[
+            p::bytes(1, &p::int32(1, 0)),
+            p::uint(5, 10),
+            p::uint(6, 4),
+            p::uint(7, 6),
+            p::bytes(8, &p::buffer(b"msg/>!")),
+        ])
+        .unwrap();
+        let chunk2 = decode_app_attach(&chunk2_reply, &req2).unwrap();
+        assert!(chunk2.complete);
+        assert_eq!(chunk2.next_pos, 10);
+
+        // Changed total length on continuation must be rejected.
+        let bad_total = p::message(&[
+            p::bytes(1, &p::int32(1, 0)),
+            p::uint(5, 12),
+            p::uint(6, 4),
+            p::uint(7, 6),
+            p::bytes(8, &p::buffer(b"msg/>!")),
+        ])
+        .unwrap();
+        assert!(decode_app_attach(&bad_total, &req2).is_err());
+
+        // Empty chunk or non-zero BaseResponse must be rejected.
+        let empty_chunk = p::message(&[
+            p::bytes(1, &p::int32(1, 0)),
+            p::uint(5, 10),
+            p::uint(6, 0),
+            p::uint(7, 0),
+            p::bytes(8, &p::buffer(b"")),
+        ])
+        .unwrap();
+        assert!(decode_app_attach(&empty_chunk, &req).is_err());
+
+        let rejected = p::message(&[p::bytes(1, &p::int32(1, -1))]).unwrap();
+        let err = decode_app_attach(&rejected, &req).unwrap_err();
+        assert_eq!(
+            ServiceRejected::find(&err),
+            Some(&ServiceRejected::new(Service::AppAttachment, -1))
+        );
+
+        // NUL bytes in metadata fields must be rejected.
+        for bad in [
+            AppAttachRequest {
+                username: "bad\0peer".into(),
+                ..req.clone()
+            },
+            AppAttachRequest {
+                app_id: "wx\0id".into(),
+                ..req.clone()
+            },
+            AppAttachRequest {
+                media_id: "m\0id".into(),
+                ..req.clone()
+            },
+        ] {
+            assert!(app_attach_request(&state, &bad).is_err());
+        }
+
+        // Chunk 0 accepts the server's authoritative TotalLen even if stub advertised another value.
+        let advertised_req = AppAttachRequest {
+            total_length: 99,
+            start_pos: 0,
+            ..req.clone()
+        };
+        let chunk0_authoritative = decode_app_attach(&chunk1_reply, &advertised_req).unwrap();
+        assert_eq!(chunk0_authoritative.total_length, 10);
+
+        // Non-varint wire types for optional fields 6 and 7 must be rejected.
+        let bad_start_wire = p::message(&[
+            p::bytes(1, &p::int32(1, 0)),
+            p::uint(5, 10),
+            p::bytes(6, b"bad"),
+            p::uint(7, 4),
+            p::bytes(8, &p::buffer(b"<app")),
+        ])
+        .unwrap();
+        assert!(decode_app_attach(&bad_start_wire, &req).is_err());
+        let bad_len_wire = p::message(&[
+            p::bytes(1, &p::int32(1, 0)),
+            p::uint(5, 10),
+            p::uint(6, 0),
+            p::bytes(7, b"bad"),
+            p::bytes(8, &p::buffer(b"<app")),
+        ])
+        .unwrap();
+        assert!(decode_app_attach(&bad_len_wire, &req).is_err());
     }
 }

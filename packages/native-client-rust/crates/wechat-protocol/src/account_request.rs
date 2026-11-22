@@ -196,6 +196,9 @@ impl AccountRequest<'_> {
     operation!(init_contacts(contact_sequence: u32, room_sequence: u32) -> crate::InitContactPage => init_contacts_snapshot);
     operation!(download_avatars(ids: &[String]) -> Vec<crate::AvatarBytes> => download_avatars_snapshot);
     operation!(download_voice_chunk(server_id: u64, length: u32, offset: u32) -> crate::VoiceChunk => download_voice_chunk_snapshot);
+    operation!(
+        /// Fetch one chunk of an oversized application-message attachment through CGI 221.
+        download_app_attach_chunk(request: &crate::AppAttachRequest) -> crate::AppAttachChunk => download_app_attach_chunk_snapshot);
     operation!(cdn_config() -> crate::media::CdnConfig => cdn_config_snapshot);
     operation!(
         /// Request a new H5 ticket for Channels post lookups. Submitted once, without renewal or retry.

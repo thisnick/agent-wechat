@@ -199,7 +199,7 @@ async function prepareNativeAttachmentInput(params: NativePrepareMediaParams): P
   if (message.type === 49 && message.appMessageType === 57) return prepareNativeQuote(params);
   if (message.type === 48) return { body: message.location && message.body ? message.body.slice(0, 32768) : "[Location unavailable]", pending: false };
   if (message.type === 49 && [1, 17, 74, 87].includes(message.appMessageType ?? 0)) return { body: message.body?.slice(0, 32768) || "[Shared text unavailable]", pending: false };
-  if (message.type === 49 && message.appMessageType === 19) return { body: message.body?.slice(0, 65536) || "[Forwarded chat history unavailable]", pending: false };
+  if (message.type === 49 && (message.appMessageType === 19 || (message.appMessageType === 40 && message.body?.trim()))) return { body: message.body?.slice(0, 65536) || "[Forwarded chat history unavailable]", pending: false };
   if (message.type === 49 && message.appMessageType === 51 && message.link && params.channelsVideo && (params.quality ?? "best") !== "thumbnail") {
     // The daemon re-reads the stored card by message ID and owns the video's transfer plan.
     // "best" would accept the already-cached cover; the video is the normal-quality asset.

@@ -418,6 +418,16 @@ impl Store {
             Ok(rows.collect::<rusqlite::Result<_>>()?)
         })
     }
+    /// Queued BigXml expansion jobs, ordered oldest first, without starving behind backoff keys.
+    pub fn big_xml_jobs(&self, account: &str) -> Result<Vec<(String, Vec<u8>)>> {
+        self.control(account, |db| {
+            let mut query = db.prepare(
+                "SELECT key,value FROM runtime WHERE substr(key,1,15)='big-xml-expand:' ORDER BY rowid LIMIT 1000",
+            )?;
+            let rows = query.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+    }
     pub fn append_event(&self, id: &str, kind: &str, data: &Value) -> Result<Event> {
         self.control(id, |db| {
             let tx = db.transaction()?;

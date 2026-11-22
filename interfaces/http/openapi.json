@@ -2431,7 +2431,7 @@
             "description": "Details of the event. The fields depend on `kind`; for example `message.committed` carries\n`messageId` and `threadId`."
           },
           "kind": {
-            "description": "Kind of event, such as `message.committed`, `thread.updated`, `group.updated`,\n`operation.updated` or `send.updated`.",
+            "description": "Kind of event, such as `message.committed`, `message.updated`, `thread.updated`,\n`group.updated`, `operation.updated` or `send.updated`.",
             "type": "string"
           }
         },

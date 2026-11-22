@@ -1,7 +1,7 @@
 ---
 title: HTTP API
 description: 基于 Daemon 的 /v1 API 和事件流构建专属智能体插件、机器人或应用。
-sourceHash: "c65867183081"
+sourceHash: "8d96ab2d5ab5"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -52,7 +52,7 @@ curl -H "Authorization: Bearer $TOKEN" "$WX/accounts/$ACCOUNT/messages?query=发
 
 此类读取操作不主动向微信服务端发送网络刷新，也不会自动下载多媒体文件。富媒体消息使用“图片”和“表情”等文字标签占位；已撤回的消息内容会被自动屏蔽。建议在接收到消息、联系人或群聊变动事件后刷新会话列表以更新摘要。[联系人刷新与同步](#refresh-and-sync-contacts) 会更新已保存的元数据。通知消费程序在弹出告警前，应先校验账号状态满足 `contactSyncReady: true` 且会话满足 `muted: false`。通过 `PUT /threads/{id}/notifications` 修改通知设置支持普通单聊与群聊。单聊修改前会先读取当前联系人信息，再提交变更。重试时请复用相同幂等键；对于不确定的执行结果切勿更换新键重试。
 
-置顶或取消置顶使用 `PUT /threads/{id}/pin`，请求体为 `{"pinned":true}` 或 `{"pinned":false}`，需要 `admin` 令牌与 `Idempotency-Key`。SDK 对应方法为 `setThreadPinned(accountId, threadId, pinned, key)`。返回结果为一个操作任务；可检查其 `remoteOutcome` 与 `profileProjection`。成功置顶后广播 `thread.updated` 事件。重新获取列表时置顶会话排在最前，其后按已保存的活动时间排序。已有分页游标保持其原有的排序快照。
+置顶或取消置顶使用 `PUT /threads/{id}/pin`，请求体为 `{"pinned":true}` 或 `{"pinned":false}`，需要 `admin` 令牌与 `Idempotency-Key`。SDK 对应方法为 `setThreadPinned(accountId, threadId, pinned, key)`。返回结果为一个操作任务；可检查其 `remoteOutcome` 与 `profileProjection`。置顶变更保存后会广播 `thread.updated` 事件。重新获取列表时置顶会话排在最前，其后按已保存的活动时间排序。已有分页游标保持其原有的排序快照。
 
 ## 联系人 \{#contacts}
 
@@ -104,7 +104,7 @@ curl -H "Authorization: Bearer $TOKEN" "$WX/accounts/$ACCOUNT/messages?query=发
      --data-urlencode 'limit=20' "$WX/accounts/$ACCOUNT/contacts" > contacts-page.json
    ```
 
-   默认限制为 50 条；允许范围 1–200。搜索字符串最多 256 个 UTF-8 字节。游标有效期为 30 分钟，并保留第一页的 ID 和顺序；字段反映当前已保存的数据。收到 `409 pagination_cursor_expired` 后，请去掉游标从头开始。已删除的记录会以 `{"id":"wxid_alice","deleted":true,"version":"..."}` 项返回。
+   默认限制为 50 条；允许范围 1–200。搜索字符串最多 256 个 UTF-8 字节。游标有效期为 30 分钟，并保留第一页的 ID 和顺序；字段反映当前已保存的数据。收到 `409 pagination_cursor_expired` 后，请去掉游标从头开始。已删除的记录可能会以 `{"id":"wxid_alice","deleted":true,"version":"..."}` 项返回。
 
 3. 若已知用户名，可直接调用 `GET /contacts/wxid_alice`。未找到时返回 `404 not_found`；这并不代表两者不是好友，也不代表服务端上不存在该账号。CLI 对应命令为 `wx --json contacts list --limit 20`、`wx --json contacts find Alice` 和 `wx --json contacts get wxid_alice`。
 
@@ -198,11 +198,13 @@ curl -N -H "Authorization: Bearer $TOKEN" "$WX/accounts/$ACCOUNT/events/stream"
 
 基于 Server-Sent Events (SSE) 的长连接事件流。新收到的消息将作为 `message.committed` 事件推送；随后可通过 `GET /messages/{messageId}` 获取详情。发生断线后，带上 `?after=CURSOR` 参数（或标准 `Last-Event-ID` 请求头）重连，Daemon 将自动补发期间错过的所有事件。向 `POST /consumers/{name}/ack` 提交 `{"cursor": "..."}` 可记录消费者的消费位点。
 
+超长的转发聊天记录会在发出 `message.committed` 事件之前先行拉取，因此同一同步批次中，该卡片可能会在后续消息之后才出现在事件流中。若首次拉取失败，该卡片会以“不可用”状态提交，并在之后的重试成功补全正文时发出 `message.updated` 事件；届时请再次调用 `GET /messages/{messageId}` 读取更新后的文本。
+
 若不提供游标，事件流将从游标 0 开始；而一旦较早的事件已被丢弃，这一请求便会失败。添加 `?newest=true` 参数即可只获取连接建立之后新增的事件。`GET /events?newest=true` 返回最新的事件，其 `nextCursor` 即为最新事件的游标。Daemon 为每个账号保留最新的 10,000 条事件；若游标早于此范围，则返回 `410 event_cursor_expired`。
 
 连接建立时将立即收到心跳注释，随后会周期性发送保活信息。心跳注释不包含消息内容，不会推动事件游标前进。
 
-群聊信息更新并在本地保存后，将推送 `group.updated` 事件；随后可通过 `GET /groups/{groupId}` 或其成员接口获取详情。`group.refresh_blocked` 表示后续读取无法顺利完成。这些事件共享同一个可重放的事件流。另一台设备上所做的每一项群编辑是否都会自动推送，目前尚未确认；参见[群组刷新限制](/use/groups/)。
+已识别的群聊变更在已保存的 Profile 更新后，将推送 `group.updated` 事件；随后可通过 `GET /groups/{groupId}` 或其成员接口获取详情。`group.refresh_blocked` 表示后续读取无法顺利完成。这些事件共享同一个可重放的事件流。另一台设备上所做的每一项群编辑是否都会自动推送，目前尚未确认；参见[群组刷新限制](/use/groups/)。
 
 ## 路由列表 \{#routes}
 

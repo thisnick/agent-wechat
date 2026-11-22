@@ -36,6 +36,8 @@ pub enum Service {
     Avatar,
     /// Voice chunk download.
     Voice,
+    /// Application attachment chunk download.
+    AppAttachment,
     /// File upload reservation.
     FileUploadReservation,
     /// CDN credential bootstrap.
@@ -75,6 +77,7 @@ impl Service {
             Self::GroupMetadata => "Group metadata service",
             Self::Avatar => "Avatar service",
             Self::Voice => "Voice service",
+            Self::AppAttachment => "Application attachment service",
             Self::FileUploadReservation => "File upload reservation",
             Self::CdnBootstrap => "CDN bootstrap",
             Self::CdnDownload => "CDN download",
@@ -143,6 +146,7 @@ impl ServiceRejected {
                     | Service::Sync
                     | Service::Contact
                     | Service::ContactSync
+                    | Service::AppAttachment
                     | Service::SavedDeviceLogin
                     | Service::AccountAuthentication
                     | Service::AutomaticAuthentication
@@ -245,6 +249,7 @@ mod tests {
             Service::Sync,
             Service::Contact,
             Service::ContactSync,
+            Service::AppAttachment,
             Service::SavedDeviceLogin,
             Service::AccountAuthentication,
             Service::AutomaticAuthentication,

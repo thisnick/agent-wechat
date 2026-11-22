@@ -373,6 +373,20 @@ pub trait Upstream: Send + Sync {
             }
         )
     }
+    fn download_app_attach(
+        &self,
+        _state: &mut AccountState,
+        _request: &wechat_protocol::AppAttachRequest,
+    ) -> Result<wechat_protocol::AppAttachChunk> {
+        bail!(
+            "{}",
+            if self.kind() == UpstreamKind::Simulator {
+                "unsupported_simulator_operation"
+            } else {
+                "account_runtime_required"
+            }
+        )
+    }
     fn notify_read(
         &self,
         _state: &mut AccountState,

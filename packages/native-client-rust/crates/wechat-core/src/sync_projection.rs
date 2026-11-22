@@ -268,15 +268,28 @@ fn envelope(message: &AddMessage) -> Result<(String, &[u8])> {
         ))
     }
 }
-fn app_fields(content: &[u8]) -> Result<(u32, Option<String>)> {
+pub(super) fn app_fields(content: &[u8]) -> Result<(u32, Option<String>)> {
     let text = std::str::from_utf8(content)?;
-    if text.len() > 4 * 1024 * 1024
+    if text.len() > 1024 * 1024
         || text.to_ascii_uppercase().contains("<!DOCTYPE")
         || text.to_ascii_uppercase().contains("<!ENTITY")
     {
         bail!("invalid_app_message_metadata")
     }
-    let doc = roxmltree::Document::parse(text)?;
+    let doc = roxmltree::Document::parse_with_options(
+        text,
+        roxmltree::ParsingOptions {
+            allow_dtd: false,
+            nodes_limit: 20_000,
+            ..Default::default()
+        },
+    )?;
+    if doc
+        .descendants()
+        .any(|n| n.ancestors().take(34).count() > 32)
+    {
+        bail!("invalid_app_message_metadata")
+    }
     let root = doc.root_element();
     let app = if root.tag_name().name() == "appmsg" {
         root
@@ -1029,18 +1042,39 @@ impl Core {
             wechat_profile::find_projected_message(&location, &keys, &message.peer, sid, &options)?;
         let own_phase = format!("{receipt}:message-started");
         let started = self.store.runtime(account, &own_phase)?.is_some();
+        let expected_local_type = match stored_fields.get("local_type") {
+            Some(SqlValue::Integer(n)) => n.clone(),
+            _ => bail!("invalid_stored_message_type"),
+        };
+        let incoming_big_xml =
+            message.message_type == 49 && expected_local_type == ((40u64 << 32) | 49).to_string();
+        let mut already_expanded = false;
         let (source, created_by_intent) = if let Some(id) = existing {
             let stored = self
                 .profile_reader(account)?
                 .message(&id, Some(&state.own_username))?;
             let expected = std::str::from_utf8(&message.content)?;
+            already_expanded = if incoming_big_xml && stored.message_type == 49 {
+                let stored_subtype = stored
+                    .local_type
+                    .parse::<u64>()
+                    .ok()
+                    .map(|v| v >> 32)
+                    .unwrap_or(0);
+                let stub_inner = std::str::from_utf8(body)
+                    .ok()
+                    .and_then(super::big_xml::parse_stub)
+                    .and_then(|s| s.real_inner_type);
+                stored_subtype > 0
+                    && stored_subtype != 40
+                    && stub_inner.is_none_or(|inner| inner as u64 == stored_subtype)
+            } else {
+                false
+            };
             if stored.create_time != message.created_at as i64
-                || stored.content.text.as_deref() != Some(expected)
-                || stored.local_type
-                    != match stored_fields.get("local_type") {
-                        Some(SqlValue::Integer(n)) => n.clone(),
-                        _ => bail!("invalid_stored_message_type"),
-                    }
+                || (!already_expanded
+                    && (stored.content.text.as_deref() != Some(expected)
+                        || stored.local_type != expected_local_type))
             {
                 bail!("message_identity_conflict")
             }
@@ -1100,29 +1134,39 @@ impl Core {
                 &options,
             )?;
         }
-        wechat_profile::apply_message_session_projection(
-            &location,
-            &keys,
-            &MessageSessionProjection {
-                source: source.clone(),
-                peer: message.peer.clone(),
-                summary,
-                outgoing: message.outgoing,
-                unread: origin != "profile_import",
-                sender: Some(sender),
-                sender_display: None,
-                created_by_this_intent: created_by_intent,
-            },
-            &options,
-        )?;
+        if !already_expanded {
+            wechat_profile::apply_message_session_projection(
+                &location,
+                &keys,
+                &MessageSessionProjection {
+                    source: source.clone(),
+                    peer: message.peer.clone(),
+                    summary,
+                    outgoing: message.outgoing,
+                    unread: origin != "profile_import",
+                    sender: Some(sender.clone()),
+                    sender_display: None,
+                    created_by_this_intent: created_by_intent,
+                },
+                &options,
+            )?;
+        }
         let id = crate::message_id(&source)?;
+        let mut defer_commit = false;
+        if incoming_big_xml && !already_expanded && origin != "profile_import" {
+            defer_commit =
+                self.queue_big_xml_expansion(account, &message, body, &sender, &id, origin)?;
+        }
         if download_media
+            && !defer_commit
             && matches!(message.message_type, 3 | 34 | 43 | 47 | 49)
             && origin != "profile_import"
         {
             self.queue_received_media(account, &id)?;
         }
-        self.store.append_event_once(account,&format!("message:{id}"),"message.committed",&json!({"messageId":id,"threadId":message.peer,"origin":origin,"direction":if message.outgoing{"outgoing"}else{"incoming"}}))?;
+        if !defer_commit {
+            self.store.append_event_once(account,&format!("message:{id}"),"message.committed",&json!({"messageId":id,"threadId":message.peer,"origin":origin,"direction":if message.outgoing{"outgoing"}else{"incoming"}}))?;
+        }
         self.store.put_runtime(account, receipt, b"1")?;
         Ok(())
     }

@@ -2018,8 +2018,8 @@ export type NativeEvent = {
  */
 cursor: string,
 /**
- * Kind of event, such as `message.committed`, `thread.updated`, `group.updated`,
- * `operation.updated` or `send.updated`.
+ * Kind of event, such as `message.committed`, `message.updated`, `thread.updated`,
+ * `group.updated`, `operation.updated` or `send.updated`.
  */
 kind: string,
 /**

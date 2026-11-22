@@ -1630,7 +1630,7 @@ impl Core {
             ),
         })
     }
-    fn media_network_suspended(&self, account: &str) -> Result<bool> {
+    pub(super) fn media_network_suspended(&self, account: &str) -> Result<bool> {
         let disconnected =
             self.store.runtime(account, "desired")?.as_deref() == Some(b"disconnected");
         let auto_disabled = self.store.runtime(account, "auto-connect")?.as_deref() == Some(b"0")

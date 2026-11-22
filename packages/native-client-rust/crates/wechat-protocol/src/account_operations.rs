@@ -73,6 +73,18 @@ impl NativeClient {
         .await
     }
 
+    /// Fetch one chunk of an oversized application-message attachment through CGI 221.
+    pub async fn download_app_attach_chunk(
+        &self,
+        request: &crate::AppAttachRequest,
+    ) -> Result<crate::AppAttachChunk> {
+        let request = request.clone();
+        self.account_request(move |transport, state, _| {
+            transport.download_app_attach_chunk_snapshot(state, &request)
+        })
+        .await
+    }
+
     pub async fn cdn_config(&self) -> Result<crate::media::CdnConfig> {
         self.account_request(|transport, state, _| transport.cdn_config_snapshot(state))
             .await

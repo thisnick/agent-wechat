@@ -337,10 +337,12 @@ pub(crate) fn normalized_message(
             let stored = msg.local_type.parse::<u64>().unwrap_or(0) >> 32;
             if stored > 0 {
                 Some(stored)
-            } else if forwarded.is_some() {
-                Some(19)
+            } else if let Some(app) = app.as_ref() {
+                Some(app.subtype as u64)
+            } else if let Some((subtype, _)) = forwarded.as_ref() {
+                Some(*subtype)
             } else {
-                app.as_ref().map(|a| a.subtype as u64)
+                None
             }
         })
         .flatten();
@@ -356,8 +358,8 @@ pub(crate) fn normalized_message(
     if let Some(body) = app.as_ref().and_then(|a| a.text.as_ref()) {
         text = Some(body.clone());
     }
-    if forwarded.is_some() {
-        text = forwarded;
+    if let Some((_, body)) = forwarded {
+        text = Some(body);
     }
     // System notices may carry a transport peer in the official row. That
     // peer is not the author of the notice. Recall normalization separately

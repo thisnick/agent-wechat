@@ -261,3 +261,48 @@ fn total_xml_parse_budget_is_bounded() {
     assert!(renderer.output.ends_with(TRUNCATED));
     assert!(parse(&" ".repeat(MAX_XML_BYTES + 1)).is_none());
 }
+
+#[test]
+fn big_xml_stub_with_realinnertype_19_renders_explicit_unavailable_body() {
+    let stub = "<msg><appmsg><title>Chat History for Team</title><des>Alice: first line excerpt</des><url>https://example.invalid/upgrade</url><type>40</type><xmlfulllen>62934</xmlfulllen><realinnertype>19</realinnertype></appmsg></msg>";
+    assert_eq!(
+        render_big_xml(stub).unwrap(),
+        "[Chat History] Chat History for Team\nAlice: first line excerpt\n[Chat History unavailable]"
+    );
+
+    let title_only = "<msg><appmsg><title>Chat History</title><type>40</type><realinnertype>19</realinnertype></appmsg></msg>";
+    assert_eq!(
+        render_big_xml(title_only).unwrap(),
+        "[Chat History] Chat History\n[Chat History unavailable]"
+    );
+
+    let empty = "<msg><appmsg><type>40</type><realinnertype>19</realinnertype></appmsg></msg>";
+    assert_eq!(render_big_xml(empty).unwrap(), "[Chat History unavailable]");
+
+    let huge = format!(
+        "<msg><appmsg><title>{}</title><des>{}</des><type>40</type><realinnertype>19</realinnertype></appmsg></msg>",
+        "中文🙂".repeat(10_000),
+        "x".repeat(10_000),
+    );
+    let rendered = render_big_xml(&huge).unwrap();
+    assert!(rendered.len() <= MAX_OUTPUT_BYTES);
+    assert!(rendered.ends_with("\n[Chat History unavailable]"));
+}
+
+#[test]
+fn big_xml_inline_record_renders_entries_and_non_19_inner_type_is_ignored() {
+    let inline = format!(
+        "<msg><appmsg><title>Fixture</title><type>40</type><realinnertype>19</realinnertype><recorditem>{}</recorditem></appmsg></msg>",
+        escape(&record(&item("Alice", "hello")))
+    );
+    assert_eq!(
+        render_big_xml(&inline).unwrap(),
+        "[Chat History] Fixture\nAlice: hello"
+    );
+
+    let note = "<msg><appmsg><title>Favorite Note</title><type>40</type><realinnertype>24</realinnertype></appmsg></msg>";
+    assert!(render_big_xml(note).is_none());
+
+    let unknown = "<msg><appmsg><title>Opaque</title><type>40</type></appmsg></msg>";
+    assert!(render_big_xml(unknown).is_none());
+}
