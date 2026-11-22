@@ -4,7 +4,7 @@
 //! not spawn FFmpeg. Transcoders run only when the local client and remote wire
 //! codec differ (for example H.264 or JPEG bridged to WeChat H.265/HEVC).
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -289,6 +289,17 @@ impl VideoTranscoder {
             !input.is_empty() && input.len() <= MAX_TRANSCODE_INPUT_BYTES,
             "Invalid video transcode input size"
         );
+        if self
+            .child
+            .as_mut()
+            .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_)) | Err(_)))
+            || self
+                .reader
+                .as_ref()
+                .is_some_and(|reader| reader.is_finished())
+        {
+            bail!("Video transcoder worker exited");
+        }
         let stdin = self
             .stdin
             .as_mut()
@@ -306,31 +317,6 @@ impl VideoTranscoder {
     /// Non-blocking poll for the next completed output frame.
     pub fn try_recv(&mut self) -> Option<EncodedVideoFrame> {
         self.rx.as_ref().and_then(|rx| rx.try_recv().ok())
-    }
-
-    /// Non-blocking poll that distinguishes an empty queue (`Err(TryRecvError::Empty)`)
-    /// from an exited or disconnected transcoder (`Err(TryRecvError::Disconnected)`).
-    pub fn try_recv_checked(
-        &mut self,
-    ) -> std::result::Result<EncodedVideoFrame, mpsc::TryRecvError> {
-        match self.rx.as_ref() {
-            Some(rx) => match rx.try_recv() {
-                Ok(frame) => Ok(frame),
-                Err(mpsc::TryRecvError::Empty) => {
-                    let exited = self
-                        .child
-                        .as_mut()
-                        .is_none_or(|c| matches!(c.try_wait(), Ok(Some(_)) | Err(_)));
-                    if exited {
-                        Err(mpsc::TryRecvError::Disconnected)
-                    } else {
-                        Err(mpsc::TryRecvError::Empty)
-                    }
-                }
-                Err(mpsc::TryRecvError::Disconnected) => Err(mpsc::TryRecvError::Disconnected),
-            },
-            None => Err(mpsc::TryRecvError::Disconnected),
-        }
     }
 
     /// Blocking receive for the next completed output frame until the stream closes.

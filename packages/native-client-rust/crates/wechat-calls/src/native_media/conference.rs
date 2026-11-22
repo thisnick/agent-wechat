@@ -133,7 +133,6 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
     let mut video_tx_exhausted = false;
     let mut last_vf_tx: Option<Instant> = None;
     let mut last_irequest_tx = BTreeMap::<u16, Instant>::new();
-    let mut last_rx_video_stream_id = BTreeMap::<u16, u8>::new();
     let mut pending_local_irequest: Option<u16> = None;
     let mut irequest_seq = 1u32;
     let mut last_p2s_tx: Option<Instant> = None;
@@ -349,9 +348,9 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                                 .is_none_or(|t| t.elapsed() >= Duration::from_millis(250))
                             {
                                 pending_local_irequest = None;
-                                let stream_id = last_rx_video_stream_id
+                                let stream_id = receivers
                                     .get(&target_member)
-                                    .copied()
+                                    .and_then(|bound| bound.receiver.last_video_stream_id())
                                     .unwrap_or(1);
                                 let req = encode_irequest(
                                     selected.own_member,
@@ -490,9 +489,6 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                                 elapsed,
                                 bound.active && bound.microphone_enabled != Some(false),
                             )?;
-                            if let Some(stream_id) = consumed.video_stream_id {
-                                last_rx_video_stream_id.insert(member, stream_id);
-                            }
                             if consumed.peer_requested_keyframe {
                                 host.on_peer_keyframe_requested();
                             }
@@ -503,7 +499,7 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                             {
                                 if let Some(sender) = &mut app_sender {
                                     let stream_id =
-                                        last_rx_video_stream_id.get(&member).copied().unwrap_or(1);
+                                        bound.receiver.last_video_stream_id().unwrap_or(1);
                                     let req = encode_irequest(
                                         selected.own_member,
                                         member,

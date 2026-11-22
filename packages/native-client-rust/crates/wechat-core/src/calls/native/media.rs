@@ -326,45 +326,39 @@ fn run_video_rx_worker(
         // without waiting for another inbound H.265/H.264 frame to arrive.
         for (&track_id, state) in &mut tracks {
             let generation = state.generation;
-            let mut failed = false;
-            while let Some(transcoder) = state.transcoder.as_mut() {
-                match transcoder.try_recv_checked() {
-                    Ok(encoded) => {
-                        state.frames_pushed_since_output = 0;
-                        let (ts_us, rot) = state
-                            .pending_meta
-                            .pop_front()
-                            .unwrap_or((state.last_timestamp_us, state.rotation));
-                        let mut flags = video_rotation_flags(rot);
-                        if encoded.is_keyframe {
-                            flags |= FLAG_KEYFRAME;
-                        }
-                        if encoded.has_codec_config {
-                            flags |= FLAG_CODEC_CONFIG;
-                        }
-                        let seq = state.sequence;
-                        state.sequence = state.sequence.saturating_add(1);
-                        let _ = runtime.block_on(sink.video_frame(
-                            track_id,
-                            generation,
-                            target_format.codec,
-                            flags,
-                            seq,
-                            ts_us,
-                            &encoded.bytes,
-                        ));
-                    }
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => {
-                        failed = true;
-                        break;
-                    }
+            while let Some(encoded) = state
+                .transcoder
+                .as_mut()
+                .and_then(VideoTranscoder::try_recv)
+            {
+                state.frames_pushed_since_output = 0;
+                let (ts_us, rot) = state
+                    .pending_meta
+                    .pop_front()
+                    .unwrap_or((state.last_timestamp_us, state.rotation));
+                let mut flags = video_rotation_flags(rot);
+                if encoded.is_keyframe {
+                    flags |= FLAG_KEYFRAME;
                 }
+                if encoded.has_codec_config {
+                    flags |= FLAG_CODEC_CONFIG;
+                }
+                let seq = state.sequence;
+                state.sequence = state.sequence.saturating_add(1);
+                let _ = runtime.block_on(sink.video_frame(
+                    track_id,
+                    generation,
+                    target_format.codec,
+                    flags,
+                    seq,
+                    ts_us,
+                    &encoded.bytes,
+                ));
             }
-            if failed || state.frames_pushed_since_output >= MAX_STALLED_RX_TRANSCODE_FRAMES {
+            if state.frames_pushed_since_output >= MAX_STALLED_RX_TRANSCODE_FRAMES {
                 if std::env::var("WX_CALL_VIDEO_TRACE").as_deref() == Ok("1") {
                     eprintln!(
-                        "[wechat-call-video] rx transcoder reset track={track_id} failed={failed} stalled_pushes={}",
+                        "[wechat-call-video] rx transcoder reset track={track_id} stalled_pushes={}",
                         state.frames_pushed_since_output
                     );
                 }

@@ -24,8 +24,6 @@ pub struct ConferenceConsumeOutput {
     pub audio: Vec<DecodedAudio>,
     /// Reassembled video frame completed by this datagram, if any.
     pub video: Option<ReassembledVideoFrame>,
-    /// Video stream ID (`packed_kind & 0x0f`) observed on an inbound video datagram.
-    pub video_stream_id: Option<u8>,
     /// True when the remote peer requested a keyframe (`0x66 IRequest`).
     pub peer_requested_keyframe: bool,
     /// True when a video frame assembly dropped and the local side should send `0x66 IRequest`.
@@ -72,6 +70,7 @@ pub struct ConferenceReceiver {
     decoder: OpusDecoder,
     order: RtpOrder,
     video: RsmVideoReassembler,
+    last_video_stream_id: Option<u8>,
     pub report: StreamReport,
     timeline: Option<(u32, u64)>,
     sequence: u64,
@@ -94,11 +93,17 @@ impl ConferenceReceiver {
             decoder: OpusDecoder::new(AudioFormat::new(16000, 1, 20)?)?,
             order: RtpOrder::new(),
             video: RsmVideoReassembler::new(),
+            last_video_stream_id: None,
             report: StreamReport::default(),
             timeline: None,
             sequence: 0,
             decoding: true,
         })
+    }
+
+    /// Last video stream ID observed on an authenticated inbound `RsmVideo` packet from this member.
+    pub(crate) fn last_video_stream_id(&self) -> Option<u8> {
+        self.last_video_stream_id
     }
     pub fn consume(
         &mut self,
@@ -157,10 +162,10 @@ impl ConferenceReceiver {
                         self.report.feedback_packets += 1;
                     }
                     VideoChannelPayload::RsmVideo(raw) => {
-                        out.video_stream_id = Some(opened.packed_kind & 0x0f);
+                        self.last_video_stream_id = Some(opened.packed_kind & 0x0f);
                         match self.video.ingest(raw) {
                             Ok(RsmIngestOutcome::Frame(frame)) => {
-                                out.video_stream_id = Some(frame.stream_id);
+                                self.last_video_stream_id = Some(frame.stream_id);
                                 if frame.prior_frames_dropped && !frame.is_keyframe {
                                     out.need_keyframe = true;
                                 }
@@ -320,6 +325,7 @@ impl ConferenceReceiver {
     /// and the shared presentation clock, while discarding codec history.
     pub fn reset_decoder(&mut self) -> Result<()> {
         self.video.reset();
+        self.last_video_stream_id = None;
         self.decoder.reset().map_err(Into::into)
     }
 }
@@ -376,18 +382,18 @@ mod tests {
             )
             .unwrap();
 
-        // Peer IRequest rewritten by relay onto 0x21 (carrying our stream 1) must not set video_stream_id.
+        // Peer IRequest rewritten by relay onto 0x21 (carrying our stream 1) must not set last_video_stream_id.
         let ireq = encode_irequest(1, 0, 1, 100, 1);
         let ireq_pkt = peer_tx.seal_video(epoch, 100, 1, false, &ireq).unwrap();
         let out_ireq = rx.consume_media(epoch, &ireq_pkt, 100, true).unwrap();
         assert!(out_ireq.peer_requested_keyframe);
-        assert_eq!(out_ireq.video_stream_id, None);
+        assert_eq!(rx.last_video_stream_id(), None);
 
-        // Peer NACK on 0x21 must not set video_stream_id.
+        // Peer NACK on 0x21 must not set last_video_stream_id.
         let nack = [0x06, 1, 0, 0, 0, 0];
         let nack_pkt = peer_tx.seal_video(epoch, 120, 1, false, &nack).unwrap();
-        let out_nack = rx.consume_media(epoch, &nack_pkt, 120, true).unwrap();
-        assert_eq!(out_nack.video_stream_id, None);
+        let _out_nack = rx.consume_media(epoch, &nack_pkt, 120, true).unwrap();
+        assert_eq!(rx.last_video_stream_id(), None);
         assert_eq!(rx.report.feedback_packets, 1);
 
         // Actual RSM video packet on stream 2 records stream 2.
@@ -397,7 +403,6 @@ mod tests {
         let chunks = packetizer
             .packetize(VideoWireCodec::H265, &annexb, 140, 15, 350)
             .unwrap();
-        let mut saw_stream = None;
         let mut saw_frame = false;
         for (idx, chunk) in chunks.iter().enumerate() {
             let pkt = peer_tx
@@ -406,15 +411,12 @@ mod tests {
             let out = rx
                 .consume_media(epoch, &pkt, 140 + idx as u64, true)
                 .unwrap();
-            if out.video_stream_id.is_some() {
-                saw_stream = out.video_stream_id;
-            }
             if let Some(frame) = out.video {
                 assert_eq!(frame.stream_id, 2);
                 saw_frame = true;
             }
         }
-        assert_eq!(saw_stream, Some(2));
+        assert_eq!(rx.last_video_stream_id(), Some(2));
         assert!(saw_frame);
     }
 }
