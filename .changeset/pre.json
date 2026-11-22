@@ -11,10 +11,16 @@
     "@agent-wechat/shared": "2.2.0"
   },
   "changesets": [
+    "big-xml-forwarded-cards",
     "calls-shared-media-client",
     "calls-stage3-desktop",
     "calls-stage3-ui",
+    "consistent-call-header-action-spacing",
+    "fix-call-search-zh",
+    "fix-video-calls-reliability-and-preview",
+    "github-star-support-prompt",
     "native-video-calls-protocol-v3",
-    "receive-vweixinf-stickers"
+    "receive-vweixinf-stickers",
+    "wecom-tp-media-downloads"
   ]
 }

@@ -1,5 +1,27 @@
 # @agent-wechat/rust-crates
 
+## 3.0.0-beta.1
+
+### Minor Changes
+
+- [#653](https://github.com/thisnick/agent-wechat/pull/653) [`e70b27a`](https://github.com/thisnick/agent-wechat/commit/e70b27ae1286fcdae13a79cce1b54908e8acacf1) Thanks [@thisnick](https://github.com/thisnick)! - Expand oversized merged-forward chat history cards arriving as app message subtype `40` (`49:40`) in place, and show an explicit unavailable fallback when expansion cannot complete.
+
+  - Add CGI `221` (`downloadappattach`) chunked download support to `wechat-protocol` (`AppAttachRequest`, `AppAttachChunk`, `download_app_attach_chunk`, `Service::AppAttachment`) and in-place subtype-`40` expansion updates to `wechat-profile` (`AppMessageExpansion`, `apply_app_message_expansion`).
+  - Automatically download and expand incoming `49:40` messages in `wechat-core`, rewriting the official `Msg_*` row to its inner subtype (such as `49:19`) and emitting `message.updated` if a later retry succeeds after an initial failure.
+  - Render unexpanded `49:40` forwarded cards with an explicit `[Chat History unavailable]` fallback instead of `body: null` across the daemon API, OpenClaw extension, and browser client UI, and allow quoting expanded `49:19` cards up to the 1 MiB forwarded-XML limit.
+
+- [#660](https://github.com/thisnick/agent-wechat/pull/660) [`7c2fa97`](https://github.com/thisnick/agent-wechat/commit/7c2fa97ac5569d66336e87a5280eafe536a69067) Thanks [@thisnick](https://github.com/thisnick)! - Support downloading Enterprise WeChat (WeCom) encrypted HTTP media (`tpurl`, `tphdurl`, `tpthumburl`, `tpvideourl`) for images, files, videos, stickers, quoted WeCom stickers, and `@im.chatroom` external groups (including live sync projection).
+
+### Patch Changes
+
+- [#661](https://github.com/thisnick/agent-wechat/pull/661) [`c38356d`](https://github.com/thisnick/agent-wechat/commit/c38356da36129e6dc5fc8323d1afc5c81575d00c) Thanks [@thisnick](https://github.com/thisnick)! - Fix video calling orientation, conference join/create reliability, local preview smoothness, incoming CLI/transcoded video recovery, and OpenClaw call-end media teardown:
+
+  - Pre-rotate outgoing call video 90° CCW across native capture (`LocalVideoCapture`), browser WebCodecs H.264, and daemon TX transcoding while signaling wire `orientation = 1` (+90° CW) in both `EncFecHeader` and `workMode = 3` virtual-frame metadata packets (`pkg_seq = 0`, `hdr[12] = 0x07`, `hdr[15] = 0x00`, `VideoPktExtHeader` fields `1..=9` and `16` with `f2 = 0`), with desktop `SelfViewDecoder` undoing the rotation for upright local self-view so outgoing video displays upright on Android, iOS/iPadOS, Official Linux, and native clients.
+  - Fix conference media mutex starvation by releasing the conference roster lock before media encoding/decoding and UDP reads, allow `connected()` to race ahead of `Admitted` without regressing state, accept initial `sequence = 0` and proto3-omitted zero values in `AVMemberList`, preserve conference `video_flags = 100`, add periodic UDP relay check-in retransmits and bounded `SubscribeVideo` retries, and hide the desktop self-view corner tile until the call is connected.
+  - Reduce desktop camera preview and in-call self-view lag with event-driven drop-oldest MJPEG capture (`480x360 @ 24 fps`, `-fflags nobuffer -flags low_delay`), low-latency single-threaded `SelfViewDecoder` without `fps=10` rate-conversion buffering, and single-in-flight `createImageBitmap` canvas coalescing.
+  - Prevent incoming transcoded video (`wx calls monitor` / JPEG clients) from stalling on `Waiting for video...` by caching codec parameter sets (`VPS`/`SPS`/`PPS`), requiring parameter sets before latching the keyframe gate, resetting exited or stalled FFmpeg transcoders, upgrading `wechat-calls` JPEG extraction to segment-aware marker scanning, tracking the peer's observed `stream_id` for `IRequest`, and sending bounded initial keyframe requests.
+  - Avoid spurious `needs_review` escalation in OpenClaw `CallsService` when `media_closed` races slightly ahead of a concurrent `call.state(ended)` control event.
+
 ## 3.0.0-beta.0
 
 ### Major Changes
