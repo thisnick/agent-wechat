@@ -1,6 +1,7 @@
 import {
   NativeWeChatClient,
   type NativeCallWebSocketFactory,
+  type NativeIdentity,
   type NativeOperation,
   type NativeMessage,
   type NativeStatus,
@@ -36,6 +37,8 @@ export type Connection = {
   endpoint: string;
   /** The hub's stable identity; the first segment of every route. */
   serverId: string;
+  /** Daemon version and build target reported by `/v1/status`. */
+  hubVersion?: NativeIdentity;
   loginAttempt: (account: string) => LoginAttempt;
   mediaOutbox: (account: string) => MediaOutbox;
   attachmentDrafts: AttachmentDrafts;
@@ -294,6 +297,7 @@ export async function connect(
     simulator,
     endpoint: client.baseUrl.origin,
     serverId: status.serverId,
+    hubVersion: status.version,
     close() {
       stopSignOut();
       stopCache();

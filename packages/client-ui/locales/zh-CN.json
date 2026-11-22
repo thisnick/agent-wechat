@@ -1101,5 +1101,28 @@
     "languageSystem": "跟随系统",
     "projectLinks": "项目链接",
     "simulator": "模拟器"
+  },
+  "supportPrompt": {
+    "alreadyStarred": "已经 Star 过",
+    "askDescription": "你的反馈能帮我们把客户端做得更好。",
+    "askNegative": "还有问题",
+    "askPositive": "挺好用的",
+    "askTitle": "Agent WeChat 用着顺手吗？",
+    "dismiss": "不再提示",
+    "issueAction": "提交 GitHub Issue",
+    "issueDescription": "欢迎在 GitHub 提一个 Issue，方便我们尽快排查修复。",
+    "issueTitle": "抱歉体验不够顺畅",
+    "notNow": "暂时不用",
+    "regionLabel": "反馈与支持",
+    "reportIssue": "反馈问题",
+    "settingsDescription": "MIT 开源协议，随时欢迎点 Star 或反馈问题。",
+    "settingsTitle": "GitHub 开源仓库",
+    "starAction": "去 GitHub 点 Star",
+    "starDescription": "去 GitHub 点个 Star，能让更多人发现这个开源项目。",
+    "starTitle": "很高兴帮到你！",
+    "thanksAlreadyTitle": "谢谢你的 Star！",
+    "thanksIssueTitle": "感谢反馈",
+    "thanksStarDescription": "之后不会再弹出此提示。",
+    "thanksStarTitle": "感谢支持！"
   }
 }

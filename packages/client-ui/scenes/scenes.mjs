@@ -2255,4 +2255,61 @@ scenes.push(
       await expect(page.getByRole("button", { name: "Video call", exact: true })).toBeDisabled();
     },
   },
+  {
+    name: "support-prompt",
+    route: "chat",
+    description: "The top-right check-in card over a direct chat asking whether the user is enjoying Agent WeChat.",
+    viewports: ["desktop", "narrow"],
+    setup: standardWorld,
+    target: (world) => ({ account: ACCOUNT.id, thread: world.mei }),
+    prepare: async ({ page }) => {
+      await page.addInitScript(() => {
+        globalThis.__agentWechatSupportPromptPreview = "ask";
+      });
+    },
+    ready: async ({ page, expect }) => {
+      await expect(page.getByRole("region", { name: "Feedback and support" })).toBeVisible();
+      await expect(page.getByText("Enjoying Agent WeChat?")).toBeVisible();
+    },
+  },
+  {
+    name: "support-prompt-star",
+    route: "chat",
+    description: "The positive follow-up step inviting the user to star Agent WeChat on GitHub or mark it as already starred.",
+    viewports: ["desktop", "narrow"],
+    setup: standardWorld,
+    target: (world) => ({ account: ACCOUNT.id, thread: world.mei }),
+    prepare: async ({ page }) => {
+      await page.addInitScript(() => {
+        globalThis.__agentWechatSupportPromptPreview = "ask";
+      });
+    },
+    ready: async ({ page, expect }) => {
+      await expect(page.getByRole("button", { name: "Yes, it’s great" })).toBeVisible();
+    },
+    actions: async ({ page, expect }) => {
+      await page.getByRole("button", { name: "Yes, it’s great" }).click();
+      await expect(page.getByRole("link", { name: "Star on GitHub" })).toBeVisible();
+    },
+  },
+  {
+    name: "support-prompt-issue",
+    route: "chat",
+    description: "The issue follow-up step linking to a GitHub bug report pre-filled with app version and platform.",
+    viewports: ["desktop"],
+    setup: standardWorld,
+    target: (world) => ({ account: ACCOUNT.id, thread: world.mei }),
+    prepare: async ({ page }) => {
+      await page.addInitScript(() => {
+        globalThis.__agentWechatSupportPromptPreview = "ask";
+      });
+    },
+    ready: async ({ page, expect }) => {
+      await expect(page.getByRole("button", { name: "Needs work" })).toBeVisible();
+    },
+    actions: async ({ page, expect }) => {
+      await page.getByRole("button", { name: "Needs work" }).click();
+      await expect(page.getByRole("link", { name: "Open GitHub Issue" })).toBeVisible();
+    },
+  },
 );
