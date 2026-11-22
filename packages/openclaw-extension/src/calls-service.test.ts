@@ -17,10 +17,11 @@ import { CallPcmOutput } from "./calls-audio.ts";
 import { CallAudioTrace } from "./calls-audio-trace.ts";
 
 class Queue<T> implements AsyncIterableIterator<T> {
-  values: T[] = []; waiter?: (value: IteratorResult<T>) => void; closed = false;
-  push(value: T) { if (this.waiter) { const waiter = this.waiter; this.waiter = undefined; waiter({ done: false, value }); } else this.values.push(value); }
-  next(): Promise<IteratorResult<T>> { const value = this.values.shift(); if (value) return Promise.resolve({ done: false, value }); if (this.closed) return Promise.resolve({ done: true, value: undefined }); return new Promise(resolve => { this.waiter = resolve; }); }
-  close() { this.closed = true; this.waiter?.({ done: true, value: undefined }); this.waiter = undefined; }
+  values: T[] = []; waiter?: (value: IteratorResult<T>) => void; rejecter?: (error: Error) => void; closed = false; failure?: Error;
+  push(value: T) { if (this.waiter) { const waiter = this.waiter; this.waiter = undefined; this.rejecter = undefined; waiter({ done: false, value }); } else this.values.push(value); }
+  next(): Promise<IteratorResult<T>> { const value = this.values.shift(); if (value) return Promise.resolve({ done: false, value }); if (this.failure) return Promise.reject(this.failure); if (this.closed) return Promise.resolve({ done: true, value: undefined }); return new Promise((resolve, reject) => { this.waiter = resolve; this.rejecter = reject; }); }
+  close() { this.closed = true; this.waiter?.({ done: true, value: undefined }); this.waiter = undefined; this.rejecter = undefined; }
+  fail(error: Error) { this.closed = true; this.failure = error; this.rejecter?.(error); this.waiter = undefined; this.rejecter = undefined; }
   [Symbol.asyncIterator]() { return this; }
 }
 const format = { sampleRate: 16000, channels: 1, frameMs: 20 };
@@ -40,7 +41,7 @@ class Media implements CallMediaPort {
   receiveTracks: CallAudioTrack[] = [{ media: "audio", id: 2, generation: 1, direction: "receive", format }];
   tracks() { return { sendTrack: { media: "audio" as const, id: 1, generation: this.generation, direction: "send" as const, format }, receiveTracks: structuredClone(this.receiveTracks) }; }
   frames() { return this.input; }
-  sendPcm(samples: Int16Array, generation: number) { if (this.closed || this.stopped) throw Error("Closed"); this.sent.push({ generation, samples: samples.slice() }); }
+  sendPcm(samples: Int16Array, generation: number) { if (this.closed || this.stopped) throw new NativeCallError("media_not_ready"); this.sent.push({ generation, samples: samples.slice() }); }
   stopAudio() { this.stopped = true; this.input.values = []; }
   close() { this.closed = true; this.input.close(); }
 }
@@ -1085,4 +1086,73 @@ test("protocol v3 audio-only OpenClaw ignores video offers and stays healthy alo
   await delay(0); now += 40;
   await until(() => voice.state.incoming.some(bytes => bytes.readInt16LE(0) === 1400));
   assert.equal(service.status().participants?.find(member => member.participantId === "a")?.cameraEnabled, true);
+});
+
+test("media_closed arriving just before control call.state ended returns cleanly to available", async t => {
+  const { service, client } = await fixture();
+  t.after(() => service.stop());
+  await service.dial("allowed-peer", { assertCurrent() {} });
+  await until(() => client.attaches === 1);
+
+  // Daemon terminal_locked() closes the media socket right alongside broadcasting
+  // call.state(ended) on control; simulate media closing ahead of control across a
+  // CallPcmOutput 20 ms tick while media.closed is set just like NativeCallMediaClient.
+  client.media.closed = true;
+  client.media.input.fail(new NativeCallError("media_closed"));
+  await delay(40);
+  client.eventsQueue.push({ type: "call.state", call: { ...view("dial", "ended"), direction: "outgoing", revision: 3 } });
+  client.eventsQueue.push({ type: "calls.availability", availability: { busy: false, ownedByThisClient: false } });
+  await until(() => service.status().state === "available");
+  assert.equal(client.ends, 0);
+  assert.equal(client.closed, false);
+});
+
+test("output media_not_ready racing a concurrent terminal call.state ended returns cleanly to available", async t => {
+  const { service, client } = await fixture();
+  t.after(() => service.stop());
+  await service.dial("allowed-peer", { assertCurrent() {} });
+  await until(() => client.attaches === 1);
+
+  // Simulate CallPcmOutput ticking while the media socket is closing before
+  // media.frames() observes media_closed or control delivers call.state(ended).
+  client.media.closed = true;
+  await delay(40);
+  client.eventsQueue.push({ type: "call.state", call: { ...view("dial", "ended"), direction: "outgoing", revision: 3 } });
+  client.eventsQueue.push({ type: "calls.availability", availability: { busy: false, ownedByThisClient: false } });
+  await until(() => service.status().state === "available");
+  assert.equal(client.ends, 0);
+  assert.equal(client.closed, false);
+});
+
+test("hangup racing a concurrent terminal call.state ended does not clobber available into needs_review", async t => {
+  const { service, client } = await fixture();
+  t.after(() => service.stop());
+  await service.dial("allowed-peer", { assertCurrent() {} });
+  await until(() => client.attaches === 1);
+
+  client.end = async () => {
+    client.ends++;
+    client.eventsQueue.push({ type: "call.state", call: { ...view("dial", "ended"), direction: "outgoing", revision: 3 } });
+    client.eventsQueue.push({ type: "calls.availability", availability: { busy: false, ownedByThisClient: false } });
+    throw new NativeCallError("not_owner");
+  };
+  await service.end();
+  await until(() => service.status().state === "available");
+  assert.equal(client.ends, 1);
+  assert.equal(client.closed, false);
+});
+
+test("mid-call media_closed without a terminal control event still requests hangup", async t => {
+  const { service, client } = await fixture();
+  t.after(() => service.stop());
+  await service.dial("allowed-peer", { assertCurrent() {} });
+  await until(() => client.attaches === 1);
+
+  client.media.closed = true;
+  client.media.input.fail(new NativeCallError("media_closed"));
+  await until(() => client.ends === 1);
+  client.eventsQueue.push({ type: "call.state", call: { ...view("dial", "ended"), direction: "outgoing", revision: 3 } });
+  client.eventsQueue.push({ type: "calls.availability", availability: { busy: false, ownedByThisClient: false } });
+  await until(() => service.status().state === "available");
+  assert.equal(client.closed, false);
 });

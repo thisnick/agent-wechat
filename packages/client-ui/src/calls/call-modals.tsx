@@ -56,6 +56,87 @@ export function drawRotatedFrame(
   ctx.restore();
 }
 
+/** Single-in-flight latest-frame JPEG decoder to prevent overlapping Blob/Image pile-ups. */
+function createJpegCanvasRenderer(getCanvas: () => HTMLCanvasElement | null) {
+  let disposed = false;
+  let decoding = false;
+  let generation = 0;
+  let pending: { jpegBytes: Uint8Array; rotationDegrees: 0 | 90 | 180 | 270 } | null = null;
+
+  const decodeNext = () => {
+    if (disposed || decoding || !pending) return;
+    const canvas = getCanvas();
+    if (!canvas) {
+      pending = null;
+      return;
+    }
+    const next = pending;
+    pending = null;
+    decoding = true;
+    const gen = generation;
+    const bytes = new Uint8Array(next.jpegBytes.byteLength);
+    bytes.set(next.jpegBytes);
+    const blob = new Blob([bytes], { type: "image/jpeg" });
+
+    const finish = () => {
+      decoding = false;
+      if (!disposed && pending) {
+        decodeNext();
+      }
+    };
+
+    if (typeof createImageBitmap === "function") {
+      createImageBitmap(blob)
+        .then((bitmap) => {
+          try {
+            const target = getCanvas();
+            if (!disposed && gen === generation && target) {
+              drawRotatedFrame(target, bitmap, bitmap.width, bitmap.height, next.rotationDegrees);
+            }
+          } finally {
+            bitmap.close();
+          }
+        })
+        .catch(() => {})
+        .finally(finish);
+      return;
+    }
+
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const target = getCanvas();
+      if (!disposed && gen === generation && target) {
+        drawRotatedFrame(target, img, img.naturalWidth, img.naturalHeight, next.rotationDegrees);
+      }
+      finish();
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      finish();
+    };
+    img.src = url;
+  };
+
+  return {
+    enqueue(jpegBytes: Uint8Array, rotationDegrees: 0 | 90 | 180 | 270) {
+      if (disposed) return;
+      pending = { jpegBytes, rotationDegrees };
+      decodeNext();
+    },
+    clear() {
+      generation += 1;
+      pending = null;
+    },
+    dispose() {
+      disposed = true;
+      generation += 1;
+      pending = null;
+    },
+  };
+}
+
 /** Subscribes directly to a track's video frames so 15-30 fps rendering bypasses React re-renders. */
 export function RemoteVideoCanvas({
   controller,
@@ -71,19 +152,18 @@ export function RemoteVideoCanvas({
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
-    let disposed = false;
-    let loadSeq = 0;
+    const jpegRenderer = createJpegCanvasRenderer(() => canvasRef.current);
     const renderFrame = (frame: RemoteVideoFrame | null) => {
       const canvas = canvasRef.current;
-      if (!canvas || disposed) return;
+      if (!canvas) return;
       if (!frame) {
-        loadSeq += 1;
+        jpegRenderer.clear();
         const ctx = canvas.getContext("2d");
         ctx?.clearRect(0, 0, canvas.width, canvas.height);
         return;
       }
       if (frame.bitmap) {
-        loadSeq += 1;
+        jpegRenderer.clear();
         drawRotatedFrame(
           canvas,
           frame.bitmap,
@@ -92,34 +172,14 @@ export function RemoteVideoCanvas({
           frame.rotationDegrees,
         );
       } else if (frame.jpegBytes) {
-        const seq = ++loadSeq;
-        const bytes = new Uint8Array(frame.jpegBytes.byteLength);
-        bytes.set(frame.jpegBytes);
-        const blob = new Blob([bytes], { type: "image/jpeg" });
-        const url = URL.createObjectURL(blob);
-        const img = new Image();
-        img.onload = () => {
-          URL.revokeObjectURL(url);
-          if (!disposed && seq === loadSeq && canvasRef.current) {
-            drawRotatedFrame(
-              canvasRef.current,
-              img,
-              img.naturalWidth,
-              img.naturalHeight,
-              frame.rotationDegrees,
-            );
-          }
-        };
-        img.onerror = () => URL.revokeObjectURL(url);
-        img.src = url;
+        jpegRenderer.enqueue(frame.jpegBytes, frame.rotationDegrees);
       }
     };
 
     renderFrame(controller.getRemoteFrame(trackId));
     const unsubscribe = controller.subscribeRemoteFrame(trackId, renderFrame);
     return () => {
-      disposed = true;
-      loadSeq += 1;
+      jpegRenderer.dispose();
       unsubscribe();
     };
   }, [controller, trackId]);
@@ -162,29 +222,12 @@ export function LocalVideoSurface({
 
   useEffect(() => {
     if (!subscribeJpeg || stream) return;
-    let disposed = false;
-    let loadSeq = 0;
+    const jpegRenderer = createJpegCanvasRenderer(() => canvasRef.current);
     const unsubscribe = subscribeJpeg((jpegBytes) => {
-      const canvas = canvasRef.current;
-      if (!canvas || disposed) return;
-      const seq = ++loadSeq;
-      const bytes = new Uint8Array(jpegBytes.byteLength);
-      bytes.set(jpegBytes);
-      const blob = new Blob([bytes], { type: "image/jpeg" });
-      const url = URL.createObjectURL(blob);
-      const img = new Image();
-      img.onload = () => {
-        URL.revokeObjectURL(url);
-        if (!disposed && seq === loadSeq && canvasRef.current) {
-          drawRotatedFrame(canvasRef.current, img, img.naturalWidth, img.naturalHeight, 0);
-        }
-      };
-      img.onerror = () => URL.revokeObjectURL(url);
-      img.src = url;
+      jpegRenderer.enqueue(jpegBytes, 0);
     });
     return () => {
-      disposed = true;
-      loadSeq += 1;
+      jpegRenderer.dispose();
       unsubscribe();
     };
   }, [subscribeJpeg, stream]);

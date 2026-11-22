@@ -501,9 +501,24 @@ impl Ownership {
         if s.attempt != ticket.attempt
             || s.authority != ticket.authority
             || s.id != ticket.call_id
-            || s.pending.as_ref() != Some(ticket)
             || s.invalidated
         {
+            return Err(Error::Stale);
+        }
+        // Media readiness (`connected()`) can win the scheduling race against the
+        // actor's `Admitted` callback for the same Dial/Answer ticket. Never fail
+        // or regress an already-connected call back to Dialing/Answering.
+        if s.pending.is_none()
+            && s.phase == Phase::Connected
+            && matches!(
+                (ticket.operation, phase),
+                (Operation::Dial, Some(Phase::Dialing))
+                    | (Operation::Answer, Some(Phase::Answering))
+            )
+        {
+            return Ok(());
+        }
+        if s.pending.as_ref() != Some(ticket) {
             return Err(Error::Stale);
         }
         if phase.is_some_and(|phase| !matches!(phase, Phase::Uncertain))
@@ -542,19 +557,34 @@ impl Ownership {
     /// attempt identity fences reused IDs and a newer operation such as Cancel.
     pub fn connected(&mut self, ticket: &Ticket) -> Result<(), Error> {
         let s = self.session.as_mut().ok_or(Error::Stale)?;
+        let pending_ok = s.pending.is_none() || s.pending.as_ref() == Some(ticket);
         if s.attempt != ticket.attempt
             || s.authority != ticket.authority
             || s.id != ticket.call_id
             || s.invalidated
-            || s.pending.is_some()
+            || !pending_ok
             || !matches!(ticket.operation, Operation::Dial | Operation::Answer)
             || !matches!(s.phase, Phase::Dialing | Phase::Answering)
+        {
+            return Err(Error::Stale);
+        }
+        if s.pending.is_some()
+            && !s
+                .owner
+                .as_ref()
+                .and_then(|owner| self.clients.get(owner))
+                .is_some_and(|client| {
+                    s.owner_logical_id == Some(client.logical_id)
+                        && client.authority == s.authority
+                        && s.owner_principal.as_deref() == Some(client.principal.as_str())
+                })
         {
             return Err(Error::Stale);
         }
         let revision = s.revision.checked_add(1).ok_or(Error::Capacity)?;
         s.revision = revision;
         s.phase = Phase::Connected;
+        s.pending = None;
         Ok(())
     }
     /// Stop local work without claiming that the remote call has ended.

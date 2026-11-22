@@ -4,7 +4,7 @@
 //! not spawn FFmpeg. Transcoders run only when the local client and remote wire
 //! codec differ (for example H.264 or JPEG bridged to WeChat H.265/HEVC).
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -73,6 +73,10 @@ impl VideoCodecCapabilities {
         if from == to {
             return true;
         }
+        self.can_reencode(from, to)
+    }
+
+    fn can_reencode(&self, from: VideoCodec, to: VideoCodec) -> bool {
         let dec = match from {
             VideoCodec::H265 => self.h265_decode,
             VideoCodec::H264 => self.h264_decode,
@@ -254,8 +258,8 @@ impl VideoTranscoder {
     /// Start a streaming transcoder for `config`.
     pub fn start(config: TranscodeConfig) -> Result<Self> {
         ensure!(
-            config.from != config.to,
-            "Pass-through codecs must not spawn a transcoder"
+            config.from != config.to || config.rotation != VideoRotation::Deg0,
+            "Pass-through codecs without rotation must not spawn a transcoder"
         );
         ensure!(
             (64..=1920).contains(&config.width)
@@ -266,7 +270,7 @@ impl VideoTranscoder {
         );
         let caps = probe_video_capabilities();
         ensure!(
-            caps.can_transcode(config.from, config.to),
+            caps.can_reencode(config.from, config.to),
             "Required FFmpeg video codec unavailable"
         );
         let ffmpeg = caps
@@ -289,6 +293,17 @@ impl VideoTranscoder {
             !input.is_empty() && input.len() <= MAX_TRANSCODE_INPUT_BYTES,
             "Invalid video transcode input size"
         );
+        if self
+            .child
+            .as_mut()
+            .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_)) | Err(_)))
+            || self
+                .reader
+                .as_ref()
+                .is_some_and(|reader| reader.is_finished())
+        {
+            bail!("Video transcoder worker exited");
+        }
         let stdin = self
             .stdin
             .as_mut()
@@ -507,10 +522,15 @@ fn spawn_worker(
         }
     }
 
+    let stderr = if std::env::var("WX_CALL_VIDEO_TRACE").as_deref() == Ok("1") {
+        Stdio::inherit()
+    } else {
+        Stdio::null()
+    };
     let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(stderr)
         .spawn()
         .context("Failed to spawn FFmpeg video transcoder")?;
     let stdin = child
@@ -611,13 +631,112 @@ fn read_output_stream(
 }
 
 fn extract_jpeg_frame(buf: &mut Vec<u8>) -> Option<Vec<u8>> {
-    let start = buf.windows(2).position(|w| w == [0xff, 0xd8])?;
-    if start > 0 {
-        buf.drain(..start);
+    loop {
+        let Some(start) = buf.windows(2).position(|w| w == [0xff, 0xd8]) else {
+            if buf.len() > 1 {
+                let keep = usize::from(*buf.last().unwrap_or(&0) == 0xff);
+                let drop_len = buf.len() - keep;
+                buf.drain(..drop_len);
+            }
+            return None;
+        };
+        if start > 0 {
+            buf.drain(..start);
+        }
+        let mut pos = 2usize;
+        let mut in_scan = false;
+        let mut frame_end = None;
+        let mut invalid = false;
+
+        while pos < buf.len() {
+            if !in_scan {
+                if buf[pos] != 0xff {
+                    invalid = true;
+                    break;
+                }
+                while pos < buf.len() && buf[pos] == 0xff {
+                    pos += 1;
+                }
+                if pos >= buf.len() {
+                    break;
+                }
+                let marker = buf[pos];
+                pos += 1;
+                if marker == 0xd9 {
+                    frame_end = Some(pos);
+                    break;
+                }
+                if marker == 0x00 || marker == 0x01 || (0xd0..=0xd8).contains(&marker) {
+                    continue;
+                }
+                if pos + 2 > buf.len() {
+                    break;
+                }
+                let seg_len = usize::from(u16::from_be_bytes([buf[pos], buf[pos + 1]]));
+                if seg_len < 2 {
+                    invalid = true;
+                    break;
+                }
+                if pos + seg_len > buf.len() {
+                    break;
+                }
+                pos += seg_len;
+                if marker == 0xda {
+                    in_scan = true;
+                }
+            } else {
+                let Some(rel) = buf[pos..].iter().position(|&b| b == 0xff) else {
+                    break;
+                };
+                pos += rel;
+                while pos < buf.len() && buf[pos] == 0xff {
+                    pos += 1;
+                }
+                if pos >= buf.len() {
+                    break;
+                }
+                let marker = buf[pos];
+                pos += 1;
+                if marker == 0x00 || (0xd0..=0xd7).contains(&marker) {
+                    continue;
+                }
+                if marker == 0xd9 {
+                    frame_end = Some(pos);
+                    break;
+                }
+                in_scan = false;
+                if marker != 0x01 && marker != 0xd8 {
+                    if pos + 2 > buf.len() {
+                        break;
+                    }
+                    let seg_len = usize::from(u16::from_be_bytes([buf[pos], buf[pos + 1]]));
+                    if seg_len < 2 {
+                        invalid = true;
+                        break;
+                    }
+                    if pos + seg_len > buf.len() {
+                        break;
+                    }
+                    pos += seg_len;
+                    if marker == 0xda {
+                        in_scan = true;
+                    }
+                }
+            }
+        }
+
+        if let Some(end) = frame_end {
+            return Some(buf.drain(..end).collect());
+        }
+        if invalid {
+            buf.drain(..2);
+            continue;
+        }
+        if buf.len() > MAX_TRANSCODE_BUFFER_BYTES {
+            buf.clear();
+        }
+        return None;
     }
-    let end_rel = buf[2..].windows(2).position(|w| w == [0xff, 0xd9])?;
-    let end = 2 + end_rel + 2;
-    Some(buf.drain(..end).collect())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -890,6 +1009,63 @@ mod tests {
             rot_h > rot_w,
             "expected portrait dimensions after 90° CW rotation, got {rot_w}x{rot_h}"
         );
+
+        // Same-codec rotation (Deg270) is allowed and rotates landscape HEVC into portrait HEVC,
+        // while same-codec Deg0 remains rejected.
+        assert!(VideoTranscoder::start(TranscodeConfig {
+            from: VideoCodec::H265,
+            to: VideoCodec::H265,
+            width: 320,
+            height: 240,
+            fps: 15,
+            bitrate_kbps: 400,
+            rotation: VideoRotation::Deg0,
+        })
+        .is_err());
+
+        let mut rot_hevc = VideoTranscoder::start(TranscodeConfig {
+            from: VideoCodec::H265,
+            to: VideoCodec::H265,
+            width: 320,
+            height: 320,
+            fps: 15,
+            bitrate_kbps: 400,
+            rotation: VideoRotation::Deg270,
+        })
+        .unwrap();
+        for frame in &hevc_frames {
+            rot_hevc.push(&frame.bytes).unwrap();
+        }
+        rot_hevc.finish_input();
+        let mut rot_frames = Vec::new();
+        while let Some(frame) = rot_hevc.recv() {
+            rot_frames.push(frame);
+        }
+        assert!(
+            !rot_frames.is_empty(),
+            "expected rotated HEVC output frames"
+        );
+        let mut check_dec = VideoTranscoder::start(TranscodeConfig {
+            from: VideoCodec::H265,
+            to: VideoCodec::Jpeg,
+            width: 320,
+            height: 320,
+            fps: 15,
+            bitrate_kbps: 400,
+            rotation: VideoRotation::Deg0,
+        })
+        .unwrap();
+        for frame in &rot_frames {
+            check_dec.push(&frame.bytes).unwrap();
+        }
+        check_dec.finish_input();
+        let check_jpg = check_dec.recv().expect("expected decoded rotated JPEG");
+        let (ccw_w, ccw_h) = jpeg_dimensions(&check_jpg.bytes).expect("JPEG SOF dimensions");
+        assert_eq!(
+            (ccw_w, ccw_h),
+            (240, 320),
+            "expected 320x240 landscape rotated 90° CCW to 240x320"
+        );
     }
 
     fn jpeg_dimensions(bytes: &[u8]) -> Option<(u16, u16)> {
@@ -927,5 +1103,23 @@ mod tests {
             i += len;
         }
         None
+    }
+
+    #[test]
+    fn extract_jpeg_frame_ignores_embedded_exif_eoi() {
+        // Synthetic JPEG with APP1 header containing an embedded thumbnail EOI (`ff d9`),
+        // followed by SOS (`ff da`), byte-stuffed scan data (`ff 00`), and the true EOI.
+        let expected = vec![
+            0xff, 0xd8, // SOI
+            0xff, 0xe1, 0x00, 0x06, 0xff, 0xd8, 0xff, 0xd9, // APP1 with embedded SOI+EOI
+            0xff, 0xda, 0x00, 0x04, 0x01, 0x00, // SOS header
+            0x12, 0xff, 0x00, 0x34, // entropy-coded scan bytes
+            0xff, 0xd9, // true EOI
+        ];
+        let mut buf = expected.clone();
+        buf.extend_from_slice(&[0xff, 0xd8, 0xaa]); // trailing partial next frame
+        let extracted = extract_jpeg_frame(&mut buf).expect("complete JPEG");
+        assert_eq!(extracted, expected);
+        assert_eq!(buf, vec![0xff, 0xd8, 0xaa]);
     }
 }

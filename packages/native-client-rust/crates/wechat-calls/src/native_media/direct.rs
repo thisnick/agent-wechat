@@ -118,7 +118,9 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
     let mut rx_order = RtpOrder::new();
     let mut rx_timeline = DirectRxAudioTimeline::new();
     let mut video_rx = RsmVideoReassembler::new();
-    let mut video_tx = RsmVideoPacketizer::new(selected.own_member, 1);
+    // Outgoing wire frames are pre-rotated 90° CCW to match mobile WeChat receivers,
+    // which apply +90° CW display rotation; orientation = 1 signals +90° CW for desktop/native peers.
+    let mut video_tx = RsmVideoPacketizer::new(selected.own_member, 1).with_orientation(1);
     let mut tx_video_queue = TxVideoQueue::new();
     let mut tx_video_packets = VecDeque::<(u32, Vec<u8>)>::new();
     let mut video_tx_exhausted = false;
@@ -126,6 +128,10 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
     let mut last_irequest_tx: Option<Instant> = None;
     let mut pending_local_irequest: Option<u16> = None;
     let mut irequest_seq = 1u32;
+    let mut last_rx_video_stream_id = 1u8;
+    let mut rx_video_seen = false;
+    let mut initial_irequests_sent = 0u8;
+    let connected_at = Instant::now();
     let mut last_p2s_tx: Option<Instant> = None;
     let mut p2s_seq = 1u16;
     let mut last_peer_activity = Instant::now();
@@ -137,6 +143,7 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
     let mut trace_fec_ok = 0u64;
     let mut trace_drops = 0u64;
     let mut trace_last_orient = 0u8;
+    let mut trace_vf_logged = false;
     let media_result = (|| -> Result<()> {
         while host.current() {
             ensure!(
@@ -198,7 +205,22 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                         }
                                         VideoChannelPayload::Nack(_) => {}
                                         VideoChannelPayload::RsmVideo(raw) => {
+                                            last_rx_video_stream_id = opened.packed_kind & 0x0f;
                                             trace_rx_pkts += 1;
+                                            if video_trace
+                                                && !trace_vf_logged
+                                                && raw.len() >= 24
+                                                && (raw[4] >> 2) == 3
+                                                && (raw[4] & 0x03) == 0
+                                            {
+                                                trace_vf_logged = true;
+                                                eprintln!(
+                                                    "[wechat-call-video] rx vf ext_byte={} stream={} hdr={:02x?}",
+                                                    opened.extension_byte(),
+                                                    last_rx_video_stream_id,
+                                                    &raw[..raw.len().min(32)]
+                                                );
+                                            }
                                             let mut need_keyframe = false;
                                             match video_rx.ingest(raw) {
                                                 Ok(RsmIngestOutcome::Frame(frame)) => {
@@ -206,6 +228,8 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                                         host.current(),
                                                         "Call authority revoked before video delivery"
                                                     );
+                                                    last_rx_video_stream_id = frame.stream_id;
+                                                    rx_video_seen = true;
                                                     trace_frames_ok += 1;
                                                     if frame.fec_recovered {
                                                         trace_fec_ok += 1;
@@ -214,6 +238,17 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                                         trace_drops += 1;
                                                     }
                                                     trace_last_orient = frame.orientation;
+                                                    if video_trace && trace_frames_ok <= 3 {
+                                                        eprintln!(
+                                                            "[wechat-call-video] rx frame #{trace_frames_ok} codec={:?} stream={} kf={} cfg={} orient={} bytes={}",
+                                                            frame.codec,
+                                                            frame.stream_id,
+                                                            frame.is_keyframe,
+                                                            frame.has_codec_config,
+                                                            frame.orientation,
+                                                            frame.payload.len()
+                                                        );
+                                                    }
                                                     if frame.prior_frames_dropped
                                                         && !frame.is_keyframe
                                                     {
@@ -244,7 +279,7 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                                 let req = encode_irequest(
                                                     selected.own_member,
                                                     media.peer_member,
-                                                    opened.packed_kind & 0x0f,
+                                                    last_rx_video_stream_id,
                                                     clock(),
                                                     irequest_seq,
                                                 );
@@ -252,7 +287,7 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                                 if let Ok(datagram) = channel.seal_video_rtcp(
                                                     epoch,
                                                     clock(),
-                                                    opened.packed_kind & 0x0f,
+                                                    last_rx_video_stream_id,
                                                     &req,
                                                 ) {
                                                     let _ = host.submit(
@@ -341,17 +376,28 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                 if pending_local_irequest.is_none() {
                     pending_local_irequest = host.take_local_keyframe_request();
                 }
+                if pending_local_irequest.is_none()
+                    && !rx_video_seen
+                    && initial_irequests_sent < 6
+                    && connected_at.elapsed() >= Duration::from_millis(500)
+                    && last_irequest_tx.is_none_or(|t| t.elapsed() >= Duration::from_millis(1500))
+                {
+                    pending_local_irequest = Some(media.peer_member);
+                    initial_irequests_sent += 1;
+                }
                 if last_irequest_tx.is_none_or(|t| t.elapsed() >= Duration::from_millis(250)) {
                     if let Some(target_member) = pending_local_irequest.take() {
                         let req = encode_irequest(
                             selected.own_member,
                             target_member,
-                            1,
+                            last_rx_video_stream_id,
                             clock(),
                             irequest_seq,
                         );
                         irequest_seq = irequest_seq.wrapping_add(1);
-                        if let Ok(datagram) = channel.seal_video_rtcp(epoch, clock(), 1, &req) {
+                        if let Ok(datagram) =
+                            channel.seal_video_rtcp(epoch, clock(), last_rx_video_stream_id, &req)
+                        {
                             let _ = host.submit(&socket, endpoint, &datagram, &[]);
                             last_irequest_tx = Some(Instant::now());
                         }
@@ -378,18 +424,6 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                             if let Some(frame) =
                                 tx_video_queue.next_frame(video_rx_ch, current_vgen)
                             {
-                                if last_vf_tx
-                                    .is_none_or(|t| t.elapsed() >= Duration::from_millis(500))
-                                {
-                                    if let Ok(vf) = video_tx.build_orientation_metadata_packet(
-                                        frame.codec,
-                                        frame.timestamp_ms,
-                                        frame.fps,
-                                    ) {
-                                        tx_video_packets.push_back((current_vgen, vf));
-                                        last_vf_tx = Some(Instant::now());
-                                    }
-                                }
                                 if let Ok(pkts) = video_tx.packetize(
                                     frame.codec,
                                     &frame.annexb,
@@ -399,6 +433,18 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                 ) {
                                     for pkt in pkts {
                                         tx_video_packets.push_back((current_vgen, pkt));
+                                    }
+                                    if last_vf_tx
+                                        .is_none_or(|t| t.elapsed() >= Duration::from_millis(500))
+                                    {
+                                        if let Ok(vf) = video_tx.build_orientation_metadata_packet(
+                                            frame.codec,
+                                            frame.timestamp_ms,
+                                            frame.fps,
+                                        ) {
+                                            tx_video_packets.push_back((current_vgen, vf));
+                                            last_vf_tx = Some(Instant::now());
+                                        }
                                     }
                                 }
                             }

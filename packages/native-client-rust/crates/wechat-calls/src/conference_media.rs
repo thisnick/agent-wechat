@@ -70,6 +70,7 @@ pub struct ConferenceReceiver {
     decoder: OpusDecoder,
     order: RtpOrder,
     video: RsmVideoReassembler,
+    last_video_stream_id: Option<u8>,
     pub report: StreamReport,
     timeline: Option<(u32, u64)>,
     sequence: u64,
@@ -92,11 +93,17 @@ impl ConferenceReceiver {
             decoder: OpusDecoder::new(AudioFormat::new(16000, 1, 20)?)?,
             order: RtpOrder::new(),
             video: RsmVideoReassembler::new(),
+            last_video_stream_id: None,
             report: StreamReport::default(),
             timeline: None,
             sequence: 0,
             decoding: true,
         })
+    }
+
+    /// Last video stream ID observed on an authenticated inbound `RsmVideo` packet from this member.
+    pub(crate) fn last_video_stream_id(&self) -> Option<u8> {
+        self.last_video_stream_id
     }
     pub fn consume(
         &mut self,
@@ -154,18 +161,22 @@ impl ConferenceReceiver {
                     VideoChannelPayload::Nack(_) => {
                         self.report.feedback_packets += 1;
                     }
-                    VideoChannelPayload::RsmVideo(raw) => match self.video.ingest(raw) {
-                        Ok(RsmIngestOutcome::Frame(frame)) => {
-                            if frame.prior_frames_dropped && !frame.is_keyframe {
+                    VideoChannelPayload::RsmVideo(raw) => {
+                        self.last_video_stream_id = Some(opened.packed_kind & 0x0f);
+                        match self.video.ingest(raw) {
+                            Ok(RsmIngestOutcome::Frame(frame)) => {
+                                self.last_video_stream_id = Some(frame.stream_id);
+                                if frame.prior_frames_dropped && !frame.is_keyframe {
+                                    out.need_keyframe = true;
+                                }
+                                out.video = Some(frame);
+                            }
+                            Ok(RsmIngestOutcome::FrameDroppedNeedKeyframe) | Err(_) => {
                                 out.need_keyframe = true;
                             }
-                            out.video = Some(frame);
+                            Ok(RsmIngestOutcome::Pending) => {}
                         }
-                        Ok(RsmIngestOutcome::FrameDroppedNeedKeyframe) | Err(_) => {
-                            out.need_keyframe = true;
-                        }
-                        Ok(RsmIngestOutcome::Pending) => {}
-                    },
+                    }
                 }
             }
             return Ok(out);
@@ -314,11 +325,98 @@ impl ConferenceReceiver {
     /// and the shared presentation clock, while discarding codec history.
     pub fn reset_decoder(&mut self) -> Result<()> {
         self.video.reset();
+        self.last_video_stream_id = None;
         self.decoder.reset().map_err(Into::into)
     }
 }
 impl Drop for ConferenceReceiver {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wechat_protocol::calls::{
+        audio_packet::TransmitScope,
+        video_packet::{encode_irequest, RsmVideoPacketizer, VideoWireCodec},
+    };
+
+    #[test]
+    fn video_stream_id_ignores_irequest_and_nack_and_tracks_rsm_video() {
+        let selected = SelectedRelay {
+            room_id: 42,
+            room_key: 77,
+            own_member: 0,
+            connection_id: 1,
+            endpoint: "127.0.0.1:6000".parse().unwrap(),
+            media_key: zeroize::Zeroizing::new([7; 32]),
+            merge_mode: false,
+        };
+        let epoch = MediaEpoch {
+            account_generation: 1,
+            logout_epoch: 0,
+            call_generation: 1,
+            key_generation: 1,
+        };
+        let mut rx = ConferenceReceiver::new(&selected, 1, epoch).unwrap();
+        let mut peer_tx = Live96::new(
+            [7; 32],
+            77,
+            MediaContext {
+                room_id: 42,
+                own_member: 1,
+                peer_member: 0,
+                connection_id: 1,
+            },
+            epoch,
+        )
+        .unwrap();
+        peer_tx
+            .authorize_transmit(
+                epoch,
+                TransmitScope::LegacyRelayAudio {
+                    key_generation: epoch.key_generation,
+                },
+            )
+            .unwrap();
+
+        // Peer IRequest rewritten by relay onto 0x21 (carrying our stream 1) must not set last_video_stream_id.
+        let ireq = encode_irequest(1, 0, 1, 100, 1);
+        let ireq_pkt = peer_tx.seal_video(epoch, 100, 1, false, &ireq).unwrap();
+        let out_ireq = rx.consume_media(epoch, &ireq_pkt, 100, true).unwrap();
+        assert!(out_ireq.peer_requested_keyframe);
+        assert_eq!(rx.last_video_stream_id(), None);
+
+        // Peer NACK on 0x21 must not set last_video_stream_id.
+        let nack = [0x06, 1, 0, 0, 0, 0];
+        let nack_pkt = peer_tx.seal_video(epoch, 120, 1, false, &nack).unwrap();
+        let _out_nack = rx.consume_media(epoch, &nack_pkt, 120, true).unwrap();
+        assert_eq!(rx.last_video_stream_id(), None);
+        assert_eq!(rx.report.feedback_packets, 1);
+
+        // Actual RSM video packet on stream 2 records stream 2.
+        let mut packetizer = RsmVideoPacketizer::new(1, 2);
+        let mut annexb = vec![0, 0, 0, 1, 0x26, 0x01];
+        annexb.extend_from_slice(&[0x55; 32]);
+        let chunks = packetizer
+            .packetize(VideoWireCodec::H265, &annexb, 140, 15, 350)
+            .unwrap();
+        let mut saw_frame = false;
+        for (idx, chunk) in chunks.iter().enumerate() {
+            let pkt = peer_tx
+                .seal_video(epoch, 140 + idx as u64, 2, true, chunk)
+                .unwrap();
+            let out = rx
+                .consume_media(epoch, &pkt, 140 + idx as u64, true)
+                .unwrap();
+            if let Some(frame) = out.video {
+                assert_eq!(frame.stream_id, 2);
+                saw_frame = true;
+            }
+        }
+        assert_eq!(rx.last_video_stream_id(), Some(2));
+        assert!(saw_frame);
     }
 }

@@ -359,6 +359,7 @@ class BrowserCallMediaSession implements CallMediaHandle {
   private videoSendTrack: CallVideoTrack | null = null;
   private videoEncoder: VideoEncoder | null = null;
   private encoderDims: { w: number; h: number } | null = null;
+  private encoderRotated = false;
   private cameraGen = 0;
   private forceNextKeyframe = true;
   private captureBusy = false;
@@ -692,13 +693,20 @@ class BrowserCallMediaSession implements CallMediaHandle {
     } catch {}
   }
 
-  private ensureH264Encoder(width: number, height: number, fps: number, bitrateKbps: number): void {
+  private ensureH264Encoder(
+    width: number,
+    height: number,
+    fps: number,
+    bitrateKbps: number,
+    rotated90Ccw: boolean,
+  ): void {
     if (typeof VideoEncoder !== "function" || typeof VideoFrame !== "function") return;
     if (
       this.videoEncoder &&
       this.videoEncoder.state === "configured" &&
       this.encoderDims?.w === width &&
-      this.encoderDims?.h === height
+      this.encoderDims?.h === height &&
+      this.encoderRotated === rotated90Ccw
     ) {
       return;
     }
@@ -708,6 +716,7 @@ class BrowserCallMediaSession implements CallMediaHandle {
       } catch {}
       this.videoEncoder = null;
       this.encoderDims = null;
+      this.encoderRotated = false;
     }
     try {
       const encoder = new VideoEncoder({
@@ -720,6 +729,7 @@ class BrowserCallMediaSession implements CallMediaHandle {
               codec: "h264",
               keyframe: chunk.type === "key",
               timestampMicros: chunk.timestamp,
+              rotationDegrees: rotated90Ccw ? 90 : 0,
             });
           } catch {}
         },
@@ -729,6 +739,7 @@ class BrowserCallMediaSession implements CallMediaHandle {
           } catch {}
           this.videoEncoder = null;
           this.encoderDims = null;
+          this.encoderRotated = false;
         },
       });
       encoder.configure({
@@ -741,10 +752,12 @@ class BrowserCallMediaSession implements CallMediaHandle {
       } as VideoEncoderConfig);
       this.videoEncoder = encoder;
       this.encoderDims = { w: width, h: height };
+      this.encoderRotated = rotated90Ccw;
       this.forceNextKeyframe = true;
     } catch {
       this.videoEncoder = null;
       this.encoderDims = null;
+      this.encoderRotated = false;
     }
   }
 
@@ -829,23 +842,40 @@ class BrowserCallMediaSession implements CallMediaHandle {
         const w = Math.max(16, Math.round((vw * scale) / 2) * 2);
         const h = Math.max(16, Math.round((vh * scale) / 2) * 2);
         if (activeTrack.format.codec === "h264" && typeof VideoEncoder === "function" && typeof VideoFrame === "function") {
+          // Pre-rotate H.264 frames 90° CCW to match WeChat mobile/conference wire orientation
+          // (+90° CW display rotation), enabling zero-transcode pass-through on H.264 wire calls.
+          const rotated = ctx2d !== null;
+          const encW = rotated ? h : w;
+          const encH = rotated ? w : h;
           this.ensureH264Encoder(
-            w,
-            h,
+            encW,
+            encH,
             Math.max(5, Math.min(activeTrack.format.maxFps, 15)),
             activeTrack.format.bitrateKbps ?? 600,
+            rotated,
           );
           if (this.videoEncoder && this.videoEncoder.state === "configured" && this.videoEncoder.encodeQueueSize <= 2) {
             let vf: VideoFrame | null = null;
             try {
-              if (canvas.width !== w || canvas.height !== h) {
-                canvas.width = w;
-                canvas.height = h;
+              if (ctx2d) {
+                if (canvas.width !== encW || canvas.height !== encH) {
+                  canvas.width = encW;
+                  canvas.height = encH;
+                }
+                ctx2d.save();
+                ctx2d.setTransform(1, 0, 0, 1, 0, 0);
+                ctx2d.translate(0, encH);
+                ctx2d.rotate(-Math.PI / 2);
+                ctx2d.drawImage(this.videoElement, 0, 0, w, h);
+                ctx2d.restore();
+                vf = new VideoFrame(canvas, {
+                  timestamp: Math.round(performance.now() * 1000),
+                });
+              } else {
+                vf = new VideoFrame(this.videoElement, {
+                  timestamp: Math.round(performance.now() * 1000),
+                });
               }
-              ctx2d?.drawImage(this.videoElement, 0, 0, w, h);
-              vf = new VideoFrame(ctx2d ? canvas : this.videoElement, {
-                timestamp: Math.round(performance.now() * 1000),
-              });
               const keyFrame = this.forceNextKeyframe;
               this.forceNextKeyframe = false;
               this.videoEncoder.encode(vf, { keyFrame });
@@ -858,6 +888,7 @@ class BrowserCallMediaSession implements CallMediaHandle {
             canvas.width = w;
             canvas.height = h;
           }
+          ctx2d.setTransform(1, 0, 0, 1, 0, 0);
           ctx2d.drawImage(this.videoElement, 0, 0, w, h);
           this.captureBusy = true;
           const sendGeneration = activeTrack.generation;
@@ -899,6 +930,7 @@ class BrowserCallMediaSession implements CallMediaHandle {
       } catch {}
       this.videoEncoder = null;
       this.encoderDims = null;
+      this.encoderRotated = false;
     }
     if (this.videoElement) {
       this.videoElement.pause();

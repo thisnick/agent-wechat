@@ -49,13 +49,13 @@ export class CallPcmOutput {
   private readonly format: CallAudioFormat;
   private readonly voice: PreparedCallVoice;
   private readonly clearRemote: () => Promise<unknown>;
-  private readonly failed: () => void;
+  private readonly failed: (error?: unknown) => void;
   private readonly trace?: CallAudioTrace;
   private readonly continuous: boolean;
   private readonly onResponseOverflow?: () => void;
   private readonly diagnostic?: (line: string) => void;
   constructor(media: Pick<NativeCallMediaClient, "sendPcm" | "tracks">, format: CallAudioFormat,
-    voice: PreparedCallVoice, clearRemote: () => Promise<unknown>, failed: () => void, trace?: CallAudioTrace,
+    voice: PreparedCallVoice, clearRemote: () => Promise<unknown>, failed: (error?: unknown) => void, trace?: CallAudioTrace,
     options?: { continuous?: boolean; onResponseOverflow?: () => void; diagnostic?: (line: string) => void }) {
     if (format.channels !== 1 || format.frameMs !== 20 || ![8000, 12000, 16000, 24000, 48000].includes(format.sampleRate)) throw Error("Calling PCM format unsupported");
     this.media = media;
@@ -248,7 +248,7 @@ export class CallPcmOutput {
       this.trace?.measure("daemonForwardMs", performance.now() - started);
       this.trace?.measure("outputLeadMs", leadAfterSubmit);
       if (!this.closed && this.clearEpoch === epoch && !this.timer) this.schedule();
-    } catch { if (this.clearEpoch === epoch) this.fail(); }
+    } catch (error) { if (this.clearEpoch === epoch) this.fail(error); }
   }
   private schedule(): void {
     const delay = this.submittedUntilMs - performance.now() - (LOOK_AHEAD_FRAMES - 1) * this.format.frameMs;
@@ -269,11 +269,11 @@ export class CallPcmOutput {
     this.overflowItem = undefined;
   }
   private log(line: string): void { try { this.diagnostic?.(line); } catch { /* Diagnostics cannot affect audio. */ } }
-  private fail(): void {
+  private fail(error?: unknown): void {
     if (this.closed) return;
     this.trace?.add("outputFailures");
     this.close();
-    this.failed();
+    this.failed(error);
   }
   close(): void { this.closed = true; this.discard(); this.items.clear(); this.revokedItems.clear(); }
 }
