@@ -1,27 +1,18 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { ArrowUpRight, Check, CircleAlert, MessageSquare, Star, X } from "lucide-react";
 import type { NativeIdentity } from "@agent-wechat/shared";
 import { desktop, desktopInvoke } from "./desktop.ts";
 import { t } from "./i18n.ts";
 import {
   buildIssueUrl,
-  DISMISSED_KEY,
-  dismissSupportPrompt,
   GITHUB_REPO_URL,
-  hasBlockingOverlay,
-  isSupportPromptDismissed,
-  readSupportPromptPreview,
-  recordSupportMessageSent,
-  THANKS_CLOSE_MS,
-  waitForIdle,
+  SupportPromptController,
   type SupportPromptStep,
 } from "./support-prompt.ts";
 import "./support-prompt.css";
 
 let cachedDesktopVersion: string | null | undefined;
 let desktopVersionRequest: Promise<string | null> | null = null;
-// Module-scoped so switching accounts or visiting /accounts never resets the per-session cap.
-let shownThisSession = false;
 
 function loadDesktopVersion(): Promise<string | null> {
   if (!desktop) return Promise.resolve(null);
@@ -76,93 +67,24 @@ export function useSupportPrompt({
   /** High-priority interruption (call, disconnect, sign-out) that closes an open check-in without snapping back. */
   hardInterrupt: boolean;
 }) {
-  const previewStep = readSupportPromptPreview(simulator);
-  const [step, setStep] = useState<SupportPromptStep | null>(() => previewStep);
-  const suppressedRef = useRef(suppressed);
-  suppressedRef.current = suppressed;
-  const hardInterruptRef = useRef(hardInterrupt);
-  hardInterruptRef.current = hardInterrupt;
-  const mountedRef = useRef(false);
-  const inFlightRef = useRef<AbortController | null>(null);
+  const controller = useMemo(() => new SupportPromptController({ simulator }), [simulator]);
+  const step = useSyncExternalStore(controller.subscribe, controller.snapshot);
 
+  useEffect(() => controller.start(), [controller]);
   useEffect(() => {
-    mountedRef.current = true;
-    if (previewStep !== null) {
-      return () => {
-        mountedRef.current = false;
-      };
-    }
-    const onStorage = (event: StorageEvent) => {
-      if (event.key !== DISMISSED_KEY || event.newValue !== "true") return;
-      inFlightRef.current?.abort();
-      inFlightRef.current = null;
-      setStep(null);
-    };
-    globalThis.addEventListener?.("storage", onStorage);
-    return () => {
-      mountedRef.current = false;
-      globalThis.removeEventListener?.("storage", onStorage);
-      inFlightRef.current?.abort();
-      inFlightRef.current = null;
-    };
-  }, [previewStep]);
-
-  // If a call starts or the session disconnects while the initial check-in is open,
-  // end this session's attempt cleanly rather than hiding and snapping back later.
-  useEffect(() => {
-    if (previewStep !== null || !hardInterrupt) return;
-    setStep((current) => (current === "ask" ? null : current));
-  }, [hardInterrupt, previewStep]);
-
-  const onMessageSent = useCallback(() => {
-    if (simulator || !mountedRef.current || shownThisSession || inFlightRef.current) return;
-    const { eligible, writable } = recordSupportMessageSent();
-    if (!eligible || !writable) return;
-    const controller = new AbortController();
-    inFlightRef.current = controller;
-    void waitForIdle({ signal: controller.signal }).then((idle) => {
-      if (inFlightRef.current === controller) inFlightRef.current = null;
-      if (!idle || !mountedRef.current || shownThisSession) return;
-      if (isSupportPromptDismissed()) return;
-      if (suppressedRef.current || hardInterruptRef.current || hasBlockingOverlay()) return;
-      shownThisSession = true;
-      setStep("ask");
-    });
-  }, [simulator]);
-
-  const dismiss = useCallback(() => {
-    inFlightRef.current?.abort();
-    inFlightRef.current = null;
-    if (previewStep === null) dismissSupportPrompt();
-    setStep(null);
-  }, [previewStep]);
-
-  const complete = useCallback(
-    (next: "thanks-star" | "thanks-already" | "thanks-issue") => {
-      if (previewStep === null) dismissSupportPrompt();
-      setStep(next);
-    },
-    [previewStep],
-  );
-
-  // Auto-close the thank-you state after a short pause (skipped for fixed visual previews).
-  useEffect(() => {
-    if (previewStep !== null) return;
-    if (step !== "thanks-star" && step !== "thanks-already" && step !== "thanks-issue") return;
-    const timer = window.setTimeout(() => setStep(null), THANKS_CLOSE_MS);
-    return () => window.clearTimeout(timer);
-  }, [step, previewStep]);
+    controller.updateGuards({ suppressed, hardInterrupt });
+  }, [controller, suppressed, hardInterrupt]);
 
   return {
     step,
     visible: step !== null,
-    onMessageSent,
-    choosePositive: useCallback(() => setStep("star"), []),
-    chooseNegative: useCallback(() => setStep("issue"), []),
-    completeStar: useCallback(() => complete("thanks-star"), [complete]),
-    completeAlreadyStarred: useCallback(() => complete("thanks-already"), [complete]),
-    completeIssue: useCallback(() => complete("thanks-issue"), [complete]),
-    dismiss,
+    onMessageSent: controller.onMessageSent,
+    choosePositive: controller.choosePositive,
+    chooseNegative: controller.chooseNegative,
+    completeStar: controller.completeStar,
+    completeAlreadyStarred: controller.completeAlreadyStarred,
+    completeIssue: controller.completeIssue,
+    dismiss: controller.dismiss,
   };
 }
 
@@ -344,7 +266,7 @@ export function SupportPrompt({
                 className="support-prompt-btn ghost"
                 onClick={onDismiss}
               >
-                {t("supportPrompt.notNow")}
+                {t("supportPrompt.dismiss")}
               </button>
             </>
           )}

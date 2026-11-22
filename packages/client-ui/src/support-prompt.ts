@@ -15,6 +15,9 @@ export const THANKS_CLOSE_MS = 4_000;
 
 export const ACTIVITY_EVENTS = ["pointerdown", "keydown", "wheel", "focus"] as const;
 
+export const BLOCKING_OVERLAY_SELECTOR =
+  '[role="dialog"][aria-modal="true"], dialog[open], .overlay-backdrop, .desktop-update-notice, .call-preview-popover';
+
 export type SupportPromptStep =
   | "ask"
   | "star"
@@ -33,6 +36,10 @@ export type SupportEnvironment = {
   desktopVersion?: string | null;
   hubVersion?: Pick<NativeIdentity, "version" | "target"> | null;
   clientPlatform?: string;
+};
+
+export type SupportPromptSession = {
+  shown: boolean;
 };
 
 type StorageLike = Pick<Storage, "getItem" | "setItem">;
@@ -70,6 +77,9 @@ const VALID_PREVIEW_STEPS = new Set<SupportPromptStep>([
   "thanks-already",
   "thanks-issue",
 ]);
+
+// Module-scoped so switching accounts or visiting /accounts never resets the per-session cap.
+const defaultSession: SupportPromptSession = { shown: false };
 
 function defaultStorage(): StorageLike | null {
   try {
@@ -280,9 +290,6 @@ export function buildIssueUrl(env: SupportEnvironment): string {
   return `${GITHUB_REPO_URL}/issues/new?${params.toString()}`;
 }
 
-export const BLOCKING_OVERLAY_SELECTOR =
-  '[role="dialog"][aria-modal="true"], dialog[open], .overlay-backdrop, .desktop-update-notice, .call-preview-popover';
-
 /** Whether a modal dialog, native `<dialog>`, popover, backdrop, or desktop update banner is currently on screen. */
 export function hasBlockingOverlay(doc: DocumentLike | undefined = globalThis.document): boolean {
   if (!doc?.querySelector) return false;
@@ -299,4 +306,169 @@ export function readSupportPromptPreview(simulator: boolean): SupportPromptStep 
     return candidate as SupportPromptStep;
   }
   return null;
+}
+
+export type SupportPromptControllerOptions = {
+  simulator: boolean;
+  storage?: StorageLike | null;
+  window?: WindowLike;
+  document?: DocumentLike;
+  idleMs?: number;
+  thanksCloseMs?: number;
+  session?: SupportPromptSession;
+  now?: () => Date;
+};
+
+/**
+ * Pure state machine driving the two-step GitHub Star / Issue prompt.
+ * Handles eligibility, idle gating, hard interrupts, cross-tab dismissal,
+ * module-scoped once-per-session capping, thanks auto-close, and unmount cleanup.
+ */
+export class SupportPromptController {
+  private readonly simulator: boolean;
+  private readonly previewStep: SupportPromptStep | null;
+  private readonly storage: StorageLike | null;
+  private readonly win: WindowLike | undefined;
+  private readonly doc: DocumentLike | undefined;
+  private readonly idleMs: number;
+  private readonly thanksCloseMs: number;
+  private readonly session: SupportPromptSession;
+  private readonly now: () => Date;
+
+  private step: SupportPromptStep | null;
+  private suppressed = false;
+  private hardInterrupt = false;
+  private active = false;
+  private inFlight: AbortController | null = null;
+  private thanksTimer: ReturnType<typeof setTimeout> | undefined;
+  private listeners = new Set<() => void>();
+
+  constructor(options: SupportPromptControllerOptions) {
+    this.simulator = options.simulator;
+    this.previewStep = readSupportPromptPreview(options.simulator);
+    this.storage = options.storage === undefined ? defaultStorage() : options.storage;
+    this.win = options.window ?? globalThis.window;
+    this.doc = options.document ?? globalThis.document;
+    this.idleMs = options.idleMs ?? IDLE_MS;
+    this.thanksCloseMs = options.thanksCloseMs ?? THANKS_CLOSE_MS;
+    this.session = options.session ?? defaultSession;
+    this.now = options.now ?? (() => new Date());
+    this.step = this.previewStep;
+  }
+
+  snapshot = (): SupportPromptStep | null => this.step;
+
+  subscribe = (listener: () => void): (() => void) => {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  };
+
+  private setStep(next: SupportPromptStep | null) {
+    if (this.step === next) return;
+    this.step = next;
+    clearTimeout(this.thanksTimer);
+    this.thanksTimer = undefined;
+    if (
+      this.previewStep === null &&
+      this.active &&
+      (next === "thanks-star" || next === "thanks-already" || next === "thanks-issue")
+    ) {
+      this.thanksTimer = setTimeout(() => {
+        this.thanksTimer = undefined;
+        this.setStep(null);
+      }, this.thanksCloseMs);
+    }
+    for (const listener of this.listeners) listener();
+  }
+
+  private readonly onStorage: EventListener = (event) => {
+    const storageEvent = event as { key?: string | null; newValue?: string | null };
+    if (storageEvent.key !== DISMISSED_KEY || storageEvent.newValue !== "true") return;
+    this.inFlight?.abort();
+    this.inFlight = null;
+    this.setStep(null);
+  };
+
+  start(): () => void {
+    this.active = true;
+    if (this.previewStep === null) {
+      this.win?.addEventListener("storage", this.onStorage);
+    }
+    return () => {
+      this.active = false;
+      if (this.previewStep === null) {
+        this.win?.removeEventListener("storage", this.onStorage);
+      }
+      this.inFlight?.abort();
+      this.inFlight = null;
+      clearTimeout(this.thanksTimer);
+      this.thanksTimer = undefined;
+    };
+  }
+
+  updateGuards({ suppressed, hardInterrupt }: { suppressed: boolean; hardInterrupt: boolean }) {
+    this.suppressed = suppressed;
+    this.hardInterrupt = hardInterrupt;
+    // If a call starts or the session disconnects while the initial check-in is open,
+    // end this session's attempt cleanly rather than hiding and snapping back later.
+    if (this.previewStep === null && hardInterrupt && this.step === "ask") {
+      this.setStep(null);
+    }
+  }
+
+  onMessageSent = () => {
+    if (this.simulator || !this.active || this.session.shown || this.inFlight) return;
+    const { eligible, writable } = recordSupportMessageSent({
+      storage: this.storage,
+      now: this.now(),
+    });
+    if (!eligible || !writable) return;
+    const controller = new AbortController();
+    this.inFlight = controller;
+    void waitForIdle({
+      idleMs: this.idleMs,
+      window: this.win,
+      document: this.doc,
+      signal: controller.signal,
+    }).then((idle) => {
+      if (this.inFlight === controller) this.inFlight = null;
+      if (!idle || !this.active || this.session.shown) return;
+      if (isSupportPromptDismissed(this.storage)) return;
+      if (this.suppressed || this.hardInterrupt || hasBlockingOverlay(this.doc)) return;
+      this.session.shown = true;
+      this.setStep("ask");
+    });
+  };
+
+  choosePositive = () => {
+    this.setStep("star");
+  };
+
+  chooseNegative = () => {
+    this.setStep("issue");
+  };
+
+  completeStar = () => {
+    if (this.previewStep === null) dismissSupportPrompt(this.storage);
+    this.setStep("thanks-star");
+  };
+
+  completeAlreadyStarred = () => {
+    if (this.previewStep === null) dismissSupportPrompt(this.storage);
+    this.setStep("thanks-already");
+  };
+
+  completeIssue = () => {
+    if (this.previewStep === null) dismissSupportPrompt(this.storage);
+    this.setStep("thanks-issue");
+  };
+
+  dismiss = () => {
+    this.inFlight?.abort();
+    this.inFlight = null;
+    if (this.previewStep === null) dismissSupportPrompt(this.storage);
+    this.setStep(null);
+  };
 }

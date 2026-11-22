@@ -15,6 +15,7 @@ import {
   readSupportPromptPreview,
   recordSupportMessageSent,
   SENDS_BEFORE_ASKING,
+  SupportPromptController,
   USAGE_KEY,
   waitForIdle,
 } from "../src/support-prompt.ts";
@@ -259,3 +260,138 @@ test("hasBlockingOverlay and simulator preview hook respect boundaries", () => {
     else globalThis.__agentWechatSupportPromptPreview = prev;
   }
 });
+
+function createControllerFixture({
+  simulator = false,
+  eligible = true,
+  session = { shown: false },
+  idleMs = 15,
+  thanksCloseMs = 25,
+} = {}) {
+  const storage = memoryStorage();
+  if (eligible) {
+    storage.setItem(
+      USAGE_KEY,
+      JSON.stringify({ days: ["2026-11-01", "2026-11-02"], sends: SENDS_BEFORE_ASKING - 1 }),
+    );
+  }
+  const events = new EventTarget();
+  const win = {
+    addEventListener: events.addEventListener.bind(events),
+    removeEventListener: events.removeEventListener.bind(events),
+  };
+  let overlay = false;
+  const doc = {
+    hasFocus: () => true,
+    activeElement: null,
+    querySelector: () => (overlay ? {} : null),
+  };
+  const controller = new SupportPromptController({
+    simulator,
+    storage,
+    window: win,
+    document: doc,
+    idleMs,
+    thanksCloseMs,
+    session,
+    now: () => new Date(2026, 10, 3, 12, 0, 0),
+  });
+  return {
+    controller,
+    storage,
+    events,
+    session,
+    setOverlay(value) {
+      overlay = value;
+    },
+  };
+}
+
+test("SupportPromptController handles hard interrupts, per-session cap across remounts, and thanks auto-close", async () => {
+  const session = { shown: false };
+  const first = createControllerFixture({ session });
+  const stopFirst = first.controller.start();
+  first.controller.onMessageSent();
+  await new Promise((r) => setTimeout(r, 35));
+  assert.equal(first.controller.snapshot(), "ask");
+  assert.equal(session.shown, true);
+
+  // Composer typing / modal suppression does not unmount an already-open card.
+  first.controller.updateGuards({ suppressed: true, hardInterrupt: false });
+  assert.equal(first.controller.snapshot(), "ask");
+
+  // High-priority interrupt (call/disconnect) ends this session's attempt without snapping back.
+  first.controller.updateGuards({ suppressed: true, hardInterrupt: true });
+  assert.equal(first.controller.snapshot(), null);
+  first.controller.updateGuards({ suppressed: false, hardInterrupt: false });
+  assert.equal(first.controller.snapshot(), null);
+  stopFirst();
+
+  // Remounting (e.g. account switch) shares the session cap and will not re-prompt.
+  const second = createControllerFixture({ session });
+  const stopSecond = second.controller.start();
+  second.controller.onMessageSent();
+  await new Promise((r) => setTimeout(r, 35));
+  assert.equal(second.controller.snapshot(), null);
+  stopSecond();
+
+  // Positive flow persists permanent dismissal and auto-closes the thank-you state.
+  const third = createControllerFixture({ session: { shown: false }, thanksCloseMs: 20 });
+  const stopThird = third.controller.start();
+  third.controller.onMessageSent();
+  await new Promise((r) => setTimeout(r, 35));
+  assert.equal(third.controller.snapshot(), "ask");
+  third.controller.choosePositive();
+  assert.equal(third.controller.snapshot(), "star");
+  third.controller.completeStar();
+  assert.equal(third.controller.snapshot(), "thanks-star");
+  assert.equal(third.storage.getItem(DISMISSED_KEY), "true");
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(third.controller.snapshot(), null);
+  stopThird();
+});
+
+test("SupportPromptController handles cross-tab dismissal, unmount cleanup, and preview boundary", async () => {
+  // Cross-tab dismissal aborts an in-flight idle wait and closes an open prompt.
+  const crossTab = createControllerFixture({ idleMs: 40 });
+  const stopCrossTab = crossTab.controller.start();
+  crossTab.controller.onMessageSent();
+  await new Promise((r) => setTimeout(r, 15));
+  const storageEvent = new Event("storage");
+  Object.assign(storageEvent, { key: DISMISSED_KEY, newValue: "true" });
+  crossTab.events.dispatchEvent(storageEvent);
+  await new Promise((r) => setTimeout(r, 45));
+  assert.equal(crossTab.controller.snapshot(), null);
+  stopCrossTab();
+
+  // Unmounting ignores late onMessageSent calls (no leaked idle timers).
+  const unmounted = createControllerFixture({ idleMs: 15 });
+  const stopUnmounted = unmounted.controller.start();
+  stopUnmounted();
+  unmounted.controller.onMessageSent();
+  await new Promise((r) => setTimeout(r, 35));
+  assert.equal(unmounted.controller.snapshot(), null);
+
+  // Preview mode stays isolated from storage, hard interrupts, and thanks auto-close.
+  const prev = globalThis.__agentWechatSupportPromptPreview;
+  try {
+    globalThis.__agentWechatSupportPromptPreview = "ask";
+    const preview = createControllerFixture({ simulator: true, thanksCloseMs: 15 });
+    const stopPreview = preview.controller.start();
+    assert.equal(preview.controller.snapshot(), "ask");
+    preview.controller.updateGuards({ suppressed: true, hardInterrupt: true });
+    assert.equal(preview.controller.snapshot(), "ask");
+    preview.controller.chooseNegative();
+    assert.equal(preview.controller.snapshot(), "issue");
+    preview.controller.completeIssue();
+    assert.equal(preview.controller.snapshot(), "thanks-issue");
+    assert.equal(preview.storage.getItem(DISMISSED_KEY), null);
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(preview.controller.snapshot(), "thanks-issue");
+    stopPreview();
+  } finally {
+    if (prev === undefined) delete globalThis.__agentWechatSupportPromptPreview;
+    else globalThis.__agentWechatSupportPromptPreview = prev;
+  }
+});
+
