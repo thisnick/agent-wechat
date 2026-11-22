@@ -486,8 +486,26 @@ try {
     ],
   });
   await until("OpenClaw media learned conference audio track 3", () => ocMedia.tracks().receiveTracks.some(t => t.id === 3));
-  await control("conference_audio", { trackId: 3, generation: 1, sequence: 0, sampleOffset: 0, value: 1500 });
-  await until("OpenClaw receives conference audio alongside peer cameras", () => ocAudioIn.some(buf => buf.readInt16LE(0) === 1500));
+  const conferenceOrigin = performance.now();
+  let conferenceSeq = 0;
+  let nextConferenceSlot = 0;
+  await until("OpenClaw receives conference audio alongside peer cameras", async () => {
+    if (ocAudioIn.some(buf => buf.length >= 2 && buf.readInt16LE(0) === 1500)) return true;
+    const currentSlot = Math.floor((performance.now() - conferenceOrigin) / 20);
+    const targetSlot = currentSlot + 1;
+    if (nextConferenceSlot < currentSlot) nextConferenceSlot = currentSlot;
+    while (nextConferenceSlot <= targetSlot) {
+      await control("conference_audio", {
+        trackId: 3,
+        generation: 1,
+        sequence: conferenceSeq++,
+        sampleOffset: nextConferenceSlot * 320,
+        value: 1500,
+      });
+      nextConferenceSlot++;
+    }
+    return ocAudioIn.some(buf => buf.length >= 2 && buf.readInt16LE(0) === 1500);
+  });
   assert.equal(ocService.status().participants?.find(p => p.contactId === "alice")?.cameraEnabled, true);
   await control("end");
   await until("OpenClaw conference ended", () => ocService.status().state === "available");
