@@ -2038,6 +2038,18 @@ async function prepareCallScene(page, options = {}) {
   });
 }
 
+async function expectConsistentHeaderActionGaps(page, expect) {
+  const buttons = page.locator(".chat-header .header-actions .icon-btn");
+  await expect(buttons).toHaveCount(4);
+  const gaps = await buttons.evaluateAll((elements) => {
+    const rects = elements.map((el) => el.getBoundingClientRect());
+    return rects.slice(1).map((rect, index) => Math.round(rect.left - rects[index].right));
+  });
+  expect(gaps).toHaveLength(3);
+  expect(gaps[0]).toBeGreaterThan(0);
+  expect(gaps).toEqual([gaps[2], gaps[2], gaps[2]]);
+}
+
 scenes.push(
   {
     name: "call-incoming-offer",
@@ -2061,6 +2073,7 @@ scenes.push(
       await expect(page.getByRole("region", { name: "Incoming call from Mei Chen" })).toBeVisible();
       await expect(page.getByRole("button", { name: "Answer video" })).toBeVisible();
       await expect(page.getByRole("button", { name: "Audio only" })).toBeVisible();
+      await expectConsistentHeaderActionGaps(page, expect);
     },
   },
   {
@@ -2086,6 +2099,7 @@ scenes.push(
     },
     ready: async ({ page, expect }) => {
       await expect(page.getByRole("button", { name: "Voice call", exact: true })).toBeEnabled();
+      await expectConsistentHeaderActionGaps(page, expect);
     },
     actions: async ({ page, expect }) => {
       await page.getByRole("button", { name: "Voice call", exact: true }).click();
