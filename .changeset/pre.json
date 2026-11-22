@@ -18,6 +18,7 @@
     "consistent-call-header-action-spacing",
     "fix-call-search-zh",
     "fix-video-calls-reliability-and-preview",
+    "fix-video-calls-self-view-cli-and-smoothness",
     "github-star-support-prompt",
     "native-video-calls-protocol-v3",
     "receive-vweixinf-stickers",
