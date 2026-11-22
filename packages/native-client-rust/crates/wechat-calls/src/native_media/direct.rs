@@ -118,7 +118,9 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
     let mut rx_order = RtpOrder::new();
     let mut rx_timeline = DirectRxAudioTimeline::new();
     let mut video_rx = RsmVideoReassembler::new();
-    let mut video_tx = RsmVideoPacketizer::new(selected.own_member, 1);
+    // Outgoing wire frames are pre-rotated 90° CCW to match mobile WeChat receivers,
+    // which apply +90° CW display rotation; orientation = 1 signals +90° CW for desktop/native peers.
+    let mut video_tx = RsmVideoPacketizer::new(selected.own_member, 1).with_orientation(1);
     let mut tx_video_queue = TxVideoQueue::new();
     let mut tx_video_packets = VecDeque::<(u32, Vec<u8>)>::new();
     let mut video_tx_exhausted = false;

@@ -24,7 +24,8 @@ use wechat_call_contracts::{
         CallVideoCodec, CallVideoFormat, CallVideoMode, CallView,
     },
     pcm_envelope::{
-        MediaPayloadKind, WireMediaFrame, FLAG_CODEC_CONFIG, FLAG_KEYFRAME, MAX_VIDEO_PAYLOAD_BYTES,
+        MediaPayloadKind, WireMediaFrame, FLAG_CODEC_CONFIG, FLAG_KEYFRAME, FLAG_ROTATE_90,
+        MAX_VIDEO_PAYLOAD_BYTES,
     },
 };
 
@@ -813,9 +814,19 @@ fn spawn_capture(
         CameraSource::Off => bail!("camera source is off"),
     }
 
-    let scale = format!(
-        "fps={fps},scale=w='min(iw,{width})':h='min(ih,{height})':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2"
-    );
+    // Pre-rotate outgoing wire H.265/H.264 90° CCW to match mobile/conference WeChat receivers
+    // (which apply +90° CW display rotation). Keep JPEG unrotated for local pre-call previews
+    // and daemon-side transcoded TX.
+    let pre_rotate_ccw = matches!(format.codec, CallVideoCodec::H265 | CallVideoCodec::H264);
+    let scale = if pre_rotate_ccw {
+        format!(
+            "fps={fps},scale=w='min(iw,{width})':h='min(ih,{height})':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2,transpose=2"
+        )
+    } else {
+        format!(
+            "fps={fps},scale=w='min(iw,{width})':h='min(ih,{height})':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2"
+        )
+    };
     cmd.args(["-vf", &scale, "-an", "-sn", "-dn"]);
 
     let gop = u32::from(fps).max(1);
@@ -923,7 +934,16 @@ fn spawn_capture(
     let reader = match thread::Builder::new()
         .name("wx-call-video-cap".into())
         .spawn(move || {
-            read_captured_stream(stdout, codec, worker_stop, started_at, tx, worker_jpeg)
+            let rotation_flags = if pre_rotate_ccw { FLAG_ROTATE_90 } else { 0 };
+            read_captured_stream(
+                stdout,
+                codec,
+                rotation_flags,
+                worker_stop,
+                started_at,
+                tx,
+                worker_jpeg,
+            )
         }) {
         Ok(reader) => reader,
         Err(error) => {
@@ -944,6 +964,7 @@ fn spawn_capture(
 fn read_captured_stream(
     mut stdout: impl Read,
     codec: CallVideoCodec,
+    rotation_flags: u16,
     stop: Arc<AtomicBool>,
     started_at: Instant,
     tx: mpsc::Sender<CapturedVideoFrame>,
@@ -987,6 +1008,7 @@ fn read_captured_stream(
                 drain_annexb_frames(
                     &mut buf,
                     codec,
+                    rotation_flags,
                     &mut pending_au,
                     &mut pending_has_slice,
                     &mut pending_is_keyframe,
@@ -1152,6 +1174,7 @@ fn split_start_codes(data: &[u8]) -> Vec<(usize, usize, usize)> {
 fn drain_annexb_frames(
     buf: &mut Vec<u8>,
     codec: CallVideoCodec,
+    rotation_flags: u16,
     pending_au: &mut Vec<u8>,
     pending_has_slice: &mut bool,
     pending_is_keyframe: &mut bool,
@@ -1189,7 +1212,7 @@ fn drain_annexb_frames(
             CallVideoCodec::Jpeg => (false, true, true, false),
         };
         if *pending_has_slice && (is_param || is_vcl || is_aud) {
-            let mut flags = 0u16;
+            let mut flags = rotation_flags;
             if *pending_is_keyframe {
                 flags |= FLAG_KEYFRAME;
             }
@@ -1876,6 +1899,7 @@ mod tests {
         drain_annexb_frames(
             &mut buf,
             CallVideoCodec::H264,
+            FLAG_ROTATE_90,
             &mut pending_au,
             &mut has_slice,
             &mut is_kf,
@@ -1886,7 +1910,10 @@ mod tests {
         );
         assert!(wait_for_kf);
         let first = rx.try_recv().unwrap();
-        assert_eq!(first.flags, FLAG_KEYFRAME | FLAG_CODEC_CONFIG);
+        assert_eq!(
+            first.flags,
+            FLAG_KEYFRAME | FLAG_CODEC_CONFIG | FLAG_ROTATE_90
+        );
         assert!(rx.try_recv().is_err());
 
         // Next P-frame must still be dropped even now that channel has room.
@@ -1894,6 +1921,7 @@ mod tests {
         drain_annexb_frames(
             &mut buf,
             CallVideoCodec::H264,
+            FLAG_ROTATE_90,
             &mut pending_au,
             &mut has_slice,
             &mut is_kf,
@@ -1911,6 +1939,7 @@ mod tests {
         drain_annexb_frames(
             &mut buf,
             CallVideoCodec::H264,
+            FLAG_ROTATE_90,
             &mut pending_au,
             &mut has_slice,
             &mut is_kf,
@@ -1921,7 +1950,10 @@ mod tests {
         );
         assert!(!wait_for_kf);
         let resumed = rx.try_recv().unwrap();
-        assert_eq!(resumed.flags, FLAG_KEYFRAME | FLAG_CODEC_CONFIG);
+        assert_eq!(
+            resumed.flags,
+            FLAG_KEYFRAME | FLAG_CODEC_CONFIG | FLAG_ROTATE_90
+        );
         assert!(resumed.bytes.ends_with(&[0x65, 0x99]));
     }
 }

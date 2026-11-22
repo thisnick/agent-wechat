@@ -539,7 +539,9 @@ impl SelfViewDecoder {
             "-i",
             "pipe:0",
             "-vf",
-            "scale=w='min(iw,320)':h='min(ih,240)':force_original_aspect_ratio=decrease",
+            // Outgoing H.264/H.265 frames from LocalVideoCapture are pre-rotated 90° CCW
+            // for mobile/conference WeChat wire compatibility; undo that (+90° CW) for self-view.
+            "transpose=1,scale=w='min(iw,320)':h='min(ih,240)':force_original_aspect_ratio=decrease",
             "-c:v",
             "mjpeg",
             "-q:v",

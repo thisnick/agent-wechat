@@ -5,7 +5,9 @@ use crate::call_types::{
     CallTrack, CallTrackDirection, CallVideoCodec, CallVideoFormat, CallVideoMode,
     AUDIO_RECEIVE_TRACK_BASE, VIDEO_RECEIVE_TRACK_BASE,
 };
-use crate::calls::pcm_envelope::{video_rotation_flags, FLAG_CODEC_CONFIG, FLAG_KEYFRAME};
+use crate::calls::pcm_envelope::{
+    video_rotation_degrees, video_rotation_flags, FLAG_CODEC_CONFIG, FLAG_KEYFRAME,
+};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use wechat_calls::{
@@ -509,6 +511,59 @@ fn process_rx_video_frame(
     state.pending_meta.push_back((timestamp_us, rotation));
 }
 
+/// Compute the clockwise rotation the outbound transcoder must apply so wire
+/// frames are always encoded 90° CCW (matching wire orientation `1`, +90° CW
+/// display rotation expected by mobile and conference receivers).
+fn tx_wire_rotation(flags: u16) -> VideoRotation {
+    match video_rotation_degrees(flags) {
+        90 => VideoRotation::Deg0,
+        180 => VideoRotation::Deg90,
+        270 => VideoRotation::Deg180,
+        _ => VideoRotation::Deg270,
+    }
+}
+
+fn tx_transcode_dimensions(format: CallVideoFormat) -> (u16, u16) {
+    // Outgoing wire frames are always rotated 90° CCW relative to the upright negotiated
+    // `(max_width, max_height)` regardless of whether the client or daemon performed the
+    // quarter turn, so preserve the negotiated long edge in both axes.
+    let max_edge = format.max_width.max(format.max_height).clamp(64, 1080);
+    (max_edge, max_edge)
+}
+
+fn contains_idr_nalu(codec: VideoCodec, annexb: &[u8]) -> bool {
+    let mut i = 0usize;
+    while i + 3 <= annexb.len() {
+        let sc_len = if annexb[i] == 0 && annexb[i + 1] == 0 {
+            if annexb[i + 2] == 1 {
+                3
+            } else if i + 4 < annexb.len() && annexb[i + 2] == 0 && annexb[i + 3] == 1 {
+                4
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        if sc_len > 0 {
+            if let Some(&header) = annexb.get(i + sc_len) {
+                let is_idr = match codec {
+                    VideoCodec::H265 => matches!((header >> 1) & 0x3f, 16..=21),
+                    VideoCodec::H264 => (header & 0x1f) == 5,
+                    VideoCodec::Jpeg => true,
+                };
+                if is_idr {
+                    return true;
+                }
+            }
+            i += sc_len;
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
 /// Spawn the outbound video pass-through/transcoder adapter thread feeding `DirectVideoTx`
 /// into the WeChat UDP media loop.
 pub(super) fn spawn_video_tx_bridge(
@@ -525,10 +580,16 @@ pub(super) fn spawn_video_tx_bridge(
     let handle = thread::Builder::new()
         .name("wechat-video-tx".into())
         .spawn(move || {
-            let passthrough =
+            let codec_matches_wire =
                 send_format.mode == CallVideoMode::Passthrough && send_format.codec == wire_codec;
+            let src_codec = to_video_codec(send_format.codec);
+            let dst_codec = to_video_codec(wire_codec);
             let mut transcoder: Option<VideoTranscoder> = None;
             let mut transcoder_gen = 0u32;
+            let mut transcoder_rotation = VideoRotation::Deg0;
+            let mut tx_started_keyframe = false;
+            let mut tx_cached_codec_config: Option<Vec<u8>> = None;
+            let mut failed_transcode: Option<(u32, VideoRotation)> = None;
             let mut last_kf_forward: Option<Instant> = None;
             let started = Instant::now();
             while worker.current() && !worker.stop.load(Ordering::Acquire) {
@@ -548,8 +609,11 @@ pub(super) fn spawn_video_tx_bridge(
                 }
                 let current_gen = worker.video_generation.load(Ordering::Acquire);
                 let camera_on = worker.camera_enabled.load(Ordering::Acquire);
-                if !camera_on || (transcoder.is_some() && current_gen != transcoder_gen) {
+                if !camera_on || (transcoder_gen != 0 && current_gen != transcoder_gen) {
                     transcoder = None;
+                    tx_started_keyframe = false;
+                    tx_cached_codec_config = None;
+                    failed_transcode = None;
                 }
                 if let Some(enc) = transcoder.as_mut() {
                     while let Some(out) = enc.try_recv() {
@@ -581,12 +645,21 @@ pub(super) fn spawn_video_tx_bridge(
                         {
                             continue;
                         }
+                        let needed_rotation = tx_wire_rotation(item.request.flags);
+                        let passthrough =
+                            codec_matches_wire && needed_rotation == VideoRotation::Deg0;
                         let ts_ms = if passthrough && item.request.timestamp_micros > 0 {
                             u32::try_from(item.request.timestamp_micros / 1_000).unwrap_or(u32::MAX)
                         } else {
                             u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX)
                         };
                         if passthrough {
+                            if transcoder.is_some() {
+                                transcoder = None;
+                                tx_started_keyframe = false;
+                                tx_cached_codec_config = None;
+                                failed_transcode = None;
+                            }
                             let _ = tx.try_send(DirectVideoTx {
                                 generation: current_gen,
                                 codec: wire,
@@ -598,22 +671,109 @@ pub(super) fn spawn_video_tx_bridge(
                             });
                             continue;
                         }
-                        if transcoder_gen != current_gen || transcoder.is_none() {
-                            transcoder = VideoTranscoder::start(TranscodeConfig {
-                                from: to_video_codec(send_format.codec),
-                                to: to_video_codec(wire_codec),
-                                width: send_format.max_width,
-                                height: send_format.max_height,
+                        if transcoder_gen != current_gen || transcoder_rotation != needed_rotation {
+                            transcoder = None;
+                            tx_started_keyframe = false;
+                            if transcoder_gen != current_gen {
+                                tx_cached_codec_config = None;
+                            }
+                            transcoder_gen = current_gen;
+                            transcoder_rotation = needed_rotation;
+                        }
+                        if failed_transcode == Some((current_gen, needed_rotation)) {
+                            if send_format.codec == wire_codec {
+                                let _ = tx.try_send(DirectVideoTx {
+                                    generation: current_gen,
+                                    codec: wire,
+                                    timestamp_ms: ts_ms,
+                                    fps: send_format.max_fps,
+                                    kbps: u16::try_from(send_format.bitrate_kbps.unwrap_or(500))
+                                        .unwrap_or(500),
+                                    annexb: item.request.payload,
+                                });
+                            }
+                            continue;
+                        }
+                        let mut prepended: Option<Vec<u8>> = None;
+                        if src_codec != VideoCodec::Jpeg {
+                            let inline_params =
+                                extract_codec_config_nalus(src_codec, &item.request.payload);
+                            let has_inline_params = inline_params.is_some();
+                            if let Some(params) = inline_params {
+                                tx_cached_codec_config = Some(params);
+                            }
+                            if !tx_started_keyframe {
+                                let is_keyframe = (item.request.flags & FLAG_KEYFRAME) != 0
+                                    || contains_idr_nalu(src_codec, &item.request.payload);
+                                if !is_keyframe {
+                                    if last_kf_forward.is_none_or(|last| {
+                                        last.elapsed() >= Duration::from_millis(1500)
+                                    }) {
+                                        last_kf_forward = Some(Instant::now());
+                                        let _ = runtime.block_on(sink.peer_keyframe_requested());
+                                    }
+                                    continue;
+                                }
+                                if !has_inline_params {
+                                    let Some(params) = tx_cached_codec_config.as_deref() else {
+                                        if last_kf_forward.is_none_or(|last| {
+                                            last.elapsed() >= Duration::from_millis(1500)
+                                        }) {
+                                            last_kf_forward = Some(Instant::now());
+                                            let _ =
+                                                runtime.block_on(sink.peer_keyframe_requested());
+                                        }
+                                        continue;
+                                    };
+                                    let mut combined = Vec::with_capacity(
+                                        params.len() + item.request.payload.len(),
+                                    );
+                                    combined.extend_from_slice(params);
+                                    combined.extend_from_slice(&item.request.payload);
+                                    prepended = Some(combined);
+                                }
+                                tx_started_keyframe = true;
+                            }
+                        }
+                        if transcoder.is_none() {
+                            let (width, height) = tx_transcode_dimensions(send_format);
+                            match VideoTranscoder::start(TranscodeConfig {
+                                from: src_codec,
+                                to: dst_codec,
+                                width,
+                                height,
                                 fps: send_format.max_fps,
                                 bitrate_kbps: send_format.bitrate_kbps.unwrap_or(500),
-                                rotation: VideoRotation::Deg0,
-                            })
-                            .ok();
-                            transcoder_gen = current_gen;
+                                rotation: needed_rotation,
+                            }) {
+                                Ok(enc) => {
+                                    transcoder = Some(enc);
+                                }
+                                Err(_) => {
+                                    tx_started_keyframe = false;
+                                    failed_transcode = Some((current_gen, needed_rotation));
+                                    if send_format.codec == wire_codec {
+                                        let _ = tx.try_send(DirectVideoTx {
+                                            generation: current_gen,
+                                            codec: wire,
+                                            timestamp_ms: ts_ms,
+                                            fps: send_format.max_fps,
+                                            kbps: u16::try_from(
+                                                send_format.bitrate_kbps.unwrap_or(500),
+                                            )
+                                            .unwrap_or(500),
+                                            annexb: item.request.payload,
+                                        });
+                                    }
+                                    continue;
+                                }
+                            }
                         }
                         if let Some(enc) = transcoder.as_mut() {
-                            if enc.push(&item.request.payload).is_err() {
+                            let push_bytes = prepended.as_deref().unwrap_or(&item.request.payload);
+                            if enc.push(push_bytes).is_err() {
                                 transcoder = None;
+                                tx_started_keyframe = false;
                                 continue;
                             }
                             while let Some(out) = enc.try_recv() {
@@ -890,5 +1050,45 @@ mod tests {
             extract_codec_config_nalus(VideoCodec::H265, &bare_idr),
             None
         );
+    }
+
+    #[test]
+    fn tx_wire_rotation_targets_90_ccw_for_mobile_and_conference_compatibility() {
+        use crate::calls::pcm_envelope::{FLAG_ROTATE_180, FLAG_ROTATE_270, FLAG_ROTATE_90};
+        assert_eq!(tx_wire_rotation(0), VideoRotation::Deg270);
+        assert_eq!(tx_wire_rotation(FLAG_KEYFRAME), VideoRotation::Deg270);
+        assert_eq!(tx_wire_rotation(FLAG_ROTATE_90), VideoRotation::Deg0);
+        assert_eq!(
+            tx_wire_rotation(FLAG_KEYFRAME | FLAG_ROTATE_90),
+            VideoRotation::Deg0
+        );
+        assert_eq!(tx_wire_rotation(FLAG_ROTATE_180), VideoRotation::Deg90);
+        assert_eq!(tx_wire_rotation(FLAG_ROTATE_270), VideoRotation::Deg180);
+    }
+
+    #[test]
+    fn tx_transcode_dimensions_preserves_long_edge_across_quarter_turn() {
+        let fmt = CallVideoFormat {
+            codec: CallVideoCodec::H264,
+            mode: CallVideoMode::Transcoded,
+            max_width: 640,
+            max_height: 480,
+            max_fps: 15,
+            bitrate_kbps: Some(500),
+        };
+        assert_eq!(tx_transcode_dimensions(fmt), (640, 640));
+    }
+
+    #[test]
+    fn contains_idr_nalu_detects_hevc_and_avc_keyframes() {
+        let hevc_idr = [0, 0, 0, 1, 0x40, 0x01, 0, 0, 0, 1, 0x26, 0x01, 0xdd];
+        let hevc_p = [0, 0, 0, 1, 0x02, 0x01, 0xdd];
+        assert!(contains_idr_nalu(VideoCodec::H265, &hevc_idr));
+        assert!(!contains_idr_nalu(VideoCodec::H265, &hevc_p));
+
+        let h264_idr = [0, 0, 1, 0x65, 0x88];
+        let h264_p = [0, 0, 1, 0x41, 0x88];
+        assert!(contains_idr_nalu(VideoCodec::H264, &h264_idr));
+        assert!(!contains_idr_nalu(VideoCodec::H264, &h264_p));
     }
 }

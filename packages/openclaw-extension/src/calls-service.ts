@@ -42,10 +42,12 @@ type CallSystemEvents = { enqueueSystemEvent?: (text: string, options: { session
   requestHeartbeatNow?: (options: { sessionKey?: string; agentId?: string; reason?: string; source?: string }) => void };
 const TERMINAL_WAIT_MS = 30_000;
 const RECENT_CONTEXT_WAIT_MS = 2_000;
+const MEDIA_CLOSE_GRACE_MS = 150;
 const MAX_RECOVERY_ATTEMPTS = 30;
 type CallAccess = { signal?: AbortSignal; assertCurrent: () => void; parentSession?: CallParentSession };
 /** A fixed error code for logs; other error text can contain private details. */
 const codeOf = (error: unknown): string => error instanceof NativeCallError ? `:${error.code}` : "";
+const waitUnref = (ms: number): Promise<void> => new Promise(resolve => { const timer = setTimeout(resolve, ms); timer.unref?.(); });
 const bounded = async <T>(promise: Promise<T>, ms: number): Promise<T> => {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try { return await Promise.race([promise, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(Error("Calling operation timed out")), ms); })]); }
@@ -566,7 +568,14 @@ export class NativeCallService {
       const tracks = media.tracks();
       if ((!active.groupId && tracks.receiveTracks.length !== 1) || JSON.stringify(tracks.sendTrack.format) !== JSON.stringify(this.format)
         || tracks.receiveTracks.some(track => JSON.stringify(track.format) !== JSON.stringify(this.format))) throw Error("Calling PCM changed");
-      active.output = new CallPcmOutput(media, this.format!, this.prepared!, () => this.client!.clearAudio(randomUUID(), active.callId!), () => { void this.fail(active, "output"); }, trace,
+      active.output = new CallPcmOutput(media, this.format!, this.prepared!, () => this.client!.clearAudio(randomUUID(), active.callId!), (error) => {
+        void (async () => {
+          if (error instanceof NativeCallError && ["media_not_ready", "media_closed"].includes(error.code) && this.current(active) && !active.endStarted) {
+            await waitUnref(MEDIA_CLOSE_GRACE_MS);
+          }
+          if (this.current(active) && !active.endStarted) await this.fail(active, "output");
+        })();
+      }, trace,
         { continuous: this.prepared!.continuous,
           onResponseOverflow: () => { if (this.current(active) && !active.endStarted) active.voice?.interruptOutput(); },
           diagnostic: line => this.info(`audio trace=${active.key.slice(0, 8)} ${line}`) });
@@ -619,7 +628,16 @@ export class NativeCallService {
             receivedMs = timestampMs + samples * 1000 / this.format!.sampleRate;
             forward(Buffer.from(frame.payload), timestampMs, consumedAt);
           }
-        } catch (error) { if (this.current(active) && !active.endStarted) await this.fail(active, `media-input${codeOf(error)}`); }
+        } catch (error) {
+          // Daemon terminal transitions close the media socket alongside broadcasting
+          // terminal call.state on control; yield briefly so an already in-flight
+          // control close retires the call before escalating to an active failure.
+          if (error instanceof NativeCallError && error.code === "media_closed" && this.current(active) && !active.endStarted) {
+            active.output?.close();
+            await waitUnref(MEDIA_CLOSE_GRACE_MS);
+          }
+          if (this.current(active) && !active.endStarted) await this.fail(active, `media-input${codeOf(error)}`);
+        }
       })();
     } catch { if (this.current(active)) await this.fail(active, "media-attach"); }
     finally { active.attaching = false; }
@@ -679,7 +697,14 @@ export class NativeCallService {
       await this.client.end(["dialing", "ringing"].includes(active.call.state) ? "call.cancel" : "call.hangup", randomUUID(), active.callId, active.call.revision);
       this.info(`control trace=${active.key.slice(0, 8)} action=hangup stage=submitted`);
       // Acceptance is not a terminal result. Keep the owner until server state arrives.
-    } catch (error) { this.state = "needs_review"; this.stopCalling(`end-outcome-unknown${codeOf(error)}`); await this.retire(active); throw Error("Call end outcome needs review"); }
+    } catch (error) {
+      if (this.stopped || this.active !== active || active.retired) return;
+      if (error instanceof NativeCallError && !error.outcomeUnknown && ["stale", "not_owner"].includes(error.code)) {
+        await waitUnref(MEDIA_CLOSE_GRACE_MS);
+        if (this.stopped || this.active !== active || active.retired) return;
+      }
+      this.state = "needs_review"; this.stopCalling(`end-outcome-unknown${codeOf(error)}`); await this.retire(active); throw Error("Call end outcome needs review");
+    }
   }
   private async fail(active: Owned, cause: string): Promise<void> {
     if (active.endStarted && !this.stopped && this.active === active && !active.retired) {

@@ -73,6 +73,10 @@ impl VideoCodecCapabilities {
         if from == to {
             return true;
         }
+        self.can_reencode(from, to)
+    }
+
+    fn can_reencode(&self, from: VideoCodec, to: VideoCodec) -> bool {
         let dec = match from {
             VideoCodec::H265 => self.h265_decode,
             VideoCodec::H264 => self.h264_decode,
@@ -254,8 +258,8 @@ impl VideoTranscoder {
     /// Start a streaming transcoder for `config`.
     pub fn start(config: TranscodeConfig) -> Result<Self> {
         ensure!(
-            config.from != config.to,
-            "Pass-through codecs must not spawn a transcoder"
+            config.from != config.to || config.rotation != VideoRotation::Deg0,
+            "Pass-through codecs without rotation must not spawn a transcoder"
         );
         ensure!(
             (64..=1920).contains(&config.width)
@@ -266,7 +270,7 @@ impl VideoTranscoder {
         );
         let caps = probe_video_capabilities();
         ensure!(
-            caps.can_transcode(config.from, config.to),
+            caps.can_reencode(config.from, config.to),
             "Required FFmpeg video codec unavailable"
         );
         let ffmpeg = caps
@@ -1004,6 +1008,63 @@ mod tests {
         assert!(
             rot_h > rot_w,
             "expected portrait dimensions after 90° CW rotation, got {rot_w}x{rot_h}"
+        );
+
+        // Same-codec rotation (Deg270) is allowed and rotates landscape HEVC into portrait HEVC,
+        // while same-codec Deg0 remains rejected.
+        assert!(VideoTranscoder::start(TranscodeConfig {
+            from: VideoCodec::H265,
+            to: VideoCodec::H265,
+            width: 320,
+            height: 240,
+            fps: 15,
+            bitrate_kbps: 400,
+            rotation: VideoRotation::Deg0,
+        })
+        .is_err());
+
+        let mut rot_hevc = VideoTranscoder::start(TranscodeConfig {
+            from: VideoCodec::H265,
+            to: VideoCodec::H265,
+            width: 320,
+            height: 320,
+            fps: 15,
+            bitrate_kbps: 400,
+            rotation: VideoRotation::Deg270,
+        })
+        .unwrap();
+        for frame in &hevc_frames {
+            rot_hevc.push(&frame.bytes).unwrap();
+        }
+        rot_hevc.finish_input();
+        let mut rot_frames = Vec::new();
+        while let Some(frame) = rot_hevc.recv() {
+            rot_frames.push(frame);
+        }
+        assert!(
+            !rot_frames.is_empty(),
+            "expected rotated HEVC output frames"
+        );
+        let mut check_dec = VideoTranscoder::start(TranscodeConfig {
+            from: VideoCodec::H265,
+            to: VideoCodec::Jpeg,
+            width: 320,
+            height: 320,
+            fps: 15,
+            bitrate_kbps: 400,
+            rotation: VideoRotation::Deg0,
+        })
+        .unwrap();
+        for frame in &rot_frames {
+            check_dec.push(&frame.bytes).unwrap();
+        }
+        check_dec.finish_input();
+        let check_jpg = check_dec.recv().expect("expected decoded rotated JPEG");
+        let (ccw_w, ccw_h) = jpeg_dimensions(&check_jpg.bytes).expect("JPEG SOF dimensions");
+        assert_eq!(
+            (ccw_w, ccw_h),
+            (240, 320),
+            "expected 320x240 landscape rotated 90° CCW to 240x320"
         );
     }
 
