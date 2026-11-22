@@ -44,6 +44,9 @@ pub use channels_video::*;
 #[path = "sticker.rs"]
 mod sticker;
 pub use sticker::*;
+#[path = "tp_media.rs"]
+mod tp_media;
+pub use tp_media::*;
 #[path = "upload_source.rs"]
 mod upload_source;
 pub use upload_source::PreparedFileUpload;
@@ -374,7 +377,7 @@ impl DownloadedMedia {
         };
         (self.bytes, receipt)
     }
-    fn from_receipt(receipt: DownloadReceipt, bytes: Vec<u8>) -> Self {
+    pub(super) fn from_receipt(receipt: DownloadReceipt, bytes: Vec<u8>) -> Self {
         Self {
             bytes,
             requested_quality: receipt.requested_quality,

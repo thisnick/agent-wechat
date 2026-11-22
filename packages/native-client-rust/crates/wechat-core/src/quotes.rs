@@ -215,7 +215,7 @@ pub(crate) fn app_message(content: &str) -> Option<AppMessage> {
         sender_id: child(app, "refermsg")
             .and_then(|r| {
                 let from = child(r, "fromusr").and_then(leaf)?;
-                if from.ends_with("@chatroom") {
+                if from.ends_with("@chatroom") || from.ends_with("@im.chatroom") {
                     child(r, "chatusr").and_then(leaf)
                 } else {
                     Some(from)
@@ -285,7 +285,7 @@ pub(crate) fn quoted_sticker_content(msg: &wechat_profile::Message) -> Option<(i
     let kind = app.reference.as_ref()?.1;
     let content = embedded_content(&app)?;
     let valid = match kind {
-        47 => crate::stickers::ordinary(content).is_some(),
+        47 => crate::stickers::is_ordinary_or_tp(content),
         49 => app_message(content)?.sticker.is_some(),
         _ => false,
     };
@@ -322,9 +322,7 @@ pub(crate) fn embedded_quote(app: &AppMessage, own: Option<&str>) -> Option<Valu
     .filter(|s| !s.is_empty() && s.len() <= 16384);
     let image = embedded_image_content(app).is_some();
     let sticker = (*kind == 47
-        && embedded_content(app)
-            .and_then(crate::stickers::ordinary)
-            .is_some())
+        && embedded_content(app).is_some_and(crate::stickers::is_ordinary_or_tp))
         || card.as_ref().is_some_and(|c| c.sticker.is_some());
     let supported = matches!(*kind, 1 | 3 | 42 | 47 | 48)
         || sticker
@@ -363,7 +361,7 @@ pub(crate) fn message_app(msg: &wechat_profile::Message) -> Option<AppMessage> {
     if msg
         .peer
         .as_deref()
-        .is_some_and(|s| s.ends_with("@chatroom"))
+        .is_some_and(|s| s.ends_with("@chatroom") || s.ends_with("@im.chatroom"))
     {
         if let Some(sender) = &msg.sender {
             text = text.strip_prefix(&format!("{sender}:\n")).unwrap_or(text);
@@ -382,7 +380,7 @@ pub(crate) fn forwarded_body(msg: &wechat_profile::Message) -> Option<String> {
     let content = if msg
         .peer
         .as_deref()
-        .is_some_and(|s| s.ends_with("@chatroom"))
+        .is_some_and(|s| s.ends_with("@chatroom") || s.ends_with("@im.chatroom"))
     {
         msg.sender
             .as_ref()
@@ -409,6 +407,11 @@ mod tests {
         for (from, member, expected_sender) in [
             (
                 "room@chatroom",
+                "<chatusr>123456@openim</chatusr>",
+                "123456@openim",
+            ),
+            (
+                "wecom_room@im.chatroom",
                 "<chatusr>123456@openim</chatusr>",
                 "123456@openim",
             ),

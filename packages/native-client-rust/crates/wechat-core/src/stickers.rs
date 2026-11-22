@@ -99,6 +99,70 @@ pub(crate) fn ordinary(content: &str) -> Option<StickerDescriptor> {
     })
 }
 
+pub(crate) fn is_ordinary_or_tp(content: &str) -> bool {
+    if ordinary(content).is_some() {
+        return true;
+    }
+    if content.len() > 128 * 1024
+        || content.to_ascii_uppercase().contains("<!DOCTYPE")
+        || content.to_ascii_uppercase().contains("<!ENTITY")
+    {
+        return false;
+    }
+    let Ok(doc) = roxmltree::Document::parse_with_options(
+        content,
+        roxmltree::ParsingOptions {
+            nodes_limit: 4096,
+            ..Default::default()
+        },
+    ) else {
+        return false;
+    };
+    let root = doc.root_element();
+    if root.tag_name().name() != "msg"
+        || root.tag_name().namespace().is_some()
+        || doc
+            .descendants()
+            .any(|n| n.ancestors().take(34).count() > 32)
+    {
+        return false;
+    }
+    let Some(emoji) = child(root, "emoji") else {
+        return false;
+    };
+    let Some(size) = emoji.attribute("len").and_then(|v| v.parse::<u64>().ok()) else {
+        return false;
+    };
+    let Some(md5) = emoji.attribute("md5") else {
+        return false;
+    };
+    if !valid_identity(size, md5) {
+        return false;
+    }
+    let Some(url) = emoji.attribute("tpurl").filter(|v| !v.is_empty()) else {
+        return false;
+    };
+    let Some(auth_key) = emoji.attribute("tpauthkey").filter(|v| !v.is_empty()) else {
+        return false;
+    };
+    let Some(aes_key) = emoji.attribute("aeskey").filter(|v| !v.is_empty()) else {
+        return false;
+    };
+    if aes_key.len() != 32 || !aes_key.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return false;
+    }
+    if !matches!(emoji.attribute("expiretime"), None | Some(""))
+        && emoji
+            .attribute("expiretime")
+            .and_then(|v| v.parse::<u64>().ok())
+            .is_none()
+    {
+        return false;
+    }
+    wechat_protocol::media::validate_tp_media_url(url).is_ok()
+        && wechat_protocol::media::validate_tp_auth_key(auth_key).is_ok()
+}
+
 impl crate::Core {
     /// Read Saved membership from the supported official profile without a network refresh.
     pub fn saved_stickers(&self, account: &str) -> anyhow::Result<crate::CustomStickerList> {

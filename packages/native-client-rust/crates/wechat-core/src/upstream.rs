@@ -420,6 +420,23 @@ pub trait Upstream: Send + Sync {
         require_native(self.kind())?;
         wechat_protocol::media::fetch_sticker(descriptor, progress)
     }
+    fn download_tp_media(
+        &self,
+        descriptor: &wechat_protocol::media::TpMediaDescriptor,
+        progress: media::Progress<'_>,
+    ) -> Result<wechat_protocol::media::DownloadedMedia> {
+        require_native(self.kind())?;
+        wechat_protocol::media::fetch_tp_media(descriptor, progress)
+    }
+    fn download_tp_media_to(
+        &self,
+        descriptor: &wechat_protocol::media::TpMediaDescriptor,
+        progress: media::Progress<'_>,
+        sink: &mut dyn std::io::Write,
+    ) -> Result<wechat_protocol::media::DownloadReceipt> {
+        require_native(self.kind())?;
+        wechat_protocol::media::fetch_tp_media_to(descriptor, progress, sink)
+    }
     /// Resolve a Channels post's playback material and download its decoded video. Each
     /// authenticated step is submitted once; `checkpoint` runs between steps and stops the
     /// transfer when the account or asset is no longer current.
