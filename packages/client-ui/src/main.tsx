@@ -8,6 +8,12 @@ import { ThreadNotifications } from "./thread-notifications.tsx";
 import { emojiText } from "./emoji-text.ts";
 import { formatLocale, richText, t, useLanguage } from "./i18n.ts";
 import { DesktopUpdates } from "./desktop-updates.tsx";
+import {
+  SupportPrompt,
+  SupportSettingsLinks,
+  useSupportIssueUrl,
+  useSupportPrompt,
+} from "./support-prompt.tsx";
 import { desktop, desktopCallActions, desktopConnect, desktopInvoke, desktopNotifications, installDesktopLinks, type DesktopSession } from "./desktop.ts";
 import { DesktopWelcome, DesktopPreferences } from "./desktop-ui.tsx";
 import { LocalCacheSettings } from "./local-cache-settings.tsx";
@@ -1388,6 +1394,32 @@ function Chats({
   ]);
   const leftGroup = state.selectedGroup?.isInGroup === false;
   const active = account?.authenticated !== false && !leftGroup;
+  const supportIssueUrl = useSupportIssueUrl(connection.hubVersion);
+  const supportHardInterrupt =
+    !state.connected ||
+    state.reconnecting ||
+    !!state.error ||
+    !!state.signInRequired ||
+    !!callState?.currentCall ||
+    !!callState?.currentOffer ||
+    !!callState?.currentPendingOffer;
+  const supportSuppressed =
+    supportHardInterrupt ||
+    !!draft.trim() ||
+    attachments.files.length > 0 ||
+    !!stickerDraft ||
+    settings ||
+    newChat ||
+    omniScope !== null ||
+    requestSelection !== null ||
+    accountMenu ||
+    groupCallPicker !== null ||
+    view.name === "media";
+  const supportPrompt = useSupportPrompt({
+    simulator,
+    suppressed: supportSuppressed,
+    hardInterrupt: supportHardInterrupt,
+  });
   async function simulate(op: Record<string, unknown>) {
     try {
       await control({ account: state.account, ...op });
@@ -1427,6 +1459,12 @@ function Chats({
       changeDraft("");
       clearReply();
     }
+    const beforeTextSendKeys = text.trim()
+      ? new Set(session.snapshot().sends.map((item) => item.key))
+      : null;
+    const beforeMediaKeys = outbox
+      ? new Set(outbox.snapshot().map((item) => item.key))
+      : null;
     void (text.trim() ? session.send(text, reply, draftMentions) : Promise.resolve(true)).then(async (queued) => {
       const current = batch ? connection.attachmentDrafts.finish(batch, queued) : true;
       if (queued) {
@@ -1434,6 +1472,38 @@ function Chats({
         if (current && batch && outbox) {
           void session.readOnInteraction(batch.account, batch.thread);
           await sendAttachmentBatch(outbox, batch);
+        }
+        const textAccepted =
+          beforeTextSendKeys !== null &&
+          !session.snapshot().sends.some(
+            (item) =>
+              !beforeTextSendKeys.has(item.key) &&
+              (item.uncertain ||
+                !!item.error ||
+                item.intent?.state === "failed" ||
+                item.intent?.state === "needs_review" ||
+                item.intent?.state === "cancelled"),
+          );
+        const mediaAccepted =
+          current &&
+          batch !== null &&
+          outbox !== null &&
+          beforeMediaKeys !== null &&
+          !outbox.snapshot().some(
+            (item) =>
+              !beforeMediaKeys.has(item.key) &&
+              (item.uncertain ||
+                !!item.error ||
+                item.stage === "failed" ||
+                item.stage === "cancelled" ||
+                item.job?.state === "failed" ||
+                item.job?.state === "needs_review" ||
+                item.job?.state === "cancelled"),
+          );
+        const stickerAccepted =
+          !!stagedSticker && !stickerDraftsNow.current[draftKey]?.error;
+        if (textAccepted || mediaAccepted || stickerAccepted) {
+          supportPrompt.onMessageSent();
         }
         return;
       }
@@ -2292,9 +2362,22 @@ function Chats({
                   }}
                 />
               )}
+              <SupportSettingsLinks issueUrl={supportIssueUrl} />
             </div>
           </section>
         </div>
+      )}
+      {supportPrompt.visible && supportPrompt.step && (
+        <SupportPrompt
+          step={supportPrompt.step}
+          issueUrl={supportIssueUrl}
+          onPositive={supportPrompt.choosePositive}
+          onNegative={supportPrompt.chooseNegative}
+          onStar={supportPrompt.completeStar}
+          onAlreadyStarred={supportPrompt.completeAlreadyStarred}
+          onIssue={supportPrompt.completeIssue}
+          onDismiss={supportPrompt.dismiss}
+        />
       )}
     </div>
   );

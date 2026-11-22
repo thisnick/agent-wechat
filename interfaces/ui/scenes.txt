@@ -70,6 +70,9 @@ scene stickers-loading | route /{server}/{account}/chats/{thread}, viewports des
 scene stickers-pack-detail | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Official pack detail has complete contents, captions, membership and a copyable ID.
 scene stickers-packs | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Official pack browser shows added and available packs in one dialog.
 scene stickers-picker | route /{server}/{account}/chats/{thread}, viewports desktop+narrow+compact | Composer-anchored Saved picker with labeled added-pack tabs.
+scene support-prompt | route /{server}/{account}/chats/{thread}, viewports desktop+narrow | The top-right check-in card over a direct chat asking whether the user is enjoying Agent WeChat.
+scene support-prompt-issue | route /{server}/{account}/chats/{thread}, viewports desktop | The issue follow-up step linking to a GitHub bug report pre-filled with app version and platform.
+scene support-prompt-star | route /{server}/{account}/chats/{thread}, viewports desktop+narrow | The positive follow-up step inviting the user to star Agent WeChat on GitHub or mark it as already starred.
 scene unknown-contact | route /{server}/{account}/chats/{thread}/info, viewports desktop+compact | A cached person opens from conversation details; confirmed non-contacts say Not friends yet, unknown membership has no label, and Add contact opens request review without submitting.
 scene unknown-contact-add | route /{server}/{account}/chats/{thread}/info, viewports desktop+compact | A cached person opens from conversation details; confirmed non-contacts say Not friends yet, unknown membership has no label, and Add contact opens request review without submitting.
 scene unnamed-group-chat | route /{server}/{account}/chats/{thread}, viewports desktop+narrow | An unnamed group labeled with member names in the chat list and conversation header.
