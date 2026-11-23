@@ -484,7 +484,7 @@ field wechat_protocol::calls::relay::RoomInputs::server_ip | u32 | MISSING DOC
 field wechat_protocol::calls::relay::RoomInputs::server_port | u16 | MISSING DOC
 field wechat_protocol::calls::relay::RoomInputs::server_text | alloc::string::String | MISSING DOC
 field wechat_protocol::calls::relay::SelectedRelay::connection_id | u16 | MISSING DOC
-field wechat_protocol::calls::relay::SelectedRelay::endpoint | core::net::socket_addr::SocketAddrV4 | MISSING DOC
+field wechat_protocol::calls::relay::SelectedRelay::endpoint | core::net::socket_addr::SocketAddr | Selected UDP relay endpoint (IPv4 or IPv6) from the admitted Strategy.
 field wechat_protocol::calls::relay::SelectedRelay::media_key | zeroize::Zeroizing<[u8; 32]> | MISSING DOC
 field wechat_protocol::calls::relay::SelectedRelay::merge_mode | bool | MISSING DOC
 field wechat_protocol::calls::relay::SelectedRelay::own_member | u16 | MISSING DOC
@@ -1120,15 +1120,18 @@ fn wechat_protocol::calls::personal::switch_av | fn(inputs: &wechat_protocol::ca
 fn wechat_protocol::calls::relay::RoomInputs::body | fn(&self) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
 fn wechat_protocol::calls::relay::RoomInputs::initial | fn(selected: &wechat_protocol::calls::relay::SelectedRelay, network_type: u16, header_timestamp: u32, body_timestamp: u32) -> Self | MISSING DOC
 fn wechat_protocol::calls::relay::RoomInputs::random_bytes_needed | fn(&self) -> anyhow::Result<usize> | MISSING DOC
-fn wechat_protocol::calls::relay::SelectedRelay::from_strategy | fn(room_id: u64, room_key: u64, own_member: u16, strategy: &[u8], connection_index: usize, udp_index: usize) -> anyhow::Result<Self> | Strategy field15 contains modern connection records. Indices must be chosen by the caller from the current admitted Strategy, not by retries.
+fn wechat_protocol::calls::relay::SelectedRelay::from_strategy | fn(room_id: u64, room_key: u64, own_member: u16, strategy: &[u8], connection_index: usize, udp_index: usize) -> anyhow::Result<Self> | Strategy field15 contains modern connection records (with field1 legacy UDP addresses used only when field15 is empty). Indices must be chosen by the caller from the current admitted Strategy, not by retries.
+fn wechat_protocol::calls::relay::SelectedRelay::strategy_candidates | fn(strategy: &[u8]) -> anyhow::Result<alloc::vec::Vec<(usize, usize, core::net::socket_addr::SocketAddr)>> | List valid UDP relay candidates as `(connection_index, udp_index, endpoint)` from an admitted Strategy in server order.
 fn wechat_protocol::calls::relay::TwoRttRelay::close | fn(&mut self) | MISSING DOC
 fn wechat_protocol::calls::relay::TwoRttRelay::continuation_random_bytes_needed | fn(&self, header_timestamp: u32, body_timestamp: u32) -> anyhow::Result<usize> | MISSING DOC
 fn wechat_protocol::calls::relay::TwoRttRelay::is_ready | fn(&self) -> bool | MISSING DOC
-fn wechat_protocol::calls::relay::TwoRttRelay::new | fn(room: wechat_protocol::calls::relay::RoomInputs, room_key: u64, endpoint: core::net::socket_addr::SocketAddrV4, epoch: wechat_protocol::calls::relay::RelayEpoch, deadline_ms: u64) -> anyhow::Result<Self> | MISSING DOC
+fn wechat_protocol::calls::relay::TwoRttRelay::merge_fallback_random_bytes_needed | fn(&self, header_timestamp: u32, body_timestamp: u32) -> anyhow::Result<usize> | Return the random padding byte count needed to rebuild the initial check-in packet with `merge_mode` cleared for 2-RTT fallback.
+fn wechat_protocol::calls::relay::TwoRttRelay::new | fn(room: wechat_protocol::calls::relay::RoomInputs, room_key: u64, endpoint: core::net::socket_addr::SocketAddr, epoch: wechat_protocol::calls::relay::RelayEpoch, deadline_ms: u64) -> anyhow::Result<Self> | Create a relay check-in state machine bound to the selected IPv4 or IPv6 UDP endpoint.
 fn wechat_protocol::calls::relay::TwoRttRelay::prepare_continuation | fn(&mut self, epoch: wechat_protocol::calls::relay::RelayEpoch, now_ms: u64, header_timestamp: u32, body_timestamp: u32, random: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
 fn wechat_protocol::calls::relay::TwoRttRelay::prepare_initial | fn(&mut self, epoch: wechat_protocol::calls::relay::RelayEpoch, now_ms: u64, random: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
+fn wechat_protocol::calls::relay::TwoRttRelay::prepare_merge_fallback | fn(&mut self, epoch: wechat_protocol::calls::relay::RelayEpoch, now_ms: u64, header_timestamp: u32, body_timestamp: u32, random: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Clear `merge_mode` after a 1-RTT timeout and rebuild the initial check-in packet for standard 2-RTT fallback.
 fn wechat_protocol::calls::relay::TwoRttRelay::random_bytes_needed | fn(&self) -> anyhow::Result<usize> | MISSING DOC
-fn wechat_protocol::calls::relay::TwoRttRelay::receive | fn(&mut self, packet: &[u8], source: core::net::socket_addr::SocketAddrV4, epoch: wechat_protocol::calls::relay::RelayEpoch, now_ms: u64) -> anyhow::Result<wechat_protocol::calls::relay::RelayProgress> | MISSING DOC
+fn wechat_protocol::calls::relay::TwoRttRelay::receive | fn(&mut self, packet: &[u8], source: core::net::socket_addr::SocketAddr, epoch: wechat_protocol::calls::relay::RelayEpoch, now_ms: u64) -> anyhow::Result<wechat_protocol::calls::relay::RelayProgress> | Process one inbound UDP datagram from `source` and advance the relay check-in state.
 fn wechat_protocol::calls::relay::TwoRttRelay::room | fn(&self) -> &wechat_protocol::calls::relay::RoomInputs | MISSING DOC
 fn wechat_protocol::calls::relay::decrypt_checkin | fn(cipher: &[u8], key: &[u8; 16], limit: usize) -> anyhow::Result<zeroize::Zeroizing<alloc::vec::Vec<u8>>> | MISSING DOC
 fn wechat_protocol::calls::relay::encrypt_checkin | fn(plain: &[u8], key: &[u8; 16], random: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Selector0 TEA chaining with its structural trailer. This is not an AEAD.
@@ -2095,7 +2098,7 @@ mod wechat_protocol::calls::host_policy | - | Inspect the active authentication 
 mod wechat_protocol::calls::host_transport | - | Call-specific ordinary reply policy and non-sensitive transport diagnostics. A verified host transport may return either owned ordinary key mode. This does not change request selection or authorize Ax/app/media key substitution.
 mod wechat_protocol::calls::incoming | - | Offline incoming call carriers and conference notification envelopes.
 mod wechat_protocol::calls::personal | - | Personal-call request codecs. Preparation performs no transport or account I/O.
-mod wechat_protocol::calls::relay | - | Selected IPv4 personal relay setup: one initial check-in, at most one learned continuation and explicit Ready. CRC/TEA structural checks are not media AEAD. The host owns sockets, current account/key generations, time and randomness.
+mod wechat_protocol::calls::relay | - | Selected IPv4/IPv6 relay setup: initial check-in, at most one learned continuation (or direct 1-RTT merged check-in) and explicit Ready. CRC/TEA structural checks are not media AEAD. The host owns sockets, current account/key generations, time and randomness.
 mod wechat_protocol::calls::signaling | - | Experimental offline call-signaling codecs.
 mod wechat_protocol::calls::video_packet | - | Video packetization, reassembly and video RTCP/QoS codecs. MP/iLink (`workMode = 3`) video packetization, Annex-B framing and video RTCP/QoS codecs.
 mod wechat_protocol::calls::voice_offer | - | Local voice advertisements are distinct from returned selected capabilities. A fresh offer advertises only the supported Opus17 bit. The server's selected codec number, packet format and channel flags require separate admission.

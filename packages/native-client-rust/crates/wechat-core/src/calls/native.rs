@@ -24,7 +24,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     future::Future,
-    net::{SocketAddrV4, UdpSocket},
+    net::{SocketAddr, UdpSocket},
     pin::Pin,
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -53,8 +53,6 @@ use wechat_protocol::{
     crypto, AccountState,
 };
 
-#[cfg(test)]
-use std::net::SocketAddr;
 #[cfg(test)]
 use wechat_calls::{
     audio::{AudioDecoder, AudioEncoder, AudioFormat},
@@ -1352,7 +1350,8 @@ fn run_control(
         session.phase() == PersonalPhase::Joined,
         "Peer call admission incomplete"
     );
-    let negotiated = session.take_media(&state, auth, 0, 0)?;
+    let (connection_index, udp_index) = media::select_relay_indices(&session.relay_candidates()?);
+    let negotiated = session.take_media(&state, auth, connection_index, udp_index)?;
     if let Some(muted) = session.peer_microphone_muted() {
         let _ = runtime.block_on(sink.peer_microphone(muted));
     }
@@ -1448,39 +1447,7 @@ fn run_control(
     // known joined room. Confirmed server termination and successful audio are
     // distinct; keep the local failure as an operational diagnostic.
     if let Err(error) = &media_result {
-        core.store.put_runtime(
-            account,
-            &format!("call-media-error:{call_id}"),
-            b"media_failed",
-        )?;
-        // Persist only fixed categories and counters, never packet material or
-        // dynamic transport errors, so a live failure can be diagnosed safely.
-        let message = error.to_string().to_ascii_lowercase();
-        let code = if message.contains("peer activity timed out") {
-            "peer_inactive"
-        } else if message.contains("nonce") {
-            "nonce_lifetime"
-        } else if message.contains("generation") {
-            "generation_changed"
-        } else if message.contains("authenticated call control") {
-            "unsupported_control"
-        } else if message.contains("opus") {
-            "opus_codec"
-        } else if message.contains("receiver unavailable") {
-            "audio_receiver_closed"
-        } else {
-            "other_media_error"
-        };
-        let _ = core.store.put_runtime(
-            account,
-            &format!("call-media-diagnostic:{call_id}"),
-            &serde_json::to_vec(&serde_json::json!({
-                "code": code,
-                "txDatagrams": worker.metrics.tx_submitted_datagrams.load(Ordering::Relaxed),
-                "rxFrames": worker.metrics.rx_delivered_frames.load(Ordering::Relaxed),
-                "txUnderruns": worker.metrics.tx_input_underruns.load(Ordering::Relaxed)
-            }))?,
-        );
+        record_media_failure(&core, account, call_id, worker, error)?;
     }
     ensure!(worker.authorized(), "Call authority revoked before Exit");
     let ended = match session.phase() {
@@ -1543,9 +1510,61 @@ struct MediaMetrics {
     tx_input_underruns: AtomicU64,
 }
 
+fn record_media_failure(
+    core: &Core,
+    account: &str,
+    call_id: &str,
+    worker: &Worker,
+    error: &anyhow::Error,
+) -> Result<()> {
+    core.store.put_runtime(
+        account,
+        &format!("call-media-error:{call_id}"),
+        b"media_failed",
+    )?;
+    // Persist only fixed categories and counters, never packet material or
+    // dynamic transport errors, so a live failure can be diagnosed safely.
+    let chain_has = |needle: &str| {
+        error
+            .chain()
+            .any(|cause| cause.to_string().to_ascii_lowercase().contains(needle))
+    };
+    let code = if chain_has("peer activity timed out") {
+        "peer_inactive"
+    } else if chain_has("nonce") {
+        "nonce_lifetime"
+    } else if chain_has("generation") {
+        "generation_changed"
+    } else if !chain_has("stopped during relay setup")
+        && !chain_has("relay handoff stopped")
+        && chain_has("relay")
+    {
+        "relay_setup_failed"
+    } else if chain_has("authenticated call control") {
+        "unsupported_control"
+    } else if chain_has("opus") {
+        "opus_codec"
+    } else if chain_has("receiver unavailable") {
+        "audio_receiver_closed"
+    } else {
+        "other_media_error"
+    };
+    let _ = core.store.put_runtime(
+        account,
+        &format!("call-media-diagnostic:{call_id}"),
+        &serde_json::to_vec(&serde_json::json!({
+            "code": code,
+            "txDatagrams": worker.metrics.tx_submitted_datagrams.load(Ordering::Relaxed),
+            "rxFrames": worker.metrics.rx_delivered_frames.load(Ordering::Relaxed),
+            "txUnderruns": worker.metrics.tx_input_underruns.load(Ordering::Relaxed)
+        }))?,
+    );
+    Ok(())
+}
+
 fn send_datagram(
     socket: &UdpSocket,
-    endpoint: SocketAddrV4,
+    endpoint: SocketAddr,
     packet: &[u8],
     worker: &Worker,
     audio: &[&QueuedAudio],
@@ -1554,7 +1573,7 @@ fn send_datagram(
 }
 fn send_datagram_generation(
     socket: &UdpSocket,
-    endpoint: SocketAddrV4,
+    endpoint: SocketAddr,
     packet: &[u8],
     worker: &Worker,
     audio: &[&QueuedAudio],

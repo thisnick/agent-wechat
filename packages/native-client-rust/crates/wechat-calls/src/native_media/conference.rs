@@ -12,7 +12,7 @@ use anyhow::{ensure, Context, Result};
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, VecDeque},
-    net::{SocketAddr, SocketAddrV4, UdpSocket},
+    net::{SocketAddr, UdpSocket},
     sync::{
         atomic::{AtomicBool, Ordering},
         Mutex,
@@ -79,7 +79,7 @@ pub trait ConferenceMediaHost: DirectMediaHost {
     fn submit_generation(
         &self,
         socket: &UdpSocket,
-        endpoint: SocketAddrV4,
+        endpoint: SocketAddr,
         packet: &[u8],
         frames: &[&Self::Frame],
         generation: u32,
@@ -453,7 +453,7 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
             let mut drained = 0usize;
             while drained < 64 {
                 match socket.recv_from(&mut buffer) {
-                    Ok((n, SocketAddr::V4(source))) if source == selected.endpoint && n <= 8197 => {
+                    Ok((n, source)) if source == selected.endpoint && n <= 8197 => {
                         drained += 1;
                         report.datagrams += 1;
                         let member = match audio_packet::unverified_live_member(&buffer[..n]) {
