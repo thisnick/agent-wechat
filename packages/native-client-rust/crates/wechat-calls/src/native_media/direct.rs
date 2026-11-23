@@ -880,6 +880,9 @@ mod tests {
             .map(|pkt| peer_chan.seal_video(epoch, 0, 1, true, pkt).unwrap())
             .collect();
 
+        let running = Arc::new(AtomicBool::new(true));
+        let peer_running = running.clone();
+        let frames = Arc::new(Mutex::new(Vec::new()));
         let server = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let endpoint = server.local_addr().unwrap();
         server
@@ -939,10 +942,14 @@ mod tests {
             ])
             .unwrap();
             server.send_to(&relay_reply(0x1004, &ready), src).unwrap();
+            // Keep the UDP socket bound until the client finishes draining so Windows
+            // does not surface ICMP Port Unreachable (WSAECONNRESET) on outbound probes.
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while peer_running.load(Ordering::Acquire) && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(5));
+            }
         });
 
-        let running = Arc::new(AtomicBool::new(true));
-        let frames = Arc::new(Mutex::new(Vec::new()));
         let host = CaptureHost {
             running: running.clone(),
             frames: frames.clone(),
