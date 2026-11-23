@@ -80,6 +80,8 @@ pub(super) fn run(
         keyframe_rx,
         transport.worker.video_keyframe_requests.clone(),
         has_tx_video.then_some(peer_kf_tx),
+        None,
+        None,
         prefer_live98,
         video_owner,
     ));
@@ -440,25 +442,27 @@ fn sync_conference_video_subscriptions(
             .iter()
             .map(|&member| (member, *video_track_gens.get(&member).unwrap_or(&1)))
             .collect();
-        video_bridge.set_conference_tracks(&active);
         if let (Some(format), ControlAdmission::Owner(sink)) =
             (recv_video_format, &transport.admission)
         {
             let tracks = active
-                .into_iter()
-                .map(|(member, generation)| crate::call_types::CallTrack::Video {
-                    id: crate::call_types::VIDEO_RECEIVE_TRACK_BASE + u32::from(member),
-                    generation,
-                    direction: crate::call_types::CallTrackDirection::Receive,
-                    format,
-                    participant_id: Some(format!("member-{member}")),
-                    active: true,
-                })
+                .iter()
+                .map(
+                    |&(member, generation)| crate::call_types::CallTrack::Video {
+                        id: crate::call_types::VIDEO_RECEIVE_TRACK_BASE + u32::from(member),
+                        generation,
+                        direction: crate::call_types::CallTrackDirection::Receive,
+                        format,
+                        participant_id: Some(format!("member-{member}")),
+                        active: true,
+                    },
+                )
                 .collect();
             let _ = transport
                 .runtime
                 .block_on(sink.receive_video_tracks(tracks));
         }
+        video_bridge.set_conference_tracks(&active);
     }
     Ok(())
 }

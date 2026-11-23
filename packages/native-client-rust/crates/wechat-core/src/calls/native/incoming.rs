@@ -93,6 +93,10 @@ pub(super) async fn prepare(
         video_generation: AtomicU32::new(1),
         muted: AtomicBool::new(false),
         camera_enabled: AtomicBool::new(false),
+        initial_camera_off_pending: AtomicBool::new(false),
+        initial_camera_off_deadlines: Mutex::new(None),
+        rx_video_packets_seen: Arc::new(AtomicBool::new(false)),
+        rx_video_keyframe_seen: Arc::new(AtomicBool::new(false)),
         joined_commands_ready: AtomicBool::new(false),
         submission: SendAdmission::default(),
         metrics: MediaMetrics::default(),
@@ -437,9 +441,8 @@ impl Actor {
                     let session = self.session.as_mut().expect("incoming session");
                     let worker = &self.worker;
                     let last_av_ts = &mut self.last_av_ts;
-                    drain_direct_switch_av(worker, &mut || {
+                    drain_direct_switch_av(worker, &mut |cam| {
                         let mic = !worker.muted.load(Ordering::Acquire);
-                        let cam = worker.camera_enabled.load(Ordering::Acquire);
                         let now = u64::try_from(
                             SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros(),
                         )?;
@@ -742,6 +745,18 @@ impl Actor {
                 self.worker
                     .camera_enabled
                     .store(request.camera_enabled, Ordering::Release);
+                let join_camera = if self.worker.call_type == CallType::Video {
+                    if !request.camera_enabled {
+                        // Direct video rooms must join with the video status bit set so the
+                        // relay forwards initial keyframe requests and the caller enters
+                        // normal video recovery; SwitchAV clears the camera bit once media
+                        // starts flowing or after the startup grace window.
+                        self.worker.schedule_initial_camera_off();
+                    }
+                    true
+                } else {
+                    request.camera_enabled
+                };
                 self.transport.admission = ControlAdmission::Owner(sink.clone());
                 self.sink = Some(sink);
                 let result = self
@@ -752,7 +767,7 @@ impl Actor {
                         &self.transport,
                         &mut self.state,
                         self.authority,
-                        request.camera_enabled,
+                        join_camera,
                         self.tasks.next()?,
                     );
                 if let Err(error) = result {
@@ -845,6 +860,12 @@ impl Actor {
             .take()
             .context("Incoming keyframe receiver already consumed")?;
         let is_video = self.worker.call_type == CallType::Video;
+        if is_video {
+            self.worker.arm_initial_camera_off(
+                self.inner.config.direct_camera_off_grace,
+                self.inner.config.direct_camera_off_recovery_grace,
+            );
+        }
         let config = self.inner.config.clone();
         let worker = self.worker.clone();
         let runtime = self.transport.runtime.clone();

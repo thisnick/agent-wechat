@@ -200,6 +200,7 @@ pub(super) struct VideoRxBridge {
     keyframe_requests: Mutex<Receiver<u32>>,
     self_keyframe_tx: SyncSender<u32>,
     peer_keyframe_tx: Option<SyncSender<()>>,
+    rx_video_seen: Option<Arc<AtomicBool>>,
     prefer_live98: bool,
     conference_tracks: ConferenceTrackUpdate,
     stop: Arc<AtomicBool>,
@@ -208,12 +209,15 @@ pub(super) struct VideoRxBridge {
 }
 
 impl VideoRxBridge {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         direct_peer_member: Option<u16>,
         format: Option<CallVideoFormat>,
         keyframe_rx: Receiver<u32>,
         self_keyframe_tx: SyncSender<u32>,
         peer_keyframe_tx: Option<SyncSender<()>>,
+        rx_video_seen: Option<Arc<AtomicBool>>,
+        first_frame_delivered: Option<Arc<AtomicBool>>,
         prefer_live98: bool,
         owner: Option<(BackendSink, tokio::runtime::Handle)>,
     ) -> Self {
@@ -235,6 +239,7 @@ impl VideoRxBridge {
                             rx,
                             worker_tracks_update,
                             worker_kf_tx,
+                            first_frame_delivered,
                             sink,
                             runtime,
                             worker_stop,
@@ -254,6 +259,7 @@ impl VideoRxBridge {
             keyframe_requests: Mutex::new(keyframe_rx),
             self_keyframe_tx,
             peer_keyframe_tx,
+            rx_video_seen,
             prefer_live98,
             conference_tracks,
             stop,
@@ -273,6 +279,9 @@ impl VideoRxBridge {
 
     /// Non-blocking handoff from the UDP media loop to the dedicated video RX worker.
     fn receive_frame(&self, frame: ReassembledVideoFrame) {
+        if let Some(seen) = self.rx_video_seen.as_ref() {
+            seen.store(true, Ordering::Release);
+        }
         let track_id = if self.direct_peer_member.is_some() {
             VIDEO_RECEIVE_TRACK_BASE
         } else {
@@ -333,6 +342,7 @@ fn run_video_rx_worker(
     rx: Receiver<ReassembledVideoFrame>,
     conference_tracks: ConferenceTrackUpdate,
     self_keyframe_tx: SyncSender<u32>,
+    first_frame_delivered: Option<Arc<AtomicBool>>,
     sink: BackendSink,
     runtime: tokio::runtime::Handle,
     stop: Arc<AtomicBool>,
@@ -378,6 +388,7 @@ fn run_video_rx_worker(
                     first,
                     &mut tracks,
                     &self_keyframe_tx,
+                    first_frame_delivered.as_deref(),
                     &sink,
                     &runtime,
                 );
@@ -392,6 +403,7 @@ fn run_video_rx_worker(
                         next,
                         &mut tracks,
                         &self_keyframe_tx,
+                        first_frame_delivered.as_deref(),
                         &sink,
                         &runtime,
                     );
@@ -432,15 +444,22 @@ fn run_video_rx_worker(
                 }
                 let seq = state.sequence;
                 state.sequence = state.sequence.saturating_add(1);
-                let _ = runtime.block_on(sink.video_frame(
-                    track_id,
-                    generation,
-                    target_format.codec,
-                    flags,
-                    seq,
-                    ts_us,
-                    &encoded.bytes,
-                ));
+                if runtime
+                    .block_on(sink.video_frame(
+                        track_id,
+                        generation,
+                        target_format.codec,
+                        flags,
+                        seq,
+                        ts_us,
+                        &encoded.bytes,
+                    ))
+                    .is_ok()
+                {
+                    if let Some(seen) = first_frame_delivered.as_deref() {
+                        seen.store(true, Ordering::Release);
+                    }
+                }
             }
             if state.frames_pushed_since_output >= MAX_STALLED_RX_TRANSCODE_FRAMES {
                 if std::env::var("WX_CALL_VIDEO_TRACE").as_deref() == Ok("1") {
@@ -520,12 +539,14 @@ fn prepare_rx_video_frame(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_rx_video_frame(
     is_conference: bool,
     target_format: CallVideoFormat,
     frame: ReassembledVideoFrame,
     tracks: &mut BTreeMap<u32, RxTrackBridge>,
     self_keyframe_tx: &SyncSender<u32>,
+    first_frame_delivered: Option<&AtomicBool>,
     sink: &BackendSink,
     runtime: &tokio::runtime::Handle,
 ) {
@@ -580,6 +601,7 @@ fn process_rx_video_frame(
     }
     state.rotation = rotation;
     let is_passthrough = wire_call_codec == target_format.codec;
+    let was_started = state.started_keyframe;
     let (prepended, effective_has_codec_config) = match prepare_rx_video_frame(
         state,
         src_codec,
@@ -621,15 +643,25 @@ fn process_rx_video_frame(
         }
         let seq = state.sequence;
         state.sequence = state.sequence.saturating_add(1);
-        let _ = runtime.block_on(sink.video_frame(
-            track_id,
-            generation,
-            target_format.codec,
-            flags,
-            seq,
-            timestamp_us,
-            push_bytes,
-        ));
+        if runtime
+            .block_on(sink.video_frame(
+                track_id,
+                generation,
+                target_format.codec,
+                flags,
+                seq,
+                timestamp_us,
+                push_bytes,
+            ))
+            .is_ok()
+        {
+            if let Some(seen) = first_frame_delivered {
+                seen.store(true, Ordering::Release);
+            }
+        } else if !was_started {
+            state.started_keyframe = false;
+            let _ = self_keyframe_tx.try_send(track_id);
+        }
         return;
     }
 
@@ -1107,6 +1139,8 @@ pub(super) fn run(
         keyframe_rx,
         worker.video_keyframe_requests.clone(),
         tx_handle.is_some().then_some(peer_kf_tx),
+        Some(worker.rx_video_packets_seen.clone()),
+        Some(worker.rx_video_keyframe_seen.clone()),
         config.prefer_live98,
         Some((sink.clone(), runtime.clone())),
     );

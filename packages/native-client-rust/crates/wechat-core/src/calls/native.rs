@@ -87,6 +87,8 @@ struct NativeCallConfig {
     ring_timeout: Duration,
     peer_idle_timeout: Duration,
     max_duration: Duration,
+    direct_camera_off_grace: Duration,
+    direct_camera_off_recovery_grace: Duration,
 }
 impl Default for NativeCallConfig {
     fn default() -> Self {
@@ -104,6 +106,14 @@ impl Default for NativeCallConfig {
             peer_idle_timeout: Duration::from_secs(60),
             // The supported media counter must not roll over without rekeying.
             max_duration: Duration::from_secs(1200),
+            // Direct video calls join/invite with the video status bit set so the
+            // relay forwards initial keyframe requests and peers establish video;
+            // when the user chose camera-off, SwitchAV clears the camera bit once
+            // the first inbound frame is ready, after `direct_camera_off_grace` if
+            // no remote video is arriving, or after `direct_camera_off_recovery_grace`
+            // if remote video is still waiting on its initial keyframe.
+            direct_camera_off_grace: Duration::from_secs(3),
+            direct_camera_off_recovery_grace: Duration::from_secs(10),
         }
     }
 }
@@ -134,6 +144,10 @@ struct Worker {
     video_generation: AtomicU32,
     muted: AtomicBool,
     camera_enabled: AtomicBool,
+    initial_camera_off_pending: AtomicBool,
+    initial_camera_off_deadlines: Mutex<Option<(Instant, Instant)>>,
+    rx_video_packets_seen: Arc<AtomicBool>,
+    rx_video_keyframe_seen: Arc<AtomicBool>,
     joined_commands_ready: AtomicBool,
     submission: SendAdmission,
     metrics: MediaMetrics,
@@ -150,6 +164,7 @@ struct Worker {
     notify: Notify,
 }
 struct DirectCommand {
+    sets_camera: bool,
     reply: oneshot::Sender<std::result::Result<(), CallServiceError>>,
 }
 struct QueuedAudio {
@@ -170,6 +185,48 @@ impl Worker {
         self.direct_commands
             .lock()
             .is_ok_and(|commands| !commands.is_empty())
+    }
+    fn schedule_initial_camera_off(&self) {
+        self.initial_camera_off_pending
+            .store(true, Ordering::Release);
+    }
+    fn arm_initial_camera_off(&self, idle_grace: Duration, recovery_grace: Duration) {
+        if !self.initial_camera_off_pending.load(Ordering::Acquire) {
+            return;
+        }
+        let now = Instant::now();
+        if let Ok(mut deadlines) = self.initial_camera_off_deadlines.lock() {
+            *deadlines = Some((now + idle_grace, now + recovery_grace.max(idle_grace)));
+        }
+    }
+    fn cancel_initial_camera_off(&self) {
+        self.initial_camera_off_pending
+            .store(false, Ordering::Release);
+        if let Ok(mut deadlines) = self.initial_camera_off_deadlines.lock() {
+            *deadlines = None;
+        }
+    }
+    fn initial_camera_off_due(&self) -> bool {
+        if !self.initial_camera_off_pending.load(Ordering::Acquire) {
+            return false;
+        }
+        if self.rx_video_keyframe_seen.load(Ordering::Acquire) {
+            return true;
+        }
+        let Some((idle_deadline, recovery_deadline)) = self
+            .initial_camera_off_deadlines
+            .lock()
+            .ok()
+            .and_then(|guard| *guard)
+        else {
+            return false;
+        };
+        let now = Instant::now();
+        if self.rx_video_packets_seen.load(Ordering::Acquire) {
+            now >= recovery_deadline
+        } else {
+            now >= idle_deadline
+        }
     }
     fn is_conference(&self) -> bool {
         self.conference.is_some() || self.conference_start.is_some()
@@ -301,7 +358,10 @@ impl CallBackend for NativeCallBackend {
                     if commands.len() >= 16 {
                         return Err(service_error(CallErrorCode::Capacity));
                     }
-                    commands.push_back(DirectCommand { reply });
+                    commands.push_back(DirectCommand {
+                        sets_camera: false,
+                        reply,
+                    });
                 }
                 return received
                     .await
@@ -340,6 +400,7 @@ impl CallBackend for NativeCallBackend {
                 return Err(service_error(CallErrorCode::Stale));
             }
             worker.camera_enabled.store(enabled, Ordering::Release);
+            worker.cancel_initial_camera_off();
             if !worker.is_conference() {
                 let (reply, received) = oneshot::channel();
                 {
@@ -350,7 +411,10 @@ impl CallBackend for NativeCallBackend {
                     if commands.len() >= 16 {
                         return Err(service_error(CallErrorCode::Capacity));
                     }
-                    commands.push_back(DirectCommand { reply });
+                    commands.push_back(DirectCommand {
+                        sets_camera: true,
+                        reply,
+                    });
                 }
                 return received
                     .await
@@ -483,6 +547,10 @@ impl CallBackend for NativeCallBackend {
                 video_generation: AtomicU32::new(1),
                 muted: AtomicBool::new(request.muted),
                 camera_enabled: AtomicBool::new(request.camera_enabled),
+                initial_camera_off_pending: AtomicBool::new(false),
+                initial_camera_off_deadlines: Mutex::new(None),
+                rx_video_packets_seen: Arc::new(AtomicBool::new(false)),
+                rx_video_keyframe_seen: Arc::new(AtomicBool::new(false)),
                 joined_commands_ready: AtomicBool::new(false),
                 submission: SendAdmission::default(),
                 metrics: MediaMetrics::default(),
@@ -825,7 +893,8 @@ impl FencedTransport {
                         if !self.worker.current()
                             || self.worker.stop.load(Ordering::Acquire)
                             || (self.worker.joined_commands_ready.load(Ordering::Acquire)
-                                && self.worker.has_direct_commands())
+                                && (self.worker.has_direct_commands()
+                                    || self.worker.initial_camera_off_due()))
                         {
                             return Err(CallLiveSyncInterrupted.into());
                         }
@@ -1265,8 +1334,11 @@ fn run_control(
         return Ok(());
     }
     let mode = if is_video {
+        if !request.camera_enabled {
+            worker.schedule_initial_camera_off();
+        }
         CallMediaMode::Video {
-            camera_enabled: request.camera_enabled,
+            camera_enabled: true,
         }
     } else {
         CallMediaMode::Voice
@@ -1380,6 +1452,12 @@ fn run_control(
         })?;
     let deadline = Instant::now() + inner.config.max_duration;
     let mut last_av_ts = 0u64;
+    if is_video {
+        worker.arm_initial_camera_off(
+            inner.config.direct_camera_off_grace,
+            inner.config.direct_camera_off_recovery_grace,
+        );
+    }
     worker.joined_commands_ready.store(true, Ordering::Release);
     let control_result = (|| -> Result<()> {
         while !worker.stop.load(Ordering::Acquire)
@@ -1392,9 +1470,8 @@ fn run_control(
                 break;
             }
             if is_video {
-                drain_direct_switch_av(worker, &mut || {
+                drain_direct_switch_av(worker, &mut |cam| {
                     let mic = !worker.muted.load(Ordering::Acquire);
-                    let cam = worker.camera_enabled.load(Ordering::Acquire);
                     let now =
                         u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
                     last_av_ts = last_av_ts.saturating_add(1).max(now);
@@ -1464,7 +1541,7 @@ fn run_control(
 
 fn drain_direct_switch_av(
     worker: &Worker,
-    send_switch: &mut impl FnMut() -> Result<()>,
+    send_switch: &mut impl FnMut(bool) -> Result<()>,
 ) -> Result<()> {
     let commands: Vec<DirectCommand> = {
         let mut queue = worker
@@ -1473,10 +1550,47 @@ fn drain_direct_switch_av(
             .map_err(|_| anyhow::anyhow!("Direct command queue closed"))?;
         queue.drain(..).collect()
     };
-    if commands.is_empty() {
+    let deferred_due = worker.initial_camera_off_due();
+    let send_deferred = commands.is_empty() && deferred_due;
+    if commands.is_empty() && !send_deferred {
         return Ok(());
     }
-    let result = send_switch().map_err(|error| {
+    let has_camera_command = commands.iter().any(|command| command.sets_camera);
+    let preserve_startup_video_bit = !commands.is_empty()
+        && !has_camera_command
+        && !deferred_due
+        && worker.initial_camera_off_pending.load(Ordering::Acquire);
+    let wire_camera = if preserve_startup_video_bit {
+        true
+    } else {
+        worker.camera_enabled.load(Ordering::Acquire)
+    };
+    let raw_result = send_switch(wire_camera);
+    let not_submitted = raw_result
+        .as_ref()
+        .is_err_and(|error| error.is::<CallRpcNotSubmitted>());
+    if send_deferred {
+        if std::env::var("WX_CALL_VIDEO_TRACE").as_deref() == Ok("1") {
+            eprintln!(
+                "[wechat-call-video] deferred initial switch_av(camera={wire_camera}) ok={} not_submitted={} rx_kf={}",
+                raw_result.is_ok(),
+                not_submitted,
+                worker.rx_video_keyframe_seen.load(Ordering::Acquire),
+            );
+        }
+        if not_submitted {
+            // Keep `initial_camera_off_pending` armed if the RPC was fenced
+            // pre-submit (for example by a post-Join Cancel that later drains
+            // as Ignored). Real stop/revocation exits before the next poll.
+            return Ok(());
+        }
+        worker.cancel_initial_camera_off();
+        return raw_result;
+    }
+    if !preserve_startup_video_bit && !not_submitted {
+        worker.cancel_initial_camera_off();
+    }
+    let result = raw_result.map_err(|error| {
         if error.is::<CallRpcNotSubmitted>() {
             service_error(CallErrorCode::Stale)
         } else {

@@ -244,7 +244,10 @@ async fn direct_poll_wait_stops_when_direct_command_queued() {
         .direct_commands
         .lock()
         .unwrap()
-        .push_back(DirectCommand { reply });
+        .push_back(DirectCommand {
+            sets_camera: true,
+            reply,
+        });
     // Before joined_commands_ready is enabled (e.g. while ringing), queued commands must not
     // interrupt LiveSync into a tight poll spin.
     f.transport.worker.notify.notify_waiters();
@@ -379,6 +382,10 @@ impl Fixture {
             video_generation: AtomicU32::new(1),
             muted: AtomicBool::new(false),
             camera_enabled: AtomicBool::new(false),
+            initial_camera_off_pending: AtomicBool::new(false),
+            initial_camera_off_deadlines: Mutex::new(None),
+            rx_video_packets_seen: Arc::new(AtomicBool::new(false)),
+            rx_video_keyframe_seen: Arc::new(AtomicBool::new(false)),
             submission: SendAdmission::default(),
             metrics: MediaMetrics::default(),
 
