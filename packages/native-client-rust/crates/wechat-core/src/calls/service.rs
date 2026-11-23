@@ -582,6 +582,17 @@ struct Peer {
     video: Option<CallVideoCapabilities>,
     events: mpsc::Sender<CallEvent>,
 }
+const MAX_CACHED_VIDEO_GOP_FRAMES: usize = 24;
+const MAX_CACHED_VIDEO_GOP_BYTES: usize = 2 * 1024 * 1024;
+
+struct CachedVideoGop {
+    generation: u32,
+    codec: CallVideoCodec,
+    frames: Vec<Vec<u8>>,
+    total_bytes: usize,
+    contiguous: bool,
+}
+
 struct LiveCall {
     identity: CallIdentity,
     authority: AccountAuthority,
@@ -600,6 +611,7 @@ struct LiveCall {
     video_receive_generation: u32,
     receive_tracks: BTreeMap<u32, CallTrack>,
     track_generations: BTreeMap<u32, u32>,
+    cached_video_gops: BTreeMap<u32, CachedVideoGop>,
     audio_lease: Arc<AtomicU32>,
     video_lease: Arc<AtomicU32>,
     camera_enabled: bool,
@@ -1386,6 +1398,7 @@ impl CallService {
             video_receive_generation: 1,
             receive_tracks: BTreeMap::new(),
             track_generations: BTreeMap::new(),
+            cached_video_gops: BTreeMap::new(),
             audio_lease: Arc::new(AtomicU32::new(1)),
             video_lease: Arc::new(AtomicU32::new(1)),
             camera_enabled: false,
@@ -2064,6 +2077,7 @@ impl CallService {
                         video_receive_generation: 1,
                         receive_tracks: BTreeMap::new(),
                         track_generations: BTreeMap::new(),
+                        cached_video_gops: BTreeMap::new(),
                         audio_lease: Arc::new(AtomicU32::new(1)),
                         video_lease: Arc::new(AtomicU32::new(1)),
                         camera_enabled: initial_camera,
@@ -2685,72 +2699,123 @@ impl CallService {
         owner_token: &str,
     ) -> Result<MediaConnection> {
         self.maintenance().await;
-        let mut s = self.lock()?;
-        // A media socket cannot reuse control identity from another account.
-        let peer = s
-            .clients
-            .get(client)
-            .ok_or_else(|| error(CallErrorCode::Forbidden))?;
-        if peer.account != account || peer.principal != principal {
-            return Err(error(CallErrorCode::Forbidden));
-        }
-        self.valid_peer(&s, client)?;
-        Self::owner(&s, client, call_id)?;
-        let c = s.call.as_ref().expect("owner call");
-        if c.state != CallState::Connected {
-            return Err(error(CallErrorCode::MediaNotReady));
-        }
-        if owner_token.len() != 64
-            || !c
-                .token
-                .as_ref()
-                .is_some_and(|t| openssl::memcmp::eq(t.as_bytes(), owner_token.as_bytes()))
-        {
-            return Err(error(CallErrorCode::NotOwner));
-        }
-        if !s.media.is_empty() {
-            return Err(error(CallErrorCode::Busy));
-        }
-        let identity = c.identity.clone();
-        let generation = c.send_generation;
-        let mut send_tracks = vec![CallTrack::Audio {
-            id: AUDIO_SEND_TRACK_ID,
-            generation,
-            direction: CallTrackDirection::Send,
-            format: Self::format(),
-            participant_id: None,
-        }];
-        if let Some(format) = c.video_send_format {
-            send_tracks.push(CallTrack::Video {
-                id: VIDEO_SEND_TRACK_ID,
-                generation: c.video_send_generation,
+        let (id, identity, frames, send_tracks, receive_tracks, missing_keyframe_tracks) = {
+            let mut s = self.lock()?;
+            // A media socket cannot reuse control identity from another account.
+            let peer = s
+                .clients
+                .get(client)
+                .ok_or_else(|| error(CallErrorCode::Forbidden))?;
+            if peer.account != account || peer.principal != principal {
+                return Err(error(CallErrorCode::Forbidden));
+            }
+            self.valid_peer(&s, client)?;
+            Self::owner(&s, client, call_id)?;
+            let c = s.call.as_ref().expect("owner call");
+            if c.state != CallState::Connected {
+                return Err(error(CallErrorCode::MediaNotReady));
+            }
+            if owner_token.len() != 64
+                || !c
+                    .token
+                    .as_ref()
+                    .is_some_and(|t| openssl::memcmp::eq(t.as_bytes(), owner_token.as_bytes()))
+            {
+                return Err(error(CallErrorCode::NotOwner));
+            }
+            if !s.media.is_empty() {
+                return Err(error(CallErrorCode::Busy));
+            }
+            let c = s.call.as_mut().expect("owner call");
+            let identity = c.identity.clone();
+            let generation = c.send_generation;
+            let mut send_tracks = vec![CallTrack::Audio {
+                id: AUDIO_SEND_TRACK_ID,
+                generation,
                 direction: CallTrackDirection::Send,
-                format,
+                format: Self::format(),
                 participant_id: None,
-                active: c.camera_enabled,
-            });
-        }
-        let receive_tracks = c.receive_tracks.values().cloned().collect::<Vec<_>>();
-        let frames = MediaQueue::new(&receive_tracks)?;
-        let id = uuid::Uuid::new_v4().to_string();
-        s.media.insert(
-            id.clone(),
-            MediaPeer {
-                client: client.into(),
-                identity,
-                stream: MediaStream::new(AUDIO_SEND_TRACK_ID, generation)
+            }];
+            if let Some(format) = c.video_send_format {
+                send_tracks.push(CallTrack::Video {
+                    id: VIDEO_SEND_TRACK_ID,
+                    generation: c.video_send_generation,
+                    direction: CallTrackDirection::Send,
+                    format,
+                    participant_id: None,
+                    active: c.camera_enabled,
+                });
+            }
+            let receive_tracks = c.receive_tracks.values().cloned().collect::<Vec<_>>();
+            let cached_video_gops = std::mem::take(&mut c.cached_video_gops);
+            let frames = MediaQueue::new(&receive_tracks)?;
+            let enqueued_at = Instant::now();
+            let mut missing_keyframe_tracks = Vec::new();
+            for track in &receive_tracks {
+                if let CallTrack::Video {
+                    id: track_id,
+                    generation: track_generation,
+                    format,
+                    ..
+                } = track
+                {
+                    if let Some(gop) = cached_video_gops.get(track_id) {
+                        if gop.generation == *track_generation
+                            && gop.codec == format.codec
+                            && gop.contiguous
+                            && !gop.frames.is_empty()
+                        {
+                            for cached in &gop.frames {
+                                let _ = frames.video(
+                                    *track_id,
+                                    *track_generation,
+                                    ReceivedCallAudio {
+                                        bytes: cached.clone(),
+                                        enqueued_at,
+                                        producer_gap: None,
+                                    },
+                                );
+                            }
+                        } else if format.codec != CallVideoCodec::Jpeg {
+                            missing_keyframe_tracks.push(*track_id);
+                        }
+                    }
+                }
+            }
+            let id = uuid::Uuid::new_v4().to_string();
+            s.media.insert(
+                id.clone(),
+                MediaPeer {
+                    client: client.into(),
+                    identity: identity.clone(),
+                    stream: MediaStream::new(AUDIO_SEND_TRACK_ID, generation)
+                        .map_err(|_| error(CallErrorCode::InvalidRequest))?,
+                    output: wechat_calls::pcm_output::PcmOutput::new(
+                        Self::media_format(),
+                        Self::format().sample_rate as usize * 8,
+                    )
                     .map_err(|_| error(CallErrorCode::InvalidRequest))?,
-                output: wechat_calls::pcm_output::PcmOutput::new(
-                    Self::media_format(),
-                    Self::format().sample_rate as usize * 8,
-                )
-                .map_err(|_| error(CallErrorCode::InvalidRequest))?,
-                video_started_generation: None,
-                frames: frames.clone(),
-                last_enqueued_at: None,
-            },
-        );
+                    video_started_generation: None,
+                    frames: frames.clone(),
+                    last_enqueued_at: None,
+                },
+            );
+            (
+                id,
+                identity,
+                frames,
+                send_tracks,
+                receive_tracks,
+                missing_keyframe_tracks,
+            )
+        };
         self.start_output(id.clone());
+        for track_id in missing_keyframe_tracks {
+            let _ = self
+                .backend
+                .request_video_keyframe(identity.clone(), track_id)
+                .await;
+        }
         Ok(MediaConnection {
             id,
             frames: MediaReceiveQueue(frames),
@@ -3024,6 +3089,9 @@ impl CallService {
         }
         for id in existing_keys {
             if let Some(old) = call.receive_tracks.remove(&id) {
+                if next.get(&id) != Some(&old) {
+                    call.cached_video_gops.remove(&id);
+                }
                 call.track_generations.insert(old.id(), old.generation());
             }
         }
@@ -3090,9 +3158,10 @@ impl CallService {
         if !allowed {
             return Err(error(CallErrorCode::Stale));
         }
+        let media_unattached = s.media.is_empty();
         let c = s
             .call
-            .as_ref()
+            .as_mut()
             .filter(|c| &c.identity == identity && c.state == CallState::Connected)
             .ok_or_else(|| error(CallErrorCode::Stale))?;
         let Some(track) = c.receive_tracks.get(&track_id) else {
@@ -3117,6 +3186,82 @@ impl CallService {
             payload,
         )
         .map_err(|_| error(CallErrorCode::InvalidRequest))?;
+        if media_unattached {
+            let is_keyframe = (flags & frame::FLAG_KEYFRAME) != 0;
+            let has_codec_config = (flags & frame::FLAG_CODEC_CONFIG) != 0;
+            if codec == CallVideoCodec::Jpeg {
+                if bytes.len() <= MAX_CACHED_VIDEO_GOP_BYTES {
+                    c.cached_video_gops.insert(
+                        track_id,
+                        CachedVideoGop {
+                            generation,
+                            codec,
+                            total_bytes: bytes.len(),
+                            frames: vec![bytes.clone()],
+                            contiguous: true,
+                        },
+                    );
+                } else {
+                    c.cached_video_gops.remove(&track_id);
+                }
+            } else if is_keyframe && has_codec_config {
+                if bytes.len() <= MAX_CACHED_VIDEO_GOP_BYTES {
+                    c.cached_video_gops.insert(
+                        track_id,
+                        CachedVideoGop {
+                            generation,
+                            codec,
+                            total_bytes: bytes.len(),
+                            frames: vec![bytes.clone()],
+                            contiguous: true,
+                        },
+                    );
+                } else {
+                    c.cached_video_gops.insert(
+                        track_id,
+                        CachedVideoGop {
+                            generation,
+                            codec,
+                            total_bytes: 0,
+                            frames: Vec::new(),
+                            contiguous: false,
+                        },
+                    );
+                }
+            } else {
+                match c.cached_video_gops.get_mut(&track_id) {
+                    Some(entry)
+                        if entry.generation == generation
+                            && entry.codec == codec
+                            && entry.contiguous =>
+                    {
+                        if entry.frames.len() < MAX_CACHED_VIDEO_GOP_FRAMES
+                            && entry.total_bytes.saturating_add(bytes.len())
+                                <= MAX_CACHED_VIDEO_GOP_BYTES
+                        {
+                            entry.total_bytes += bytes.len();
+                            entry.frames.push(bytes.clone());
+                        } else {
+                            entry.frames.clear();
+                            entry.total_bytes = 0;
+                            entry.contiguous = false;
+                        }
+                    }
+                    _ => {
+                        c.cached_video_gops.insert(
+                            track_id,
+                            CachedVideoGop {
+                                generation,
+                                codec,
+                                total_bytes: 0,
+                                frames: Vec::new(),
+                                contiguous: false,
+                            },
+                        );
+                    }
+                }
+            }
+        }
         let enqueued_at = Instant::now();
         for m in s.media.values_mut().filter(|m| &m.identity == identity) {
             let _ = m.frames.video(

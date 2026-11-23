@@ -148,6 +148,7 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
     let mut trace_drops = 0u64;
     let mut trace_last_orient = 0u8;
     let mut trace_vf_logged = false;
+    let mut trace_kf_logged = 0u32;
     let media_result = (|| -> Result<()> {
         while host.current() {
             ensure!(
@@ -253,7 +254,15 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                                         trace_drops += 1;
                                                     }
                                                     trace_last_orient = frame.orientation;
-                                                    if video_trace && trace_frames_ok <= 3 {
+                                                    if video_trace
+                                                        && (trace_frames_ok <= 3
+                                                            || (frame.is_keyframe
+                                                                && trace_kf_logged < 16))
+                                                    {
+                                                        if frame.is_keyframe {
+                                                            trace_kf_logged =
+                                                                trace_kf_logged.saturating_add(1);
+                                                        }
                                                         eprintln!(
                                                             "[wechat-call-video] rx frame #{trace_frames_ok} codec={:?} stream={} kf={} cfg={} orient={} bytes={}",
                                                             frame.codec,
@@ -268,6 +277,13 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                                         && !frame.is_keyframe
                                                     {
                                                         need_keyframe = true;
+                                                    } else if frame.is_keyframe
+                                                        && frame.has_codec_config
+                                                    {
+                                                        // A self-contained recovery IDR satisfied any
+                                                        // pending keyframe request from earlier drops.
+                                                        pending_local_irequest = None;
+                                                        let _ = host.take_local_keyframe_request();
                                                     }
                                                     host.receive_video(frame)?;
                                                 }
@@ -312,6 +328,14 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                                         &datagram,
                                                         &[],
                                                     );
+                                                    if video_trace {
+                                                        eprintln!(
+                                                            "[wechat-call-video] tx ireq reason=drop stream={} target={} lost_seq={}",
+                                                            last_rx_video_stream_id,
+                                                            media.peer_member,
+                                                            lost_seq
+                                                        );
+                                                    }
                                                     last_irequest_tx = Some(Instant::now());
                                                 }
                                             }
@@ -401,7 +425,7 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                     pending_local_irequest = Some(media.peer_member);
                     initial_irequests_sent += 1;
                 }
-                if last_irequest_tx.is_none_or(|t| t.elapsed() >= Duration::from_millis(250)) {
+                if last_irequest_tx.is_none_or(|t| t.elapsed() >= Duration::from_millis(1000)) {
                     if let Some(target_member) = pending_local_irequest.take() {
                         let lost_seq = last_rx_total_pkg_seq.unwrap_or(0);
                         let req = encode_irequest_with_force(
@@ -416,6 +440,14 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                             channel.seal_video_rtcp(epoch, clock(), last_rx_video_stream_id, &req)
                         {
                             let _ = host.submit(&socket, endpoint, &datagram, &[]);
+                            if video_trace {
+                                eprintln!(
+                                    "[wechat-call-video] tx ireq reason=local stream={} target={} lost_seq={}",
+                                    last_rx_video_stream_id,
+                                    target_member,
+                                    lost_seq
+                                );
+                            }
                             last_irequest_tx = Some(Instant::now());
                         }
                     }
