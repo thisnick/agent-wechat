@@ -108,9 +108,11 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
     // Ready establishes this transport. Peer speech is not a prerequisite for
     // transmitting; actual decoded/heard audio remains a separate observation.
     host.connected()?;
-    if let Ok(probe) = channel.seal_probe_init(epoch, clock()) {
-        let _ = host.submit(&socket, endpoint, &probe, &[]);
-    }
+    let probe = channel.seal_probe_init(epoch, clock())?;
+    ensure!(
+        host.submit(&socket, endpoint, &probe, &[])?,
+        "Call stopped during initial probe"
+    );
     let mut encoder_generation = host.generation();
     let mut pacer = FramePacer::new(format, started.elapsed());
     let mut tx_audio_buf = TxAudioJitterBuffer::<H::Frame>::new();
@@ -131,7 +133,7 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
     let mut pending_local_irequest: Option<u16> = None;
     let mut irequest_seq = 1u32;
     let mut last_rx_video_stream_id = 1u8;
-    let mut last_rx_total_pkg_seq = 0u64;
+    let mut last_rx_total_pkg_seq: Option<u64> = None;
     let mut rx_video_seen = false;
     let mut initial_irequests_sent = 0u8;
     let connected_at = Instant::now();
@@ -216,15 +218,22 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                         VideoChannelPayload::Nack(_) => {}
                                         VideoChannelPayload::RsmVideo(raw) => {
                                             last_rx_video_stream_id = opened.packed_kind & 0x0f;
-                                            if raw.len() >= 7 {
+                                            if raw.len() >= 24 && (raw[3] & 0x03) == 3 {
                                                 let pkt_seq = u16::from_be_bytes([raw[5], raw[6]]);
-                                                let delta = pkt_seq
-                                                    .wrapping_sub(last_rx_total_pkg_seq as u16)
-                                                    as i16;
-                                                if delta > 0 {
-                                                    last_rx_total_pkg_seq = last_rx_total_pkg_seq
-                                                        .wrapping_add(delta as u64);
-                                                }
+                                                last_rx_total_pkg_seq =
+                                                    Some(match last_rx_total_pkg_seq {
+                                                        None => u64::from(pkt_seq),
+                                                        Some(prev) => {
+                                                            let delta = pkt_seq
+                                                                .wrapping_sub(prev as u16)
+                                                                as i16;
+                                                            if delta > 0 {
+                                                                prev.wrapping_add(delta as u64)
+                                                            } else {
+                                                                prev
+                                                            }
+                                                        }
+                                                    });
                                             }
                                             trace_rx_pkts += 1;
                                             if video_trace
@@ -297,6 +306,7 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                                 })
                                             {
                                                 let lost_seq = last_rx_total_pkg_seq
+                                                    .unwrap_or(0)
                                                     .max(u64::from(irequest_seq));
                                                 let req = encode_irequest_with_force(
                                                     selected.own_member,
@@ -410,7 +420,9 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                 }
                 if last_irequest_tx.is_none_or(|t| t.elapsed() >= Duration::from_millis(250)) {
                     if let Some(target_member) = pending_local_irequest.take() {
-                        let lost_seq = last_rx_total_pkg_seq.max(u64::from(irequest_seq));
+                        let lost_seq = last_rx_total_pkg_seq
+                            .unwrap_or(0)
+                            .max(u64::from(irequest_seq));
                         let force = (irequest_seq % 2) == 1;
                         let req = encode_irequest_with_force(
                             selected.own_member,

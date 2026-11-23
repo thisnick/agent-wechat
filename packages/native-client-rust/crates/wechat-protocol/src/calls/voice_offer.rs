@@ -9,7 +9,7 @@ use zeroize::Zeroizing;
 /// Advertised standard video codec capabilities for an engine capability offer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VideoOfferOptions {
-    /// Advertise standard H.265/HEVC (`Vcodec2`, bit `0x10`).
+    /// Advertise standard H.265/HEVC (`Vcodec2` bit `0x10` and `HW265` bit `0x04`, with capability fields 21 and 22).
     pub hevc: bool,
     /// Advertise standard H.264/AVC (`SwH264 | HW264`, bits `0x09`).
     pub h264: bool,

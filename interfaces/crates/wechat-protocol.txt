@@ -544,7 +544,7 @@ field wechat_protocol::calls::video_packet::VideoS2pCommand::rs_level | u32 | Re
 field wechat_protocol::calls::video_packet::VideoS2pCommand::stream_id | u32 | Target video stream identifier (`field 12: u32StreamID`).
 field wechat_protocol::calls::video_packet::VideoWireCodec::Unknown::0 | u8 | -
 field wechat_protocol::calls::voice_offer::VideoOfferOptions::h264 | bool | Advertise standard H.264/AVC (`SwH264 | HW264`, bits `0x09`).
-field wechat_protocol::calls::voice_offer::VideoOfferOptions::hevc | bool | Advertise standard H.265/HEVC (`Vcodec2`, bit `0x10`).
+field wechat_protocol::calls::voice_offer::VideoOfferOptions::hevc | bool | Advertise standard H.265/HEVC (`Vcodec2` bit `0x10` and `HW265` bit `0x04`, with capability fields 21 and 22).
 field wechat_protocol::calls::voice_offer::VideoOfferOptions::video_flags | u32 | Display aspect ratio hint encoded in engine capability field 4 (for example `178` for 16:9 direct or `100` for conference).
 field wechat_protocol::contact_sync::ContactSyncBatch::commands | alloc::vec::Vec<wechat_protocol::wire::SyncCommand> | MISSING DOC
 field wechat_protocol::contact_sync::ContactSyncBatch::continuation | alloc::vec::Vec<u64> | MISSING DOC

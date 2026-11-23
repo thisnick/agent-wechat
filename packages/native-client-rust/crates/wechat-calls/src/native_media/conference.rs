@@ -371,7 +371,7 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                             }
                         }
                         if last_p2s_tx.is_none_or(|t| t.elapsed() >= Duration::from_secs(1)) {
-                            if let Ok(p2s) = encode_p2s(p2s_seq, 1, 0x19, 15) {
+                            if let Ok(p2s) = encode_p2s(p2s_seq, 2, 0x1d, 15) {
                                 p2s_seq = p2s_seq.wrapping_add(1);
                                 if let Ok(datagram) = sender.seal_qos_p2s(ready_at.elapsed(), &p2s)
                                 {
