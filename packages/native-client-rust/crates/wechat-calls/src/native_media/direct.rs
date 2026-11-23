@@ -131,7 +131,6 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
     let mut last_vf_tx: Option<Instant> = None;
     let mut last_irequest_tx: Option<Instant> = None;
     let mut pending_local_irequest: Option<u16> = None;
-    let mut irequest_seq = 1u32;
     let mut last_rx_video_stream_id = 1u8;
     let mut last_rx_total_pkg_seq: Option<u64> = None;
     let mut rx_video_seen = false;
@@ -218,23 +217,10 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                         VideoChannelPayload::Nack(_) => {}
                                         VideoChannelPayload::RsmVideo(raw) => {
                                             last_rx_video_stream_id = opened.packed_kind & 0x0f;
-                                            if raw.len() >= 24 && (raw[3] & 0x03) == 3 {
-                                                let pkt_seq = u16::from_be_bytes([raw[5], raw[6]]);
-                                                last_rx_total_pkg_seq =
-                                                    Some(match last_rx_total_pkg_seq {
-                                                        None => u64::from(pkt_seq),
-                                                        Some(prev) => {
-                                                            let delta = pkt_seq
-                                                                .wrapping_sub(prev as u16)
-                                                                as i16;
-                                                            if delta > 0 {
-                                                                prev.wrapping_add(delta as u64)
-                                                            } else {
-                                                                prev
-                                                            }
-                                                        }
-                                                    });
-                                            }
+                                            last_rx_total_pkg_seq = advance_rx_total_pkg_seq(
+                                                last_rx_total_pkg_seq,
+                                                raw,
+                                            );
                                             trace_rx_pkts += 1;
                                             if video_trace
                                                 && !trace_vf_logged
@@ -305,9 +291,7 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                                     t.elapsed() >= Duration::from_millis(1200)
                                                 })
                                             {
-                                                let lost_seq = last_rx_total_pkg_seq
-                                                    .unwrap_or(0)
-                                                    .max(u64::from(irequest_seq));
+                                                let lost_seq = last_rx_total_pkg_seq.unwrap_or(0);
                                                 let req = encode_irequest_with_force(
                                                     selected.own_member,
                                                     media.peer_member,
@@ -316,7 +300,6 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                                     lost_seq,
                                                     true,
                                                 );
-                                                irequest_seq = irequest_seq.wrapping_add(1);
                                                 if let Ok(datagram) = channel.seal_video_rtcp(
                                                     epoch,
                                                     clock(),
@@ -420,19 +403,15 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                 }
                 if last_irequest_tx.is_none_or(|t| t.elapsed() >= Duration::from_millis(250)) {
                     if let Some(target_member) = pending_local_irequest.take() {
-                        let lost_seq = last_rx_total_pkg_seq
-                            .unwrap_or(0)
-                            .max(u64::from(irequest_seq));
-                        let force = (irequest_seq % 2) == 1;
+                        let lost_seq = last_rx_total_pkg_seq.unwrap_or(0);
                         let req = encode_irequest_with_force(
                             selected.own_member,
                             target_member,
                             last_rx_video_stream_id,
                             clock(),
                             lost_seq,
-                            force,
+                            true,
                         );
-                        irequest_seq = irequest_seq.wrapping_add(1);
                         if let Ok(datagram) =
                             channel.seal_video_rtcp(epoch, clock(), last_rx_video_stream_id, &req)
                         {
@@ -600,6 +579,24 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
     channel.close();
     media_result
 }
+fn advance_rx_total_pkg_seq(prev: Option<u64>, raw: &[u8]) -> Option<u64> {
+    if raw.len() < 24 || (raw[3] & 0x03) != 3 {
+        return prev;
+    }
+    let pkt_seq = u16::from_be_bytes([raw[5], raw[6]]);
+    Some(match prev {
+        None => u64::from(pkt_seq),
+        Some(current) => {
+            let delta = pkt_seq.wrapping_sub(current as u16) as i16;
+            if delta > 0 {
+                current.wrapping_add(delta as u64)
+            } else {
+                current
+            }
+        }
+    })
+}
+
 fn synchronize_encoder_generation<T>(
     encoder: &mut impl AudioEncoder,
     current: &mut u32,
@@ -731,5 +728,260 @@ mod tests {
             tl.admit_offsets(1, 0, 0, 3260, t0 + Duration::from_millis(3160)),
             vec![52_160]
         );
+    }
+
+    #[test]
+    fn advance_rx_total_pkg_seq_handles_high_start_wraparound_reordering_and_invalid_headers() {
+        let make_pkt = |hkind: u8, seq: u16| -> Vec<u8> {
+            let mut pkt = vec![0u8; 24];
+            pkt[3] = hkind;
+            pkt[5..7].copy_from_slice(&seq.to_be_bytes());
+            pkt
+        };
+        // Truncated or non-kind-3 headers are ignored.
+        assert_eq!(advance_rx_total_pkg_seq(None, &[0; 7]), None);
+        assert_eq!(advance_rx_total_pkg_seq(None, &make_pkt(2, 100)), None);
+
+        // High initial sequence (>= 0x8000) anchors cleanly instead of stalling at 0.
+        let mut seq = advance_rx_total_pkg_seq(None, &make_pkt(3, 0xfffe));
+        assert_eq!(seq, Some(0xfffe));
+
+        // Out-of-order older packet does not move the unwrapped sequence backward.
+        seq = advance_rx_total_pkg_seq(seq, &make_pkt(3, 0xfffc));
+        assert_eq!(seq, Some(0xfffe));
+
+        // 16-bit wraparound advances monotonically into 64-bit space.
+        seq = advance_rx_total_pkg_seq(seq, &make_pkt(3, 0xffff));
+        assert_eq!(seq, Some(0xffff));
+        seq = advance_rx_total_pkg_seq(seq, &make_pkt(3, 0x0000));
+        assert_eq!(seq, Some(0x1_0000));
+        seq = advance_rx_total_pkg_seq(seq, &make_pkt(3, 0x0005));
+        assert_eq!(seq, Some(0x1_0005));
+
+        // Late packet from before wraparound is still rejected as older.
+        seq = advance_rx_total_pkg_seq(seq, &make_pkt(3, 0xfffe));
+        assert_eq!(seq, Some(0x1_0005));
+    }
+
+    #[test]
+    fn early_handshake_bwe_flagged_idr_burst_is_drained_opened_and_reassembled() {
+        use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, Arc, Mutex,
+        };
+        use wechat_protocol::{
+            calls::{
+                audio_packet::MediaEpoch,
+                relay::{encrypt_checkin, frame_outer, SelectedRelay},
+                video_packet::{ReassembledVideoFrame, VideoWireCodec},
+            },
+            crypto, protobuf as p,
+        };
+        use zeroize::Zeroizing;
+
+        struct DummyFrame(Vec<i16>);
+        impl DirectAudioFrame for DummyFrame {
+            fn generation(&self) -> u32 {
+                1
+            }
+            fn samples(&self) -> &[i16] {
+                &self.0
+            }
+        }
+        struct CaptureHost {
+            running: Arc<AtomicBool>,
+            frames: Arc<Mutex<Vec<ReassembledVideoFrame>>>,
+        }
+        impl DirectMediaHost for CaptureHost {
+            type Frame = DummyFrame;
+            fn current(&self) -> bool {
+                self.running.load(Ordering::Acquire)
+            }
+            fn generation(&self) -> u32 {
+                1
+            }
+            fn frame_current(&self, _frame: &Self::Frame) -> bool {
+                true
+            }
+            fn connected(&self) -> Result<()> {
+                Ok(())
+            }
+            fn receive_pcm(&self, _samples: &[i16]) -> Result<()> {
+                Ok(())
+            }
+            fn record(&self, _metric: MediaMetric, _count: u64) {}
+            fn submit(
+                &self,
+                socket: &UdpSocket,
+                endpoint: SocketAddr,
+                packet: &[u8],
+                _frames: &[&Self::Frame],
+            ) -> Result<bool> {
+                socket.send_to(packet, endpoint)?;
+                Ok(true)
+            }
+            fn receive_video(&self, frame: ReassembledVideoFrame) -> Result<()> {
+                self.frames.lock().unwrap().push(frame);
+                self.running.store(false, Ordering::Release);
+                Ok(())
+            }
+        }
+
+        let key = [0x42u8; 32];
+        let room_id = 77u64;
+        let room_key = 99u64;
+        let epoch = MediaEpoch {
+            account_generation: 1,
+            logout_epoch: 0,
+            call_generation: 1,
+            key_generation: 1,
+        };
+
+        let mut h264_idr = Vec::new();
+        h264_idr.extend_from_slice(&[0, 0, 0, 1, 0x67, 0x64, 0x00, 0x16, 0xac, 0xd2]);
+        h264_idr.extend_from_slice(&[0, 0, 0, 1, 0x68, 0xee, 0x3c, 0x80]);
+        h264_idr.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88]);
+        h264_idr.extend((0..360u16).map(|i| (i.wrapping_mul(17) & 0xff) as u8));
+
+        let mut tx_video = RsmVideoPacketizer::new(7, 1)
+            .with_orientation(5)
+            .with_chunk_bytes(100)
+            .unwrap();
+        let mut rsm_pkts = tx_video
+            .packetize(VideoWireCodec::H264, &h264_idr, 1234, 15, 500)
+            .unwrap();
+        // Mark the initial IDR packets with the mobile BWE probe bit (hdr[13] |= 0x10).
+        for pkt in rsm_pkts.iter_mut().take(3) {
+            pkt[3 + 13] |= 0x10;
+        }
+
+        let mut peer_chan = Live96::new(
+            key,
+            room_key,
+            MediaContext {
+                room_id,
+                own_member: 7,
+                peer_member: 3,
+                connection_id: 1,
+            },
+            epoch,
+        )
+        .unwrap();
+        peer_chan
+            .authorize_transmit(
+                epoch,
+                TransmitScope::VerifiedGeneration { key_generation: 1 },
+            )
+            .unwrap();
+        let early_probe = peer_chan.seal_probe_init(epoch, 0).unwrap();
+        let early_video_datagrams: Vec<Vec<u8>> = rsm_pkts
+            .iter()
+            .map(|pkt| peer_chan.seal_video(epoch, 0, 1, true, pkt).unwrap())
+            .collect();
+
+        let server = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let endpoint = server.local_addr().unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let peer_thread = thread::spawn(move || {
+            let checkin_key: [u8; 16] = crypto::md5(&room_key.to_le_bytes()).try_into().unwrap();
+            let relay_reply = |cmd: u64, body: &[u8]| -> Vec<u8> {
+                let public = p::message(&[p::uint(1, cmd), p::uint(2, 3), p::uint(3, 0)]).unwrap();
+                let header =
+                    p::message(&[p::bytes(1, &public), p::uint(2, room_id), p::uint(3, 10)])
+                        .unwrap();
+                let rand = vec![5; (8 - (body.len() + 10) % 8) % 8 + 3];
+                let cipher = encrypt_checkin(body, &checkin_key, &rand).unwrap();
+                frame_outer(
+                    &p::message(&[
+                        p::bytes(1, &header),
+                        p::uint(2, cipher.len() as u64),
+                        p::bytes(3, &cipher),
+                    ])
+                    .unwrap(),
+                )
+                .unwrap()
+            };
+            let mut buf = [0u8; 8198];
+            let (_n, src) = server.recv_from(&mut buf).unwrap();
+            let resp = p::message(&[
+                p::uint(1, 0),
+                p::uint(2, u64::from(u32::from_le_bytes([127, 0, 0, 1]))),
+                p::uint(3, u64::from(u32::from_le_bytes([127, 0, 0, 1]))),
+                p::uint(4, u64::from(src.port())),
+                p::uint(5, u64::from(endpoint.port())),
+                p::uint(6, 1),
+                p::uint(7, 0),
+                p::uint(8, 2),
+                p::uint(9, 1),
+                p::bytes(12, b"127.0.0.1"),
+                p::bytes(13, b"127.0.0.1"),
+                p::uint(14, 0),
+            ])
+            .unwrap();
+            server.send_to(&relay_reply(0x1002, &resp), src).unwrap();
+            // Send peer 0x70 seq=0 probe + early BWE-flagged IDR burst BEFORE 0x1004 Ready.
+            server.send_to(&early_probe, src).unwrap();
+            for datagram in &early_video_datagrams {
+                server.send_to(datagram, src).unwrap();
+            }
+            let (_n2, src2) = server.recv_from(&mut buf).unwrap();
+            assert_eq!(src2, src);
+            let ready = p::message(&[
+                p::uint(1, 0),
+                p::uint(2, room_id),
+                p::uint(3, 0),
+                p::uint(5, 3),
+                p::uint(6, 1),
+                p::uint(7, 0),
+            ])
+            .unwrap();
+            server.send_to(&relay_reply(0x1004, &ready), src).unwrap();
+        });
+
+        let running = Arc::new(AtomicBool::new(true));
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let host = CaptureHost {
+            running: running.clone(),
+            frames: frames.clone(),
+        };
+        let (_audio_tx, audio_rx) = mpsc::channel();
+        let media = NegotiatedMedia {
+            relay: SelectedRelay {
+                room_id,
+                room_key,
+                own_member: 3,
+                connection_id: 1,
+                endpoint,
+                media_key: Zeroizing::new(key),
+                merge_mode: false,
+            },
+            peer_member: 7,
+            frames_per_packet: 1,
+            video_enabled: true,
+            video_dec_cap_mask: 0x1d,
+        };
+        run_direct_media_with_video(
+            &host,
+            DirectMediaOptions {
+                epoch,
+                peer_idle_timeout: Duration::from_secs(3),
+            },
+            media,
+            audio_rx,
+            None,
+        )
+        .unwrap();
+        peer_thread.join().unwrap();
+
+        let delivered = frames.lock().unwrap();
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].codec, VideoWireCodec::H264);
+        assert!(delivered[0].is_keyframe);
+        assert!(delivered[0].has_codec_config);
+        assert_eq!(delivered[0].orientation, 5);
+        assert_eq!(delivered[0].payload, h264_idr);
     }
 }

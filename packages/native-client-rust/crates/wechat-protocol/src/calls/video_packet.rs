@@ -167,7 +167,7 @@ pub fn encode_irequest(
         stream_id,
         timestamp_ms,
         u64::from(sequence),
-        true,
+        false,
     )
 }
 
