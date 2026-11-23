@@ -161,6 +161,26 @@ pub fn encode_irequest(
     timestamp_ms: u64,
     sequence: u32,
 ) -> Vec<u8> {
+    encode_irequest_with_force(
+        local_member,
+        target_member,
+        stream_id,
+        timestamp_ms,
+        u64::from(sequence),
+        false,
+    )
+}
+
+/// Encode a 58-byte `0x66` `IRequest` keyframe request packet with explicit
+/// `ullLostPointSeq` (`body[0x24..0x2c]`) and `force` flag (`body[0x2c] & 1`).
+pub fn encode_irequest_with_force(
+    local_member: u16,
+    target_member: u16,
+    stream_id: u8,
+    timestamp_ms: u64,
+    lost_point_seq: u64,
+    force: bool,
+) -> Vec<u8> {
     let mut out = vec![0u8; 58];
     let local_packed = pack_rtcp_member(local_member, stream_id);
     let target_packed = pack_rtcp_member(target_member, stream_id);
@@ -174,7 +194,8 @@ pub fn encode_irequest(
     out[6] = 0x02;
     out[6 + 0x0c] = 0x03;
     out[6 + 0x1c..6 + 0x24].copy_from_slice(&timestamp_ms.to_le_bytes());
-    out[6 + 0x24..6 + 0x28].copy_from_slice(&sequence.to_le_bytes());
+    out[6 + 0x24..6 + 0x2c].copy_from_slice(&lost_point_seq.to_le_bytes());
+    out[6 + 0x2c..6 + 0x30].copy_from_slice(&u32::from(force).to_le_bytes());
     out
 }
 
@@ -283,18 +304,42 @@ pub fn parse_s2p(payload: &[u8]) -> Result<ParsedS2p> {
     Ok(parsed)
 }
 
-/// Encode a minimal `0x0b` MP P2S QoS heartbeat payload for `packed_kind = 0x30`.
+/// Encode an `0x0b` MP P2S QoS heartbeat payload for `packed_kind = 0x30`
+/// matching the nested `inner.f1` (client header) + `inner.f3.f1` (`video_p2s`) wire layout.
 pub fn encode_p2s(
     sequence: u16,
     cap_seq: u32,
     codec_support_mask: u32,
     decode_type: u32,
 ) -> Result<Vec<u8>> {
+    let client_hdr = p::message(&[
+        p::uint(1, 11),
+        p::uint(2, 0),
+        p::uint(3, 0),
+        p::uint(4, 1),
+        p::uint(5, 4),
+        p::uint(6, 111),
+        p::uint(7, 0x050000cb),
+    ])?;
     let video_p2s = p::message(&[
+        p::uint(1, 0),
+        p::uint(2, 1),
+        p::uint(4, 0x7e),
+        p::uint(8, 500),
+        p::uint(9, 500),
+        p::uint(10, 15),
+        p::uint(11, 15),
+        p::uint(12, 15),
+        p::uint(15, 15),
+        p::uint(16, 8),
+        p::uint(17, 1),
+        p::uint(19, 1),
+        p::uint(20, 1),
         p::uint(24, u64::from(codec_support_mask)),
         p::uint(29, u64::from(decode_type)),
     ])?;
-    let inner = p::message(&[p::bytes(3, &video_p2s)])?;
+    let video_wrapper = p::message(&[p::bytes(1, &video_p2s)])?;
+    let inner = p::message(&[p::bytes(1, &client_hdr), p::bytes(3, &video_wrapper)])?;
     let outer = p::message(&[
         p::uint(1, u64::from(sequence)),
         p::uint(2, u64::from(cap_seq)),
@@ -920,7 +965,6 @@ impl StreamReassembler {
         let s_lo6 = usize::from(hdr[12] >> 2);
         let orientation = hdr[13] >> 5;
         let r_mid2 = u32::from(hdr[13] & 0x03);
-        let bw_probe = (hdr[13] & 0x10) != 0;
         let r_hi4 = u32::from(hdr[14] & 0x0f);
         let r_full = (r_lo2 | (r_mid2 << 2) | (r_hi4 << 4)) as usize;
         let group_idx_x = usize::from(hdr[14] >> 5);
@@ -1005,8 +1049,10 @@ impl StreamReassembler {
             return Ok(RsmIngestOutcome::Pending);
         }
 
-        // Skip bandwidth-probe padding packets and degenerate headers.
-        if bw_probe || f_tot_pkts == 0 || f_pkt_idx == 0 || s_per_group == 0 {
+        // Skip degenerate or padding-only headers. Do not drop packets solely because
+        // `hdr[13] & 0x10` is set: peers mark real IDR/media packets with that
+        // bandwidth-estimation probe bit while carrying valid frame data.
+        if f_tot_pkts == 0 || f_pkt_idx == 0 || s_per_group == 0 {
             return Ok(RsmIngestOutcome::Pending);
         }
         let total_source_pkts = x_groups.saturating_mul(s_per_group);
@@ -1441,11 +1487,18 @@ mod tests {
         assert_eq!(parsed.video_commands[0].codec_type, 4);
         assert_eq!(parsed.video_commands[0].i_request_flag, 1);
 
-        let p2s = encode_p2s(5, 2, 0x10, 15).unwrap();
+        let p2s = encode_p2s(5, 2, 0x1d, 15).unwrap();
         assert_eq!(p2s[0], 0x0b);
         let decoded = p::decode(&p2s[1..]).unwrap();
         assert_eq!(opt_u32(&decoded, 1).unwrap(), Some(5));
+        assert_eq!(opt_u32(&decoded, 2).unwrap(), Some(2));
         assert_eq!(opt_u32(&decoded, 4).unwrap(), Some(2));
+        let inner = p::decode(p::optional_data(&decoded, 3).unwrap().unwrap()).unwrap();
+        assert!(p::optional_data(&inner, 1).unwrap().is_some());
+        let wrapper = p::decode(p::optional_data(&inner, 3).unwrap().unwrap()).unwrap();
+        let video_p2s = p::decode(p::optional_data(&wrapper, 1).unwrap().unwrap()).unwrap();
+        assert_eq!(opt_u32(&video_p2s, 24).unwrap(), Some(0x1d));
+        assert_eq!(opt_u32(&video_p2s, 29).unwrap(), Some(15));
     }
 
     #[test]
@@ -2501,6 +2554,74 @@ mod tests {
         assert!(
             frame.prior_frames_dropped,
             "eviction during an earlier packet must propagate prior_frames_dropped to the completed frame"
+        );
+    }
+
+    #[test]
+    fn bwe_probe_flagged_h264_idr_packets_reassemble_and_degenerate_probes_skip() {
+        let mut h264_idr = Vec::new();
+        h264_idr.extend_from_slice(&[0, 0, 0, 1, 0x67, 0x64, 0x00, 0x16, 0xac, 0xd2]); // SPS
+        h264_idr.extend_from_slice(&[0, 0, 0, 1, 0x68, 0xee, 0x3c, 0x80]); // PPS
+        h264_idr.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88]); // IDR slice
+        h264_idr.extend((0..460u16).map(|i| (i.wrapping_mul(13) & 0xff) as u8));
+
+        let mut tx = RsmVideoPacketizer::new(0, 1)
+            .with_orientation(5)
+            .with_chunk_bytes(100)
+            .unwrap();
+        let mut pkts = tx
+            .packetize(VideoWireCodec::H264, &h264_idr, 12_345, 15, 500)
+            .unwrap();
+        assert_eq!(pkts.len(), 5);
+
+        // Set EncFecHeader byte 13 bit 4 (0x10) on the first 4 packets, matching
+        // mobile HW264 initial IDR bursts (`hdr[13] = 0xb0`), and verify all packets
+        // are retained rather than dropped as padding.
+        for pkt in &mut pkts[..4] {
+            pkt[3 + 13] |= 0x10;
+            assert_eq!(pkt[3 + 13], 0xb0);
+        }
+
+        let mut rx = RsmVideoReassembler::new();
+        // A degenerate padding-only probe packet (`f_tot_pkts == 0`) must still be skipped.
+        let mut degenerate_probe = pkts[0].clone();
+        degenerate_probe[3 + 19] = 0;
+        assert_eq!(
+            rx.ingest(&degenerate_probe).unwrap(),
+            RsmIngestOutcome::Pending
+        );
+
+        let mut out = None;
+        for pkt in &pkts {
+            if let RsmIngestOutcome::Frame(frame) = rx.ingest(pkt).unwrap() {
+                out = Some(frame);
+            }
+        }
+        let frame = out.expect("BWE-flagged H264 IDR must reassemble");
+        assert_eq!(frame.codec, VideoWireCodec::H264);
+        assert!(frame.is_keyframe);
+        assert!(frame.has_codec_config);
+        assert_eq!(frame.orientation, 5);
+        assert!(!frame.prior_frames_dropped);
+        assert_eq!(frame.payload, h264_idr);
+    }
+
+    #[test]
+    fn irequest_with_force_encodes_64bit_lost_seq_and_force_flag() {
+        let forced = encode_irequest_with_force(1, 0, 1, 0x1122_3344, 0x0001_0000_002a, true);
+        assert_eq!(forced.len(), 58);
+        assert_eq!(
+            u64::from_le_bytes(forced[6 + 0x24..6 + 0x2c].try_into().unwrap()),
+            0x0001_0000_002a
+        );
+        assert_eq!(
+            u32::from_le_bytes(forced[6 + 0x2c..6 + 0x30].try_into().unwrap()),
+            1
+        );
+        let unforced = encode_irequest_with_force(1, 0, 1, 0x1122_3344, 42, false);
+        assert_eq!(
+            u32::from_le_bytes(unforced[6 + 0x2c..6 + 0x30].try_into().unwrap()),
+            0
         );
     }
 }

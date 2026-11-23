@@ -138,6 +138,7 @@ pub struct Live96 {
     prefer_live98_tx: bool,
     first_tx_audio: u16,
     first_tx_video: u16,
+    first_tx_control: u16,
     next_audio: u32,
     next_video: u32,
     next_qos: u32,
@@ -242,6 +243,7 @@ impl Live96 {
             prefer_live98_tx: false,
             first_tx_audio: 0,
             first_tx_video: 0,
+            first_tx_control: 0,
             next_audio: 0,
             next_video: 0,
             next_qos: 0,
@@ -292,6 +294,8 @@ impl Live96 {
             self.next_audio = u32::from(self.first_tx_audio);
             self.first_tx_video = self.legacy_start(b"agent-wechat/live96/video-start/v1")?;
             self.next_video = u32::from(self.first_tx_video);
+            self.first_tx_control = self.legacy_control_start()?;
+            self.next_control = u32::from(self.first_tx_control);
             self.legacy_receive_nonce_reuse = true;
         }
         self.tx_scope = Some(scope);
@@ -307,6 +311,19 @@ impl Live96 {
         let digest = Zeroizing::new(mac.sign_to_vec()?);
         let prefix = u32::from_le_bytes(digest[..4].try_into()?);
         Ok((prefix % u32::from(MAX_LEGACY_AUDIO_START) + 1) as u16)
+    }
+    fn legacy_control_start(&self) -> Result<u16> {
+        let key = PKey::hmac(&self.key[..])?;
+        let mut mac = Signer::new(MessageDigest::sha256(), &key)?;
+        mac.update(b"agent-wechat/live96/control-start/v1")?;
+        mac.update(&self.context.room_id.to_le_bytes())?;
+        mac.update(&self.base.to_le_bytes())?;
+        mac.update(&self.context.own_member.to_le_bytes())?;
+        let digest = Zeroizing::new(mac.sign_to_vec()?);
+        let prefix = u32::from_le_bytes(digest[..4].try_into()?);
+        // Reserve 0..1024 for peers that start 0x70 control probes at 0 while
+        // keeping >31,000 sequences available below u16::MAX.
+        Ok((1024 + (prefix % 32_768)) as u16)
     }
     fn tx_check(&mut self, current: MediaEpoch, now_ms: u64) -> Result<()> {
         self.check(current)?;
@@ -537,7 +554,7 @@ impl Live96 {
         };
         let family_ok = match kind & 0xf0 {
             0x10 | 0x30 | 0x50 | 0x70 => kind == (kind & 0xf0) && ext_byte == 0,
-            0x20 | 0x40 => ext_byte <= 1,
+            0x20 | 0x40 => ext_byte <= 2,
             0x60 => ext_byte == 0,
             _ => false,
         };
@@ -574,7 +591,7 @@ impl Live96 {
             0x10 => (self.next_audio, u32::from(self.first_tx_audio)),
             0x20 => (self.next_video, u32::from(self.first_tx_video)),
             0x30 => (self.next_qos, 0),
-            0x70 => (self.next_control, 0),
+            0x70 => (self.next_control, u32::from(self.first_tx_control)),
             _ => (0, 0),
         };
         if sequence32 < own_next && sequence32 >= first_tx {
@@ -635,6 +652,13 @@ impl Live96 {
             context: self.context,
         }))
     }
+    /// Send the initial `0x70` faking_type1 probe (`[8, 1, 18, 2, 8, 1]`) after
+    /// relay check-in completes, matching official clients.
+    pub fn seal_probe_init(&mut self, current: MediaEpoch, now_ms: u64) -> Result<Vec<u8>> {
+        self.check(current)?;
+        self.seal(current, now_ms, 0x70, &[8, 1, 18, 2, 8, 1])
+    }
+
     /// Reply only to the exact selected authenticated faking_type1 probe. A
     /// periodic/control response receives no echo. No general control sender is
     /// inferred, and retries would consume another semantic operation.
@@ -1089,9 +1113,83 @@ mod tests {
             )
             .unwrap();
         let mut remote = peer();
+        assert!(local.first_tx_control >= 1024);
         local.seal(epoch(), 0, 0x70, &[8, 1, 18, 2, 8, 2]).unwrap();
+        // Force a true cross-direction nonce collision at local's control sequence.
+        remote.next_control = u32::from(local.first_tx_control);
         let control = remote.seal(epoch(), 0, 0x70, &[8, 1, 18, 2, 8, 1]).unwrap();
         assert!(local.open(epoch(), &control).is_err());
+
+        // LegacyRelayAudio starts 0x70 at a member-bound offset >= 1024, so an
+        // initial probe never collides with an official peer starting at seq 0,
+        // and two LegacyRelayAudio peers can both send initial probes and reply.
+        let mut local = receiver();
+        local
+            .authorize_transmit(
+                epoch(),
+                TransmitScope::LegacyRelayAudio { key_generation: 1 },
+            )
+            .unwrap();
+        let mut official_peer = peer();
+        let local_init = local.seal_probe_init(epoch(), 0).unwrap();
+        let opened_by_official = official_peer.open(epoch(), &local_init).unwrap().unwrap();
+        assert_eq!(opened_by_official.packed_kind, 0x70);
+        assert_eq!(opened_by_official.payload(), &[8, 1, 18, 2, 8, 1]);
+        let official_init = official_peer.seal_probe_init(epoch(), 0).unwrap();
+        let opened_by_local = local.open(epoch(), &official_init).unwrap().unwrap();
+        assert_eq!(opened_by_local.sequence, 0);
+        let reply = local
+            .reply_to_probe(epoch(), 0, &opened_by_local)
+            .unwrap()
+            .expect("reply must succeed without colliding with peer seq 0");
+        let opened_reply = official_peer.open(epoch(), &reply).unwrap().unwrap();
+        assert_eq!(opened_reply.payload(), &[8, 1, 18, 2, 8, 2]);
+
+        let mut peer_a = receiver();
+        peer_a
+            .authorize_transmit(
+                epoch(),
+                TransmitScope::LegacyRelayAudio { key_generation: 1 },
+            )
+            .unwrap();
+        let mut peer_b = Live96::new(
+            [7; 32],
+            11,
+            MediaContext {
+                own_member: context().peer_member,
+                peer_member: context().own_member,
+                ..context()
+            },
+            epoch(),
+        )
+        .unwrap();
+        peer_b
+            .authorize_transmit(
+                epoch(),
+                TransmitScope::LegacyRelayAudio { key_generation: 1 },
+            )
+            .unwrap();
+        assert_ne!(peer_a.first_tx_control, peer_b.first_tx_control);
+        let init_a = peer_a.seal_probe_init(epoch(), 0).unwrap();
+        let init_b = peer_b.seal_probe_init(epoch(), 0).unwrap();
+        let open_b_from_a = peer_b.open(epoch(), &init_a).unwrap().unwrap();
+        let open_a_from_b = peer_a.open(epoch(), &init_b).unwrap().unwrap();
+        let reply_b = peer_b
+            .reply_to_probe(epoch(), 0, &open_b_from_a)
+            .unwrap()
+            .expect("peer_b replies to peer_a init probe");
+        let reply_a = peer_a
+            .reply_to_probe(epoch(), 0, &open_a_from_b)
+            .unwrap()
+            .expect("peer_a replies to peer_b init probe");
+        assert_eq!(
+            peer_a.open(epoch(), &reply_b).unwrap().unwrap().payload(),
+            &[8, 1, 18, 2, 8, 2]
+        );
+        assert_eq!(
+            peer_b.open(epoch(), &reply_a).unwrap().unwrap().payload(),
+            &[8, 1, 18, 2, 8, 2]
+        );
 
         let mut local = receiver();
         local
@@ -1298,6 +1396,22 @@ mod tests {
         assert_eq!(opened98.magic(), 0x98);
         assert_eq!(opened98.sequence32(), 0x0001_0005);
         assert_eq!(opened98.payload(), raw_audio);
+
+        // Live98 video packet with extension_byte == 2 opens cleanly.
+        let ext2_pkt = sender
+            .seal_inner(epoch(), 0, 0x21, 2, true, &[9, 0, 8, 3])
+            .unwrap();
+        let opened_ext2 = recv.open(epoch(), &ext2_pkt).unwrap().unwrap();
+        assert_eq!(opened_ext2.magic(), 0x98);
+        assert_eq!(opened_ext2.packed_kind, 0x21);
+        assert_eq!(opened_ext2.extension_byte(), 2);
+        assert_eq!(opened_ext2.payload(), &[9, 0, 8, 3]);
+
+        // Initial 0x70 probe roundtrips and elicits the expected reply shape.
+        let init_probe = sender.seal_probe_init(epoch(), 0).unwrap();
+        let opened_probe = recv.open(epoch(), &init_probe).unwrap().unwrap();
+        assert_eq!(opened_probe.packed_kind, 0x70);
+        assert_eq!(opened_probe.payload(), &[8, 1, 18, 2, 8, 1]);
 
         // VerifiedGeneration fails closed if TX tries to reuse a high Live98 RX sequence.
         recv.authorize_transmit(

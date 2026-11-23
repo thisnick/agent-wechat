@@ -9,7 +9,7 @@ use zeroize::Zeroizing;
 /// Advertised standard video codec capabilities for an engine capability offer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VideoOfferOptions {
-    /// Advertise standard H.265/HEVC (`Vcodec2`, bit `0x10`).
+    /// Advertise standard H.265/HEVC (`Vcodec2` bit `0x10` and `HW265` bit `0x04`, with capability fields 21 and 22).
     pub hevc: bool,
     /// Advertise standard H.264/AVC (`SwH264 | HW264`, bits `0x09`).
     pub h264: bool,
@@ -78,10 +78,18 @@ impl VoiceOffer {
                     (2, Some(v)) => {
                         let mut mask = 0u64;
                         if v.hevc {
-                            mask |= 0x10;
+                            // 0x10 = Vcodec2 (SW HEVC), 0x04 = HW265 (HW HEVC).
+                            // Official ExchangeCabInfo drops Vcodec2 unless HW265 is also present.
+                            mask |= 0x14;
                         }
                         if v.h264 {
                             mask |= 0x09;
+                        }
+                        if mask != 0 {
+                            // Standard video feature bits (NewP2S=0x80, CLF=0x100, CABAC=0x200,
+                            // HPP=0x400, LDENOISE=0x800, RDENOISE=0x1000, IREQUEST=0x2000).
+                            // Proprietary Vcodec1 (0x02) remains unset.
+                            mask |= 0x3f80;
                         }
                         mask
                     }
@@ -96,6 +104,8 @@ impl VoiceOffer {
                     (14, Some(v)) if v.hevc => 8,
                     (19, Some(v)) if v.h264 => 6,
                     (20, Some(v)) if v.h264 => 8,
+                    (21, Some(v)) if v.hevc => 6,
+                    (22, Some(v)) if v.hevc => 8,
                     (23, Some(v)) if v.h264 => 6,
                     (24, Some(v)) if v.h264 => 8,
                     (25, _) => 5,
@@ -182,7 +192,7 @@ mod tests {
             VoiceOffer::from_owned_random_video(0x01020300, [9; 32], VideoOfferOptions::default())
                 .unwrap();
         let fields = p::decode(offer.engine_advertisement()).unwrap();
-        assert_eq!(p::scalar(&fields, 2).unwrap(), 0x19);
+        assert_eq!(p::scalar(&fields, 2).unwrap(), 0x3f9d);
         assert_eq!(p::scalar(&fields, 3).unwrap(), 0x3f);
         assert_eq!(p::scalar(&fields, 4).unwrap(), 178);
         assert_eq!(p::scalar(&fields, 5).unwrap(), 0x40000);
@@ -192,6 +202,8 @@ mod tests {
         assert_eq!(p::scalar(&fields, 14).unwrap(), 8);
         assert_eq!(p::scalar(&fields, 19).unwrap(), 6);
         assert_eq!(p::scalar(&fields, 20).unwrap(), 8);
+        assert_eq!(p::scalar(&fields, 21).unwrap(), 6);
+        assert_eq!(p::scalar(&fields, 22).unwrap(), 8);
         assert_eq!(p::scalar(&fields, 40).unwrap(), 7);
     }
 }

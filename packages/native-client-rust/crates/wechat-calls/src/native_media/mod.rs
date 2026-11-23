@@ -9,6 +9,7 @@ mod submission;
 pub use conference_sources::{reconcile_roster, BoundConferenceReceiver};
 pub use direct::{run_direct_media, run_direct_media_with_video};
 pub use relay::connect_relay;
+use relay::connect_relay_with_early;
 pub use submission::SubmissionGate;
 
 use anyhow::Result;

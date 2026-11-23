@@ -1,6 +1,7 @@
 //! Relay setup shared by direct and conference media workers.
 use anyhow::{ensure, Context, Result};
 use std::{
+    collections::VecDeque,
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
     thread,
     time::{Duration, Instant},
@@ -10,7 +11,8 @@ use wechat_protocol::{
     crypto,
 };
 
-const RELAY_RETRANSMIT_INTERVAL: Duration = Duration::from_millis(400);
+const RELAY_RETRANSMIT_INTERVAL: Duration = Duration::from_millis(200);
+const MAX_EARLY_MEDIA_PACKETS: usize = 256;
 
 /// Run on an embedding worker. `submit` must recheck account authority at the
 /// physical handoff; the earlier `current` check alone does not authorize a send.
@@ -22,6 +24,22 @@ pub fn connect_relay(
     current: impl Fn() -> bool,
     submit: impl Fn(&UdpSocket, SocketAddr, &[u8]) -> Result<()>,
 ) -> Result<UdpSocket> {
+    let (socket, _early) =
+        connect_relay_with_early(selected, relay_epoch, started, current, submit)?;
+    Ok(socket)
+}
+
+/// Like [`connect_relay`], but preserves non-`0xd5` datagrams arriving from the
+/// selected relay endpoint during the check-in handshake (such as an incoming
+/// peer's initial audio/video IDR keyframe burst) so callers can feed them into
+/// the authenticated media channel instead of discarding them.
+pub(super) fn connect_relay_with_early(
+    selected: &SelectedRelay,
+    relay_epoch: RelayEpoch,
+    started: Instant,
+    current: impl Fn() -> bool,
+    submit: impl Fn(&UdpSocket, SocketAddr, &[u8]) -> Result<()>,
+) -> Result<(UdpSocket, VecDeque<Vec<u8>>)> {
     ensure!(current(), "Call stopped during relay setup");
     let clock = || u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let endpoint = selected.endpoint;
@@ -35,7 +53,7 @@ pub fn connect_relay(
     socket
         .set_nonblocking(true)
         .context("Relay UDP socket setup failed")?;
-    let room = RoomInputs::initial(selected, 0, clock() as u32, clock() as u32);
+    let room = RoomInputs::initial(selected, 4, clock() as u32, clock() as u32);
     let mut checkin = TwoRttRelay::new(room, selected.room_key, endpoint, relay_epoch, 15_000)?;
     let random = crypto::random::<10>()?;
     let mut active_packet = checkin
@@ -49,6 +67,7 @@ pub fn connect_relay(
     let mut last_tx = Instant::now();
     // One extra byte distinguishes a maximum-size datagram from truncation.
     let mut buffer = [0u8; 8198];
+    let mut early_packets = VecDeque::<Vec<u8>>::new();
     while !checkin.is_ready() {
         ensure!(current(), "Call stopped during relay setup");
         ensure!(clock() < 15_000, "Call relay deadline exceeded");
@@ -90,6 +109,11 @@ pub fn connect_relay(
                     | RelayProgress::DuplicateCheckin => {}
                 }
             }
+            Ok((n, source)) if source == endpoint && n > 0 && n <= 8197 => {
+                if early_packets.len() < MAX_EARLY_MEDIA_PACKETS {
+                    early_packets.push_back(buffer[..n].to_vec());
+                }
+            }
             Ok(_) => {}
             Err(e)
                 if matches!(
@@ -102,7 +126,7 @@ pub fn connect_relay(
             Err(e) => return Err(e).context("Relay UDP receive failed"),
         }
     }
-    Ok(socket)
+    Ok((socket, early_packets))
 }
 
 #[cfg(test)]
@@ -313,5 +337,80 @@ mod tests {
             assert!(matches!(sock6.local_addr().unwrap().ip(), IpAddr::V6(_)));
             peer6.join().unwrap();
         }
+    }
+
+    #[test]
+    fn connect_relay_buffers_early_media_packets_during_handshake() {
+        let server = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let endpoint = server.local_addr().unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let peer = thread::spawn(move || {
+            let mut buf = [0u8; 8198];
+            let (n, src) = server.recv_from(&mut buf).unwrap();
+            let first = decode_checkin_body(&buf[..n], 9);
+            assert_eq!(p::scalar(&first, 13).unwrap(), 4);
+            let resp = p::message(&[
+                p::uint(1, 0),
+                p::uint(2, u64::from(u32::from_le_bytes([127, 0, 0, 1]))),
+                p::uint(3, u64::from(u32::from_le_bytes([127, 0, 0, 1]))),
+                p::uint(4, u64::from(src.port())),
+                p::uint(5, u64::from(endpoint.port())),
+                p::uint(6, 1),
+                p::uint(7, 0),
+                p::uint(8, 2),
+                p::uint(9, 1),
+                p::bytes(12, b"127.0.0.1"),
+                p::bytes(13, b"127.0.0.1"),
+                p::uint(14, 0),
+            ])
+            .unwrap();
+            server
+                .send_to(&relay_reply(7, 9, 0x1002, &resp), src)
+                .unwrap();
+            // Simulate early peer Live96 media packets (e.g. initial IDR keyframe)
+            // arriving before CheckIn #2 Ready (0x1004).
+            server.send_to(&[0x96, 0x13, 0xaa, 0xbb], src).unwrap();
+            server.send_to(&[0x96, 0x13, 0xcc, 0xdd], src).unwrap();
+            let (_n2, src2) = server.recv_from(&mut buf).unwrap();
+            assert_eq!(src2, src);
+            let ready = p::message(&[
+                p::uint(1, 0),
+                p::uint(2, 7),
+                p::uint(3, 0),
+                p::uint(5, 0),
+                p::uint(6, 1),
+                p::uint(7, 0),
+            ])
+            .unwrap();
+            server
+                .send_to(&relay_reply(7, 9, 0x1004, &ready), src)
+                .unwrap();
+        });
+        let selected = SelectedRelay {
+            room_id: 7,
+            room_key: 9,
+            own_member: 0,
+            connection_id: 1,
+            endpoint,
+            media_key: Zeroizing::new([3; 32]),
+            merge_mode: false,
+        };
+        let (_sock, early) = connect_relay_with_early(
+            &selected,
+            test_epoch(),
+            Instant::now(),
+            || true,
+            |socket, dest, pkt| {
+                socket.send_to(pkt, dest)?;
+                Ok(())
+            },
+        )
+        .unwrap();
+        peer.join().unwrap();
+        assert_eq!(early.len(), 2);
+        assert_eq!(early[0], vec![0x96, 0x13, 0xaa, 0xbb]);
+        assert_eq!(early[1], vec![0x96, 0x13, 0xcc, 0xdd]);
     }
 }
