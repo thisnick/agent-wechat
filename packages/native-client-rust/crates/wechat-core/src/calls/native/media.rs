@@ -1514,4 +1514,45 @@ mod tests {
             assert_eq!(picked, (1, 2));
         }
     }
+
+    #[test]
+    fn take_keyframe_member_coalesces_direct_bursts() {
+        let (tx, rx) = mpsc::sync_channel(8);
+        let direct =
+            VideoRxBridge::new(Some(7), None, rx, tx.clone(), None, None, None, false, None);
+        tx.try_send(VIDEO_RECEIVE_TRACK_BASE).unwrap();
+        tx.try_send(VIDEO_RECEIVE_TRACK_BASE).unwrap();
+        tx.try_send(VIDEO_RECEIVE_TRACK_BASE).unwrap();
+        assert_eq!(direct.take_keyframe_member(), Some(7));
+        assert_eq!(direct.take_keyframe_member(), None);
+
+        // Non-matching tracks mixed with the direct track still resolve once and drain.
+        tx.try_send(VIDEO_RECEIVE_TRACK_BASE + 5).unwrap();
+        tx.try_send(VIDEO_RECEIVE_TRACK_BASE).unwrap();
+        assert_eq!(direct.take_keyframe_member(), Some(7));
+        assert_eq!(direct.take_keyframe_member(), None);
+
+        // Unrelated track IDs alone do not trigger a direct keyframe request.
+        tx.try_send(VIDEO_RECEIVE_TRACK_BASE + 5).unwrap();
+        assert_eq!(direct.take_keyframe_member(), None);
+
+        // Conference mode preserves distinct per-member requests in order.
+        let (conf_tx, conf_rx) = mpsc::sync_channel(8);
+        let conference = VideoRxBridge::new(
+            None,
+            None,
+            conf_rx,
+            conf_tx.clone(),
+            None,
+            None,
+            None,
+            false,
+            None,
+        );
+        conf_tx.try_send(VIDEO_RECEIVE_TRACK_BASE + 4).unwrap();
+        conf_tx.try_send(VIDEO_RECEIVE_TRACK_BASE + 9).unwrap();
+        assert_eq!(conference.take_keyframe_member(), Some(4));
+        assert_eq!(conference.take_keyframe_member(), Some(9));
+        assert_eq!(conference.take_keyframe_member(), None);
+    }
 }

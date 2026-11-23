@@ -1578,11 +1578,12 @@ async fn deferred_initial_camera_off_extends_grace_while_packets_arrive_and_canc
     assert_eq!(sent_cameras, vec![true, false]);
     assert!(worker.initial_camera_off_pending.load(Ordering::Acquire));
 
-    // A real post-handoff failure clears pending (no blind retry) and propagates Err.
-    assert!(drain_direct_switch_av(&worker, &mut |_| {
+    // A real post-handoff failure clears pending (no blind retry) and keeps the
+    // active call running instead of propagating an actor-terminating error.
+    drain_direct_switch_av(&worker, &mut |_| {
         Err(anyhow::anyhow!("synthetic post-handoff SwitchAV failure"))
     })
-    .is_err());
+    .unwrap();
     assert!(!worker.initial_camera_off_pending.load(Ordering::Acquire));
 
     // Explicit camera toggle cancels a pending deferred SwitchAV.

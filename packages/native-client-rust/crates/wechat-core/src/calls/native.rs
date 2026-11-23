@@ -1584,8 +1584,11 @@ fn drain_direct_switch_av(
             // as Ignored). Real stop/revocation exits before the next poll.
             return Ok(());
         }
+        // Clear pending so a possibly-accepted post-handoff SwitchAV is never
+        // blindly retried, and keep the active call running (matching how a
+        // failed user-requested SwitchAV does not tear down the call).
         worker.cancel_initial_camera_off();
-        return raw_result;
+        return Ok(());
     }
     if !preserve_startup_video_bit && !not_submitted {
         worker.cancel_initial_camera_off();

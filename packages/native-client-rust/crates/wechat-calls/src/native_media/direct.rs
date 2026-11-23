@@ -278,11 +278,13 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                                         && !frame.is_keyframe
                                                     {
                                                         need_keyframe = true;
-                                                    } else if frame.is_keyframe
-                                                        && frame.has_codec_config
-                                                    {
-                                                        // A self-contained recovery IDR satisfied any
-                                                        // pending keyframe request from earlier drops.
+                                                    } else if frame.is_keyframe {
+                                                        // A recovery IDR (self-contained or bare, with
+                                                        // cached parameter sets prepended in media.rs)
+                                                        // satisfied any pending keyframe request from
+                                                        // earlier drops. If an initial bare IDR still
+                                                        // needs parameter sets, media.rs queues a
+                                                        // fresh local request after receive_video.
                                                         pending_local_irequest = None;
                                                         irequest_streak = 0;
                                                         let _ = host.take_local_keyframe_request();
