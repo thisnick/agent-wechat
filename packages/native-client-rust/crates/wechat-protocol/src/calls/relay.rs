@@ -294,6 +294,7 @@ pub struct TwoRttRelay {
     deadline_ms: u64,
     last_ms: Option<u64>,
     phase: Phase,
+    merge_requested: bool,
 }
 impl TwoRttRelay {
     /// Create a relay check-in state machine bound to the selected IPv4 or IPv6 UDP endpoint.
@@ -320,6 +321,7 @@ impl TwoRttRelay {
                 && room.server_port == endpoint.port(),
             "Relay request endpoint mismatch"
         );
+        let merge_requested = room.merge_mode;
         Ok(Self {
             room,
             key: Zeroizing::new(room_key),
@@ -328,6 +330,7 @@ impl TwoRttRelay {
             deadline_ms,
             last_ms: None,
             phase: Phase::New,
+            merge_requested,
         })
     }
     pub fn room(&self) -> &RoomInputs {
@@ -364,14 +367,17 @@ impl TwoRttRelay {
     }
 
     fn live(&mut self, epoch: RelayEpoch, now_ms: u64) -> Result<()> {
-        if epoch.validate().is_err()
-            || epoch != self.epoch
-            || now_ms >= self.deadline_ms
-            || self.last_ms.is_some_and(|last| now_ms < last)
-            || self.phase == Phase::Closed
-        {
+        if epoch.validate().is_err() || epoch != self.epoch {
             self.close();
-            bail!("Relay generation, clock or deadline changed");
+            bail!("Relay generation changed");
+        }
+        if now_ms >= self.deadline_ms {
+            self.close();
+            bail!("Relay check-in deadline exceeded");
+        }
+        if self.last_ms.is_some_and(|last| now_ms < last) || self.phase == Phase::Closed {
+            self.close();
+            bail!("Relay clock or state invalid");
         }
         self.last_ms = Some(now_ms);
         Ok(())
@@ -513,7 +519,8 @@ impl TwoRttRelay {
         }
         let merged = number(&body, 14, Some(0))?;
         ensure!(
-            number(&body, 6, None)? == u64::from(self.room.checkin_sequence) && merged <= 1,
+            number(&body, 6, None)? == u64::from(self.room.checkin_sequence)
+                && (merged == 0 || (merged == 1 && self.merge_requested)),
             "Relay check-in sequence or merge mismatch"
         );
         let client = p::optional_data(&body, 12)?.unwrap_or_default();
@@ -1177,5 +1184,27 @@ mod tests {
             RelayProgress::Ready
         );
         assert!(fallback.is_ready());
+
+        // 4. Non-merge attempt (Strategy without merge_mode bit) rejects f14 = 1.
+        let non_merge = selected();
+        assert!(!non_merge.merge_mode);
+        let mut standard = TwoRttRelay::new(
+            RoomInputs::initial(&non_merge, 0, 0, 0),
+            9,
+            non_merge.endpoint,
+            epoch(),
+            100,
+        )
+        .unwrap();
+        let random = vec![1; standard.random_bytes_needed().unwrap()];
+        standard.prepare_initial(epoch(), 1, &random).unwrap();
+        assert!(standard
+            .receive(
+                &reply(0x1002, &merged_reply),
+                non_merge.endpoint,
+                epoch(),
+                2
+            )
+            .is_err());
     }
 }

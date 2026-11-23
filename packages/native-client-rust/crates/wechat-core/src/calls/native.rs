@@ -1535,7 +1535,10 @@ fn record_media_failure(
         "nonce_lifetime"
     } else if chain_has("generation") {
         "generation_changed"
-    } else if chain_has("relay") {
+    } else if !chain_has("stopped during relay setup")
+        && !chain_has("relay handoff stopped")
+        && chain_has("relay")
+    {
         "relay_setup_failed"
     } else if chain_has("authenticated call control") {
         "unsupported_control"
