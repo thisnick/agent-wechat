@@ -1,7 +1,7 @@
 //! Conference receive tracks, one paced uplink and optional generated diagnostics.
 use super::{
-    connect_relay, reconcile_roster, BoundConferenceReceiver, DirectAudioFrame, DirectMediaHost,
-    DirectVideoTx, MediaMetric, TxAudioJitterBuffer, TxVideoQueue,
+    connect_relay_with_early, reconcile_roster, BoundConferenceReceiver, DirectAudioFrame,
+    DirectMediaHost, DirectVideoTx, MediaMetric, TxAudioJitterBuffer, TxVideoQueue,
 };
 use crate::{
     conference_media::{ConferenceReceiver as Receiver, DecodedAudio, StreamReport},
@@ -149,7 +149,7 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
             selected.connection_id,
             epoch,
         )?;
-        let socket = connect_relay(
+        let (socket, mut early_packets) = connect_relay_with_early(
             &selected,
             relay_epoch,
             started,
@@ -452,7 +452,14 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
             stage = "receive_failed";
             let mut drained = 0usize;
             while drained < 64 {
-                match socket.recv_from(&mut buffer) {
+                let recv_outcome = if let Some(early) = early_packets.pop_front() {
+                    let n = early.len().min(buffer.len());
+                    buffer[..n].copy_from_slice(&early[..n]);
+                    Ok((n, selected.endpoint))
+                } else {
+                    socket.recv_from(&mut buffer)
+                };
+                match recv_outcome {
                     Ok((n, source)) if source == selected.endpoint && n <= 8197 => {
                         drained += 1;
                         report.datagrams += 1;

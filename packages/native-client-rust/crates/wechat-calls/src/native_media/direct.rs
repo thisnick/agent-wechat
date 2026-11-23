@@ -1,6 +1,6 @@
 //! Direct voice and video transport, codec state, packet ordering and pacing.
 use super::{
-    connect_relay, DirectAudioFrame, DirectMediaHost, DirectMediaOptions, DirectVideoTx,
+    connect_relay_with_early, DirectAudioFrame, DirectMediaHost, DirectMediaOptions, DirectVideoTx,
     MediaMetric, TxAudioJitterBuffer, TxVideoQueue,
 };
 use crate::{
@@ -21,8 +21,8 @@ use wechat_protocol::calls::{
     audio_packet::{self, Live96, MediaContext, TransmitScope},
     relay::RelayEpoch,
     video_packet::{
-        classify_video_channel_payload, encode_irequest, encode_p2s, parse_s2p, RsmIngestOutcome,
-        RsmVideoPacketizer, RsmVideoReassembler, VideoChannelPayload,
+        classify_video_channel_payload, encode_irequest_with_force, encode_p2s, parse_s2p,
+        RsmIngestOutcome, RsmVideoPacketizer, RsmVideoReassembler, VideoChannelPayload,
     },
 };
 
@@ -60,7 +60,7 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
     };
     let selected = media.relay;
     let endpoint = selected.endpoint;
-    let socket = connect_relay(
+    let (socket, mut early_packets) = connect_relay_with_early(
         &selected,
         relay_epoch,
         started,
@@ -108,6 +108,9 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
     // Ready establishes this transport. Peer speech is not a prerequisite for
     // transmitting; actual decoded/heard audio remains a separate observation.
     host.connected()?;
+    if let Ok(probe) = channel.seal_probe_init(epoch, clock()) {
+        let _ = host.submit(&socket, endpoint, &probe, &[]);
+    }
     let mut encoder_generation = host.generation();
     let mut pacer = FramePacer::new(format, started.elapsed());
     let mut tx_audio_buf = TxAudioJitterBuffer::<H::Frame>::new();
@@ -128,6 +131,7 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
     let mut pending_local_irequest: Option<u16> = None;
     let mut irequest_seq = 1u32;
     let mut last_rx_video_stream_id = 1u8;
+    let mut last_rx_total_pkg_seq = 0u64;
     let mut rx_video_seen = false;
     let mut initial_irequests_sent = 0u8;
     let connected_at = Instant::now();
@@ -153,7 +157,14 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
             // do not fall behind while still keeping audio pacing tight.
             let mut drained = 0usize;
             while drained < 64 {
-                match socket.recv_from(&mut buffer) {
+                let recv_outcome = if let Some(early) = early_packets.pop_front() {
+                    let n = early.len().min(buffer.len());
+                    buffer[..n].copy_from_slice(&early[..n]);
+                    Ok((n, endpoint))
+                } else {
+                    socket.recv_from(&mut buffer)
+                };
+                match recv_outcome {
                     Ok((n, source)) if source == endpoint && n <= 8197 => {
                         drained += 1;
                         let Ok((_magic, member)) =
@@ -205,6 +216,16 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                         VideoChannelPayload::Nack(_) => {}
                                         VideoChannelPayload::RsmVideo(raw) => {
                                             last_rx_video_stream_id = opened.packed_kind & 0x0f;
+                                            if raw.len() >= 7 {
+                                                let pkt_seq = u16::from_be_bytes([raw[5], raw[6]]);
+                                                let delta = pkt_seq
+                                                    .wrapping_sub(last_rx_total_pkg_seq as u16)
+                                                    as i16;
+                                                if delta > 0 {
+                                                    last_rx_total_pkg_seq = last_rx_total_pkg_seq
+                                                        .wrapping_add(delta as u64);
+                                                }
+                                            }
                                             trace_rx_pkts += 1;
                                             if video_trace
                                                 && !trace_vf_logged
@@ -275,12 +296,15 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                                     t.elapsed() >= Duration::from_millis(1200)
                                                 })
                                             {
-                                                let req = encode_irequest(
+                                                let lost_seq = last_rx_total_pkg_seq
+                                                    .max(u64::from(irequest_seq));
+                                                let req = encode_irequest_with_force(
                                                     selected.own_member,
                                                     media.peer_member,
                                                     last_rx_video_stream_id,
                                                     clock(),
-                                                    irequest_seq,
+                                                    lost_seq,
+                                                    true,
                                                 );
                                                 irequest_seq = irequest_seq.wrapping_add(1);
                                                 if let Ok(datagram) = channel.seal_video_rtcp(
@@ -386,12 +410,15 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                 }
                 if last_irequest_tx.is_none_or(|t| t.elapsed() >= Duration::from_millis(250)) {
                     if let Some(target_member) = pending_local_irequest.take() {
-                        let req = encode_irequest(
+                        let lost_seq = last_rx_total_pkg_seq.max(u64::from(irequest_seq));
+                        let force = (irequest_seq % 2) == 1;
+                        let req = encode_irequest_with_force(
                             selected.own_member,
                             target_member,
                             last_rx_video_stream_id,
                             clock(),
-                            irequest_seq,
+                            lost_seq,
+                            force,
                         );
                         irequest_seq = irequest_seq.wrapping_add(1);
                         if let Ok(datagram) =
@@ -403,7 +430,7 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                     }
                 }
                 if last_p2s_tx.is_none_or(|t| t.elapsed() >= Duration::from_secs(1)) {
-                    if let Ok(p2s) = encode_p2s(p2s_seq, 1, 0x19, 15) {
+                    if let Ok(p2s) = encode_p2s(p2s_seq, 2, 0x1d, 15) {
                         p2s_seq = p2s_seq.wrapping_add(1);
                         if let Ok(datagram) = channel.seal_qos_p2s(epoch, clock(), &p2s) {
                             let _ = host.submit(&socket, endpoint, &datagram, &[]);

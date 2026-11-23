@@ -413,12 +413,13 @@ pub fn acknowledge_voice(
 }
 
 /// Ringing ACK for an incoming voice or video direct call.
-/// Field 4 is the ringing ACK type (`1` = ringing; `3` signals busy), while
-/// video capabilities and dimensions travel in `inputs` (`12`, `14`, `15`).
+/// Field 4 is the ringing ACK type (`1` = ringing; `3` signals busy), field 13
+/// is `av_status` (`3` for video, `1` for voice), while video capabilities and
+/// dimensions travel in `inputs` (`12`, `14`, `15`).
 pub fn acknowledge_with_mode(
     inputs: &VoiceInputs<'_>,
     room: VoiceRoom,
-    _mode: CallMediaMode,
+    mode: CallMediaMode,
     sdk_task: u32,
 ) -> Result<HostRequest> {
     inputs.checked()?;
@@ -442,7 +443,7 @@ pub fn acknowledge_with_mode(
         p::uint(9, u64::from(inputs.sim_type)),
         p::bytes(11, inputs.device),
         p::bytes(12, &caps),
-        p::uint(13, 1),
+        p::uint(13, mode.av_status()),
         p::uint(14, u64::from(inputs.video_length)),
         p::uint(15, u64::from(inputs.video_ratio)),
     ]);
@@ -985,7 +986,13 @@ mod tests {
         let outer = fields(req.body()).unwrap();
         let inner = fields(required_bytes(&outer, 1).unwrap()).unwrap();
         assert_eq!(required_u64(&inner, 4).unwrap(), 1);
+        assert_eq!(required_u64(&inner, 13).unwrap(), 3);
         assert_eq!(required_u64(&inner, 14).unwrap(), 640);
         assert_eq!(required_u64(&inner, 15).unwrap(), 178);
+
+        let voice_req = acknowledge_with_mode(&inputs, room, CallMediaMode::Voice, 8).unwrap();
+        let voice_outer = fields(voice_req.body()).unwrap();
+        let voice_inner = fields(required_bytes(&voice_outer, 1).unwrap()).unwrap();
+        assert_eq!(required_u64(&voice_inner, 13).unwrap(), 1);
     }
 }

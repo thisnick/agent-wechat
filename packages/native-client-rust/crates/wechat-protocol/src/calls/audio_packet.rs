@@ -537,7 +537,7 @@ impl Live96 {
         };
         let family_ok = match kind & 0xf0 {
             0x10 | 0x30 | 0x50 | 0x70 => kind == (kind & 0xf0) && ext_byte == 0,
-            0x20 | 0x40 => ext_byte <= 1,
+            0x20 | 0x40 => ext_byte <= 2,
             0x60 => ext_byte == 0,
             _ => false,
         };
@@ -635,6 +635,13 @@ impl Live96 {
             context: self.context,
         }))
     }
+    /// Send the initial `0x70` faking_type1 probe (`[8, 1, 18, 2, 8, 1]`) after
+    /// relay check-in completes, matching official clients.
+    pub fn seal_probe_init(&mut self, current: MediaEpoch, now_ms: u64) -> Result<Vec<u8>> {
+        self.check(current)?;
+        self.seal(current, now_ms, 0x70, &[8, 1, 18, 2, 8, 1])
+    }
+
     /// Reply only to the exact selected authenticated faking_type1 probe. A
     /// periodic/control response receives no echo. No general control sender is
     /// inferred, and retries would consume another semantic operation.
@@ -1298,6 +1305,22 @@ mod tests {
         assert_eq!(opened98.magic(), 0x98);
         assert_eq!(opened98.sequence32(), 0x0001_0005);
         assert_eq!(opened98.payload(), raw_audio);
+
+        // Live98 video packet with extension_byte == 2 opens cleanly.
+        let ext2_pkt = sender
+            .seal_inner(epoch(), 0, 0x21, 2, true, &[9, 0, 8, 3])
+            .unwrap();
+        let opened_ext2 = recv.open(epoch(), &ext2_pkt).unwrap().unwrap();
+        assert_eq!(opened_ext2.magic(), 0x98);
+        assert_eq!(opened_ext2.packed_kind, 0x21);
+        assert_eq!(opened_ext2.extension_byte(), 2);
+        assert_eq!(opened_ext2.payload(), &[9, 0, 8, 3]);
+
+        // Initial 0x70 probe roundtrips and elicits the expected reply shape.
+        let init_probe = sender.seal_probe_init(epoch(), 0).unwrap();
+        let opened_probe = recv.open(epoch(), &init_probe).unwrap().unwrap();
+        assert_eq!(opened_probe.packed_kind, 0x70);
+        assert_eq!(opened_probe.payload(), &[8, 1, 18, 2, 8, 1]);
 
         // VerifiedGeneration fails closed if TX tries to reuse a high Live98 RX sequence.
         recv.authorize_transmit(

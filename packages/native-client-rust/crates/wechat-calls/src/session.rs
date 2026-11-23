@@ -1547,12 +1547,21 @@ fn ready(room: &ActiveRoom, own: &str) -> Result<bool> {
     Ok(true)
 }
 fn replace_group(raw: &[u8], live_id: u64, group: &str) -> Result<Vec<u8>> {
+    replace_group_with_flag(raw, live_id, group, 0)
+}
+fn replace_group_with_flag(
+    raw: &[u8],
+    live_id: u64,
+    group: &str,
+    member_flag: u64,
+) -> Result<Vec<u8>> {
     let values = fields(raw)?;
     let mut encoded = Vec::new();
     for field in values {
         let value = match field.number {
             2 => p::uint(2, live_id),
             4 => p::bytes(4, group.as_bytes()),
+            7 => p::uint(7, member_flag),
             _ => match field.value {
                 Value::Varint(v) => p::uint(field.number, v),
                 Value::Bytes(v) => p::bytes(field.number, &v),

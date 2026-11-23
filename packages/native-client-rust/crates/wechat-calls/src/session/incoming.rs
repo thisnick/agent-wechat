@@ -293,7 +293,7 @@ impl NativeIncomingSession {
         let group = fields(&self.base.parameters.group)?;
         let cloud_group = std::str::from_utf8(data(&group, 4)?)?;
         self.base.parameters.group =
-            replace_group(&self.base.parameters.group, live_id, cloud_group)?;
+            replace_group_with_flag(&self.base.parameters.group, live_id, cloud_group, 1)?;
         // ACK6 is MemList(seq1/member2); it is not LiveSync item10(seq3/member4).
         let (sequence, members) = if let Some(raw) = p::optional_data(&ack, 6)? {
             let list = fields(raw)?;
@@ -550,7 +550,7 @@ impl NativeIncomingSession {
         let old_group = fields(&self.base.parameters.group)?;
         let cloud_group = std::str::from_utf8(data(&old_group, 4)?)?;
         self.base.parameters.group =
-            replace_group(&self.base.parameters.group, live_id, cloud_group)?;
+            replace_group_with_flag(&self.base.parameters.group, live_id, cloud_group, 1)?;
         let (cap_sequence, engine, channel) = cap(data(&parsed_strategy, 13)?)?;
         let (av_sequence, av) = av(
             data(&joined, 9)?,
@@ -1346,9 +1346,17 @@ mod tests {
         session
             .ringing_ack(&transport, &mut state, authority(), tasks(1))
             .unwrap();
+        assert_eq!(
+            number(&fields(&session.base.parameters.group).unwrap(), 7, None).unwrap(),
+            1
+        );
         session
             .accept(&transport, &mut state, authority(), tasks(2))
             .unwrap();
+        assert_eq!(
+            number(&fields(&session.base.parameters.group).unwrap(), 7, None).unwrap(),
+            1
+        );
         for task in [3, 4] {
             assert_eq!(
                 session
