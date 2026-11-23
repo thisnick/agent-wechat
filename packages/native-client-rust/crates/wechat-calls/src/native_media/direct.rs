@@ -130,7 +130,8 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
     let mut video_tx_exhausted = false;
     let mut last_vf_tx: Option<Instant> = None;
     let mut last_irequest_tx: Option<Instant> = None;
-    let mut pending_local_irequest: Option<u16> = None;
+    let mut pending_local_irequest: Option<(u16, u8)> = None;
+    let mut irequest_streak = 0u32;
     let mut last_rx_video_stream_id = 1u8;
     let mut last_rx_total_pkg_seq: Option<u64> = None;
     let mut rx_video_seen = false;
@@ -148,6 +149,7 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
     let mut trace_drops = 0u64;
     let mut trace_last_orient = 0u8;
     let mut trace_vf_logged = false;
+    let mut trace_kf_logged = 0u32;
     let media_result = (|| -> Result<()> {
         while host.current() {
             ensure!(
@@ -253,7 +255,15 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                                         trace_drops += 1;
                                                     }
                                                     trace_last_orient = frame.orientation;
-                                                    if video_trace && trace_frames_ok <= 3 {
+                                                    if video_trace
+                                                        && (trace_frames_ok <= 3
+                                                            || (frame.is_keyframe
+                                                                && trace_kf_logged < 16))
+                                                    {
+                                                        if frame.is_keyframe {
+                                                            trace_kf_logged =
+                                                                trace_kf_logged.saturating_add(1);
+                                                        }
                                                         eprintln!(
                                                             "[wechat-call-video] rx frame #{trace_frames_ok} codec={:?} stream={} kf={} cfg={} orient={} bytes={}",
                                                             frame.codec,
@@ -268,6 +278,16 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                                         && !frame.is_keyframe
                                                     {
                                                         need_keyframe = true;
+                                                    } else if frame.is_keyframe {
+                                                        // A recovery IDR (self-contained or bare, with
+                                                        // cached parameter sets prepended in media.rs)
+                                                        // satisfied any pending keyframe request from
+                                                        // earlier drops. If an initial bare IDR still
+                                                        // needs parameter sets, media.rs queues a
+                                                        // fresh local request after receive_video.
+                                                        pending_local_irequest = None;
+                                                        irequest_streak = 0;
+                                                        let _ = host.take_local_keyframe_request();
                                                     }
                                                     host.receive_video(frame)?;
                                                 }
@@ -292,13 +312,17 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                                 })
                                             {
                                                 let lost_seq = last_rx_total_pkg_seq.unwrap_or(0);
+                                                let force = should_force_irequest(
+                                                    irequest_streak,
+                                                    last_rx_total_pkg_seq.is_some(),
+                                                );
                                                 let req = encode_irequest_with_force(
                                                     selected.own_member,
                                                     media.peer_member,
                                                     last_rx_video_stream_id,
                                                     clock(),
                                                     lost_seq,
-                                                    true,
+                                                    force,
                                                 );
                                                 if let Ok(datagram) = channel.seal_video_rtcp(
                                                     epoch,
@@ -312,6 +336,17 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                                         &datagram,
                                                         &[],
                                                     );
+                                                    if video_trace {
+                                                        eprintln!(
+                                                            "[wechat-call-video] tx ireq reason=drop stream={} target={} lost_seq={} force={}",
+                                                            last_rx_video_stream_id,
+                                                            media.peer_member,
+                                                            lost_seq,
+                                                            force
+                                                        );
+                                                    }
+                                                    irequest_streak =
+                                                        irequest_streak.wrapping_add(1);
                                                     last_irequest_tx = Some(Instant::now());
                                                 }
                                             }
@@ -389,8 +424,12 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                 }
             }
             if video_enabled {
-                if pending_local_irequest.is_none() {
-                    pending_local_irequest = host.take_local_keyframe_request();
+                if let Some(member) = host.take_local_keyframe_request() {
+                    // Arm a small bounded retry budget (3 attempts at 1000 ms) so an
+                    // attach-time or client-triggered keyframe request survives single
+                    // UDP loss and reaches `force = true` escalation on attempt 3;
+                    // cancelled immediately once a self-contained IDR arrives.
+                    pending_local_irequest = Some((member, 3));
                 }
                 if pending_local_irequest.is_none()
                     && !rx_video_seen
@@ -398,26 +437,40 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                     && connected_at.elapsed() >= Duration::from_millis(500)
                     && last_irequest_tx.is_none_or(|t| t.elapsed() >= Duration::from_millis(1500))
                 {
-                    pending_local_irequest = Some(media.peer_member);
+                    pending_local_irequest = Some((media.peer_member, 1));
                     initial_irequests_sent += 1;
                 }
-                if last_irequest_tx.is_none_or(|t| t.elapsed() >= Duration::from_millis(250)) {
-                    if let Some(target_member) = pending_local_irequest.take() {
+                if last_irequest_tx.is_none_or(|t| t.elapsed() >= Duration::from_millis(1000)) {
+                    if let Some((target_member, remaining)) = pending_local_irequest {
                         let lost_seq = last_rx_total_pkg_seq.unwrap_or(0);
+                        let force =
+                            should_force_irequest(irequest_streak, last_rx_total_pkg_seq.is_some());
                         let req = encode_irequest_with_force(
                             selected.own_member,
                             target_member,
                             last_rx_video_stream_id,
                             clock(),
                             lost_seq,
-                            true,
+                            force,
                         );
                         if let Ok(datagram) =
                             channel.seal_video_rtcp(epoch, clock(), last_rx_video_stream_id, &req)
                         {
                             let _ = host.submit(&socket, endpoint, &datagram, &[]);
+                            if video_trace {
+                                eprintln!(
+                                    "[wechat-call-video] tx ireq reason=local stream={} target={} lost_seq={} force={}",
+                                    last_rx_video_stream_id,
+                                    target_member,
+                                    lost_seq,
+                                    force
+                                );
+                            }
+                            irequest_streak = irequest_streak.wrapping_add(1);
                             last_irequest_tx = Some(Instant::now());
                         }
+                        pending_local_irequest =
+                            (remaining > 1).then_some((target_member, remaining.saturating_sub(1)));
                     }
                 }
                 if last_p2s_tx.is_none_or(|t| t.elapsed() >= Duration::from_secs(1)) {
@@ -579,6 +632,14 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
     channel.close();
     media_result
 }
+/// Normal video keyframe requests use `force = false` so peers dispatch their
+/// encoder keyframe-request callback (required by hardware encoders in addition
+/// to software/QoS request flags). Escalate to `force = true` after unanswered
+/// retries to bypass sender sequence gating if `lost_point_seq` lags behind.
+fn should_force_irequest(streak: u32, has_rx_seq: bool) -> bool {
+    (!has_rx_seq && streak > 0) || streak % 3 == 2
+}
+
 fn advance_rx_total_pkg_seq(prev: Option<u64>, raw: &[u8]) -> Option<u64> {
     if raw.len() < 24 || (raw[3] & 0x03) != 3 {
         return prev;
@@ -761,6 +822,23 @@ mod tests {
         // Late packet from before wraparound is still rejected as older.
         seq = advance_rx_total_pkg_seq(seq, &make_pkt(3, 0xfffe));
         assert_eq!(seq, Some(0x1_0005));
+    }
+
+    #[test]
+    fn should_force_irequest_starts_unforced_and_escalates_periodically() {
+        // When inbound video packets are arriving, send two unforced requests
+        // first so hardware encoders receive the callback, then escalate on the 3rd.
+        assert!(!should_force_irequest(0, true));
+        assert!(!should_force_irequest(1, true));
+        assert!(should_force_irequest(2, true));
+        assert!(!should_force_irequest(3, true));
+        assert!(!should_force_irequest(4, true));
+        assert!(should_force_irequest(5, true));
+
+        // Before any video packet has arrived, the first request is still unforced
+        // and subsequent retries escalate immediately.
+        assert!(!should_force_irequest(0, false));
+        assert!(should_force_irequest(1, false));
     }
 
     #[test]

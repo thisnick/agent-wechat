@@ -1525,3 +1525,210 @@ async fn video_negotiation_camera_control_and_binary_frames_work_independently_o
         CallErrorCode::InvalidRequest
     );
 }
+
+#[tokio::test]
+async fn attach_media_replays_pre_attach_video_gop_and_requests_keyframe_on_gap() {
+    let (backend, mut attempts) = FakeBackend::new();
+    backend.video_enabled.store(true, Ordering::Release);
+    let service = Arc::new(CallService::new(backend.clone()));
+    let mut owner = service.connect("a", "owner", true).await.unwrap();
+    let _ = owner.events.recv().await.unwrap();
+    service
+        .command(
+            &owner.client_id,
+            CallCommand::Ready {
+                request_id: "ready-pre-attach".into(),
+                ready: true,
+                format: CallAudioFormat::default(),
+                video: Some(CallVideoCapabilities {
+                    send_codecs: vec![CallVideoCodec::H265],
+                    receive_codecs: vec![CallVideoCodec::H265],
+                    max_width: Some(640),
+                    max_height: Some(480),
+                    max_fps: Some(15),
+                }),
+                scope: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result(&mut owner, "ready-pre-attach").await.0,
+        CallCommandStatus::Accepted
+    );
+    service
+        .command(
+            &owner.client_id,
+            CallCommand::Dial {
+                request_id: "dial-pre-attach".into(),
+                target: CallTarget::Direct {
+                    contact_id: "peer".into(),
+                },
+                call_type: CallType::Video,
+                camera_enabled: Some(false),
+                muted: None,
+            },
+        )
+        .await
+        .unwrap();
+    let (_, call, token, _) = result(&mut owner, "dial-pre-attach").await;
+    let call = call.unwrap();
+    let token = token.unwrap();
+    let attempt = next_attempt(&mut attempts).await;
+    let sink = attempt.sink.clone();
+    attempt
+        .reply
+        .send(Ok(BackendOutcome::Connected))
+        .unwrap_or_else(|_| panic!("active operation"));
+    state(&mut owner, CallState::Connected).await;
+
+    // Deliver IDR + two P-frames BEFORE attach_media runs.
+    sink.video_frame(
+        VIDEO_RECEIVE_TRACK_BASE,
+        1,
+        CallVideoCodec::H265,
+        frame::FLAG_KEYFRAME | frame::FLAG_CODEC_CONFIG,
+        0,
+        0,
+        &[0, 0, 0, 1, 0x26, 0x01],
+    )
+    .await
+    .unwrap();
+    sink.video_frame(
+        VIDEO_RECEIVE_TRACK_BASE,
+        1,
+        CallVideoCodec::H265,
+        0,
+        1,
+        66_000,
+        &[0, 0, 0, 1, 0x02, 0x01],
+    )
+    .await
+    .unwrap();
+    sink.video_frame(
+        VIDEO_RECEIVE_TRACK_BASE,
+        1,
+        CallVideoCodec::H265,
+        0,
+        2,
+        132_000,
+        &[0, 0, 0, 1, 0x02, 0x02],
+    )
+    .await
+    .unwrap();
+
+    // Attaching media replays the contiguous pre-attach GOP without requesting an extra keyframe.
+    let mut media = service
+        .attach_media("a", "owner", &call, &owner.client_id, &token)
+        .await
+        .unwrap();
+    assert!(backend.keyframe_requests.lock().unwrap().is_empty());
+    let mut replayed = Vec::new();
+    for _ in 0..3 {
+        let MediaDelivery::Audio(raw) = media.frames.recv_delivery().await.unwrap() else {
+            panic!("expected replayed video frame");
+        };
+        let wire = frame::WireMediaFrame::decode(&raw.bytes).unwrap();
+        replayed.push((wire.header.sequence, wire.flags));
+    }
+    assert_eq!(
+        replayed,
+        vec![
+            (0, frame::FLAG_KEYFRAME | frame::FLAG_CODEC_CONFIG),
+            (1, 0),
+            (2, 0),
+        ]
+    );
+
+    // Separate connected call: overflow the cached GOP past MAX_CACHED_VIDEO_GOP_FRAMES before attach.
+    let (backend2, mut attempts2) = FakeBackend::new();
+    backend2.video_enabled.store(true, Ordering::Release);
+    let service2 = Arc::new(CallService::new(backend2.clone()));
+    let mut owner2 = service2.connect("a", "owner", true).await.unwrap();
+    let _ = owner2.events.recv().await.unwrap();
+    service2
+        .command(
+            &owner2.client_id,
+            CallCommand::Ready {
+                request_id: "ready-pre-attach-2".into(),
+                ready: true,
+                format: CallAudioFormat::default(),
+                video: Some(CallVideoCapabilities {
+                    send_codecs: vec![CallVideoCodec::H265],
+                    receive_codecs: vec![CallVideoCodec::H265],
+                    max_width: Some(640),
+                    max_height: Some(480),
+                    max_fps: Some(15),
+                }),
+                scope: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result(&mut owner2, "ready-pre-attach-2").await.0,
+        CallCommandStatus::Accepted
+    );
+    service2
+        .command(
+            &owner2.client_id,
+            CallCommand::Dial {
+                request_id: "dial-pre-attach-2".into(),
+                target: CallTarget::Direct {
+                    contact_id: "peer".into(),
+                },
+                call_type: CallType::Video,
+                camera_enabled: Some(false),
+                muted: None,
+            },
+        )
+        .await
+        .unwrap();
+    let (_, call2, token2, _) = result(&mut owner2, "dial-pre-attach-2").await;
+    let call2 = call2.unwrap();
+    let token2 = token2.unwrap();
+    let attempt2 = next_attempt(&mut attempts2).await;
+    let sink2 = attempt2.sink.clone();
+    attempt2
+        .reply
+        .send(Ok(BackendOutcome::Connected))
+        .unwrap_or_else(|_| panic!("active operation"));
+    state(&mut owner2, CallState::Connected).await;
+    sink2
+        .video_frame(
+            VIDEO_RECEIVE_TRACK_BASE,
+            1,
+            CallVideoCodec::H265,
+            frame::FLAG_KEYFRAME | frame::FLAG_CODEC_CONFIG,
+            0,
+            0,
+            &[0, 0, 0, 1, 0x26, 0x01],
+        )
+        .await
+        .unwrap();
+    for seq in 1..=(MAX_CACHED_VIDEO_GOP_FRAMES as u64 + 5) {
+        sink2
+            .video_frame(
+                VIDEO_RECEIVE_TRACK_BASE,
+                1,
+                CallVideoCodec::H265,
+                0,
+                seq,
+                seq * 66_000,
+                &[0, 0, 0, 1, 0x02, 0x03],
+            )
+            .await
+            .unwrap();
+    }
+    let media2 = service2
+        .attach_media("a", "owner", &call2, &owner2.client_id, &token2)
+        .await
+        .unwrap();
+    // Truncated GOP is NOT replayed; instead a keyframe is immediately requested.
+    assert_eq!(media2.frames.pending_frames(), 0);
+    assert_eq!(backend2.keyframe_requests.lock().unwrap().len(), 1);
+    assert_eq!(
+        backend2.keyframe_requests.lock().unwrap()[0].1,
+        VIDEO_RECEIVE_TRACK_BASE
+    );
+}

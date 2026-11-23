@@ -7,8 +7,9 @@ pub type MediaDelivery = Delivery<ReceivedCallAudio, CallEvent>;
 
 /// Independent JPEG frames keep a shallow drop-oldest queue so display stays fresh.
 const VIDEO_JPEG_RECEIVE_CAPACITY: usize = 2;
-/// Inter-frame H.264/H.265 tracks keep deeper per-track buffering so worker bursts never evict keyframes.
-const VIDEO_INTERFRAME_RECEIVE_CAPACITY: usize = 16;
+/// Inter-frame H.264/H.265 tracks keep deeper per-track buffering so worker bursts
+/// and pre-attach GOP replays never evict keyframes.
+const VIDEO_INTERFRAME_RECEIVE_CAPACITY: usize = 32;
 
 fn track_is_jpeg_video(track: &CallTrack) -> bool {
     track

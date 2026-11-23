@@ -71,6 +71,7 @@ impl Gate {
 }
 struct Host {
     case: Case,
+    video_mode: bool,
     ready_media: Option<ReadyMedia>,
     routes: Mutex<Vec<(CallHostRoute, Option<u32>)>>,
     gate: Gate,
@@ -79,17 +80,22 @@ struct Host {
     hold_acked_poll: AtomicBool,
     reject_poll_gate: Gate,
     exit_members: Mutex<Vec<u32>>,
+    join_av_statuses: Mutex<Vec<u64>>,
+    switch_av_statuses: Mutex<Vec<u64>>,
 }
 impl Host {
-    fn new(case: Case, ready_media: Option<ReadyMedia>) -> Arc<Self> {
+    fn with_video_mode(case: Case, ready_media: Option<ReadyMedia>, video_mode: bool) -> Arc<Self> {
         Arc::new(Self {
             case,
+            video_mode,
             ready_media,
             routes: Mutex::new(vec![]),
             sync_held: AtomicBool::new(false),
             hold_acked_poll: AtomicBool::new(false),
             reject_poll_gate: Gate::default(),
             exit_members: Mutex::new(vec![]),
+            join_av_statuses: Mutex::new(vec![]),
+            switch_av_statuses: Mutex::new(vec![]),
             gate: Gate::default(),
             post_join_gate: Gate::default(),
         })
@@ -183,6 +189,26 @@ impl TestCallIo for Host {
         {
             self.gate.wait()?;
         }
+        if route == CallHostRoute::Transfer && command == Some(3361) {
+            let frame = TaskFrame::decode(p::data(&fields, 5)?, 3361)?;
+            let clear = wechat_protocol::calls::app_frame::lz4_decode(&frame.payload, 64 * 1024)?;
+            let cloud = p::decode(&clear)?;
+            let join = p::decode(p::data(&cloud, 2)?)?;
+            self.join_av_statuses
+                .lock()
+                .unwrap()
+                .push(p::scalar(&join, 6)?);
+        }
+        if route == CallHostRoute::Transfer && command == Some(3197) {
+            let frame = TaskFrame::decode(p::data(&fields, 5)?, 3197)?;
+            let clear = wechat_protocol::calls::app_frame::lz4_decode(&frame.payload, 64 * 1024)?;
+            let cloud = p::decode(&clear)?;
+            let switch_av = p::decode(p::data(&cloud, 2)?)?;
+            self.switch_av_statuses
+                .lock()
+                .unwrap()
+                .push(p::scalar(&switch_av, 6)?);
+        }
         if route == CallHostRoute::Transfer && command == Some(3380) {
             let frame = TaskFrame::decode(p::data(&fields, 5)?, 3380)?;
             let clear = wechat_protocol::calls::app_frame::lz4_decode(&frame.payload, 64 * 1024)?;
@@ -214,7 +240,11 @@ impl TestCallIo for Host {
             )),
             CallHostRoute::LiveSync => Ok(host_reply(&p::bytes(2, b"cursor"))),
             CallHostRoute::Transfer => match command {
-                Some(3361) => Ok(join_reply_with_media(3, self.ready_media)),
+                Some(3361) => Ok(join_reply_with_media(3, self.ready_media, self.video_mode)),
+                Some(3197) => Ok(wrapped_reply(
+                    3197,
+                    &p::message(&[p::uint(1, ROOM), p::uint(2, ROOM_KEY), p::uint(3, 3)])?,
+                )),
                 Some(3380) => Ok(wrapped_reply(
                     3380,
                     &p::message(&[p::uint(1, ROOM), p::uint(2, ROOM_KEY), p::uint(3, 3)])?,
@@ -300,7 +330,7 @@ fn wrapped_reply(command: u32, body: &[u8]) -> Vec<u8> {
     .unwrap();
     host_reply(&p::message(&[p::uint(1, 0), p::bytes(2, &frame)]).unwrap())
 }
-fn join_reply_with_media(own_member: u16, media: Option<ReadyMedia>) -> Vec<u8> {
+fn join_reply_with_media(own_member: u16, media: Option<ReadyMedia>, video_mode: bool) -> Vec<u8> {
     let format = (u64::from(media.map_or(2, |media| media.frames_per_packet)) << 8) | 6;
     let engine = p::message(&[p::uint(5, 17), p::uint(6, format), p::uint(7, 0x800000)]).unwrap();
     let channel = p::message(&[p::uint(1, 2), p::uint(2, 3)]).unwrap();
@@ -356,7 +386,7 @@ fn join_reply_with_media(own_member: u16, media: Option<ReadyMedia>) -> Vec<u8> 
             p::uint(2, ROOM_KEY),
             p::uint(3, u64::from(own_member)),
             p::bytes(4, &strategy),
-            p::uint(8, 2),
+            p::uint(8, if video_mode { 1 } else { 2 }),
             p::bytes(9, &av),
             p::uint(11, 99),
             p::bytes(12, b"join-cursor"),
@@ -377,6 +407,12 @@ impl Fixture {
         Self::with_media(case, None)
     }
     fn with_media(case: Case, ready_media: Option<ReadyMedia>) -> Self {
+        Self::with_options(case, ready_media, false)
+    }
+    fn new_video(case: Case) -> Self {
+        Self::with_options(case, None, true)
+    }
+    fn with_options(case: Case, ready_media: Option<ReadyMedia>, video_mode: bool) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(&temp.path().join("data")).unwrap());
         store.create_account("one").unwrap();
@@ -411,7 +447,7 @@ impl Fixture {
         if ready_media.is_some() {
             inner.config.peer_idle_timeout = Duration::from_millis(500);
         }
-        let host = Host::new(case, ready_media);
+        let host = Host::with_video_mode(case, ready_media, video_mode);
         Arc::get_mut(&mut backend.inner).unwrap().test_io = Some(host.clone());
         let backend = Arc::new(backend);
         Core::configure_calls(&core, backend.clone()).unwrap();
@@ -438,7 +474,7 @@ impl Fixture {
                 p::uint(1, ROOM),
                 p::uint(2, ROOM_KEY),
                 p::uint(3, 0),
-                p::uint(4, 2),
+                p::uint(4, if self.host.video_mode { 1 } else { 2 }),
                 p::bytes(5, b"peer-open"),
                 p::bytes(6, b"self-open"),
                 p::bytes(7, PEER.as_bytes()),
@@ -1413,4 +1449,151 @@ async fn later_owner_loss_does_not_clear_preexisting_uncertainty() {
         JoinReplyChange::UncertainThenDisconnect,
     )
     .await;
+}
+
+#[tokio::test]
+async fn incoming_video_answer_camera_off_joins_with_video_bit_then_switches_av_on_first_frame() {
+    let f = Fixture::new_video(Case::Normal);
+    let mut client = f.client().await;
+    f.stage(false, 0);
+    let offer = f.offer().await;
+    assert_eq!(offer.call_type, CallType::Video);
+    f.core
+        .call_service("one")
+        .unwrap()
+        .command(
+            &client.client_id,
+            CallCommand::Answer {
+                request_id: "answer-cam-off".into(),
+                call_id: offer.call_id.clone(),
+                expected_revision: offer.revision,
+                camera_enabled: Some(false),
+                muted: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result(&mut client, "answer-cam-off").await,
+        CallCommandStatus::Accepted
+    );
+
+    // Wait until Join(3361) completes.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while f.host.join_av_statuses.lock().unwrap().is_empty() {
+        assert!(Instant::now() < deadline, "timed out waiting for Join");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // Join must advertise av_status = 3 so the relay forwards initial IRequests,
+    // while keeping local camera capture/send disabled.
+    assert_eq!(f.host.join_av_statuses.lock().unwrap().as_slice(), &[3]);
+    let worker = f.backend.inner.active.lock().unwrap().clone().unwrap();
+    assert!(!worker.camera_enabled.load(Ordering::Acquire));
+    assert!(worker.initial_camera_off_pending.load(Ordering::Acquire));
+    assert!(f.host.switch_av_statuses.lock().unwrap().is_empty());
+
+    // Simulate the first decoded/passthrough inbound video frame arriving.
+    worker.rx_video_keyframe_seen.store(true, Ordering::Release);
+    let sw_deadline = Instant::now() + Duration::from_secs(2);
+    while f.host.switch_av_statuses.lock().unwrap().is_empty()
+        || worker.initial_camera_off_pending.load(Ordering::Acquire)
+    {
+        assert!(
+            Instant::now() < sw_deadline,
+            "timed out waiting for deferred SwitchAV(camera=false)"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(f.host.switch_av_statuses.lock().unwrap().as_slice(), &[1]);
+    assert!(!worker.initial_camera_off_pending.load(Ordering::Acquire));
+
+    // Cleanly hang up the joined call.
+    let rev = f.snapshot().await.current_call.unwrap().revision;
+    f.core
+        .call_service("one")
+        .unwrap()
+        .command(
+            &client.client_id,
+            CallCommand::Hangup {
+                request_id: "hangup".into(),
+                call_id: offer.call_id,
+                expected_revision: rev,
+            },
+        )
+        .await
+        .unwrap();
+    f.finished().await;
+}
+
+#[tokio::test]
+async fn deferred_initial_camera_off_extends_grace_while_packets_arrive_and_cancels_on_toggle() {
+    let f = Fixture::new_video(Case::Normal);
+    let _client = f.client().await;
+    f.stage(false, 0);
+    let _offer = f.offer().await;
+    let worker = f.backend.inner.active.lock().unwrap().clone().unwrap();
+
+    assert!(!worker.initial_camera_off_due());
+    worker.schedule_initial_camera_off();
+    // Before media arms the grace window, not due yet.
+    assert!(!worker.initial_camera_off_due());
+    worker.arm_initial_camera_off(Duration::from_millis(20), Duration::from_millis(80));
+    // While inbound video packets are arriving without a keyframe yet, the
+    // shorter idle grace does not fire SwitchAV prematurely.
+    worker.rx_video_packets_seen.store(true, Ordering::Release);
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert!(!worker.initial_camera_off_due());
+
+    // A mute-only DirectCommand during the startup grace preserves wire camera=true
+    // and keeps `initial_camera_off_pending` armed.
+    let (reply_tx, reply_rx) = oneshot::channel();
+    worker
+        .direct_commands
+        .lock()
+        .unwrap()
+        .push_back(DirectCommand {
+            sets_camera: false,
+            reply: reply_tx,
+        });
+    let mut sent_cameras = Vec::new();
+    drain_direct_switch_av(&worker, &mut |cam| {
+        sent_cameras.push(cam);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(sent_cameras, vec![true]);
+    assert!(reply_rx.await.unwrap().is_ok());
+    assert!(worker.initial_camera_off_pending.load(Ordering::Acquire));
+
+    // Once recovery_deadline elapses, deferred SwitchAV becomes due.
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert!(worker.initial_camera_off_due());
+
+    // A transient CallRpcNotSubmitted keeps deferred camera-off armed for retry.
+    drain_direct_switch_av(&worker, &mut |cam| {
+        sent_cameras.push(cam);
+        Err(CallRpcNotSubmitted.into())
+    })
+    .unwrap();
+    assert_eq!(sent_cameras, vec![true, false]);
+    assert!(worker.initial_camera_off_pending.load(Ordering::Acquire));
+
+    // A real post-handoff failure clears pending (no blind retry) and keeps the
+    // active call running instead of propagating an actor-terminating error.
+    drain_direct_switch_av(&worker, &mut |_| {
+        Err(anyhow::anyhow!("synthetic post-handoff SwitchAV failure"))
+    })
+    .unwrap();
+    assert!(!worker.initial_camera_off_pending.load(Ordering::Acquire));
+
+    // Explicit camera toggle cancels a pending deferred SwitchAV.
+    worker.schedule_initial_camera_off();
+    worker.rx_video_keyframe_seen.store(true, Ordering::Release);
+    assert!(worker.initial_camera_off_due());
+    worker.cancel_initial_camera_off();
+    assert!(!worker.initial_camera_off_due());
+
+    // Cancel the synthetic offer cleanly before dropping the fixture.
+    f.stage(true, 0);
+    f.finished().await;
 }

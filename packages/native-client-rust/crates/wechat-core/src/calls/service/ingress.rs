@@ -341,6 +341,7 @@ impl CallService {
             video_receive_generation: 1,
             receive_tracks: BTreeMap::new(),
             track_generations: BTreeMap::new(),
+            cached_video_gops: BTreeMap::new(),
             audio_lease: Arc::new(AtomicU32::new(1)),
             video_lease: Arc::new(AtomicU32::new(1)),
             camera_enabled: false,

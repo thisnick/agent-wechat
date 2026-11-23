@@ -200,6 +200,7 @@ pub(super) struct VideoRxBridge {
     keyframe_requests: Mutex<Receiver<u32>>,
     self_keyframe_tx: SyncSender<u32>,
     peer_keyframe_tx: Option<SyncSender<()>>,
+    rx_video_seen: Option<Arc<AtomicBool>>,
     prefer_live98: bool,
     conference_tracks: ConferenceTrackUpdate,
     stop: Arc<AtomicBool>,
@@ -208,12 +209,15 @@ pub(super) struct VideoRxBridge {
 }
 
 impl VideoRxBridge {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         direct_peer_member: Option<u16>,
         format: Option<CallVideoFormat>,
         keyframe_rx: Receiver<u32>,
         self_keyframe_tx: SyncSender<u32>,
         peer_keyframe_tx: Option<SyncSender<()>>,
+        rx_video_seen: Option<Arc<AtomicBool>>,
+        first_frame_delivered: Option<Arc<AtomicBool>>,
         prefer_live98: bool,
         owner: Option<(BackendSink, tokio::runtime::Handle)>,
     ) -> Self {
@@ -235,6 +239,7 @@ impl VideoRxBridge {
                             rx,
                             worker_tracks_update,
                             worker_kf_tx,
+                            first_frame_delivered,
                             sink,
                             runtime,
                             worker_stop,
@@ -254,6 +259,7 @@ impl VideoRxBridge {
             keyframe_requests: Mutex::new(keyframe_rx),
             self_keyframe_tx,
             peer_keyframe_tx,
+            rx_video_seen,
             prefer_live98,
             conference_tracks,
             stop,
@@ -273,6 +279,9 @@ impl VideoRxBridge {
 
     /// Non-blocking handoff from the UDP media loop to the dedicated video RX worker.
     fn receive_frame(&self, frame: ReassembledVideoFrame) {
+        if let Some(seen) = self.rx_video_seen.as_ref() {
+            seen.store(true, Ordering::Release);
+        }
         let track_id = if self.direct_peer_member.is_some() {
             VIDEO_RECEIVE_TRACK_BASE
         } else {
@@ -302,7 +311,16 @@ impl VideoRxBridge {
         let rx = self.keyframe_requests.lock().ok()?;
         let track_id = rx.try_recv().ok()?;
         if let Some(peer) = self.direct_peer_member {
-            (track_id == VIDEO_RECEIVE_TRACK_BASE).then_some(peer)
+            // Coalesce bursty direct-call keyframe requests so queued entries
+            // from dropped P-frames do not keep triggering forced IRequests
+            // after an IDR arrives.
+            let mut matched = track_id == VIDEO_RECEIVE_TRACK_BASE;
+            while let Ok(next_track) = rx.try_recv() {
+                if next_track == VIDEO_RECEIVE_TRACK_BASE {
+                    matched = true;
+                }
+            }
+            matched.then_some(peer)
         } else if track_id >= VIDEO_RECEIVE_TRACK_BASE {
             u16::try_from(track_id - VIDEO_RECEIVE_TRACK_BASE).ok()
         } else {
@@ -324,6 +342,7 @@ fn run_video_rx_worker(
     rx: Receiver<ReassembledVideoFrame>,
     conference_tracks: ConferenceTrackUpdate,
     self_keyframe_tx: SyncSender<u32>,
+    first_frame_delivered: Option<Arc<AtomicBool>>,
     sink: BackendSink,
     runtime: tokio::runtime::Handle,
     stop: Arc<AtomicBool>,
@@ -369,6 +388,7 @@ fn run_video_rx_worker(
                     first,
                     &mut tracks,
                     &self_keyframe_tx,
+                    first_frame_delivered.as_deref(),
                     &sink,
                     &runtime,
                 );
@@ -383,6 +403,7 @@ fn run_video_rx_worker(
                         next,
                         &mut tracks,
                         &self_keyframe_tx,
+                        first_frame_delivered.as_deref(),
                         &sink,
                         &runtime,
                     );
@@ -423,15 +444,22 @@ fn run_video_rx_worker(
                 }
                 let seq = state.sequence;
                 state.sequence = state.sequence.saturating_add(1);
-                let _ = runtime.block_on(sink.video_frame(
-                    track_id,
-                    generation,
-                    target_format.codec,
-                    flags,
-                    seq,
-                    ts_us,
-                    &encoded.bytes,
-                ));
+                if runtime
+                    .block_on(sink.video_frame(
+                        track_id,
+                        generation,
+                        target_format.codec,
+                        flags,
+                        seq,
+                        ts_us,
+                        &encoded.bytes,
+                    ))
+                    .is_ok()
+                {
+                    if let Some(seen) = first_frame_delivered.as_deref() {
+                        seen.store(true, Ordering::Release);
+                    }
+                }
             }
             if state.frames_pushed_since_output >= MAX_STALLED_RX_TRANSCODE_FRAMES {
                 if std::env::var("WX_CALL_VIDEO_TRACE").as_deref() == Ok("1") {
@@ -461,12 +489,64 @@ fn should_drop_rx_frame_for_recovery(
     !state.started_keyframe && !is_keyframe
 }
 
+enum RxFramePrep {
+    DropRequestKeyframe {
+        missing_initial_config: bool,
+    },
+    Deliver {
+        prepended: Option<Vec<u8>>,
+        has_codec_config: bool,
+    },
+}
+
+fn prepare_rx_video_frame(
+    state: &mut RxTrackBridge,
+    src_codec: VideoCodec,
+    is_passthrough: bool,
+    frame: &ReassembledVideoFrame,
+) -> RxFramePrep {
+    if frame.has_codec_config {
+        if let Some(params) = extract_codec_config_nalus(src_codec, &frame.payload) {
+            state.cached_codec_config = Some(params);
+        }
+    }
+    if should_drop_rx_frame_for_recovery(state, frame.is_keyframe, frame.prior_frames_dropped) {
+        return RxFramePrep::DropRequestKeyframe {
+            missing_initial_config: false,
+        };
+    }
+    let mut prepended: Option<Vec<u8>> = None;
+    let mut has_codec_config = frame.has_codec_config;
+    if !state.started_keyframe || (is_passthrough && frame.is_keyframe) {
+        if !frame.has_codec_config {
+            if let Some(params) = state.cached_codec_config.as_deref() {
+                let mut combined = Vec::with_capacity(params.len() + frame.payload.len());
+                combined.extend_from_slice(params);
+                combined.extend_from_slice(&frame.payload);
+                prepended = Some(combined);
+                has_codec_config = true;
+            } else if !state.started_keyframe {
+                return RxFramePrep::DropRequestKeyframe {
+                    missing_initial_config: true,
+                };
+            }
+        }
+        state.started_keyframe = true;
+    }
+    RxFramePrep::Deliver {
+        prepended,
+        has_codec_config,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn process_rx_video_frame(
     is_conference: bool,
     target_format: CallVideoFormat,
     frame: ReassembledVideoFrame,
     tracks: &mut BTreeMap<u32, RxTrackBridge>,
     self_keyframe_tx: &SyncSender<u32>,
+    first_frame_delivered: Option<&AtomicBool>,
     sink: &BackendSink,
     runtime: &tokio::runtime::Handle,
 ) {
@@ -493,39 +573,14 @@ fn process_rx_video_frame(
     let rotation = VideoRotation::from_wire(frame.orientation, is_conference);
     state.last_timestamp_us = timestamp_us;
 
-    if wire_call_codec == target_format.codec {
-        let mut flags = video_rotation_flags(rotation);
-        if frame.is_keyframe {
-            flags |= FLAG_KEYFRAME;
-        }
-        if frame.has_codec_config {
-            flags |= FLAG_CODEC_CONFIG;
-        }
-        state.rotation = rotation;
-        let seq = state.sequence;
-        state.sequence = state.sequence.saturating_add(1);
-        let _ = runtime.block_on(sink.video_frame(
-            track_id,
-            generation,
-            target_format.codec,
-            flags,
-            seq,
-            timestamp_us,
-            &frame.payload,
-        ));
-        return;
-    }
-
-    // Transcoded receive path: keep the H.265/H.264 decoder running continuously at Deg0
-    // across orientation changes and convey display rotation in WXCM flags so rotating a
-    // mobile device never kills the decoder or drops P-frames waiting for an IDR keyframe.
     let src_codec = to_video_codec(wire_call_codec);
     let dst_codec = to_video_codec(target_format.codec);
     if state.source_codec != Some(src_codec) {
         if std::env::var("WX_CALL_VIDEO_TRACE").as_deref() == Ok("1") {
             eprintln!(
-                "[wechat-call-video] rx stream codec={:?} orient={} rot={}deg kf={} cfg={}",
+                "[wechat-call-video] rx stream codec={:?} target={:?} orient={} rot={}deg kf={} cfg={}",
                 src_codec,
+                dst_codec,
                 frame.orientation,
                 rotation.degrees(),
                 frame.is_keyframe,
@@ -545,37 +600,74 @@ fn process_rx_video_frame(
         );
     }
     state.rotation = rotation;
-    if frame.has_codec_config {
-        if let Some(params) = extract_codec_config_nalus(src_codec, &frame.payload) {
-            state.cached_codec_config = Some(params);
+    let is_passthrough = wire_call_codec == target_format.codec;
+    let was_started = state.started_keyframe;
+    let (prepended, effective_has_codec_config) = match prepare_rx_video_frame(
+        state,
+        src_codec,
+        is_passthrough,
+        &frame,
+    ) {
+        RxFramePrep::DropRequestKeyframe {
+            missing_initial_config,
+        } => {
+            if std::env::var("WX_CALL_VIDEO_TRACE").as_deref() == Ok("1") {
+                if missing_initial_config {
+                    eprintln!(
+                            "[wechat-call-video] rx dropping initial IDR without codec config track={track_id} codec={:?}; requesting IDR",
+                            src_codec
+                        );
+                } else if frame.prior_frames_dropped {
+                    eprintln!(
+                            "[wechat-call-video] rx holding P-frames after drop on track={track_id}; requesting IDR"
+                        );
+                }
+            }
+            let _ = self_keyframe_tx.try_send(track_id);
+            return;
         }
-    }
-    if should_drop_rx_frame_for_recovery(state, frame.is_keyframe, frame.prior_frames_dropped) {
-        if frame.prior_frames_dropped && std::env::var("WX_CALL_VIDEO_TRACE").as_deref() == Ok("1")
+        RxFramePrep::Deliver {
+            prepended,
+            has_codec_config,
+        } => (prepended, has_codec_config),
+    };
+
+    let push_bytes = prepended.as_deref().unwrap_or(&frame.payload);
+    if is_passthrough {
+        let mut flags = video_rotation_flags(rotation);
+        if frame.is_keyframe {
+            flags |= FLAG_KEYFRAME;
+        }
+        if effective_has_codec_config {
+            flags |= FLAG_CODEC_CONFIG;
+        }
+        let seq = state.sequence;
+        state.sequence = state.sequence.saturating_add(1);
+        if runtime
+            .block_on(sink.video_frame(
+                track_id,
+                generation,
+                target_format.codec,
+                flags,
+                seq,
+                timestamp_us,
+                push_bytes,
+            ))
+            .is_ok()
         {
-            eprintln!(
-                "[wechat-call-video] rx holding P-frames after drop on track={track_id}; requesting IDR"
-            );
+            if let Some(seen) = first_frame_delivered {
+                seen.store(true, Ordering::Release);
+            }
+        } else if !was_started {
+            state.started_keyframe = false;
+            let _ = self_keyframe_tx.try_send(track_id);
         }
-        let _ = self_keyframe_tx.try_send(track_id);
         return;
     }
-    let mut prepended: Option<Vec<u8>> = None;
-    if !state.started_keyframe {
-        if !frame.has_codec_config {
-            let Some(params) = state.cached_codec_config.as_deref() else {
-                // An IDR without inline VPS/SPS/PPS (and no prior parameter sets)
-                // cannot initialize FFmpeg's raw elementary-stream decoder.
-                let _ = self_keyframe_tx.try_send(track_id);
-                return;
-            };
-            let mut combined = Vec::with_capacity(params.len() + frame.payload.len());
-            combined.extend_from_slice(params);
-            combined.extend_from_slice(&frame.payload);
-            prepended = Some(combined);
-        }
-        state.started_keyframe = true;
-    }
+
+    // Transcoded receive path: keep the H.265/H.264 decoder running continuously at Deg0
+    // across orientation changes and convey display rotation in WXCM flags so rotating a
+    // mobile device never kills the decoder or drops P-frames waiting for an IDR keyframe.
     if state.transcoder.is_none() {
         match VideoTranscoder::start(TranscodeConfig {
             from: src_codec,
@@ -603,7 +695,6 @@ fn process_rx_video_frame(
     let Some(transcoder) = state.transcoder.as_mut() else {
         return;
     };
-    let push_bytes = prepended.as_deref().unwrap_or(&frame.payload);
     if let Err(error) = transcoder.push(push_bytes) {
         if std::env::var("WX_CALL_VIDEO_TRACE").as_deref() == Ok("1") {
             eprintln!("[wechat-call-video] rx transcoder push failed track={track_id}: {error:#}");
@@ -1048,6 +1139,8 @@ pub(super) fn run(
         keyframe_rx,
         worker.video_keyframe_requests.clone(),
         tx_handle.is_some().then_some(peer_kf_tx),
+        Some(worker.rx_video_packets_seen.clone()),
+        Some(worker.rx_video_keyframe_seen.clone()),
         config.prefer_live98,
         Some((sink.clone(), runtime.clone())),
     );
@@ -1228,6 +1321,137 @@ mod tests {
     }
 
     #[test]
+    fn prepare_rx_video_frame_gates_and_prepends_codec_config_in_passthrough() {
+        let mut state = RxTrackBridge::new(1);
+        let sps_pps = [0, 0, 0, 1, 0x67, 0x42, 0, 0, 0, 1, 0x68, 0xce];
+        let idr_slice = [0, 0, 0, 1, 0x65, 0x88, 0x99];
+        let p_slice = [0, 0, 0, 1, 0x41, 0x11, 0x22];
+        let mut idr_with_cfg = Vec::new();
+        idr_with_cfg.extend_from_slice(&sps_pps);
+        idr_with_cfg.extend_from_slice(&idr_slice);
+
+        let make = |is_keyframe: bool,
+                    has_codec_config: bool,
+                    prior_frames_dropped: bool,
+                    payload: &[u8]| ReassembledVideoFrame {
+            codec: VideoWireCodec::H264,
+            member_id: 1,
+            stream_id: 1,
+            frame_index: 1,
+            timestamp_ms: 0,
+            orientation: 0,
+            prior_frames_dropped,
+            fec_recovered: false,
+            is_keyframe,
+            has_codec_config,
+            payload: payload.to_vec(),
+        };
+
+        // 1. P-frame before first keyframe is dropped and requests a keyframe.
+        assert!(matches!(
+            prepare_rx_video_frame(
+                &mut state,
+                VideoCodec::H264,
+                true,
+                &make(false, false, false, &p_slice)
+            ),
+            RxFramePrep::DropRequestKeyframe {
+                missing_initial_config: false
+            }
+        ));
+
+        // 2. Initial bare IDR without SPS/PPS is dropped with missing_initial_config = true.
+        assert!(matches!(
+            prepare_rx_video_frame(
+                &mut state,
+                VideoCodec::H264,
+                true,
+                &make(true, false, false, &idr_slice)
+            ),
+            RxFramePrep::DropRequestKeyframe {
+                missing_initial_config: true
+            }
+        ));
+        assert!(!state.started_keyframe);
+
+        // 3. IDR with SPS/PPS starts the stream and caches parameter sets.
+        assert!(matches!(
+            prepare_rx_video_frame(
+                &mut state,
+                VideoCodec::H264,
+                true,
+                &make(true, true, false, &idr_with_cfg)
+            ),
+            RxFramePrep::Deliver {
+                prepended: None,
+                has_codec_config: true
+            }
+        ));
+        assert!(state.started_keyframe);
+        assert_eq!(
+            state.cached_codec_config.as_deref(),
+            Some(sps_pps.as_slice())
+        );
+
+        // 4. Subsequent P-frame passes through unchanged.
+        assert!(matches!(
+            prepare_rx_video_frame(
+                &mut state,
+                VideoCodec::H264,
+                true,
+                &make(false, false, false, &p_slice)
+            ),
+            RxFramePrep::Deliver {
+                prepended: None,
+                has_codec_config: false
+            }
+        ));
+
+        // 5. Packet loss drops P-frame and re-arms keyframe recovery.
+        assert!(matches!(
+            prepare_rx_video_frame(
+                &mut state,
+                VideoCodec::H264,
+                true,
+                &make(false, false, true, &p_slice)
+            ),
+            RxFramePrep::DropRequestKeyframe {
+                missing_initial_config: false
+            }
+        ));
+        assert!(!state.started_keyframe);
+
+        // 6. Recovery IDR without inline SPS/PPS gets cached SPS/PPS prepended and FLAG_CODEC_CONFIG set.
+        match prepare_rx_video_frame(
+            &mut state,
+            VideoCodec::H264,
+            true,
+            &make(true, false, false, &idr_slice),
+        ) {
+            RxFramePrep::Deliver {
+                prepended: Some(bytes),
+                has_codec_config: true,
+            } => assert_eq!(bytes, idr_with_cfg),
+            _ => panic!("expected prepended SPS/PPS on bare recovery IDR"),
+        }
+        assert!(state.started_keyframe);
+
+        // 7. Even while already started, a later bare IDR in passthrough gets cached SPS/PPS prepended.
+        match prepare_rx_video_frame(
+            &mut state,
+            VideoCodec::H264,
+            true,
+            &make(true, false, false, &idr_slice),
+        ) {
+            RxFramePrep::Deliver {
+                prepended: Some(bytes),
+                has_codec_config: true,
+            } => assert_eq!(bytes, idr_with_cfg),
+            _ => panic!("expected prepended SPS/PPS on subsequent passthrough bare IDR"),
+        }
+    }
+
+    #[test]
     fn rx_frame_sender_marks_drop_at_exact_stream_position() {
         let (tx, rx) = mpsc::sync_channel(1);
         let mut sender = RxFrameSender {
@@ -1289,5 +1513,46 @@ mod tests {
         } else {
             assert_eq!(picked, (1, 2));
         }
+    }
+
+    #[test]
+    fn take_keyframe_member_coalesces_direct_bursts() {
+        let (tx, rx) = mpsc::sync_channel(8);
+        let direct =
+            VideoRxBridge::new(Some(7), None, rx, tx.clone(), None, None, None, false, None);
+        tx.try_send(VIDEO_RECEIVE_TRACK_BASE).unwrap();
+        tx.try_send(VIDEO_RECEIVE_TRACK_BASE).unwrap();
+        tx.try_send(VIDEO_RECEIVE_TRACK_BASE).unwrap();
+        assert_eq!(direct.take_keyframe_member(), Some(7));
+        assert_eq!(direct.take_keyframe_member(), None);
+
+        // Non-matching tracks mixed with the direct track still resolve once and drain.
+        tx.try_send(VIDEO_RECEIVE_TRACK_BASE + 5).unwrap();
+        tx.try_send(VIDEO_RECEIVE_TRACK_BASE).unwrap();
+        assert_eq!(direct.take_keyframe_member(), Some(7));
+        assert_eq!(direct.take_keyframe_member(), None);
+
+        // Unrelated track IDs alone do not trigger a direct keyframe request.
+        tx.try_send(VIDEO_RECEIVE_TRACK_BASE + 5).unwrap();
+        assert_eq!(direct.take_keyframe_member(), None);
+
+        // Conference mode preserves distinct per-member requests in order.
+        let (conf_tx, conf_rx) = mpsc::sync_channel(8);
+        let conference = VideoRxBridge::new(
+            None,
+            None,
+            conf_rx,
+            conf_tx.clone(),
+            None,
+            None,
+            None,
+            false,
+            None,
+        );
+        conf_tx.try_send(VIDEO_RECEIVE_TRACK_BASE + 4).unwrap();
+        conf_tx.try_send(VIDEO_RECEIVE_TRACK_BASE + 9).unwrap();
+        assert_eq!(conference.take_keyframe_member(), Some(4));
+        assert_eq!(conference.take_keyframe_member(), Some(9));
+        assert_eq!(conference.take_keyframe_member(), None);
     }
 }
