@@ -19,6 +19,7 @@
     "fix-call-search-zh",
     "fix-calls-ipv6-relay-checkin",
     "fix-incoming-video-call-rx",
+    "fix-incoming-video-keyframe-recovery",
     "fix-video-calls-reliability-and-preview",
     "fix-video-calls-self-view-cli-and-smoothness",
     "github-star-support-prompt",
