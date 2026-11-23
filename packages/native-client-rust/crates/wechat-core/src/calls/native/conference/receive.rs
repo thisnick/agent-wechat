@@ -25,7 +25,9 @@ pub(super) fn run(
     keyframe_rx: std::sync::mpsc::Receiver<u32>,
 ) -> Result<()> {
     let core = transport.core.upgrade().context("Conference core closed")?;
-    let selected = session.take_media(0, 0)?;
+    let (connection_index, udp_index) =
+        super::super::media::select_relay_indices(&session.relay_candidates()?);
+    let selected = session.take_media(connection_index, udp_index)?;
     let initial_profile = session.media_profile()?;
     let is_video = transport.worker.call_type == CallType::Video;
     let wire_codec = super::super::media::wire_codec_for_mask(session.video_dec_cap_mask());
@@ -271,7 +273,9 @@ pub(super) fn run(
                 }
                 Err(error) => return Err(error),
             }
-            session.take_media(0, 0)?;
+            let (connection_index, udp_index) =
+                super::super::media::select_relay_indices(&session.relay_candidates()?);
+            session.take_media(connection_index, udp_index)?;
             if transmit_grouping.is_some() {
                 ensure!(
                     same_media_format(initial_profile, session.media_profile()?),

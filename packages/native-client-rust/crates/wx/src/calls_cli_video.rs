@@ -406,4 +406,96 @@ mod tests {
         let frame = rx.tracks()[&65_538].frame.as_ref().unwrap();
         assert_eq!((frame.width, frame.height), (8, 16));
     }
+
+    #[test]
+    fn ffmpeg_transcoded_hevc_renders_in_cli_receive_video() {
+        use wechat_calls::video_codec::{
+            probe_video_capabilities, TranscodeConfig, VideoCodec, VideoTranscoder,
+        };
+        let caps = probe_video_capabilities();
+        if !caps.can_transcode(VideoCodec::Jpeg, VideoCodec::H265)
+            || !caps.can_transcode(VideoCodec::H265, VideoCodec::Jpeg)
+        {
+            return;
+        }
+        let mut enc = VideoTranscoder::start(TranscodeConfig {
+            from: VideoCodec::Jpeg,
+            to: VideoCodec::H265,
+            width: 160,
+            height: 120,
+            fps: 15,
+            bitrate_kbps: 300,
+            rotation: Default::default(),
+        })
+        .unwrap();
+        for i in 0..4u8 {
+            // Use >= 64x64 input so x265 builds enforcing sourceHeight >= maxCUSize (32) succeed.
+            let mut img = image::RgbImage::new(160, 120);
+            for (x, y, pixel) in img.enumerate_pixels_mut() {
+                *pixel = image::Rgb([
+                    (40 + i * 30).saturating_add((x % 64) as u8),
+                    120u8.saturating_add((y % 64) as u8),
+                    180,
+                ]);
+            }
+            let mut out = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgb8(img)
+                .write_to(&mut out, image::ImageFormat::Jpeg)
+                .unwrap();
+            enc.push(&out.into_inner()).unwrap();
+        }
+        enc.finish_input();
+        let mut hevc_frames = Vec::new();
+        while let Some(frame) = enc.recv() {
+            hevc_frames.push(frame);
+        }
+        assert!(!hevc_frames.is_empty());
+
+        let mut dec = VideoTranscoder::start(TranscodeConfig {
+            from: VideoCodec::H265,
+            to: VideoCodec::Jpeg,
+            width: 320,
+            height: 240,
+            fps: 15,
+            bitrate_kbps: 300,
+            rotation: Default::default(),
+        })
+        .unwrap();
+        for frame in &hevc_frames {
+            dec.push(&frame.bytes).unwrap();
+        }
+        dec.finish_input();
+        let jpeg = dec
+            .recv()
+            .expect("FFmpeg HEVC -> MJPEG transcoder must emit a valid full-range JPEG");
+
+        let mut rx = ReceiveVideo::new(vec![video_track(65_538, None)]);
+        rx.set_peer_label("peer-a");
+        let wire = encode_video(
+            MediaPayloadKind::Jpeg,
+            FLAG_KEYFRAME,
+            MediaHeader {
+                track_id: 65_538,
+                generation: 1,
+                sequence: 0,
+                timestamp_micros: 0,
+            },
+            &jpeg.bytes,
+        )
+        .unwrap();
+        let decoded = WireMediaFrame::decode(&wire).unwrap();
+        assert!(rx.binary_frame(&decoded));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !rx.poll_decoded() {
+            assert!(
+                Instant::now() < deadline,
+                "ReceiveVideo failed to decode FFmpeg MJPEG frame"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        let rows = render_rows(&rx, 80, 14);
+        assert!(rows[0].contains("peer-a (live)"));
+        assert!(!rows.iter().any(|row| row.contains("Waiting for video")));
+        assert!(rows[1].contains('▀'));
+    }
 }

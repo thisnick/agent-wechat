@@ -13,7 +13,6 @@ use crate::{
 use anyhow::{ensure, Result};
 use std::{
     collections::VecDeque,
-    net::SocketAddr,
     sync::mpsc::Receiver,
     thread,
     time::{Duration, Instant},
@@ -155,7 +154,7 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
             let mut drained = 0usize;
             while drained < 64 {
                 match socket.recv_from(&mut buffer) {
-                    Ok((n, SocketAddr::V4(source))) if source == endpoint && n <= 8197 => {
+                    Ok((n, source)) if source == endpoint && n <= 8197 => {
                         drained += 1;
                         let Ok((_magic, member)) =
                             audio_packet::unverified_live_member(&buffer[..n])

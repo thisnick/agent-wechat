@@ -162,6 +162,17 @@ pub fn verify_upgrade(headers: &header::HeaderMap, key: &str) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn map_ws_send_error(error: tokio_tungstenite::tungstenite::Error) -> anyhow::Error {
+    match error {
+        tokio_tungstenite::tungstenite::Error::ConnectionClosed
+        | tokio_tungstenite::tungstenite::Error::AlreadyClosed
+        | tokio_tungstenite::tungstenite::Error::Protocol(
+            tokio_tungstenite::tungstenite::error::ProtocolError::SendAfterClosing,
+        ) => anyhow::anyhow!("call socket closed"),
+        other => other.into(),
+    }
+}
+
 pub async fn send_json(socket: &mut Socket, value: &impl serde::Serialize) -> Result<()> {
     let text = serde_json::to_string(value)?;
     if text.len() > 16 * 1024 {
@@ -169,7 +180,8 @@ pub async fn send_json(socket: &mut Socket, value: &impl serde::Serialize) -> Re
     }
     timeout(WRITE_TIMEOUT, socket.send(Message::Text(text.into())))
         .await
-        .context("call socket write timed out")??;
+        .context("call socket write timed out")?
+        .map_err(map_ws_send_error)?;
     Ok(())
 }
 
@@ -191,7 +203,7 @@ pub async fn receive(socket: &mut Socket, label: &str) -> Result<Message> {
                 if let Err(error) = timeout(WRITE_TIMEOUT, socket.send(Message::Pong(data)))
                     .await
                     .context("call socket pong timed out")
-                    .and_then(|result| result.map_err(Into::into))
+                    .and_then(|result| result.map_err(map_ws_send_error))
                 {
                     debug_call(label, format_args!("pong write failed: {error:#}"));
                     return Err(error);

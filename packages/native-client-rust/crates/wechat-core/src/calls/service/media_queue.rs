@@ -1,10 +1,20 @@
 use super::*;
+use std::collections::BTreeSet;
 use tokio::sync::Notify;
 use wechat_calls::track_queue::{Delivery, TrackQueue};
 
 pub type MediaDelivery = Delivery<ReceivedCallAudio, CallEvent>;
 
-const VIDEO_RECEIVE_CAPACITY: usize = 4;
+/// Independent JPEG frames keep a shallow drop-oldest queue so display stays fresh.
+const VIDEO_JPEG_RECEIVE_CAPACITY: usize = 2;
+/// Inter-frame H.264/H.265 tracks keep deeper per-track buffering so worker bursts never evict keyframes.
+const VIDEO_INTERFRAME_RECEIVE_CAPACITY: usize = 16;
+
+fn track_is_jpeg_video(track: &CallTrack) -> bool {
+    track
+        .video_format()
+        .is_some_and(|fmt| fmt.codec == CallVideoCodec::Jpeg)
+}
 
 pub(super) struct MediaQueue {
     data: Mutex<QueueData>,
@@ -12,7 +22,9 @@ pub(super) struct MediaQueue {
 }
 struct QueueData {
     audio: TrackQueue<ReceivedCallAudio, CallEvent>,
-    video: TrackQueue<ReceivedCallAudio, ()>,
+    video_jpeg: TrackQueue<ReceivedCallAudio, ()>,
+    video_interframe: TrackQueue<ReceivedCallAudio, ()>,
+    jpeg_video_tracks: BTreeSet<u32>,
     closed: bool,
 }
 
@@ -20,13 +32,23 @@ impl MediaQueue {
     pub(super) fn new(tracks: &[CallTrack]) -> Result<Arc<Self>> {
         let mut audio = TrackQueue::new(128, MEDIA_RECEIVE_CAPACITY, 512)
             .map_err(|_| error(CallErrorCode::Capacity))?;
-        let mut video = TrackQueue::new(128, VIDEO_RECEIVE_CAPACITY, 512)
+        let mut video_jpeg = TrackQueue::new(128, VIDEO_JPEG_RECEIVE_CAPACITY, 512)
             .map_err(|_| error(CallErrorCode::Capacity))?;
+        let mut video_interframe = TrackQueue::new(128, VIDEO_INTERFRAME_RECEIVE_CAPACITY, 512)
+            .map_err(|_| error(CallErrorCode::Capacity))?;
+        let mut jpeg_video_tracks = BTreeSet::new();
         for track in tracks {
             if track.is_video() {
-                video
-                    .initial_track(track.id(), track.generation())
-                    .map_err(|_| error(CallErrorCode::Stale))?;
+                if track_is_jpeg_video(track) {
+                    jpeg_video_tracks.insert(track.id());
+                    video_jpeg
+                        .initial_track(track.id(), track.generation())
+                        .map_err(|_| error(CallErrorCode::Stale))?;
+                } else {
+                    video_interframe
+                        .initial_track(track.id(), track.generation())
+                        .map_err(|_| error(CallErrorCode::Stale))?;
+                }
             } else {
                 audio
                     .initial_track(track.id(), track.generation())
@@ -36,7 +58,9 @@ impl MediaQueue {
         Ok(Arc::new(Self {
             data: Mutex::new(QueueData {
                 audio,
-                video,
+                video_jpeg,
+                video_interframe,
+                jpeg_video_tracks,
                 closed: false,
             }),
             changed: Notify::new(),
@@ -76,7 +100,11 @@ impl MediaQueue {
         frame: ReceivedCallAudio,
     ) -> Result<()> {
         self.change(|data| {
-            let _ = data.video.push(track, generation, frame);
+            if data.jpeg_video_tracks.contains(&track) {
+                let _ = data.video_jpeg.push(track, generation, frame);
+            } else {
+                let _ = data.video_interframe.push(track, generation, frame);
+            }
             Ok(())
         })
     }
@@ -84,7 +112,19 @@ impl MediaQueue {
     pub(super) fn control(&self, event: CallEvent) -> Result<()> {
         self.change(|data| match &event {
             CallEvent::TrackAdded { track, .. } if track.is_video() => {
-                data.video.add(track.id(), track.generation(), ())?;
+                if track_is_jpeg_video(track) {
+                    let _ = data
+                        .video_interframe
+                        .remove(track.id(), track.generation(), ());
+                    data.jpeg_video_tracks.insert(track.id());
+                    data.video_jpeg.add(track.id(), track.generation(), ())?;
+                } else {
+                    if data.jpeg_video_tracks.remove(&track.id()) {
+                        let _ = data.video_jpeg.remove(track.id(), track.generation(), ());
+                    }
+                    data.video_interframe
+                        .add(track.id(), track.generation(), ())?;
+                }
                 data.audio.control(event)
             }
             CallEvent::TrackAdded { track, .. } => {
@@ -92,7 +132,20 @@ impl MediaQueue {
             }
             CallEvent::TrackUpdated { track, .. } if track.is_video() => {
                 if track.direction() == CallTrackDirection::Receive {
-                    let _ = data.video.add(track.id(), track.generation(), ());
+                    if track_is_jpeg_video(track) {
+                        let _ = data
+                            .video_interframe
+                            .remove(track.id(), track.generation(), ());
+                        data.jpeg_video_tracks.insert(track.id());
+                        let _ = data.video_jpeg.add(track.id(), track.generation(), ());
+                    } else {
+                        if data.jpeg_video_tracks.remove(&track.id()) {
+                            let _ = data.video_jpeg.remove(track.id(), track.generation(), ());
+                        }
+                        let _ = data
+                            .video_interframe
+                            .add(track.id(), track.generation(), ());
+                    }
                 }
                 data.audio.control(event)
             }
@@ -101,7 +154,9 @@ impl MediaQueue {
                 generation,
                 ..
             } if *track_id >= VIDEO_SEND_TRACK_ID => {
-                let _ = data.video.remove(*track_id, *generation, ());
+                data.jpeg_video_tracks.remove(track_id);
+                let _ = data.video_jpeg.remove(*track_id, *generation, ());
+                let _ = data.video_interframe.remove(*track_id, *generation, ());
                 data.audio.control(event)
             }
             CallEvent::TrackRemoved {
@@ -130,7 +185,9 @@ impl Drop for MediaReceiveQueue {
 impl MediaReceiveQueue {
     pub fn pending_frames(&self) -> usize {
         self.0.data.lock().map_or(0, |data| {
-            data.audio.pending_audio() + data.video.pending_audio()
+            data.audio.pending_audio()
+                + data.video_jpeg.pending_audio()
+                + data.video_interframe.pending_audio()
         })
     }
     fn poll_delivery(
@@ -153,8 +210,14 @@ impl MediaReceiveQueue {
             return Ok(delivery);
         }
         // Discard silent video drops and internal video control sentinels.
-        let _ = data.video.take_dropped();
-        while let Some(delivery) = data.video.pop() {
+        let _ = data.video_jpeg.take_dropped();
+        while let Some(delivery) = data.video_jpeg.pop() {
+            if let Delivery::Audio(frame) = delivery {
+                return Ok(Delivery::Audio(frame));
+            }
+        }
+        let _ = data.video_interframe.take_dropped();
+        while let Some(delivery) = data.video_interframe.pop() {
             if let Delivery::Audio(frame) = delivery {
                 return Ok(Delivery::Audio(frame));
             }
@@ -212,5 +275,82 @@ impl MediaReceiveQueue {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn video_track(id: u32, codec: CallVideoCodec) -> CallTrack {
+        CallTrack::Video {
+            id,
+            generation: 1,
+            direction: CallTrackDirection::Receive,
+            format: CallVideoFormat {
+                codec,
+                mode: CallVideoMode::Transcoded,
+                max_width: 640,
+                max_height: 480,
+                max_fps: 15,
+                bitrate_kbps: None,
+            },
+            participant_id: None,
+            active: true,
+        }
+    }
+
+    #[test]
+    fn jpeg_tracks_cap_at_two_frames_while_interframe_tracks_keep_burst_intact() {
+        let jpeg_track = video_track(65_538, CallVideoCodec::Jpeg);
+        let h264_track = video_track(65_539, CallVideoCodec::H264);
+        let queue = MediaQueue::new(&[jpeg_track, h264_track]).unwrap();
+        let mut rx = MediaReceiveQueue(queue.clone());
+
+        for seq in 0..4u8 {
+            queue
+                .video(
+                    65_538,
+                    1,
+                    ReceivedCallAudio {
+                        bytes: vec![seq],
+                        enqueued_at: Instant::now(),
+                        producer_gap: None,
+                    },
+                )
+                .unwrap();
+        }
+        let mut jpeg_out = Vec::new();
+        while let Ok(bytes) = rx.try_recv() {
+            jpeg_out.push(bytes[0]);
+        }
+        assert_eq!(
+            jpeg_out,
+            vec![2, 3],
+            "JPEG video queue should drop stale frames past capacity 2"
+        );
+
+        for seq in 0..6u8 {
+            queue
+                .video(
+                    65_539,
+                    1,
+                    ReceivedCallAudio {
+                        bytes: vec![100 + seq],
+                        enqueued_at: Instant::now(),
+                        producer_gap: None,
+                    },
+                )
+                .unwrap();
+        }
+        let mut h264_out = Vec::new();
+        while let Ok(bytes) = rx.try_recv() {
+            h264_out.push(bytes[0]);
+        }
+        assert_eq!(
+            h264_out,
+            vec![100, 101, 102, 103, 104, 105],
+            "inter-frame H.264/H.265 queue must preserve multi-frame bursts without evicting keyframes"
+        );
     }
 }

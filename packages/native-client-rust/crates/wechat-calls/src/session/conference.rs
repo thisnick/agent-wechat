@@ -589,6 +589,11 @@ impl ConferenceSession {
         Ok(())
     }
 
+    pub fn relay_candidates(&self) -> Result<Vec<(usize, usize, std::net::SocketAddr)>> {
+        let room = self.room.as_ref().context("Conference room missing")?;
+        wechat_protocol::calls::relay::SelectedRelay::strategy_candidates(&room.strategy)
+    }
+
     pub fn take_media(
         &self,
         connection: usize,

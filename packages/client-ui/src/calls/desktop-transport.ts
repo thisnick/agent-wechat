@@ -91,6 +91,9 @@ export class DesktopCallTransport implements CallSessionTransport {
   private nativeSessionId: number | null = null;
   private callbacks: CallTransportCallbacks | null = null;
   private hostFullscreenActive = false;
+  private videoAckScheduled = false;
+  private videoAckRafId: number | null = null;
+  private videoAckGen = 0;
 
   constructor(
     connectionId: string,
@@ -138,9 +141,11 @@ export class DesktopCallTransport implements CallSessionTransport {
             rotationDegrees: normalizeRotation(packet.rotationDegrees),
             jpegBytes: decodeBase64Bytes(packet.jpeg),
           });
+          this.scheduleVideoAck(session);
           break;
         case "localJpeg":
           callbacks.onLocalJpeg(decodeBase64Bytes(packet.jpeg));
+          this.scheduleVideoAck(session);
           break;
         case "trackCleared":
           callbacks.onTrackCleared(packet.trackId);
@@ -159,6 +164,7 @@ export class DesktopCallTransport implements CallSessionTransport {
           callbacks.onOsCallAlert?.(packet.callId);
           break;
         case "disconnected":
+          this.cancelVideoAck();
           this.activeSession = 0;
           this.nativeSessionId = null;
           this.callbacks = null;
@@ -198,6 +204,7 @@ export class DesktopCallTransport implements CallSessionTransport {
   }
 
   disconnect(): void {
+    this.cancelVideoAck();
     const wasActive = this.activeSession !== 0;
     const sessionId = this.nativeSessionId;
     this.activeSession = 0;
@@ -480,11 +487,42 @@ export class DesktopCallTransport implements CallSessionTransport {
   }
 
   stopMedia(): void {
+    this.cancelVideoAck();
     this.exitHostFullscreenIfOwned();
     void this.invokeFn("call_stop_media", {
       connectionId: this.connectionId,
       accountId: this.account,
     }).catch(() => {});
+  }
+
+  private scheduleVideoAck(session: number): void {
+    if (this.videoAckScheduled) return;
+    this.videoAckScheduled = true;
+    const gen = this.videoAckGen;
+    const sendAck = () => {
+      if (this.videoAckGen !== gen) return;
+      this.videoAckScheduled = false;
+      this.videoAckRafId = null;
+      if (this.activeSession !== session) return;
+      void this.invokeFn("call_video_ack", {
+        connectionId: this.connectionId,
+        accountId: this.account,
+      }).catch(() => {});
+    };
+    if (typeof requestAnimationFrame === "function") {
+      this.videoAckRafId = requestAnimationFrame(sendAck);
+    } else {
+      queueMicrotask(sendAck);
+    }
+  }
+
+  private cancelVideoAck(): void {
+    this.videoAckGen += 1;
+    if (this.videoAckRafId !== null && typeof cancelAnimationFrame === "function") {
+      cancelAnimationFrame(this.videoAckRafId);
+    }
+    this.videoAckRafId = null;
+    this.videoAckScheduled = false;
   }
 
   async setFullscreen(enabled: boolean): Promise<boolean> {

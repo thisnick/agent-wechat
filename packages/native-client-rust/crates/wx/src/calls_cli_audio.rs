@@ -1383,11 +1383,31 @@ async fn owned_call(
                 let event=event?;
                 control.update(&event);
                 match event {
-                    CallEvent::State {call:view} if view.call_id==call_id=>match view.state {
-                        CallState::Ended=>{levels.notice("Call ended.");return Ok(true);},
-                        CallState::Uncertain=>bail!("call outcome unknown; check calls status before retrying"),
-                        _=>{}
+                    CallEvent::State {call:view} if view.call_id==call_id=>{
+                        if let Some(current) = media.as_mut() {
+                            let _ = current.receive.roster(&view);
+                            current.receive_video.roster(&view);
+                        }
+                        match view.state {
+                            CallState::Ended=>{levels.notice("Call ended.");return Ok(true);},
+                            CallState::Uncertain=>bail!("call outcome unknown; check calls status before retrying"),
+                            _=>{}
+                        }
                     },
+                    CallEvent::TrackAdded {..}|CallEvent::TrackUpdated {..}|CallEvent::TrackRemoved {..}=>{
+                        if let Some(current) = media.as_mut() {
+                            current.receive_video.event(&event, call_id);
+                            if let Some(view) = control.call.as_ref().filter(|v| v.call_id == call_id) {
+                                current.receive_video.roster(view);
+                            }
+                            if current.receive.event(&event, call_id)?
+                                && matches!(event, CallEvent::TrackRemoved {..})
+                            {
+                                audio.playback_token = audio.playback.clear()?;
+                                levels.clear_speaker();
+                            }
+                        }
+                    }
                     CallEvent::Control { call_id: id, participant_id, control: peer_ctrl } if id == call_id => {
                         match peer_ctrl {
                             wechat_core::call_types::CallControl::Camera { enabled } => {
@@ -1616,7 +1636,18 @@ async fn terminate(control: &mut Control, call_id: &str) -> Result<()> {
                     expected_revision: call.revision,
                 }
             };
-            control.command(command).await?;
+            if let Err(error) = control.command(command).await {
+                if control
+                    .call
+                    .as_ref()
+                    .is_some_and(|view| view.call_id == call_id && view.state == CallState::Ended)
+                    || !control.availability.busy
+                {
+                    return Ok(());
+                }
+                return Err(error)
+                    .context("termination outcome unknown; check calls status before retrying");
+            }
         }
         loop {
             if control

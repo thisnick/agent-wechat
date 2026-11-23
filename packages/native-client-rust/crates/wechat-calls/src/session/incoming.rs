@@ -746,6 +746,13 @@ impl NativeIncomingSession {
         );
         self.base.media_ready(state, current)
     }
+    pub fn relay_candidates(&self) -> Result<Vec<(usize, usize, std::net::SocketAddr)>> {
+        ensure!(
+            self.phase == IncomingPhase::Joined,
+            "Incoming media unavailable"
+        );
+        self.base.relay_candidates()
+    }
     pub fn take_media(
         &mut self,
         state: &AccountState,

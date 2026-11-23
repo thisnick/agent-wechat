@@ -854,6 +854,7 @@ struct StreamReassembler {
     last_timestamp_ms: Option<u32>,
     arrival_counter: u64,
     vf_orientation: Option<u8>,
+    pending_drop: bool,
 }
 
 /// Reassembles MP/iLink kind-3 RSM video packets (including multi-group and 2D RS FEC)
@@ -1047,6 +1048,7 @@ impl StreamReassembler {
                 if encoder_reset {
                     self.active.clear();
                     self.last_completed = None;
+                    self.pending_drop = false;
                 } else {
                     return Ok(RsmIngestOutcome::Pending);
                 }
@@ -1064,6 +1066,7 @@ impl StreamReassembler {
             {
                 self.active.remove(&oldest_key);
                 dropped = true;
+                self.pending_drop = true;
             }
         }
 
@@ -1074,6 +1077,7 @@ impl StreamReassembler {
                 let newer = timestamp_ms.wrapping_sub(existing.timestamp_ms) < 0x8000_0000;
                 if newer {
                     self.active.remove(&full_frame_idx);
+                    self.pending_drop = true;
                 } else {
                     return Ok(RsmIngestOutcome::Pending);
                 }
@@ -1177,6 +1181,8 @@ impl StreamReassembler {
             _ => (assembled, completed.is_iframe, false),
         };
 
+        let prior_frames_dropped = std::mem::take(&mut self.pending_drop) || evicted_older;
+
         Ok(RsmIngestOutcome::Frame(ReassembledVideoFrame {
             codec: completed.codec,
             member_id: completed.member_id,
@@ -1184,7 +1190,7 @@ impl StreamReassembler {
             frame_index: full_frame_idx,
             timestamp_ms: completed.timestamp_ms,
             orientation: self.vf_orientation.unwrap_or(completed.orientation),
-            prior_frames_dropped: dropped || evicted_older,
+            prior_frames_dropped,
             fec_recovered: completed.fec_recovered,
             is_keyframe: is_keyframe || completed.is_iframe,
             has_codec_config,
@@ -2456,5 +2462,45 @@ mod tests {
         assert_eq!(f2.stream_id, 2);
         assert_eq!(f2.payload, p_frame);
         assert!(!f2.prior_frames_dropped);
+    }
+
+    #[test]
+    fn rsm_eviction_on_non_final_packet_sets_prior_frames_dropped_on_next_completed_frame() {
+        let mut p_frame = vec![0, 0, 0, 1, 0x02, 0x01];
+        p_frame.extend((0..240u8).map(|i| i.wrapping_mul(5)));
+        let mut tx = RsmVideoPacketizer::new(2, 1).with_chunk_bytes(80).unwrap();
+        let mut rx = RsmVideoReassembler::new();
+
+        // Fill MAX_ACTIVE_ASSEMBLIES (8) with incomplete multi-packet frames so the 9th evicts frame 0.
+        for i in 0..MAX_ACTIVE_ASSEMBLIES as u32 {
+            let pkts = tx
+                .packetize(VideoWireCodec::H265, &p_frame, 100 + i * 66, 15, 500)
+                .unwrap();
+            assert!(pkts.len() >= 2, "expected multi-packet P-frame");
+            assert_eq!(rx.ingest(&pkts[0]).unwrap(), RsmIngestOutcome::Pending);
+        }
+
+        // First packet of the 9th frame evicts the oldest incomplete assembly and asks for a keyframe.
+        let ninth = tx
+            .packetize(VideoWireCodec::H265, &p_frame, 1000, 15, 500)
+            .unwrap();
+        assert!(ninth.len() >= 2);
+        assert_eq!(
+            rx.ingest(&ninth[0]).unwrap(),
+            RsmIngestOutcome::FrameDroppedNeedKeyframe
+        );
+
+        // Remaining packets complete the 9th frame; prior_frames_dropped must still be true!
+        let mut completed = None;
+        for pkt in &ninth[1..] {
+            if let RsmIngestOutcome::Frame(frame) = rx.ingest(pkt).unwrap() {
+                completed = Some(frame);
+            }
+        }
+        let frame = completed.expect("9th frame must complete");
+        assert!(
+            frame.prior_frames_dropped,
+            "eviction during an earlier packet must propagate prior_frames_dropped to the completed frame"
+        );
     }
 }

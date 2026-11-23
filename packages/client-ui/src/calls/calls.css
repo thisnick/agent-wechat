@@ -837,6 +837,7 @@ dialog.call-theater-dialog:fullscreen {
   left: 8px;
   right: 8px;
   bottom: 8px;
+  z-index: 1;
   display: flex;
   align-items: center;
   justify-content: space-between;

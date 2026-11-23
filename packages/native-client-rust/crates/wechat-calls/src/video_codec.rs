@@ -11,7 +11,7 @@ use std::{
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
         mpsc::{self, Receiver},
-        OnceLock,
+        Arc, Condvar, Mutex, OnceLock,
     },
     thread::{self, JoinHandle},
 };
@@ -240,8 +240,80 @@ pub struct EncodedVideoFrame {
 
 const MAX_TRANSCODE_INPUT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TRANSCODE_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+/// Annex-B Access Unit Delimiter NALUs appended after each raw H.265/H.264
+/// access unit when transcoding to standalone JPEG frames so FFmpeg's raw
+/// elementary-stream parser flushes the picture immediately instead of holding
+/// an extra frame until the next start code arrives.
+const HEVC_AUD_NALU: &[u8] = &[0, 0, 0, 1, 0x46, 0x01, 0x50];
+const H264_AUD_NALU: &[u8] = &[0, 0, 0, 1, 0x09, 0xf0];
+
+/// Latest-frame drop-oldest output slot for standalone JPEG transcoding so a
+/// momentarily slow reader always receives the freshest frame without building
+/// a multi-frame FIFO backlog.
+struct LatestJpegSlot {
+    state: Mutex<(Option<EncodedVideoFrame>, bool)>,
+    ready: Condvar,
+}
+
+impl LatestJpegSlot {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new((None, false)),
+            ready: Condvar::new(),
+        }
+    }
+
+    fn publish(&self, frame: EncodedVideoFrame) {
+        if let Ok(mut guard) = self.state.lock() {
+            if guard.1 {
+                return;
+            }
+            guard.0 = Some(frame);
+        }
+        self.ready.notify_one();
+    }
+
+    fn close(&self) {
+        if let Ok(mut guard) = self.state.lock() {
+            guard.1 = true;
+        }
+        self.ready.notify_all();
+    }
+
+    fn try_recv(&self) -> Option<EncodedVideoFrame> {
+        self.state.lock().ok().and_then(|mut guard| guard.0.take())
+    }
+
+    fn recv(&self) -> Option<EncodedVideoFrame> {
+        let mut guard = self.state.lock().ok()?;
+        loop {
+            if let Some(frame) = guard.0.take() {
+                return Some(frame);
+            }
+            if guard.1 {
+                return None;
+            }
+            guard = self.ready.wait(guard).ok()?;
+        }
+    }
+}
+
+enum TranscodeOutputRx {
+    Fifo(Receiver<EncodedVideoFrame>),
+    LatestJpeg(Arc<LatestJpegSlot>),
+}
+
+enum TranscodeOutputTx {
+    Fifo(mpsc::SyncSender<EncodedVideoFrame>),
+    LatestJpeg(Arc<LatestJpegSlot>),
+}
 
 /// Streaming low-latency FFmpeg subprocess transcoder.
+///
+/// Output delivery is codec-aware: inter-frame `H265`/`H264` outputs use a
+/// bounded FIFO queue to keep reference frames intact, while standalone `Jpeg`
+/// outputs use a latest-frame slot (dropping unread older JPEGs) so live
+/// display paths do not build a stale backlog.
 ///
 /// Dropping this handle cleanly closes stdin, terminates the child process and
 /// joins the reader thread.
@@ -250,7 +322,7 @@ pub struct VideoTranscoder {
     config: TranscodeConfig,
     child: Option<Child>,
     stdin: Option<ChildStdin>,
-    rx: Option<Receiver<EncodedVideoFrame>>,
+    rx: Option<TranscodeOutputRx>,
     reader: Option<JoinHandle<()>>,
 }
 
@@ -309,6 +381,13 @@ impl VideoTranscoder {
             .as_mut()
             .context("Video transcoder input closed")?;
         stdin.write_all(input)?;
+        if self.config.to == VideoCodec::Jpeg {
+            match self.config.from {
+                VideoCodec::H265 => stdin.write_all(HEVC_AUD_NALU)?,
+                VideoCodec::H264 => stdin.write_all(H264_AUD_NALU)?,
+                VideoCodec::Jpeg => {}
+            }
+        }
         stdin.flush()?;
         Ok(())
     }
@@ -318,14 +397,20 @@ impl VideoTranscoder {
         self.stdin.take();
     }
 
-    /// Non-blocking poll for the next completed output frame.
+    /// Non-blocking poll for the next completed output frame (latest unread frame for `VideoCodec::Jpeg`, FIFO for `H265`/`H264`).
     pub fn try_recv(&mut self) -> Option<EncodedVideoFrame> {
-        self.rx.as_ref().and_then(|rx| rx.try_recv().ok())
+        match self.rx.as_ref()? {
+            TranscodeOutputRx::Fifo(rx) => rx.try_recv().ok(),
+            TranscodeOutputRx::LatestJpeg(slot) => slot.try_recv(),
+        }
     }
 
-    /// Blocking receive for the next completed output frame until the stream closes.
+    /// Blocking receive for the next completed output frame until the stream closes (latest unread frame for `VideoCodec::Jpeg`, FIFO for `H265`/`H264`).
     pub fn recv(&mut self) -> Option<EncodedVideoFrame> {
-        self.rx.as_ref().and_then(|rx| rx.recv().ok())
+        match self.rx.as_ref()? {
+            TranscodeOutputRx::Fifo(rx) => rx.recv().ok(),
+            TranscodeOutputRx::LatestJpeg(slot) => slot.recv(),
+        }
     }
 
     /// Restart the underlying encoder so the very next pushed frame emits a fresh keyframe
@@ -342,9 +427,11 @@ impl VideoTranscoder {
 
     fn shutdown_worker(&mut self) {
         self.stdin.take();
-        // Drop the output receiver before joining the stdout reader thread so a full
-        // channel can never deadlock shutdown.
-        self.rx.take();
+        // Drop or close the output receiver before joining the stdout reader thread so a
+        // full channel can never deadlock shutdown.
+        if let Some(TranscodeOutputRx::LatestJpeg(slot)) = self.rx.take() {
+            slot.close();
+        }
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -364,12 +451,7 @@ impl Drop for VideoTranscoder {
 fn spawn_worker(
     ffmpeg: &Path,
     config: TranscodeConfig,
-) -> Result<(
-    Child,
-    ChildStdin,
-    Receiver<EncodedVideoFrame>,
-    JoinHandle<()>,
-)> {
+) -> Result<(Child, ChildStdin, TranscodeOutputRx, JoinHandle<()>)> {
     let mut cmd = Command::new(ffmpeg);
     cmd.args([
         "-hide_banner",
@@ -435,10 +517,19 @@ fn spawn_worker(
         VideoRotation::Deg180 => "hflip,vflip,",
         VideoRotation::Deg270 => "transpose=2,",
     };
-    let scale = format!(
-        "{rotate_prefix}scale=w='min(iw,{})':h='min(ih,{})':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
-        config.width, config.height
-    );
+    let scale = if config.to == VideoCodec::Jpeg {
+        // Explicitly convert limited-range decoder output to full-range YUV for MJPEG
+        // so FFmpeg 7.1/8.0 strict standards compliance never rejects yuv420p frames.
+        format!(
+            "{rotate_prefix}scale=w='min(iw,{})':h='min(ih,{})':force_original_aspect_ratio=decrease:out_range=full,scale=trunc(iw/2)*2:trunc(ih/2)*2:out_range=full",
+            config.width, config.height
+        )
+    } else {
+        format!(
+            "{rotate_prefix}scale=w='min(iw,{})':h='min(ih,{})':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            config.width, config.height
+        )
+    };
     cmd.args(["-vf", &scale, "-an", "-sn", "-dn"]);
 
     let gop = u32::from(config.fps).max(1);
@@ -509,8 +600,14 @@ fn spawn_worker(
         }
         VideoCodec::Jpeg => {
             cmd.args([
+                "-strict",
+                "unofficial",
                 "-c:v",
                 "mjpeg",
+                "-pix_fmt",
+                "yuv420p",
+                "-color_range",
+                "pc",
                 "-q:v",
                 "6",
                 "-flush_packets",
@@ -541,11 +638,20 @@ fn spawn_worker(
         .stdout
         .take()
         .context("Missing FFmpeg transcoder stdout")?;
-    let (tx, rx) = mpsc::sync_channel(16);
     let out_codec = config.to;
+    let (out_tx, out_rx) = if out_codec == VideoCodec::Jpeg {
+        let slot = Arc::new(LatestJpegSlot::new());
+        (
+            TranscodeOutputTx::LatestJpeg(slot.clone()),
+            TranscodeOutputRx::LatestJpeg(slot),
+        )
+    } else {
+        let (tx, rx) = mpsc::sync_channel(16);
+        (TranscodeOutputTx::Fifo(tx), TranscodeOutputRx::Fifo(rx))
+    };
     let reader = match thread::Builder::new()
         .name("wechat-video-transcode".into())
-        .spawn(move || read_output_stream(stdout, out_codec, tx))
+        .spawn(move || read_output_stream(stdout, out_codec, out_tx))
     {
         Ok(reader) => reader,
         Err(error) => {
@@ -555,14 +661,10 @@ fn spawn_worker(
             return Err(error).context("Failed to spawn FFmpeg stdout reader");
         }
     };
-    Ok((child, stdin, rx, reader))
+    Ok((child, stdin, out_rx, reader))
 }
 
-fn read_output_stream(
-    mut stdout: impl Read,
-    codec: VideoCodec,
-    tx: mpsc::SyncSender<EncodedVideoFrame>,
-) {
+fn read_output_stream(mut stdout: impl Read, codec: VideoCodec, tx: TranscodeOutputTx) {
     let mut buf = Vec::with_capacity(64 * 1024);
     let mut chunk = [0u8; 8192];
     let mut pending_au = Vec::<u8>::new();
@@ -585,47 +687,61 @@ fn read_output_stream(
         match codec {
             VideoCodec::Jpeg => {
                 while let Some(frame) = extract_jpeg_frame(&mut buf) {
-                    let _ = tx.try_send(EncodedVideoFrame {
+                    let encoded = EncodedVideoFrame {
                         codec: VideoCodec::Jpeg,
                         is_keyframe: true,
                         has_codec_config: false,
                         bytes: frame,
-                    });
+                    };
+                    match &tx {
+                        TranscodeOutputTx::LatestJpeg(slot) => slot.publish(encoded),
+                        TranscodeOutputTx::Fifo(fifo) => {
+                            let _ = fifo.try_send(encoded);
+                        }
+                    }
                 }
             }
             VideoCodec::H265 | VideoCodec::H264 => {
-                drain_annexb_nalus(
-                    &mut buf,
-                    codec,
-                    false,
-                    &mut pending_au,
-                    &mut pending_has_slice,
-                    &mut pending_is_keyframe,
-                    &mut pending_has_config,
-                    &tx,
-                );
+                if let TranscodeOutputTx::Fifo(fifo) = &tx {
+                    drain_annexb_nalus(
+                        &mut buf,
+                        codec,
+                        false,
+                        &mut pending_au,
+                        &mut pending_has_slice,
+                        &mut pending_is_keyframe,
+                        &mut pending_has_config,
+                        fifo,
+                    );
+                }
             }
         }
     }
 
+    if let TranscodeOutputTx::LatestJpeg(slot) = &tx {
+        slot.close();
+    }
+
     if matches!(codec, VideoCodec::H265 | VideoCodec::H264) {
-        drain_annexb_nalus(
-            &mut buf,
-            codec,
-            true,
-            &mut pending_au,
-            &mut pending_has_slice,
-            &mut pending_is_keyframe,
-            &mut pending_has_config,
-            &tx,
-        );
-        if !pending_au.is_empty() && pending_has_slice {
-            let _ = tx.try_send(EncodedVideoFrame {
+        if let TranscodeOutputTx::Fifo(fifo) = &tx {
+            drain_annexb_nalus(
+                &mut buf,
                 codec,
-                is_keyframe: pending_is_keyframe,
-                has_codec_config: pending_has_config,
-                bytes: std::mem::take(&mut pending_au),
-            });
+                true,
+                &mut pending_au,
+                &mut pending_has_slice,
+                &mut pending_is_keyframe,
+                &mut pending_has_config,
+                fifo,
+            );
+            if !pending_au.is_empty() && pending_has_slice {
+                let _ = fifo.try_send(EncodedVideoFrame {
+                    codec,
+                    is_keyframe: pending_is_keyframe,
+                    has_codec_config: pending_has_config,
+                    bytes: std::mem::take(&mut pending_au),
+                });
+            }
         }
     }
 }
@@ -1121,5 +1237,74 @@ mod tests {
         let extracted = extract_jpeg_frame(&mut buf).expect("complete JPEG");
         assert_eq!(extracted, expected);
         assert_eq!(buf, vec![0xff, 0xd8, 0xaa]);
+    }
+
+    #[test]
+    fn latest_jpeg_slot_drops_stale_frames_and_keeps_newest() {
+        let slot = LatestJpegSlot::new();
+        for seq in 0..5u8 {
+            slot.publish(EncodedVideoFrame {
+                codec: VideoCodec::Jpeg,
+                is_keyframe: true,
+                has_codec_config: false,
+                bytes: vec![0xff, 0xd8, seq, 0xff, 0xd9],
+            });
+        }
+        let latest = slot.try_recv().expect("latest JPEG present");
+        assert_eq!(latest.bytes, vec![0xff, 0xd8, 4, 0xff, 0xd9]);
+        assert!(slot.try_recv().is_none());
+
+        slot.close();
+        assert!(slot.recv().is_none());
+    }
+
+    #[test]
+    fn ffmpeg_jpeg_to_h264_to_jpeg_roundtrip_when_ffmpeg_available() {
+        let caps = probe_video_capabilities();
+        if !caps.can_transcode(VideoCodec::Jpeg, VideoCodec::H264)
+            || !caps.can_transcode(VideoCodec::H264, VideoCodec::Jpeg)
+        {
+            return;
+        }
+        let mut enc = VideoTranscoder::start(TranscodeConfig {
+            from: VideoCodec::Jpeg,
+            to: VideoCodec::H264,
+            width: 320,
+            height: 240,
+            fps: 15,
+            bitrate_kbps: 400,
+            rotation: VideoRotation::Deg0,
+        })
+        .unwrap();
+        for i in 0..4u8 {
+            let jpg = synthetic_test_jpeg(320, 240, i * 30).unwrap();
+            enc.push(&jpg).unwrap();
+        }
+        enc.finish_input();
+        let mut h264_frames = Vec::new();
+        while let Some(frame) = enc.recv() {
+            h264_frames.push(frame);
+        }
+        assert!(!h264_frames.is_empty(), "expected encoded H.264 frames");
+
+        let mut dec = VideoTranscoder::start(TranscodeConfig {
+            from: VideoCodec::H264,
+            to: VideoCodec::Jpeg,
+            width: 320,
+            height: 240,
+            fps: 15,
+            bitrate_kbps: 400,
+            rotation: VideoRotation::Deg0,
+        })
+        .unwrap();
+        for frame in &h264_frames {
+            dec.push(&frame.bytes).unwrap();
+        }
+        dec.finish_input();
+        let decoded = dec.recv().expect("expected decoded H.264->JPEG frame");
+        assert_eq!(&decoded.bytes[..2], &[0xff, 0xd8]);
+        assert_eq!(&decoded.bytes[decoded.bytes.len() - 2..], &[0xff, 0xd9]);
+        let (w, h) = jpeg_dimensions(&decoded.bytes).expect("JPEG SOF dimensions");
+        assert_eq!((w, h), (320, 240));
     }
 }

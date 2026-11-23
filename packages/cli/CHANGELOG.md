@@ -1,5 +1,26 @@
 # @agent-wechat/cli
 
+## 3.0.0-beta.3
+
+### Patch Changes
+
+- [#666](https://github.com/thisnick/agent-wechat/pull/666) [`ee575c1`](https://github.com/thisnick/agent-wechat/commit/ee575c14f2813cd8b01db5bcffcd1f38ea8a81e7) Thanks [@thisnick](https://github.com/thisnick)! - Fix VoIP relay check-in failing on IPv6 addresses and add dual-stack IPv4/IPv6 relay support across direct audio, direct video, and conference calls (#662).
+
+  - Accept IPv4, IPv6, or empty strings (up to 45 bytes) in `RelayS2CCheckinResp` `clientIpStr` (field 12) and `svrIpStr` (field 13), preserving the learned text verbatim and setting the numeric IPv4 fields to `0` for IPv6/empty values matching the official client while keeping UDP pinned to the actual relay endpoint.
+  - Add end-to-end dual-stack IPv4/IPv6 UDP relay selection and transport (`SelectedRelay::endpoint`, `TwoRttRelay::new`, `TwoRttRelay::receive` now take/expose `std::net::SocketAddr`), strategy candidate enumeration with local route probing and legacy `Strategy.udp_addrs` fallback, and 1-RTT `merge_mode` (`is_merged_response`) support with 2-RTT fallback.
+  - Classify relay handshake errors as `relay_setup_failed` and record `call-media-diagnostic` for incoming direct calls as well as outgoing direct calls.
+  - Breaking Rust crate change in `wechat-protocol`: `SelectedRelay::endpoint`, `TwoRttRelay::new`, and `TwoRttRelay::receive` now use `std::net::SocketAddr` instead of `std::net::SocketAddrV4`.
+
+## 3.0.0-beta.2
+
+### Patch Changes
+
+- [#663](https://github.com/thisnick/agent-wechat/pull/663) [`a36a58f`](https://github.com/thisnick/agent-wechat/commit/a36a58fbc79e51ca3c54320c0e557294a2b86aef) Thanks [@thisnick](https://github.com/thisnick)! - Improve native video calling across desktop UI, `wx calls`, and daemon transcoding:
+
+  - Render local self-capture directly inside the local participant's conference grid tile (with local speaking, mute, and camera indicators), hide the redundant corner self-view overlay when the self tile is visible, avoid duplicating the local participant in the conference roster drawer, and raise desktop self-view resolution to 640x480 without `-fflags nobuffer` IDR drops.
+  - Fix incoming transcoded MJPEG video stalling on `Waiting for video...` under FFmpeg 7.1/8.0 (such as Homebrew FFmpeg on macOS) by explicitly converting MJPEG encoder frames to full-range YUV (`out_range=full`, `-strict unofficial -pix_fmt yuv420p -color_range pc`), forwarding control-socket track events into `wx calls` video reception, and using per-track latest-frame decoding. Also normalize WebSocket close teardown errors so `wx calls` does not print raw `Sending after closing is not allowed` errors.
+  - Reduce desktop video lag, choppiness, and macroblocking by dropping unreferenced P-frames after packet/queue loss until the next IDR keyframe (including carrying eviction drop flags across multi-packet RSM reassembly), replacing the 16-frame FIFO JPEG transcoder buffer with a latest-frame slot and AUD frame flushing, keeping receive queues shallow for independent JPEG frames (2) while preserving deeper bursts for inter-frame H.264/H.265 tracks (16), skipping SQLite `spawn_blocking` grant lookups for owner bearer tokens on media frames, pacing desktop WebView JPEG IPC with `requestAnimationFrame` acknowledgements, and deduplicating steady-state audio level updates.
+
 ## 3.0.0-beta.1
 
 ### Minor Changes

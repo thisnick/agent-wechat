@@ -28,6 +28,7 @@ import {
   canCallThread,
   formatCallDuration,
   isCancellableCall,
+  isSelfParticipant,
   type CallController,
   type CallView,
 } from "./call-controller.ts";
@@ -630,10 +631,13 @@ function CallTheaterDialog({
     return map;
   }, [videoReceiveTracks]);
 
+  const ownUsername =
+    sessionState.accounts.find((item) => item.id === account)?.ownUsername ?? null;
   const joinedParticipants: CallParticipant[] = useMemo(() => {
     const list = (call.participants ?? []).filter((p) => p.membership !== "left");
     return list;
   }, [call.participants]);
+  const visibleParticipants = joinedParticipants.slice(0, 9);
 
   const isConference = call.kind === "conference";
   const singleRemoteVideo = !isConference ? videoReceiveTracks[0] ?? null : null;
@@ -698,6 +702,14 @@ function CallTheaterDialog({
     },
     [controller],
   );
+
+  const showLocalVideo =
+    call.callType === "video" &&
+    callState.localCamera &&
+    (Boolean(callState.localStream) || hasLocalJpeg);
+  const hasSelfTile =
+    isConference &&
+    visibleParticipants.some((participant) => isSelfParticipant(participant, ownUsername));
 
   return createPortal(
     <dialog
@@ -860,19 +872,42 @@ function CallTheaterDialog({
                     <span>{callStateLabel(call, callState.elapsedSeconds)}</span>
                   </div>
                 ) : (
-                  joinedParticipants.slice(0, 9).map((participant) => {
+                  visibleParticipants.map((participant) => {
+                    const isSelf = isSelfParticipant(participant, ownUsername);
                     const label = resolveName(participant.contactId);
-                    const vTrack = videoTrackByParticipant.get(participant.participantId);
+                    const vTrack = !isSelf
+                      ? videoTrackByParticipant.get(participant.participantId)
+                      : undefined;
                     const hasFrame = !!vTrack && !!callState.remoteTrackFrames[vTrack.id];
-                    const aTrackId = audioTrackByParticipant.get(participant.participantId);
-                    const level = aTrackId ? (callState.levels.trackLevels[aTrackId] ?? 0) : 0;
+                    const aTrackId = !isSelf
+                      ? audioTrackByParticipant.get(participant.participantId)
+                      : undefined;
+                    const level = isSelf
+                      ? callState.localMuted
+                        ? 0
+                        : callState.levels.micLevel
+                      : aTrackId
+                        ? (callState.levels.trackLevels[aTrackId] ?? 0)
+                        : 0;
                     const speaking = level > 0.08;
+                    const micEnabled = isSelf
+                      ? !callState.localMuted
+                      : participant.microphoneEnabled;
+                    const cameraEnabled = isSelf
+                      ? callState.localCamera
+                      : participant.cameraEnabled;
                     return (
                       <div
                         key={participant.participantId}
-                        className={`call-tile ${speaking ? "is-speaking" : ""}`}
+                        className={`call-tile ${isSelf ? "is-self" : ""} ${speaking ? "is-speaking" : ""}`}
                       >
-                        {vTrack && hasFrame ? (
+                        {isSelf && showLocalVideo ? (
+                          <LocalVideoSurface
+                            stream={callState.localStream}
+                            subscribeJpeg={subscribeLocalJpeg}
+                            label={t("calls.selfView")}
+                          />
+                        ) : vTrack && hasFrame ? (
                           <RemoteVideoCanvas
                             controller={controller}
                             trackId={vTrack.id}
@@ -894,11 +929,11 @@ function CallTheaterDialog({
                             {participant.membership === "invited" && (
                               <span className="call-chip">{t("calls.invited")}</span>
                             )}
-                            {participant.microphoneEnabled === false ? (
+                            {micEnabled === false ? (
                               <span className="call-badge is-muted" title={t("calls.muted")}>
                                 <Icon name="mic-off" />
                               </span>
-                            ) : participant.microphoneEnabled === true ? (
+                            ) : micEnabled === true ? (
                               <span className="call-badge" title={t("calls.microphoneOn")}>
                                 <Icon name="mic" />
                               </span>
@@ -910,7 +945,7 @@ function CallTheaterDialog({
                                 ·
                               </span>
                             )}
-                            {call.callType === "video" && participant.cameraEnabled === false && (
+                            {call.callType === "video" && cameraEnabled === false && (
                               <span className="call-badge is-muted" title={t("calls.cameraOff")}>
                                 <Icon name="video-off" />
                               </span>
@@ -965,11 +1000,10 @@ function CallTheaterDialog({
               </div>
             )}
 
-            {/* Self-view corner tile once a local video stream or first JPEG frame is available */}
-            {call.callType === "video" &&
-              callState.localCamera &&
-              (Boolean(callState.localStream) || hasLocalJpeg) && (
-                <div className="call-self-view" aria-label={t("calls.selfView")}>
+            {/* Self-view corner tile once a local video stream or first JPEG frame is available,
+                unless the local participant already has a visible conference grid tile. */}
+            {showLocalVideo && !hasSelfTile && (
+              <div className="call-self-view" aria-label={t("calls.selfView")}>
                 <LocalVideoSurface
                   stream={callState.localStream}
                   subscribeJpeg={subscribeLocalJpeg}
@@ -1018,7 +1052,9 @@ function CallTheaterDialog({
                       </span>
                     </li>
                   )}
-                  {joinedParticipants.map((p) => (
+                  {joinedParticipants
+                    .filter((p) => !isSelfParticipant(p, ownUsername))
+                    .map((p) => (
                     <li key={p.participantId} className="call-roster-row">
                       <span>{resolveName(p.contactId)}</span>
                       <span className="call-roster-status">

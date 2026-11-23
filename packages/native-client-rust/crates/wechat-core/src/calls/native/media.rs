@@ -8,7 +8,7 @@ use crate::call_types::{
 use crate::calls::pcm_envelope::{
     video_rotation_degrees, video_rotation_flags, FLAG_CODEC_CONFIG, FLAG_KEYFRAME,
 };
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use wechat_calls::{
     native_media::{
@@ -18,6 +18,24 @@ use wechat_calls::{
     video_codec::{TranscodeConfig, VideoCodec, VideoTranscoder},
 };
 use wechat_protocol::calls::video_packet::{ReassembledVideoFrame, VideoRotation, VideoWireCodec};
+
+pub(super) fn select_relay_indices(candidates: &[(usize, usize, SocketAddr)]) -> (usize, usize) {
+    candidates
+        .iter()
+        .find(|(_, _, endpoint)| udp_route_available(*endpoint))
+        .or_else(|| candidates.first())
+        .map_or((0, 0), |&(conn, udp, _)| (conn, udp))
+}
+
+fn udp_route_available(endpoint: SocketAddr) -> bool {
+    let bind_addr: SocketAddr = match endpoint {
+        SocketAddr::V4(_) => SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0)),
+        SocketAddr::V6(_) => SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0)),
+    };
+    UdpSocket::bind(bind_addr)
+        .and_then(|socket| socket.connect(endpoint))
+        .is_ok()
+}
 
 impl DirectAudioFrame for QueuedAudio {
     fn generation(&self) -> u32 {
@@ -147,6 +165,33 @@ fn extract_codec_config_nalus(codec: VideoCodec, annexb: &[u8]) -> Option<Vec<u8
 
 type ConferenceTrackUpdate = Arc<Mutex<Option<Vec<(u16, u32)>>>>;
 
+struct RxFrameSender {
+    tx: Option<SyncSender<ReassembledVideoFrame>>,
+    pending_drops: BTreeSet<u32>,
+}
+
+impl RxFrameSender {
+    fn send_or_mark_drop(&mut self, track_id: u32, mut frame: ReassembledVideoFrame) -> bool {
+        let Some(tx) = self.tx.as_ref() else {
+            return false;
+        };
+        if self.pending_drops.contains(&track_id) {
+            frame.prior_frames_dropped = true;
+        }
+        match tx.try_send(frame) {
+            Ok(()) => {
+                self.pending_drops.remove(&track_id);
+                false
+            }
+            Err(mpsc::TrySendError::Full(_)) => {
+                self.pending_drops.insert(track_id);
+                true
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => false,
+        }
+    }
+}
+
 /// Shared inbound video state bridging WeChat RSM reassembly to either direct
 /// pass-through or per-track FFmpeg transcoding on a dedicated worker thread
 /// so video decoding never blocks the 20 ms UDP audio loop.
@@ -158,7 +203,7 @@ pub(super) struct VideoRxBridge {
     prefer_live98: bool,
     conference_tracks: ConferenceTrackUpdate,
     stop: Arc<AtomicBool>,
-    frame_tx: Mutex<Option<SyncSender<ReassembledVideoFrame>>>,
+    frame_tx: Mutex<RxFrameSender>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
@@ -212,7 +257,10 @@ impl VideoRxBridge {
             prefer_live98,
             conference_tracks,
             stop,
-            frame_tx: Mutex::new(frame_tx),
+            frame_tx: Mutex::new(RxFrameSender {
+                tx: frame_tx,
+                pending_drops: BTreeSet::new(),
+            }),
             worker: Mutex::new(worker),
         }
     }
@@ -230,19 +278,18 @@ impl VideoRxBridge {
         } else {
             VIDEO_RECEIVE_TRACK_BASE + u32::from(frame.member_id)
         };
-        if let Ok(guard) = self.frame_tx.lock() {
-            if let Some(tx) = guard.as_ref() {
-                if matches!(tx.try_send(frame), Err(mpsc::TrySendError::Full(_))) {
-                    let _ = self.self_keyframe_tx.try_send(track_id);
-                }
+        if let Ok(mut guard) = self.frame_tx.lock() {
+            if guard.send_or_mark_drop(track_id, frame) {
+                let _ = self.self_keyframe_tx.try_send(track_id);
             }
         }
     }
 
     pub(super) fn shutdown(&self) {
         self.stop.store(true, Ordering::Release);
-        if let Ok(mut tx) = self.frame_tx.lock() {
-            tx.take();
+        if let Ok(mut guard) = self.frame_tx.lock() {
+            guard.tx.take();
+            guard.pending_drops.clear();
         }
         if let Ok(mut handle) = self.worker.lock() {
             if let Some(join) = handle.take() {
@@ -308,23 +355,44 @@ fn run_video_rx_worker(
             }
         }
 
-        match rx.recv_timeout(Duration::from_millis(8)) {
-            Ok(frame) => {
+        let has_in_flight = tracks.values().any(|state| !state.pending_meta.is_empty());
+        let wait = if has_in_flight {
+            Duration::from_millis(4)
+        } else {
+            Duration::from_millis(10)
+        };
+        match rx.recv_timeout(wait) {
+            Ok(first) => {
                 process_rx_video_frame(
                     is_conference,
                     target_format,
-                    frame,
+                    first,
                     &mut tracks,
                     &self_keyframe_tx,
                     &sink,
                     &runtime,
                 );
+                // Drain a small burst of ready frames so the worker keeps pace with multi-stream arrivals.
+                for _ in 0..3 {
+                    let Ok(next) = rx.try_recv() else {
+                        break;
+                    };
+                    process_rx_video_frame(
+                        is_conference,
+                        target_format,
+                        next,
+                        &mut tracks,
+                        &self_keyframe_tx,
+                        &sink,
+                        &runtime,
+                    );
+                }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
 
-        // Continuously drain all ready transcoded output frames from FFmpeg stdout
+        // Continuously drain ready transcoded output frames from FFmpeg stdout
         // without waiting for another inbound H.265/H.264 frame to arrive.
         for (&track_id, state) in &mut tracks {
             let generation = state.generation;
@@ -334,10 +402,18 @@ fn run_video_rx_worker(
                 .and_then(VideoTranscoder::try_recv)
             {
                 state.frames_pushed_since_output = 0;
-                let (ts_us, rot) = state
-                    .pending_meta
-                    .pop_front()
-                    .unwrap_or((state.last_timestamp_us, state.rotation));
+                // When JPEG transcoding drops older intermediate frames in its latest-frame
+                // slot, align metadata to the newest pushed entry rather than lagging behind.
+                let (ts_us, rot) = if target_format.codec == CallVideoCodec::Jpeg {
+                    let latest = state.pending_meta.back().copied();
+                    state.pending_meta.clear();
+                    latest.unwrap_or((state.last_timestamp_us, state.rotation))
+                } else {
+                    state
+                        .pending_meta
+                        .pop_front()
+                        .unwrap_or((state.last_timestamp_us, state.rotation))
+                };
                 let mut flags = video_rotation_flags(rot);
                 if encoded.is_keyframe {
                     flags |= FLAG_KEYFRAME;
@@ -369,6 +445,20 @@ fn run_video_rx_worker(
             }
         }
     }
+}
+
+/// Gate inter-frame P-frames after packet loss or before the first keyframe so
+/// unreferenced P-frames never corrupt the live FFmpeg decoder with macroblocking.
+fn should_drop_rx_frame_for_recovery(
+    state: &mut RxTrackBridge,
+    is_keyframe: bool,
+    prior_frames_dropped: bool,
+) -> bool {
+    if prior_frames_dropped && !is_keyframe {
+        state.started_keyframe = false;
+        return true;
+    }
+    !state.started_keyframe && !is_keyframe
 }
 
 fn process_rx_video_frame(
@@ -460,12 +550,18 @@ fn process_rx_video_frame(
             state.cached_codec_config = Some(params);
         }
     }
+    if should_drop_rx_frame_for_recovery(state, frame.is_keyframe, frame.prior_frames_dropped) {
+        if frame.prior_frames_dropped && std::env::var("WX_CALL_VIDEO_TRACE").as_deref() == Ok("1")
+        {
+            eprintln!(
+                "[wechat-call-video] rx holding P-frames after drop on track={track_id}; requesting IDR"
+            );
+        }
+        let _ = self_keyframe_tx.try_send(track_id);
+        return;
+    }
     let mut prepended: Option<Vec<u8>> = None;
     if !state.started_keyframe {
-        if !frame.is_keyframe {
-            let _ = self_keyframe_tx.try_send(track_id);
-            return;
-        }
         if !frame.has_codec_config {
             let Some(params) = state.cached_codec_config.as_deref() else {
                 // An IDR without inline VPS/SPS/PPS (and no prior parameter sets)
@@ -481,7 +577,7 @@ fn process_rx_video_frame(
         state.started_keyframe = true;
     }
     if state.transcoder.is_none() {
-        let Ok(transcoder) = VideoTranscoder::start(TranscodeConfig {
+        match VideoTranscoder::start(TranscodeConfig {
             from: src_codec,
             to: dst_codec,
             width: target_format.max_width,
@@ -489,17 +585,29 @@ fn process_rx_video_frame(
             fps: target_format.max_fps,
             bitrate_kbps: target_format.bitrate_kbps.unwrap_or(500),
             rotation: VideoRotation::Deg0,
-        }) else {
-            state.started_keyframe = false;
-            return;
-        };
-        state.transcoder = Some(transcoder);
+        }) {
+            Ok(transcoder) => {
+                state.transcoder = Some(transcoder);
+            }
+            Err(error) => {
+                if std::env::var("WX_CALL_VIDEO_TRACE").as_deref() == Ok("1") {
+                    eprintln!(
+                        "[wechat-call-video] rx transcoder start failed track={track_id}: {error:#}"
+                    );
+                }
+                state.started_keyframe = false;
+                return;
+            }
+        }
     }
     let Some(transcoder) = state.transcoder.as_mut() else {
         return;
     };
     let push_bytes = prepended.as_deref().unwrap_or(&frame.payload);
-    if transcoder.push(push_bytes).is_err() {
+    if let Err(error) = transcoder.push(push_bytes) {
+        if std::env::var("WX_CALL_VIDEO_TRACE").as_deref() == Ok("1") {
+            eprintln!("[wechat-call-video] rx transcoder push failed track={track_id}: {error:#}");
+        }
         state.reset_transcoder();
         let _ = self_keyframe_tx.try_send(track_id);
         return;
@@ -854,7 +962,7 @@ impl DirectMediaHost for Host<'_> {
     fn submit(
         &self,
         socket: &UdpSocket,
-        endpoint: SocketAddrV4,
+        endpoint: SocketAddr,
         packet: &[u8],
         frames: &[&QueuedAudio],
     ) -> Result<bool> {
@@ -1002,7 +1110,7 @@ impl ConferenceMediaHost for Host<'_> {
     fn submit_generation(
         &self,
         socket: &UdpSocket,
-        endpoint: SocketAddrV4,
+        endpoint: SocketAddr,
         packet: &[u8],
         frames: &[&QueuedAudio],
         generation: u32,
@@ -1090,5 +1198,96 @@ mod tests {
         let h264_p = [0, 0, 1, 0x41, 0x88];
         assert!(contains_idr_nalu(VideoCodec::H264, &h264_idr));
         assert!(!contains_idr_nalu(VideoCodec::H264, &h264_p));
+    }
+
+    #[test]
+    fn rx_loss_recovery_drops_unreferenced_p_frames_until_next_idr() {
+        let mut state = RxTrackBridge::new(1);
+
+        // Before the first keyframe, P-frames are gated out.
+        assert!(should_drop_rx_frame_for_recovery(&mut state, false, false));
+        assert!(!state.started_keyframe);
+
+        // An IDR keyframe passes through, allowing the caller to latch started_keyframe.
+        assert!(!should_drop_rx_frame_for_recovery(&mut state, true, false));
+        state.started_keyframe = true;
+
+        // Normal P-frames pass through once latched.
+        assert!(!should_drop_rx_frame_for_recovery(&mut state, false, false));
+        assert!(state.started_keyframe);
+
+        // Packet/queue loss before a P-frame resets the gate and drops the unreferenced P-frame.
+        assert!(should_drop_rx_frame_for_recovery(&mut state, false, true));
+        assert!(!state.started_keyframe);
+
+        // Subsequent P-frames stay dropped until the next IDR arrives.
+        assert!(should_drop_rx_frame_for_recovery(&mut state, false, false));
+
+        // An IDR recovers immediately even if frames were dropped ahead of it.
+        assert!(!should_drop_rx_frame_for_recovery(&mut state, true, true));
+    }
+
+    #[test]
+    fn rx_frame_sender_marks_drop_at_exact_stream_position() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let mut sender = RxFrameSender {
+            tx: Some(tx),
+            pending_drops: BTreeSet::new(),
+        };
+        let make_frame = |frame_index: u32, is_keyframe: bool| ReassembledVideoFrame {
+            codec: VideoWireCodec::H265,
+            member_id: 1,
+            stream_id: 0,
+            frame_index,
+            timestamp_ms: frame_index * 66,
+            orientation: 0,
+            prior_frames_dropped: false,
+            fec_recovered: false,
+            is_keyframe,
+            has_codec_config: is_keyframe,
+            payload: vec![0, 0, 0, 1, 0x26, 0x01],
+        };
+
+        // Frame 1 (IDR) enters the 1-slot channel without drop flag.
+        assert!(!sender.send_or_mark_drop(VIDEO_RECEIVE_TRACK_BASE, make_frame(1, true)));
+        // Frame 2 overflows and is dropped -> records pending drop for the track.
+        assert!(sender.send_or_mark_drop(VIDEO_RECEIVE_TRACK_BASE, make_frame(2, false)));
+
+        // Consumer drains pre-drop frame 1 cleanly (still prior_frames_dropped == false).
+        let f1 = rx.try_recv().unwrap();
+        assert_eq!(f1.frame_index, 1);
+        assert!(!f1.prior_frames_dropped);
+
+        // Next post-drop frame 3 carries prior_frames_dropped == true at the exact gap.
+        assert!(!sender.send_or_mark_drop(VIDEO_RECEIVE_TRACK_BASE, make_frame(3, false)));
+        let f3 = rx.try_recv().unwrap();
+        assert_eq!(f3.frame_index, 3);
+        assert!(f3.prior_frames_dropped);
+
+        // Once delivered, pending drop clears so frame 4 is unmarked.
+        assert!(!sender.send_or_mark_drop(VIDEO_RECEIVE_TRACK_BASE, make_frame(4, false)));
+        let f4 = rx.try_recv().unwrap();
+        assert_eq!(f4.frame_index, 4);
+        assert!(!f4.prior_frames_dropped);
+    }
+
+    #[test]
+    fn select_relay_indices_prefers_first_routable_candidate() {
+        let v4: SocketAddr = "127.0.0.1:6000".parse().unwrap();
+        assert_eq!(select_relay_indices(&[]), (0, 0));
+        assert_eq!(select_relay_indices(&[(2, 1, v4)]), (2, 1));
+        if udp_route_available("[::1]:6000".parse().unwrap()) {
+            let v6: SocketAddr = "[::1]:6000".parse().unwrap();
+            assert_eq!(select_relay_indices(&[(0, 0, v6), (0, 1, v4)]), (0, 0));
+        }
+        // If an IPv6 candidate is unroutable on an IPv4-only host, select_relay_indices
+        // falls through to the routable IPv4 candidate; on dual-stack hosts it picks index 0.
+        let doc_v6: SocketAddr = "[2001:db8::1]:6000".parse().unwrap();
+        let picked = select_relay_indices(&[(0, 0, doc_v6), (1, 2, v4)]);
+        if udp_route_available(doc_v6) {
+            assert_eq!(picked, (0, 0));
+        } else {
+            assert_eq!(picked, (1, 2));
+        }
     }
 }
