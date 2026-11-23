@@ -1,12 +1,12 @@
 ---
 title: 智能体工具
-description: DeepSeek Harness 智能体可以调用的微信工具，以及三级权限如何运作。
-sourceHash: "9cdd2797d306"
+description: DeepSeek Harness 智能体可以调用的微信工具，以及权限层级如何运作。
+sourceHash: "edc07bcea59f"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-除了回复之外，智能体还获得三个层级的工具。可见性通过工具注册表的 activation 钩子**在每一步从模型侧强制执行**：未被授予某工具的智能体永远看不到它的声明，而每次执行都会重新校验实时路由和授权。
+除了回复之外，智能体还获得三个层级的工具，外加两个可选工具（通话与推送）。可见性通过工具注册表的 activation 钩子**在每一步从模型侧强制执行**：未被授予某工具的智能体永远看不到它的声明，而每次执行都会重新校验实时路由和授权。
 
 ## 当前聊天
 
@@ -73,6 +73,26 @@ tools:
 ## 通话
 
 可选的 `wechat_call` 是第十七个工具：检查状态、发起允许的单聊语音通话、开始或加入已配置的会议、邀请允许的联系人，或结束插件持有的通话。它需要 owner 单聊授权加上 `outboundToolAllowFrom`；仅有消息权限不会授予它。参见[设置通话](/deepseek-harness/calling/)。
+
+## 消息推送
+
+可选的 `wechat_push` 工具向预配置的微信 id 或群 id（群 id 以 `@chatroom` 结尾）发送单向通知消息。它有意打破了层级模型——配置的白名单**就是**授权边界：
+
+- 默认关闭。设置 `push.enabled: true` 且至少一个 `push.targets` 条目后启用。
+- 启用后，它对**每个 DSH 会话**可见且可调用，包括未在处理微信聊天的智能体（例如想通知你的 CLI 会话）。
+- 白名单之外的目标一律拒绝；投递走与回复相同的持久化 outbox——不确定的发送返回 `needs_review`，绝不自动重试。
+
+```yaml
+push:
+  enabled: true
+  targets: ['wxid_owner', '123456@chatroom']
+```
+
+目标可以直接写 id，也可以在设置页面用通讯录搜索点选（参见[设置界面](/deepseek-harness/setup/#settings-ui)）。
+
+<Aside type="caution" title="推送是账号级的">
+任何能调用工具的会话都可以通知名单上的每个目标。名单保持精简，不要指向不是你建的群。
+</Aside>
 
 <Aside title="小提示">
 - **搜索是本地的。** 它覆盖你的 profile 里存储的内容，绝不会从微信拉取更早的历史。

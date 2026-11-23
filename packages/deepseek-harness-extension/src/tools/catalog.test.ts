@@ -5,9 +5,9 @@ import { dshConfigShape, wechatToolCatalog } from './catalog.ts';
 import { DEFAULT_GRANTS } from '../tool-context.ts';
 
 describe('wechatToolCatalog', () => {
-  it('lists all seventeen tools from synthetic deps without touching them', () => {
+  it('lists all eighteen tools from synthetic deps without touching them', () => {
     const tools = wechatToolCatalog();
-    assert.equal(tools.length, 17);
+    assert.equal(tools.length, 18);
     for (const tool of tools) {
       assert.equal(typeof tool.name, 'string');
       assert.match(tool.description, /\S/);
@@ -23,6 +23,7 @@ describe('wechatToolCatalog', () => {
     assert.equal(byName.get('wechat_login'), 'owner DM only');
     assert.equal(byName.get('wechat_archive_history'), 'opt-in via tools.grants.archive');
     assert.equal(byName.get('wechat_call'), 'opt-in via calls config');
+    assert.equal(byName.get('wechat_push'), 'opt-in via push config');
     // Every default-granted tool maps to a non-archive visibility bucket.
     for (const name of [...DEFAULT_GRANTS.currentChat, ...DEFAULT_GRANTS.owner]) {
       assert.notEqual(byName.get(name), 'opt-in via tools.grants.archive', name);

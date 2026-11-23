@@ -1,7 +1,7 @@
 ---
 title: 谁会得到回复
 description: 控制哪些单聊和群聊消息能够到达你的 DeepSeek Harness 智能体。
-sourceHash: "22c220be7892"
+sourceHash: "d00a37ed7455"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -66,7 +66,7 @@ requireMentionInGroups: true
 守护进程上的事件日志有自己的保留窗口；桥接器在重连时恢复最新的保留游标，并跳过陈旧历史。被跳过的消息会记在宿主日志里。
 
 <Aside title="小提示">
-- **查找 ID**：用 `wx contacts find NAME` 查联系人，用 `wx chats find NAME` 查群（群 ID 以 `@chatroom` 结尾）。你自己的 ID 是你发出的消息上的 `senderId`。
+- **查找 ID**：用 `wx contacts find NAME` 查联系人，用 `wx chats find NAME` 查群（群 ID 以 `@chatroom` 结尾）。你自己的 ID 是你发出的消息上的 `senderId`。设置页面的通讯录搜索不用命令行也能找到同样的 ID。
 - **@提及指真正的微信 @提及**，即提及你的账号或群里的所有人。守护进程读取微信的提及元数据；把 "@你的名字" 当普通文本输入不算数。
 - **被撤回的消息**会从上下文中移除。
 - **媒体在发送者校验之后才处理。** 被忽略消息里的附件永远不会被下载或转写。

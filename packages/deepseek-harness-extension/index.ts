@@ -73,6 +73,17 @@ export const Config = z
       })
       .default({}),
     /**
+     * Message push (one-way notifications). Arming `enabled` with at least
+     * one target registers the `wechat_push` tool for EVERY DSH session —
+     * the configured whitelist is the authorization boundary. Off by default.
+     */
+    push: z
+      .object({
+        enabled: z.boolean().default(false).volatile(),
+        targets: z.array(z.string()).default([]).volatile(),
+      })
+      .default({}),
+    /**
      * Calls configuration (M5). Validated by resolveWeChatCallsConfig — see
      * README for the full shape (calls.voice.* mirrors the OpenClaw voice
      * calling config; `realtime.apiKeyCredentialRef` names a harness

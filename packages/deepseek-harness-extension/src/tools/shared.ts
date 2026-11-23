@@ -171,6 +171,19 @@ export interface CallCoordinatorLike {
   hangupCall(callId?: string): Promise<boolean>;
 }
 
+/**
+ * One-way notification sender behind `wechat_push`. Present only when
+ * `push.enabled` is true with at least one configured target; the whitelist
+ * IS the authorization — no route binding or owner flag is consulted, so the
+ * tool works from any DSH session (user decision 2025-11-23).
+ */
+export interface PushSenderLike {
+  /** Exact wxids / @chatroom ids the tool may deliver to. */
+  readonly targets: readonly string[];
+  /** Deliver text to one configured target through the durable outbox. */
+  deliver(target: string, text: string): Promise<{ status: string; key: string }>;
+}
+
 export interface ToolDeps {
   readonly client: NativeToolsLike;
   readonly context: TrustedToolContext;
@@ -182,6 +195,8 @@ export interface ToolDeps {
   readonly calls?: CallCoordinatorLike;
   /** Exact contact IDs allowed to start calls through the tool. */
   readonly outboundToolAllowFrom?: readonly string[];
+  /** Present when message push is enabled with at least one target. */
+  readonly push?: PushSenderLike;
 }
 
 /** JSON text renderer used by every tool that returns data. */

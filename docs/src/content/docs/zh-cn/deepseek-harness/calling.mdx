@@ -1,7 +1,7 @@
 ---
 title: 设置通话
 description: 在 DeepSeek Harness 中配置语音通话、对话模式、凭据和智能体咨询。
-sourceHash: "5738e5c57dde"
+sourceHash: "28f40f9b5839"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -43,7 +43,7 @@ calls:
 
 已启用且就绪的语音服务在守护进程空闲时报告 `available`；provider 或能力失败时报告 `unavailable`，来电保持未接。如果语音 API key 无法解析，协调器保持离线（fail closed）。
 
-对于呼入的单聊语音通话，当 `inboundPolicy` 为 `allowlist` 时，`inboundAllowFrom: ["*"]` 接受任何来电。空列表则不接受任何人。这个设置不授予 owner 工具。
+对于呼入的单聊语音通话，当 `inboundPolicy` 为 `allowlist` 时，`inboundAllowFrom: ["*"]` 接受任何来电。空列表则不接受任何人。这个设置不授予 owner 工具。`inboundAllowFrom` 和 `outboundAllowTo` 里的来电者 id 也可以在设置页面用通讯录搜索点选。
 
 ## 会议通话
 

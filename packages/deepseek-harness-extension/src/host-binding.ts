@@ -25,6 +25,7 @@ import { NativeCallsClient, NativeWeChatClient } from '@agent-wechat/shared';
 import type { NativeCallWebSocketFactory } from '@agent-wechat/shared';
 import {
   asAccountId,
+  asChatJid,
   asSessionId,
   asServerId,
   stableHash32,
@@ -74,6 +75,7 @@ import { currentChatTools } from './tools/chat.ts';
 import { accountTools } from './tools/account.ts';
 import { ownerTools } from './tools/owner.ts';
 import { callTools } from './tools/call.ts';
+import { pushTools } from './tools/push.ts';
 import {
   createHostMediaSink,
   registerWechatTools,
@@ -167,7 +169,7 @@ export interface HostWebServerLike {
     readonly kind: 'exact' | 'prefix';
     readonly path: string;
     readonly handler: (
-      req: { readonly method?: string },
+      req: { readonly method?: string; readonly url?: string },
       res: {
         writeHead(status: number, headers: Record<string, string>): unknown;
         end(body?: string): unknown;
@@ -252,6 +254,172 @@ export function bindStatusRoute(
 }
 
 // ---------------------------------------------------------------------------
+// Settings directory search (wxid / group pickers in the settings UI)
+// ---------------------------------------------------------------------------
+
+export type DirectoryKind = 'contacts' | 'groups' | 'both';
+
+export interface DirectorySearchResults {
+  readonly contacts: ReadonlyArray<{ readonly id: string; readonly name: string; readonly alias?: string }>;
+  readonly groups: ReadonlyArray<{ readonly id: string; readonly name: string }>;
+}
+
+/** Structural native client subset the directory search needs. */
+export interface DirectoryClientLike {
+  contacts(
+    accountId: string,
+    options?: { limit?: number; cursor?: string },
+    signal?: AbortSignal,
+  ): Promise<any>;
+  threads(accountId: string, options?: { limit?: number; cursor?: string }): Promise<any>;
+}
+
+const DIRECTORY_PAGE_LIMIT = 200;
+const DIRECTORY_MAX_PAGES = 3;
+const DIRECTORY_MAX_MATCHES = 8;
+
+const matchesNeedle = (fields: ReadonlyArray<unknown>, needle: string): boolean =>
+  fields.some((field) => typeof field === 'string' && field.toLowerCase().includes(needle));
+
+/**
+ * Build the directory search behind `GET /plugins/wechat-channel/search`.
+ * Reads the locally synced profile (contacts + chat threads) through the
+ * daemon; never mutates anything and never touches message content.
+ */
+export function createDirectorySearch(
+  client: DirectoryClientLike,
+  accountId: string,
+): (query: string, kind: DirectoryKind) => Promise<DirectorySearchResults> {
+  return async (query: string, kind: DirectoryKind): Promise<DirectorySearchResults> => {
+    const needle = query.trim().toLowerCase();
+    if (needle.length === 0) return { contacts: [], groups: [] };
+    const contacts: Array<{ id: string; name: string; alias?: string }> = [];
+    const groups: Array<{ id: string; name: string }> = [];
+
+    if (kind !== 'groups') {
+      let cursor: string | undefined;
+      for (let page = 0; page < DIRECTORY_MAX_PAGES && contacts.length < DIRECTORY_MAX_MATCHES; page += 1) {
+        const result: any = await client.contacts(
+          accountId,
+          { limit: DIRECTORY_PAGE_LIMIT, ...(cursor === undefined ? {} : { cursor }) },
+        );
+        for (const contact of result?.items ?? []) {
+          if (contacts.length >= DIRECTORY_MAX_MATCHES) break;
+          if (
+            matchesNeedle(
+              [contact?.username, contact?.alias, contact?.remark, contact?.nickname, contact?.displayName],
+              needle,
+            )
+          ) {
+            contacts.push({
+              id: String(contact.username),
+              name: String(contact.displayName ?? contact.nickname ?? contact.username),
+              ...(typeof contact.alias === 'string' && contact.alias.length > 0 ? { alias: contact.alias } : {}),
+            });
+          }
+        }
+        const next: unknown = result?.nextCursor;
+        cursor = typeof next === 'string' && next.length > 0 ? next : undefined;
+        if (cursor === undefined) break;
+      }
+    }
+
+    if (kind !== 'contacts') {
+      let cursor: string | undefined;
+      for (let page = 0; page < DIRECTORY_MAX_PAGES && groups.length < DIRECTORY_MAX_MATCHES; page += 1) {
+        const result: any = await client.threads(
+          accountId,
+          { limit: DIRECTORY_PAGE_LIMIT, ...(cursor === undefined ? {} : { cursor }) },
+        );
+        for (const thread of result?.items ?? []) {
+          if (groups.length >= DIRECTORY_MAX_MATCHES) break;
+          if (thread?.kind !== 'group') continue;
+          if (matchesNeedle([thread?.id, thread?.displayName], needle)) {
+            groups.push({ id: String(thread.id), name: String(thread.displayName ?? thread.id) });
+          }
+        }
+        const next: unknown = result?.nextCursor;
+        cursor = typeof next === 'string' && next.length > 0 ? next : undefined;
+        if (cursor === undefined) break;
+      }
+    }
+
+    return { contacts, groups };
+  };
+}
+
+/**
+ * Register `GET /plugins/wechat-channel/search?q=<keyword>&kind=contacts|groups`
+ * so the settings page can offer a search-and-pick helper for the wxid / group
+ * id fields. Same trust level as the status route: host-side, no secrets.
+ */
+export function bindSearchRoute(
+  webServer: HostWebServerLike,
+  search: (query: string, kind: DirectoryKind) => Promise<DirectorySearchResults>,
+): (() => void) | undefined {
+  try {
+    return webServer.register({
+      kind: 'exact',
+      path: '/plugins/wechat-channel/search',
+      handler: (req, res) => {
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          res.writeHead(405, { Allow: 'GET, HEAD', 'Content-Length': '0' });
+          res.end();
+          return;
+        }
+        let url: URL;
+        try {
+          url = new URL(req.url ?? '/', 'http://localhost');
+        } catch {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'invalid request url' }));
+          return;
+        }
+        const query = (url.searchParams.get('q') ?? '').trim();
+        const kindParam = url.searchParams.get('kind') ?? 'both';
+        const kind: DirectoryKind = kindParam === 'contacts' || kindParam === 'groups' ? kindParam : 'both';
+        if (query.length === 0 || query.length > 64) {
+          const body = JSON.stringify({ error: 'query parameter q is required (1..64 chars)' });
+          res.writeHead(400, {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Content-Length': String(Buffer.byteLength(body)),
+          });
+          res.end(body);
+          return;
+        }
+        Promise.resolve()
+          .then(() => search(query, kind))
+          .then(
+          (results) => {
+            const body = JSON.stringify(results);
+            res.writeHead(200, {
+              'Content-Type': 'application/json; charset=utf-8',
+              'Cache-Control': 'no-store',
+              'Content-Length': String(Buffer.byteLength(body)),
+            });
+            res.end(req.method === 'HEAD' ? undefined : body);
+          },
+          (error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            const status = (error as { statusCode?: number } | undefined)?.statusCode === 503 ? 503 : 502;
+            const body = JSON.stringify({ error: message });
+            res.writeHead(status, {
+              'Content-Type': 'application/json; charset=utf-8',
+              'Cache-Control': 'no-store',
+              'Content-Length': String(Buffer.byteLength(body)),
+            });
+            res.end(body);
+          },
+        );
+      },
+    });
+  } catch {
+    // A name collision or a closed server must not block channel startup.
+    return undefined;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Config surface
 // ---------------------------------------------------------------------------
 
@@ -282,6 +450,11 @@ export interface WechatConfigView {
   };
   /** Calls configuration (M5); validated by resolveWeChatCallsConfig. */
   readonly calls?: unknown;
+  /** Message push: armed tool + delivery whitelist. */
+  readonly push?: {
+    readonly enabled?: boolean;
+    readonly targets?: readonly string[];
+  };
 }
 
 /** Credential refs are POSIX identifiers — same grammar the host enforces. */
@@ -363,6 +536,11 @@ export interface WechatBinding {
   readonly disposeCalls?: () => Promise<void>;
   /** Fold a committed session event into the reply projection state (test seam). */
   applyReply(state: ReplyState, event: ReplyEventView): ReplyState;
+  /**
+   * Directory search behind the settings picker route (contacts + groups from
+   * the locally synced profile). Rejects while the channel is parked.
+   */
+  readonly search: (query: string, kind: DirectoryKind) => Promise<DirectorySearchResults>;
 }
 
 /** Structural native client the binding needs (real client or a test fake). */
@@ -582,6 +760,38 @@ export async function assembleWechatBinding(deps: AssemblyDeps): Promise<WechatB
       now: Date.now,
     });
 
+    // 5b. Message push (wechat_push). Armed only when explicitly enabled with
+    // at least one target; the whitelist IS the authorization. Delivery rides
+    // the same durable outbox as replies (at-most-once POST, needs_review on
+    // ambiguity, never an automatic resend).
+    const pushTargets: readonly string[] = config.push?.enabled === true
+      ? [
+          ...new Set(
+            (config.push.targets ?? [])
+              .map((target) => target.trim())
+              .filter((target) => target.length > 0),
+          ),
+        ]
+      : [];
+    const pushAccountId = config.native?.accountId ?? DEFAULT_ACCOUNT;
+    const pushSender = pushTargets.length > 0
+      ? {
+          targets: pushTargets,
+          deliver: async (target: string, text: string) => {
+            const key = `push:${pushAccountId}:${target}:${randomUUID()}`;
+            const record = await outbox.enqueue({
+              key,
+              accountId: asAccountId(pushAccountId),
+              chatJid: asChatJid(target),
+              kind: 'text',
+              payload: text,
+            });
+            const delivered = await outbox.deliver(record.key);
+            return { status: delivered?.status ?? 'pending', key: record.key };
+          },
+        }
+      : undefined;
+
     // 6. Session-id -> route reverse lookup (restart-safe, scans durable threads).
     const sessionRoutes = (sessionId: string): RouteBinding | undefined => {
       for (const [, record] of tables.threads.entries()) {
@@ -791,6 +1001,7 @@ export async function assembleWechatBinding(deps: AssemblyDeps): Promise<WechatB
       now: Date.now,
       ...(media === undefined ? {} : { media }),
       ...(coordinator === undefined ? {} : { calls: coordinator }),
+      ...(pushSender === undefined ? {} : { push: pushSender }),
       ...(callsVoice?.outboundToolAllowFrom === undefined
         ? {}
         : { outboundToolAllowFrom: callsVoice.outboundToolAllowFrom }),
@@ -801,6 +1012,7 @@ export async function assembleWechatBinding(deps: AssemblyDeps): Promise<WechatB
       ...accountTools(toolDeps),
       ...ownerTools(toolDeps),
       ...(coordinator === undefined ? [] : callTools(toolDeps)),
+      ...(pushSender === undefined ? [] : pushTools(toolDeps)),
     ];
     debugTrace('assemble', `registering ${wechatTools.length} tools (ctx.tools ${ctx.tools === undefined ? 'absent' : 'present'})`);
     const disposeTools: () => void =
@@ -817,8 +1029,11 @@ export async function assembleWechatBinding(deps: AssemblyDeps): Promise<WechatB
               : { resolveImageRef: (ref: string) => media.refOf(ref) }),
             // M4: per-step model-side visibility. Tools the calling Agent is
             // not granted (owner/archive scope, non-WeChat agents) never reach
-            // the model's declarations or dispatch. Never throws.
+            // the model's declarations or dispatch. Never throws. The push
+            // tool is the exception by design: it is callable from ANY session
+            // (including non-WeChat agents) whenever it is registered.
             activation: async (toolName, context) => {
+              if (toolName === 'wechat_push') return pushSender !== undefined;
               const agentId = context.agent?.id;
               if (agentId === undefined) return false;
               try {
@@ -831,6 +1046,7 @@ export async function assembleWechatBinding(deps: AssemblyDeps): Promise<WechatB
           });
 
     debugTrace('assemble', 'tools registered');
+    const directoryAccountId = config.native?.accountId ?? DEFAULT_ACCOUNT;
     return {
       runtime,
       replyHandle,
@@ -844,6 +1060,9 @@ export async function assembleWechatBinding(deps: AssemblyDeps): Promise<WechatB
       ...(coordinator === undefined ? {} : { coordinator }),
       ...(disposeCalls === undefined ? {} : { disposeCalls }),
       applyReply: (state, event) => replyProjection.apply(state, event),
+      search: (query, kind) => freshClient().then((client) =>
+        createDirectorySearch(client as unknown as DirectoryClientLike, directoryAccountId)(query, kind),
+      ),
     };
   } catch (error) {
     await disposeCalls?.().catch(() => {});
@@ -929,14 +1148,33 @@ export function bindWechatHost(
     // `ctx.webServer` property can be undefined there.
     const statusView = unwrapVolatileConfig(config) as WechatConfigView;
     let disposeStatusRoute: (() => void) | undefined;
+    // Live directory search for the settings picker; updated by the activate
+    // loop after each successful assemble, cleared on teardown/park.
+    let activeSearch:
+      | ((query: string, kind: DirectoryKind) => Promise<DirectorySearchResults>)
+      | undefined;
+    const searchViaBinding = (query: string, kind: DirectoryKind): Promise<DirectorySearchResults> => {
+      const search = activeSearch;
+      if (search === undefined) {
+        throw Object.assign(new Error('wechat channel is not connected'), { statusCode: 503 });
+      }
+      return search(query, kind);
+    };
+    let disposeSearchRoute: (() => void) | undefined;
     if (typeof ctx.inject === 'function') {
       ctx.inject(['webServer'], (scoped) => {
-        if (scoped.webServer !== undefined && disposeStatusRoute === undefined) {
-          disposeStatusRoute = bindStatusRoute(scoped.webServer, () => state, statusView);
+        if (scoped.webServer !== undefined) {
+          if (disposeStatusRoute === undefined) {
+            disposeStatusRoute = bindStatusRoute(scoped.webServer, () => state, statusView);
+          }
+          if (disposeSearchRoute === undefined) {
+            disposeSearchRoute = bindSearchRoute(scoped.webServer, searchViaBinding);
+          }
         }
       });
     } else if (ctx.webServer !== undefined) {
       disposeStatusRoute = bindStatusRoute(ctx.webServer, () => state, statusView);
+      disposeSearchRoute = bindSearchRoute(ctx.webServer, searchViaBinding);
     }
 
     const sleep = (ms: number): Promise<void> =>
@@ -985,6 +1223,7 @@ export function bindWechatHost(
           );
 
           // Start inbound consumers for the configured account.
+          activeSearch = binding.search;
           const accountId = asAccountId(
             (unwrapVolatileConfig(config.native) as WechatConfigView['native'] | undefined)?.accountId ??
               DEFAULT_ACCOUNT,
@@ -995,6 +1234,7 @@ export function bindWechatHost(
           } catch (error) {
             // Roll this attempt back completely before parking: registered
             // tools must not linger while the channel retries.
+            activeSearch = undefined;
             binding.disposeTools();
             await binding.disposeCalls?.().catch(() => {});
             await binding.runtime.stop().catch(() => {});
@@ -1013,6 +1253,7 @@ export function bindWechatHost(
           );
           cleanup = async () => {
             offEvent();
+            activeSearch = undefined;
             binding.disposeTools();
             await binding.disposeCalls?.().catch(() => {});
             await binding.runtime.stop();
@@ -1044,6 +1285,13 @@ export function bindWechatHost(
       if (disposeStatusRoute !== undefined) {
         try {
           disposeStatusRoute();
+        } catch {
+          // Route already gone; disposal must not mask the original cleanup.
+        }
+      }
+      if (disposeSearchRoute !== undefined) {
+        try {
+          disposeSearchRoute();
         } catch {
           // Route already gone; disposal must not mask the original cleanup.
         }

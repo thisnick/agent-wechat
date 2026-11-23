@@ -21,6 +21,8 @@ window.__ModuleLoader__.load({
     Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });
     const react = require('react');
     const h = react.createElement;
+    const useState = react.useState;
+    const useEffect = react.useEffect;
 
     // ---------------------------------------------------------------------------
     // Localized copy (zh first: this deployment's primary UI language).
@@ -33,6 +35,18 @@ window.__ModuleLoader__.load({
       groupAdm: '消息准入',
       groupOwner: 'Owner 与工具授权',
       groupCalls: '语音通话（默认关闭）',
+      groupPush: '消息推送（默认关闭）',
+      pushEnabled: '启用推送工具',
+      pushEnabledHint: '开启后 wechat_push 工具对每个 DSH 会话可见；目标仅限下方白名单。',
+      pushTargets: '推送目标',
+      pushTargetsHint: '允许推送的微信 id 或群 id（群 id 以 @chatroom 结尾），逗号分隔；不在名单内的目标一律拒绝。',
+      searchPick: '从通讯录选择',
+      searchPickHide: '收起搜索',
+      searchPlaceholder: '输入备注、昵称或 wxid 搜索',
+      searchEmpty: '没有匹配的联系人或群',
+      searchOffline: '通道未连接，无法搜索通讯录',
+      searchError: '搜索失败',
+      searchGroupTag: '群',
       mode: '运行模式',
       mode_external: 'external（外接 daemon，推荐）',
       mode_managed: 'managed（由插件托管 daemon）',
@@ -98,6 +112,18 @@ window.__ModuleLoader__.load({
       groupAdm: 'Message admission',
       groupOwner: 'Owner & tool grants',
       groupCalls: 'Voice calls (off by default)',
+      groupPush: 'Message push (off by default)',
+      pushEnabled: 'Enable push tool',
+      pushEnabledHint: 'When on, the wechat_push tool is visible to every DSH session; delivery is limited to the whitelist below.',
+      pushTargets: 'Push targets',
+      pushTargetsHint: 'WeChat ids or group ids (group ids end with @chatroom), comma separated; targets outside this list are always rejected.',
+      searchPick: 'Pick from directory',
+      searchPickHide: 'Hide search',
+      searchPlaceholder: 'Search by remark, nickname or wxid',
+      searchEmpty: 'No matching contacts or groups',
+      searchOffline: 'Channel not connected; directory search is unavailable',
+      searchError: 'Search failed',
+      searchGroupTag: 'group',
       mode: 'Run mode',
       mode_external: 'external (external daemon, recommended)',
       mode_managed: 'managed (plugin-hosted daemon)',
@@ -165,24 +191,27 @@ window.__ModuleLoader__.load({
       { key: 'accountId', path: ['native', 'accountId'], kind: 'text', group: 'conn' },
       { key: 'tokenRef', path: ['native', 'tokenCredentialRef'], kind: 'text', group: 'conn' },
       { key: 'dmPolicy', path: ['dmPolicy'], kind: 'select', options: ['disabled', 'allowlist', 'open'], group: 'adm', optionPrefix: 'dm' },
-      { key: 'dmAllowFrom', path: ['dmAllowFrom'], kind: 'csv', group: 'adm' },
+      { key: 'dmAllowFrom', path: ['dmAllowFrom'], kind: 'csv', group: 'adm', pick: 'contacts' },
       { key: 'groupPolicy', path: ['groupPolicy'], kind: 'select', options: ['disabled', 'allowlist'], group: 'adm', optionPrefix: 'grp' },
-      { key: 'groupAllowFrom', path: ['groupAllowFrom'], kind: 'csv', group: 'adm' },
-      { key: 'groupSenderAllowFrom', path: ['groupSenderAllowFrom'], kind: 'csv', group: 'adm' },
+      { key: 'groupAllowFrom', path: ['groupAllowFrom'], kind: 'csv', group: 'adm', pick: 'groups' },
+      { key: 'groupSenderAllowFrom', path: ['groupSenderAllowFrom'], kind: 'csv', group: 'adm', pick: 'contacts' },
       { key: 'mention', path: ['requireMentionInGroups'], kind: 'bool', group: 'adm' },
-      { key: 'ownerAllowFrom', path: ['tools', 'ownerAllowFrom'], kind: 'csv', group: 'owner' },
+      { key: 'ownerAllowFrom', path: ['tools', 'ownerAllowFrom'], kind: 'csv', group: 'owner', pick: 'contacts' },
       { key: 'archiveGrant', path: ['tools', 'grants', 'archive'], kind: 'csv', group: 'owner' },
       { key: 'callGrant', path: ['tools', 'grants', 'call'], kind: 'csv', group: 'owner' },
       { key: 'callsEnabled', path: ['calls', 'voice', 'enabled'], kind: 'bool', group: 'calls' },
       { key: 'callsAgent', path: ['calls', 'voice', 'agentId'], kind: 'text', group: 'calls' },
-      { key: 'callsInbound', path: ['calls', 'voice', 'inboundAllowFrom'], kind: 'csv', group: 'calls' },
+      { key: 'callsInbound', path: ['calls', 'voice', 'inboundAllowFrom'], kind: 'csv', group: 'calls', pick: 'contacts' },
       { key: 'callsKeyRef', path: ['calls', 'voice', 'realtime', 'apiKeyCredentialRef'], kind: 'text', group: 'calls' },
+      { key: 'pushEnabled', path: ['push', 'enabled'], kind: 'bool', group: 'push' },
+      { key: 'pushTargets', path: ['push', 'targets'], kind: 'csv', group: 'push', pick: 'both' },
     ];
     const GROUPS = [
       { key: 'groupConn', fields: FIELDS.filter((f) => f.group === 'conn') },
       { key: 'groupAdm', fields: FIELDS.filter((f) => f.group === 'adm') },
       { key: 'groupOwner', fields: FIELDS.filter((f) => f.group === 'owner') },
       { key: 'groupCalls', fields: FIELDS.filter((f) => f.group === 'calls') },
+      { key: 'groupPush', fields: FIELDS.filter((f) => f.group === 'push') },
     ];
 
     function pathGet(obj, path) {
@@ -461,6 +490,21 @@ window.__ModuleLoader__.load({
 .wechatcfg-invalid{border-color:#d54966}
 .wechatcfg-check{display:flex;align-items:center;gap:8px;padding-top:6px}
 .wechatcfg-hint{opacity:.6;font-size:12px;margin-top:3px}
+.wechatcfg-withpick{display:flex;flex-direction:column;gap:6px}
+.wechatcfg-pickbtn{align-self:flex-start;padding:3px 10px;border-radius:6px;border:1px solid rgba(127,127,127,.4);background:transparent;color:inherit;cursor:pointer;font:inherit;font-size:12px}
+.wechatcfg-pickbtn:disabled{opacity:.5;cursor:default}
+.wechatcfg-picker{display:flex;flex-direction:column;gap:6px}
+.wechatcfg-pickerbar{display:flex;gap:6px}
+.wechatcfg-search{flex:1}
+.wechatcfg-rows{list-style:none;margin:0;padding:0;max-height:220px;overflow-y:auto;border:1px solid rgba(127,127,127,.3);border-radius:8px}
+.wechatcfg-row{border-bottom:1px solid rgba(127,127,127,.15)}
+.wechatcfg-row:last-child{border-bottom:none}
+.wechatcfg-rowbtn{display:flex;align-items:center;gap:6px;width:100%;padding:6px 10px;border:none;background:transparent;color:inherit;cursor:pointer;font:inherit;font-size:12px;text-align:left}
+.wechatcfg-rowbtn:hover{background:rgba(127,127,127,.12)}
+.wechatcfg-rowbtn:disabled{opacity:.5;cursor:default}
+.wechatcfg-rowon{opacity:.65}
+.wechatcfg-tag{padding:0 6px;border-radius:999px;border:1px solid rgba(127,127,127,.4);font-size:10px;opacity:.75}
+.wechatcfg-rowid{margin-left:auto;opacity:.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .wechatcfg-err{color:#d54966;font-size:12px;margin-top:3px}
 .wechatcfg-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:2px}
 .wechatcfg-btn{padding:5px 16px;border-radius:6px;border:1px solid rgba(127,127,127,.4);background:transparent;color:inherit;cursor:pointer;font:inherit}
@@ -487,6 +531,109 @@ window.__ModuleLoader__.load({
       },
         h('path', { fill: '#2aae67', d: 'M9.5 3C5.36 3 2 5.86 2 9.38c0 1.97 1.03 3.73 2.64 4.9l-.66 2.1 2.36-1.19c.86.24 1.79.37 2.76.37h.32a6.2 6.2 0 0 1-.28-1.85c0-3.51 3.29-6.36 7.35-6.36.1 0 .2 0 .3.01C16.5 4.68 13.3 3 9.5 3Zm-2.6 3.1a.9.9 0 1 1 0 1.8.9.9 0 0 1 0-1.8Zm5.2 0a.9.9 0 1 1 0 1.8.9.9 0 0 1 0-1.8Z' }),
         h('path', { fill: '#7ec79f', d: 'M22 14.88c0-2.93-2.8-5.3-6.25-5.3s-6.25 2.37-6.25 5.3 2.8 5.3 6.25 5.3c.62 0 1.22-.08 1.78-.22l2.05 1.04-.57-1.82C20.94 18.15 22 16.63 22 14.88Zm-8.45-1.63a.78.78 0 1 1 0 1.56.78.78 0 0 1 0-1.56Zm4.4 0a.78.78 0 1 1 0 1.56.78.78 0 0 1 0-1.56Z' }));
+    }
+
+    // ---------------------------------------------------------------------------
+    // Directory picker (wxid / group search backed by the host-side route).
+    // ---------------------------------------------------------------------------
+
+    const SEARCH_URL = '/plugins/wechat-channel/search';
+    const csvIds = (text) => String(text || '')
+      .split(/[,，]/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+
+    function DirectoryPicker(props) {
+      const state = props.state;
+      const field = props.field;
+      const t = props.t;
+      const disabled = props.disabled === true;
+      const kind = field.pick || 'both';
+      const [open, setOpen] = useState(false);
+      const [query, setQuery] = useState('');
+      const [rows, setRows] = useState(null);
+      const [error, setError] = useState('');
+      useEffect(() => {
+        if (!open) return undefined;
+        const q = query.trim();
+        if (q.length === 0) {
+          setRows(null);
+          setError('');
+          return undefined;
+        }
+        let alive = true;
+        const timer = setTimeout(() => {
+          fetch(SEARCH_URL + '?kind=' + encodeURIComponent(kind) + '&q=' + encodeURIComponent(q), { cache: 'no-store' })
+            .then(async (res) => {
+              if (res.status === 503) throw new Error(t('searchOffline'));
+              if (!res.ok) throw new Error(t('searchError') + ' (HTTP ' + res.status + ')');
+              return res.json();
+            })
+            .then((data) => {
+              if (!alive) return;
+              const contacts = Array.isArray(data?.contacts) ? data.contacts : [];
+              const groups = Array.isArray(data?.groups) ? data.groups : [];
+              const merged = kind === 'contacts'
+                ? contacts.map((c) => ({ id: c.id, name: c.name, group: false }))
+                : kind === 'groups'
+                  ? groups.map((g) => ({ id: g.id, name: g.name, group: true }))
+                  : [
+                      ...contacts.map((c) => ({ id: c.id, name: c.name, group: false })),
+                      ...groups.map((g) => ({ id: g.id, name: g.name, group: true })),
+                    ];
+              setRows(merged);
+              setError('');
+            })
+            .catch((err) => {
+              if (!alive) return;
+              setRows([]);
+              setError(String((err && err.message) || err));
+            });
+        }, 300);
+        return () => {
+          alive = false;
+          clearTimeout(timer);
+        };
+      }, [open, query]);
+      const selected = csvIds(state.stagedText(field));
+      const toggle = (id) => {
+        const next = selected.includes(id)
+          ? selected.filter((x) => x !== id)
+          : [...selected, id];
+        state.edit(field, next.join(','));
+      };
+      if (!open) {
+        return h('button', {
+          type: 'button', className: 'wechatcfg-pickbtn', disabled: disabled,
+          onClick: () => setOpen(true),
+        }, t('searchPick'));
+      }
+      return h('div', { className: 'wechatcfg-picker' },
+        h('div', { className: 'wechatcfg-pickerbar' },
+          h('input', {
+            type: 'text', className: 'wechatcfg-input wechatcfg-search', disabled: disabled,
+            value: query, placeholder: t('searchPlaceholder'), autoFocus: true,
+            onChange: (e) => setQuery(e.target.value),
+          }),
+          h('button', {
+            type: 'button', className: 'wechatcfg-pickbtn', disabled: disabled,
+            onClick: () => { setOpen(false); setQuery(''); setRows(null); setError(''); },
+          }, t('searchPickHide'))),
+        error ? h('div', { className: 'wechatcfg-err' }, error) : null,
+        !error && rows !== null && rows.length === 0 ? h('div', { className: 'wechatcfg-hint' }, t('searchEmpty')) : null,
+        rows !== null && rows.length > 0
+          ? h('ul', { className: 'wechatcfg-rows' }, rows.map((row) => {
+              const on = selected.includes(row.id);
+              return h('li', { key: row.id, className: 'wechatcfg-row' },
+                h('button', {
+                  type: 'button', className: 'wechatcfg-rowbtn' + (on ? ' wechatcfg-rowon' : ''),
+                  disabled: disabled, title: row.id,
+                  onClick: () => toggle(row.id),
+                }, on ? '✓ ' : '+ ', row.name || row.id,
+                  row.group ? h('span', { className: 'wechatcfg-tag' }, t('searchGroupTag')) : null,
+                  h('span', { className: 'wechatcfg-rowid' }, row.id)));
+            }))
+          : null);
     }
 
     function renderField(state, t, snap, field) {
@@ -520,6 +667,10 @@ window.__ModuleLoader__.load({
           onChange: (e) => state.edit(field, e.target.value),
           'aria-label': t(field.key),
         });
+        if (field.kind === 'csv' && field.pick) {
+          control = h('div', { className: 'wechatcfg-withpick' }, control,
+            h(DirectoryPicker, { state, field, t, disabled }));
+        }
       }
       const hintKey = field.key + 'Hint';
       const hint = t(hintKey);

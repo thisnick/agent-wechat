@@ -20,6 +20,8 @@ import { test } from 'node:test';
 import {
   assembleWechatBinding,
   bindWechatHost,
+  bindSearchRoute,
+  createDirectorySearch,
   type BindingNativeClient,
   type HostContextLike,
   type NativeClientFactory,
@@ -52,6 +54,9 @@ interface FakeHost {
   readonly liveToolCount: () => number;
   /** Native read calls recorded by the fake client (method + first args). */
   readonly nativeCalls: Array<{ method: string; args: unknown[] }>;
+  /** Local directory rows served by the fake client's contacts/threads. */
+  readonly directoryContacts: Array<Record<string, unknown>>;
+  readonly directoryThreads: Array<Record<string, unknown>>;
 }
 
 function makeFakeHost(): FakeHost {
@@ -101,6 +106,8 @@ function makeFakeHost(): FakeHost {
   const toolRegistrations: Array<Record<string, unknown>> = [];
   const registerWhens = new Map<string, (context: unknown) => boolean | Promise<boolean>>();
   const nativeCalls: FakeHost['nativeCalls'] = [];
+  const directoryContacts: Array<Record<string, unknown>> = [];
+  const directoryThreads: Array<Record<string, unknown>> = [];
   let liveTools = 0;
   let imageSeq = 0;
   let fileSeq = 0;
@@ -213,6 +220,8 @@ function makeFakeHost(): FakeHost {
     registerWhens,
     liveToolCount: () => liveTools,
     nativeCalls,
+    directoryContacts,
+    directoryThreads,
   };
 }
 
@@ -254,6 +263,8 @@ function fakeClientFactory(
         return { serverId: 'srv-msg-1', localMessageId: 'local-1' };
       },
       sendByKey: async () => undefined,
+      contacts: async () => ({ items: host.directoryContacts, nextCursor: undefined }),
+      threads: async () => ({ items: host.directoryThreads, nextCursor: undefined }),
     };
   };
 }
@@ -800,5 +811,235 @@ test('without a calls config only the sixteen base tools register', async () => 
     binding.disposeTools();
     await binding.replyHandle.dispose();
     await binding.domain.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Message push (wechat_push): whitelist-delivery tool for any DSH session
+// ---------------------------------------------------------------------------
+
+test('a push config arms wechat_push for every session and delivers through the outbox', async () => {
+  const host = makeFakeHost();
+  const binding = await assembleWechatBinding({
+    ctx: host.ctx,
+    config: {
+      ...CONFIG,
+      push: { enabled: true, targets: ['wxid_boss', '555@chatroom'] },
+    } as WechatConfigView,
+    log: () => {},
+    createNativeClient: fakeClientFactory(host),
+  });
+  try {
+    const names = host.toolRegistrations.map((d) => d['name']);
+    assert.deepEqual(names, [...EXPECTED_TOOL_NAMES, 'wechat_push']);
+    assert.equal(host.liveToolCount(), 17);
+
+    // Model-side visibility: armed for an agent with NO WeChat route binding.
+    const when = host.registerWhens.get('wechat_push');
+    assert.equal(typeof when, 'function');
+    assert.equal(await when!({ agent: { id: 'agent-cli-no-route' } }), true);
+
+    // End-to-end dispatch from a non-WeChat agent through the durable outbox.
+    const def = host.toolRegistrations.find((d) => d['name'] === 'wechat_push') as {
+      execute: (args: unknown, exec: unknown) => Promise<unknown>;
+    };
+    const result = (await def.execute(
+      { target: 'wxid_boss', text: '  nightly build is green ✅  ' },
+      { agent: { id: 'agent-cli-no-route' }, signal: new AbortController().signal },
+    )) as { status: string; target: string };
+    assert.equal(result.status, 'sent');
+    assert.equal(result.target, 'wxid_boss');
+    const send = host.sends.find((s) => s.text === 'nightly build is green ✅');
+    assert.ok(send, 'push reached the native transport');
+    assert.equal(send?.chatJid, 'wxid_boss');
+
+    // Whitelist enforcement at dispatch time.
+    await assert.rejects(
+      def.execute(
+        { target: 'wxid_stranger', text: 'hi' },
+        { agent: { id: 'agent-cli-no-route' }, signal: new AbortController().signal },
+      ),
+      /not in the configured push targets/,
+    );
+  } finally {
+    binding.disposeTools();
+    await binding.replyHandle.dispose();
+    await binding.domain.close();
+  }
+});
+
+test('without a push config the wechat_push tool never registers', async () => {
+  const host = makeFakeHost();
+  const binding = await assembleWechatBinding({
+    ctx: host.ctx,
+    config: CONFIG,
+    log: () => {},
+    createNativeClient: fakeClientFactory(host),
+  });
+  try {
+    const names = host.toolRegistrations.map((d) => d['name']);
+    assert.equal(names.includes('wechat_push'), false);
+    assert.equal(host.liveToolCount(), 16);
+  } finally {
+    binding.disposeTools();
+    await binding.replyHandle.dispose();
+    await binding.domain.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Settings directory search (wxid / group pickers)
+// ---------------------------------------------------------------------------
+
+interface FakeRouteRequest {
+  method?: string;
+  url?: string;
+}
+
+interface FakeRouteResponse {
+  status?: number;
+  headers?: Record<string, string>;
+  body?: string | undefined;
+}
+
+function fakeWebServer(): {
+  routes: Map<string, (req: FakeRouteRequest, res: unknown) => void>;
+  webServer: HostContextLike['webServer'];
+} {
+  const routes = new Map<string, (req: FakeRouteRequest, res: unknown) => void>();
+  const webServer = {
+    register: (route: { kind: string; path: string; handler: (req: FakeRouteRequest, res: unknown) => void }) => {
+      routes.set(route.path, route.handler);
+      return () => {
+        routes.delete(route.path);
+      };
+    },
+  };
+  return { routes, webServer: webServer as never };
+}
+
+function fakeResponse() {
+  const chunks: FakeRouteResponse = {};
+  const res = {
+    writeHead: (status: number, headers: Record<string, string>) => {
+      chunks.status = status;
+      chunks.headers = headers;
+    },
+    end: (body?: string) => {
+      chunks.body = body;
+    },
+  };
+  return { res, chunks };
+}
+
+test('createDirectorySearch filters contacts and groups from the local profile', async () => {
+  const client = {
+    contacts: async () => ({
+      items: [
+        { username: 'wxid_alice', displayName: 'Alice', alias: 'ali', remark: null, nickname: 'AliceNick' },
+        { username: 'wxid_bob', displayName: 'Bob', alias: null, remark: null, nickname: 'bobby' },
+      ],
+      nextCursor: undefined,
+    }),
+    threads: async () => ({
+      items: [
+        { id: '123@chatroom', kind: 'group', displayName: 'Family' },
+        { id: 'wxid_alice', kind: 'direct', displayName: 'Alice' },
+        { id: '456@chatroom', kind: 'group', displayName: 'Work crew' },
+      ],
+      nextCursor: undefined,
+    }),
+  };
+  const search = createDirectorySearch(client as never, 'default');
+
+  const both = await search('ali', 'both');
+  assert.deepEqual(both.contacts.map((c) => c.id), ['wxid_alice'], 'alias/username hit');
+  assert.deepEqual(both.groups, [], 'contacts kind never returns groups');
+
+  const groups = await search('fam', 'groups');
+  assert.deepEqual(groups.groups.map((g) => g.id), ['123@chatroom']);
+  assert.deepEqual(groups.contacts, []);
+
+  const empty = await search('   ', 'both');
+  assert.deepEqual(empty, { contacts: [], groups: [] });
+
+  const miss = await search('zzz-nothing', 'both');
+  assert.deepEqual(miss, { contacts: [], groups: [] });
+});
+
+test('the search route answers 503 while parked and 400/405 for bad requests', async () => {
+  const host = makeFakeHost();
+  const { routes, webServer } = fakeWebServer();
+  (host.ctx as { webServer?: unknown }).webServer = webServer;
+
+  const binding = bindWechatHost(host.ctx, CONFIG, {
+    createNativeClient: fakeClientFactory(host, { failStatus: true }),
+    retryInitialMs: 10,
+  });
+  try {
+    await binding.ready; // parked (daemon unreachable in this fake)
+    const handler = routes.get('/plugins/wechat-channel/search');
+    assert.equal(typeof handler, 'function');
+
+    const parked = fakeResponse();
+    handler!({ method: 'GET', url: '/plugins/wechat-channel/search?q=ali' }, parked.res);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(parked.chunks.status, 503);
+
+    const badQuery = fakeResponse();
+    handler!({ method: 'GET', url: '/plugins/wechat-channel/search' }, badQuery.res);
+    assert.equal(badQuery.chunks.status, 400);
+
+    const method = fakeResponse();
+    handler!({ method: 'POST', url: '/plugins/wechat-channel/search?q=ali' }, method.res);
+    assert.equal(method.chunks.status, 405);
+  } finally {
+    await disposeAll(host);
+  }
+});
+
+test('after activation the search route serves whitelist-ready directory rows', async () => {
+  const host = makeFakeHost();
+  const { routes, webServer } = fakeWebServer();
+  (host.ctx as { webServer?: unknown }).webServer = webServer;
+  host.directoryContacts.push(
+    { username: 'wxid_alice', displayName: 'Alice', alias: 'ali', remark: null, nickname: null },
+    { username: 'wxid_bob', displayName: 'Bob', alias: null, remark: null, nickname: null },
+  );
+  host.directoryThreads.push(
+    { id: '123@chatroom', kind: 'group', displayName: 'Family' },
+    { id: 'wxid_alice', kind: 'direct', displayName: 'Alice' },
+  );
+
+  const binding = bindWechatHost(host.ctx, CONFIG, {
+    createNativeClient: fakeClientFactory(host),
+    retryInitialMs: 10,
+  });
+  try {
+    await binding.ready;
+    const handler = routes.get('/plugins/wechat-channel/search');
+    assert.equal(typeof handler, 'function');
+
+    const hit = fakeResponse();
+    handler!({ method: 'GET', url: '/plugins/wechat-channel/search?q=ali' }, hit.res);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(hit.chunks.status, 200);
+    const payload = JSON.parse(hit.chunks.body ?? '{}') as {
+      contacts: Array<{ id: string; name: string; alias?: string }>;
+      groups: Array<{ id: string; name: string }>;
+    };
+    assert.deepEqual(payload.contacts, [{ id: 'wxid_alice', name: 'Alice', alias: 'ali' }]);
+    assert.deepEqual(payload.groups, []);
+
+    const groupHit = fakeResponse();
+    handler!({ method: 'GET', url: '/plugins/wechat-channel/search?q=fam&kind=groups' }, groupHit.res);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(groupHit.chunks.status, 200);
+    const groupPayload = JSON.parse(groupHit.chunks.body ?? '{}') as {
+      groups: Array<{ id: string; name: string }>;
+    };
+    assert.deepEqual(groupPayload.groups, [{ id: '123@chatroom', name: 'Family' }]);
+  } finally {
+    await disposeAll(host);
   }
 });

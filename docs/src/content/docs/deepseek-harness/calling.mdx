@@ -57,7 +57,9 @@ unanswered. Without a resolvable speech API key the coordinator stays offline
 
 For incoming direct voice calls, `inboundAllowFrom: ["*"]` accepts any caller
 when `inboundPolicy` is `allowlist`. An empty list accepts none. This setting
-does not grant owner tools.
+does not grant owner tools. The caller ids in `inboundAllowFrom` and
+`outboundAllowTo` can also be picked from the directory search on the
+settings page.
 
 ## Conference calls
 

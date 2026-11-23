@@ -14,6 +14,7 @@ import { accountTools } from './account.ts';
 import { callTools } from './call.ts';
 import { currentChatTools } from './chat.ts';
 import { ownerTools } from './owner.ts';
+import { pushTools } from './push.ts';
 import type { ToolDeps } from './shared.ts';
 
 export interface CatalogToolEntry {
@@ -25,7 +26,8 @@ export interface CatalogToolEntry {
     | 'enabled by default'
     | 'owner DM only'
     | 'opt-in via tools.grants.archive'
-    | 'opt-in via calls config';
+    | 'opt-in via calls config'
+    | 'opt-in via push config';
 }
 
 export function wechatToolCatalog(): CatalogToolEntry[] {
@@ -39,17 +41,21 @@ export function wechatToolCatalog(): CatalogToolEntry[] {
     // The call tool appears in the catalog even when calls are unconfigured;
     // its row documents that it only arms with a calls config.
     ...callTools(syntheticDeps),
+    // Same pattern for push: documented, but only registered when armed.
+    ...pushTools(syntheticDeps),
   ].map((tool) => ({
     name: tool.name,
     description: tool.description,
     parameters: tool.parameters,
     visibility: tool.name === 'wechat_call'
       ? 'opt-in via calls config'
-      : currentChat.has(tool.name)
-        ? 'enabled by default'
-        : owner.has(tool.name)
-          ? 'owner DM only'
-          : 'opt-in via tools.grants.archive',
+      : tool.name === 'wechat_push'
+        ? 'opt-in via push config'
+        : currentChat.has(tool.name)
+          ? 'enabled by default'
+          : owner.has(tool.name)
+            ? 'owner DM only'
+            : 'opt-in via tools.grants.archive',
   }));
 }
 
@@ -101,4 +107,6 @@ export const dshConfigShape: readonly CatalogConfigEntry[] = [
   { path: 'calls.voice.transcription', attributes: ['object'], description: 'STT provider/model/language (openai)' },
   { path: 'calls.voice.conferences.groups', attributes: ['object'], description: 'Per-group rules keyed by @chatroom id or *: autoJoin/autoJoinAllowFrom/toolPolicy/ownerInviterToolPolicy/sessionKey' },
   { path: 'gatewayFacade', attributes: ['boolean', 'default false'], description: 'Expose the local gateway facade (M6; default off)' },
+  { path: 'push.enabled', attributes: ['boolean', 'default false'], description: 'Arm the wechat_push tool for every DSH session (fail-closed default)' },
+  { path: 'push.targets', attributes: ['string[]', 'default []'], description: 'Exact wxids / @chatroom ids wechat_push may deliver to; at least one is required' },
 ];

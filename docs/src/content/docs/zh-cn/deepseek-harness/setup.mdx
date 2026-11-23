@@ -1,7 +1,7 @@
 ---
 title: DeepSeek Harness 快速上手
 description: 在 DeepSeek Harness 宿主中把微信添加为一个通道，让你的智能体读取并回复聊天消息。
-sourceHash: "87793b957984"
+sourceHash: "c4758f0ce8f7"
 ---
 
 import { Aside, Steps } from '@astrojs/starlight/components';
@@ -44,9 +44,9 @@ import { Aside, Steps } from '@astrojs/starlight/components';
            - wxid_friend
    ```
 
-   用 `wx contacts find NAME` 查找好友 ID，用 `wx chats find NAME` 查找群 ID（以 `@chatroom` 结尾）。使用返回的 ID，而不是昵称或可变的微信号。你自己的 ID 是你发出的任意消息上的 `senderId`。
+   用 `wx contacts find NAME` 查找好友 ID，用 `wx chats find NAME` 查找群 ID（以 `@chatroom` 结尾）。使用返回的 ID，而不是昵称或可变的微信号。你自己的 ID 是你发出的任意消息上的 `senderId`。设置页面的通讯录搜索（见第 4 步）不用命令行也能找到同样的 ID。
 
-4. **使用设置页面。** 打开**设置 → 微信通道**（或插件页面下该 bundle 的页面），无需碰 YAML 就能编辑 hub 地址和准入规则。页面会显示实时连接状态，方便你确认通道已连上守护进程。参见[设置界面](#settings-ui)。
+4. **使用设置页面。** 打开**设置 → 微信通道**（或插件页面下该 bundle 的页面），无需碰 YAML 就能编辑 hub 地址和准入规则。所有输入 wxid 和群 id 的字段都带**通讯录搜索**，直接查询已连接的 hub 并从结果中点选联系人和群聊。页面会显示实时连接状态，方便你确认通道已连上守护进程。参见[设置界面](#settings-ui)。
 
 5. **必要时重启，然后测试。** 让好友给你发一条消息。智能体应该在同一个聊天中回复。如果状态条一直是红色，检查 token 和 endpoint；守护进程不可用不会让宿主崩溃——通道会进入 park 状态并在后台重试。
 
@@ -56,7 +56,9 @@ import { Aside, Steps } from '@astrojs/starlight/components';
 
 ## 设置界面 \{#settings-ui}
 
-这个 bundle 为最关键的配置字段渲染了可视化表单——hub 地址（`native.endpoint`）、运行模式、单聊/群聊准入、owner 白名单、工具授权和 calls 配置块。编辑经由宿主设置服务写入 profile 补丁，因此 UI 与手工修改补丁是等价的。密钥永不显示；只显示诸如 `native.tokenCredentialRef` 这样的凭据*名称*。安装或升级 bundle 后，刷新一次浏览器。
+这个 bundle 为最关键的配置字段渲染了可视化表单——hub 地址（`native.endpoint`）、运行模式、单聊/群聊准入、owner 白名单、工具授权、calls 配置块和消息推送。编辑经由宿主设置服务写入 profile 补丁，因此 UI 与手工修改补丁是等价的。密钥永不显示；只显示诸如 `native.tokenCredentialRef` 这样的凭据*名称*。安装或升级 bundle 后，刷新一次浏览器。
+
+每个 wxid / 群 id 字段（`dmAllowFrom`、`groupAllowFrom`、`groupSenderAllowFrom`、`tools.ownerAllowFrom`、`calls.voice.inboundAllowFrom`、`push.targets`）都带**「从通讯录选择」**搜索。它通过宿主侧只读路由（`GET /plugins/wechat-channel/search`——只查联系人和群聊名称，绝不触碰消息内容）查询已连接的 hub，点选结果即在待保存列表中切换。通道未连接时该路由返回 `503`，选择器会显示内联的"未连接"提示而不是结果。
 
 一个只读状态路由（`GET /plugins/wechat-channel/status`）报告 `running`、`serverId`、重试次数和任何错误。设置页面每 5 秒轮询一次，用彩色圆点显示：绿色=已连接，琥珀色=连接中，红色=已 park，灰色=已停止/未知。
 
@@ -66,4 +68,5 @@ import { Aside, Steps } from '@astrojs/starlight/components';
 - **token 放在凭据存储里**，通过 `native.tokenCredentialRef` 引用。不要写进配置，也不要提交到版本控制。
 - **fail-soft 设计。** 守护进程不可达或凭据无法解析时，通道进入 park 并按指数退避重试；绝不会把异常抛给宿主的插件加载器。
 - **语音通话是可选的**，需要一个 `calls` 配置块和可解析的语音 API key；参见[设置通话](/deepseek-harness/calling/)。
+- **消息推送同样是可选的。** 设置 `push.enabled: true` 后，`wechat_push` 工具让任意 DSH 会话通知白名单里的微信 id 和群聊；参见[消息推送](/deepseek-harness/tools/#消息推送)。
 </Aside>

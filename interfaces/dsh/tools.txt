@@ -59,6 +59,10 @@ tool wechat_media.assetId | string | Specific attachment id; omit to use the mes
 tool wechat_media.messageId | string, required, min length 1 | Stored message ID.
 tool wechat_message | enabled by default | Read one message by its stored message ID from the current WeChat chat. Read-only; rejects IDs from other chats.
 tool wechat_message.messageId | string, required, min length 1 | Stored message ID.
+tool wechat_push | opt-in via push config | Send a one-way notification message to a pre-configured WeChat contact or group from any session. Targets are limited to the configured push whitelist; use action "list" to see it. Fire-and-forget: this is not a chat reply and does not create a conversation.
+tool wechat_push.action | string, values send|list, default send | send delivers text to one configured target; list returns the configured targets.
+tool wechat_push.target | string | Configured target id: a wxid for a direct message or a group id ending with @chatroom. Required for send.
+tool wechat_push.text | string, min length 1 | Message text delivered verbatim (whitespace-trimmed). Required for send.
 tool wechat_recall | enabled by default | Recall (unsend) a message this account sent in the current WeChat chat. Requires the stored message ID and its server ID; refuses messages that are not your own in this chat.
 tool wechat_recall.messageId | string, required, min length 1 | Stored message ID.
 tool wechat_recall.serverId | string, required, min length 1 | WeChat's message server ID.

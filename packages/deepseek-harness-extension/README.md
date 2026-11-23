@@ -66,6 +66,15 @@ annotations, voice calls). The gateway facade (M6) is not yet wired.
   followup text; bytes are fetched on demand by `wechat_media`, which
   re-validates the chat scope before touching attachments and reports
   pending/expired states verbatim (never fabricates content).
+- **Message push (opt-in, default off)** — `push.enabled: true` with at least
+  one `push.targets` entry arms an `wechat_push` tool that sends one-way
+  notification messages to the configured WeChat ids / group ids (group ids
+  end with `@chatroom`). Unlike the scoped tools above, the whitelist IS the
+  authorization: the tool is visible to and callable from **every DSH
+  session** (including non-WeChat agents such as CLI sessions), unknown
+  targets are rejected, and delivery rides the same durable outbox
+  (at-most-once POST, canonical readback, `needs_review` on ambiguity —
+  never auto-resends).
 
 ## Known limitations
 
@@ -125,6 +134,15 @@ Dialing out additionally needs `outboundPolicy: 'allowlist'` +
 `outboundAllowTo`, and tool-triggered calls need `outboundToolAllowFrom`
 listing the owner DMs allowed to invoke `wechat_call`.
 
+Message push stays off until armed. Minimal example that lets any DSH session
+notify two targets:
+
+```
+push:
+  enabled: true
+  targets: ['wxid_owner', '123456@chatroom']
+```
+
 Everything else stays closed by default. Groups additionally require
 `groupPolicy: 'allowlist'` + `groupAllowFrom` (+ `groupSenderAllowFrom` to
 admit specific senders; `requireMentionInGroups` defaults to true).
@@ -132,9 +150,9 @@ admit specific senders; `requireMentionInGroups` defaults to true).
 ## Settings UI
 
 The bundle ships a client half (`client/client.js`) that renders a visual
-settings page for the 17 most relevant config fields — hub address
+settings page for the 19 most relevant config fields — hub address
 (`native.endpoint`), run mode, DM/group admission, owner allowlist, tool
-grants, and the calls block — in two host surfaces:
+grants, the calls block, and message push — in two host surfaces:
 
 - **Settings → 微信通道** — a dedicated page in the Settings panel nav
   (`settings.section`, id `wechat-channel`).
@@ -148,6 +166,15 @@ button; CSV lists are comma-separated; secrets are never displayed (only
 credential *names* such as `native.tokenCredentialRef` /
 `calls.voice.realtime.apiKeyCredentialRef`). The client half loads on page
 load; after installing or upgrading the bundle, refresh the browser once.
+
+wxid / group-id fields (`dmAllowFrom`, `groupAllowFrom`,
+`groupSenderAllowFrom`, `tools.ownerAllowFrom`,
+`calls.voice.inboundAllowFrom`, `push.targets`) carry a **Pick from
+directory** search: it queries the connected hub through a host-side,
+read-only route (`GET /plugins/wechat-channel/search`, contact + group names
+only — never message content) and clicking a result toggles it in the staged
+list. The route answers `503` while the channel is parked, so the picker
+shows an inline "not connected" note instead of results.
 
 Both surfaces also show a **live connection status** strip: the plugin host
 half registers a read-only route, `GET /plugins/wechat-channel/status`

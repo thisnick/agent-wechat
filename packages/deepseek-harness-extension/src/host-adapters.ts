@@ -80,6 +80,10 @@ export interface SharedNativeClientLike {
   status(): Promise<any>;
   accounts(): Promise<any>;
   events(accountId: string, after?: string, limit?: number): Promise<any>;
+  /** Local contact directory (used by the settings search route). */
+  contacts?(accountId: string, options?: unknown, signal?: AbortSignal): Promise<any>;
+  /** Local chat threads incl. groups (used by the settings search route). */
+  threads?(accountId: string, options?: unknown): Promise<any>;
   watch(
     accountId: string,
     after: string,

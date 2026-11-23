@@ -1,11 +1,12 @@
 ---
 title: Agent tools
-description: The WeChat tools your DeepSeek Harness agent can call, and how the three access tiers work.
+description: The WeChat tools your DeepSeek Harness agent can call, and how the access tiers work.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-Besides replying, the agent gets tools in three tiers. Visibility is enforced
+Besides replying, the agent gets tools in three tiers plus two opt-in
+tools (calling and push). Visibility is enforced
 **model-side per step** through the tool registry's activation hook: an agent
 that isn't granted a tool never sees its declaration, and every execution
 re-validates the live route and grant.
@@ -88,6 +89,36 @@ call, starts or joins a configured conference, invites allowed contacts, or
 ends the call the plugin owns. It requires owner DM authorization plus
 `outboundToolAllowFrom`; messaging permission alone doesn't grant it. See
 [Set up calling](/deepseek-harness/calling/).
+
+## Message push
+
+The optional `wechat_push` tool sends a one-way notification message to
+pre-configured WeChat ids or group ids (group ids end with `@chatroom`). It
+breaks the tier model on purpose — the configured whitelist **is** the
+authorization:
+
+- Off by default. Arm it with `push.enabled: true` plus at least one
+  `push.targets` entry.
+- When armed, it is visible to and callable from **every DSH session**,
+  including agents that aren't handling a WeChat chat (for example a CLI
+  session that wants to notify you).
+- Targets outside the whitelist are always rejected, and delivery rides the
+  same durable outbox as replies — an uncertain send comes back as
+  `needs_review` and is never retried automatically.
+
+```yaml
+push:
+  enabled: true
+  targets: ['wxid_owner', '123456@chatroom']
+```
+
+Targets can be typed as plain ids or picked from the directory search in the
+settings page (see [Settings UI](/deepseek-harness/setup/#settings-ui)).
+
+<Aside type="caution" title="Push is account-wide">
+Any session that can call tools can ring every target on the list. Keep the
+whitelist short, and don't point it at groups you didn't create.
+</Aside>
 
 <Aside title="Good to know">
 - **Search is local.** It covers what's stored in your profile and never

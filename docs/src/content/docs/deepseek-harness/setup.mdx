@@ -59,12 +59,15 @@ yourself.
    Find a friend's ID with `wx contacts find NAME`, and a group's (ending in
    `@chatroom`) with `wx chats find NAME`. Use the returned ID rather than a
    nickname or a changeable WeChat alias. Your own ID is the `senderId` on any
-   message you sent.
+   message you sent. The settings page's directory search (step 4) finds the
+   same IDs without the CLI.
 
 4. **Use the settings page.** Open **Settings → 微信通道** (or the bundle's page
    under Plugins) to edit the hub address and admission rules without touching
-   YAML. The page shows a live connection status so you can confirm the channel
-   reached the daemon. See [Settings UI](#settings-ui).
+   YAML. wxid and group-id fields carry a **directory search** that queries the
+   connected hub and lets you pick contacts and groups from results. The page
+   shows a live connection status so you can confirm the channel reached the
+   daemon. See [Settings UI](#settings-ui).
 
 5. **Restart if needed, then test.** Have your friend send you a message. The
    agent should reply in the same chat. If the status strip stays red, check the
@@ -81,10 +84,20 @@ Next: decide [who the bot answers](/deepseek-harness/access/), which
 
 The bundle renders a visual form for the most relevant config fields — hub
 address (`native.endpoint`), run mode, DM/group admission, owner allowlist, tool
-grants and the calls block. Edits go through the host settings service and land
-in the profile patch, so the UI and a manual patch edit stay equivalent. Secrets
-are never shown; only credential *names* such as `native.tokenCredentialRef`
-appear. After installing or upgrading the bundle, refresh the browser once.
+grants, the calls block and message push. Edits go through the host settings
+service and land in the profile patch, so the UI and a manual patch edit stay
+equivalent. Secrets are never shown; only credential *names* such as
+`native.tokenCredentialRef` appear. After installing or upgrading the bundle,
+refresh the browser once.
+
+Every wxid / group-id field (`dmAllowFrom`, `groupAllowFrom`,
+`groupSenderAllowFrom`, `tools.ownerAllowFrom`,
+`calls.voice.inboundAllowFrom`, `push.targets`) has a **Pick from directory**
+search. It queries the connected hub through a host-side, read-only route
+(`GET /plugins/wechat-channel/search` — contact and group names only, never
+message content), and clicking a result toggles it in the staged list. While
+the channel is parked the route answers `503`, so the picker shows an inline
+"not connected" note instead of results.
 
 A read-only status route (`GET /plugins/wechat-channel/status`) reports
 `running`, `serverId`, retry count and any error. The settings page polls it
@@ -102,4 +115,7 @@ red parked, gray stopped/unknown.
   host's plugin loader.
 - **Voice calls are opt-in** and need a `calls` block plus a resolvable speech
   API key; see [Set up calling](/deepseek-harness/calling/).
+- **Message push is opt-in** too. With `push.enabled: true` the `wechat_push`
+  tool lets any DSH session notify a whitelist of WeChat ids and groups; see
+  [Message push](/deepseek-harness/tools/#message-push).
 </Aside>

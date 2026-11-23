@@ -33,6 +33,8 @@ native.readinessTimeoutMs | number, default 15000 | Managed daemon readiness tim
 native.serverConfig | string | Daemon server config path for managed mode
 native.stopTimeoutMs | number, default 8000 | Managed daemon stop timeout
 native.tokenCredentialRef | string, default WECHAT_DAEMON_TOKEN | Credential reference holding the native daemon token
+push.enabled | boolean, default false | Arm the wechat_push tool for every DSH session (fail-closed default)
+push.targets | string[], default [] | Exact wxids / @chatroom ids wechat_push may deliver to; at least one is required
 readPolicy | values on_inbound|never|on_model_dispatch, default on_inbound | Reserved read-receipt policy; the native daemon exposes no read API today, so this has no effect yet
 requireMentionInGroups | boolean, default true | Require a real mention before answering in groups
 tools.ownerAllowFrom | string[], default [] | Exact DM wxids treated as the account owner (enables owner tools; archive stays deny-by-default)
