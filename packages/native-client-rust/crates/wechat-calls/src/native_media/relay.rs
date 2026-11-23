@@ -1,7 +1,7 @@
 //! Relay setup shared by direct and conference media workers.
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use std::{
-    net::{SocketAddr, SocketAddrV4, UdpSocket},
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
     thread,
     time::{Duration, Instant},
 };
@@ -20,24 +20,32 @@ pub fn connect_relay(
     relay_epoch: RelayEpoch,
     started: Instant,
     current: impl Fn() -> bool,
-    submit: impl Fn(&UdpSocket, SocketAddrV4, &[u8]) -> Result<()>,
+    submit: impl Fn(&UdpSocket, SocketAddr, &[u8]) -> Result<()>,
 ) -> Result<UdpSocket> {
     ensure!(current(), "Call stopped during relay setup");
     let clock = || u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let endpoint = selected.endpoint;
-    let socket = UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0))?;
+    let bind_addr: SocketAddr = match endpoint {
+        SocketAddr::V4(_) => SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
+        SocketAddr::V6(_) => SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
+    };
+    let socket = UdpSocket::bind(bind_addr).context("Relay UDP bind failed")?;
     // Physical sends are nonblocking while account/clear submission gates are
     // held. Waiting for input happens only outside those gates.
-    socket.set_nonblocking(true)?;
+    socket
+        .set_nonblocking(true)
+        .context("Relay UDP socket setup failed")?;
     let room = RoomInputs::initial(selected, 0, clock() as u32, clock() as u32);
     let mut checkin = TwoRttRelay::new(room, selected.room_key, endpoint, relay_epoch, 15_000)?;
     let random = crypto::random::<10>()?;
-    let mut active_packet = checkin.prepare_initial(
-        relay_epoch,
-        clock(),
-        &random[..checkin.random_bytes_needed()?],
-    )?;
-    submit(&socket, endpoint, &active_packet)?;
+    let mut active_packet = checkin
+        .prepare_initial(
+            relay_epoch,
+            clock(),
+            &random[..checkin.random_bytes_needed()?],
+        )
+        .context("Relay check-in preparation failed")?;
+    submit(&socket, endpoint, &active_packet).context("Relay UDP send failed")?;
     let mut last_tx = Instant::now();
     // One extra byte distinguishes a maximum-size datagram from truncation.
     let mut buffer = [0u8; 8198];
@@ -45,27 +53,36 @@ pub fn connect_relay(
         ensure!(current(), "Call stopped during relay setup");
         ensure!(clock() < 15_000, "Call relay deadline exceeded");
         if last_tx.elapsed() >= RELAY_RETRANSMIT_INTERVAL {
-            submit(&socket, endpoint, &active_packet)?;
+            if checkin.room().merge_mode {
+                let header = clock() as u32;
+                let body = clock() as u32;
+                let random = crypto::random::<10>()?;
+                let n = checkin.merge_fallback_random_bytes_needed(header, body)?;
+                active_packet = checkin
+                    .prepare_merge_fallback(relay_epoch, clock(), header, body, &random[..n])
+                    .context("Relay merge fallback failed")?;
+            }
+            submit(&socket, endpoint, &active_packet).context("Relay UDP send failed")?;
             last_tx = Instant::now();
         }
         match socket.recv_from(&mut buffer) {
-            Ok((n, SocketAddr::V4(source)))
+            Ok((n, source))
                 if source == endpoint && n <= 8197 && buffer[..n].first() == Some(&0xd5) =>
             {
-                match checkin.receive(&buffer[..n], source, relay_epoch, clock())? {
+                match checkin
+                    .receive(&buffer[..n], source, relay_epoch, clock())
+                    .context("Relay check-in response failed")?
+                {
                     RelayProgress::FirstCheckin => {
                         let header = clock() as u32;
                         let body = clock() as u32;
                         let random = crypto::random::<10>()?;
                         let n = checkin.continuation_random_bytes_needed(header, body)?;
-                        active_packet = checkin.prepare_continuation(
-                            relay_epoch,
-                            clock(),
-                            header,
-                            body,
-                            &random[..n],
-                        )?;
-                        submit(&socket, endpoint, &active_packet)?;
+                        active_packet = checkin
+                            .prepare_continuation(relay_epoch, clock(), header, body, &random[..n])
+                            .context("Relay continuation preparation failed")?;
+                        submit(&socket, endpoint, &active_packet)
+                            .context("Relay UDP send failed")?;
                         last_tx = Instant::now();
                     }
                     RelayProgress::Ready
@@ -82,8 +99,219 @@ pub fn connect_relay(
             {
                 thread::sleep(Duration::from_millis(5));
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(e).context("Relay UDP receive failed"),
         }
     }
     Ok(socket)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::IpAddr;
+    use wechat_protocol::{
+        calls::relay::{decrypt_checkin, encrypt_checkin, frame_outer, unframe_outer},
+        protobuf as p,
+    };
+    use zeroize::Zeroizing;
+
+    fn test_epoch() -> RelayEpoch {
+        RelayEpoch {
+            account_generation: 1,
+            logout_epoch: 0,
+            call_generation: 1,
+            key_generation: 1,
+            socket_generation: 1,
+            attempt_id: 1,
+        }
+    }
+
+    fn checkin_key(room_key: u64) -> [u8; 16] {
+        crypto::md5(&room_key.to_le_bytes())
+            .try_into()
+            .expect("md5 digest is 16 bytes")
+    }
+
+    fn decode_checkin_body(packet: &[u8], room_key: u64) -> Vec<p::Field> {
+        let outer = p::decode(unframe_outer(packet).unwrap()).unwrap();
+        let cipher = p::data(&outer, 3).unwrap();
+        let clear = decrypt_checkin(cipher, &checkin_key(room_key), 4096).unwrap();
+        p::decode(&clear).unwrap()
+    }
+
+    fn relay_reply(room_id: u64, room_key: u64, command: u64, body: &[u8]) -> Vec<u8> {
+        let public = p::message(&[p::uint(1, command), p::uint(2, 3), p::uint(3, 0)]).unwrap();
+        let header =
+            p::message(&[p::bytes(1, &public), p::uint(2, room_id), p::uint(3, 10)]).unwrap();
+        let rand = vec![5; (8 - (body.len() + 10) % 8) % 8 + 3];
+        let cipher = encrypt_checkin(body, &checkin_key(room_key), &rand).unwrap();
+        frame_outer(
+            &p::message(&[
+                p::bytes(1, &header),
+                p::uint(2, cipher.len() as u64),
+                p::bytes(3, &cipher),
+            ])
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn connect_relay_handles_ipv6_svr_ip_str_on_ipv4_and_native_ipv6_and_merge_fallback() {
+        // 1. IPv4 relay returning IPv6 svrIpStr (issue #662 shape).
+        let server = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let endpoint = server.local_addr().unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let peer = thread::spawn(move || {
+            let mut buf = [0u8; 8198];
+            let (n, src) = server.recv_from(&mut buf).unwrap();
+            let first = decode_checkin_body(&buf[..n], 9);
+            assert_eq!(p::scalar(&first, 7).unwrap(), 1);
+            let resp = p::message(&[
+                p::uint(1, 0),
+                p::uint(2, u64::from(u32::from_le_bytes([127, 0, 0, 1]))),
+                p::uint(3, u64::from(u32::from_le_bytes([198, 51, 100, 9]))),
+                p::uint(4, u64::from(src.port())),
+                p::uint(5, 0),
+                p::uint(6, 1),
+                p::uint(7, 0),
+                p::uint(8, 2),
+                p::uint(9, 1),
+                p::bytes(12, b"127.0.0.1"),
+                p::bytes(13, b"2001:db8:10:2212:2e::"),
+                p::uint(14, 0),
+            ])
+            .unwrap();
+            server
+                .send_to(&relay_reply(7, 9, 0x1002, &resp), src)
+                .unwrap();
+
+            let (n, src2) = server.recv_from(&mut buf).unwrap();
+            assert_eq!(src2, src);
+            let cont = decode_checkin_body(&buf[..n], 9);
+            assert_eq!(p::scalar(&cont, 4).unwrap(), 0);
+            assert_eq!(p::scalar(&cont, 6).unwrap(), 0);
+            assert_eq!(p::data(&cont, 15).unwrap(), b"2001:db8:10:2212:2e::");
+            let ready = p::message(&[
+                p::uint(1, 0),
+                p::uint(2, 7),
+                p::uint(3, 0),
+                p::uint(5, 0),
+                p::uint(6, 1),
+                p::uint(7, 0),
+            ])
+            .unwrap();
+            server
+                .send_to(&relay_reply(7, 9, 0x1004, &ready), src)
+                .unwrap();
+        });
+        let selected = SelectedRelay {
+            room_id: 7,
+            room_key: 9,
+            own_member: 0,
+            connection_id: 1,
+            endpoint,
+            media_key: Zeroizing::new([3; 32]),
+            merge_mode: false,
+        };
+        let sock = connect_relay(
+            &selected,
+            test_epoch(),
+            Instant::now(),
+            || true,
+            |socket, dest, pkt| {
+                socket.send_to(pkt, dest)?;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(matches!(sock.local_addr().unwrap().ip(), IpAddr::V4(_)));
+        peer.join().unwrap();
+
+        // 2. Native IPv6 loopback relay + 1-RTT timeout fallback to 2-RTT.
+        if let Ok(server6) = UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)) {
+            let endpoint6 = server6.local_addr().unwrap();
+            server6
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let peer6 = thread::spawn(move || {
+                let mut buf = [0u8; 8198];
+                // Drop first 1-RTT packet (f21 = 1) to exercise 2-RTT retransmit fallback.
+                let (n, src) = server6.recv_from(&mut buf).unwrap();
+                let first = decode_checkin_body(&buf[..n], 9);
+                assert_eq!(p::scalar(&first, 4).unwrap(), 0);
+                assert_eq!(p::data(&first, 15).unwrap(), b"::1");
+                assert_eq!(p::scalar(&first, 21).unwrap(), 1);
+
+                let (n, src2) = server6.recv_from(&mut buf).unwrap();
+                assert_eq!(src2, src);
+                let retried = decode_checkin_body(&buf[..n], 9);
+                assert!(p::optional(&retried, 21).unwrap().is_none());
+
+                let resp = p::message(&[
+                    p::uint(1, 0),
+                    p::uint(2, 0),
+                    p::uint(3, 0),
+                    p::uint(4, u64::from(src.port())),
+                    p::uint(5, u64::from(endpoint6.port())),
+                    p::uint(6, 1),
+                    p::uint(7, 0),
+                    p::uint(8, 2),
+                    p::uint(9, 1),
+                    p::bytes(12, b"::1"),
+                    p::bytes(13, b"::1"),
+                    p::uint(14, 0),
+                ])
+                .unwrap();
+                server6
+                    .send_to(&relay_reply(7, 9, 0x1002, &resp), src)
+                    .unwrap();
+
+                let (n, src3) = server6.recv_from(&mut buf).unwrap();
+                assert_eq!(src3, src);
+                let cont = decode_checkin_body(&buf[..n], 9);
+                assert_eq!(p::scalar(&cont, 3).unwrap(), 0);
+                assert_eq!(p::scalar(&cont, 4).unwrap(), 0);
+                assert_eq!(p::data(&cont, 14).unwrap(), b"::1");
+                assert_eq!(p::data(&cont, 15).unwrap(), b"::1");
+                assert!(p::optional(&cont, 21).unwrap().is_none());
+                let ready = p::message(&[
+                    p::uint(1, 0),
+                    p::uint(2, 7),
+                    p::uint(3, 0),
+                    p::uint(5, 0),
+                    p::uint(6, 1),
+                    p::uint(7, 0),
+                ])
+                .unwrap();
+                server6
+                    .send_to(&relay_reply(7, 9, 0x1004, &ready), src)
+                    .unwrap();
+            });
+            let selected6 = SelectedRelay {
+                room_id: 7,
+                room_key: 9,
+                own_member: 0,
+                connection_id: 1,
+                endpoint: endpoint6,
+                media_key: Zeroizing::new([3; 32]),
+                merge_mode: true,
+            };
+            let sock6 = connect_relay(
+                &selected6,
+                test_epoch(),
+                Instant::now(),
+                || true,
+                |socket, dest, pkt| {
+                    socket.send_to(pkt, dest)?;
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert!(matches!(sock6.local_addr().unwrap().ip(), IpAddr::V6(_)));
+            peer6.join().unwrap();
+        }
+    }
 }

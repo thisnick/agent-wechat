@@ -826,7 +826,9 @@ impl Actor {
             sink.is_current() && self.worker.current(),
             "Incoming media admission revoked"
         );
-        let media = session.take_media(&self.state, self.authority, 0, 0)?;
+        let (connection_index, udp_index) =
+            super::media::select_relay_indices(&session.relay_candidates()?);
+        let media = session.take_media(&self.state, self.authority, connection_index, udp_index)?;
         if let Some(muted) = session.peer_microphone_muted() {
             let _ = self.transport.runtime.block_on(sink.peer_microphone(muted));
         }
@@ -872,13 +874,24 @@ impl Actor {
         }
         self.worker.media_stop.store(true, Ordering::Release);
         if let Some(media) = self.media.take() {
-            let failed = media.join().map_or(true, |result| result.is_err());
-            if failed {
-                let _ = self.core.store.put_runtime(
-                    &self.worker.lease.authority().account_id,
-                    &format!("call-media-error:{}", self.worker.identity.call_id()),
-                    b"media_failed",
-                );
+            match media.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    let _ = record_media_failure(
+                        &self.core,
+                        &self.worker.lease.authority().account_id,
+                        self.worker.identity.call_id(),
+                        &self.worker,
+                        &error,
+                    );
+                }
+                Err(_) => {
+                    let _ = self.core.store.put_runtime(
+                        &self.worker.lease.authority().account_id,
+                        &format!("call-media-error:{}", self.worker.identity.call_id()),
+                        b"media_failed",
+                    );
+                }
             }
         }
     }

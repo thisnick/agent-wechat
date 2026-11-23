@@ -19,6 +19,24 @@ use wechat_calls::{
 };
 use wechat_protocol::calls::video_packet::{ReassembledVideoFrame, VideoRotation, VideoWireCodec};
 
+pub(super) fn select_relay_indices(candidates: &[(usize, usize, SocketAddr)]) -> (usize, usize) {
+    candidates
+        .iter()
+        .find(|(_, _, endpoint)| udp_route_available(*endpoint))
+        .or_else(|| candidates.first())
+        .map_or((0, 0), |&(conn, udp, _)| (conn, udp))
+}
+
+fn udp_route_available(endpoint: SocketAddr) -> bool {
+    let bind_addr: SocketAddr = match endpoint {
+        SocketAddr::V4(_) => SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0)),
+        SocketAddr::V6(_) => SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0)),
+    };
+    UdpSocket::bind(bind_addr)
+        .and_then(|socket| socket.connect(endpoint))
+        .is_ok()
+}
+
 impl DirectAudioFrame for QueuedAudio {
     fn generation(&self) -> u32 {
         self.request.generation
@@ -944,7 +962,7 @@ impl DirectMediaHost for Host<'_> {
     fn submit(
         &self,
         socket: &UdpSocket,
-        endpoint: SocketAddrV4,
+        endpoint: SocketAddr,
         packet: &[u8],
         frames: &[&QueuedAudio],
     ) -> Result<bool> {
@@ -1092,7 +1110,7 @@ impl ConferenceMediaHost for Host<'_> {
     fn submit_generation(
         &self,
         socket: &UdpSocket,
-        endpoint: SocketAddrV4,
+        endpoint: SocketAddr,
         packet: &[u8],
         frames: &[&QueuedAudio],
         generation: u32,
@@ -1251,5 +1269,25 @@ mod tests {
         let f4 = rx.try_recv().unwrap();
         assert_eq!(f4.frame_index, 4);
         assert!(!f4.prior_frames_dropped);
+    }
+
+    #[test]
+    fn select_relay_indices_prefers_first_routable_candidate() {
+        let v4: SocketAddr = "127.0.0.1:6000".parse().unwrap();
+        assert_eq!(select_relay_indices(&[]), (0, 0));
+        assert_eq!(select_relay_indices(&[(2, 1, v4)]), (2, 1));
+        if udp_route_available("[::1]:6000".parse().unwrap()) {
+            let v6: SocketAddr = "[::1]:6000".parse().unwrap();
+            assert_eq!(select_relay_indices(&[(0, 0, v6), (0, 1, v4)]), (0, 0));
+        }
+        // If an IPv6 candidate is unroutable on an IPv4-only host, select_relay_indices
+        // falls through to the routable IPv4 candidate; on dual-stack hosts it picks index 0.
+        let doc_v6: SocketAddr = "[2001:db8::1]:6000".parse().unwrap();
+        let picked = select_relay_indices(&[(0, 0, doc_v6), (1, 2, v4)]);
+        if udp_route_available(doc_v6) {
+            assert_eq!(picked, (0, 0));
+        } else {
+            assert_eq!(picked, (1, 2));
+        }
     }
 }

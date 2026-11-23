@@ -843,6 +843,14 @@ impl NativePersonalSession {
             SyncProgress::Waiting
         })
     }
+    /// List valid UDP relay candidates from the currently admitted Strategy.
+    pub fn relay_candidates(&self) -> Result<Vec<(usize, usize, std::net::SocketAddr)>> {
+        let active = self
+            .active
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Missing personal room"))?;
+        SelectedRelay::strategy_candidates(&active.strategy)
+    }
     /// Move one admitted media context out only after current roster/capability/AV
     /// state agrees. This never constructs a synthetic callee Join response.
     pub fn take_media(

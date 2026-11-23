@@ -1,14 +1,16 @@
-//! Selected IPv4 personal relay setup: one initial check-in, at most one learned
-//! continuation and explicit Ready. CRC/TEA structural checks are not media AEAD.
-//! The host owns sockets, current account/key generations, time and randomness.
+//! Selected IPv4/IPv6 relay setup: initial check-in, at most one learned
+//! continuation (or direct 1-RTT merged check-in) and explicit Ready. CRC/TEA
+//! structural checks are not media AEAD. The host owns sockets, current
+//! account/key generations, time and randomness.
 
 use crate::protobuf::{self as p, Field, Value};
 use anyhow::{bail, ensure, Result};
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use zeroize::Zeroizing;
 
 const MAX_PACKET: usize = 8197;
 const MAX_BODY: usize = 8192;
+const MAX_IP_TEXT: usize = 45;
 
 /// An endpoint selected from an admitted Strategy. No DNS or fallback is used.
 /// Room key and media material intentionally have no Debug representation.
@@ -17,13 +19,15 @@ pub struct SelectedRelay {
     pub room_key: u64,
     pub own_member: u16,
     pub connection_id: u16,
-    pub endpoint: SocketAddrV4,
+    /// Selected UDP relay endpoint (IPv4 or IPv6) from the admitted Strategy.
+    pub endpoint: SocketAddr,
     pub media_key: Zeroizing<[u8; 32]>,
     pub merge_mode: bool,
 }
 impl SelectedRelay {
-    /// Strategy field15 contains modern connection records. Indices must be
-    /// chosen by the caller from the current admitted Strategy, not by retries.
+    /// Strategy field15 contains modern connection records (with field1 legacy
+    /// UDP addresses used only when field15 is empty). Indices must be chosen by
+    /// the caller from the current admitted Strategy, not by retries.
     pub fn from_strategy(
         room_id: u64,
         room_key: u64,
@@ -35,29 +39,30 @@ impl SelectedRelay {
         ensure!(room_id != 0 && room_key != 0, "Unallocated relay room");
         let strategy = fields(strategy)?;
         let connections = repeated(&strategy, 15, 32)?;
-        let connection = fields(
-            connections
-                .get(connection_index)
-                .ok_or_else(|| anyhow::anyhow!("Relay connection selection unavailable"))?,
-        )?;
-        let connection_id = u16::try_from(number(&connection, 1, None)?)?;
-        if let Some(nic) = p::optional_data(&connection, 2)? {
+        let (connection_id, endpoint) = if connections.is_empty() {
             ensure!(
-                nic.len() <= 128 && !nic.contains(&0),
-                "Invalid relay NIC identity"
+                connection_index == 0,
+                "Relay connection selection unavailable"
             );
-            std::str::from_utf8(nic)?;
-        }
-        u16::try_from(number(&connection, 3, Some(0))?)?;
-        let endpoints = repeated(&connection, 4, 32)?;
-        let endpoint = fields(
-            endpoints
+            let endpoints = repeated(&strategy, 1, 32)?;
+            let raw = endpoints
                 .get(udp_index)
-                .ok_or_else(|| anyhow::anyhow!("Relay UDP selection unavailable"))?,
-        )?;
-        let address = ipv4(data(&endpoint, 1)?, false)?;
-        let port = u16::try_from(number(&endpoint, 2, None)?)?;
-        ensure!(port != 0, "Invalid relay endpoint port");
+                .ok_or_else(|| anyhow::anyhow!("Relay UDP selection unavailable"))?;
+            (0u16, parse_endpoint(raw)?)
+        } else {
+            let connection = fields(
+                connections
+                    .get(connection_index)
+                    .ok_or_else(|| anyhow::anyhow!("Relay connection selection unavailable"))?,
+            )?;
+            let connection_id = u16::try_from(number(&connection, 1, None)?)?;
+            validate_connection_metadata(&connection)?;
+            let endpoints = repeated(&connection, 4, 32)?;
+            let raw = endpoints
+                .get(udp_index)
+                .ok_or_else(|| anyhow::anyhow!("Relay UDP selection unavailable"))?;
+            (connection_id, parse_endpoint(raw)?)
+        };
         let key = data(&strategy, 10)?;
         ensure!(key.len() == 32, "Unsupported relay media key size");
         Ok(Self {
@@ -65,10 +70,52 @@ impl SelectedRelay {
             room_key,
             own_member,
             connection_id,
-            endpoint: SocketAddrV4::new(address, port),
+            endpoint,
             media_key: Zeroizing::new(key.try_into()?),
             merge_mode: number(&strategy, 16, Some(0))? & 1 != 0,
         })
+    }
+
+    /// List valid UDP relay candidates as `(connection_index, udp_index, endpoint)`
+    /// from an admitted Strategy in server order.
+    pub fn strategy_candidates(strategy: &[u8]) -> Result<Vec<(usize, usize, SocketAddr)>> {
+        let strategy = fields(strategy)?;
+        let connections = repeated(&strategy, 15, 32)?;
+        let mut out = Vec::new();
+        if connections.is_empty() {
+            let Ok(endpoints) = repeated(&strategy, 1, 32) else {
+                return Ok(out);
+            };
+            for (udp_index, raw) in endpoints.into_iter().enumerate() {
+                if let Ok(endpoint) = parse_endpoint(raw) {
+                    out.push((0, udp_index, endpoint));
+                }
+            }
+            return Ok(out);
+        }
+        for (connection_index, raw_connection) in connections.into_iter().enumerate() {
+            let Ok(connection) = fields(raw_connection) else {
+                continue;
+            };
+            let Ok(connection_id) = number(&connection, 1, None) else {
+                continue;
+            };
+            if u16::try_from(connection_id).is_err() {
+                continue;
+            }
+            if validate_connection_metadata(&connection).is_err() {
+                continue;
+            }
+            let Ok(endpoints) = repeated(&connection, 4, 32) else {
+                continue;
+            };
+            for (udp_index, raw) in endpoints.into_iter().enumerate() {
+                if let Ok(endpoint) = parse_endpoint(raw) {
+                    out.push((connection_index, udp_index, endpoint));
+                }
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -130,6 +177,10 @@ impl RoomInputs {
         header_timestamp: u32,
         body_timestamp: u32,
     ) -> Self {
+        let (server_ip, server_text) = match selected.endpoint.ip() {
+            IpAddr::V4(ip) => (u32::from_le_bytes(ip.octets()), ip.to_string()),
+            IpAddr::V6(ip) => (0, ip.to_string()),
+        };
         Self {
             room_id: selected.room_id,
             own_member: selected.own_member,
@@ -137,8 +188,8 @@ impl RoomInputs {
             client_ip: 0,
             client_text: String::new(),
             client_port: 0,
-            server_ip: u32::from_le_bytes(selected.endpoint.ip().octets()),
-            server_text: selected.endpoint.ip().to_string(),
+            server_ip,
+            server_text,
             server_port: selected.endpoint.port(),
             checkin_sequence: 1,
             network_type,
@@ -194,7 +245,6 @@ impl RoomInputs {
         Ok((8 - (self.body()?.len() + 10) % 8) % 8 + 3)
     }
     fn packet(&self, room_key: u64, random: &[u8]) -> Result<Vec<u8>> {
-        ensure!(!self.merge_mode, "Merged relay check-in unsupported");
         let cipher = encrypt_checkin(&self.body()?, &*checkin_key(room_key)?, random)?;
         let pub_header = bounded_message(&[p::uint(1, 2), p::uint(2, 3), p::uint(3, 0)])?;
         let (room32, room64) = room_pair(self.room_id);
@@ -239,17 +289,18 @@ enum Phase {
 pub struct TwoRttRelay {
     room: RoomInputs,
     key: Zeroizing<u64>,
-    endpoint: SocketAddrV4,
+    endpoint: SocketAddr,
     epoch: RelayEpoch,
     deadline_ms: u64,
     last_ms: Option<u64>,
     phase: Phase,
 }
 impl TwoRttRelay {
+    /// Create a relay check-in state machine bound to the selected IPv4 or IPv6 UDP endpoint.
     pub fn new(
         room: RoomInputs,
         room_key: u64,
-        endpoint: SocketAddrV4,
+        endpoint: SocketAddr,
         epoch: RelayEpoch,
         deadline_ms: u64,
     ) -> Result<Self> {
@@ -259,9 +310,13 @@ impl TwoRttRelay {
             room_key != 0 && endpoint.port() != 0,
             "Invalid relay key or endpoint"
         );
+        let expected_server_ip = match endpoint.ip() {
+            IpAddr::V4(ip) => u32::from_le_bytes(ip.octets()),
+            IpAddr::V6(_) => 0,
+        };
         ensure!(
             room.server_text == endpoint.ip().to_string()
-                && room.server_ip == u32::from_le_bytes(endpoint.ip().octets())
+                && room.server_ip == expected_server_ip
                 && room.server_port == endpoint.port(),
             "Relay request endpoint mismatch"
         );
@@ -290,6 +345,19 @@ impl TwoRttRelay {
         body_timestamp: u32,
     ) -> Result<usize> {
         let mut room = self.room.clone();
+        room.header_timestamp = header_timestamp;
+        room.body_timestamp = body_timestamp;
+        room.random_bytes_needed()
+    }
+    /// Return the random padding byte count needed to rebuild the initial check-in
+    /// packet with `merge_mode` cleared for 2-RTT fallback.
+    pub fn merge_fallback_random_bytes_needed(
+        &self,
+        header_timestamp: u32,
+        body_timestamp: u32,
+    ) -> Result<usize> {
+        let mut room = self.room.clone();
+        room.merge_mode = false;
         room.header_timestamp = header_timestamp;
         room.body_timestamp = body_timestamp;
         room.random_bytes_needed()
@@ -324,6 +392,29 @@ impl TwoRttRelay {
         self.phase = Phase::AwaitingCheckin;
         Ok(packet)
     }
+    /// Clear `merge_mode` after a 1-RTT timeout and rebuild the initial check-in
+    /// packet for standard 2-RTT fallback.
+    pub fn prepare_merge_fallback(
+        &mut self,
+        epoch: RelayEpoch,
+        now_ms: u64,
+        header_timestamp: u32,
+        body_timestamp: u32,
+        random: &[u8],
+    ) -> Result<Vec<u8>> {
+        self.live(epoch, now_ms)?;
+        ensure!(
+            self.phase == Phase::AwaitingCheckin && self.room.merge_mode,
+            "Relay merge fallback unavailable"
+        );
+        self.phase = Phase::Closed;
+        self.room.merge_mode = false;
+        self.room.header_timestamp = header_timestamp;
+        self.room.body_timestamp = body_timestamp;
+        let packet = self.room.packet(*self.key, random)?;
+        self.phase = Phase::AwaitingCheckin;
+        Ok(packet)
+    }
     pub fn prepare_continuation(
         &mut self,
         epoch: RelayEpoch,
@@ -344,10 +435,11 @@ impl TwoRttRelay {
         self.phase = Phase::AwaitingReady;
         Ok(packet)
     }
+    /// Process one inbound UDP datagram from `source` and advance the relay check-in state.
     pub fn receive(
         &mut self,
         packet: &[u8],
-        source: SocketAddrV4,
+        source: SocketAddr,
         epoch: RelayEpoch,
         now_ms: u64,
     ) -> Result<RelayProgress> {
@@ -365,7 +457,7 @@ impl TwoRttRelay {
         }
         result
     }
-    fn receive_checked(&mut self, packet: &[u8], source: SocketAddrV4) -> Result<RelayProgress> {
+    fn receive_checked(&mut self, packet: &[u8], source: SocketAddr) -> Result<RelayProgress> {
         ensure!(source == self.endpoint, "Unexpected relay source endpoint");
         ensure!(packet.len() <= MAX_PACKET, "Relay packet too large");
         if packet.first() != Some(&0xd5) {
@@ -419,26 +511,31 @@ impl TwoRttRelay {
         for n in 1..=9 {
             u32::try_from(number(&body, n, None)?)?;
         }
+        let merged = number(&body, 14, Some(0))?;
         ensure!(
-            number(&body, 6, None)? == u64::from(self.room.checkin_sequence)
-                && number(&body, 14, Some(0))? == 0,
+            number(&body, 6, None)? == u64::from(self.room.checkin_sequence) && merged <= 1,
             "Relay check-in sequence or merge mismatch"
         );
         let client = p::optional_data(&body, 12)?.unwrap_or_default();
         let server = p::optional_data(&body, 13)?.unwrap_or_default();
-        let client_address = ipv4(client, true)?;
-        let server_address = ipv4(server, true)?;
+        let (client_text, client_v4) = parse_relay_ip_text(client, true)?;
+        let (server_text, server_v4) = parse_relay_ip_text(server, true)?;
         let client_numeric = number(&body, 2, None)? as u32;
         self.room.client_ip = if client_numeric == 0 {
-            u32::from_le_bytes(client_address.octets())
+            client_v4.map_or(0, |ip| u32::from_le_bytes(ip.octets()))
         } else {
             client_numeric
         };
-        self.room.client_text = std::str::from_utf8(client)?.to_owned();
-        self.room.server_text = std::str::from_utf8(server)?.to_owned();
-        self.room.server_ip = u32::from_le_bytes(server_address.octets());
+        self.room.client_text = client_text.to_owned();
+        self.room.server_text = server_text.to_owned();
+        self.room.server_ip = server_v4.map_or(0, |ip| u32::from_le_bytes(ip.octets()));
         self.room.client_port = number(&body, 4, None)? as u16;
         self.room.server_port = number(&body, 5, None)? as u16;
+        if merged == 1 {
+            self.phase = Phase::Ready;
+            return Ok(RelayProgress::Ready);
+        }
+        self.room.merge_mode = false;
         self.phase = Phase::ContinuationPending;
         Ok(RelayProgress::FirstCheckin)
     }
@@ -448,6 +545,24 @@ impl TwoRttRelay {
     }
 }
 
+fn validate_connection_metadata(connection: &[Field]) -> Result<()> {
+    if let Some(nic) = p::optional_data(connection, 2)? {
+        ensure!(
+            nic.len() <= 128 && !nic.contains(&0),
+            "Invalid relay NIC identity"
+        );
+        std::str::from_utf8(nic)?;
+    }
+    u16::try_from(number(connection, 3, Some(0))?)?;
+    Ok(())
+}
+fn parse_endpoint(raw: &[u8]) -> Result<SocketAddr> {
+    let endpoint = fields(raw)?;
+    let address = parse_relay_ip(data(&endpoint, 1)?)?;
+    let port = u16::try_from(number(&endpoint, 2, None)?)?;
+    ensure!(port != 0, "Invalid relay endpoint port");
+    Ok(SocketAddr::new(address, port))
+}
 fn room_pair(room: u64) -> (u64, u64) {
     if room <= u64::from(u32::MAX) {
         (room, 0)
@@ -488,15 +603,32 @@ fn repeated(values: &[Field], n: u32, limit: usize) -> Result<Vec<&[u8]>> {
     }
     Ok(out)
 }
-fn ipv4(raw: &[u8], allow_empty: bool) -> Result<Ipv4Addr> {
-    if raw.is_empty() && allow_empty {
-        return Ok(Ipv4Addr::UNSPECIFIED);
-    }
-    ensure!(raw.len() <= 15, "Relay IPv4 text too large");
+fn parse_relay_ip(raw: &[u8]) -> Result<IpAddr> {
+    ensure!(
+        !raw.is_empty() && raw.len() <= MAX_IP_TEXT && !raw.contains(&0),
+        "Relay IP text too large or empty"
+    );
     let text = std::str::from_utf8(raw)?;
-    let ip: Ipv4Addr = text.parse()?;
-    ensure!(ip.to_string() == text, "Noncanonical relay IPv4 address");
+    ensure!(text.is_ascii(), "Non-ASCII relay IP address");
+    let ip: IpAddr = text.parse()?;
+    if let IpAddr::V4(v4) = ip {
+        ensure!(v4.to_string() == text, "Noncanonical relay IPv4 address");
+    }
     Ok(ip)
+}
+fn parse_relay_ip_text(raw: &[u8], allow_empty: bool) -> Result<(&str, Option<Ipv4Addr>)> {
+    if raw.is_empty() && allow_empty {
+        return Ok(("", None));
+    }
+    let ip = parse_relay_ip(raw)?;
+    let text = std::str::from_utf8(raw)?;
+    Ok((
+        text,
+        match ip {
+            IpAddr::V4(v4) => Some(v4),
+            IpAddr::V6(_) => None,
+        },
+    ))
 }
 fn checkin_key(room_key: u64) -> Result<Zeroizing<[u8; 16]>> {
     ensure!(room_key != 0, "Missing relay key");
@@ -680,10 +812,16 @@ mod tests {
             room_key: 9,
             own_member: 0,
             connection_id: 1,
-            endpoint: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 6000),
+            endpoint: SocketAddr::from((Ipv4Addr::LOCALHOST, 6000)),
             media_key: Zeroizing::new([3; 32]),
             merge_mode: false,
         }
+    }
+    fn decode_c2s_body(packet: &[u8]) -> Vec<Field> {
+        let outer = fields(unframe_outer(packet).unwrap()).unwrap();
+        let cipher = data(&outer, 3).unwrap();
+        let clear = decrypt_checkin(cipher, &checkin_key(9).unwrap(), 4096).unwrap();
+        fields(&clear).unwrap()
     }
     fn reply(command: u64, body: &[u8]) -> Vec<u8> {
         let public = p::message(&[p::uint(1, command), p::uint(2, 3), p::uint(3, 0)]).unwrap();
@@ -746,5 +884,298 @@ mod tests {
             RelayProgress::Ready
         );
         assert!(attempt.is_ready());
+    }
+
+    #[test]
+    fn first_checkin_accepts_ipv6_server_and_client_text_and_zeroes_ipv4_numeric() {
+        let selected = selected();
+        let mut attempt = TwoRttRelay::new(
+            RoomInputs::initial(&selected, 0, 0, 0),
+            9,
+            selected.endpoint,
+            epoch(),
+            100,
+        )
+        .unwrap();
+        let random = vec![1; attempt.random_bytes_needed().unwrap()];
+        attempt.prepare_initial(epoch(), 1, &random).unwrap();
+
+        let client_ip_u32 = u32::from_le_bytes([203, 0, 113, 5]);
+        let server_ip_u32 = u32::from_le_bytes([198, 51, 100, 9]);
+        let body = p::message(&[
+            p::uint(1, 0),
+            p::uint(2, u64::from(client_ip_u32)),
+            p::uint(3, u64::from(server_ip_u32)),
+            p::uint(4, 40_664),
+            p::uint(5, 0),
+            p::uint(6, 1),
+            p::uint(7, 0),
+            p::uint(8, 2),
+            p::uint(9, 1),
+            p::bytes(12, b"203.0.113.5"),
+            p::bytes(13, b"2001:db8:10:2212:2e::"),
+            p::uint(14, 0),
+        ])
+        .unwrap();
+        assert_eq!(
+            attempt
+                .receive(&reply(0x1002, &body), selected.endpoint, epoch(), 3)
+                .unwrap(),
+            RelayProgress::FirstCheckin
+        );
+        assert_eq!(attempt.room().client_ip, client_ip_u32);
+        assert_eq!(attempt.room().client_text, "203.0.113.5");
+        assert_eq!(attempt.room().client_port, 40_664);
+        assert_eq!(attempt.room().server_ip, 0);
+        assert_eq!(attempt.room().server_text, "2001:db8:10:2212:2e::");
+        assert_eq!(attempt.room().server_port, 0);
+
+        let random = vec![2; attempt.continuation_random_bytes_needed(1, 1).unwrap()];
+        let cont = attempt
+            .prepare_continuation(epoch(), 4, 1, 1, &random)
+            .unwrap();
+        let decoded = decode_c2s_body(&cont);
+        assert_eq!(number(&decoded, 3, None).unwrap(), u64::from(client_ip_u32));
+        assert_eq!(number(&decoded, 4, None).unwrap(), 0);
+        assert_eq!(number(&decoded, 5, None).unwrap(), 40_664);
+        assert_eq!(number(&decoded, 6, None).unwrap(), 0);
+        assert_eq!(data(&decoded, 14).unwrap(), b"203.0.113.5");
+        assert_eq!(data(&decoded, 15).unwrap(), b"2001:db8:10:2212:2e::");
+
+        let ready = p::message(
+            &(1..=7)
+                .filter(|n| *n != 4)
+                .map(|n| p::uint(n, 0))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert_eq!(
+            attempt
+                .receive(&reply(0x1004, &ready), selected.endpoint, epoch(), 5)
+                .unwrap(),
+            RelayProgress::Ready
+        );
+        assert!(attempt.is_ready());
+
+        // IPv6 clientIpStr with zero numeric clientIp keeps client_ip = 0 and text verbatim.
+        let mut v6_client = TwoRttRelay::new(
+            RoomInputs::initial(&selected, 0, 0, 0),
+            9,
+            selected.endpoint,
+            epoch(),
+            100,
+        )
+        .unwrap();
+        let random = vec![1; v6_client.random_bytes_needed().unwrap()];
+        v6_client.prepare_initial(epoch(), 1, &random).unwrap();
+        let v6_body = p::message(
+            &(1..=9)
+                .map(|n| p::uint(n, if n == 6 { 1 } else { 0 }))
+                .chain([p::bytes(12, b"2001:db8::42"), p::bytes(13, b"2001:db8::1")])
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert_eq!(
+            v6_client
+                .receive(&reply(0x1002, &v6_body), selected.endpoint, epoch(), 2)
+                .unwrap(),
+            RelayProgress::FirstCheckin
+        );
+        assert_eq!(v6_client.room().client_ip, 0);
+        assert_eq!(v6_client.room().client_text, "2001:db8::42");
+        assert_eq!(v6_client.room().server_ip, 0);
+        assert_eq!(v6_client.room().server_text, "2001:db8::1");
+
+        // Hostnames or oversized strings remain rejected.
+        let mut bad = TwoRttRelay::new(
+            RoomInputs::initial(&selected, 0, 0, 0),
+            9,
+            selected.endpoint,
+            epoch(),
+            100,
+        )
+        .unwrap();
+        let random = vec![1; bad.random_bytes_needed().unwrap()];
+        bad.prepare_initial(epoch(), 1, &random).unwrap();
+        let bad_body = p::message(
+            &(1..=9)
+                .map(|n| p::uint(n, if n == 6 { 1 } else { 0 }))
+                .chain([p::bytes(13, b"relay.example.com")])
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert!(bad
+            .receive(&reply(0x1002, &bad_body), selected.endpoint, epoch(), 2)
+            .is_err());
+    }
+
+    #[test]
+    fn strategy_selection_supports_ipv6_mixed_conn_set_and_legacy_udp_addrs() {
+        let ep_v6 =
+            p::message(&[p::bytes(1, b"2001:db8:10:2212:2e::"), p::uint(2, 16285)]).unwrap();
+        let ep_v4 = p::message(&[p::bytes(1, b"198.51.100.7"), p::uint(2, 8080)]).unwrap();
+        let conn = p::message(&[p::uint(1, 5), p::bytes(4, &ep_v6), p::bytes(4, &ep_v4)]).unwrap();
+        // A secondary connection omitting field 1 (or otherwise invalid) must be skipped,
+        // not abort candidate enumeration when earlier connections are valid.
+        let secondary_missing_id = p::message(&[p::bytes(4, &ep_v4)]).unwrap();
+        let strategy = p::message(&[
+            p::bytes(10, &[7; 32]),
+            p::bytes(15, &conn),
+            p::bytes(15, &secondary_missing_id),
+            p::uint(16, 1),
+        ])
+        .unwrap();
+
+        let candidates = SelectedRelay::strategy_candidates(&strategy).unwrap();
+        assert_eq!(
+            candidates,
+            vec![
+                (0, 0, "[2001:db8:10:2212:2e::]:16285".parse().unwrap()),
+                (0, 1, "198.51.100.7:8080".parse().unwrap()),
+            ]
+        );
+
+        let selected_v6 = SelectedRelay::from_strategy(7, 9, 0, &strategy, 0, 0).unwrap();
+        assert_eq!(selected_v6.connection_id, 5);
+        assert_eq!(
+            selected_v6.endpoint,
+            "[2001:db8:10:2212:2e::]:16285"
+                .parse::<SocketAddr>()
+                .unwrap()
+        );
+        assert!(selected_v6.merge_mode);
+        let initial_v6 = RoomInputs::initial(&selected_v6, 0, 0, 0);
+        assert_eq!(initial_v6.server_ip, 0);
+        assert_eq!(initial_v6.server_text, "2001:db8:10:2212:2e::");
+        assert_eq!(initial_v6.server_port, 16285);
+        assert!(TwoRttRelay::new(initial_v6, 9, selected_v6.endpoint, epoch(), 100).is_ok());
+
+        let selected_v4 = SelectedRelay::from_strategy(7, 9, 0, &strategy, 0, 1).unwrap();
+        assert_eq!(
+            selected_v4.endpoint,
+            "198.51.100.7:8080".parse::<SocketAddr>().unwrap()
+        );
+
+        // Legacy Strategy.udp_addrs (field 1) fallback when conn_set (field 15) is absent.
+        let legacy_strategy = p::message(&[
+            p::bytes(1, &ep_v6),
+            p::bytes(1, &ep_v4),
+            p::bytes(10, &[7; 32]),
+        ])
+        .unwrap();
+        assert_eq!(
+            SelectedRelay::strategy_candidates(&legacy_strategy).unwrap(),
+            vec![
+                (0, 0, "[2001:db8:10:2212:2e::]:16285".parse().unwrap()),
+                (0, 1, "198.51.100.7:8080".parse().unwrap()),
+            ]
+        );
+        let legacy = SelectedRelay::from_strategy(7, 9, 0, &legacy_strategy, 0, 1).unwrap();
+        assert_eq!(legacy.connection_id, 0);
+        assert_eq!(legacy.endpoint, "198.51.100.7:8080".parse().unwrap());
+    }
+
+    #[test]
+    fn merge_mode_supports_one_rtt_legacy_response_and_timeout_fallback() {
+        // 1. 1-RTT merged response completes directly on 0x1002 (f14 = 1).
+        let mut merged_selected = selected();
+        merged_selected.merge_mode = true;
+        let mut one_rtt = TwoRttRelay::new(
+            RoomInputs::initial(&merged_selected, 0, 0, 0),
+            9,
+            merged_selected.endpoint,
+            epoch(),
+            100,
+        )
+        .unwrap();
+        let random = vec![1; one_rtt.random_bytes_needed().unwrap()];
+        let initial = one_rtt.prepare_initial(epoch(), 1, &random).unwrap();
+        assert_eq!(number(&decode_c2s_body(&initial), 21, Some(0)).unwrap(), 1);
+        let merged_reply = p::message(
+            &(1..=9)
+                .map(|n| p::uint(n, if n == 6 { 1 } else { 0 }))
+                .chain([p::bytes(13, b"2001:db8:10:2212:2e::"), p::uint(14, 1)])
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert_eq!(
+            one_rtt
+                .receive(
+                    &reply(0x1002, &merged_reply),
+                    merged_selected.endpoint,
+                    epoch(),
+                    2
+                )
+                .unwrap(),
+            RelayProgress::Ready
+        );
+        assert!(one_rtt.is_ready());
+        assert_eq!(one_rtt.room().server_text, "2001:db8:10:2212:2e::");
+
+        // 2. Legacy 0x1002 (f14 = 0) clears merge_mode and finishes via 2-RTT continuation.
+        let mut legacy = TwoRttRelay::new(
+            RoomInputs::initial(&merged_selected, 0, 0, 0),
+            9,
+            merged_selected.endpoint,
+            epoch(),
+            100,
+        )
+        .unwrap();
+        let random = vec![1; legacy.random_bytes_needed().unwrap()];
+        legacy.prepare_initial(epoch(), 1, &random).unwrap();
+        let unmerged_reply = p::message(
+            &(1..=9)
+                .map(|n| p::uint(n, if n == 6 { 1 } else { 0 }))
+                .chain([p::bytes(13, b"198.51.100.1"), p::uint(14, 0)])
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert_eq!(
+            legacy
+                .receive(
+                    &reply(0x1002, &unmerged_reply),
+                    merged_selected.endpoint,
+                    epoch(),
+                    2
+                )
+                .unwrap(),
+            RelayProgress::FirstCheckin
+        );
+        assert!(!legacy.room().merge_mode);
+        let random = vec![2; legacy.continuation_random_bytes_needed(2, 2).unwrap()];
+        let cont = legacy
+            .prepare_continuation(epoch(), 3, 2, 2, &random)
+            .unwrap();
+        assert_eq!(number(&decode_c2s_body(&cont), 21, Some(0)).unwrap(), 0);
+
+        // 3. Timeout fallback clears merge_mode before retransmit and still accepts late 1-RTT.
+        let mut fallback = TwoRttRelay::new(
+            RoomInputs::initial(&merged_selected, 0, 0, 0),
+            9,
+            merged_selected.endpoint,
+            epoch(),
+            100,
+        )
+        .unwrap();
+        let random = vec![1; fallback.random_bytes_needed().unwrap()];
+        fallback.prepare_initial(epoch(), 1, &random).unwrap();
+        let random = vec![2; fallback.merge_fallback_random_bytes_needed(2, 2).unwrap()];
+        let retried = fallback
+            .prepare_merge_fallback(epoch(), 2, 2, 2, &random)
+            .unwrap();
+        assert!(!fallback.room().merge_mode);
+        assert_eq!(number(&decode_c2s_body(&retried), 21, Some(0)).unwrap(), 0);
+        assert_eq!(
+            fallback
+                .receive(
+                    &reply(0x1002, &merged_reply),
+                    merged_selected.endpoint,
+                    epoch(),
+                    3
+                )
+                .unwrap(),
+            RelayProgress::Ready
+        );
+        assert!(fallback.is_ready());
     }
 }

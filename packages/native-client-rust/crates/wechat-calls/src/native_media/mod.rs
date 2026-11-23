@@ -14,7 +14,7 @@ pub use submission::SubmissionGate;
 use anyhow::Result;
 use std::{
     collections::VecDeque,
-    net::{SocketAddrV4, UdpSocket},
+    net::{SocketAddr, UdpSocket},
     sync::mpsc::{Receiver, TryRecvError},
     time::{Duration, Instant},
 };
@@ -80,7 +80,7 @@ pub trait DirectMediaHost {
     fn submit(
         &self,
         socket: &UdpSocket,
-        endpoint: SocketAddrV4,
+        endpoint: SocketAddr,
         packet: &[u8],
         frames: &[&Self::Frame],
     ) -> Result<bool>;

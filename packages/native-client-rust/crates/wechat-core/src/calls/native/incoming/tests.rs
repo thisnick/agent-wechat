@@ -15,9 +15,10 @@ mod media_loopback;
 
 #[derive(Clone, Copy)]
 struct ReadyMedia {
-    endpoint: SocketAddrV4,
+    endpoint: SocketAddr,
     key: [u8; 32],
     frames_per_packet: u8,
+    merge_mode: bool,
 }
 
 const OWN: &str = "synthetic_self";
@@ -312,7 +313,7 @@ fn join_reply_with_media(own_member: u16, media: Option<ReadyMedia>) -> Vec<u8> 
     ])
     .unwrap();
     let endpoint = media.map_or_else(
-        || SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 6000),
+        || SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 6000)),
         |media| media.endpoint,
     );
     let address = p::message(&[
@@ -320,7 +321,7 @@ fn join_reply_with_media(own_member: u16, media: Option<ReadyMedia>) -> Vec<u8> 
         p::uint(2, u64::from(endpoint.port())),
     ])
     .unwrap();
-    let strategy = p::message(&[
+    let mut strategy_fields = vec![
         p::bytes(10, &media.map_or([7; 32], |media| media.key)),
         p::bytes(13, &capabilities),
         p::uint(14, 0),
@@ -328,8 +329,11 @@ fn join_reply_with_media(own_member: u16, media: Option<ReadyMedia>) -> Vec<u8> 
             15,
             &p::message(&[p::uint(1, 1), p::bytes(4, &address)]).unwrap(),
         ),
-    ])
-    .unwrap();
+    ];
+    if media.is_some_and(|m| m.merge_mode) {
+        strategy_fields.push(p::uint(16, 1));
+    }
+    let strategy = p::message(&strategy_fields).unwrap();
     // Only the dedicated localhost fixture supplies a ready media endpoint.
     // Other actor fixtures still cannot start a media socket.
     let av_status = u64::from(media.is_some());
