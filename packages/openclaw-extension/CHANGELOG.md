@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 3.0.0-beta.4
+
+### Patch Changes
+
+- [#670](https://github.com/thisnick/agent-wechat/pull/670) [`73d1129`](https://github.com/thisnick/agent-wechat/commit/73d1129afa194ad53165ae8e5e533d3cdf79cc3a) Thanks [@thisnick](https://github.com/thisnick)! - Validate the OpenClaw integration against OpenClaw 2026.11.7.
+
 ## 3.0.0-beta.3
 
 ## 3.0.0-beta.2

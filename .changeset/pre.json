@@ -18,10 +18,12 @@
     "consistent-call-header-action-spacing",
     "fix-call-search-zh",
     "fix-calls-ipv6-relay-checkin",
+    "fix-incoming-video-call-rx",
     "fix-video-calls-reliability-and-preview",
     "fix-video-calls-self-view-cli-and-smoothness",
     "github-star-support-prompt",
     "native-video-calls-protocol-v3",
+    "openclaw-2026-11-7",
     "receive-vweixinf-stickers",
     "wecom-tp-media-downloads"
   ]
