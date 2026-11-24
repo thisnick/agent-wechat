@@ -501,7 +501,22 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                             if consumed.peer_requested_keyframe {
                                 host.on_peer_keyframe_requested();
                             }
-                            if consumed.need_keyframe
+                            if audio.is_some() {
+                                for frame in consumed.audio {
+                                    host.receive_track_pcm(member, bound.generation, frame)?;
+                                }
+                            }
+                            let mut need_keyframe = consumed.need_keyframe;
+                            if let Some(video_frame) = consumed.video {
+                                host.receive_video(video_frame)?;
+                            }
+                            while let Some(video_frame) = bound.receiver.pop_ready_video() {
+                                if video_frame.prior_frames_dropped && !video_frame.is_keyframe {
+                                    need_keyframe = true;
+                                }
+                                host.receive_video(video_frame)?;
+                            }
+                            if need_keyframe
                                 && last_irequest_tx
                                     .get(&member)
                                     .is_none_or(|t| t.elapsed() >= Duration::from_millis(1200))
@@ -525,14 +540,6 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                                         last_irequest_tx.insert(member, Instant::now());
                                     }
                                 }
-                            }
-                            if audio.is_some() {
-                                for frame in consumed.audio {
-                                    host.receive_track_pcm(member, bound.generation, frame)?;
-                                }
-                            }
-                            if let Some(video_frame) = consumed.video {
-                                host.receive_video(video_frame)?;
                             }
                         } else {
                             report.unselected_member += 1;
