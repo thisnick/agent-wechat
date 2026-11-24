@@ -1158,6 +1158,7 @@ fn wechat_protocol::calls::video_packet::RsmVideoPacketizer::with_chunk_bytes | 
 fn wechat_protocol::calls::video_packet::RsmVideoPacketizer::with_orientation | fn(self, orientation: u8) -> Self | Override the 3-bit wire orientation code (`0..=7`) written into `EncFecHeader` byte 13 and virtual-frame orientation metadata packets.
 fn wechat_protocol::calls::video_packet::RsmVideoReassembler::ingest | fn(&mut self, packet: &[u8]) -> anyhow::Result<wechat_protocol::calls::video_packet::RsmIngestOutcome> | Feed one decrypted MP/iLink RSM video packet (`[codecType, mid/sid, EncFecHeader, ...]`).
 fn wechat_protocol::calls::video_packet::RsmVideoReassembler::new | fn() -> Self | Create a fresh reassembler with empty assembly state.
+fn wechat_protocol::calls::video_packet::RsmVideoReassembler::pop_ready | fn(&mut self) -> core::option::Option<wechat_protocol::calls::video_packet::ReassembledVideoFrame> | Pop the next in-order completed frame that is no longer blocked by an older active assembly.
 fn wechat_protocol::calls::video_packet::RsmVideoReassembler::reset | fn(&mut self) | Clear all pending assemblies (for example after a remote camera toggle).
 fn wechat_protocol::calls::video_packet::VideoRotation::degrees | const fn(self) -> u16 | Return clockwise degrees (`0`, `90`, `180` or `270`).
 fn wechat_protocol::calls::video_packet::VideoRotation::from_wire | const fn(orientation: u8, is_conference: bool) -> Self | Map the 3-bit wire orientation code (`EncFecHeader` byte 13 bits 7..5) to clockwise display rotation.

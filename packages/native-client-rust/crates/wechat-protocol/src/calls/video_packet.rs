@@ -15,6 +15,12 @@ pub const DEFAULT_RSM_CHUNK_BYTES: usize = 1100;
 /// Default wire orientation code (`2` = upright 0° in `EncFecHeader` byte 13 bits 7..5).
 pub const DEFAULT_RSM_ORIENTATION: u8 = 2;
 const MAX_ACTIVE_ASSEMBLIES: usize = 8;
+/// Reordering/pacing grace window (in frames) before evicting an older incomplete
+/// FEC-protected P-frame when newer frames complete ahead of it.
+const FEC_P_GRACE_FRAMES: u32 = 2;
+/// Reordering/pacing grace window (in frames) before evicting an older incomplete
+/// keyframe whose paced source/parity burst overlaps subsequent small P-frames.
+const IFRAME_GRACE_FRAMES: u32 = 4;
 const MAX_FRAGMENTS_PER_FRAME: usize = 512;
 const MAX_FEC_PARITY: usize = 64;
 
@@ -806,7 +812,21 @@ struct PendingAssembly {
     arrival_order: u64,
 }
 
+fn grace_frames_for(is_iframe: bool, r_per_group: usize, y_groups: usize) -> u32 {
+    if is_iframe {
+        IFRAME_GRACE_FRAMES
+    } else if r_per_group > 0 || y_groups > 0 {
+        FEC_P_GRACE_FRAMES
+    } else {
+        0
+    }
+}
+
 impl PendingAssembly {
+    fn grace_frames(&self) -> u32 {
+        grace_frames_for(self.is_iframe, self.r_per_group, self.y_groups)
+    }
+
     fn source_chunks_complete(&self) -> bool {
         self.groups
             .iter()
@@ -895,11 +915,33 @@ impl PendingAssembly {
 #[derive(Default)]
 struct StreamReassembler {
     active: BTreeMap<u32, PendingAssembly>,
+    ready: BTreeMap<u32, ReassembledVideoFrame>,
     last_completed: Option<u32>,
     last_timestamp_ms: Option<u32>,
     arrival_counter: u64,
     vf_orientation: Option<u8>,
-    pending_drop: bool,
+    pending_drops: Vec<u32>,
+}
+
+/// Returns `true` when `earlier` is strictly older than `later` in 16-bit modular frame order.
+fn is_frame_older(earlier: u32, later: u32) -> bool {
+    let diff = later.wrapping_sub(earlier) & 0xffff;
+    diff > 0 && diff < 0x8000
+}
+
+fn frame_distance(earlier: u32, later: u32) -> u32 {
+    later.wrapping_sub(earlier) & 0xffff
+}
+
+fn oldest_frame_key<T>(map: &BTreeMap<u32, T>) -> Option<u32> {
+    let mut keys = map.keys().copied();
+    let mut oldest = keys.next()?;
+    for key in keys {
+        if is_frame_older(key, oldest) {
+            oldest = key;
+        }
+    }
+    Some(oldest)
 }
 
 /// Reassembles MP/iLink kind-3 RSM video packets (including multi-group and 2D RS FEC)
@@ -927,6 +969,20 @@ impl RsmVideoReassembler {
         self.streams.clear();
     }
 
+    /// Pop the next in-order completed frame that is no longer blocked by an older active assembly.
+    ///
+    /// Callers should drain this after [`Self::ingest`] so newer frames buffered during a paced
+    /// keyframe or FEC-protected P-frame grace window are delivered immediately once that older
+    /// frame completes or expires.
+    pub fn pop_ready(&mut self) -> Option<ReassembledVideoFrame> {
+        for stream in self.streams.values_mut() {
+            if let Some(frame) = stream.pop_next_ready() {
+                return Some(frame);
+            }
+        }
+        None
+    }
+
     /// Feed one decrypted MP/iLink RSM video packet (`[codecType, mid/sid, EncFecHeader, ...]`).
     pub fn ingest(&mut self, packet: &[u8]) -> Result<RsmIngestOutcome> {
         ensure!(
@@ -946,6 +1002,47 @@ impl RsmVideoReassembler {
 }
 
 impl StreamReassembler {
+    fn record_drop(&mut self, frame_idx: u32) {
+        if !self.pending_drops.contains(&frame_idx) {
+            self.pending_drops.push(frame_idx);
+            if self.pending_drops.len() > MAX_ACTIVE_ASSEMBLIES * 2 {
+                let mut oldest_pos = 0usize;
+                let mut oldest_val = self.pending_drops[0];
+                for (pos, &val) in self.pending_drops.iter().enumerate().skip(1) {
+                    if is_frame_older(val, oldest_val) {
+                        oldest_val = val;
+                        oldest_pos = pos;
+                    }
+                }
+                self.pending_drops.remove(oldest_pos);
+            }
+        }
+    }
+
+    fn pop_next_ready(&mut self) -> Option<ReassembledVideoFrame> {
+        let next_ready = oldest_frame_key(&self.ready)?;
+        if self
+            .active
+            .keys()
+            .any(|&active_idx| is_frame_older(active_idx, next_ready))
+        {
+            return None;
+        }
+        let mut frame = self.ready.remove(&next_ready)?;
+        self.last_completed = Some(next_ready);
+        self.last_timestamp_ms = Some(frame.timestamp_ms);
+        let had_prior_drop = self
+            .pending_drops
+            .iter()
+            .any(|&d| d == next_ready || is_frame_older(d, next_ready));
+        if had_prior_drop {
+            frame.prior_frames_dropped = true;
+            self.pending_drops
+                .retain(|&d| is_frame_older(next_ready, d));
+        }
+        Some(frame)
+    }
+
     fn ingest_stream(&mut self, packet: &[u8]) -> Result<RsmIngestOutcome> {
         let codec = VideoWireCodec::from_wire(packet[0]);
         let ms = u16::from_le_bytes([packet[1], packet[2]]);
@@ -966,7 +1063,9 @@ impl StreamReassembler {
         let orientation = hdr[13] >> 5;
         let r_mid2 = u32::from(hdr[13] & 0x03);
         let r_hi4 = u32::from(hdr[14] & 0x0f);
-        let r_full = (r_lo2 | (r_mid2 << 2) | (r_hi4 << 4)) as usize;
+        // RS parity count uses additive overflow across `r_lo2` (0..=3), `r_mid2` (0..=3),
+        // and `r_hi4` (0..=15), matching `s_per_group` and `pkg_idx_in_group`.
+        let r_full = (r_lo2 + r_mid2 + r_hi4) as usize;
         let group_idx_x = usize::from(hdr[14] >> 5);
         let x_groups = usize::from(hdr[15] & 0x07).max(1);
 
@@ -1046,7 +1145,9 @@ impl StreamReassembler {
                     }
                 }
             }
-            return Ok(RsmIngestOutcome::Pending);
+            return Ok(self
+                .pop_next_ready()
+                .map_or(RsmIngestOutcome::Pending, RsmIngestOutcome::Frame));
         }
 
         // Skip degenerate or padding-only headers. Do not drop packets solely because
@@ -1093,11 +1194,63 @@ impl StreamReassembler {
             if lag < 256 {
                 if encoder_reset {
                     self.active.clear();
+                    self.ready.clear();
                     self.last_completed = None;
-                    self.pending_drop = false;
+                    self.pending_drops.clear();
                 } else {
-                    return Ok(RsmIngestOutcome::Pending);
+                    return Ok(self
+                        .pop_next_ready()
+                        .map_or(RsmIngestOutcome::Pending, RsmIngestOutcome::Frame));
                 }
+            }
+        }
+        if let Some(existing_ready) = self.ready.get(&full_frame_idx) {
+            if existing_ready.timestamp_ms == timestamp_ms {
+                return Ok(self
+                    .pop_next_ready()
+                    .map_or(RsmIngestOutcome::Pending, RsmIngestOutcome::Frame));
+            }
+            let newer = timestamp_ms.wrapping_sub(existing_ready.timestamp_ms) < 0x8000_0000;
+            let low_idx_reset = full_frame_idx <= 4
+                && timestamp_ms < 1000
+                && existing_ready.timestamp_ms.saturating_sub(timestamp_ms) > 5000;
+            if is_iframe && (newer || low_idx_reset) {
+                self.active.clear();
+                self.ready.clear();
+                self.last_completed = None;
+                self.pending_drops.clear();
+            } else {
+                return Ok(self
+                    .pop_next_ready()
+                    .map_or(RsmIngestOutcome::Pending, RsmIngestOutcome::Frame));
+            }
+        }
+
+        if !self.active.contains_key(&full_frame_idx) {
+            let packet_grace = grace_frames_for(is_iframe, r_full, y_groups);
+            let ready_low_idx_reset = is_iframe
+                && full_frame_idx <= 4
+                && timestamp_ms < 1000
+                && self.ready.iter().any(|(&ridx, rf)| {
+                    ridx > 32 && rf.timestamp_ms.saturating_sub(timestamp_ms) > 5000
+                });
+            if ready_low_idx_reset {
+                self.active.clear();
+                self.ready.clear();
+                self.last_completed = None;
+                self.pending_drops.clear();
+            } else if self.pending_drops.contains(&full_frame_idx) {
+                return Ok(self
+                    .pop_next_ready()
+                    .map_or(RsmIngestOutcome::Pending, RsmIngestOutcome::Frame));
+            } else if self.ready.keys().any(|&ridx| {
+                is_frame_older(full_frame_idx, ridx)
+                    && frame_distance(full_frame_idx, ridx) > packet_grace
+            }) {
+                self.record_drop(full_frame_idx);
+                return Ok(self
+                    .pop_next_ready()
+                    .map_or(RsmIngestOutcome::Pending, RsmIngestOutcome::Frame));
             }
         }
 
@@ -1112,7 +1265,7 @@ impl StreamReassembler {
             {
                 self.active.remove(&oldest_key);
                 dropped = true;
-                self.pending_drop = true;
+                self.record_drop(oldest_key);
             }
         }
 
@@ -1123,7 +1276,7 @@ impl StreamReassembler {
                 let newer = timestamp_ms.wrapping_sub(existing.timestamp_ms) < 0x8000_0000;
                 if newer {
                     self.active.remove(&full_frame_idx);
-                    self.pending_drop = true;
+                    self.record_drop(full_frame_idx);
                 } else {
                     return Ok(RsmIngestOutcome::Pending);
                 }
@@ -1158,6 +1311,7 @@ impl StreamReassembler {
         {
             return Ok(RsmIngestOutcome::Pending);
         }
+        entry.is_iframe |= is_iframe;
         entry.r_per_group = entry.r_per_group.max(r_full);
         entry.y_groups = entry.y_groups.max(y_groups);
         if is_vert_parity {
@@ -1175,6 +1329,9 @@ impl StreamReassembler {
             entry.fec_recovered = true;
         }
         if !entry.source_chunks_complete() {
+            if let Some(ready_frame) = self.pop_next_ready() {
+                return Ok(RsmIngestOutcome::Frame(ready_frame));
+            }
             return Ok(if dropped {
                 RsmIngestOutcome::FrameDroppedNeedKeyframe
             } else {
@@ -1183,19 +1340,6 @@ impl StreamReassembler {
         }
 
         let completed = self.active.remove(&full_frame_idx).expect("just inserted");
-        self.last_completed = Some(full_frame_idx);
-        self.last_timestamp_ms = Some(completed.timestamp_ms);
-        // Drop any strictly older stalled assemblies (16-bit wraparound-safe) so latency
-        // never accumulates.
-        let before = self.active.len();
-        self.active.retain(|&idx, _| {
-            let older = {
-                let diff = full_frame_idx.wrapping_sub(idx) & 0xffff;
-                diff > 0 && diff < 0x8000
-            };
-            !older
-        });
-        let evicted_older = self.active.len() < before;
 
         let total_bytes: usize = completed
             .groups
@@ -1226,22 +1370,79 @@ impl StreamReassembler {
             )?,
             _ => (assembled, completed.is_iframe, false),
         };
+        let is_keyframe = is_keyframe || completed.is_iframe;
 
-        let prior_frames_dropped = std::mem::take(&mut self.pending_drop) || evicted_older;
+        // Evict strictly older stalled assemblies once they exceed their reordering/FEC
+        // grace window (or immediately when a self-contained keyframe completes).
+        let mut evicted = Vec::new();
+        if is_keyframe {
+            self.active.retain(|&idx, _| {
+                if is_frame_older(idx, full_frame_idx) {
+                    evicted.push(idx);
+                    false
+                } else {
+                    true
+                }
+            });
+            self.ready
+                .retain(|&idx, _| !is_frame_older(idx, full_frame_idx));
+        } else {
+            self.active.retain(|&idx, asm| {
+                if !is_frame_older(idx, full_frame_idx) {
+                    return true;
+                }
+                if frame_distance(idx, full_frame_idx) <= asm.grace_frames() {
+                    true
+                } else {
+                    evicted.push(idx);
+                    false
+                }
+            });
+        }
+        for idx in evicted {
+            self.record_drop(idx);
+        }
 
-        Ok(RsmIngestOutcome::Frame(ReassembledVideoFrame {
-            codec: completed.codec,
-            member_id: completed.member_id,
-            stream_id: completed.stream_id,
-            frame_index: full_frame_idx,
-            timestamp_ms: completed.timestamp_ms,
-            orientation: self.vf_orientation.unwrap_or(completed.orientation),
-            prior_frames_dropped,
-            fec_recovered: completed.fec_recovered,
-            is_keyframe: is_keyframe || completed.is_iframe,
-            has_codec_config,
-            payload: frame_payload,
-        }))
+        self.ready.insert(
+            full_frame_idx,
+            ReassembledVideoFrame {
+                codec: completed.codec,
+                member_id: completed.member_id,
+                stream_id: completed.stream_id,
+                frame_index: full_frame_idx,
+                timestamp_ms: completed.timestamp_ms,
+                orientation: self.vf_orientation.unwrap_or(completed.orientation),
+                prior_frames_dropped: false,
+                fec_recovered: completed.fec_recovered,
+                is_keyframe,
+                has_codec_config,
+                payload: frame_payload,
+            },
+        );
+        if self.ready.len() > MAX_ACTIVE_ASSEMBLIES {
+            if let Some(oldest_ready) = oldest_frame_key(&self.ready) {
+                let mut overflow_evicted = Vec::new();
+                self.active.retain(|&idx, _| {
+                    if is_frame_older(idx, oldest_ready) {
+                        overflow_evicted.push(idx);
+                        false
+                    } else {
+                        true
+                    }
+                });
+                for idx in overflow_evicted {
+                    self.record_drop(idx);
+                }
+            }
+        }
+
+        if let Some(ready_frame) = self.pop_next_ready() {
+            Ok(RsmIngestOutcome::Frame(ready_frame))
+        } else if dropped {
+            Ok(RsmIngestOutcome::FrameDroppedNeedKeyframe)
+        } else {
+            Ok(RsmIngestOutcome::Pending)
+        }
     }
 }
 
@@ -1786,9 +1987,9 @@ mod tests {
         let mp_ms: u16 = 2 | (1 << 11);
         let frame_idx_lo = (frame_idx & 0x1f) as u8;
         let frame_idx_hi = ((frame_idx >> 5) & 0x07ff) as u16;
-        let r_lo2 = (r & 0x03) as u8;
-        let r_mid2 = ((r >> 2) & 0x03) as u8;
-        let r_hi4 = ((r >> 4) & 0x0f) as u8;
+        let r_lo2 = r.min(3) as u8;
+        let r_mid2 = r.saturating_sub(3).min(3) as u8;
+        let r_hi4 = r.saturating_sub(6).min(15) as u8;
         let mut ext_mask: u16 = 0x0044;
         if y_groups > 0 || is_vert_parity {
             ext_mask |= 0x0020;
@@ -2361,8 +2562,8 @@ mod tests {
         let framed = frame_annexb_access_unit(VideoWireCodec::H265, &annexb).unwrap();
         let parities = test_rs_encode(std::slice::from_ref(&framed.bytes), 4);
 
-        // s = 1, r = 4 (r_lo2 = 0, r_mid2 = 1): pkg_idx = 3 is the second RS parity packet,
-        // NOT a virtual-frame metadata packet (which requires r_full == 0).
+        // s = 1, r = 4 (r_lo2 = 3, r_mid2 = 1, r_hi4 = 0): pkg_idx = 3 is the second RS parity
+        // packet, NOT a virtual-frame metadata packet (which requires r_full == 0).
         let pkt_par2 = build_2d_rsm_pkt(
             VideoWireCodec::H265,
             30,
@@ -2384,6 +2585,93 @@ mod tests {
         };
         assert!(frame.fec_recovered);
         assert_eq!(frame.payload, annexb);
+    }
+
+    #[test]
+    fn high_parity_additive_r_full_keyframes_reassemble_and_recover_fec() {
+        let mut h264_idr = Vec::new();
+        h264_idr.extend_from_slice(&[0, 0, 0, 1, 0x67, 0x64, 0x00, 0x16, 0xac, 0xd2]); // SPS
+        h264_idr.extend_from_slice(&[0, 0, 0, 1, 0x68, 0xee, 0x3c, 0x80]); // PPS
+        h264_idr.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88]); // IDR slice
+        h264_idr.extend((0..1600u16).map(|i| (i.wrapping_mul(41).wrapping_add(19) & 0xff) as u8));
+        let framed = frame_annexb_access_unit(VideoWireCodec::H264, &h264_idr).unwrap();
+
+        // Cover r = 4 (r_mid2 > 0), r = 7 (r_hi4 = 1), r = 12 (r_hi4 = 6, which bit-shifting
+        // previously inflated to 111 > MAX_FEC_PARITY and dropped even with 0% loss), and r = 20.
+        for (s, r, drop_indices) in [
+            (8usize, 4usize, vec![2usize, 6]),
+            (10usize, 7usize, vec![0usize, 3, 7, 9]),
+            (12usize, 12usize, vec![]),
+            (12usize, 12usize, vec![1usize, 4, 8, 11]),
+            (14usize, 20usize, vec![0usize, 5, 10, 13]),
+        ] {
+            let chunk_len = framed.bytes.len().div_ceil(s);
+            let mut padded = framed.bytes.clone();
+            padded.resize(s * chunk_len, 0);
+            let srcs: Vec<Vec<u8>> = (0..s)
+                .map(|i| padded[i * chunk_len..(i + 1) * chunk_len].to_vec())
+                .collect();
+            let parities = test_rs_encode(&srcs, r);
+            let mut rx = RsmVideoReassembler::new();
+            let mut out = None;
+
+            for (i, src) in srcs.iter().enumerate() {
+                if drop_indices.contains(&i) {
+                    continue;
+                }
+                let mut pkt = build_2d_rsm_pkt(
+                    VideoWireCodec::H264,
+                    40,
+                    1,
+                    0,
+                    s,
+                    r,
+                    i + 1,
+                    i + 1,
+                    s + r,
+                    0,
+                    false,
+                    0,
+                    src,
+                );
+                pkt[3] |= 0x04; // is_iframe
+                pkt[3 + 12] =
+                    ((framed.frame_count.saturating_sub(1)) & 0x03) | ((s as u8 & 0x3f) << 2);
+                if let RsmIngestOutcome::Frame(f) = rx.ingest(&pkt).unwrap() {
+                    out = Some(f);
+                }
+            }
+            for (p_i, par) in parities.iter().enumerate() {
+                let mut pkt = build_2d_rsm_pkt(
+                    VideoWireCodec::H264,
+                    40,
+                    1,
+                    0,
+                    s,
+                    r,
+                    s + 1 + p_i,
+                    s + 1 + p_i,
+                    s + r,
+                    0,
+                    false,
+                    0,
+                    par,
+                );
+                pkt[3] |= 0x04; // is_iframe
+                pkt[3 + 12] =
+                    ((framed.frame_count.saturating_sub(1)) & 0x03) | ((s as u8 & 0x3f) << 2);
+                if let RsmIngestOutcome::Frame(f) = rx.ingest(&pkt).unwrap() {
+                    out = Some(f);
+                }
+            }
+            let frame = out.unwrap_or_else(|| {
+                panic!("H.264 IDR with s={s}, r={r}, drops={drop_indices:?} must reassemble")
+            });
+            assert_eq!(frame.fec_recovered, !drop_indices.is_empty());
+            assert!(frame.is_keyframe);
+            assert!(frame.has_codec_config);
+            assert_eq!(frame.payload, h264_idr);
+        }
     }
 
     #[test]
@@ -2623,5 +2911,610 @@ mod tests {
             u32::from_le_bytes(unforced[6 + 0x2c..6 + 0x30].try_into().unwrap()),
             0
         );
+    }
+
+    #[test]
+    fn paced_fec_iframe_survives_newer_p_frame_completion_and_emits_in_order() {
+        let mut h264_idr = Vec::new();
+        h264_idr.extend_from_slice(&[0, 0, 0, 1, 0x67, 0x64, 0x00, 0x16, 0xac, 0xd2]); // SPS
+        h264_idr.extend_from_slice(&[0, 0, 0, 1, 0x68, 0xee, 0x3c, 0x80]); // PPS
+        h264_idr.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88]); // IDR
+        h264_idr.extend((0..600u16).map(|i| (i.wrapping_mul(31).wrapping_add(5) & 0xff) as u8));
+        let idr_framed = frame_annexb_access_unit(VideoWireCodec::H264, &h264_idr).unwrap();
+
+        let mut p_frame = vec![0, 0, 0, 1, 0x41, 0x9a];
+        p_frame.extend((0..140u8).map(|i| i.wrapping_mul(7).wrapping_add(3)));
+        let p_framed = frame_annexb_access_unit(VideoWireCodec::H264, &p_frame).unwrap();
+
+        // Build paced IDR (frame 50: s=5, r=4) where source packet 4 is lost and parity 0 arrives
+        // AFTER P-frame 51 (s=2, r=1) has already completed.
+        let s_idr = 5usize;
+        let r_idr = 4usize;
+        let idr_chunk = idr_framed.bytes.len().div_ceil(s_idr);
+        let mut idr_pad = idr_framed.bytes.clone();
+        idr_pad.resize(s_idr * idr_chunk, 0);
+        let idr_srcs: Vec<Vec<u8>> = (0..s_idr)
+            .map(|i| idr_pad[i * idr_chunk..(i + 1) * idr_chunk].to_vec())
+            .collect();
+        let idr_pars = test_rs_encode(&idr_srcs, r_idr);
+
+        let make_idr_pkt = |pkg_1based: usize, payload: &[u8]| {
+            let mut pkt = build_2d_rsm_pkt(
+                VideoWireCodec::H264,
+                50,
+                1,
+                0,
+                s_idr,
+                r_idr,
+                pkg_1based,
+                pkg_1based,
+                s_idr + r_idr,
+                0,
+                false,
+                0,
+                payload,
+            );
+            pkt[3] |= 0x04;
+            pkt[3 + 12] =
+                ((idr_framed.frame_count.saturating_sub(1)) & 0x03) | ((s_idr as u8 & 0x3f) << 2);
+            pkt
+        };
+
+        let p_chunk = p_framed.bytes.len().div_ceil(2);
+        let mut p_pad = p_framed.bytes.clone();
+        p_pad.resize(2 * p_chunk, 0);
+        let p_srcs = [p_pad[..p_chunk].to_vec(), p_pad[p_chunk..].to_vec()];
+        let p_pkt1 = build_2d_rsm_pkt(
+            VideoWireCodec::H264,
+            51,
+            1,
+            0,
+            2,
+            1,
+            1,
+            1,
+            3,
+            0,
+            false,
+            0,
+            &p_srcs[0],
+        );
+        let p_pkt2 = build_2d_rsm_pkt(
+            VideoWireCodec::H264,
+            51,
+            1,
+            0,
+            2,
+            1,
+            2,
+            2,
+            3,
+            0,
+            false,
+            0,
+            &p_srcs[1],
+        );
+
+        let mut rx = RsmVideoReassembler::new();
+        // IDR packets 1..4 arrive (packet 5 lost).
+        for (i, src) in idr_srcs.iter().enumerate().take(4) {
+            assert_eq!(
+                rx.ingest(&make_idr_pkt(i + 1, src)).unwrap(),
+                RsmIngestOutcome::Pending
+            );
+        }
+        // Next P-frame 51 completes BEFORE IDR parity arrives: must NOT evict IDR 50!
+        assert_eq!(rx.ingest(&p_pkt1).unwrap(), RsmIngestOutcome::Pending);
+        assert_eq!(rx.ingest(&p_pkt2).unwrap(), RsmIngestOutcome::Pending);
+
+        // IDR parity packet 6 arrives -> RS recovers packet 5 and emits IDR 50 first.
+        let RsmIngestOutcome::Frame(out_idr) = rx.ingest(&make_idr_pkt(6, &idr_pars[0])).unwrap()
+        else {
+            panic!("expected FEC-recovered IDR 50");
+        };
+        assert_eq!(out_idr.frame_index, 50);
+        assert!(out_idr.is_keyframe);
+        assert!(out_idr.has_codec_config);
+        assert!(out_idr.fec_recovered);
+        assert!(!out_idr.prior_frames_dropped);
+        assert_eq!(out_idr.payload, h264_idr);
+
+        // Immediately drain buffered P-frame 51 via pop_ready without waiting for another packet.
+        let out_p = rx
+            .pop_ready()
+            .expect("expected buffered P-frame 51 to drain immediately after IDR 50");
+        assert_eq!(out_p.frame_index, 51);
+        assert!(!out_p.is_keyframe);
+        assert!(!out_p.prior_frames_dropped);
+        assert_eq!(out_p.payload, p_frame);
+        assert!(rx.pop_ready().is_none());
+
+        // Trailing IDR parity packet 7 is safely ignored after both frames emitted.
+        assert_eq!(
+            rx.ingest(&make_idr_pkt(7, &idr_pars[1])).unwrap(),
+            RsmIngestOutcome::Pending
+        );
+    }
+
+    #[test]
+    fn fec_protected_p_frame_recovers_after_next_frame_completes_without_false_drop() {
+        let mut p1 = vec![0, 0, 0, 1, 0x41, 0x9a];
+        p1.extend((0..160u8).map(|i| i.wrapping_mul(3).wrapping_add(1)));
+        let f1 = frame_annexb_access_unit(VideoWireCodec::H264, &p1).unwrap();
+        let mut p2 = vec![0, 0, 0, 1, 0x41, 0x9a];
+        p2.extend((0..140u8).map(|i| i.wrapping_mul(11).wrapping_add(9)));
+        let f2 = frame_annexb_access_unit(VideoWireCodec::H264, &p2).unwrap();
+
+        let c1 = f1.bytes.len().div_ceil(2);
+        let mut pad1 = f1.bytes.clone();
+        pad1.resize(2 * c1, 0);
+        let s1 = vec![pad1[..c1].to_vec(), pad1[c1..].to_vec()];
+        let par1 = test_rs_encode(&s1, 1);
+
+        let c2 = f2.bytes.len().div_ceil(2);
+        let mut pad2 = f2.bytes.clone();
+        pad2.resize(2 * c2, 0);
+        let s2 = vec![pad2[..c2].to_vec(), pad2[c2..].to_vec()];
+        let par2 = test_rs_encode(&s2, 1);
+
+        let mut rx = RsmVideoReassembler::new();
+        // Frame 10 loses source packet 2; frame 11 completes before frame 10's XOR parity arrives.
+        assert_eq!(
+            rx.ingest(&build_2d_rsm_pkt(
+                VideoWireCodec::H264,
+                10,
+                1,
+                0,
+                2,
+                1,
+                1,
+                1,
+                3,
+                0,
+                false,
+                0,
+                &s1[0]
+            ))
+            .unwrap(),
+            RsmIngestOutcome::Pending
+        );
+        assert_eq!(
+            rx.ingest(&build_2d_rsm_pkt(
+                VideoWireCodec::H264,
+                11,
+                1,
+                0,
+                2,
+                1,
+                1,
+                1,
+                3,
+                0,
+                false,
+                0,
+                &s2[0]
+            ))
+            .unwrap(),
+            RsmIngestOutcome::Pending
+        );
+        assert_eq!(
+            rx.ingest(&build_2d_rsm_pkt(
+                VideoWireCodec::H264,
+                11,
+                1,
+                0,
+                2,
+                1,
+                2,
+                2,
+                3,
+                0,
+                false,
+                0,
+                &s2[1]
+            ))
+            .unwrap(),
+            RsmIngestOutcome::Pending
+        );
+
+        // Frame 10's XOR parity arrives -> recovers frame 10 with fec_recovered=true and no drop!
+        let RsmIngestOutcome::Frame(out10) = rx
+            .ingest(&build_2d_rsm_pkt(
+                VideoWireCodec::H264,
+                10,
+                1,
+                0,
+                2,
+                1,
+                3,
+                3,
+                3,
+                0,
+                false,
+                0,
+                &par1[0],
+            ))
+            .unwrap()
+        else {
+            panic!("expected FEC-recovered P-frame 10");
+        };
+        assert_eq!(out10.frame_index, 10);
+        assert!(out10.fec_recovered);
+        assert!(!out10.prior_frames_dropped);
+        assert_eq!(out10.payload, p1);
+
+        // Frame 11's parity packet flushes buffered frame 11 in order.
+        let RsmIngestOutcome::Frame(out11) = rx
+            .ingest(&build_2d_rsm_pkt(
+                VideoWireCodec::H264,
+                11,
+                1,
+                0,
+                2,
+                1,
+                3,
+                3,
+                3,
+                0,
+                false,
+                0,
+                &par2[0],
+            ))
+            .unwrap()
+        else {
+            panic!("expected buffered P-frame 11");
+        };
+        assert_eq!(out11.frame_index, 11);
+        assert!(!out11.prior_frames_dropped);
+        assert_eq!(out11.payload, p2);
+    }
+
+    #[test]
+    fn unrecoverable_fec_p_frame_evicts_after_grace_window_and_recovery_keyframe_evicts_immediately(
+    ) {
+        let mut p_frame = vec![0, 0, 0, 1, 0x41, 0x9a];
+        p_frame.extend((0..120u8).map(|i| i.wrapping_mul(5).wrapping_add(1)));
+        let pf = frame_annexb_access_unit(VideoWireCodec::H264, &p_frame).unwrap();
+
+        let mut idr = vec![0, 0, 0, 1, 0x67, 0x64, 0x00, 0x16, 0, 0, 0, 1, 0x68, 0xee];
+        idr.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88]);
+        idr.extend((0..120u8).map(|i| i.wrapping_mul(9).wrapping_add(2)));
+        let idrf = frame_annexb_access_unit(VideoWireCodec::H264, &idr).unwrap();
+
+        // Part 1: Frame 20 (s=3, r=1) only gets 1 packet (unrecoverable). Frames 21..=22 stay
+        // buffered within FEC_P_GRACE_FRAMES (2); frame 23 exceeds grace, evicts 20, and emits 21
+        // with prior_frames_dropped = true.
+        let mut rx = RsmVideoReassembler::new();
+        assert_eq!(
+            rx.ingest(&build_2d_rsm_pkt(
+                VideoWireCodec::H264,
+                20,
+                1,
+                0,
+                3,
+                1,
+                1,
+                1,
+                4,
+                0,
+                false,
+                0,
+                &pf.bytes[..44]
+            ))
+            .unwrap(),
+            RsmIngestOutcome::Pending
+        );
+        for fidx in [21u32, 22u32] {
+            assert_eq!(
+                rx.ingest(&build_2d_rsm_pkt(
+                    VideoWireCodec::H264,
+                    fidx,
+                    1,
+                    0,
+                    1,
+                    0,
+                    1,
+                    1,
+                    1,
+                    0,
+                    false,
+                    0,
+                    &pf.bytes
+                ))
+                .unwrap(),
+                RsmIngestOutcome::Pending
+            );
+        }
+        let RsmIngestOutcome::Frame(out21) = rx
+            .ingest(&build_2d_rsm_pkt(
+                VideoWireCodec::H264,
+                23,
+                1,
+                0,
+                1,
+                0,
+                1,
+                1,
+                1,
+                0,
+                false,
+                0,
+                &pf.bytes,
+            ))
+            .unwrap()
+        else {
+            panic!("expected buffered frame 21 to flush once frame 20 exceeds grace window");
+        };
+        assert_eq!(out21.frame_index, 21);
+        assert!(out21.prior_frames_dropped);
+
+        // Part 2: An incomplete FEC P-frame (frame 30) is immediately evicted when a complete
+        // recovery keyframe (frame 31) arrives.
+        let mut rx2 = RsmVideoReassembler::new();
+        assert_eq!(
+            rx2.ingest(&build_2d_rsm_pkt(
+                VideoWireCodec::H264,
+                30,
+                1,
+                0,
+                2,
+                1,
+                1,
+                1,
+                3,
+                0,
+                false,
+                0,
+                &pf.bytes[..64]
+            ))
+            .unwrap(),
+            RsmIngestOutcome::Pending
+        );
+        let mut idr_pkt = build_2d_rsm_pkt(
+            VideoWireCodec::H264,
+            31,
+            1,
+            0,
+            1,
+            0,
+            1,
+            1,
+            1,
+            0,
+            false,
+            0,
+            &idrf.bytes,
+        );
+        idr_pkt[3] |= 0x04;
+        idr_pkt[3 + 12] = ((idrf.frame_count.saturating_sub(1)) & 0x03) | (1 << 2);
+        let RsmIngestOutcome::Frame(out_kf) = rx2.ingest(&idr_pkt).unwrap() else {
+            panic!("recovery keyframe must emit immediately");
+        };
+        assert_eq!(out_kf.frame_index, 31);
+        assert!(out_kf.is_keyframe);
+        assert!(out_kf.prior_frames_dropped);
+        assert_eq!(out_kf.payload, idr);
+    }
+
+    #[test]
+    fn intermediate_drop_attaches_after_keyframe_and_rejects_zombie_resurrection() {
+        let mut idr = vec![0, 0, 0, 1, 0x67, 0x64, 0x00, 0x16, 0, 0, 0, 1, 0x68, 0xee];
+        idr.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88]);
+        idr.extend((0..240u8).map(|i| i.wrapping_mul(7).wrapping_add(3)));
+        let idrf = frame_annexb_access_unit(VideoWireCodec::H264, &idr).unwrap();
+
+        let mut p_frame = vec![0, 0, 0, 1, 0x41, 0x9a];
+        p_frame.extend((0..120u8).map(|i| i.wrapping_mul(5).wrapping_add(1)));
+        let pf = frame_annexb_access_unit(VideoWireCodec::H264, &p_frame).unwrap();
+
+        let s_idr = 3usize;
+        let r_idr = 2usize;
+        let idr_chunk = idrf.bytes.len().div_ceil(s_idr);
+        let mut idr_pad = idrf.bytes.clone();
+        idr_pad.resize(s_idr * idr_chunk, 0);
+        let idr_srcs: Vec<Vec<u8>> = (0..s_idr)
+            .map(|i| idr_pad[i * idr_chunk..(i + 1) * idr_chunk].to_vec())
+            .collect();
+        let idr_pars = test_rs_encode(&idr_srcs, r_idr);
+        let make_idr_pkt = |pkg_1based: usize, payload: &[u8]| {
+            let mut pkt = build_2d_rsm_pkt(
+                VideoWireCodec::H264,
+                50,
+                1,
+                0,
+                s_idr,
+                r_idr,
+                pkg_1based,
+                pkg_1based,
+                s_idr + r_idr,
+                0,
+                false,
+                0,
+                payload,
+            );
+            pkt[3] |= 0x04;
+            pkt[3 + 12] =
+                ((idrf.frame_count.saturating_sub(1)) & 0x03) | ((s_idr as u8 & 0x3f) << 2);
+            pkt
+        };
+
+        let mut rx = RsmVideoReassembler::new();
+        // IDR 50 receives 2 of 3 source packets (still within IFRAME_GRACE_FRAMES = 4).
+        assert_eq!(
+            rx.ingest(&make_idr_pkt(1, &idr_srcs[0])).unwrap(),
+            RsmIngestOutcome::Pending
+        );
+        assert_eq!(
+            rx.ingest(&make_idr_pkt(2, &idr_srcs[1])).unwrap(),
+            RsmIngestOutcome::Pending
+        );
+        // P-frame 51 (s=3, r=1, grace=2) receives only 1 packet.
+        assert_eq!(
+            rx.ingest(&build_2d_rsm_pkt(
+                VideoWireCodec::H264,
+                51,
+                1,
+                0,
+                3,
+                1,
+                1,
+                1,
+                4,
+                0,
+                false,
+                0,
+                &pf.bytes[..44]
+            ))
+            .unwrap(),
+            RsmIngestOutcome::Pending
+        );
+        // Single-packet P-frames 52, 53, 54 complete: frame 54 evicts P-frame 51 (distance 3 > 2)
+        // while keeping IDR 50 alive (distance 4 <= 4).
+        for fidx in [52u32, 53u32, 54u32] {
+            assert_eq!(
+                rx.ingest(&build_2d_rsm_pkt(
+                    VideoWireCodec::H264,
+                    fidx,
+                    1,
+                    0,
+                    1,
+                    0,
+                    1,
+                    1,
+                    1,
+                    0,
+                    false,
+                    0,
+                    &pf.bytes
+                ))
+                .unwrap(),
+                RsmIngestOutcome::Pending
+            );
+        }
+
+        // A late trailing packet for already-evicted P-frame 51 must NOT resurrect a zombie assembly.
+        assert_eq!(
+            rx.ingest(&build_2d_rsm_pkt(
+                VideoWireCodec::H264,
+                51,
+                1,
+                0,
+                3,
+                1,
+                4,
+                4,
+                4,
+                0,
+                false,
+                0,
+                &pf.bytes[..44]
+            ))
+            .unwrap(),
+            RsmIngestOutcome::Pending
+        );
+
+        // IDR 50 recovers via parity -> emits 50 WITHOUT consuming the newer drop of 51.
+        let RsmIngestOutcome::Frame(out50) = rx.ingest(&make_idr_pkt(4, &idr_pars[0])).unwrap()
+        else {
+            panic!("expected FEC-recovered IDR 50");
+        };
+        assert_eq!(out50.frame_index, 50);
+        assert!(out50.is_keyframe);
+        assert!(!out50.prior_frames_dropped);
+
+        // Draining pop_ready emits 52 with prior_frames_dropped=true (reporting evicted 51),
+        // then 53 and 54 with prior_frames_dropped=false, with zero zombie stall.
+        let out52 = rx.pop_ready().expect("expected buffered P-frame 52");
+        assert_eq!(out52.frame_index, 52);
+        assert!(out52.prior_frames_dropped);
+        let out53 = rx.pop_ready().expect("expected buffered P-frame 53");
+        assert_eq!(out53.frame_index, 53);
+        assert!(!out53.prior_frames_dropped);
+        let out54 = rx.pop_ready().expect("expected buffered P-frame 54");
+        assert_eq!(out54.frame_index, 54);
+        assert!(!out54.prior_frames_dropped);
+        assert!(rx.pop_ready().is_none());
+    }
+
+    #[test]
+    fn ready_queue_drains_in_order_across_16bit_frame_index_wraparound() {
+        let mut p_frame = vec![0, 0, 0, 1, 0x41, 0x9a];
+        p_frame.extend((0..120u8).map(|i| i.wrapping_mul(3).wrapping_add(7)));
+        let pf = frame_annexb_access_unit(VideoWireCodec::H264, &p_frame).unwrap();
+        let half = pf.bytes.len().div_ceil(2);
+        let mut pad = pf.bytes.clone();
+        pad.resize(2 * half, 0);
+        let s0 = &pad[..half];
+        let s1 = &pad[half..];
+
+        let mut rx = RsmVideoReassembler::new();
+        // Frame 0xfffe (FEC-protected P-frame) starts incomplete.
+        assert_eq!(
+            rx.ingest(&build_2d_rsm_pkt(
+                VideoWireCodec::H264,
+                0xfffe,
+                1,
+                0,
+                2,
+                1,
+                1,
+                1,
+                3,
+                0,
+                false,
+                0,
+                s0
+            ))
+            .unwrap(),
+            RsmIngestOutcome::Pending
+        );
+        // Frames 0xffff and 0x0000 complete while 0xfffe is within FEC_P_GRACE_FRAMES (2).
+        for fidx in [0xffffu32, 0x0000u32] {
+            assert_eq!(
+                rx.ingest(&build_2d_rsm_pkt(
+                    VideoWireCodec::H264,
+                    fidx,
+                    1,
+                    0,
+                    1,
+                    0,
+                    1,
+                    1,
+                    1,
+                    0,
+                    false,
+                    0,
+                    &pf.bytes
+                ))
+                .unwrap(),
+                RsmIngestOutcome::Pending
+            );
+        }
+        // Second source packet finishes 0xfffe; pop_ready drains 0xffff and 0x0000 in wrap order.
+        let RsmIngestOutcome::Frame(first) = rx
+            .ingest(&build_2d_rsm_pkt(
+                VideoWireCodec::H264,
+                0xfffe,
+                1,
+                0,
+                2,
+                1,
+                2,
+                2,
+                3,
+                0,
+                false,
+                0,
+                s1,
+            ))
+            .unwrap()
+        else {
+            panic!("expected 0xfffe to emit first");
+        };
+        assert_eq!(first.frame_index, 0xfffe);
+        assert!(!first.prior_frames_dropped);
+        assert_eq!(rx.pop_ready().unwrap().frame_index, 0xffff);
+        assert_eq!(rx.pop_ready().unwrap().frame_index, 0x0000);
+        assert!(rx.pop_ready().is_none());
     }
 }

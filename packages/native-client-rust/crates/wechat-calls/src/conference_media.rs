@@ -105,6 +105,13 @@ impl ConferenceReceiver {
     pub(crate) fn last_video_stream_id(&self) -> Option<u8> {
         self.last_video_stream_id
     }
+
+    /// Pop the next buffered in-order video frame that is ready for delivery after [`Self::consume_media`].
+    pub fn pop_ready_video(&mut self) -> Option<ReassembledVideoFrame> {
+        let frame = self.video.pop_ready()?;
+        self.last_video_stream_id = Some(frame.stream_id);
+        Some(frame)
+    }
     pub fn consume(
         &mut self,
         epoch: MediaEpoch,

@@ -150,6 +150,11 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
     let mut trace_last_orient = 0u8;
     let mut trace_vf_logged = false;
     let mut trace_kf_logged = 0u32;
+    let mut trace_iframe_frames_logged = 0u32;
+    let mut trace_last_iframe_fidx: Option<u32> = None;
+    let mut trace_fec_logged = 0u32;
+    let mut trace_drop_logged = 0u32;
+    let mut trace_ingest_err_logged = 0u32;
     let media_result = (|| -> Result<()> {
         while host.current() {
             ensure!(
@@ -227,8 +232,11 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                             if video_trace
                                                 && !trace_vf_logged
                                                 && raw.len() >= 24
+                                                && (raw[3] & 0x03) == 3
                                                 && (raw[4] >> 2) == 3
                                                 && (raw[4] & 0x03) == 0
+                                                && (raw[15] >> 2) == 1
+                                                && raw[19] == 0
                                             {
                                                 trace_vf_logged = true;
                                                 eprintln!(
@@ -238,65 +246,164 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                                     &raw[..raw.len().min(32)]
                                                 );
                                             }
+                                            if video_trace
+                                                && trace_iframe_frames_logged < 32
+                                                && raw.len() >= 24
+                                                && (raw[3] & 0x03) == 3
+                                                && (raw[3] & 0x04) != 0
+                                            {
+                                                let fidx_lo = u32::from(raw[3] >> 3);
+                                                let ext_len = usize::from(raw[23]);
+                                                let mut s_ovf_hi = 0usize;
+                                                let mut pkg_ovf_hi = 0usize;
+                                                let mut f_pkt_hi = 0usize;
+                                                let mut f_tot_hi = 0usize;
+                                                let mut fidx_hi = 0u32;
+                                                if ext_len >= 2 && 24 + ext_len <= raw.len() {
+                                                    let ext = &raw[24..24 + ext_len];
+                                                    let mask = u16::from_be_bytes([ext[0], ext[1]]);
+                                                    let mut pos = 2usize;
+                                                    if mask & 0x0001 != 0 && pos + 2 <= ext_len {
+                                                        s_ovf_hi = usize::from(ext[pos] & 0x0f);
+                                                        pkg_ovf_hi = usize::from(ext[pos] >> 4);
+                                                        f_pkt_hi = usize::from(ext[pos + 1] & 0x0f);
+                                                        f_tot_hi = usize::from(ext[pos + 1] >> 4);
+                                                        pos += 2;
+                                                    }
+                                                    if mask & 0x0002 != 0 && pos + 2 <= ext_len {
+                                                        pos += 2;
+                                                    }
+                                                    if mask & 0x0004 != 0 && pos + 2 <= ext_len {
+                                                        fidx_hi = u32::from(ext[pos])
+                                                            | (u32::from(ext[pos + 1] & 0x07) << 8);
+                                                    }
+                                                }
+                                                let fidx = (fidx_hi << 5) | fidx_lo;
+                                                if trace_last_iframe_fidx != Some(fidx) {
+                                                    trace_last_iframe_fidx = Some(fidx);
+                                                    trace_iframe_frames_logged += 1;
+                                                    let r_sum = usize::from(raw[4] & 0x03)
+                                                        + usize::from(raw[16] & 0x03)
+                                                        + usize::from(raw[17] & 0x0f);
+                                                    let s_lo = usize::from(raw[15] >> 2);
+                                                    let s_ovf = usize::from(raw[19]);
+                                                    let pkg_lo = usize::from(raw[4] >> 2);
+                                                    let pkg_ovf = usize::from(raw[20]);
+                                                    let x_grp = usize::from(raw[18] & 0x07).max(1);
+                                                    eprintln!(
+                                                        "[wechat-call-video] rx iframe_frame #{trace_iframe_frames_logged} fidx={fidx} stream={} s={} r={} x={} g={} pkg={} f={}/{} fc={} ext_len={} bytes={} hdr={:02x?}",
+                                                        last_rx_video_stream_id,
+                                                        s_lo + s_ovf + (s_ovf_hi << 8),
+                                                        r_sum,
+                                                        x_grp,
+                                                        raw[17] >> 5,
+                                                        pkg_lo + pkg_ovf + (pkg_ovf_hi << 8),
+                                                        usize::from(raw[21]) + (f_pkt_hi << 8),
+                                                        usize::from(raw[22]) + (f_tot_hi << 8),
+                                                        (raw[15] & 0x03) + 1,
+                                                        ext_len,
+                                                        raw.len(),
+                                                        &raw[..raw.len().min(32)]
+                                                    );
+                                                }
+                                            }
                                             let mut need_keyframe = false;
+                                            let mut ready_frames = Vec::new();
                                             match video_rx.ingest(raw) {
                                                 Ok(RsmIngestOutcome::Frame(frame)) => {
-                                                    ensure!(
-                                                        host.current(),
-                                                        "Call authority revoked before video delivery"
-                                                    );
-                                                    last_rx_video_stream_id = frame.stream_id;
-                                                    rx_video_seen = true;
-                                                    trace_frames_ok += 1;
-                                                    if frame.fec_recovered {
-                                                        trace_fec_ok += 1;
-                                                    }
-                                                    if frame.prior_frames_dropped {
-                                                        trace_drops += 1;
-                                                    }
-                                                    trace_last_orient = frame.orientation;
-                                                    if video_trace
-                                                        && (trace_frames_ok <= 3
-                                                            || (frame.is_keyframe
-                                                                && trace_kf_logged < 16))
+                                                    ready_frames.push(frame);
+                                                    while let Some(next_frame) =
+                                                        video_rx.pop_ready()
                                                     {
-                                                        if frame.is_keyframe {
-                                                            trace_kf_logged =
-                                                                trace_kf_logged.saturating_add(1);
-                                                        }
-                                                        eprintln!(
-                                                            "[wechat-call-video] rx frame #{trace_frames_ok} codec={:?} stream={} kf={} cfg={} orient={} bytes={}",
-                                                            frame.codec,
-                                                            frame.stream_id,
-                                                            frame.is_keyframe,
-                                                            frame.has_codec_config,
-                                                            frame.orientation,
-                                                            frame.payload.len()
-                                                        );
+                                                        ready_frames.push(next_frame);
                                                     }
-                                                    if frame.prior_frames_dropped
-                                                        && !frame.is_keyframe
-                                                    {
-                                                        need_keyframe = true;
-                                                    } else if frame.is_keyframe {
-                                                        // A recovery IDR (self-contained or bare, with
-                                                        // cached parameter sets prepended in media.rs)
-                                                        // satisfied any pending keyframe request from
-                                                        // earlier drops. If an initial bare IDR still
-                                                        // needs parameter sets, media.rs queues a
-                                                        // fresh local request after receive_video.
-                                                        pending_local_irequest = None;
-                                                        irequest_streak = 0;
-                                                        let _ = host.take_local_keyframe_request();
-                                                    }
-                                                    host.receive_video(frame)?;
                                                 }
-                                                Ok(RsmIngestOutcome::FrameDroppedNeedKeyframe)
-                                                | Err(_) => {
+                                                Ok(RsmIngestOutcome::FrameDroppedNeedKeyframe) => {
                                                     trace_drops += 1;
                                                     need_keyframe = true;
+                                                    while let Some(next_frame) =
+                                                        video_rx.pop_ready()
+                                                    {
+                                                        ready_frames.push(next_frame);
+                                                    }
+                                                }
+                                                Err(err) => {
+                                                    trace_drops += 1;
+                                                    need_keyframe = true;
+                                                    if video_trace && trace_ingest_err_logged < 12 {
+                                                        trace_ingest_err_logged += 1;
+                                                        eprintln!(
+                                                            "[wechat-call-video] rx ingest err #{trace_ingest_err_logged}: {err:#} hdr={:02x?}",
+                                                            &raw[..raw.len().min(32)]
+                                                        );
+                                                    }
                                                 }
                                                 Ok(RsmIngestOutcome::Pending) => {}
+                                            }
+                                            for frame in ready_frames {
+                                                ensure!(
+                                                    host.current(),
+                                                    "Call authority revoked before video delivery"
+                                                );
+                                                last_rx_video_stream_id = frame.stream_id;
+                                                rx_video_seen = true;
+                                                trace_frames_ok += 1;
+                                                if frame.fec_recovered {
+                                                    trace_fec_ok += 1;
+                                                }
+                                                if frame.prior_frames_dropped {
+                                                    trace_drops += 1;
+                                                }
+                                                trace_last_orient = frame.orientation;
+                                                if video_trace
+                                                    && (trace_frames_ok <= 3
+                                                        || (frame.is_keyframe
+                                                            && trace_kf_logged < 32)
+                                                        || (frame.fec_recovered
+                                                            && trace_fec_logged < 16)
+                                                        || (frame.prior_frames_dropped
+                                                            && trace_drop_logged < 16))
+                                                {
+                                                    if frame.is_keyframe {
+                                                        trace_kf_logged =
+                                                            trace_kf_logged.saturating_add(1);
+                                                    }
+                                                    if frame.fec_recovered {
+                                                        trace_fec_logged =
+                                                            trace_fec_logged.saturating_add(1);
+                                                    }
+                                                    if frame.prior_frames_dropped {
+                                                        trace_drop_logged =
+                                                            trace_drop_logged.saturating_add(1);
+                                                    }
+                                                    eprintln!(
+                                                        "[wechat-call-video] rx frame #{trace_frames_ok} fidx={} codec={:?} stream={} kf={} cfg={} fec={} drop={} orient={} bytes={}",
+                                                        frame.frame_index,
+                                                        frame.codec,
+                                                        frame.stream_id,
+                                                        frame.is_keyframe,
+                                                        frame.has_codec_config,
+                                                        frame.fec_recovered,
+                                                        frame.prior_frames_dropped,
+                                                        frame.orientation,
+                                                        frame.payload.len()
+                                                    );
+                                                }
+                                                if frame.prior_frames_dropped && !frame.is_keyframe
+                                                {
+                                                    need_keyframe = true;
+                                                } else if frame.is_keyframe {
+                                                    // A recovery IDR (self-contained or bare, with
+                                                    // cached parameter sets prepended in media.rs)
+                                                    // satisfied any pending keyframe request from
+                                                    // earlier drops. If an initial bare IDR still
+                                                    // needs parameter sets, media.rs queues a
+                                                    // fresh local request after receive_video.
+                                                    pending_local_irequest = None;
+                                                    irequest_streak = 0;
+                                                    let _ = host.take_local_keyframe_request();
+                                                }
+                                                host.receive_video(frame)?;
                                             }
                                             if video_trace
                                                 && trace_last.elapsed() >= Duration::from_secs(2)
