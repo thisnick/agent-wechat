@@ -39,6 +39,10 @@ import {
   LocalVideoSurface,
   RemoteVideoCanvas,
 } from "./call-modals.tsx";
+import {
+  localVideoFrameLayout,
+  type LocalVideoDimensions,
+} from "./media-backend.ts";
 
 function callErrorText(code: string): string {
   switch (code) {
@@ -683,6 +687,7 @@ function CallTheaterDialog({
   };
 
   const [hasLocalJpeg, setHasLocalJpeg] = useState(false);
+  const [localVideoDims, setLocalVideoDims] = useState<LocalVideoDimensions | null>(null);
   const latestLocalJpegRef = useRef<Uint8Array | null>(null);
 
   useEffect(() => {
@@ -710,6 +715,14 @@ function CallTheaterDialog({
   const hasSelfTile =
     isConference &&
     visibleParticipants.some((participant) => isSelfParticipant(participant, ownUsername));
+  const showCornerSelfView = showLocalVideo && !hasSelfTile;
+  const localVideoLayout = localVideoFrameLayout(localVideoDims);
+
+  useEffect(() => {
+    if (!showCornerSelfView) {
+      setLocalVideoDims(null);
+    }
+  }, [showCornerSelfView]);
 
   return createPortal(
     <dialog
@@ -1002,12 +1015,21 @@ function CallTheaterDialog({
 
             {/* Self-view corner tile once a local video stream or first JPEG frame is available,
                 unless the local participant already has a visible conference grid tile. */}
-            {showLocalVideo && !hasSelfTile && (
-              <div className="call-self-view" aria-label={t("calls.selfView")}>
+            {showCornerSelfView && (
+              <div
+                className={`call-self-view ${localVideoLayout.isPortrait ? "is-portrait" : ""}`}
+                style={
+                  localVideoLayout.aspectRatio
+                    ? { aspectRatio: localVideoLayout.aspectRatio }
+                    : undefined
+                }
+                aria-label={t("calls.selfView")}
+              >
                 <LocalVideoSurface
                   stream={callState.localStream}
                   subscribeJpeg={subscribeLocalJpeg}
                   label={t("calls.selfView")}
+                  onDimensionsChange={setLocalVideoDims}
                 />
                 <span className="call-self-label">{t("calls.you")}</span>
               </div>

@@ -9,7 +9,10 @@ import {
   isSelfParticipant,
   levelsMeaningfullyChanged,
 } from "../src/calls/call-controller.ts";
-import { EMPTY_CALL_DEVICES } from "../src/calls/media-backend.ts";
+import {
+  EMPTY_CALL_DEVICES,
+  localVideoFrameLayout,
+} from "../src/calls/media-backend.ts";
 import {
   RINGTONE_LOOP_SECONDS,
   renderMarimbaDoubleSamples,
@@ -624,4 +627,42 @@ test("levelsMeaningfullyChanged and CallController skip redundant steady-state l
 
   levelCallback({ micLevel: 0.252, speakerLevel: 0, trackLevels: { 1: 0.301 } });
   assert.equal(notifications, 1, "repeated unchanged active levels must not re-render");
+});
+
+test("localVideoFrameLayout preserves portrait, square, and landscape aspect ratios within safe bounds", () => {
+  assert.deepEqual(localVideoFrameLayout(null), { isPortrait: false });
+  assert.deepEqual(localVideoFrameLayout({ width: 0, height: 480 }), { isPortrait: false });
+  assert.deepEqual(localVideoFrameLayout({ width: 270, height: 480 }), {
+    isPortrait: true,
+    aspectRatio: "563 / 1000",
+  });
+  assert.deepEqual(localVideoFrameLayout({ width: 202, height: 360 }), {
+    isPortrait: true,
+    aspectRatio: "563 / 1000",
+  });
+  assert.deepEqual(localVideoFrameLayout({ width: 360, height: 480 }), {
+    isPortrait: true,
+    aspectRatio: "750 / 1000",
+  });
+  assert.deepEqual(localVideoFrameLayout({ width: 640, height: 480 }), {
+    isPortrait: false,
+    aspectRatio: "1333 / 1000",
+  });
+  assert.deepEqual(localVideoFrameLayout({ width: 640, height: 360 }), {
+    isPortrait: false,
+    aspectRatio: "1778 / 1000",
+  });
+  assert.deepEqual(localVideoFrameLayout({ width: 480, height: 480 }), {
+    isPortrait: false,
+    aspectRatio: "1000 / 1000",
+  });
+  // Extreme aspect ratios clamp to [9/16, 16/9] while preserving orientation.
+  assert.deepEqual(localVideoFrameLayout({ width: 100, height: 500 }), {
+    isPortrait: true,
+    aspectRatio: "563 / 1000",
+  });
+  assert.deepEqual(localVideoFrameLayout({ width: 1000, height: 200 }), {
+    isPortrait: false,
+    aspectRatio: "1778 / 1000",
+  });
 });
