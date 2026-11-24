@@ -1432,6 +1432,17 @@ mod tests {
         assert_eq!(&nack98_pkt[..2], &[0x98, 21]);
         assert_eq!(nack98_pkt[14], 0x61);
         assert_eq!(nack98_pkt[19], 2);
+        // Verify unmasked 0x61 (ext_byte=2) is also accepted directly on receive, while ext_byte=3 is rejected.
+        let mut bad_ext = nack98_pkt.clone();
+        bad_ext[19] = 3;
+        assert!(recv.open(epoch(), &bad_ext).is_err());
+        let direct_nack98 = sender
+            .seal_video_nack(epoch(), 0, 1, &[0x06, 1, 8, 1, 8, 0, 1, 3])
+            .unwrap();
+        let opened_direct_nack98 = recv.open(epoch(), &direct_nack98).unwrap().unwrap();
+        assert_eq!(opened_direct_nack98.packed_kind, 0x61);
+        assert_eq!(opened_direct_nack98.extension_byte(), 2);
+        assert_eq!(opened_direct_nack98.payload(), &[0x06, 1, 8, 1, 8, 0, 1, 3]);
         nack98_pkt[14] &= 0x2f;
         let opened_nack98 = recv.open(epoch(), &nack98_pkt).unwrap().unwrap();
         assert_eq!(opened_nack98.magic(), 0x98);

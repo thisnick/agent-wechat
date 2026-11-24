@@ -15,6 +15,14 @@ use wechat_protocol::{
 
 const RELAY_RETRANSMIT_INTERVAL: Duration = Duration::from_millis(200);
 const MAX_EARLY_MEDIA_PACKETS: usize = 256;
+const MAX_EARLY_DRAIN_PER_CALL: usize = MAX_EARLY_MEDIA_PACKETS * 4;
+
+fn push_early_packet(early_packets: &mut VecDeque<Vec<u8>>, packet: &[u8]) {
+    if early_packets.len() >= MAX_EARLY_MEDIA_PACKETS {
+        early_packets.pop_front();
+    }
+    early_packets.push_back(packet.to_vec());
+}
 
 /// A UDP relay socket whose check-in handshake already reached `Ready` (for
 /// example while ringing after `ConfAck`), together with any non-`0xd5`
@@ -57,15 +65,15 @@ impl PreconnectedRelay {
     }
 
     /// Non-blocking drain of any pending non-`0xd5` datagrams from the selected relay
-    /// endpoint into the bounded early-packet buffer (such as an incoming caller's
-    /// opening video IDR burst arriving while `Join` is completing).
+    /// endpoint into the bounded early-packet ring buffer (retaining the newest packets
+    /// so ringing traffic cannot evict an incoming caller's opening video IDR burst).
     pub fn drain_early_packets(&mut self) {
         let mut buffer = [0u8; 8198];
-        for _ in 0..64 {
+        for _ in 0..MAX_EARLY_DRAIN_PER_CALL {
             match self.socket.recv_from(&mut buffer) {
                 Ok((n, source)) if source == self.target.endpoint && n > 0 && n <= 8197 => {
-                    if buffer[0] != 0xd5 && self.early_packets.len() < MAX_EARLY_MEDIA_PACKETS {
-                        self.early_packets.push_back(buffer[..n].to_vec());
+                    if buffer[0] != 0xd5 {
+                        push_early_packet(&mut self.early_packets, &buffer[..n]);
                     }
                 }
                 Ok(_) => {}
@@ -213,9 +221,7 @@ fn connect_target_with_early(
                 }
             }
             Ok((n, source)) if source == endpoint && n > 0 && n <= 8197 => {
-                if early_packets.len() < MAX_EARLY_MEDIA_PACKETS {
-                    early_packets.push_back(buffer[..n].to_vec());
-                }
+                push_early_packet(&mut early_packets, &buffer[..n]);
             }
             Ok(_) => {}
             Err(e)
@@ -612,5 +618,22 @@ mod tests {
         let (_sock, early) = ready.into_parts();
         assert_eq!(early.len(), 1);
         assert_eq!(early[0], vec![0x96, 0x13, 0xde, 0xad]);
+    }
+
+    #[test]
+    fn early_packet_ring_buffer_keeps_newest_packets_when_full() {
+        let mut ring = VecDeque::new();
+        for seq in 0..(MAX_EARLY_MEDIA_PACKETS + 5) {
+            let bytes = (seq as u16).to_be_bytes();
+            push_early_packet(&mut ring, &[0x96, 0x13, bytes[0], bytes[1]]);
+        }
+        assert_eq!(ring.len(), MAX_EARLY_MEDIA_PACKETS);
+        assert_eq!(ring.front().unwrap(), &vec![0x96, 0x13, 0x00, 0x05]);
+        let last = (MAX_EARLY_MEDIA_PACKETS + 4) as u16;
+        let last_bytes = last.to_be_bytes();
+        assert_eq!(
+            ring.back().unwrap(),
+            &vec![0x96, 0x13, last_bytes[0], last_bytes[1]]
+        );
     }
 }

@@ -1,8 +1,9 @@
 //! Conference receive tracks, one paced uplink and optional generated diagnostics.
 use super::{
-    connect_relay_with_early, direct::should_force_irequest, reconcile_roster,
-    BoundConferenceReceiver, DirectAudioFrame, DirectMediaHost, DirectVideoTx, MediaMetric,
-    TxAudioJitterBuffer, TxVideoQueue,
+    connect_relay_with_early,
+    direct::{record_rx_video_frame_sync, should_force_irequest},
+    reconcile_roster, BoundConferenceReceiver, DirectAudioFrame, DirectMediaHost, DirectVideoTx,
+    MediaMetric, TxAudioJitterBuffer, TxVideoQueue,
 };
 use crate::{
     conference_media::{ConferenceReceiver as Receiver, DecodedAudio, StreamReport},
@@ -141,6 +142,7 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
     let mut last_irequest_tx = BTreeMap::<u16, Instant>::new();
     let mut pending_local_irequests = BTreeMap::<u16, u8>::new();
     let mut irequest_streaks = BTreeMap::<u16, u32>::new();
+    let mut rx_codec_configs_seen = BTreeSet::<u16>::new();
     let mut rx_keyframes_seen = BTreeSet::<u16>::new();
     let mut last_p2s_tx: Option<Instant> = None;
     let mut p2s_seq = 1u16;
@@ -222,6 +224,7 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                     .filter(|(_, bound)| bound.active)
                     .map(|(&id, _)| id)
                     .collect();
+                rx_codec_configs_seen.retain(|id| active_members.contains(id));
                 rx_keyframes_seen.retain(|id| active_members.contains(id));
                 irequest_streaks.retain(|id, _| active_members.contains(id));
                 last_irequest_tx.retain(|id, _| active_members.contains(id));
@@ -253,9 +256,12 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
             let joined_remote = cached_members
                 .iter()
                 .any(|member| member.status == 1 && member.member_id != selected.own_member);
+            let pending_remote = cached_members.iter().any(|member| {
+                matches!(member.status, 2 | 3) && member.member_id != selected.own_member
+            });
             if joined_remote {
                 seen_remote = true;
-            } else if seen_remote {
+            } else if seen_remote && !pending_remote {
                 report.all_remotes_left = true;
                 break;
             }
@@ -681,12 +687,23 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                                         video_frame.payload.len()
                                     );
                                 }
+                                let mut cfg_seen = rx_codec_configs_seen.contains(&member);
+                                let mut kf_seen = rx_keyframes_seen.contains(&member);
+                                record_rx_video_frame_sync(
+                                    &mut cfg_seen,
+                                    &mut kf_seen,
+                                    video_frame.is_keyframe,
+                                    video_frame.has_codec_config,
+                                );
+                                if cfg_seen {
+                                    rx_codec_configs_seen.insert(member);
+                                }
+                                if kf_seen {
+                                    rx_keyframes_seen.insert(member);
+                                }
                                 if video_frame.prior_frames_dropped && !video_frame.is_keyframe {
                                     need_keyframe = true;
                                 } else if video_frame.is_keyframe {
-                                    if video_frame.has_codec_config {
-                                        rx_keyframes_seen.insert(member);
-                                    }
                                     pending_local_irequests.remove(&member);
                                     irequest_streaks.remove(&member);
                                 }

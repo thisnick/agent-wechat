@@ -168,6 +168,7 @@ pub fn run_direct_media_with_preconnected_relay<H: DirectMediaHost>(
     let mut last_rx_video_stream_id = 1u8;
     let mut last_rx_total_pkg_seq: Option<u64> = None;
     let mut rx_video_seen = false;
+    let mut rx_codec_config_seen = false;
     let mut rx_keyframe_seen = false;
     let mut initial_irequests_sent = 0u8;
     let connected_at = Instant::now();
@@ -500,13 +501,16 @@ pub fn run_direct_media_with_preconnected_relay<H: DirectMediaHost>(
                                                         frame.payload.len()
                                                     );
                                                 }
+                                                record_rx_video_frame_sync(
+                                                    &mut rx_codec_config_seen,
+                                                    &mut rx_keyframe_seen,
+                                                    frame.is_keyframe,
+                                                    frame.has_codec_config,
+                                                );
                                                 if frame.prior_frames_dropped && !frame.is_keyframe
                                                 {
                                                     need_keyframe = true;
                                                 } else if frame.is_keyframe {
-                                                    if frame.has_codec_config {
-                                                        rx_keyframe_seen = true;
-                                                    }
                                                     // A recovery IDR (self-contained or bare, with
                                                     // cached parameter sets prepended in media.rs)
                                                     // satisfied any pending keyframe request from
@@ -1026,6 +1030,24 @@ pub(crate) fn should_force_irequest(streak: u32, has_rx_seq: bool, has_rx_keyfra
     !has_rx_keyframe || !has_rx_seq || streak % 2 == 1
 }
 
+/// Update codec-config and keyframe sync flags for an inbound reassembled video frame.
+/// Once codec parameter sets have been observed on the stream (either in-band on the
+/// keyframe or in an earlier access unit), any subsequent IDR satisfies `keyframe_seen`
+/// so mid-stream recovery can resume unforced first-attempt `IRequest`s.
+pub(crate) fn record_rx_video_frame_sync(
+    codec_config_seen: &mut bool,
+    keyframe_seen: &mut bool,
+    is_keyframe: bool,
+    has_codec_config: bool,
+) {
+    if has_codec_config {
+        *codec_config_seen = true;
+    }
+    if is_keyframe && *codec_config_seen {
+        *keyframe_seen = true;
+    }
+}
+
 pub(crate) fn advance_rx_total_pkg_seq(prev: Option<u64>, raw: &[u8]) -> Option<u64> {
     if raw.len() < 24 || (raw[3] & 0x03) != 3 {
         return prev;
@@ -1441,8 +1463,32 @@ impl DirectVideoRxTelemetry {
             .div_ceil(window_ms)
             .min(60);
 
-        if !self.ever_received_video {
+        if !self.ever_received_video || (self.rx_pkts_in_window == 0 && self.frames_in_window == 0)
+        {
+            // No inbound video packets arrived during this reporting window (either video
+            // has not started or the remote camera is off/paused). Report idle instead of
+            // 100% loss/heavy freeze, preserve `est_bw_kbps`, and clear per-stream gap
+            // anchors so resuming video does not record a synthetic freeze or loss spike.
             self.window_start = now;
+            self.rx_pkts_in_window = 0;
+            self.rx_bytes_in_window = 0;
+            self.arq_recovered_in_window = 0;
+            self.highest_seq = None;
+            self.window_base_seq = None;
+            self.long_loss_ewma_x100 = 0;
+            self.last_pkt_arrival = None;
+            self.prev_pkt_gap_ms = None;
+            self.max_pkt_gap_ms = 0;
+            self.jitter_ms_x16 = 0;
+            self.frames_in_window = 0;
+            self.last_frame_at = None;
+            self.freeze_cursor = None;
+            self.counted_light_stall = false;
+            self.counted_heavy_stall = false;
+            self.light_freeze_cnt = 0;
+            self.heavy_freeze_cnt = 0;
+            self.light_freeze_ms = 0;
+            self.heavy_freeze_ms = 0;
             self.tx_bytes_in_window = 0;
             self.tx_frames_in_window = 0;
             return VideoP2sReport {
@@ -1462,7 +1508,7 @@ impl DirectVideoRxTelemetry {
                 loss_pkts: 0,
                 decode_type: u32::from(self.last_rx_codec.wire()),
                 play_fps: 0,
-                play_frames: 0,
+                play_frames: self.total_play_frames,
                 light_freeze_cnt: 0,
                 heavy_freeze_cnt: 0,
                 light_freeze_time_ratio: 0,
@@ -1501,8 +1547,6 @@ impl DirectVideoRxTelemetry {
                 .saturating_mul(100)
                 .div_ceil(expected_pkts)
                 .min(100)
-        } else if self.heavy_freeze_ms >= 500 {
-            100
         } else {
             0
         };
@@ -1757,7 +1801,7 @@ mod tests {
     }
 
     #[test]
-    fn should_force_irequest_starts_unforced_and_escalates_periodically() {
+    fn should_force_irequest_forces_before_keyframe_and_alternates_after() {
         // After an initial keyframe has been received, send an unforced request first
         // so encoder callbacks run, then alternate forced/unforced retries.
         assert!(!should_force_irequest(0, true, true));
@@ -1772,6 +1816,33 @@ mod tests {
         // Before any video packet has arrived (lost_seq == 0), force immediately.
         assert!(should_force_irequest(0, false, false));
         assert!(should_force_irequest(1, false, true));
+    }
+
+    #[test]
+    fn record_rx_video_frame_sync_accepts_bare_idr_after_cached_codec_config() {
+        let mut cfg_seen = false;
+        let mut kf_seen = false;
+
+        // Bare IDR before any parameter sets does not satisfy initial keyframe sync.
+        record_rx_video_frame_sync(&mut cfg_seen, &mut kf_seen, true, false);
+        assert!(!cfg_seen);
+        assert!(!kf_seen);
+
+        // Separate parameter-set access unit marks codec config known without falsely claiming an IDR.
+        record_rx_video_frame_sync(&mut cfg_seen, &mut kf_seen, false, true);
+        assert!(cfg_seen);
+        assert!(!kf_seen);
+
+        // Subsequent bare IDR (without in-band parameter sets) completes keyframe sync.
+        record_rx_video_frame_sync(&mut cfg_seen, &mut kf_seen, true, false);
+        assert!(cfg_seen);
+        assert!(kf_seen);
+
+        // Self-contained IDR sets both flags immediately.
+        let (mut cfg2, mut kf2) = (false, false);
+        record_rx_video_frame_sync(&mut cfg2, &mut kf2, true, true);
+        assert!(cfg2);
+        assert!(kf2);
     }
 
     #[test]
@@ -2103,6 +2174,67 @@ mod tests {
         assert!(report.heavy_freeze_time_ratio >= 60);
         assert!(report.est_bw_kbps < 500);
         assert_eq!(report.actual_member_num, 1);
+    }
+
+    #[test]
+    fn direct_video_rx_telemetry_treats_camera_off_idle_windows_without_loss_or_bw_decay() {
+        let t0 = Instant::now();
+        let mut tel = DirectVideoRxTelemetry::new(t0);
+        let make_pkt = |codec: u8, seq: u16| -> Vec<u8> {
+            let mut pkt = vec![0u8; 400];
+            pkt[0] = codec;
+            pkt[3] = 3; // kind-3
+            pkt[4] = 1 << 2; // pkg_idx_in_group = 1
+            pkt[7..9].copy_from_slice(&seq.to_be_bytes());
+            pkt[15] = 1 << 2; // s_per_group = 1
+            pkt[18] = 1; // x_groups = 1
+            pkt[21] = 1; // f_pkt_idx = 1
+            pkt[22] = 1; // f_tot_pkts = 1
+            pkt
+        };
+
+        // 1. Active healthy video in [0s, 1s].
+        for i in 0..10u16 {
+            let ts = t0 + Duration::from_millis(u64::from(i) * 100);
+            tel.observe_raw_packet(&make_pkt(15, 1 + i), false, ts);
+            tel.observe_frame(VideoWireCodec::H265, ts);
+        }
+        let active = tel.snapshot_p2s(7, 1, 99, 0x1d, t0 + Duration::from_secs(1));
+        assert_eq!(active.loss_pct, 0);
+        assert_eq!(active.heavy_freeze_cnt, 0);
+        assert_eq!(active.actual_member_num, 1);
+        let bw_before_pause = active.est_bw_kbps;
+        assert!(bw_before_pause >= 300);
+
+        // 2. Peer turns camera off for 5 seconds: every idle window reports 0 loss,
+        // 0 freeze, actual_member_num = 0, and preserves est_bw_kbps.
+        for sec in 2..=6u64 {
+            let idle = tel.snapshot_p2s(7, 1, 99, 0x1d, t0 + Duration::from_secs(sec));
+            assert_eq!(idle.loss_pct, 0);
+            assert_eq!(idle.short_loss_pct, 0);
+            assert_eq!(idle.long_loss_pct, 0);
+            assert_eq!(idle.heavy_freeze_cnt, 0);
+            assert_eq!(idle.heavy_freeze_time_ratio, 0);
+            assert_eq!(idle.recv_data_interval_ms, 0);
+            assert_eq!(idle.est_bw_kbps, bw_before_pause);
+            assert_eq!(idle.actual_member_num, 0);
+            assert_eq!(idle.play_frames, 10);
+        }
+
+        // 3. Peer turns camera back on at t = 6.2s with fresh sequence numbers:
+        // resumption does not emit a phantom multi-second freeze or loss spike.
+        for i in 0..5u16 {
+            let ts = t0 + Duration::from_millis(6200 + u64::from(i) * 100);
+            tel.observe_raw_packet(&make_pkt(15, 50 + i), false, ts);
+            tel.observe_frame(VideoWireCodec::H265, ts);
+        }
+        let resumed = tel.snapshot_p2s(7, 1, 99, 0x1d, t0 + Duration::from_secs(7));
+        assert_eq!(resumed.loss_pct, 0);
+        assert_eq!(resumed.heavy_freeze_cnt, 0);
+        assert_eq!(resumed.heavy_freeze_time_ratio, 0);
+        assert!(resumed.recv_data_interval_ms < 500);
+        assert_eq!(resumed.actual_member_num, 1);
+        assert_eq!(resumed.play_frames, 15);
     }
 
     #[test]

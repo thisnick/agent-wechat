@@ -258,10 +258,10 @@ pub(super) fn run(
                 let _ = command.reply.send(result);
             }
             publish_roster(transport, session, &roster)?;
-            let has_remote = has_joined_remote_member(&session.members(), own_member);
-            if has_remote {
+            let members = session.members();
+            if has_joined_remote_member(&members, own_member) {
                 seen_remote_member = true;
-            } else if seen_remote_member {
+            } else if should_exit_after_remote_departure(seen_remote_member, &members, own_member) {
                 break;
             }
             if is_video
@@ -312,10 +312,10 @@ pub(super) fn run(
                 );
             }
             publish_roster(transport, session, &roster)?;
-            let has_remote = has_joined_remote_member(&session.members(), own_member);
-            if has_remote {
+            let members = session.members();
+            if has_joined_remote_member(&members, own_member) {
                 seen_remote_member = true;
-            } else if seen_remote_member {
+            } else if should_exit_after_remote_departure(seen_remote_member, &members, own_member) {
                 break;
             }
             if is_video
@@ -406,6 +406,25 @@ fn has_joined_remote_member(
     members
         .iter()
         .any(|member| member.status == 1 && member.member_id != own_member)
+}
+
+fn has_pending_remote_member(
+    members: &[wechat_calls::session::ConferenceMember],
+    own_member: u16,
+) -> bool {
+    members
+        .iter()
+        .any(|member| matches!(member.status, 2 | 3) && member.member_id != own_member)
+}
+
+fn should_exit_after_remote_departure(
+    seen_remote_member: bool,
+    members: &[wechat_calls::session::ConferenceMember],
+    own_member: u16,
+) -> bool {
+    seen_remote_member
+        && !has_joined_remote_member(members, own_member)
+        && !has_pending_remote_member(members, own_member)
 }
 
 fn desired_conference_video_members(
@@ -1041,10 +1060,55 @@ mod tests {
     fn has_joined_remote_member_detects_when_all_remotes_leave() {
         let mut own = member(0, "self");
         let mut remote = member(1, "peer");
+        let mut invitee = member(2, "invitee");
         assert!(has_joined_remote_member(&[own.clone(), remote.clone()], 0));
-        // Remote leaves (status = 4): no joined remote members remain.
+        assert!(!should_exit_after_remote_departure(
+            true,
+            &[own.clone(), remote.clone()],
+            0
+        ));
+
+        // Remote leaves (status = 4) while another invitee is still ringing (status = 2):
+        // keep polling so the invitee can still join.
         remote.status = 4;
-        assert!(!has_joined_remote_member(&[own.clone(), remote.clone()], 0));
+        invitee.status = 2;
+        assert!(!has_joined_remote_member(
+            &[own.clone(), remote.clone(), invitee.clone()],
+            0
+        ));
+        assert!(has_pending_remote_member(
+            &[own.clone(), remote.clone(), invitee.clone()],
+            0
+        ));
+        assert!(!should_exit_after_remote_departure(
+            true,
+            &[own.clone(), remote.clone(), invitee.clone()],
+            0
+        ));
+
+        // Invitee acknowledged (status = 3) also keeps the loop alive.
+        invitee.status = 3;
+        assert!(!should_exit_after_remote_departure(
+            true,
+            &[own.clone(), remote.clone(), invitee.clone()],
+            0
+        ));
+
+        // Once all remote members have left/declined (status = 4), exit promptly.
+        invitee.status = 4;
+        assert!(should_exit_after_remote_departure(
+            true,
+            &[own.clone(), remote.clone(), invitee],
+            0
+        ));
+
+        // Before any remote ever joined, do not exit early.
+        assert!(!should_exit_after_remote_departure(
+            false,
+            &[own.clone(), remote],
+            0
+        ));
+
         // Own member alone does not count as a remote participant.
         own.status = 1;
         assert!(!has_joined_remote_member(&[own], 0));

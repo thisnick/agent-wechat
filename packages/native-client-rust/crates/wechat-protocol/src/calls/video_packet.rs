@@ -495,10 +495,8 @@ impl Default for VideoP2sReport {
     }
 }
 
-/// Encode an `0x0b` MP P2S QoS heartbeat payload for `packed_kind = 0x30`
-/// using the supplied live receiver/sender telemetry (`inner.f1` + `inner.f3.f1` + `inner.f6.f1`).
-pub fn encode_p2s_report(sequence: u16, cap_seq: u32, report: &VideoP2sReport) -> Result<Vec<u8>> {
-    let client_hdr = p::message(&[
+fn encode_p2s_client_header() -> Result<Vec<u8>> {
+    p::message(&[
         p::uint(1, 11),
         p::uint(2, 0),
         p::uint(3, 0),
@@ -506,7 +504,13 @@ pub fn encode_p2s_report(sequence: u16, cap_seq: u32, report: &VideoP2sReport) -
         p::uint(5, 4),
         p::uint(6, 111),
         p::uint(7, 0x050000cb),
-    ])?;
+    ])
+}
+
+/// Encode an `0x0b` MP P2S QoS heartbeat payload for `packed_kind = 0x30`
+/// using the supplied live receiver/sender telemetry (`inner.f1` + `inner.f3.f1` + `inner.f6.f1`).
+pub fn encode_p2s_report(sequence: u16, cap_seq: u32, report: &VideoP2sReport) -> Result<Vec<u8>> {
+    let client_hdr = encode_p2s_client_header()?;
     let loss_clamped = report.loss_pct.min(100);
     let short_loss = report.short_loss_pct.min(100);
     let long_loss = report.long_loss_pct.min(100);
@@ -571,19 +575,43 @@ pub fn encode_p2s_report(sequence: u16, cap_seq: u32, report: &VideoP2sReport) -
 }
 
 /// Encode an `0x0b` MP P2S QoS heartbeat payload for `packed_kind = 0x30`
-/// with default baseline telemetry for callers without live stats.
+/// matching the nested `inner.f1` (client header) + `inner.f3.f1` (`video_p2s`) wire layout.
 pub fn encode_p2s(
     sequence: u16,
     cap_seq: u32,
     codec_support_mask: u32,
     decode_type: u32,
 ) -> Result<Vec<u8>> {
-    let report = VideoP2sReport {
-        codec_support_mask,
-        decode_type,
-        ..VideoP2sReport::default()
-    };
-    encode_p2s_report(sequence, cap_seq, &report)
+    let client_hdr = encode_p2s_client_header()?;
+    let video_p2s = p::message(&[
+        p::uint(1, 0),
+        p::uint(2, 1),
+        p::uint(4, 0x7e),
+        p::uint(8, 500),
+        p::uint(9, 500),
+        p::uint(10, 15),
+        p::uint(11, 15),
+        p::uint(12, 15),
+        p::uint(15, 15),
+        p::uint(16, 8),
+        p::uint(17, 1),
+        p::uint(19, 1),
+        p::uint(20, 1),
+        p::uint(24, u64::from(codec_support_mask)),
+        p::uint(29, u64::from(decode_type)),
+    ])?;
+    let video_wrapper = p::message(&[p::bytes(1, &video_p2s)])?;
+    let inner = p::message(&[p::bytes(1, &client_hdr), p::bytes(3, &video_wrapper)])?;
+    let outer = p::message(&[
+        p::uint(1, u64::from(sequence)),
+        p::uint(2, u64::from(cap_seq)),
+        p::bytes(3, &inner),
+        p::uint(4, 2),
+    ])?;
+    let mut out = Vec::with_capacity(1 + outer.len());
+    out.push(0x0b);
+    out.extend_from_slice(&outer);
+    Ok(out)
 }
 
 /// Split an Annex-B H.264/H.265 access unit into parameter-set (XPS) bytes and
@@ -3972,11 +4000,68 @@ mod tests {
         assert_eq!(opt_u32(&vlink, 5).unwrap(), Some(1));
         assert_eq!(opt_u32(&vlink, 6).unwrap(), Some(5));
 
-        // Default baseline encode_p2s (conn_id = 0, recv_pkgs = 0, arq = 0) omits videoLink (inner.f6).
+        // Baseline encode_p2s keeps the exact original 15-field video_p2s wire layout
+        // and omits inner.f6 (videoLink) so conference P2S heartbeats stay byte-identical.
         let baseline = encode_p2s(7, 2, 0x1d, 15).unwrap();
+        let expected_client_hdr = p::message(&[
+            p::uint(1, 11),
+            p::uint(2, 0),
+            p::uint(3, 0),
+            p::uint(4, 1),
+            p::uint(5, 4),
+            p::uint(6, 111),
+            p::uint(7, 0x050000cb),
+        ])
+        .unwrap();
+        let expected_video_p2s = p::message(&[
+            p::uint(1, 0),
+            p::uint(2, 1),
+            p::uint(4, 0x7e),
+            p::uint(8, 500),
+            p::uint(9, 500),
+            p::uint(10, 15),
+            p::uint(11, 15),
+            p::uint(12, 15),
+            p::uint(15, 15),
+            p::uint(16, 8),
+            p::uint(17, 1),
+            p::uint(19, 1),
+            p::uint(20, 1),
+            p::uint(24, 0x1d),
+            p::uint(29, 15),
+        ])
+        .unwrap();
+        let expected_video_wrap = p::message(&[p::bytes(1, &expected_video_p2s)]).unwrap();
+        let expected_inner = p::message(&[
+            p::bytes(1, &expected_client_hdr),
+            p::bytes(3, &expected_video_wrap),
+        ])
+        .unwrap();
+        let expected_outer = p::message(&[
+            p::uint(1, 7),
+            p::uint(2, 2),
+            p::bytes(3, &expected_inner),
+            p::uint(4, 2),
+        ])
+        .unwrap();
+        let mut expected_baseline = Vec::with_capacity(1 + expected_outer.len());
+        expected_baseline.push(0x0b);
+        expected_baseline.extend_from_slice(&expected_outer);
+        assert_eq!(baseline, expected_baseline);
+
         let baseline_outer = p::decode(&baseline[1..]).unwrap();
         let baseline_inner =
             p::decode(p::optional_data(&baseline_outer, 3).unwrap().unwrap()).unwrap();
-        assert!(p::optional_data(&baseline_inner, 6).unwrap().is_none());
+        let baseline_inner_tags: Vec<u32> = baseline_inner.iter().map(|f| f.number).collect();
+        assert_eq!(baseline_inner_tags, vec![1, 3]);
+        let baseline_vwrap =
+            p::decode(p::optional_data(&baseline_inner, 3).unwrap().unwrap()).unwrap();
+        let baseline_vp2s =
+            p::decode(p::optional_data(&baseline_vwrap, 1).unwrap().unwrap()).unwrap();
+        let baseline_vp2s_tags: Vec<u32> = baseline_vp2s.iter().map(|f| f.number).collect();
+        assert_eq!(
+            baseline_vp2s_tags,
+            vec![1, 2, 4, 8, 9, 10, 11, 12, 15, 16, 17, 19, 20, 24, 29]
+        );
     }
 }
