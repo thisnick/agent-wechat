@@ -1,5 +1,34 @@
 # @agent-wechat/rust-crates
 
+## 3.0.0-beta.6
+
+### Major Changes
+
+- [#682](https://github.com/thisnick/agent-wechat/pull/682) [`d8ec7f2`](https://github.com/thisnick/agent-wechat/commit/d8ec7f221cce4e5f844062c93472ad861664c18c) Thanks [@thisnick](https://github.com/thisnick)! - Clean up the calling packet/runtime boundary between `wechat-protocol` and `wechat-calls`.
+
+  - Expose canonical RSM kind-3 header parsing (`RsmPacketHeader`, `parse_rsm_packet_header`, `RsmVideoReassembler::ingest_with_header`), `advance_seq16`, and Annex-B NALU helpers (`is_annexb_keyframe`, `annexb_nalu_types`) in `wechat-protocol::calls::video_packet` so callers never slice raw `EncFecHeader` or NALU bytes.
+  - Add deterministic, clock-injected (`now_ms: u64`) `VideoNackTracker`, `VideoP2sAccumulator`, and `VideoKeyframePolicy` state machines under `wechat-protocol::calls::video_qos` for direct reuse without `wechat-calls` runtime or codec dependencies.
+  - Unify direct and conference video receive recovery and outbound video burst pacing inside `wechat-calls` so both paths share the same state machines.
+  - Mark the low-level `wechat_calls::conference_media` and `wechat_calls::conference_send` host-integration modules `#[doc(hidden)]` alongside `admission`, `session`, and `native_media` (breaking change to the `wechat-calls` public API listing).
+
+### Patch Changes
+
+- [#676](https://github.com/thisnick/agent-wechat/pull/676) [`9b47c28`](https://github.com/thisnick/agent-wechat/commit/9b47c28ecd88826b013e33c4ffbf6f7eb51b8de8) Thanks [@thisnick](https://github.com/thisnick)! - Fix incoming MP/iLink RSM video keyframe parity decoding and out-of-order FEC reassembly.
+
+  - Sum the three wire RS parity fields (`r_lo2 + r_mid2 + r_hi4`, max 21) additively instead of bit-shifting them (`r_lo2 | (r_mid2 << 2) | (r_hi4 << 4)`), matching `s_per_group` and `pkg_idx_in_group`. Bit-shifting inflated high-parity keyframes (`r >= 10`) past `MAX_FEC_PARITY (64)` so every keyframe packet was silently dropped even without packet loss, and corrupted `r = 4..9` RS erasure recovery.
+  - Hold completed newer frames in a bounded in-order ready queue while an older incomplete keyframe (up to 4 frames) or FEC-protected P-frame (up to 2 frames) is still receiving paced packets or parity, instead of immediately evicting the older frame when a smaller subsequent P-frame completes first, and expose `RsmVideoReassembler::pop_ready` / `ConferenceReceiver::pop_ready_video` so callers drain all newly unblocked frames without pipeline lag. Completed recovery keyframes continue to evict strictly older incomplete assemblies immediately.
+  - Expand bounded keyframe, FEC recovery, drop, and ingest-error logging under `WX_CALL_VIDEO_TRACE=1`.
+
+- [#679](https://github.com/thisnick/agent-wechat/pull/679) [`e195410`](https://github.com/thisnick/agent-wechat/commit/e1954100cb43ed991081730a7c716d52da809057) Thanks [@thisnick](https://github.com/thisnick)! - Improve incoming video call keyframe recovery under packet loss, add direct ringing relay pre-connect, and clean up conference remote-end teardown.
+
+  - Track missing 16-bit `pkg_seq` ranges on direct and conference incoming video streams and send bounded `0x06` ARQ/NACK retransmission requests matched to the active `Live96`/`Live98` relay framing, report live `0x0b` MP P2S video/link telemetry (separating received `recv_fps` from playable `play_fps` and reporting heavy freeze while awaiting initial or post-drop keyframe sync so QoS servers trigger `u8IRequestFlag` on hardware H.264 peers), and send immediate forced `0x66` `IRequest` recovery before the first self-contained keyframe arrives.
+  - Reassemble 1D multi-group RSM video frames whose trailing FEC group carries fewer source packets than group 0, and recover 2D multi-group frames across full-group loss via vertical Reed-Solomon parity.
+  - Advertise the video transport capability bit (`1 << 17`) in `Cap11` field 7 on video offers while leaving audio-only offers unchanged.
+  - Bound mid-stream post-drop P-frame holds to 1200 ms on initialized video streams so playback resumes with periodic background keyframe requests if a peer drops recovery IDRs, while still requiring a fresh IDR after a transcoder reset.
+  - Pre-connect the incoming direct UDP relay during the ringing phase when `ConfAck` returns relay candidates, buffering early post-Ready packets (such as initial `seq = 0` keyframes) and handing off a fresh matching socket to the media session on `Join`.
+  - Require a startup grace window before resetting an FFmpeg receive transcoder for zero output, drain transcoder output during synchronous early-conference replay, and clear stale conference cache entries when a track ends.
+  - Reconcile early-announced conference tracks, exit the conference receive control loop promptly when all remote members leave, and extend the CLI media-closed-before-control-end grace window so remote conference teardown reports clean completion instead of `termination outcome unknown`.
+
 ## 3.0.0-beta.5
 
 ### Patch Changes

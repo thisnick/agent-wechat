@@ -1,5 +1,14 @@
 # @agent-wechat/desktop
 
+## 3.0.0-beta.6
+
+### Patch Changes
+
+- [#677](https://github.com/thisnick/agent-wechat/pull/677) [`a579b45`](https://github.com/thisnick/agent-wechat/commit/a579b45aaff49667423eba8d5a3ddd7ce9b41df3) Thanks [@thisnick](https://github.com/thisnick)! - Show the full uncropped local camera frame in pre-call video previews, in-call self-view overlays, and conference self tiles (`object-fit: contain`) and adapt preview and self-view container proportions for portrait cameras (such as macOS Center Stage cameras capturing 9:16 portrait video) so the preview matches what is transmitted.
+
+- Updated dependencies [[`a579b45`](https://github.com/thisnick/agent-wechat/commit/a579b45aaff49667423eba8d5a3ddd7ce9b41df3)]:
+  - @agent-wechat/client-ui@0.7.0-beta.3
+
 ## 3.0.0-beta.5
 
 ## 3.0.0-beta.4
