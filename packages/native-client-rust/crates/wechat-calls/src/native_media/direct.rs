@@ -312,20 +312,10 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                             match video_rx.ingest(raw) {
                                                 Ok(RsmIngestOutcome::Frame(frame)) => {
                                                     ready_frames.push(frame);
-                                                    while let Some(next_frame) =
-                                                        video_rx.pop_ready()
-                                                    {
-                                                        ready_frames.push(next_frame);
-                                                    }
                                                 }
                                                 Ok(RsmIngestOutcome::FrameDroppedNeedKeyframe) => {
                                                     trace_drops += 1;
                                                     need_keyframe = true;
-                                                    while let Some(next_frame) =
-                                                        video_rx.pop_ready()
-                                                    {
-                                                        ready_frames.push(next_frame);
-                                                    }
                                                 }
                                                 Err(err) => {
                                                     trace_drops += 1;
@@ -339,6 +329,9 @@ pub fn run_direct_media_with_video<H: DirectMediaHost>(
                                                     }
                                                 }
                                                 Ok(RsmIngestOutcome::Pending) => {}
+                                            }
+                                            while let Some(next_frame) = video_rx.pop_ready() {
+                                                ready_frames.push(next_frame);
                                             }
                                             for frame in ready_frames {
                                                 ensure!(
