@@ -52,14 +52,19 @@ pub mod opus;
 pub mod session;
 
 #[cfg(all(feature = "native-runtime", not(target_arch = "wasm32")))]
+#[doc(hidden)]
 pub mod conference_media;
 
 #[cfg(all(feature = "native-runtime", not(target_arch = "wasm32")))]
+#[doc(hidden)]
 pub mod conference_send;
 
 #[cfg(all(feature = "native-runtime", not(target_arch = "wasm32")))]
 #[doc(hidden)]
 pub mod native_media;
+
+#[cfg(all(feature = "native-runtime", not(target_arch = "wasm32")))]
+mod video_stream;
 
 #[cfg(all(feature = "native-runtime", not(target_arch = "wasm32")))]
 /// FFmpeg-backed video codec probing and low-latency transcoding bridge.

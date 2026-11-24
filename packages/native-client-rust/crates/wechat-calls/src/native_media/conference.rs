@@ -1,19 +1,18 @@
 //! Conference receive tracks, one paced uplink and optional generated diagnostics.
 use super::{
-    connect_relay_with_early,
-    direct::{record_rx_video_frame_sync, should_force_irequest},
-    reconcile_roster, BoundConferenceReceiver, DirectAudioFrame, DirectMediaHost, DirectVideoTx,
-    MediaMetric, TxAudioJitterBuffer, TxVideoQueue,
+    connect_relay_with_early, reconcile_roster, BoundConferenceReceiver, DirectAudioFrame,
+    DirectMediaHost, DirectVideoTx, MediaMetric, TxAudioJitterBuffer,
 };
 use crate::{
     conference_media::{ConferenceReceiver as Receiver, DecodedAudio, StreamReport},
     conference_send::ConferenceSender,
     session::ConferenceMember,
+    video_stream::{VideoTxPacer, VideoTxSendAction},
 };
 use anyhow::{ensure, Context, Result};
 use serde::Serialize;
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::BTreeMap,
     net::{SocketAddr, UdpSocket},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -26,9 +25,10 @@ use wechat_protocol::calls::{
     audio_packet::{self, Live96, MediaEpoch},
     relay::{RelayEpoch, SelectedRelay},
     video_packet::{
-        encode_irequest_with_force, encode_p2s, encode_p2s_report, encode_video_nack, parse_s2p,
-        RsmVideoPacketizer, VideoS2pCommand,
+        annexb_nalu_types, encode_p2s, encode_p2s_report, encode_video_nack, parse_s2p,
+        VideoS2pCommand,
     },
+    video_qos::KeyframeRequestReason,
 };
 #[path = "conference_tone.rs"]
 mod tone;
@@ -132,23 +132,8 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
     let mut seen_remote = false;
     let mut receivers = BTreeMap::<u16, BoundConferenceReceiver>::new();
     let mut unattributed = BTreeMap::<u16, Receiver>::new();
-    // Outgoing wire frames are pre-rotated 90° CCW to match mobile and conference receivers,
-    // which apply +90° CW display rotation; orientation = 1 signals +90° CW for desktop/native peers.
-    let mut video_tx = RsmVideoPacketizer::new(selected.own_member, 1).with_orientation(1);
-    let mut tx_video_queue = TxVideoQueue::new();
-    let mut tx_video_packets = VecDeque::<(u32, Vec<u8>)>::new();
-    let mut video_tx_exhausted = false;
-    let mut last_vf_tx: Option<Instant> = None;
-    let mut last_irequest_tx = BTreeMap::<u16, Instant>::new();
-    let mut pending_local_irequests = BTreeMap::<u16, u8>::new();
-    let mut irequest_streaks = BTreeMap::<u16, u32>::new();
-    let mut rx_codec_configs_seen = BTreeSet::<u16>::new();
-    let mut rx_keyframes_seen = BTreeSet::<u16>::new();
     let mut last_p2s_tx: Option<Instant> = None;
     let mut p2s_seq = 1u16;
-    let mut conf_tx_window_start = started;
-    let mut conf_tx_video_bytes = 0u64;
-    let mut conf_tx_video_frames = 0u32;
     let video_enabled = options.video_enabled || video.is_some();
     let video_trace = std::env::var("WX_CALL_VIDEO_TRACE").as_deref() == Ok("1");
     let mut trace_last_s2p: Option<VideoS2pCommand> = None;
@@ -186,6 +171,8 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
         stage = "receive_failed";
         let mut application_connected = false;
         let ready_at = Instant::now();
+        let mut video_tx =
+            VideoTxPacer::new(selected.own_member, 1, started.elapsed().as_millis() as u64);
         let mut observation_deadline = if audio.is_some() || options.multi_speaker {
             None
         } else {
@@ -222,16 +209,12 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                     &mut receivers,
                     &mut unattributed,
                 )?;
-                let active_members: std::collections::BTreeSet<u16> = receivers
-                    .iter()
-                    .filter(|(_, bound)| bound.active)
-                    .map(|(&id, _)| id)
-                    .collect();
-                rx_codec_configs_seen.retain(|id| active_members.contains(id));
-                rx_keyframes_seen.retain(|id| active_members.contains(id));
-                irequest_streaks.retain(|id, _| active_members.contains(id));
-                last_irequest_tx.retain(|id, _| active_members.contains(id));
-                pending_local_irequests.retain(|id, _| active_members.contains(id));
+                let anchor_ms = started.elapsed().as_millis() as u64;
+                for bound in receivers.values_mut() {
+                    if bound.active {
+                        bound.receiver.anchor_video_clock(anchor_ms);
+                    }
+                }
                 report.roster_updates += 1;
                 if audio.is_some() {
                     let tracks = receivers
@@ -375,12 +358,17 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                     }
                     if video_enabled {
                         let video_now = Instant::now();
+                        let now_ms = started.elapsed().as_millis() as u64;
+                        while let Some(member_id) = host.take_local_keyframe_request() {
+                            if let Some(bound) = receivers.get_mut(&member_id) {
+                                bound.receiver.queue_local_keyframe_request(3);
+                            }
+                        }
                         for (&member_id, bound) in &mut receivers {
                             if !bound.active {
                                 continue;
                             }
-                            if let Some((arq_seq, ranges)) = bound.receiver.poll_due_nack(video_now)
-                            {
+                            if let Some((arq_seq, ranges)) = bound.receiver.poll_due_nack(now_ms) {
                                 let stream_id = bound.receiver.last_video_stream_id().unwrap_or(1);
                                 let nack = encode_video_nack(
                                     selected.own_member,
@@ -401,81 +389,35 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                                     }
                                 }
                             }
-                        }
-                        while let Some(member_id) = host.take_local_keyframe_request() {
-                            pending_local_irequests.insert(member_id, 3);
-                        }
-                        let due_targets: Vec<u16> = pending_local_irequests
-                            .keys()
-                            .copied()
-                            .filter(|member_id| {
-                                last_irequest_tx
-                                    .get(member_id)
-                                    .is_none_or(|t| t.elapsed() >= Duration::from_millis(1000))
-                            })
-                            .collect();
-                        for target_member in due_targets {
-                            let Some(remaining) = pending_local_irequests.remove(&target_member)
-                            else {
-                                continue;
-                            };
-                            let (stream_id, last_seq) = receivers
-                                .get(&target_member)
-                                .map(|bound| {
-                                    (
-                                        bound.receiver.last_video_stream_id().unwrap_or(1),
-                                        bound.receiver.last_video_total_pkg_seq(),
-                                    )
-                                })
-                                .unwrap_or((1, None));
-                            let streak = irequest_streaks.get(&target_member).copied().unwrap_or(0);
-                            let has_kf = rx_keyframes_seen.contains(&target_member);
-                            let lost_seq = if has_kf { last_seq.unwrap_or(0) } else { 0 };
-                            let force = should_force_irequest(streak, last_seq.is_some(), has_kf);
-                            let req = encode_irequest_with_force(
+                            for req in bound.receiver.poll_due_irequests(
                                 selected.own_member,
-                                target_member,
-                                stream_id,
-                                started.elapsed().as_millis() as u64,
-                                lost_seq,
-                                force,
-                            );
-                            if let Ok(datagram) =
-                                sender.seal_video_rtcp(ready_at.elapsed(), stream_id, &req)
-                            {
-                                let _ = host.submit(&socket, selected.endpoint, &datagram, &[]);
-                                if video_trace {
-                                    eprintln!(
-                                        "[wechat-call-video] conf tx ireq reason=local stream={stream_id} target={target_member} lost_seq={lost_seq} force={force}"
-                                    );
-                                }
-                                if streak >= 2 && streak.is_multiple_of(2) && stream_id != 0 {
-                                    let req0 = encode_irequest_with_force(
-                                        selected.own_member,
-                                        target_member,
-                                        0,
-                                        started.elapsed().as_millis() as u64,
-                                        lost_seq,
-                                        force,
-                                    );
-                                    if let Ok(dg0) =
-                                        sender.seal_video_rtcp(ready_at.elapsed(), 0, &req0)
-                                    {
-                                        let _ = host.submit(&socket, selected.endpoint, &dg0, &[]);
+                                member_id,
+                                now_ms,
+                            ) {
+                                if let Ok(datagram) = sender.seal_video_rtcp(
+                                    ready_at.elapsed(),
+                                    req.stream_id,
+                                    &req.payload,
+                                ) {
+                                    let _ = host.submit(&socket, selected.endpoint, &datagram, &[]);
+                                    if video_trace && !req.is_stream0_fallback {
+                                        let reason = match req.reason {
+                                            KeyframeRequestReason::FrameDrop => "drop",
+                                            KeyframeRequestReason::LocalRequest => "local",
+                                            KeyframeRequestReason::InitialSync => "initial",
+                                        };
+                                        eprintln!(
+                                            "[wechat-call-video] conf tx ireq reason={reason} stream={} target={member_id} lost_seq={} force={}",
+                                            req.stream_id, req.lost_point_seq, req.force
+                                        );
                                     }
                                 }
-                                irequest_streaks.insert(target_member, streak.wrapping_add(1));
-                                last_irequest_tx.insert(target_member, Instant::now());
-                            }
-                            if remaining > 1 {
-                                pending_local_irequests
-                                    .insert(target_member, remaining.saturating_sub(1));
                             }
                         }
-                        let awaiting_sync = receivers.iter().any(|(&mid, b)| {
+                        let awaiting_sync = receivers.values().any(|b| {
                             b.active
                                 && b.receiver.has_active_video_window()
-                                && !rx_keyframes_seen.contains(&mid)
+                                && !b.receiver.is_video_keyframe_synced()
                         });
                         let p2s_interval = if awaiting_sync {
                             Duration::from_millis(550)
@@ -483,24 +425,7 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                             Duration::from_secs(1)
                         };
                         if last_p2s_tx.is_none_or(|t| t.elapsed() >= p2s_interval) {
-                            let tx_window_ms = u32::try_from(
-                                video_now
-                                    .saturating_duration_since(conf_tx_window_start)
-                                    .as_millis(),
-                            )
-                            .unwrap_or(1000)
-                            .max(1);
-                            let send_kbps = ((conf_tx_video_bytes.saturating_mul(8))
-                                / u64::from(tx_window_ms))
-                                as u32;
-                            let send_fps = conf_tx_video_frames
-                                .saturating_mul(1000)
-                                .div_ceil(tx_window_ms)
-                                .min(60);
-                            conf_tx_window_start = video_now;
-                            conf_tx_video_bytes = 0;
-                            conf_tx_video_frames = 0;
-
+                            let (send_kbps, send_fps) = video_tx.take_window_stats(now_ms);
                             // Snapshot every active bound receiver so paused/camera-off streams
                             // clear stale gap anchors and multi-sender streams roll their 1s
                             // windows evenly without starving higher member IDs.
@@ -510,28 +435,36 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                                     continue;
                                 }
                                 let was_active = b.receiver.has_active_video_window();
+                                let synced = b.receiver.is_video_keyframe_synced();
                                 let mut rep = b.receiver.snapshot_video_p2s(
                                     mid,
                                     u32::from(selected.connection_id),
                                     0x1d,
-                                    video_now,
+                                    now_ms,
                                 );
                                 rep.send_kbps = send_kbps;
                                 rep.send_fps = send_fps;
                                 rep.capt_fps = send_fps;
                                 if was_active {
-                                    active_reports.push((mid, rep));
+                                    active_reports.push((synced, rep));
                                 }
                             }
-                            let selected_rep = active_reports
+                            let unsynced_reports: Vec<
+                                &wechat_protocol::calls::video_packet::VideoP2sReport,
+                            > = active_reports
                                 .iter()
-                                .find(|(mid, _)| !rx_keyframes_seen.contains(mid))
-                                .or_else(|| {
-                                    (!active_reports.is_empty()).then(|| {
-                                        &active_reports[usize::from(p2s_seq) % active_reports.len()]
-                                    })
-                                })
-                                .map(|(_, rep)| rep);
+                                .filter(|(synced, _)| !*synced)
+                                .map(|(_, rep)| rep)
+                                .collect();
+                            let selected_rep = if !unsynced_reports.is_empty() {
+                                Some(
+                                    unsynced_reports[usize::from(p2s_seq) % unsynced_reports.len()],
+                                )
+                            } else if !active_reports.is_empty() {
+                                Some(&active_reports[usize::from(p2s_seq) % active_reports.len()].1)
+                            } else {
+                                None
+                            };
                             let encoded = if let Some(p2s_rep) = selected_rep {
                                 encode_p2s_report(p2s_seq, 2, p2s_rep)
                             } else {
@@ -548,56 +481,18 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                         }
                     }
                     if let Some(video_rx_ch) = &video {
-                        let current_vgen = host.video_generation();
-                        if current_vgen == 0 || video_tx_exhausted {
-                            tx_video_queue.clear();
-                            tx_video_packets.clear();
-                            last_vf_tx = None;
-                        } else {
-                            tx_video_packets.retain(|(gen_id, _)| *gen_id == current_vgen);
-                            if tx_video_packets.is_empty() {
-                                if let Some(frame) =
-                                    tx_video_queue.next_frame(video_rx_ch, current_vgen)
-                                {
-                                    conf_tx_video_bytes = conf_tx_video_bytes
-                                        .saturating_add(frame.annexb.len() as u64);
-                                    conf_tx_video_frames = conf_tx_video_frames.saturating_add(1);
-                                    if let Ok(pkts) = video_tx.packetize(
-                                        frame.codec,
-                                        &frame.annexb,
-                                        frame.timestamp_ms,
-                                        frame.fps,
-                                        frame.kbps,
-                                    ) {
-                                        for pkt in pkts {
-                                            tx_video_packets.push_back((current_vgen, pkt));
-                                        }
-                                        if last_vf_tx.is_none_or(|t| {
-                                            t.elapsed() >= Duration::from_millis(500)
-                                        }) {
-                                            if let Ok(vf) = video_tx
-                                                .build_orientation_metadata_packet(
-                                                    frame.codec,
-                                                    frame.timestamp_ms,
-                                                    frame.fps,
-                                                )
-                                            {
-                                                tx_video_packets.push_back((current_vgen, vf));
-                                                last_vf_tx = Some(Instant::now());
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            for _ in 0..4 {
-                                let Some((pkt_gen, pkt)) = tx_video_packets.pop_front() else {
-                                    break;
-                                };
+                        let now_ms = started.elapsed().as_millis() as u64;
+                        video_tx.drain_and_pace(
+                            video_rx_ch,
+                            host.video_generation(),
+                            now_ms,
+                            4,
+                            |_| {},
+                            |pkt_gen, pkt| {
                                 if !host.current() || host.video_generation() != pkt_gen {
-                                    tx_video_packets.clear();
-                                    break;
+                                    return Ok(VideoTxSendAction::StaleGeneration);
                                 }
-                                match sender.seal_video(ready_at.elapsed(), 1, true, &pkt) {
+                                match sender.seal_video(ready_at.elapsed(), 1, true, pkt) {
                                     Ok(datagram) => {
                                         let _ = host.submit(
                                             &socket,
@@ -605,16 +500,12 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                                             &datagram,
                                             &[],
                                         )?;
+                                        Ok(VideoTxSendAction::Sent)
                                     }
-                                    Err(_) => {
-                                        tx_video_packets.clear();
-                                        tx_video_queue.clear();
-                                        video_tx_exhausted = true;
-                                        break;
-                                    }
+                                    Err(_) => Ok(VideoTxSendAction::SequenceExhausted),
                                 }
-                            }
-                        }
+                            },
+                        )?;
                     }
                 }
             }
@@ -696,7 +587,6 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                                     host.receive_track_pcm(member, bound.generation, frame)?;
                                 }
                             }
-                            let mut need_keyframe = consumed.need_keyframe;
                             let mut ready_frames = Vec::new();
                             if let Some(video_frame) = consumed.video {
                                 ready_frames.push(video_frame);
@@ -728,21 +618,8 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                                     if video_frame.prior_frames_dropped {
                                         trace_drop_logged = trace_drop_logged.saturating_add(1);
                                     }
-                                    let nalus: Vec<u8> =
-                                        wechat_protocol::calls::video_packet::split_annexb_nalus(
-                                            &video_frame.payload,
-                                        )
-                                        .into_iter()
-                                        .map(|(start, _end, sc)| {
-                                            let b = video_frame.payload[start + sc];
-                                            match video_frame.codec {
-                                                wechat_protocol::calls::video_packet::VideoWireCodec::H265 => {
-                                                    (b >> 1) & 0x3f
-                                                }
-                                                _ => b & 0x1f,
-                                            }
-                                        })
-                                        .collect();
+                                    let nalus =
+                                        annexb_nalu_types(video_frame.codec, &video_frame.payload);
                                     eprintln!(
                                         "[wechat-call-video] conf rx frame #{trace_frames_ok} member={member} fidx={} ts={} codec={:?} stream={} kf={} cfg={} fec={} drop={} orient={} bytes={} nalus={nalus:?}",
                                         video_frame.frame_index,
@@ -757,31 +634,6 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                                         video_frame.payload.len()
                                     );
                                 }
-                                let mut cfg_seen = rx_codec_configs_seen.contains(&member);
-                                let mut kf_seen = rx_keyframes_seen.contains(&member);
-                                record_rx_video_frame_sync(
-                                    &mut cfg_seen,
-                                    &mut kf_seen,
-                                    video_frame.is_keyframe,
-                                    video_frame.has_codec_config,
-                                );
-                                if cfg_seen {
-                                    rx_codec_configs_seen.insert(member);
-                                }
-                                if kf_seen {
-                                    rx_keyframes_seen.insert(member);
-                                }
-                                bound.receiver.observe_reassembled_video_frame(
-                                    &video_frame,
-                                    kf_seen,
-                                    Instant::now(),
-                                );
-                                if video_frame.prior_frames_dropped && !video_frame.is_keyframe {
-                                    need_keyframe = true;
-                                } else if video_frame.is_keyframe {
-                                    pending_local_irequests.remove(&member);
-                                    irequest_streaks.remove(&member);
-                                }
                                 host.receive_video(video_frame)?;
                             }
                             if video_trace
@@ -792,65 +644,6 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                                     "[wechat-call-video] conf rx_summary frames={trace_frames_ok} fec={trace_total_fec} drops={trace_total_drops}"
                                 );
                                 trace_last = Instant::now();
-                            }
-                            if need_keyframe
-                                && last_irequest_tx
-                                    .get(&member)
-                                    .is_none_or(|t| t.elapsed() >= Duration::from_millis(1200))
-                            {
-                                if let Some(sender) = &mut app_sender {
-                                    let stream_id =
-                                        bound.receiver.last_video_stream_id().unwrap_or(1);
-                                    let last_seq = bound.receiver.last_video_total_pkg_seq();
-                                    let streak =
-                                        irequest_streaks.get(&member).copied().unwrap_or(0);
-                                    let has_kf = rx_keyframes_seen.contains(&member);
-                                    let lost_seq = if has_kf { last_seq.unwrap_or(0) } else { 0 };
-                                    let force =
-                                        should_force_irequest(streak, last_seq.is_some(), has_kf);
-                                    let req = encode_irequest_with_force(
-                                        selected.own_member,
-                                        member,
-                                        stream_id,
-                                        elapsed,
-                                        lost_seq,
-                                        force,
-                                    );
-                                    if let Ok(datagram) =
-                                        sender.seal_video_rtcp(ready_at.elapsed(), stream_id, &req)
-                                    {
-                                        let _ =
-                                            host.submit(&socket, selected.endpoint, &datagram, &[]);
-                                        if video_trace {
-                                            eprintln!(
-                                                "[wechat-call-video] conf tx ireq reason=drop stream={stream_id} target={member} lost_seq={lost_seq} force={force}"
-                                            );
-                                        }
-                                        if streak >= 2 && streak.is_multiple_of(2) && stream_id != 0
-                                        {
-                                            let req0 = encode_irequest_with_force(
-                                                selected.own_member,
-                                                member,
-                                                0,
-                                                elapsed,
-                                                lost_seq,
-                                                force,
-                                            );
-                                            if let Ok(dg0) =
-                                                sender.seal_video_rtcp(ready_at.elapsed(), 0, &req0)
-                                            {
-                                                let _ = host.submit(
-                                                    &socket,
-                                                    selected.endpoint,
-                                                    &dg0,
-                                                    &[],
-                                                );
-                                            }
-                                        }
-                                        irequest_streaks.insert(member, streak.wrapping_add(1));
-                                        last_irequest_tx.insert(member, Instant::now());
-                                    }
-                                }
                             }
                         } else {
                             report.unselected_member += 1;
@@ -877,7 +670,7 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                 }
             }
             if idle {
-                let sleep_ms = if tx_video_packets.is_empty() { 5 } else { 2 };
+                let sleep_ms = if video_tx.has_pending_packets() { 2 } else { 5 };
                 thread::sleep(Duration::from_millis(sleep_ms));
             }
         }
