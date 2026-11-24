@@ -20,12 +20,16 @@
     "fix-calls-ipv6-relay-checkin",
     "fix-incoming-video-call-rx",
     "fix-incoming-video-keyframe-recovery",
+    "fix-local-call-video-preview-framing",
+    "fix-rsm-additive-fec-parity",
+    "fix-video-call-recovery-and-conference-teardown",
     "fix-video-calls-reliability-and-preview",
     "fix-video-calls-self-view-cli-and-smoothness",
     "github-star-support-prompt",
     "native-video-calls-protocol-v3",
     "openclaw-2026-11-7",
     "receive-vweixinf-stickers",
+    "refactor-calls-protocol-runtime-boundary",
     "wecom-tp-media-downloads"
   ]
 }
