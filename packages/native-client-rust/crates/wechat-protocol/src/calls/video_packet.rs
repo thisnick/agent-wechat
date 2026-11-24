@@ -1347,10 +1347,10 @@ impl StreamReassembler {
             .flat_map(|g| (0..completed.s_per_group).filter_map(|col| g.get(&col)))
             .map(Vec::len)
             .sum();
-        ensure!(
-            total_bytes <= MAX_VIDEO_FRAME_BYTES + 4096,
-            "Reassembled video frame exceeds budget"
-        );
+        if total_bytes > MAX_VIDEO_FRAME_BYTES + 4096 {
+            self.record_drop(full_frame_idx);
+            bail!("Reassembled video frame exceeds budget");
+        }
         let mut assembled = Vec::with_capacity(total_bytes);
         for group in &completed.groups {
             for col in 0..completed.s_per_group {
@@ -1361,13 +1361,21 @@ impl StreamReassembler {
         }
 
         let (frame_payload, is_keyframe, has_codec_config) = match completed.codec {
-            VideoWireCodec::H264 | VideoWireCodec::H265 => unframe_annexb_access_unit_with_count(
-                completed.codec,
-                &assembled,
-                completed.frame_count,
-                completed.xps_len_hi,
-                completed.slice_len_hi,
-            )?,
+            VideoWireCodec::H264 | VideoWireCodec::H265 => {
+                match unframe_annexb_access_unit_with_count(
+                    completed.codec,
+                    &assembled,
+                    completed.frame_count,
+                    completed.xps_len_hi,
+                    completed.slice_len_hi,
+                ) {
+                    Ok(unframed) => unframed,
+                    Err(err) => {
+                        self.record_drop(full_frame_idx);
+                        return Err(err);
+                    }
+                }
+            }
             _ => (assembled, completed.is_iframe, false),
         };
         let is_keyframe = is_keyframe || completed.is_iframe;
@@ -3516,5 +3524,104 @@ mod tests {
         assert_eq!(rx.pop_ready().unwrap().frame_index, 0xffff);
         assert_eq!(rx.pop_ready().unwrap().frame_index, 0x0000);
         assert!(rx.pop_ready().is_none());
+    }
+
+    #[test]
+    fn failed_unframe_records_drop_and_rejects_trailing_parity_without_zombie_stall() {
+        let mut p_frame = vec![0, 0, 0, 1, 0x41, 0x9a];
+        p_frame.extend((0..120u8).map(|i| i.wrapping_mul(3).wrapping_add(7)));
+        let pf = frame_annexb_access_unit(VideoWireCodec::H264, &p_frame).unwrap();
+
+        // Malformed H.264 framed payload (truncated length prefix) triggers an unframe error on
+        // completion of frame 70 (s=1, r=1).
+        let bad_payload = vec![0xffu8; 8];
+        let mut rx = RsmVideoReassembler::new();
+        assert!(rx
+            .ingest(&build_2d_rsm_pkt(
+                VideoWireCodec::H264,
+                70,
+                1,
+                0,
+                1,
+                1,
+                1,
+                1,
+                2,
+                0,
+                false,
+                0,
+                &bad_payload,
+            ))
+            .is_err());
+
+        // Trailing parity packet for frame 70 must be rejected via pending_drops instead of
+        // creating a parity-only zombie assembly.
+        assert_eq!(
+            rx.ingest(&build_2d_rsm_pkt(
+                VideoWireCodec::H264,
+                70,
+                1,
+                0,
+                1,
+                1,
+                2,
+                2,
+                2,
+                0,
+                false,
+                0,
+                &bad_payload,
+            ))
+            .unwrap(),
+            RsmIngestOutcome::Pending
+        );
+
+        // Next valid frame 71 emits immediately (not held back by a zombie frame 70) and reports
+        // prior_frames_dropped = true.
+        let RsmIngestOutcome::Frame(out71) = rx
+            .ingest(&build_2d_rsm_pkt(
+                VideoWireCodec::H264,
+                71,
+                1,
+                0,
+                1,
+                0,
+                1,
+                1,
+                1,
+                0,
+                false,
+                0,
+                &pf.bytes,
+            ))
+            .unwrap()
+        else {
+            panic!("frame 71 must emit immediately without zombie stall");
+        };
+        assert_eq!(out71.frame_index, 71);
+        assert!(out71.prior_frames_dropped);
+
+        let RsmIngestOutcome::Frame(out72) = rx
+            .ingest(&build_2d_rsm_pkt(
+                VideoWireCodec::H264,
+                72,
+                1,
+                0,
+                1,
+                0,
+                1,
+                1,
+                1,
+                0,
+                false,
+                0,
+                &pf.bytes,
+            ))
+            .unwrap()
+        else {
+            panic!("frame 72 must emit immediately");
+        };
+        assert_eq!(out72.frame_index, 72);
+        assert!(!out72.prior_frames_dropped);
     }
 }
