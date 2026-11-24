@@ -11,41 +11,6 @@ field wechat_calls::audio::AudioFrame::samples | alloc::vec::Vec<i16> | MISSING 
 field wechat_calls::audio::AudioFrame::sequence | u64 | MISSING DOC
 field wechat_calls::audio::AudioFrame::timestamp | u64 | MISSING DOC
 field wechat_calls::audio::MediaError::Codec::code | i32 | MISSING DOC
-field wechat_calls::conference_media::ConferenceConsumeOutput::audio | alloc::vec::Vec<wechat_calls::conference_media::DecodedAudio> | Decoded Opus PCM frames from this datagram.
-field wechat_calls::conference_media::ConferenceConsumeOutput::need_keyframe | bool | True when a video frame assembly dropped and the local side should send `0x66 IRequest`.
-field wechat_calls::conference_media::ConferenceConsumeOutput::peer_requested_keyframe | bool | True when the remote peer requested a keyframe (`0x66 IRequest`).
-field wechat_calls::conference_media::ConferenceConsumeOutput::video | core::option::Option<wechat_protocol::calls::video_packet::ReassembledVideoFrame> | Reassembled video frame completed by this datagram, if any.
-field wechat_calls::conference_media::ConferenceReceiver::report | wechat_calls::conference_media::StreamReport | MISSING DOC
-field wechat_calls::conference_media::DecodedAudio::sample_offset | u64 | MISSING DOC
-field wechat_calls::conference_media::DecodedAudio::samples | alloc::vec::Vec<i16> | MISSING DOC
-field wechat_calls::conference_media::DecodedAudio::sequence | u64 | MISSING DOC
-field wechat_calls::conference_media::StreamReport::aggregate_member_hints | alloc::collections::btree::map::BTreeMap<u16, u64> | MISSING DOC
-field wechat_calls::conference_media::StreamReport::aggregate_packets | u64 | MISSING DOC
-field wechat_calls::conference_media::StreamReport::authenticated_nonce_reuses | alloc::collections::btree::map::BTreeMap<u8, u64> | MISSING DOC
-field wechat_calls::conference_media::StreamReport::authenticated_packets | u64 | MISSING DOC
-field wechat_calls::conference_media::StreamReport::codec_markers | alloc::collections::btree::map::BTreeMap<alloc::string::String, u64> | MISSING DOC
-field wechat_calls::conference_media::StreamReport::control_packets | u64 | MISSING DOC
-field wechat_calls::conference_media::StreamReport::decode_errors | u64 | MISSING DOC
-field wechat_calls::conference_media::StreamReport::decoded_frames | u64 | MISSING DOC
-field wechat_calls::conference_media::StreamReport::feedback_packets | u64 | MISSING DOC
-field wechat_calls::conference_media::StreamReport::identity_quarantined | bool | MISSING DOC
-field wechat_calls::conference_media::StreamReport::invalid_packets | u64 | MISSING DOC
-field wechat_calls::conference_media::StreamReport::invalid_reasons | alloc::collections::btree::map::BTreeMap<&'static str, u64> | MISSING DOC
-field wechat_calls::conference_media::StreamReport::invalid_while_inactive | u64 | MISSING DOC
-field wechat_calls::conference_media::StreamReport::joined_events | u64 | MISSING DOC
-field wechat_calls::conference_media::StreamReport::left_events | u64 | MISSING DOC
-field wechat_calls::conference_media::StreamReport::malformed_aggregates | u64 | MISSING DOC
-field wechat_calls::conference_media::StreamReport::nonzero_frames | u64 | MISSING DOC
-field wechat_calls::conference_media::StreamReport::nonzero_second_bins | alloc::collections::btree::map::BTreeMap<u16, u64> | MISSING DOC
-field wechat_calls::conference_media::StreamReport::ordering_drops | u64 | MISSING DOC
-field wechat_calls::conference_media::StreamReport::payload_kinds | alloc::collections::btree::map::BTreeMap<u8, u64> | MISSING DOC
-field wechat_calls::conference_media::StreamReport::peak_magnitude | u16 | MISSING DOC
-field wechat_calls::conference_media::StreamReport::replayed_packets | u64 | MISSING DOC
-field wechat_calls::conference_media::StreamReport::unsupported_audio | u64 | MISSING DOC
-field wechat_calls::conference_media::StreamReport::unsupported_lengths | alloc::collections::btree::map::BTreeMap<usize, u64> | MISSING DOC
-field wechat_calls::conference_media::StreamReport::unsupported_reasons | alloc::collections::btree::map::BTreeMap<&'static str, u64> | MISSING DOC
-field wechat_calls::conference_send::PreparedAudio::generation | u32 | MISSING DOC
-field wechat_calls::conference_send::PreparedAudio::packet | alloc::vec::Vec<u8> | MISSING DOC
 field wechat_calls::mixer::MixedFrame::contributing_tracks | alloc::vec::Vec<u32> | Tracks with a frame in this slot, not a claim that a person spoke.
 field wechat_calls::mixer::MixedFrame::sample_offset | u64 | MISSING DOC
 field wechat_calls::mixer::MixedFrame::samples | alloc::vec::Vec<i16> | MISSING DOC
@@ -91,19 +56,6 @@ fn wechat_calls::audio::AudioFormat::sample_rate | fn(self) -> u32 | MISSING DOC
 fn wechat_calls::audio::AudioFormat::samples_per_channel | fn(self) -> usize | MISSING DOC
 fn wechat_calls::audio::AudioFormat::samples_per_frame | fn(self) -> usize | MISSING DOC
 fn wechat_calls::audio::AudioFormat::validate_frame | fn(self, samples: &[i16]) -> core::result::Result<(), wechat_calls::audio::MediaError> | MISSING DOC
-fn wechat_calls::conference_media::ConferenceReceiver::close | fn(&mut self) | MISSING DOC
-fn wechat_calls::conference_media::ConferenceReceiver::consume | fn(&mut self, epoch: wechat_protocol::calls::audio_packet::MediaEpoch, packet: &[u8], elapsed_ms: u64, decode_audio: bool) -> anyhow::Result<alloc::vec::Vec<wechat_calls::conference_media::DecodedAudio>> | MISSING DOC
-fn wechat_calls::conference_media::ConferenceReceiver::consume_media | fn(&mut self, epoch: wechat_protocol::calls::audio_packet::MediaEpoch, packet: &[u8], elapsed_ms: u64, decode_audio: bool) -> anyhow::Result<wechat_calls::conference_media::ConferenceConsumeOutput> | Consume one conference relay packet and return decoded audio, reassembled video and keyframe-request signals.
-fn wechat_calls::conference_media::ConferenceReceiver::new | fn(selected: &wechat_protocol::calls::relay::SelectedRelay, member: u16, epoch: wechat_protocol::calls::audio_packet::MediaEpoch) -> anyhow::Result<Self> | MISSING DOC
-fn wechat_calls::conference_media::ConferenceReceiver::pop_ready_video | fn(&mut self) -> core::option::Option<wechat_protocol::calls::video_packet::ReassembledVideoFrame> | Pop the next buffered in-order video frame that is ready for delivery after [`Self::consume_media`].
-fn wechat_calls::conference_media::ConferenceReceiver::reset_decoder | fn(&mut self) -> anyhow::Result<()> | New application track incarnation; keep authenticated replay/order state and the shared presentation clock, while discarding codec history.
-fn wechat_calls::conference_send::ConferenceSender::new | fn(selected: &wechat_protocol::calls::relay::SelectedRelay, reference_member: u16, epoch: wechat_protocol::calls::audio_packet::MediaEpoch, grouping: u8, start: core::time::Duration) -> anyhow::Result<Self> | MISSING DOC
-fn wechat_calls::conference_send::ConferenceSender::poll | fn(&mut self, now: core::time::Duration, generation: u32, microphone_enabled: bool, source: impl core::ops::function::FnOnce() -> core::option::Option<alloc::vec::Vec<i16>>) -> anyhow::Result<core::option::Option<wechat_calls::conference_send::PreparedAudio>> | The source is called only for one due slot. A late worker skips elapsed slots instead of requesting a catch-up burst. The host must recheck this returned generation under its physical UDP handoff gate.
-fn wechat_calls::conference_send::ConferenceSender::seal_qos_p2s | fn(&mut self, now: core::time::Duration, payload: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Seal one MP QoS P2S telemetry heartbeat (`0x0b` on `0x30`).
-fn wechat_calls::conference_send::ConferenceSender::seal_video | fn(&mut self, now: core::time::Duration, stream_id: u8, is_data: bool, payload: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Seal one MP/iLink conference video payload sharing this sender's room media key.
-fn wechat_calls::conference_send::ConferenceSender::seal_video_nack | fn(&mut self, now: core::time::Duration, stream_id: u8, payload: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Seal one peer-to-peer `0x06` video ARQ/NACK packet matching the active envelope (`Live96` with `ext_byte = 0`, or `Live98` with `ext_byte = 2` when enabled).
-fn wechat_calls::conference_send::ConferenceSender::seal_video_rtcp | fn(&mut self, now: core::time::Duration, stream_id: u8, payload: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Seal one peer-to-peer video RTCP packet (`0x66 IRequest`).
-fn wechat_calls::conference_send::ConferenceSender::set_prefer_live98_tx | fn(&mut self, enabled: bool) | Opt into `Live98` (`0x98`) framing on outbound packets.
 fn wechat_calls::mixer::PcmMixer::add_track | fn(&mut self, track_id: u32, generation: u64) -> core::result::Result<(), wechat_calls::audio::MediaError> | Announce a receive source. A newer generation replaces queued PCM but does not reset the call clock or any transport cryptographic state.
 fn wechat_calls::mixer::PcmMixer::metrics | fn(&self) -> wechat_calls::mixer::MixerMetrics | MISSING DOC
 fn wechat_calls::mixer::PcmMixer::new | fn(format: wechat_calls::audio::AudioFormat, track_capacity: usize, frames_per_track: usize, start_offset: u64) -> core::result::Result<Self, wechat_calls::audio::MediaError> | MISSING DOC
@@ -196,8 +148,6 @@ impl core::cmp::PartialEq for wechat_calls::video_codec::EncodedVideoFrame | imp
 impl core::cmp::PartialEq for wechat_calls::video_codec::TranscodeConfig | impl | -
 impl core::cmp::PartialEq for wechat_calls::video_codec::VideoCodec | impl | -
 impl core::cmp::PartialEq for wechat_calls::video_codec::VideoCodecCapabilities | impl | -
-impl core::default::Default for wechat_calls::conference_media::ConferenceConsumeOutput | impl | -
-impl core::default::Default for wechat_calls::conference_media::StreamReport | impl | -
 impl core::default::Default for wechat_calls::mixer::MixerMetrics | impl | -
 impl core::default::Default for wechat_calls::ordering::RtpOrder | impl | -
 impl core::default::Default for wechat_calls::playout::QueueMetrics | impl | -
@@ -240,16 +190,11 @@ impl core::marker::StructuralPartialEq for wechat_calls::video_codec::EncodedVid
 impl core::marker::StructuralPartialEq for wechat_calls::video_codec::TranscodeConfig | impl | -
 impl core::marker::StructuralPartialEq for wechat_calls::video_codec::VideoCodec | impl | -
 impl core::marker::StructuralPartialEq for wechat_calls::video_codec::VideoCodecCapabilities | impl | -
-impl core::ops::drop::Drop for wechat_calls::conference_media::ConferenceReceiver | impl | -
-impl core::ops::drop::Drop for wechat_calls::conference_send::ConferenceSender | impl | -
 impl core::ops::drop::Drop for wechat_calls::video_codec::VideoTranscoder | impl | -
-impl serde_core::ser::Serialize for wechat_calls::conference_media::StreamReport | impl | -
 impl wechat_calls::audio::AudioDecoder for wechat_calls::opus::OpusDecoder | impl | -
 impl wechat_calls::audio::AudioEncoder for wechat_calls::opus::OpusEncoder | impl | -
 mod wechat_calls | - | Voice-session and media building blocks without devices or persistence.
 mod wechat_calls::audio | - | Owned PCM and codec interfaces shared by native and hosted implementations.
-mod wechat_calls::conference_media | #[cfg(all(feature = \"native-runtime\", not(target_arch = \"wasm32\")))] | Authenticated conference source decoding. Devices, sockets and persistence belong to the embedding runtime; no packet can announce its own participant.
-mod wechat_calls::conference_send | #[cfg(all(feature = \"native-runtime\", not(target_arch = \"wasm32\")))] | One paced conference uplink. Application interruption never resets crypto counters or the presentation clock. Missing application audio becomes silence.
 mod wechat_calls::mixer | - | PCM mixing on a shared presentation clock. This module owns no timer or device: the consumer supplies the due sample offset after its alignment delay.
 mod wechat_calls::opus | #[cfg(all(feature = \"native-opus\", not(target_arch = \"wasm32\")))] | Optional native libopus implementation of the portable audio interfaces.
 mod wechat_calls::ordering | - | Drop-late ordering for authenticated ordinary95 audio primaries.
@@ -260,12 +205,6 @@ mod wechat_calls::track_queue | - | Independent audio budgets with ordered, non-
 mod wechat_calls::video_codec | #[cfg(all(feature = \"native-runtime\", not(target_arch = \"wasm32\")))] | FFmpeg-backed video codec probing and low-latency transcoding bridge. Low-latency FFmpeg video codec probing and transcoding bridge for call media.
 struct wechat_calls::audio::AudioFormat | struct { private fields } | Interleaved signed 16-bit PCM, grouped into fixed-duration frames.
 struct wechat_calls::audio::AudioFrame | struct { public fields } | An owned frame. Generation fences queued output after interruption; timestamp is the stream's sample-frame position per channel, not wall-clock time.
-struct wechat_calls::conference_media::ConferenceConsumeOutput | struct { public fields } | Outcome of consuming one conference relay datagram, including audio, video and RTCP signals.
-struct wechat_calls::conference_media::ConferenceReceiver | struct { private fields } | MISSING DOC
-struct wechat_calls::conference_media::DecodedAudio | struct { public fields } | MISSING DOC
-struct wechat_calls::conference_media::StreamReport | struct { public fields } | MISSING DOC
-struct wechat_calls::conference_send::ConferenceSender | struct { private fields } | MISSING DOC
-struct wechat_calls::conference_send::PreparedAudio | struct { public fields } | MISSING DOC
 struct wechat_calls::mixer::MixedFrame | struct { public fields } | MISSING DOC
 struct wechat_calls::mixer::MixerMetrics | struct { public fields } | MISSING DOC
 struct wechat_calls::mixer::PcmMixer | struct { private fields } | A fixed-format mixer with separate queue budgets for each receive track. Missing/muted tracks contribute silence. Rendering never waits for a source.

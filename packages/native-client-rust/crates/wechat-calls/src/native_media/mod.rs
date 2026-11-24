@@ -3,7 +3,7 @@
 //! account-owning runtime migration, not the final public calling facade.
 mod conference;
 mod conference_sources;
-pub(crate) mod direct;
+mod direct;
 mod relay;
 mod submission;
 pub use conference_sources::{reconcile_roster, BoundConferenceReceiver};
@@ -23,7 +23,7 @@ use std::{
 };
 use wechat_protocol::calls::{
     audio_packet::MediaEpoch,
-    video_packet::{ReassembledVideoFrame, VideoWireCodec},
+    video_packet::{is_annexb_keyframe, ReassembledVideoFrame, VideoWireCodec},
 };
 
 #[derive(Clone, Copy)]
@@ -200,22 +200,22 @@ impl<T> TxAudioJitterBuffer<T> {
 
 /// FIFO outbound video frame buffer that preserves inter-frame H.265/H.264
 /// reference chains and only skips ahead to a newer self-contained IDR keyframe.
-pub(super) struct TxVideoQueue {
+pub(crate) struct TxVideoQueue {
     buffered: VecDeque<DirectVideoTx>,
 }
 
 impl TxVideoQueue {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             buffered: VecDeque::with_capacity(16),
         }
     }
 
-    pub(super) fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.buffered.clear();
     }
 
-    pub(super) fn next_frame(
+    pub(crate) fn next_frame(
         &mut self,
         rx: &Receiver<DirectVideoTx>,
         generation: u32,
@@ -235,40 +235,6 @@ impl TxVideoQueue {
         }
         self.buffered.pop_front()
     }
-}
-
-fn is_annexb_keyframe(codec: VideoWireCodec, data: &[u8]) -> bool {
-    let mut i = 0usize;
-    while i + 3 < data.len() {
-        let sc_len = if i + 4 <= data.len() && data[i..i + 4] == [0, 0, 0, 1] {
-            4
-        } else if data[i..i + 3] == [0, 0, 1] {
-            3
-        } else {
-            i += 1;
-            continue;
-        };
-        let hdr_pos = i + sc_len;
-        if hdr_pos < data.len() {
-            let hdr = data[hdr_pos];
-            match codec {
-                VideoWireCodec::H265 => {
-                    let nal_type = (hdr >> 1) & 0x3f;
-                    if matches!(nal_type, 19..=21) {
-                        return true;
-                    }
-                }
-                VideoWireCodec::H264 => {
-                    if (hdr & 0x1f) == 5 {
-                        return true;
-                    }
-                }
-                _ => {}
-            }
-        }
-        i = hdr_pos;
-    }
-    false
 }
 
 #[cfg(test)]
