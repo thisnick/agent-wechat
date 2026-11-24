@@ -29,6 +29,7 @@ struct PeerScenario {
     svr_ip_override: Option<u32>,
     svr_port_override: Option<u16>,
     merge_mode: bool,
+    ack_preconnect: bool,
 }
 
 struct PeerStats {
@@ -78,6 +79,7 @@ impl LocalPeer {
                         key,
                         frames_per_packet,
                         merge_mode: scenario.merge_mode,
+                        ack_preconnect: scenario.ack_preconnect,
                     },
                     scenario,
                     receive_start,
@@ -129,6 +131,7 @@ impl Harness {
                 key: peer.key,
                 frames_per_packet,
                 merge_mode: scenario.merge_mode,
+                ack_preconnect: scenario.ack_preconnect,
             }),
         );
         Ok(Self {
@@ -326,6 +329,7 @@ fn peer(
         key,
         frames_per_packet,
         merge_mode,
+        ..
     } = media;
     let began = Instant::now();
     diagnostic.stage.store(1, Ordering::Release);
@@ -602,6 +606,20 @@ async fn generated_audio_crosses_native_queues_opus_encryption_and_local_udp() -
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn generated_audio_reuses_ringing_preconnected_relay_without_duplicate_checkins() -> Result<()>
+{
+    run_loopback_scenario(
+        1,
+        PeerScenario {
+            ack_preconnect: true,
+            ..PeerScenario::default()
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn generated_audio_succeeds_with_ipv6_svr_ip_str_and_native_ipv6_relay() -> Result<()> {
     // Reproduces issue #662: IPv4 relay returns an IPv6 svrIpStr and svrPort = 0 in 0x1002.
     run_loopback_scenario(
@@ -612,6 +630,7 @@ async fn generated_audio_succeeds_with_ipv6_svr_ip_str_and_native_ipv6_relay() -
             svr_ip_override: Some(u32::from_le_bytes([198, 51, 100, 9])),
             svr_port_override: Some(0),
             merge_mode: false,
+            ack_preconnect: false,
         },
     )
     .await?;
@@ -626,6 +645,7 @@ async fn generated_audio_succeeds_with_ipv6_svr_ip_str_and_native_ipv6_relay() -
                 svr_ip_override: None,
                 svr_port_override: None,
                 merge_mode: true,
+                ack_preconnect: false,
             },
         )
         .await?;

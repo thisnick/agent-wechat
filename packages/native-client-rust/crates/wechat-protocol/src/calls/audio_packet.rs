@@ -414,7 +414,7 @@ impl Live96 {
         )
     }
 
-    /// Seal one peer-to-peer video RTCP packet (`0x66` `IRequest` or `0x06` NACK).
+    /// Seal one peer-to-peer video RTCP packet (`0x66` `IRequest`).
     /// Wire byte 14 carries `0x60 | stream_id`, while the AEAD nonce uses `kind & 0x2f`
     /// and shares the video sequence counter (`GetSeqIndex` slot 12).
     pub fn seal_video_rtcp(
@@ -426,6 +426,29 @@ impl Live96 {
     ) -> Result<Vec<u8>> {
         let kind = 0x60 | (stream_id & 0x0f);
         self.seal_inner(current, now_ms, kind, 0, self.prefer_live98_tx, payload)
+    }
+
+    /// Seal one peer-to-peer `0x06` video ARQ/NACK packet on `packed_kind = 0x60 | stream_id`.
+    /// Uses the active session envelope (`Live96` with `ext_byte = 0`, or `Live98` with
+    /// `ext_byte = 2` when `prefer_live98_tx` is enabled) and advances the shared video
+    /// sequence counter to preserve nonce uniqueness.
+    pub fn seal_video_nack(
+        &mut self,
+        current: MediaEpoch,
+        now_ms: u64,
+        stream_id: u8,
+        payload: &[u8],
+    ) -> Result<Vec<u8>> {
+        let kind = 0x60 | (stream_id & 0x0f);
+        let ext_byte = if self.prefer_live98_tx { 2 } else { 0 };
+        self.seal_inner(
+            current,
+            now_ms,
+            kind,
+            ext_byte,
+            self.prefer_live98_tx,
+            payload,
+        )
     }
 
     /// Seal one MP QoS P2S telemetry packet (`packed_kind = 0x30`).
@@ -554,8 +577,7 @@ impl Live96 {
         };
         let family_ok = match kind & 0xf0 {
             0x10 | 0x30 | 0x50 | 0x70 => kind == (kind & 0xf0) && ext_byte == 0,
-            0x20 | 0x40 => ext_byte <= 2,
-            0x60 => ext_byte == 0,
+            0x20 | 0x40 | 0x60 => ext_byte <= 2,
             _ => false,
         };
         ensure!(family_ok, "Unsupported Live96 packet family or extension");
@@ -1385,9 +1407,38 @@ mod tests {
         // Shared slot-12 counter advances monotonically across video and RTCP.
         assert_eq!(opened_rtcp.sequence32(), opened_video.sequence32() + 1);
 
+        // Video NACK matches the active room envelope: Live96 (0x96, ext_byte=0) by default.
+        let mut nack96_pkt = sender
+            .seal_video_nack(epoch(), 0, 1, &[0x06, 0, 8, 1, 8, 0, 1, 1])
+            .unwrap();
+        assert_eq!(&nack96_pkt[..2], &[0x96, 19]);
+        assert_eq!(nack96_pkt[14], 0x61);
+        assert_eq!(nack96_pkt[17], 0);
+        nack96_pkt[14] &= 0x2f;
+        let opened_nack96 = recv.open(epoch(), &nack96_pkt).unwrap().unwrap();
+        assert_eq!(opened_nack96.magic(), 0x96);
+        assert_eq!(opened_nack96.packed_kind, 0x21);
+        assert_eq!(opened_nack96.extension_byte(), 0);
+        assert_eq!(opened_nack96.payload(), &[0x06, 0, 8, 1, 8, 0, 1, 1]);
+        assert_eq!(opened_nack96.sequence32(), opened_rtcp.sequence32() + 1);
+
         // Live98 (0x98, 21-byte header) with seq32 >= 65536, advancing monotonic next_audio.
         let raw_audio = ordinary95_single(0, 1, 320, &[1, 2, 3]).unwrap();
         sender.set_prefer_live98_tx(true);
+        // When Live98 TX is enabled, video NACK uses Live98 (0x98, ext_byte=2).
+        let mut nack98_pkt = sender
+            .seal_video_nack(epoch(), 0, 1, &[0x06, 1, 8, 1, 8, 0, 1, 2])
+            .unwrap();
+        assert_eq!(&nack98_pkt[..2], &[0x98, 21]);
+        assert_eq!(nack98_pkt[14], 0x61);
+        assert_eq!(nack98_pkt[19], 2);
+        nack98_pkt[14] &= 0x2f;
+        let opened_nack98 = recv.open(epoch(), &nack98_pkt).unwrap().unwrap();
+        assert_eq!(opened_nack98.magic(), 0x98);
+        assert_eq!(opened_nack98.packed_kind, 0x21);
+        assert_eq!(opened_nack98.extension_byte(), 2);
+        assert_eq!(opened_nack98.payload(), &[0x06, 1, 8, 1, 8, 0, 1, 2]);
+        assert_eq!(opened_nack98.sequence32(), opened_nack96.sequence32() + 1);
         sender.next_audio = 0x0001_0005;
         let live98 = sender.seal_audio(epoch(), 0, &raw_audio).unwrap();
         assert_eq!(&live98[..2], &[0x98, 21]);

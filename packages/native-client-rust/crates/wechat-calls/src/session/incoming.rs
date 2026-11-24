@@ -2,7 +2,10 @@
 //! and retains the live carrier and grants the broker winner before `accept`.
 
 use super::*;
-use wechat_protocol::calls::incoming::{CancelNotification, InviteNotification};
+use wechat_protocol::calls::{
+    incoming::{CancelNotification, InviteNotification},
+    relay::RelayTarget,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IncomingPhase {
@@ -753,6 +756,48 @@ impl NativeIncomingSession {
         );
         self.base.relay_candidates()
     }
+    /// List valid UDP relay candidates from the ringing `ConfAck` strategy while
+    /// awaiting Answer/Reject, or an empty list if the ACK omitted relay endpoints.
+    pub fn ringing_relay_candidates(&self) -> Result<Vec<(usize, usize, std::net::SocketAddr)>> {
+        ensure!(
+            self.phase == IncomingPhase::Acknowledged,
+            "Incoming ringing relay unavailable"
+        );
+        self.base.relay_candidates()
+    }
+    /// Extract a UDP relay check-in target from the ringing `ConfAck` strategy so
+    /// the callee can complete relay check-in ahead of `Join` and capture the
+    /// caller's initial video IDR keyframe. Returns `Ok(None)` when the ACK
+    /// strategy does not carry relay candidates.
+    pub fn ringing_relay_target(
+        &self,
+        state: &AccountState,
+        current: AppAuthority,
+        connection_index: usize,
+        udp_index: usize,
+    ) -> Result<Option<RelayTarget>> {
+        self.base.check(state, current)?;
+        ensure!(
+            self.phase == IncomingPhase::Acknowledged,
+            "Incoming ringing relay unavailable"
+        );
+        let active = self
+            .base
+            .active
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Missing incoming room"))?;
+        match RelayTarget::from_strategy(
+            active.identity.room,
+            active.identity.room_key,
+            active.identity.own_member as u16,
+            &active.strategy,
+            connection_index,
+            udp_index,
+        ) {
+            Ok(target) => Ok(Some(target)),
+            Err(_) => Ok(None),
+        }
+    }
     pub fn take_media(
         &mut self,
         state: &AccountState,
@@ -1402,5 +1447,80 @@ mod tests {
             recorded_exit_reason(&transport.requests.borrow().last().unwrap().1),
             5
         );
+    }
+
+    #[test]
+    fn ringing_relay_target_is_optional_and_scoped_to_acknowledged_phase() {
+        let endpoint = p::message(&[p::bytes(1, b"127.0.0.1"), p::uint(2, 6000)]).unwrap();
+        let ack_with_relay = host_reply(&p::bytes(
+            1,
+            &p::message(&[
+                p::uint(1, 7),
+                p::uint(2, 9),
+                p::uint(3, 0),
+                p::uint(4, 99),
+                p::bytes(5, b"ack-cursor"),
+                p::bytes(
+                    6,
+                    &p::message(&[
+                        p::uint(1, 1),
+                        p::bytes(2, &member("own", 0, 3)),
+                        p::bytes(2, &member("peer", 1, 1)),
+                    ])
+                    .unwrap(),
+                ),
+                p::bytes(
+                    7,
+                    &p::message(&[
+                        p::uint(14, 0),
+                        p::bytes(
+                            15,
+                            &p::message(&[p::uint(1, 1), p::bytes(4, &endpoint)]).unwrap(),
+                        ),
+                    ])
+                    .unwrap(),
+                ),
+            ])
+            .unwrap(),
+        ));
+
+        // 1. ACK without relay addresses yields empty candidates and Ok(None).
+        let wire_empty = transport(vec![
+            (CallHostRoute::AppAuth, auth_reply()),
+            (CallHostRoute::RingingAck, ack_reply()),
+        ]);
+        let mut st = state();
+        let mut s = session(&wire_empty, &mut st);
+        assert!(s.ringing_relay_candidates().is_err());
+        s.ringing_ack(&wire_empty, &mut st, authority(), tasks(1))
+            .unwrap();
+        assert!(s.ringing_relay_candidates().unwrap().is_empty());
+        assert!(s
+            .ringing_relay_target(&st, authority(), 0, 0)
+            .unwrap()
+            .is_none());
+
+        // 2. ACK carrying field 15 relay addresses (without media key) returns target while Acknowledged.
+        let wire = transport(vec![
+            (CallHostRoute::AppAuth, auth_reply()),
+            (CallHostRoute::RingingAck, ack_with_relay),
+            (CallHostRoute::Transfer, join_reply(17, false)),
+        ]);
+        let mut st = state();
+        let mut s = session(&wire, &mut st);
+        s.ringing_ack(&wire, &mut st, authority(), tasks(1))
+            .unwrap();
+        let candidates = s.ringing_relay_candidates().unwrap();
+        assert_eq!(candidates.len(), 1);
+        let target = s
+            .ringing_relay_target(&st, authority(), 0, 0)
+            .unwrap()
+            .expect("ringing target");
+        assert_eq!(target.endpoint, "127.0.0.1:6000".parse().unwrap());
+        assert_eq!(target.connection_id, 1);
+
+        // 3. Once Joined, ringing_relay_target is no longer available.
+        s.accept(&wire, &mut st, authority(), tasks(2)).unwrap();
+        assert!(s.ringing_relay_target(&st, authority(), 0, 0).is_err());
     }
 }

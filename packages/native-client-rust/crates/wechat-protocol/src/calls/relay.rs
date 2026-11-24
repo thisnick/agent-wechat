@@ -12,22 +12,29 @@ const MAX_PACKET: usize = 8197;
 const MAX_BODY: usize = 8192;
 const MAX_IP_TEXT: usize = 45;
 
-/// An endpoint selected from an admitted Strategy. No DNS or fallback is used.
-/// Room key and media material intentionally have no Debug representation.
-pub struct SelectedRelay {
+/// Relay endpoint identity sufficient to run the UDP check-in handshake
+/// (before media keys are admitted on `Join`). Room key intentionally has no
+/// `Debug` representation, matching [`SelectedRelay`].
+#[derive(Clone, PartialEq, Eq)]
+pub struct RelayTarget {
+    /// Allocated call room identifier.
     pub room_id: u64,
+    /// Allocated room key used to derive the CheckIn TEA key.
     pub room_key: u64,
+    /// Local member index in the room.
     pub own_member: u16,
+    /// Selected relay connection identifier.
     pub connection_id: u16,
-    /// Selected UDP relay endpoint (IPv4 or IPv6) from the admitted Strategy.
+    /// Selected UDP relay endpoint (IPv4 or IPv6) from the Strategy.
     pub endpoint: SocketAddr,
-    pub media_key: Zeroizing<[u8; 32]>,
+    /// Whether the Strategy advertises 1-RTT merged check-in support.
     pub merge_mode: bool,
 }
-impl SelectedRelay {
-    /// Strategy field15 contains modern connection records (with field1 legacy
-    /// UDP addresses used only when field15 is empty). Indices must be chosen by
-    /// the caller from the current admitted Strategy, not by retries.
+
+impl RelayTarget {
+    /// Extract a UDP relay check-in target from a Strategy message without requiring
+    /// field 10 (`media_key`). Used for ringing pre-connect when `ConfAck` carries
+    /// relay endpoints ahead of `Join`.
     pub fn from_strategy(
         room_id: u64,
         room_key: u64,
@@ -63,17 +70,73 @@ impl SelectedRelay {
                 .ok_or_else(|| anyhow::anyhow!("Relay UDP selection unavailable"))?;
             (connection_id, parse_endpoint(raw)?)
         };
-        let key = data(&strategy, 10)?;
-        ensure!(key.len() == 32, "Unsupported relay media key size");
         Ok(Self {
             room_id,
             room_key,
             own_member,
             connection_id,
             endpoint,
-            media_key: Zeroizing::new(key.try_into()?),
             merge_mode: number(&strategy, 16, Some(0))? & 1 != 0,
         })
+    }
+}
+
+/// An endpoint selected from an admitted Strategy. No DNS or fallback is used.
+/// Room key and media material intentionally have no Debug representation.
+pub struct SelectedRelay {
+    pub room_id: u64,
+    pub room_key: u64,
+    pub own_member: u16,
+    pub connection_id: u16,
+    /// Selected UDP relay endpoint (IPv4 or IPv6) from the admitted Strategy.
+    pub endpoint: SocketAddr,
+    pub media_key: Zeroizing<[u8; 32]>,
+    pub merge_mode: bool,
+}
+impl SelectedRelay {
+    /// Strategy field15 contains modern connection records (with field1 legacy
+    /// UDP addresses used only when field15 is empty). Indices must be chosen by
+    /// the caller from the current admitted Strategy, not by retries.
+    pub fn from_strategy(
+        room_id: u64,
+        room_key: u64,
+        own_member: u16,
+        strategy: &[u8],
+        connection_index: usize,
+        udp_index: usize,
+    ) -> Result<Self> {
+        let target = RelayTarget::from_strategy(
+            room_id,
+            room_key,
+            own_member,
+            strategy,
+            connection_index,
+            udp_index,
+        )?;
+        let strategy = fields(strategy)?;
+        let key = data(&strategy, 10)?;
+        ensure!(key.len() == 32, "Unsupported relay media key size");
+        Ok(Self {
+            room_id: target.room_id,
+            room_key: target.room_key,
+            own_member: target.own_member,
+            connection_id: target.connection_id,
+            endpoint: target.endpoint,
+            media_key: Zeroizing::new(key.try_into()?),
+            merge_mode: target.merge_mode,
+        })
+    }
+
+    /// Return the check-in target metadata for this selected relay (without media key material).
+    pub fn target(&self) -> RelayTarget {
+        RelayTarget {
+            room_id: self.room_id,
+            room_key: self.room_key,
+            own_member: self.own_member,
+            connection_id: self.connection_id,
+            endpoint: self.endpoint,
+            merge_mode: self.merge_mode,
+        }
     }
 
     /// List valid UDP relay candidates as `(connection_index, udp_index, endpoint)`
@@ -177,20 +240,35 @@ impl RoomInputs {
         header_timestamp: u32,
         body_timestamp: u32,
     ) -> Self {
-        let (server_ip, server_text) = match selected.endpoint.ip() {
+        Self::initial_for_target(
+            &selected.target(),
+            network_type,
+            header_timestamp,
+            body_timestamp,
+        )
+    }
+
+    /// Build initial check-in inputs from a [`RelayTarget`] without requiring media keys.
+    pub fn initial_for_target(
+        target: &RelayTarget,
+        network_type: u16,
+        header_timestamp: u32,
+        body_timestamp: u32,
+    ) -> Self {
+        let (server_ip, server_text) = match target.endpoint.ip() {
             IpAddr::V4(ip) => (u32::from_le_bytes(ip.octets()), ip.to_string()),
             IpAddr::V6(ip) => (0, ip.to_string()),
         };
         Self {
-            room_id: selected.room_id,
-            own_member: selected.own_member,
-            connection_id: selected.connection_id,
+            room_id: target.room_id,
+            own_member: target.own_member,
+            connection_id: target.connection_id,
             client_ip: 0,
             client_text: String::new(),
             client_port: 0,
             server_ip,
             server_text,
-            server_port: selected.endpoint.port(),
+            server_port: target.endpoint.port(),
             checkin_sequence: 1,
             network_type,
             arq_flag: 0,
@@ -198,7 +276,7 @@ impl RoomInputs {
             data_sequence: 0,
             mix_timestamp: 0,
             mix_sequence: 0,
-            merge_mode: selected.merge_mode,
+            merge_mode: target.merge_mode,
             header_timestamp,
             body_timestamp,
         }
@@ -1206,5 +1284,27 @@ mod tests {
                 2
             )
             .is_err());
+    }
+
+    #[test]
+    fn relay_target_parses_ringing_strategy_without_media_key() {
+        let address = p::message(&[p::bytes(1, b"127.0.0.1"), p::uint(2, 6000)]).unwrap();
+        let strategy = p::message(&[
+            p::bytes(
+                15,
+                &p::message(&[p::uint(1, 2), p::bytes(4, &address)]).unwrap(),
+            ),
+            p::uint(16, 1),
+        ])
+        .unwrap();
+        let target = RelayTarget::from_strategy(7, 9, 3, &strategy, 0, 0).unwrap();
+        assert_eq!(target.room_id, 7);
+        assert_eq!(target.room_key, 9);
+        assert_eq!(target.own_member, 3);
+        assert_eq!(target.connection_id, 2);
+        assert_eq!(target.endpoint, "127.0.0.1:6000".parse().unwrap());
+        assert!(target.merge_mode);
+        // Full SelectedRelay still requires the 32-byte media key.
+        assert!(SelectedRelay::from_strategy(7, 9, 3, &strategy, 0, 0).is_err());
     }
 }

@@ -85,6 +85,22 @@ pub(super) fn run(
         prefer_live98,
         video_owner,
     ));
+    let own_member = selected.own_member;
+    let mut video_track_gens = BTreeMap::<u16, u32>::new();
+    let mut announced_video = Vec::<u16>::new();
+    if is_video {
+        let initial_video = desired_conference_video_members(&session.members(), own_member);
+        if !initial_video.is_empty() {
+            announce_conference_video_tracks(
+                transport,
+                recv_video_format,
+                &video_bridge,
+                &initial_video,
+                &mut announced_video,
+                &mut video_track_gens,
+            );
+        }
+    }
     let stop = Arc::new(AtomicBool::new(false));
     let done = Arc::new(AtomicBool::new(false));
     let media_stop = stop.clone();
@@ -92,7 +108,6 @@ pub(super) fn run(
     let media_roster = roster.clone();
     let media_video_bridge = video_bridge.clone();
     let worker = transport.worker.clone();
-    let own_member = selected.own_member;
     let thread = thread::Builder::new()
         .name("wechat-group-receive-probe".into())
         .spawn(move || {
@@ -119,7 +134,7 @@ pub(super) fn run(
         let mut last_microphone = 0u64;
         let mut last_subscribe = 0u64;
         let mut subscribed_video = Vec::<u16>::new();
-        let mut video_track_gens = BTreeMap::<u16, u32>::new();
+        let mut seen_remote_member = has_joined_remote_member(&session.members(), own_member);
         if transport.worker.muted.load(Ordering::Acquire) {
             let now = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
             last_microphone = last_microphone.saturating_add(1).max(now);
@@ -243,7 +258,17 @@ pub(super) fn run(
                 let _ = command.reply.send(result);
             }
             publish_roster(transport, session, &roster)?;
-            if is_video {
+            let has_remote = has_joined_remote_member(&session.members(), own_member);
+            if has_remote {
+                seen_remote_member = true;
+            } else if seen_remote_member {
+                break;
+            }
+            if is_video
+                && transport.worker.current()
+                && !done.load(Ordering::Acquire)
+                && !transport.worker.stop.load(Ordering::Acquire)
+            {
                 sync_conference_video_subscriptions(
                     transport,
                     state,
@@ -254,6 +279,7 @@ pub(super) fn run(
                     recv_video_format,
                     &video_bridge,
                     &mut subscribed_video,
+                    &mut announced_video,
                     &mut video_track_gens,
                     &mut last_subscribe,
                 )?;
@@ -269,7 +295,8 @@ pub(super) fn run(
                 Err(error)
                     if error.is::<CallLiveSyncInterrupted>()
                         && (done.load(Ordering::Acquire)
-                            || transport.worker.stop.load(Ordering::Acquire)) =>
+                            || transport.worker.stop.load(Ordering::Acquire)
+                            || transport.worker.media_stop.load(Ordering::Acquire)) =>
                 {
                     break
                 }
@@ -285,7 +312,17 @@ pub(super) fn run(
                 );
             }
             publish_roster(transport, session, &roster)?;
-            if is_video {
+            let has_remote = has_joined_remote_member(&session.members(), own_member);
+            if has_remote {
+                seen_remote_member = true;
+            } else if seen_remote_member {
+                break;
+            }
+            if is_video
+                && transport.worker.current()
+                && !done.load(Ordering::Acquire)
+                && !transport.worker.stop.load(Ordering::Acquire)
+            {
                 sync_conference_video_subscriptions(
                     transport,
                     state,
@@ -296,6 +333,7 @@ pub(super) fn run(
                     recv_video_format,
                     &video_bridge,
                     &mut subscribed_video,
+                    &mut announced_video,
                     &mut video_track_gens,
                     &mut last_subscribe,
                 )?;
@@ -361,6 +399,79 @@ fn publish_roster(
     Ok(())
 }
 
+fn has_joined_remote_member(
+    members: &[wechat_calls::session::ConferenceMember],
+    own_member: u16,
+) -> bool {
+    members
+        .iter()
+        .any(|member| member.status == 1 && member.member_id != own_member)
+}
+
+fn desired_conference_video_members(
+    members: &[wechat_calls::session::ConferenceMember],
+    own_member: u16,
+) -> Vec<u16> {
+    let mut desired: Vec<u16> = members
+        .iter()
+        .filter(|member| {
+            member.member_id != own_member
+                && member.status == 1
+                && member.camera_enabled == Some(true)
+        })
+        .map(|member| member.member_id)
+        .collect();
+    desired.sort_unstable();
+    desired.dedup();
+    desired.truncate(9);
+    desired
+}
+
+fn announce_conference_video_tracks(
+    transport: &FencedTransport,
+    recv_video_format: Option<crate::call_types::CallVideoFormat>,
+    video_bridge: &super::super::media::VideoRxBridge,
+    desired: &[u16],
+    announced_video: &mut Vec<u16>,
+    video_track_gens: &mut BTreeMap<u16, u32>,
+) {
+    if desired == announced_video.as_slice() {
+        return;
+    }
+    for &member in desired {
+        if !announced_video.contains(&member) {
+            let entry = video_track_gens.entry(member).or_insert(0);
+            *entry = entry.saturating_add(1);
+        }
+    }
+    announced_video.clear();
+    announced_video.extend_from_slice(desired);
+    let active: Vec<(u16, u32)> = announced_video
+        .iter()
+        .map(|&member| (member, *video_track_gens.get(&member).unwrap_or(&1)))
+        .collect();
+    if let (Some(format), ControlAdmission::Owner(sink)) = (recv_video_format, &transport.admission)
+    {
+        let tracks = active
+            .iter()
+            .map(
+                |&(member, generation)| crate::call_types::CallTrack::Video {
+                    id: crate::call_types::VIDEO_RECEIVE_TRACK_BASE + u32::from(member),
+                    generation,
+                    direction: crate::call_types::CallTrackDirection::Receive,
+                    format,
+                    participant_id: Some(format!("member-{member}")),
+                    active: true,
+                },
+            )
+            .collect();
+        let _ = transport
+            .runtime
+            .block_on(sink.receive_video_tracks(tracks));
+    }
+    video_bridge.set_conference_tracks(&active);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn sync_conference_video_subscriptions(
     transport: &FencedTransport,
@@ -372,23 +483,20 @@ fn sync_conference_video_subscriptions(
     recv_video_format: Option<crate::call_types::CallVideoFormat>,
     video_bridge: &super::super::media::VideoRxBridge,
     subscribed_video: &mut Vec<u16>,
+    announced_video: &mut Vec<u16>,
     video_track_gens: &mut BTreeMap<u16, u32>,
     last_subscribe: &mut u64,
 ) -> Result<()> {
-    let mut desired: Vec<u16> = session
-        .members()
-        .into_iter()
-        .filter(|member| {
-            member.member_id != own_member
-                && member.status == 1
-                && member.camera_enabled == Some(true)
-        })
-        .map(|member| member.member_id)
-        .collect();
-    desired.sort_unstable();
-    desired.dedup();
-    desired.truncate(9);
+    let desired = desired_conference_video_members(&session.members(), own_member);
     if desired == *subscribed_video {
+        announce_conference_video_tracks(
+            transport,
+            recv_video_format,
+            video_bridge,
+            &desired,
+            announced_video,
+            video_track_gens,
+        );
         return Ok(());
     }
     let targets: Vec<(u32, u32)> = desired.iter().map(|&id| (u32::from(id), 640)).collect();
@@ -396,6 +504,9 @@ fn sync_conference_video_subscriptions(
     // does not leave remote video unsubscribed for an entire LiveSync poll interval.
     let mut subscribed_ok = false;
     for attempt in 0..2 {
+        if !transport.worker.current() || transport.worker.stop.load(Ordering::Acquire) {
+            break;
+        }
         let now = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
         *last_subscribe = last_subscribe
             .checked_add(1)
@@ -421,48 +532,30 @@ fn sync_conference_video_subscriptions(
                         desired
                     );
                 }
-                if attempt == 0
-                    && transport.worker.current()
-                    && !transport.worker.stop.load(Ordering::Acquire)
-                {
+                if !transport.worker.current() || transport.worker.stop.load(Ordering::Acquire) {
+                    break;
+                }
+                if attempt == 0 {
                     thread::sleep(Duration::from_millis(250));
                 }
             }
         }
     }
     if subscribed_ok {
-        for &member in &desired {
-            if !subscribed_video.contains(&member) {
-                let entry = video_track_gens.entry(member).or_insert(0);
-                *entry = entry.saturating_add(1);
-            }
+        if std::env::var("WX_CALL_VIDEO_TRACE").as_deref() == Ok("1") {
+            eprintln!(
+                "[wechat-call-video] conference subscribe ok targets={desired:?} own={own_member}"
+            );
         }
         *subscribed_video = desired;
-        let active: Vec<(u16, u32)> = subscribed_video
-            .iter()
-            .map(|&member| (member, *video_track_gens.get(&member).unwrap_or(&1)))
-            .collect();
-        if let (Some(format), ControlAdmission::Owner(sink)) =
-            (recv_video_format, &transport.admission)
-        {
-            let tracks = active
-                .iter()
-                .map(
-                    |&(member, generation)| crate::call_types::CallTrack::Video {
-                        id: crate::call_types::VIDEO_RECEIVE_TRACK_BASE + u32::from(member),
-                        generation,
-                        direction: crate::call_types::CallTrackDirection::Receive,
-                        format,
-                        participant_id: Some(format!("member-{member}")),
-                        active: true,
-                    },
-                )
-                .collect();
-            let _ = transport
-                .runtime
-                .block_on(sink.receive_video_tracks(tracks));
-        }
-        video_bridge.set_conference_tracks(&active);
+        announce_conference_video_tracks(
+            transport,
+            recv_video_format,
+            video_bridge,
+            subscribed_video,
+            announced_video,
+            video_track_gens,
+        );
     }
     Ok(())
 }
@@ -942,5 +1035,18 @@ mod tests {
         receiver.consume(epoch(), &changed, 0, true).unwrap();
         assert_eq!(receiver.report.decoded_frames, 0);
         assert_eq!(receiver.report.invalid_packets, 2);
+    }
+
+    #[test]
+    fn has_joined_remote_member_detects_when_all_remotes_leave() {
+        let mut own = member(0, "self");
+        let mut remote = member(1, "peer");
+        assert!(has_joined_remote_member(&[own.clone(), remote.clone()], 0));
+        // Remote leaves (status = 4): no joined remote members remain.
+        remote.status = 4;
+        assert!(!has_joined_remote_member(&[own.clone(), remote.clone()], 0));
+        // Own member alone does not count as a remote participant.
+        own.status = 1;
+        assert!(!has_joined_remote_member(&[own], 0));
     }
 }

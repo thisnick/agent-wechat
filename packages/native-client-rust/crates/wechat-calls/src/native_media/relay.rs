@@ -7,12 +7,105 @@ use std::{
     time::{Duration, Instant},
 };
 use wechat_protocol::{
-    calls::relay::{RelayEpoch, RelayProgress, RoomInputs, SelectedRelay, TwoRttRelay},
+    calls::relay::{
+        RelayEpoch, RelayProgress, RelayTarget, RoomInputs, SelectedRelay, TwoRttRelay,
+    },
     crypto,
 };
 
 const RELAY_RETRANSMIT_INTERVAL: Duration = Duration::from_millis(200);
 const MAX_EARLY_MEDIA_PACKETS: usize = 256;
+
+/// A UDP relay socket whose check-in handshake already reached `Ready` (for
+/// example while ringing after `ConfAck`), together with any non-`0xd5`
+/// datagrams received from that relay endpoint prior to media handoff.
+pub struct PreconnectedRelay {
+    target: RelayTarget,
+    socket: UdpSocket,
+    early_packets: VecDeque<Vec<u8>>,
+    ready_at: Instant,
+}
+
+impl PreconnectedRelay {
+    /// Selected UDP relay endpoint bound by this pre-connected socket.
+    pub fn endpoint(&self) -> SocketAddr {
+        self.target.endpoint
+    }
+
+    /// Selected relay connection identifier bound by this pre-connected socket.
+    pub fn connection_id(&self) -> u16 {
+        self.target.connection_id
+    }
+
+    /// Number of early non-`0xd5` datagrams currently buffered for media handoff.
+    pub fn early_packet_count(&self) -> usize {
+        self.early_packets.len()
+    }
+
+    /// Elapsed duration since this pre-connected relay completed its `Ready` handshake.
+    pub fn age(&self) -> Duration {
+        self.ready_at.elapsed()
+    }
+
+    /// Verify that this pre-connected relay matches the admitted post-`Join` relay identity.
+    pub fn matches(&self, selected: &SelectedRelay) -> bool {
+        self.target.room_id == selected.room_id
+            && self.target.room_key == selected.room_key
+            && self.target.own_member == selected.own_member
+            && self.target.connection_id == selected.connection_id
+            && self.target.endpoint == selected.endpoint
+    }
+
+    /// Non-blocking drain of any pending non-`0xd5` datagrams from the selected relay
+    /// endpoint into the bounded early-packet buffer (such as an incoming caller's
+    /// opening video IDR burst arriving while `Join` is completing).
+    pub fn drain_early_packets(&mut self) {
+        let mut buffer = [0u8; 8198];
+        for _ in 0..64 {
+            match self.socket.recv_from(&mut buffer) {
+                Ok((n, source)) if source == self.target.endpoint && n > 0 && n <= 8197 => {
+                    if buffer[0] != 0xd5 && self.early_packets.len() < MAX_EARLY_MEDIA_PACKETS {
+                        self.early_packets.push_back(buffer[..n].to_vec());
+                    }
+                }
+                Ok(_) => {}
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
+    pub(super) fn into_parts(self) -> (UdpSocket, VecDeque<Vec<u8>>) {
+        (self.socket, self.early_packets)
+    }
+}
+
+/// Complete the UDP relay check-in handshake ahead of media start (for example
+/// while ringing after `ConfAck`) and return a [`PreconnectedRelay`] for later
+/// handoff to [`super::run_direct_media_with_preconnected_relay`].
+pub fn preconnect_relay(
+    target: &RelayTarget,
+    relay_epoch: RelayEpoch,
+    started: Instant,
+    current: impl Fn() -> bool,
+    submit: impl Fn(&UdpSocket, SocketAddr, &[u8]) -> Result<()>,
+) -> Result<PreconnectedRelay> {
+    let (socket, early_packets) =
+        connect_target_with_early(target, relay_epoch, started, current, submit)?;
+    Ok(PreconnectedRelay {
+        target: target.clone(),
+        socket,
+        early_packets,
+        ready_at: Instant::now(),
+    })
+}
 
 /// Run on an embedding worker. `submit` must recheck account authority at the
 /// physical handoff; the earlier `current` check alone does not authorize a send.
@@ -40,9 +133,19 @@ pub(super) fn connect_relay_with_early(
     current: impl Fn() -> bool,
     submit: impl Fn(&UdpSocket, SocketAddr, &[u8]) -> Result<()>,
 ) -> Result<(UdpSocket, VecDeque<Vec<u8>>)> {
+    connect_target_with_early(&selected.target(), relay_epoch, started, current, submit)
+}
+
+fn connect_target_with_early(
+    target: &RelayTarget,
+    relay_epoch: RelayEpoch,
+    started: Instant,
+    current: impl Fn() -> bool,
+    submit: impl Fn(&UdpSocket, SocketAddr, &[u8]) -> Result<()>,
+) -> Result<(UdpSocket, VecDeque<Vec<u8>>)> {
     ensure!(current(), "Call stopped during relay setup");
     let clock = || u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let endpoint = selected.endpoint;
+    let endpoint = target.endpoint;
     let bind_addr: SocketAddr = match endpoint {
         SocketAddr::V4(_) => SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
         SocketAddr::V6(_) => SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
@@ -53,8 +156,8 @@ pub(super) fn connect_relay_with_early(
     socket
         .set_nonblocking(true)
         .context("Relay UDP socket setup failed")?;
-    let room = RoomInputs::initial(selected, 4, clock() as u32, clock() as u32);
-    let mut checkin = TwoRttRelay::new(room, selected.room_key, endpoint, relay_epoch, 15_000)?;
+    let room = RoomInputs::initial_for_target(target, 4, clock() as u32, clock() as u32);
+    let mut checkin = TwoRttRelay::new(room, target.room_key, endpoint, relay_epoch, 15_000)?;
     let random = crypto::random::<10>()?;
     let mut active_packet = checkin
         .prepare_initial(
@@ -412,5 +515,102 @@ mod tests {
         assert_eq!(early.len(), 2);
         assert_eq!(early[0], vec![0x96, 0x13, 0xaa, 0xbb]);
         assert_eq!(early[1], vec![0x96, 0x13, 0xcc, 0xdd]);
+    }
+
+    #[test]
+    fn preconnect_relay_drains_post_ready_early_packets_and_matches_selected_relay() {
+        let server = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let endpoint = server.local_addr().unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let (sent_post_ready, wait_post_ready) = std::sync::mpsc::channel();
+        let peer = thread::spawn(move || {
+            let mut buf = [0u8; 8198];
+            let (_n, src) = server.recv_from(&mut buf).unwrap();
+            let resp = p::message(&[
+                p::uint(1, 0),
+                p::uint(2, u64::from(u32::from_le_bytes([127, 0, 0, 1]))),
+                p::uint(3, u64::from(u32::from_le_bytes([127, 0, 0, 1]))),
+                p::uint(4, u64::from(src.port())),
+                p::uint(5, u64::from(endpoint.port())),
+                p::uint(6, 1),
+                p::uint(7, 0),
+                p::uint(8, 2),
+                p::uint(9, 1),
+                p::bytes(12, b"127.0.0.1"),
+                p::bytes(13, b"127.0.0.1"),
+                p::uint(14, 0),
+            ])
+            .unwrap();
+            server
+                .send_to(&relay_reply(7, 9, 0x1002, &resp), src)
+                .unwrap();
+            let (_n2, src2) = server.recv_from(&mut buf).unwrap();
+            assert_eq!(src2, src);
+            let ready = p::message(&[
+                p::uint(1, 0),
+                p::uint(2, 7),
+                p::uint(3, 0),
+                p::uint(5, 3),
+                p::uint(6, 1),
+                p::uint(7, 0),
+            ])
+            .unwrap();
+            server
+                .send_to(&relay_reply(7, 9, 0x1004, &ready), src)
+                .unwrap();
+            // Simulate caller opening IDR packet arriving after Ready (e.g. while Join is in flight)
+            // alongside an ignored 0xd5 relay control datagram.
+            server.send_to(&[0xd5, 0x00, 0x01, 0x02], src).unwrap();
+            server.send_to(&[0x96, 0x13, 0xde, 0xad], src).unwrap();
+            let _ = sent_post_ready.send(());
+        });
+        let target = RelayTarget {
+            room_id: 7,
+            room_key: 9,
+            own_member: 3,
+            connection_id: 1,
+            endpoint,
+            merge_mode: false,
+        };
+        let mut ready = preconnect_relay(
+            &target,
+            test_epoch(),
+            Instant::now(),
+            || true,
+            |socket, dest, pkt| {
+                socket.send_to(pkt, dest)?;
+                Ok(())
+            },
+        )
+        .unwrap();
+        wait_post_ready
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        peer.join().unwrap();
+        ready.drain_early_packets();
+        assert_eq!(ready.endpoint(), endpoint);
+        assert_eq!(ready.connection_id(), 1);
+        assert_eq!(ready.early_packet_count(), 1);
+
+        let matching = SelectedRelay {
+            room_id: 7,
+            room_key: 9,
+            own_member: 3,
+            connection_id: 1,
+            endpoint,
+            media_key: Zeroizing::new([5; 32]),
+            merge_mode: true,
+        };
+        assert!(ready.matches(&matching));
+        let mismatched = SelectedRelay {
+            own_member: 4,
+            ..matching
+        };
+        assert!(!ready.matches(&mismatched));
+        let (_sock, early) = ready.into_parts();
+        assert_eq!(early.len(), 1);
+        assert_eq!(early[0], vec![0x96, 0x13, 0xde, 0xad]);
     }
 }

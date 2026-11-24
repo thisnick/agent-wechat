@@ -1098,6 +1098,14 @@ async fn ensure_video_capture(
     }
 }
 
+/// Maximum time to wait for `/socket` to report `CallState::Ended` after `/media`
+/// closes during a remote hangup before treating the closed media socket as an error.
+const MEDIA_CLOSED_END_GRACE: Duration = Duration::from_secs(10);
+
+fn media_closed_grace_expired(media_closed_at: Option<Instant>, now: Instant) -> bool {
+    media_closed_at.is_some_and(|at| now.saturating_duration_since(at) >= MEDIA_CLOSED_END_GRACE)
+}
+
 async fn owned_call(
     remote: &Remote,
     control: &mut Control,
@@ -1390,6 +1398,11 @@ async fn owned_call(
                         }
                         match view.state {
                             CallState::Ended=>{levels.notice("Call ended.");return Ok(true);},
+                            CallState::Ending=>{
+                                if media_closed_at.is_some() {
+                                    media_closed_at = Some(Instant::now());
+                                }
+                            }
                             CallState::Uncertain=>bail!("call outcome unknown; check calls status before retrying"),
                             _=>{}
                         }
@@ -1516,7 +1529,7 @@ async fn owned_call(
                 }
             }
             _=meter_tick.tick()=>{
-                if media_closed_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(2)) {
+                if media_closed_grace_expired(media_closed_at, Instant::now()) {
                     return Err(media_closed_err
                         .take()
                         .unwrap_or_else(|| anyhow::anyhow!("call media socket closed")));
@@ -1811,5 +1824,23 @@ mod tests {
         wait_checked.await.unwrap();
         control.close().await;
         server.await.unwrap();
+    }
+
+    #[test]
+    fn media_closed_grace_allows_slow_remote_exit_before_timing_out() {
+        let closed_at = Instant::now();
+        assert!(!media_closed_grace_expired(None, closed_at));
+        assert!(!media_closed_grace_expired(
+            Some(closed_at),
+            closed_at + Duration::from_secs(2)
+        ));
+        assert!(!media_closed_grace_expired(
+            Some(closed_at),
+            closed_at + MEDIA_CLOSED_END_GRACE - Duration::from_millis(1)
+        ));
+        assert!(media_closed_grace_expired(
+            Some(closed_at),
+            closed_at + MEDIA_CLOSED_END_GRACE
+        ));
     }
 }
