@@ -166,12 +166,16 @@ pub fn run_direct_media_with_preconnected_relay<H: DirectMediaHost>(
     let mut rx_order = RtpOrder::new();
     let mut rx_timeline = DirectRxAudioTimeline::new();
     let connected_ms = clock();
-    let mut video_rx = VideoStreamReceiver::new(connected_ms).with_proactive_initial_requests(6);
+    let video_enabled = media.video_enabled || video.is_some();
+    let mut video_rx = if video_enabled {
+        VideoStreamReceiver::new(connected_ms).with_proactive_initial_requests(6)
+    } else {
+        VideoStreamReceiver::new(connected_ms)
+    };
     let mut video_tx = VideoTxPacer::new(selected.own_member, 1, connected_ms);
     let mut last_p2s_tx: Option<Instant> = None;
     let mut p2s_seq = 1u16;
     let mut last_peer_activity = Instant::now();
-    let video_enabled = media.video_enabled || video.is_some();
     let mut trace_last = Instant::now();
     let mut trace_rx_pkts = 0u64;
     let mut trace_frames_ok = 0u64;
@@ -524,7 +528,7 @@ pub fn run_direct_media_with_preconnected_relay<H: DirectMediaHost>(
                     Err(e) => return Err(e.into()),
                 }
             }
-            if video_enabled {
+            if video_enabled || video_rx.last_stream_id().is_some() {
                 let video_now = Instant::now();
                 let now_ms = clock();
                 let rx_stream_id = video_rx.last_stream_id().unwrap_or(1);
@@ -568,81 +572,85 @@ pub fn run_direct_media_with_preconnected_relay<H: DirectMediaHost>(
                 for req in
                     video_rx.poll_due_irequests(selected.own_member, media.peer_member, now_ms)
                 {
-                    if let Ok(datagram) =
+                    let Ok(datagram) =
                         channel.seal_video_rtcp(epoch, now_ms, req.stream_id, &req.payload)
-                    {
-                        let _ = host.submit(&socket, endpoint, &datagram, &[]);
-                        if video_trace {
-                            let base_reason = match req.reason {
-                                KeyframeRequestReason::FrameDrop => "drop",
-                                KeyframeRequestReason::LocalRequest => "local",
-                                KeyframeRequestReason::InitialSync => "initial",
-                            };
-                            if req.is_stream0_fallback {
-                                eprintln!(
-                                    "[wechat-call-video] tx ireq reason={base_reason}_s0 stream=0 target={} lost_seq={} force={}",
-                                    req.target_member, req.lost_point_seq, req.force
-                                );
-                            } else if trace_tx_ireq_wire_logged < 4 {
-                                trace_tx_ireq_wire_logged += 1;
-                                eprintln!(
-                                    "[wechat-call-video] tx ireq reason={base_reason} stream={} target={} lost_seq={} force={} wire_hdr={:02x?} req={:02x?}",
-                                    req.stream_id,
-                                    req.target_member,
-                                    req.lost_point_seq,
-                                    req.force,
-                                    &datagram[..datagram.len().min(21)],
-                                    &req.payload
-                                );
-                            } else {
-                                eprintln!(
-                                    "[wechat-call-video] tx ireq reason={base_reason} stream={} target={} lost_seq={} force={}",
-                                    req.stream_id, req.target_member, req.lost_point_seq, req.force
-                                );
-                            }
+                    else {
+                        break;
+                    };
+                    let _ = host.submit(&socket, endpoint, &datagram, &[]);
+                    if video_trace {
+                        let base_reason = match req.reason {
+                            KeyframeRequestReason::FrameDrop => "drop",
+                            KeyframeRequestReason::LocalRequest => "local",
+                            KeyframeRequestReason::InitialSync => "initial",
+                        };
+                        if req.is_stream0_fallback {
+                            eprintln!(
+                                "[wechat-call-video] tx ireq reason={base_reason}_s0 stream=0 target={} lost_seq={} force={}",
+                                req.target_member, req.lost_point_seq, req.force
+                            );
+                        } else if trace_tx_ireq_wire_logged < 4 {
+                            trace_tx_ireq_wire_logged += 1;
+                            eprintln!(
+                                "[wechat-call-video] tx ireq reason={base_reason} stream={} target={} lost_seq={} force={} wire_hdr={:02x?} req={:02x?}",
+                                req.stream_id,
+                                req.target_member,
+                                req.lost_point_seq,
+                                req.force,
+                                &datagram[..datagram.len().min(21)],
+                                &req.payload
+                            );
+                        } else {
+                            eprintln!(
+                                "[wechat-call-video] tx ireq reason={base_reason} stream={} target={} lost_seq={} force={}",
+                                req.stream_id, req.target_member, req.lost_point_seq, req.force
+                            );
                         }
                     }
                 }
-                let p2s_interval = Duration::from_millis(video_rx.recommended_p2s_interval_ms());
-                if last_p2s_tx.is_none_or(|t| t.elapsed() >= p2s_interval) {
-                    let report = video_rx.snapshot_p2s(
-                        media.peer_member,
-                        u32::from(selected.connection_id),
-                        0x1d,
-                        now_ms,
-                    );
-                    if let Ok(p2s) = encode_p2s_report(p2s_seq, 2, &report) {
-                        let sent_seq = p2s_seq;
-                        p2s_seq = p2s_seq.wrapping_add(1);
-                        if let Ok(datagram) = channel.seal_qos_p2s(epoch, now_ms, &p2s) {
-                            let _ = host.submit(&socket, endpoint, &datagram, &[]);
-                            last_p2s_tx = Some(video_now);
-                            if video_trace
-                                && (report.loss_pct > 0
-                                    || report.heavy_freeze_cnt > 0
-                                    || report.light_freeze_cnt > 0
-                                    || report.recv_arq_resp_pkgs > 0
-                                    || sent_seq.is_multiple_of(2))
-                            {
-                                eprintln!(
-                                    "[wechat-call-video] tx p2s seq={sent_seq} peer={} stream={} codec={} rx_kbps={} est_bw={} rx_fps={} play_fps={} loss={}%({}pkts,long={}%) arq={} freeze=L{}/{}%,H{}/{}% gap={}ms",
-                                    report.remote_member_id,
-                                    report.stream_id,
-                                    report.decode_type,
-                                    report.recv_kbps,
-                                    report.est_bw_kbps,
-                                    report.recv_fps,
-                                    report.play_fps,
-                                    report.loss_pct,
-                                    report.loss_pkts,
-                                    report.long_loss_pct,
-                                    report.recv_arq_resp_pkgs,
-                                    report.light_freeze_cnt,
-                                    report.light_freeze_time_ratio,
-                                    report.heavy_freeze_cnt,
-                                    report.heavy_freeze_time_ratio,
-                                    report.recv_data_interval_ms
-                                );
+                if video_enabled {
+                    let p2s_interval =
+                        Duration::from_millis(video_rx.recommended_p2s_interval_ms());
+                    if last_p2s_tx.is_none_or(|t| t.elapsed() >= p2s_interval) {
+                        let report = video_rx.snapshot_p2s(
+                            media.peer_member,
+                            u32::from(selected.connection_id),
+                            0x1d,
+                            now_ms,
+                        );
+                        if let Ok(p2s) = encode_p2s_report(p2s_seq, 2, &report) {
+                            let sent_seq = p2s_seq;
+                            p2s_seq = p2s_seq.wrapping_add(1);
+                            if let Ok(datagram) = channel.seal_qos_p2s(epoch, now_ms, &p2s) {
+                                let _ = host.submit(&socket, endpoint, &datagram, &[]);
+                                last_p2s_tx = Some(video_now);
+                                if video_trace
+                                    && (report.loss_pct > 0
+                                        || report.heavy_freeze_cnt > 0
+                                        || report.light_freeze_cnt > 0
+                                        || report.recv_arq_resp_pkgs > 0
+                                        || sent_seq.is_multiple_of(2))
+                                {
+                                    eprintln!(
+                                        "[wechat-call-video] tx p2s seq={sent_seq} peer={} stream={} codec={} rx_kbps={} est_bw={} rx_fps={} play_fps={} loss={}%({}pkts,long={}%) arq={} freeze=L{}/{}%,H{}/{}% gap={}ms",
+                                        report.remote_member_id,
+                                        report.stream_id,
+                                        report.decode_type,
+                                        report.recv_kbps,
+                                        report.est_bw_kbps,
+                                        report.recv_fps,
+                                        report.play_fps,
+                                        report.loss_pct,
+                                        report.loss_pkts,
+                                        report.long_loss_pct,
+                                        report.recv_arq_resp_pkgs,
+                                        report.light_freeze_cnt,
+                                        report.light_freeze_time_ratio,
+                                        report.heavy_freeze_cnt,
+                                        report.heavy_freeze_time_ratio,
+                                        report.recv_data_interval_ms
+                                    );
+                                }
                             }
                         }
                     }

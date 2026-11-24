@@ -714,14 +714,79 @@ mod tests {
         assert!(rejoin_rep.play_fps >= 12);
         assert_eq!(rejoin_rep.heavy_freeze_cnt, 0);
 
-        // Audio-only consume() (used for unattributed members) must never retain ready_video frames.
-        let chunks = pktz
-            .packetize(VideoWireCodec::H264, &p_frame, 241_000, 15, 500)
+        // Multi-frame release (completing a 2-packet IDR while a newer P-frame is buffered
+        // behind it) must emit frames in FIFO order via consume_media + pop_ready_video, and
+        // audio-only consume() must clear the extra buffered frames rather than retaining them.
+        let mut multi_pktz = RsmVideoPacketizer::new(1, 1)
+            .with_orientation(1)
+            .with_chunk_bytes(64)
             .unwrap();
-        let pkt = peer_tx
-            .seal_video(epoch, 241_000, 1, true, &chunks[0])
+        let mut two_pkt_idr = idr.clone();
+        two_pkt_idr.extend_from_slice(&[0x55; 96]);
+        let idr_pair = multi_pktz
+            .packetize(VideoWireCodec::H264, &two_pkt_idr, 241_000, 15, 500)
             .unwrap();
-        let _ = rx.consume(epoch, &pkt, 241_000, false).unwrap();
+        assert!(idr_pair.len() >= 2);
+        let trailing_p = multi_pktz
+            .packetize(VideoWireCodec::H264, &p_frame, 241_066, 15, 500)
+            .unwrap();
+        assert_eq!(trailing_p.len(), 1);
+
+        // Positive FIFO order check via consume_media: send IDR pkt 0, then P-frame (buffered
+        // behind incomplete IDR), then remaining IDR packets so both release on the final packet.
+        let d0 = peer_tx
+            .seal_video(epoch, 241_000, 1, true, &idr_pair[0])
+            .unwrap();
+        assert!(rx
+            .consume_media(epoch, &d0, 241_000, true)
+            .unwrap()
+            .video
+            .is_none());
+        let dp = peer_tx
+            .seal_video(epoch, 241_020, 1, true, &trailing_p[0])
+            .unwrap();
+        assert!(rx
+            .consume_media(epoch, &dp, 241_020, true)
+            .unwrap()
+            .video
+            .is_none());
+        let mut released_first = None;
+        for (idx, chunk) in idr_pair.iter().enumerate().skip(1) {
+            let at = 241_030 + idx as u64;
+            let d = peer_tx.seal_video(epoch, at, 1, true, chunk).unwrap();
+            let out = rx.consume_media(epoch, &d, at, true).unwrap();
+            if out.video.is_some() {
+                released_first = out.video;
+            }
+        }
+        let f_idr = released_first.expect("final IDR packet must release IDR first");
+        assert!(f_idr.is_keyframe);
+        let f_p = rx
+            .pop_ready_video()
+            .expect("buffered P-frame must follow IDR in FIFO order");
+        assert!(!f_p.is_keyframe);
+        assert!(rx.pop_ready_video().is_none());
+
+        // Audio-only consume() receiving the same 2-frame release burst must clear ready_video.
+        let idr_pair2 = multi_pktz
+            .packetize(VideoWireCodec::H264, &two_pkt_idr, 242_000, 15, 500)
+            .unwrap();
+        let trailing_p2 = multi_pktz
+            .packetize(VideoWireCodec::H264, &p_frame, 242_066, 15, 500)
+            .unwrap();
+        let d2_0 = peer_tx
+            .seal_video(epoch, 242_000, 1, true, &idr_pair2[0])
+            .unwrap();
+        let _ = rx.consume(epoch, &d2_0, 242_000, false).unwrap();
+        let d2_p = peer_tx
+            .seal_video(epoch, 242_020, 1, true, &trailing_p2[0])
+            .unwrap();
+        let _ = rx.consume(epoch, &d2_p, 242_020, false).unwrap();
+        for (idx, chunk) in idr_pair2.iter().enumerate().skip(1) {
+            let at = 242_030 + idx as u64;
+            let d = peer_tx.seal_video(epoch, at, 1, true, chunk).unwrap();
+            let _ = rx.consume(epoch, &d, at, false).unwrap();
+        }
         assert!(rx.pop_ready_video().is_none());
     }
 }
