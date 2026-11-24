@@ -17,9 +17,11 @@ import {
   offerKey,
   type CallController,
 } from "./call-controller.ts";
-import type {
-  LocalPreviewSurface,
-  RemoteVideoFrame,
+import {
+  localVideoFrameLayout,
+  type LocalPreviewSurface,
+  type LocalVideoDimensions,
+  type RemoteVideoFrame,
 } from "./media-backend.ts";
 
 /** Draws a decoded remote video frame onto a canvas while honoring WXCM clockwise rotation. */
@@ -57,11 +59,28 @@ export function drawRotatedFrame(
 }
 
 /** Single-in-flight latest-frame JPEG decoder to prevent overlapping Blob/Image pile-ups. */
-function createJpegCanvasRenderer(getCanvas: () => HTMLCanvasElement | null) {
+function createJpegCanvasRenderer(
+  getCanvas: () => HTMLCanvasElement | null,
+  onFrameSize?: (width: number, height: number) => void,
+) {
   let disposed = false;
   let decoding = false;
   let generation = 0;
   let pending: { jpegBytes: Uint8Array; rotationDegrees: 0 | 90 | 180 | 270 } | null = null;
+
+  const drawAndReport = (
+    target: HTMLCanvasElement,
+    source: CanvasImageSource,
+    srcWidth: number,
+    srcHeight: number,
+    rotationDegrees: 0 | 90 | 180 | 270,
+  ) => {
+    drawRotatedFrame(target, source, srcWidth, srcHeight, rotationDegrees);
+    if (onFrameSize && srcWidth > 0 && srcHeight > 0) {
+      const swapped = rotationDegrees === 90 || rotationDegrees === 270;
+      onFrameSize(swapped ? srcHeight : srcWidth, swapped ? srcWidth : srcHeight);
+    }
+  };
 
   const decodeNext = () => {
     if (disposed || decoding || !pending) return;
@@ -100,7 +119,7 @@ function createJpegCanvasRenderer(getCanvas: () => HTMLCanvasElement | null) {
           try {
             const target = getCanvas();
             if (!disposed && gen === generation && target) {
-              drawRotatedFrame(target, bitmap, bitmap.width, bitmap.height, next.rotationDegrees);
+              drawAndReport(target, bitmap, bitmap.width, bitmap.height, next.rotationDegrees);
             }
           } finally {
             bitmap.close();
@@ -117,7 +136,7 @@ function createJpegCanvasRenderer(getCanvas: () => HTMLCanvasElement | null) {
       URL.revokeObjectURL(url);
       const target = getCanvas();
       if (!disposed && gen === generation && target) {
-        drawRotatedFrame(target, img, img.naturalWidth, img.naturalHeight, next.rotationDegrees);
+        drawAndReport(target, img, img.naturalWidth, img.naturalHeight, next.rotationDegrees);
       }
       finish();
     };
@@ -208,30 +227,53 @@ export function LocalVideoSurface({
   subscribeJpeg,
   label,
   className = "",
+  onDimensionsChange,
 }: {
   stream?: MediaStream | null;
   subscribeJpeg?: (listener: (bytes: Uint8Array) => void) => () => void;
   label: string;
   className?: string;
+  onDimensionsChange?: (dims: LocalVideoDimensions) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const onDimensionsRef = useRef(onDimensionsChange);
+  onDimensionsRef.current = onDimensionsChange;
+  const lastDimsRef = useRef<LocalVideoDimensions | null>(null);
+
+  const reportDimensions = (width: number, height: number) => {
+    if (width <= 0 || height <= 0) return;
+    if (lastDimsRef.current?.width === width && lastDimsRef.current?.height === height) return;
+    const next = { width, height };
+    lastDimsRef.current = next;
+    onDimensionsRef.current?.(next);
+  };
 
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
+    lastDimsRef.current = null;
     video.srcObject = stream ?? null;
+    const syncVideoDims = () => {
+      reportDimensions(video.videoWidth, video.videoHeight);
+    };
+    video.addEventListener("loadedmetadata", syncVideoDims);
+    video.addEventListener("resize", syncVideoDims);
     if (stream) {
+      syncVideoDims();
       void video.play().catch(() => {});
     }
     return () => {
+      video.removeEventListener("loadedmetadata", syncVideoDims);
+      video.removeEventListener("resize", syncVideoDims);
       video.srcObject = null;
     };
   }, [stream]);
 
   useEffect(() => {
     if (!subscribeJpeg || stream) return;
-    const jpegRenderer = createJpegCanvasRenderer(() => canvasRef.current);
+    lastDimsRef.current = null;
+    const jpegRenderer = createJpegCanvasRenderer(() => canvasRef.current, reportDimensions);
     const unsubscribe = subscribeJpeg((jpegBytes) => {
       jpegRenderer.enqueue(jpegBytes, 0);
     });
@@ -281,6 +323,7 @@ export function CallPreviewPopover({
   const [muted, setMuted] = useState(false);
   const [preview, setPreview] = useState<LocalPreviewSurface | null>(null);
   const previewRef = useRef<LocalPreviewSurface | null>(null);
+  const [previewDims, setPreviewDims] = useState<LocalVideoDimensions | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
 
@@ -311,6 +354,7 @@ export function CallPreviewPopover({
   }, [onClose, triggerRef]);
 
   useEffect(() => {
+    setPreviewDims(null);
     if (!cameraEnabled) {
       previewRef.current?.stop();
       previewRef.current = null;
@@ -350,6 +394,8 @@ export function CallPreviewPopover({
     };
   }, [controller, cameraEnabled, callState.selectedDevices.cameraDeviceId]);
 
+  const previewLayout = localVideoFrameLayout(previewDims);
+
   return (
     <div
       ref={popoverRef}
@@ -361,12 +407,13 @@ export function CallPreviewPopover({
         <strong>{t("calls.videoCallPreviewTitle", { name: peerName })}</strong>
         <Button icon="close" label={t("calls.close")} onClick={onClose} />
       </div>
-      <div className="call-preview-stage">
+      <div className={`call-preview-stage ${previewLayout.isPortrait ? "is-portrait" : ""}`}>
         {cameraEnabled && preview ? (
           <LocalVideoSurface
             stream={preview.stream}
             subscribeJpeg={preview.subscribeJpeg}
             label={t("calls.cameraPreview")}
+            onDimensionsChange={setPreviewDims}
           />
         ) : (
           <div className="call-preview-placeholder">

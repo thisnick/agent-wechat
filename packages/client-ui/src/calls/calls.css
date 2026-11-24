@@ -145,6 +145,8 @@
   right: 0;
   width: 310px;
   max-width: calc(100vw - 24px);
+  max-height: calc(100dvh - 88px);
+  overflow-y: auto;
   background: var(--surface);
   color: var(--ink);
   border: 1px solid var(--line);
@@ -180,6 +182,12 @@
   background: #171719;
   display: grid;
   place-items: center;
+  flex-shrink: 0;
+}
+
+.call-preview-stage.is-portrait {
+  aspect-ratio: 1 / 1;
+  max-height: 260px;
 }
 
 .call-preview-placeholder {
@@ -193,12 +201,21 @@
   text-align: center;
 }
 
+/* Match outgoing frame framing: never silently crop portrait or widescreen camera capture */
 .call-local-video {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  min-width: 0;
+  min-height: 0;
+  object-fit: contain;
   transform: scaleX(-1);
   display: block;
+}
+
+.call-preview-stage > .call-local-video,
+.call-self-view > .call-local-video {
+  position: absolute;
+  inset: 0;
 }
 
 .call-preview-toggles,
@@ -899,6 +916,7 @@ dialog.call-theater-dialog:fullscreen {
   right: 28px;
   bottom: 22px;
   width: 168px;
+  max-height: calc(100% - 44px);
   aspect-ratio: 4 / 3;
   border-radius: 12px;
   overflow: hidden;
@@ -906,6 +924,12 @@ dialog.call-theater-dialog:fullscreen {
   background: #101014;
   box-shadow: 0 12px 30px #00000066;
   z-index: 3;
+}
+
+.call-self-view.is-portrait {
+  width: auto;
+  height: min(184px, calc(100% - 44px));
+  max-width: 168px;
 }
 
 .call-self-label {
@@ -916,6 +940,7 @@ dialog.call-theater-dialog:fullscreen {
   border-radius: 999px;
   background: #0000008c;
   font-size: 11px;
+  z-index: 1;
 }
 
 /* Slide-over translucent chat & roster drawer */
@@ -1170,8 +1195,15 @@ dialog.call-theater-dialog:fullscreen {
 
   .call-self-view {
     width: 108px;
+    max-height: calc(100% - 24px);
     right: 12px;
     bottom: 12px;
+  }
+
+  .call-self-view.is-portrait {
+    width: auto;
+    height: min(136px, calc(100% - 24px));
+    max-width: 108px;
   }
 
   .call-conference-grid {

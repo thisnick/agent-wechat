@@ -64,6 +64,40 @@ export type RemoteVideoFrame = {
   height?: number;
 };
 
+export type LocalVideoDimensions = {
+  width: number;
+  height: number;
+};
+
+export type LocalVideoFrameLayout = {
+  isPortrait: boolean;
+  aspectRatio?: string;
+};
+
+const MIN_LOCAL_VIDEO_ASPECT = 9 / 16;
+const MAX_LOCAL_VIDEO_ASPECT = 16 / 9;
+
+/** Compute bounded container orientation and CSS aspect-ratio for local camera surfaces. */
+export function localVideoFrameLayout(
+  dims: LocalVideoDimensions | null,
+): LocalVideoFrameLayout {
+  if (
+    !dims ||
+    !Number.isFinite(dims.width) ||
+    !Number.isFinite(dims.height) ||
+    dims.width <= 0 ||
+    dims.height <= 0
+  ) {
+    return { isPortrait: false };
+  }
+  const raw = dims.width / dims.height;
+  const clamped = Math.max(MIN_LOCAL_VIDEO_ASPECT, Math.min(MAX_LOCAL_VIDEO_ASPECT, raw));
+  return {
+    isPortrait: dims.height > dims.width,
+    aspectRatio: `${Math.round(clamped * 1000)} / 1000`,
+  };
+}
+
 export type LocalPreviewSurface = {
   /** Browser path attaches a MediaStream directly to a <video> element. */
   stream?: MediaStream;
