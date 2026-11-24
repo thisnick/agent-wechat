@@ -362,10 +362,11 @@ pub(super) fn run(
     Ok(())
 }
 
-// Both profiles must pass session.take_media first. Channel health policy can
-// change without changing the codec, packet grouping or transport flags.
+// Both profiles must pass session.take_media first. Extended capability flags,
+// P2P lite-access channel bit (2 <-> 3), and channel health policy (0 <-> 3)
+// can update as participants join without changing the running codec or packet grouping.
 fn same_media_format(initial: [u64; 6], current: [u64; 6]) -> bool {
-    initial[..5] == current[..5]
+    initial[..2] == current[..2]
 }
 
 fn publish_roster(
@@ -722,9 +723,12 @@ mod tests {
     fn admitted_channel_health_updates_preserve_the_running_media_format() {
         let creator = [17, 0x206, 0, 0, 2, 0];
         let joined = [17, 0x206, 0, 0, 2, 3];
+        let joined_lite = [17, 0x206, 0x482_0000, 0, 3, 3];
         assert!(same_media_format(creator, joined));
         assert!(same_media_format(joined, creator));
-        for index in 0..5 {
+        assert!(same_media_format(creator, joined_lite));
+        assert!(same_media_format(joined_lite, creator));
+        for index in 0..2 {
             let mut changed = creator;
             changed[index] ^= 1;
             assert!(!same_media_format(creator, changed));

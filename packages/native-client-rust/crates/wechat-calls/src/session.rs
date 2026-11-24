@@ -1477,15 +1477,28 @@ fn profile(engine: &[u8], channel: &[u8]) -> Result<()> {
 
 fn profile_for_mode(engine: &[u8], channel: &[u8], video_mode: bool) -> Result<()> {
     let shape = profile_shape(engine, channel)?;
+    // Channel field 1 bit 1 (`0x2`) selects the standard relay route; peer
+    // callers may also advertise bit 0 (`0x1`, P2P lite-access capability),
+    // which leaves relay check-in, ChaCha20-Poly1305 framing and codec
+    // packetization unchanged (`2 | 3`).
     let ok = if video_mode {
         shape[0] == 17
             && matches!(shape[1], 0x106 | 0x206)
-            && shape[4] == 2
+            && matches!(shape[4], 2 | 3)
             && matches!(shape[5], 0 | 3)
     } else {
-        matches!(shape, [17, 0x106 | 0x206, 0x800000, 0, 2, 3])
+        matches!(
+            shape,
+            [17, 0x106 | 0x206, 0x800000 | 0x4800000, 0, 2 | 3, 3]
+        )
     };
     if !ok {
+        if std::env::var("WX_CALL_VIDEO_TRACE").as_deref() == Ok("1") {
+            let dec_mask = engine_video_dec_cap_mask(engine);
+            eprintln!(
+                "[wechat-call-video] profile_for_mode rejected video={video_mode} shape={shape:#x?} dec_mask=0x{dec_mask:08x}"
+            );
+        }
         return Err(UnsupportedCallMedia.into());
     }
     Ok(())
@@ -1665,7 +1678,7 @@ mod tests {
                 assert_eq!(number(&inner, 5, None)?, 7);
                 assert_eq!(number(&inner, 6, None)?, 9);
                 assert_eq!(number(&inner, 7, None)?, 0);
-                assert_eq!(number(&inner, 13, None)?, 1);
+                assert!([1, 3].contains(&number(&inner, 13, None)?));
                 let caps = fields(data(&inner, 12)?)?;
                 assert_eq!(number(&fields(data(&caps, 1)?)?, 5, None)?, 0x40000);
                 assert_eq!(data(&caps, 2)?.len(), 12);
@@ -1693,8 +1706,12 @@ mod tests {
                 assert_eq!(data(&app_base, 2)?, b"Ldeviceid");
                 let inner = fields(data(&cloud, 2)?)?;
                 if command == 3361 {
-                    assert_eq!(number(&inner, 5, None)?, 2);
-                    assert_eq!(number(&inner, 6, None)?, 1);
+                    let room_type = number(&inner, 5, None)?;
+                    let av_status = number(&inner, 6, None)?;
+                    assert!(
+                        matches!((room_type, av_status), (2, 1) | (1, 1 | 3)),
+                        "unexpected JoinReq room_type={room_type} av_status={av_status}"
+                    );
                     assert_eq!(number(&inner, 8, None)?, 0);
                     assert_eq!(number(&inner, 11, None)?, 7);
                     assert_eq!(number(&inner, 12, None)?, 9);
@@ -2953,15 +2970,29 @@ mod tests {
         assert_eq!(parsed.get(&0).map(|(s, _)| *s), Some(3));
         assert_eq!(parsed.get(&1).map(|(s, _)| *s), Some(3));
 
-        let engine = p::message(&[
-            p::uint(5, 17),
-            p::uint(6, 0x206),
-            p::uint(7, 0x800000),
-            p::uint(33, 0x8808_0800),
-            p::bytes(41, &[8, 1]),
-        ])
-        .unwrap();
-        let channel = p::message(&[p::uint(1, 2), p::uint(2, 3)]).unwrap();
-        assert!(profile_for_mode(&engine, &channel, true).is_ok());
+        for channel_flags in [2, 3] {
+            let engine = p::message(&[
+                p::uint(5, 17),
+                p::uint(6, 0x106),
+                p::uint(7, 0x482_0000),
+                p::uint(33, 0x8808_0800),
+                p::bytes(41, &[8, 1]),
+            ])
+            .unwrap();
+            let channel = p::message(&[p::uint(1, channel_flags), p::uint(2, 3)]).unwrap();
+            assert!(profile_for_mode(&engine, &channel, true).is_ok());
+
+            let voice_engine =
+                p::message(&[p::uint(5, 17), p::uint(6, 0x106), p::uint(7, 0x480_0000)]).unwrap();
+            assert!(profile_for_mode(&voice_engine, &channel, false).is_ok());
+        }
+        for bad_flags in [0, 1, 4, 6] {
+            let engine =
+                p::message(&[p::uint(5, 17), p::uint(6, 0x106), p::uint(7, 0x482_0000)]).unwrap();
+            let channel = p::message(&[p::uint(1, bad_flags), p::uint(2, 3)]).unwrap();
+            assert!(profile_for_mode(&engine, &channel, true)
+                .unwrap_err()
+                .is::<UnsupportedCallMedia>());
+        }
     }
 }

@@ -1523,4 +1523,181 @@ mod tests {
         s.accept(&wire, &mut st, authority(), tasks(2)).unwrap();
         assert!(s.ringing_relay_target(&st, authority(), 0, 0).is_err());
     }
+
+    #[test]
+    fn incoming_video_and_voice_accept_peer_channel_lite_access_flag() {
+        let video_invite = InviteNotification::decode(
+            &p::message(&[
+                p::uint(1, 7),
+                p::uint(2, 9),
+                p::uint(3, 0),
+                p::uint(4, 1),
+                p::bytes(5, b"peer"),
+                p::bytes(6, b"own"),
+                p::bytes(7, b"peer"),
+                p::bytes(8, b"own"),
+                p::bytes(9, b"own"),
+                p::bytes(9, b"peer"),
+                p::bytes(10, b"wechat"),
+                p::bytes(11, b"voip-2p"),
+                p::uint(12, 1),
+                p::bytes(13, b"owner-group"),
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(video_invite.room_type, Some(1));
+
+        let join_with_channel = |video: bool, channel_flags: u64| {
+            let engine = if video {
+                p::message(&[
+                    p::uint(5, 17),
+                    p::uint(6, 0x106),
+                    p::uint(7, 0x482_0000),
+                    p::uint(33, 0x8808_0800),
+                    p::uint(40, 7),
+                ])
+                .unwrap()
+            } else {
+                p::message(&[p::uint(5, 17), p::uint(6, 0x106), p::uint(7, 0x480_0000)]).unwrap()
+            };
+            let channel = p::message(&[p::uint(1, channel_flags), p::uint(2, 3)]).unwrap();
+            let cap = p::message(&[
+                p::uint(1, 1),
+                p::bytes(
+                    2,
+                    &p::message(&[p::bytes(1, &engine), p::bytes(2, &channel)]).unwrap(),
+                ),
+            ])
+            .unwrap();
+            let address = p::message(&[p::bytes(1, b"127.0.0.1"), p::uint(2, 6000)]).unwrap();
+            let strategy = p::message(&[
+                p::bytes(10, &[7; 32]),
+                p::bytes(13, &cap),
+                p::uint(14, 0),
+                p::bytes(
+                    15,
+                    &p::message(&[p::uint(1, 1), p::bytes(4, &address)]).unwrap(),
+                ),
+            ])
+            .unwrap();
+            let members = p::message(&[
+                p::uint(1, 2),
+                p::bytes(2, &member("own", 0, 1)),
+                p::bytes(2, &member("peer", 1, 1)),
+            ])
+            .unwrap();
+            let av = if video {
+                av_status(3, 3)
+            } else {
+                av_status(1, 1)
+            };
+            wrapped_reply(
+                3361,
+                &p::message(&[
+                    p::uint(1, 7),
+                    p::uint(2, 9),
+                    p::uint(3, 0),
+                    p::bytes(4, &strategy),
+                    p::bytes(6, b"opaque-one"),
+                    p::bytes(6, b"opaque-two"),
+                    p::uint(5, 0),
+                    p::bytes(6, &[]),
+                    p::uint(8, if video { 1 } else { 2 }),
+                    p::bytes(9, &av),
+                    p::uint(11, 99),
+                    p::bytes(12, b"joined-cursor"),
+                    p::bytes(13, &members),
+                ])
+                .unwrap(),
+            )
+        };
+
+        // Incoming video call with caller channel flags = 3 (relay + lite-access bit) succeeds.
+        let wire = transport(vec![
+            (CallHostRoute::AppAuth, auth_reply()),
+            (CallHostRoute::RingingAck, ack_reply()),
+            (CallHostRoute::Transfer, join_with_channel(true, 3)),
+        ]);
+        let mut st = state();
+        let mut video_params = parameters();
+        video_params.apply_offer(
+            &wechat_protocol::calls::voice_offer::VoiceOffer::from_owned_random_video(
+                0x0102_0300,
+                [9; 32],
+                Default::default(),
+            )
+            .unwrap(),
+        );
+        let mut s = NativeIncomingSession::authenticate(
+            &wire,
+            &mut st,
+            authority(),
+            1,
+            [9; 32],
+            video_params,
+            &video_invite,
+            "peer",
+        )
+        .unwrap();
+        s.ringing_ack(&wire, &mut st, authority(), tasks(1))
+            .unwrap();
+        s.accept_with_camera(&wire, &mut st, authority(), true, tasks(2))
+            .unwrap();
+        assert_eq!(s.phase(), IncomingPhase::Joined);
+        let media = s.take_media(&st, authority(), 0, 0).unwrap();
+        assert_eq!(media.video_dec_cap_mask, 0x8808_0800);
+
+        // Incoming voice call with caller channel flags = 3 and extended audio cap 0x4800000 succeeds.
+        let voice_wire = transport(vec![
+            (CallHostRoute::AppAuth, auth_reply()),
+            (CallHostRoute::RingingAck, ack_reply()),
+            (CallHostRoute::Transfer, join_with_channel(false, 3)),
+        ]);
+        let mut voice_st = state();
+        let mut voice_s = session(&voice_wire, &mut voice_st);
+        voice_s
+            .ringing_ack(&voice_wire, &mut voice_st, authority(), tasks(1))
+            .unwrap();
+        voice_s
+            .accept(&voice_wire, &mut voice_st, authority(), tasks(2))
+            .unwrap();
+        assert_eq!(voice_s.phase(), IncomingPhase::Joined);
+        assert!(voice_s.take_media(&voice_st, authority(), 0, 0).is_ok());
+
+        // Unknown channel flag bits (e.g. 6) remain rejected with UnsupportedCallMedia.
+        let bad_wire = transport(vec![
+            (CallHostRoute::AppAuth, auth_reply()),
+            (CallHostRoute::RingingAck, ack_reply()),
+            (CallHostRoute::Transfer, join_with_channel(true, 6)),
+        ]);
+        let mut bad_st = state();
+        let mut bad_params = parameters();
+        bad_params.apply_offer(
+            &wechat_protocol::calls::voice_offer::VoiceOffer::from_owned_random_video(
+                0x0102_0300,
+                [9; 32],
+                Default::default(),
+            )
+            .unwrap(),
+        );
+        let mut bad_s = NativeIncomingSession::authenticate(
+            &bad_wire,
+            &mut bad_st,
+            authority(),
+            1,
+            [9; 32],
+            bad_params,
+            &video_invite,
+            "peer",
+        )
+        .unwrap();
+        bad_s
+            .ringing_ack(&bad_wire, &mut bad_st, authority(), tasks(1))
+            .unwrap();
+        assert!(bad_s
+            .accept_with_camera(&bad_wire, &mut bad_st, authority(), true, tasks(2))
+            .unwrap_err()
+            .is::<UnsupportedCallMedia>());
+    }
 }

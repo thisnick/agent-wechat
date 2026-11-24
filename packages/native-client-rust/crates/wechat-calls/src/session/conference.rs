@@ -907,12 +907,12 @@ fn conference_receive_profile_for_mode(
     let ok = if video_mode {
         shape[0] == 17
             && matches!(shape[1], 0x106 | 0x206)
-            && shape[4] == 2
+            && matches!(shape[4], 2 | 3)
             && matches!(shape[5], 0 | 3)
     } else {
         matches!(
             shape,
-            [17, 0x106 | 0x206, 0, 0, 2, 3] | [17, 0x206, 0, 0, 2, 0]
+            [17, 0x106 | 0x206, 0, 0, 2 | 3, 3] | [17, 0x206, 0, 0, 2, 0]
         )
     };
     if !ok {
@@ -1104,17 +1104,27 @@ mod tests {
             p::message(&[p::uint(5, codec), p::uint(6, packet), p::uint(7, extension)]).unwrap()
         };
         let channel = p::message(&[p::uint(1, 2), p::uint(2, 3)]).unwrap();
-        for packet in [0x106, 0x206] {
-            let group = engine(17, packet, 0);
-            assert!(conference_receive_profile(&group, &channel).is_ok());
-            assert!(profile(&group, &channel).is_err());
-            let personal = engine(17, packet, 0x800000);
-            assert!(conference_receive_profile(&personal, &channel).is_err());
-            assert!(profile(&personal, &channel).is_ok());
+        let channel_lite = p::message(&[p::uint(1, 3), p::uint(2, 3)]).unwrap();
+        for ch in [&channel, &channel_lite] {
+            for packet in [0x106, 0x206] {
+                let group = engine(17, packet, 0);
+                assert!(conference_receive_profile(&group, ch).is_ok());
+                assert!(conference_receive_profile_for_mode(&group, ch, true).is_ok());
+                assert!(profile(&group, ch).is_err());
+                let personal = engine(17, packet, 0x800000);
+                assert!(conference_receive_profile(&personal, ch).is_err());
+                assert!(profile(&personal, ch).is_ok());
+            }
         }
         assert!(conference_receive_profile(&engine(0, 0x106, 0), &channel).is_err());
         assert!(conference_receive_profile(&engine(17, 0x306, 0), &channel).is_err());
         assert!(conference_receive_profile(&engine(17, 0x106, 0x100), &channel).is_err());
+        assert!(conference_receive_profile_for_mode(
+            &engine(17, 0x106, 0),
+            &p::message(&[p::uint(1, 6), p::uint(2, 3)]).unwrap(),
+            true,
+        )
+        .is_err());
     }
 
     #[test]
