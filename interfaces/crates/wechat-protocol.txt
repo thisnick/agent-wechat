@@ -9,6 +9,7 @@ const wechat_protocol::calls::signaling::MAX_SIGNALING_BYTES | usize | Local bud
 const wechat_protocol::calls::video_packet::DEFAULT_RSM_CHUNK_BYTES | usize | Default source payload chunk size per UDP video packet (leaves room for Live96/Live98 + RSM headers inside MTU).
 const wechat_protocol::calls::video_packet::DEFAULT_RSM_ORIENTATION | u8 | Default wire orientation code (`2` = upright 0° in `EncFecHeader` byte 13 bits 7..5).
 const wechat_protocol::calls::video_packet::MAX_VIDEO_FRAME_BYTES | usize | Maximum unframed Annex-B access unit accepted by the packetizer or reassembler.
+const wechat_protocol::calls::video_packet::MAX_VIDEO_NACK_RANGES | usize | Maximum packet sequence ranges encoded in a single `0x06` video NACK payload.
 const wechat_protocol::contact_sync::CONTACT_SELECTOR | u64 | MISSING DOC
 const wechat_protocol::file_upload::MAX_RESERVED_FILE_BYTES | usize | MISSING DOC
 const wechat_protocol::media::MAX_CDN_TRANSFER_BYTES | usize | MISSING DOC
@@ -464,6 +465,12 @@ field wechat_protocol::calls::relay::RelayEpoch::call_generation | u64 | MISSING
 field wechat_protocol::calls::relay::RelayEpoch::key_generation | u64 | MISSING DOC
 field wechat_protocol::calls::relay::RelayEpoch::logout_epoch | u64 | MISSING DOC
 field wechat_protocol::calls::relay::RelayEpoch::socket_generation | u64 | MISSING DOC
+field wechat_protocol::calls::relay::RelayTarget::connection_id | u16 | Selected relay connection identifier.
+field wechat_protocol::calls::relay::RelayTarget::endpoint | core::net::socket_addr::SocketAddr | Selected UDP relay endpoint (IPv4 or IPv6) from the Strategy.
+field wechat_protocol::calls::relay::RelayTarget::merge_mode | bool | Whether the Strategy advertises 1-RTT merged check-in support.
+field wechat_protocol::calls::relay::RelayTarget::own_member | u16 | Local member index in the room.
+field wechat_protocol::calls::relay::RelayTarget::room_id | u64 | Allocated call room identifier.
+field wechat_protocol::calls::relay::RelayTarget::room_key | u64 | Allocated room key used to derive the CheckIn TEA key.
 field wechat_protocol::calls::relay::RoomInputs::arq_flag | u16 | MISSING DOC
 field wechat_protocol::calls::relay::RoomInputs::body_timestamp | u32 | MISSING DOC
 field wechat_protocol::calls::relay::RoomInputs::checkin_sequence | u16 | MISSING DOC
@@ -533,6 +540,40 @@ field wechat_protocol::calls::video_packet::VideoIRequest::local_stream_id | u8 
 field wechat_protocol::calls::video_packet::VideoIRequest::target_member | u16 | Target member ID whose encoder should emit a keyframe.
 field wechat_protocol::calls::video_packet::VideoIRequest::target_stream_id | u8 | Target stream ID whose encoder should emit a keyframe.
 field wechat_protocol::calls::video_packet::VideoIRequest::timestamp_ms | u64 | Monotonic millisecond timestamp carried in the body.
+field wechat_protocol::calls::video_packet::VideoNack::arq_seq | u8 | Monotonic wrapping NACK sequence number.
+field wechat_protocol::calls::video_packet::VideoNack::is_screen | u8 | Nonzero for screen-share streams; `0` for camera video.
+field wechat_protocol::calls::video_packet::VideoNack::local_member | u16 | Requesting member ID.
+field wechat_protocol::calls::video_packet::VideoNack::local_stream_id | u8 | Requesting video stream ID.
+field wechat_protocol::calls::video_packet::VideoNack::ranges | alloc::vec::Vec<(u16, u16)> | Half-open `[start_seq, end_seq)` missing 16-bit packet sequence ranges (`pkg_seq`).
+field wechat_protocol::calls::video_packet::VideoNack::target_member | u16 | Target member ID whose sender should retransmit the missing packets.
+field wechat_protocol::calls::video_packet::VideoNack::target_stream_id | u8 | Target video stream ID.
+field wechat_protocol::calls::video_packet::VideoP2sReport::actual_member_num | u32 | Actual active remote member count delivering video (`videoLink` field 5).
+field wechat_protocol::calls::video_packet::VideoP2sReport::capt_fps | u32 | Local capture frame rate (`field 12`).
+field wechat_protocol::calls::video_packet::VideoP2sReport::codec_support_mask | u32 | Supported video codec capability bitmask (`field 24`).
+field wechat_protocol::calls::video_packet::VideoP2sReport::conn_id | u32 | Relay connection ID (`video_new_p2s.videoLink` field 1).
+field wechat_protocol::calls::video_packet::VideoP2sReport::decode_type | u32 | Active receive wire codec (`9` = H.264, `15` = H.265, `field 29`).
+field wechat_protocol::calls::video_packet::VideoP2sReport::delay_ms | u32 | Smoothed inter-arrival delay/jitter estimate in milliseconds (`field 6`).
+field wechat_protocol::calls::video_packet::VideoP2sReport::est_bw_kbps | u32 | Estimated receive bandwidth in kbps (`field 7`).
+field wechat_protocol::calls::video_packet::VideoP2sReport::expected_member_num | u32 | Expected active remote member count (`videoLink` field 4).
+field wechat_protocol::calls::video_packet::VideoP2sReport::heavy_freeze_cnt | u32 | Heavy freeze event count (`>= 500 ms` gaps, `field 33`).
+field wechat_protocol::calls::video_packet::VideoP2sReport::heavy_freeze_time_ratio | u32 | Percentage of the interval spent in heavy freeze (`0..=100`, `field 35`).
+field wechat_protocol::calls::video_packet::VideoP2sReport::light_freeze_cnt | u32 | Light freeze event count (`200..500 ms` gaps, `field 32`).
+field wechat_protocol::calls::video_packet::VideoP2sReport::light_freeze_time_ratio | u32 | Percentage of the interval spent in light freeze (`0..=100`, `field 34`).
+field wechat_protocol::calls::video_packet::VideoP2sReport::long_loss_pct | u32 | Smoothed long-window packet loss percentage (`0..=100`, `field 48`).
+field wechat_protocol::calls::video_packet::VideoP2sReport::loss_pct | u32 | Packet loss percentage (`0..=100`, `field 14`).
+field wechat_protocol::calls::video_packet::VideoP2sReport::loss_pkts | u32 | Lost packet count in the reporting interval (`field 26`).
+field wechat_protocol::calls::video_packet::VideoP2sReport::play_fps | u32 | Rendered/delivered frame rate (`field 30`).
+field wechat_protocol::calls::video_packet::VideoP2sReport::play_frames | u32 | Cumulative delivered frame count (`field 31`).
+field wechat_protocol::calls::video_packet::VideoP2sReport::recv_arq_resp_pkgs | u32 | Packets recovered via ARQ/NACK retransmission in the interval (`videoLink` field 6).
+field wechat_protocol::calls::video_packet::VideoP2sReport::recv_data_interval_ms | u32 | Maximum inter-packet arrival gap in the reporting interval in milliseconds (`field 5`).
+field wechat_protocol::calls::video_packet::VideoP2sReport::recv_fps | u32 | Inbound video frame rate (`field 11`).
+field wechat_protocol::calls::video_packet::VideoP2sReport::recv_kbps | u32 | Inbound video bitrate in kbps (`field 9`).
+field wechat_protocol::calls::video_packet::VideoP2sReport::recv_pkgs | u32 | Received packet count in the reporting interval (`videoLink` field 2).
+field wechat_protocol::calls::video_packet::VideoP2sReport::remote_member_id | u32 | Remote sender member ID (`video_p2s` field 1).
+field wechat_protocol::calls::video_packet::VideoP2sReport::send_fps | u32 | Outbound video frame rate (`field 10`).
+field wechat_protocol::calls::video_packet::VideoP2sReport::send_kbps | u32 | Outbound video bitrate in kbps (`field 8`).
+field wechat_protocol::calls::video_packet::VideoP2sReport::short_loss_pct | u32 | Short-window packet loss percentage (`0..=100`, `field 47`).
+field wechat_protocol::calls::video_packet::VideoP2sReport::stream_id | u32 | Video stream ID (`video_p2s` field 2).
 field wechat_protocol::calls::video_packet::VideoS2pCommand::alg | u32 | QoS algorithm identifier (`field 1: u8Alg`).
 field wechat_protocol::calls::video_packet::VideoS2pCommand::codec_type | u32 | Server-commanded codec selector (`field 11: u8CodecType`).
 field wechat_protocol::calls::video_packet::VideoS2pCommand::fps | u32 | Target frame rate (`field 3: u8Fps`).
@@ -1053,7 +1094,8 @@ fn wechat_protocol::calls::audio_packet::Live96::seal_audio | fn(&mut self, curr
 fn wechat_protocol::calls::audio_packet::Live96::seal_probe_init | fn(&mut self, current: wechat_protocol::calls::audio_packet::MediaEpoch, now_ms: u64) -> anyhow::Result<alloc::vec::Vec<u8>> | Send the initial `0x70` faking_type1 probe (`[8, 1, 18, 2, 8, 1]`) after relay check-in completes, matching official clients.
 fn wechat_protocol::calls::audio_packet::Live96::seal_qos_p2s | fn(&mut self, current: wechat_protocol::calls::audio_packet::MediaEpoch, now_ms: u64, payload: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Seal one MP QoS P2S telemetry packet (`packed_kind = 0x30`).
 fn wechat_protocol::calls::audio_packet::Live96::seal_video | fn(&mut self, current: wechat_protocol::calls::audio_packet::MediaEpoch, now_ms: u64, stream_id: u8, is_data: bool, payload: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Seal one MP/iLink video payload (`packed_kind = 0x20 | stream_id`, `ext_byte = is_data`).
-fn wechat_protocol::calls::audio_packet::Live96::seal_video_rtcp | fn(&mut self, current: wechat_protocol::calls::audio_packet::MediaEpoch, now_ms: u64, stream_id: u8, payload: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Seal one peer-to-peer video RTCP packet (`0x66` `IRequest` or `0x06` NACK). Wire byte 14 carries `0x60 | stream_id`, while the AEAD nonce uses `kind & 0x2f` and shares the video sequence counter (`GetSeqIndex` slot 12).
+fn wechat_protocol::calls::audio_packet::Live96::seal_video_nack | fn(&mut self, current: wechat_protocol::calls::audio_packet::MediaEpoch, now_ms: u64, stream_id: u8, payload: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Seal one peer-to-peer `0x06` video ARQ/NACK packet on `packed_kind = 0x60 | stream_id`. Uses the active session envelope (`Live96` with `ext_byte = 0`, or `Live98` with `ext_byte = 2` when `prefer_live98_tx` is enabled) and advances the shared video sequence counter to preserve nonce uniqueness.
+fn wechat_protocol::calls::audio_packet::Live96::seal_video_rtcp | fn(&mut self, current: wechat_protocol::calls::audio_packet::MediaEpoch, now_ms: u64, stream_id: u8, payload: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Seal one peer-to-peer video RTCP packet (`0x66` `IRequest`). Wire byte 14 carries `0x60 | stream_id`, while the AEAD nonce uses `kind & 0x2f` and shares the video sequence counter (`GetSeqIndex` slot 12).
 fn wechat_protocol::calls::audio_packet::Live96::set_prefer_live98_tx | fn(&mut self, enabled: bool) | Opt into `Live98` (`0x98`, 21-byte header, 32-bit sequence) for outbound media packets.
 fn wechat_protocol::calls::audio_packet::OpenedPayload::extension_byte | fn(&self) -> u8 | Header extension/data flag byte (`packet[17]` on `Live96`, `packet[19]` on `Live98`).
 fn wechat_protocol::calls::audio_packet::OpenedPayload::magic | fn(&self) -> u8 | Wire envelope magic (`0x96` for `Live96`, `0x98` for `Live98`).
@@ -1118,11 +1160,14 @@ fn wechat_protocol::calls::personal::join_with_mode | fn(inputs: &wechat_protoco
 fn wechat_protocol::calls::personal::live_sync | fn(live_id: u64, cookies: &[u8], timeout_seconds: u32, sdk_task: u32) -> anyhow::Result<wechat_protocol::calls::personal::HostRequest> | Prepare one caller LiveSync. `timeout_seconds` is source-selected (3..50), distinct from the outer request deadline. Cookies remain uncommitted until the owner has handled the entire response batch.
 fn wechat_protocol::calls::personal::reject | fn(inputs: &wechat_protocol::calls::personal::VoiceInputs<'_>, room: wechat_protocol::calls::personal::VoiceRoom, sdk_task: u32) -> anyhow::Result<wechat_protocol::calls::signaling::CloudRequest> | Decline an already-ACKed callee with source Reject reason1. Pre-ACK busy uses a different operation and is not implied by this builder.
 fn wechat_protocol::calls::personal::switch_av | fn(inputs: &wechat_protocol::calls::personal::VoiceInputs<'_>, room: wechat_protocol::calls::personal::VoiceRoom, microphone_enabled: bool, camera_enabled: bool, timestamp: u64, sdk_task: u32) -> anyhow::Result<wechat_protocol::calls::signaling::CloudRequest> | Prepare a direct-call `SwitchAV` (`3197`) request toggling microphone and camera bits.
+fn wechat_protocol::calls::relay::RelayTarget::from_strategy | fn(room_id: u64, room_key: u64, own_member: u16, strategy: &[u8], connection_index: usize, udp_index: usize) -> anyhow::Result<Self> | Extract a UDP relay check-in target from a Strategy message without requiring field 10 (`media_key`). Used for ringing pre-connect when `ConfAck` carries relay endpoints ahead of `Join`.
 fn wechat_protocol::calls::relay::RoomInputs::body | fn(&self) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
 fn wechat_protocol::calls::relay::RoomInputs::initial | fn(selected: &wechat_protocol::calls::relay::SelectedRelay, network_type: u16, header_timestamp: u32, body_timestamp: u32) -> Self | MISSING DOC
+fn wechat_protocol::calls::relay::RoomInputs::initial_for_target | fn(target: &wechat_protocol::calls::relay::RelayTarget, network_type: u16, header_timestamp: u32, body_timestamp: u32) -> Self | Build initial check-in inputs from a [`RelayTarget`] without requiring media keys.
 fn wechat_protocol::calls::relay::RoomInputs::random_bytes_needed | fn(&self) -> anyhow::Result<usize> | MISSING DOC
 fn wechat_protocol::calls::relay::SelectedRelay::from_strategy | fn(room_id: u64, room_key: u64, own_member: u16, strategy: &[u8], connection_index: usize, udp_index: usize) -> anyhow::Result<Self> | Strategy field15 contains modern connection records (with field1 legacy UDP addresses used only when field15 is empty). Indices must be chosen by the caller from the current admitted Strategy, not by retries.
 fn wechat_protocol::calls::relay::SelectedRelay::strategy_candidates | fn(strategy: &[u8]) -> anyhow::Result<alloc::vec::Vec<(usize, usize, core::net::socket_addr::SocketAddr)>> | List valid UDP relay candidates as `(connection_index, udp_index, endpoint)` from an admitted Strategy in server order.
+fn wechat_protocol::calls::relay::SelectedRelay::target | fn(&self) -> wechat_protocol::calls::relay::RelayTarget | Return the check-in target metadata for this selected relay (without media key material).
 fn wechat_protocol::calls::relay::TwoRttRelay::close | fn(&mut self) | MISSING DOC
 fn wechat_protocol::calls::relay::TwoRttRelay::continuation_random_bytes_needed | fn(&self, header_timestamp: u32, body_timestamp: u32) -> anyhow::Result<usize> | MISSING DOC
 fn wechat_protocol::calls::relay::TwoRttRelay::is_ready | fn(&self) -> bool | MISSING DOC
@@ -1166,11 +1211,14 @@ fn wechat_protocol::calls::video_packet::VideoWireCodec::from_wire | const fn(va
 fn wechat_protocol::calls::video_packet::VideoWireCodec::wire | const fn(self) -> u8 | Encode to the wire `codecType` byte.
 fn wechat_protocol::calls::video_packet::classify_video_channel_payload | fn(payload: &[u8]) -> anyhow::Result<wechat_protocol::calls::video_packet::VideoChannelPayload<'_>> | Classify a decrypted payload arriving on `packed_kind` `0x20..=0x2f`.
 fn wechat_protocol::calls::video_packet::encode_irequest | fn(local_member: u16, target_member: u16, stream_id: u8, timestamp_ms: u64, sequence: u32) -> alloc::vec::Vec<u8> | Encode a 58-byte `0x66` `IRequest` keyframe request packet.
-fn wechat_protocol::calls::video_packet::encode_irequest_with_force | fn(local_member: u16, target_member: u16, stream_id: u8, timestamp_ms: u64, lost_point_seq: u64, force: bool) -> alloc::vec::Vec<u8> | Encode a 58-byte `0x66` `IRequest` keyframe request packet with explicit `ullLostPointSeq` (`body[0x24..0x2c]`) and `force` flag (`body[0x2c] & 1`).
+fn wechat_protocol::calls::video_packet::encode_irequest_with_force | fn(local_member: u16, target_member: u16, stream_id: u8, timestamp_ms: u64, lost_point_seq: u64, force: bool) -> alloc::vec::Vec<u8> | Encode a 58-byte `0x66` `IRequest` camera keyframe request packet with explicit `ullLostPointSeq` (`body[0x24..0x2c]`) and `force` flag (`body[0x2c] & 1`).
 fn wechat_protocol::calls::video_packet::encode_p2s | fn(sequence: u16, cap_seq: u32, codec_support_mask: u32, decode_type: u32) -> anyhow::Result<alloc::vec::Vec<u8>> | Encode an `0x0b` MP P2S QoS heartbeat payload for `packed_kind = 0x30` matching the nested `inner.f1` (client header) + `inner.f3.f1` (`video_p2s`) wire layout.
+fn wechat_protocol::calls::video_packet::encode_p2s_report | fn(sequence: u16, cap_seq: u32, report: &wechat_protocol::calls::video_packet::VideoP2sReport) -> anyhow::Result<alloc::vec::Vec<u8>> | Encode an `0x0b` MP P2S QoS heartbeat payload for `packed_kind = 0x30` using the supplied live receiver/sender telemetry (`inner.f1` + `inner.f3.f1` + `inner.f6.f1`).
+fn wechat_protocol::calls::video_packet::encode_video_nack | fn(local_member: u16, target_member: u16, stream_id: u8, arq_seq: u8, ranges: &[(u16, u16)]) -> alloc::vec::Vec<u8> | Encode a `0x06` video ARQ/NACK payload for `packed_kind = 0x60 | stream_id`.
 fn wechat_protocol::calls::video_packet::frame_annexb_access_unit | fn(codec: wechat_protocol::calls::video_packet::VideoWireCodec, annexb: &[u8]) -> anyhow::Result<wechat_protocol::calls::video_packet::FramedAnnexB> | Frame a single standard Annex-B access unit (H.265 or H.264) with WeChat's 4-byte `[xps_len_be16, idr_len_be16]` / `[slice_len_be16, 0, 0]` prefix.
 fn wechat_protocol::calls::video_packet::parse_irequest | fn(payload: &[u8]) -> anyhow::Result<wechat_protocol::calls::video_packet::VideoIRequest> | Parse a 58-byte `0x66` `IRequest` keyframe request packet.
 fn wechat_protocol::calls::video_packet::parse_s2p | fn(payload: &[u8]) -> anyhow::Result<wechat_protocol::calls::video_packet::ParsedS2p> | Parse a `0x0c` MP S2P packet arriving on `packed_kind = 0x30`.
+fn wechat_protocol::calls::video_packet::parse_video_nack | fn(payload: &[u8]) -> anyhow::Result<wechat_protocol::calls::video_packet::VideoNack> | Parse a `0x06` video ARQ/NACK payload.
 fn wechat_protocol::calls::video_packet::split_annexb_nalus | fn(data: &[u8]) -> alloc::vec::Vec<(usize, usize, usize)> | Locate `(start, end, start_code_len)` spans for every Annex-B NALU in `data`.
 fn wechat_protocol::calls::video_packet::unframe_annexb_access_unit | fn(codec: wechat_protocol::calls::video_packet::VideoWireCodec, framed: &[u8], xps_len_hi: u8, slice_len_hi: u8) -> anyhow::Result<(alloc::vec::Vec<u8>, bool, bool)> | Strip WeChat's 4-byte framing prefix from a reassembled MP/iLink payload, returning standard Annex-B bytes plus keyframe/codec-config flags.
 fn wechat_protocol::calls::voice_offer::VoiceOffer::advertised_channel_identity | fn(&self) -> &[u8; 12] | MISSING DOC
@@ -1464,11 +1512,14 @@ impl core::clone::Clone for wechat_protocol::calls::personal::RemoteExitReason |
 impl core::clone::Clone for wechat_protocol::calls::personal::VoiceRoom | impl | -
 impl core::clone::Clone for wechat_protocol::calls::relay::RelayEpoch | impl | -
 impl core::clone::Clone for wechat_protocol::calls::relay::RelayProgress | impl | -
+impl core::clone::Clone for wechat_protocol::calls::relay::RelayTarget | impl | -
 impl core::clone::Clone for wechat_protocol::calls::relay::RoomInputs | impl | -
 impl core::clone::Clone for wechat_protocol::calls::signaling::CallOperation | impl | -
 impl core::clone::Clone for wechat_protocol::calls::video_packet::ParsedS2p | impl | -
 impl core::clone::Clone for wechat_protocol::calls::video_packet::ReassembledVideoFrame | impl | -
 impl core::clone::Clone for wechat_protocol::calls::video_packet::VideoIRequest | impl | -
+impl core::clone::Clone for wechat_protocol::calls::video_packet::VideoNack | impl | -
+impl core::clone::Clone for wechat_protocol::calls::video_packet::VideoP2sReport | impl | -
 impl core::clone::Clone for wechat_protocol::calls::video_packet::VideoRotation | impl | -
 impl core::clone::Clone for wechat_protocol::calls::video_packet::VideoS2pCommand | impl | -
 impl core::clone::Clone for wechat_protocol::calls::video_packet::VideoWireCodec | impl | -
@@ -1571,12 +1622,15 @@ impl core::cmp::Eq for wechat_protocol::calls::personal::RemoteExitReason | impl
 impl core::cmp::Eq for wechat_protocol::calls::personal::VoiceRoom | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::relay::RelayEpoch | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::relay::RelayProgress | impl | -
+impl core::cmp::Eq for wechat_protocol::calls::relay::RelayTarget | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::signaling::CallOperation | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::video_packet::ParsedS2p | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::video_packet::ReassembledVideoFrame | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::video_packet::RsmIngestOutcome | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::video_packet::VideoChannelPayload | impl<'a> | -
 impl core::cmp::Eq for wechat_protocol::calls::video_packet::VideoIRequest | impl | -
+impl core::cmp::Eq for wechat_protocol::calls::video_packet::VideoNack | impl | -
+impl core::cmp::Eq for wechat_protocol::calls::video_packet::VideoP2sReport | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::video_packet::VideoRotation | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::video_packet::VideoS2pCommand | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::video_packet::VideoWireCodec | impl | -
@@ -1637,12 +1691,15 @@ impl core::cmp::PartialEq for wechat_protocol::calls::personal::RemoteExitReason
 impl core::cmp::PartialEq for wechat_protocol::calls::personal::VoiceRoom | impl | -
 impl core::cmp::PartialEq for wechat_protocol::calls::relay::RelayEpoch | impl | -
 impl core::cmp::PartialEq for wechat_protocol::calls::relay::RelayProgress | impl | -
+impl core::cmp::PartialEq for wechat_protocol::calls::relay::RelayTarget | impl | -
 impl core::cmp::PartialEq for wechat_protocol::calls::signaling::CallOperation | impl | -
 impl core::cmp::PartialEq for wechat_protocol::calls::video_packet::ParsedS2p | impl | -
 impl core::cmp::PartialEq for wechat_protocol::calls::video_packet::ReassembledVideoFrame | impl | -
 impl core::cmp::PartialEq for wechat_protocol::calls::video_packet::RsmIngestOutcome | impl | -
 impl core::cmp::PartialEq for wechat_protocol::calls::video_packet::VideoChannelPayload | impl<'a> | -
 impl core::cmp::PartialEq for wechat_protocol::calls::video_packet::VideoIRequest | impl | -
+impl core::cmp::PartialEq for wechat_protocol::calls::video_packet::VideoNack | impl | -
+impl core::cmp::PartialEq for wechat_protocol::calls::video_packet::VideoP2sReport | impl | -
 impl core::cmp::PartialEq for wechat_protocol::calls::video_packet::VideoRotation | impl | -
 impl core::cmp::PartialEq for wechat_protocol::calls::video_packet::VideoS2pCommand | impl | -
 impl core::cmp::PartialEq for wechat_protocol::calls::video_packet::VideoWireCodec | impl | -
@@ -1681,6 +1738,7 @@ impl core::default::Default for wechat_protocol::calls::signaling::CommonRequest
 impl core::default::Default for wechat_protocol::calls::signaling::CommonResponse | impl | -
 impl core::default::Default for wechat_protocol::calls::video_packet::ParsedS2p | impl | -
 impl core::default::Default for wechat_protocol::calls::video_packet::RsmVideoReassembler | impl | -
+impl core::default::Default for wechat_protocol::calls::video_packet::VideoP2sReport | impl | -
 impl core::default::Default for wechat_protocol::calls::video_packet::VideoRotation | impl | -
 impl core::default::Default for wechat_protocol::calls::video_packet::VideoS2pCommand | impl | -
 impl core::default::Default for wechat_protocol::calls::voice_offer::VideoOfferOptions | impl | -
@@ -1751,6 +1809,8 @@ impl core::fmt::Debug for wechat_protocol::calls::video_packet::ReassembledVideo
 impl core::fmt::Debug for wechat_protocol::calls::video_packet::RsmIngestOutcome | impl | -
 impl core::fmt::Debug for wechat_protocol::calls::video_packet::VideoChannelPayload | impl<'a> | -
 impl core::fmt::Debug for wechat_protocol::calls::video_packet::VideoIRequest | impl | -
+impl core::fmt::Debug for wechat_protocol::calls::video_packet::VideoNack | impl | -
+impl core::fmt::Debug for wechat_protocol::calls::video_packet::VideoP2sReport | impl | -
 impl core::fmt::Debug for wechat_protocol::calls::video_packet::VideoRotation | impl | -
 impl core::fmt::Debug for wechat_protocol::calls::video_packet::VideoS2pCommand | impl | -
 impl core::fmt::Debug for wechat_protocol::calls::video_packet::VideoWireCodec | impl | -
@@ -1823,6 +1883,7 @@ impl core::marker::Copy for wechat_protocol::calls::relay::RelayEpoch | impl | -
 impl core::marker::Copy for wechat_protocol::calls::relay::RelayProgress | impl | -
 impl core::marker::Copy for wechat_protocol::calls::signaling::CallOperation | impl | -
 impl core::marker::Copy for wechat_protocol::calls::video_packet::VideoIRequest | impl | -
+impl core::marker::Copy for wechat_protocol::calls::video_packet::VideoP2sReport | impl | -
 impl core::marker::Copy for wechat_protocol::calls::video_packet::VideoRotation | impl | -
 impl core::marker::Copy for wechat_protocol::calls::video_packet::VideoS2pCommand | impl | -
 impl core::marker::Copy for wechat_protocol::calls::video_packet::VideoWireCodec | impl | -
@@ -1875,12 +1936,15 @@ impl core::marker::StructuralPartialEq for wechat_protocol::calls::personal::Rem
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::personal::VoiceRoom | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::relay::RelayEpoch | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::relay::RelayProgress | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::calls::relay::RelayTarget | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::signaling::CallOperation | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::video_packet::ParsedS2p | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::video_packet::ReassembledVideoFrame | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::video_packet::RsmIngestOutcome | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::video_packet::VideoChannelPayload | impl<'a> | -
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::video_packet::VideoIRequest | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::calls::video_packet::VideoNack | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::calls::video_packet::VideoP2sReport | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::video_packet::VideoRotation | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::video_packet::VideoS2pCommand | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::video_packet::VideoWireCodec | impl | -
@@ -2213,6 +2277,7 @@ struct wechat_protocol::calls::personal::LiveSyncResponse | struct { public fiel
 struct wechat_protocol::calls::personal::VoiceInputs | struct<'a> { public fields } | Caller-supplied, selected direct-voice request settings. Nested protobufs are checked for their known wire types while unknown fields remain byte-identical.
 struct wechat_protocol::calls::personal::VoiceRoom | struct { public fields } | Owned room correlation supplied only after the matching Join/Invite reply. Member zero is valid. Room/key are private and deliberately not Debug.
 struct wechat_protocol::calls::relay::RelayEpoch | struct { public fields } | MISSING DOC
+struct wechat_protocol::calls::relay::RelayTarget | struct { public fields } | Relay endpoint identity sufficient to run the UDP check-in handshake (before media keys are admitted on `Join`). Room key intentionally has no `Debug` representation, matching [`SelectedRelay`].
 struct wechat_protocol::calls::relay::RoomInputs | struct { public fields } | Selected initial/reset room values. Constructors are deliberately scoped to this personal profile; they do not describe every supported server transport.
 struct wechat_protocol::calls::relay::SelectedRelay | struct { public fields } | An endpoint selected from an admitted Strategy. No DNS or fallback is used. Room key and media material intentionally have no Debug representation.
 struct wechat_protocol::calls::relay::TwoRttRelay | struct { private fields } | No retries or network I/O. Every preparation is spent before randomness or encryption; failure closes this attempt instead of making it reusable.
@@ -2225,6 +2290,8 @@ struct wechat_protocol::calls::video_packet::ReassembledVideoFrame | struct { pu
 struct wechat_protocol::calls::video_packet::RsmVideoPacketizer | struct { private fields } | Stateful MP/iLink kind-3 RSM video packetizer (zero-FEC uncoded `x = 1, r = 0, y = 0`).
 struct wechat_protocol::calls::video_packet::RsmVideoReassembler | struct { private fields } | Reassembles MP/iLink kind-3 RSM video packets (including multi-group and 2D RS FEC) into complete Annex-B frames, keeping independent state per `stream_id`.
 struct wechat_protocol::calls::video_packet::VideoIRequest | struct { public fields } | Decoded `0x66` video keyframe request (`IRequest`) carried on `0x60..0x6f` (TX) / `0x20..0x2f` (RX).
+struct wechat_protocol::calls::video_packet::VideoNack | struct { public fields } | Decoded `0x06` video ARQ/NACK payload carried on `0x60..0x6f` (TX) / `0x20..0x2f` (RX).
+struct wechat_protocol::calls::video_packet::VideoP2sReport | struct { public fields } | Per-interval video QoS telemetry reported in `0x0b` MP P2S packets (`video_p2s` + `video_new_p2s`).
 struct wechat_protocol::calls::video_packet::VideoS2pCommand | struct { public fields } | Parsed per-stream `video_s2p` QoS directive from a `0x0c` S2P message on `0x30`.
 struct wechat_protocol::calls::voice_offer::VideoOfferOptions | struct { public fields } | Advertised standard video codec capabilities for an engine capability offer.
 struct wechat_protocol::calls::voice_offer::VoiceOffer | struct { private fields } | Owned request metadata for one call generation. It intentionally has no `Clone` or `Debug`: create a fresh identity for each new call. The embedding owner must supply new random bytes and keep this value until that call ends.

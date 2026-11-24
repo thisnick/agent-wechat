@@ -5,8 +5,11 @@ use crate::calls::notifications::{
     IncomingCancellation, IncomingNotification, IncomingPreparation, IncomingRequest,
 };
 use std::sync::mpsc::RecvTimeoutError;
-use wechat_calls::session::{IncomingPhase, NativeIncomingSession};
-use wechat_protocol::calls::incoming::NotificationPayload;
+use wechat_calls::{
+    native_media::{preconnect_relay, PreconnectedRelay},
+    session::{IncomingPhase, NativeIncomingSession},
+};
+use wechat_protocol::calls::{incoming::NotificationPayload, relay::RelayEpoch};
 
 type PreparationReply =
     Arc<Mutex<Option<oneshot::Sender<std::result::Result<IncomingPreparation, CallServiceError>>>>>;
@@ -220,6 +223,22 @@ fn reply_prepared(prepared: &PreparationReply, outcome: IncomingPreparation) -> 
         .is_some_and(|send| send.send(Ok(outcome)).is_ok())
 }
 
+/// Maximum time a ringing pre-connect UDP handshake may run before giving up
+/// and letting post-`Join` media startup run its own relay check-in.
+const PRECONNECT_HANDSHAKE_BUDGET: Duration = Duration::from_secs(4);
+/// Maximum time `start_media` waits for an in-flight matching pre-connect
+/// handshake before aborting it and letting the dedicated media worker connect.
+const PRECONNECT_HANDOFF_WAIT: Duration = Duration::from_millis(250);
+
+struct PreconnectHandle {
+    target: wechat_protocol::calls::relay::RelayTarget,
+    ready: Arc<AtomicBool>,
+    answering: Arc<AtomicBool>,
+    handoff: Arc<AtomicBool>,
+    abort: Arc<AtomicBool>,
+    handle: thread::JoinHandle<Option<PreconnectedRelay>>,
+}
+
 struct Actor {
     inner: Arc<Inner>,
     worker: Arc<Worker>,
@@ -237,6 +256,7 @@ struct Actor {
     tasks: Tasks,
     session: Option<NativeIncomingSession>,
     sink: Option<BackendSink>,
+    preconnect: Option<PreconnectHandle>,
     media: Option<thread::JoinHandle<Result<()>>>,
     joined_deadline: Option<Instant>,
     last_av_ts: u64,
@@ -305,6 +325,7 @@ impl Actor {
             tasks: Tasks::new()?,
             session: None,
             sink: None,
+            preconnect: None,
             media: None,
             joined_deadline: None,
             last_av_ts: 0,
@@ -387,6 +408,7 @@ impl Actor {
             reply_prepared(&self.prepared, IncomingPreparation::Acked),
             "Incoming preparation receiver closed"
         );
+        self.start_preconnect();
         // Give the offered client a chance to answer before a blocking poll
         // starts. The actor still serializes Join, cancellation and LiveSync.
         let wait = FIRST_ANSWER_WINDOW.min(
@@ -710,6 +732,7 @@ impl Actor {
                 && cancel.member_id == invite.member_id
         };
         if ended {
+            self.abort_preconnect();
             self.worker.media_stop.store(true, Ordering::Release);
             Ok(IncomingCancellation::Ended)
         } else {
@@ -759,6 +782,12 @@ impl Actor {
                 };
                 self.transport.admission = ControlAdmission::Owner(sink.clone());
                 self.sink = Some(sink);
+                // Answer retires the pre-answer offer guard while Join is in flight;
+                // keep the pre-connected relay socket alive and draining seq=0 packets
+                // until start_media claims it or Join fails.
+                if let Some(pre) = self.preconnect.as_ref() {
+                    pre.answering.store(true, Ordering::Release);
+                }
                 let result = self
                     .session
                     .as_mut()
@@ -771,6 +800,7 @@ impl Actor {
                         self.tasks.next()?,
                     );
                 if let Err(error) = result {
+                    self.abort_preconnect();
                     if error.is::<UnsupportedCallMedia>() && self.phase() == IncomingPhase::Joined {
                         self.exit()?;
                         return Ok(BackendOutcome::Ended);
@@ -781,6 +811,7 @@ impl Actor {
                     return Err(error);
                 }
                 if let Err(error) = self.register_member() {
+                    self.abort_preconnect();
                     let stale_binding = error
                         .downcast_ref::<CallServiceError>()
                         .is_some_and(|error| error.0 == CallErrorCode::Stale);
@@ -806,6 +837,7 @@ impl Actor {
                 Ok(BackendOutcome::Admitted)
             }
             Operation::Reject => {
+                self.abort_preconnect();
                 ensure!(
                     sink.is_terminal_current(),
                     "Incoming Reject admission revoked"
@@ -828,6 +860,189 @@ impl Actor {
             _ => bail!("Unsupported incoming owner operation"),
         }
     }
+    fn start_preconnect(&mut self) {
+        if self.preconnect.is_some() || self.phase() != IncomingPhase::Acknowledged {
+            return;
+        }
+        let video_trace = std::env::var("WX_CALL_VIDEO_TRACE").as_deref() == Ok("1");
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let candidates = match session.ringing_relay_candidates() {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                if video_trace {
+                    eprintln!(
+                        "[wechat-call-video] incoming relay preconnect candidates err: {error:#}"
+                    );
+                }
+                return;
+            }
+        };
+        if candidates.is_empty() {
+            if video_trace {
+                eprintln!(
+                    "[wechat-call-video] incoming relay preconnect skipped: 0 ack candidates"
+                );
+            }
+            return;
+        }
+        let (connection_index, udp_index) = super::media::select_relay_indices(&candidates);
+        let target = match session.ringing_relay_target(
+            &self.state,
+            self.authority,
+            connection_index,
+            udp_index,
+        ) {
+            Ok(Some(target)) => target,
+            Ok(None) => {
+                if video_trace {
+                    eprintln!(
+                        "[wechat-call-video] incoming relay preconnect skipped: target unavailable (candidates={})",
+                        candidates.len()
+                    );
+                }
+                return;
+            }
+            Err(error) => {
+                if video_trace {
+                    eprintln!(
+                        "[wechat-call-video] incoming relay preconnect target err: {error:#}"
+                    );
+                }
+                return;
+            }
+        };
+        let worker = self.worker.clone();
+        let guard = self.request.guard.clone();
+        let ready_flag = Arc::new(AtomicBool::new(false));
+        let answering = Arc::new(AtomicBool::new(false));
+        let handoff = Arc::new(AtomicBool::new(false));
+        let abort = Arc::new(AtomicBool::new(false));
+        let thread_ready = ready_flag.clone();
+        let thread_answering = answering.clone();
+        let thread_handoff = handoff.clone();
+        let thread_abort = abort.clone();
+        let thread_target = target.clone();
+        let relay_epoch = RelayEpoch {
+            account_generation: nonzero64(worker.lease.authority().generation.as_bytes()),
+            logout_epoch: 0,
+            call_generation: nonzero64(worker.identity.call_id().as_bytes()),
+            key_generation: 1,
+            socket_generation: 1,
+            attempt_id: 1,
+        };
+        let Ok(handle) = thread::Builder::new()
+            .name("wechat-call-preconnect".into())
+            .spawn(move || -> Option<PreconnectedRelay> {
+                let video_trace = std::env::var("WX_CALL_VIDEO_TRACE").as_deref() == Ok("1");
+                let started = Instant::now();
+                let can_continue = || {
+                    !thread_abort.load(Ordering::Acquire)
+                        && worker.current()
+                        && !worker.stop.load(Ordering::Acquire)
+                        && (thread_answering.load(Ordering::Acquire)
+                            || thread_handoff.load(Ordering::Acquire)
+                            || guard.is_current())
+                };
+                let mut ready = match preconnect_relay(
+                    &thread_target,
+                    relay_epoch,
+                    started,
+                    || can_continue() && started.elapsed() < PRECONNECT_HANDSHAKE_BUDGET,
+                    |socket, endpoint, packet| {
+                        ensure!(can_continue(), "Incoming relay pre-connect stopped");
+                        ensure!(
+                            send_datagram(socket, endpoint, packet, &worker, &[])?,
+                            "Incoming relay pre-connect handoff stopped"
+                        );
+                        Ok(())
+                    },
+                ) {
+                    Ok(ready) => ready,
+                    Err(error) => {
+                        if video_trace {
+                            eprintln!(
+                                "[wechat-call-video] incoming relay preconnect skipped/failed endpoint={}: {error:#}",
+                                thread_target.endpoint
+                            );
+                        }
+                        return None;
+                    }
+                };
+                thread_ready.store(true, Ordering::Release);
+                if video_trace {
+                    eprintln!(
+                        "[wechat-call-video] incoming relay preconnected endpoint={} conn={} elapsed_ms={} early_pkts={}",
+                        ready.endpoint(),
+                        ready.connection_id(),
+                        started.elapsed().as_millis(),
+                        ready.early_packet_count()
+                    );
+                }
+                while !thread_handoff.load(Ordering::Acquire) {
+                    if !can_continue() {
+                        return None;
+                    }
+                    ready.drain_early_packets();
+                    thread::sleep(Duration::from_millis(5));
+                }
+                if thread_abort.load(Ordering::Acquire)
+                    || !worker.current()
+                    || worker.stop.load(Ordering::Acquire)
+                {
+                    return None;
+                }
+                ready.drain_early_packets();
+                Some(ready)
+            })
+        else {
+            return;
+        };
+        self.preconnect = Some(PreconnectHandle {
+            target,
+            ready: ready_flag,
+            answering,
+            handoff,
+            abort,
+            handle,
+        });
+    }
+
+    fn take_matching_preconnected_relay(
+        &mut self,
+        candidates: &[(usize, usize, std::net::SocketAddr)],
+        own_member: u16,
+    ) -> Option<PreconnectedRelay> {
+        let pre = self.preconnect.take()?;
+        let endpoint_matches = candidates
+            .iter()
+            .any(|&(_, _, ep)| ep == pre.target.endpoint);
+        if pre.target.own_member != own_member || !endpoint_matches {
+            pre.abort.store(true, Ordering::Release);
+            let _ = pre.handle.join();
+            return None;
+        }
+        pre.answering.store(true, Ordering::Release);
+        pre.handoff.store(true, Ordering::Release);
+        let wait_started = Instant::now();
+        while !pre.ready.load(Ordering::Acquire) && !pre.handle.is_finished() {
+            if wait_started.elapsed() >= PRECONNECT_HANDOFF_WAIT {
+                pre.abort.store(true, Ordering::Release);
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        pre.handle.join().ok().flatten()
+    }
+
+    fn abort_preconnect(&mut self) {
+        if let Some(pre) = self.preconnect.take() {
+            pre.abort.store(true, Ordering::Release);
+            let _ = pre.handle.join();
+        }
+    }
+
     fn start_media(&mut self) -> Result<()> {
         if self.media.is_some() {
             return Ok(());
@@ -841,8 +1056,24 @@ impl Actor {
             sink.is_current() && self.worker.current(),
             "Incoming media admission revoked"
         );
-        let (connection_index, udp_index) =
-            super::media::select_relay_indices(&session.relay_candidates()?);
+        let (candidates, own_member) = {
+            let session = self.session.as_ref().context("Missing incoming session")?;
+            (
+                session.relay_candidates()?,
+                session.room().own_member as u16,
+            )
+        };
+        let preconnected = self.take_matching_preconnected_relay(&candidates, own_member);
+        let (connection_index, udp_index) = preconnected
+            .as_ref()
+            .and_then(|ready| {
+                candidates
+                    .iter()
+                    .find(|&&(_, _, ep)| ep == ready.endpoint())
+                    .map(|&(c, u, _)| (c, u))
+            })
+            .unwrap_or_else(|| super::media::select_relay_indices(&candidates));
+        let session = self.session.as_mut().context("Missing incoming session")?;
         let media = session.take_media(&self.state, self.authority, connection_index, udp_index)?;
         if let Some(muted) = session.peer_microphone_muted() {
             let _ = self.transport.runtime.block_on(sink.peer_microphone(muted));
@@ -873,13 +1104,14 @@ impl Actor {
             thread::Builder::new()
                 .name("wechat-call-media".into())
                 .spawn(move || {
-                    let result = run_media(
+                    let result = super::media::run_with_preconnected_relay(
                         &config,
                         &worker,
                         media,
                         audio,
                         is_video.then_some(video).flatten(),
                         keyframe_rx,
+                        preconnected,
                         &sink,
                         &runtime,
                     );
@@ -890,6 +1122,7 @@ impl Actor {
         Ok(())
     }
     fn stop_media(&mut self) {
+        self.abort_preconnect();
         if let Some(sink) = &self.sink {
             let _ = self.transport.runtime.block_on(sink.ending());
         }

@@ -3,13 +3,15 @@
 //! account-owning runtime migration, not the final public calling facade.
 mod conference;
 mod conference_sources;
-mod direct;
+pub(crate) mod direct;
 mod relay;
 mod submission;
 pub use conference_sources::{reconcile_roster, BoundConferenceReceiver};
-pub use direct::{run_direct_media, run_direct_media_with_video};
-pub use relay::connect_relay;
+pub use direct::{
+    run_direct_media, run_direct_media_with_preconnected_relay, run_direct_media_with_video,
+};
 use relay::connect_relay_with_early;
+pub use relay::{connect_relay, preconnect_relay, PreconnectedRelay};
 pub use submission::SubmissionGate;
 
 use anyhow::Result;

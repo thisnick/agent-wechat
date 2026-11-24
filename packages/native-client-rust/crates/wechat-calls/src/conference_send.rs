@@ -162,7 +162,7 @@ impl ConferenceSender {
         )
     }
 
-    /// Seal one peer-to-peer video RTCP packet (`0x66 IRequest` or `0x06 NACK`).
+    /// Seal one peer-to-peer video RTCP packet (`0x66 IRequest`).
     pub fn seal_video_rtcp(
         &mut self,
         now: Duration,
@@ -170,6 +170,22 @@ impl ConferenceSender {
         payload: &[u8],
     ) -> Result<Vec<u8>> {
         self.channel.seal_video_rtcp(
+            self.epoch,
+            u64::try_from(now.as_millis())?,
+            stream_id,
+            payload,
+        )
+    }
+
+    /// Seal one peer-to-peer `0x06` video ARQ/NACK packet matching the active envelope
+    /// (`Live96` with `ext_byte = 0`, or `Live98` with `ext_byte = 2` when enabled).
+    pub fn seal_video_nack(
+        &mut self,
+        now: Duration,
+        stream_id: u8,
+        payload: &[u8],
+    ) -> Result<Vec<u8>> {
+        self.channel.seal_video_nack(
             self.epoch,
             u64::try_from(now.as_millis())?,
             stream_id,

@@ -19,6 +19,7 @@ struct ReadyMedia {
     key: [u8; 32],
     frames_per_packet: u8,
     merge_mode: bool,
+    ack_preconnect: bool,
 }
 
 const OWN: &str = "synthetic_self";
@@ -230,13 +231,18 @@ impl TestCallIo for Host {
                 }
                 Ok(auth_reply())
             }
-            CallHostRoute::RingingAck => Ok(ack_reply(
-                self.own_member(),
+            CallHostRoute::RingingAck => Ok(ack_reply_with_media(
+                if self.ready_media.is_some_and(|m| m.ack_preconnect) {
+                    3
+                } else {
+                    self.own_member()
+                },
                 if matches!(self.case, Case::OtherDevice) {
                     1
                 } else {
                     3
                 },
+                self.ready_media.filter(|m| m.ack_preconnect),
             )),
             CallHostRoute::LiveSync => Ok(host_reply(&p::bytes(2, b"cursor"))),
             CallHostRoute::Transfer => match command {
@@ -287,7 +293,31 @@ fn members(sequence: u32, own_member: u16, own_status: u32) -> Vec<u8> {
     ])
     .unwrap()
 }
-fn ack_reply(own_member: u16, own_status: u32) -> Vec<u8> {
+fn ack_reply_with_media(
+    own_member: u16,
+    own_status: u32,
+    preconnect_media: Option<ReadyMedia>,
+) -> Vec<u8> {
+    let strategy = if let Some(media) = preconnect_media {
+        let address = p::message(&[
+            p::bytes(1, media.endpoint.ip().to_string().as_bytes()),
+            p::uint(2, u64::from(media.endpoint.port())),
+        ])
+        .unwrap();
+        let mut strategy_fields = vec![
+            p::uint(14, 0),
+            p::bytes(
+                15,
+                &p::message(&[p::uint(1, 1), p::bytes(4, &address)]).unwrap(),
+            ),
+        ];
+        if media.merge_mode {
+            strategy_fields.push(p::uint(16, 1));
+        }
+        p::message(&strategy_fields).unwrap()
+    } else {
+        p::uint(14, 0)
+    };
     // AckRsp6 is MemList(seq1/member2), unlike LiveSync's item10 payload.
     host_reply(&p::bytes(
         1,
@@ -305,7 +335,7 @@ fn ack_reply(own_member: u16, own_status: u32) -> Vec<u8> {
                     members(1, own_member, own_status)
                 },
             ),
-            p::bytes(7, &p::uint(14, 0)),
+            p::bytes(7, &strategy),
         ])
         .unwrap(),
     ))

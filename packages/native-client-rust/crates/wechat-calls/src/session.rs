@@ -1477,15 +1477,28 @@ fn profile(engine: &[u8], channel: &[u8]) -> Result<()> {
 
 fn profile_for_mode(engine: &[u8], channel: &[u8], video_mode: bool) -> Result<()> {
     let shape = profile_shape(engine, channel)?;
+    // Channel field 1 bit 1 (`0x2`) selects the standard relay route; peer
+    // callers may also advertise bit 0 (`0x1`, P2P lite-access capability),
+    // which leaves relay check-in, ChaCha20-Poly1305 framing and codec
+    // packetization unchanged (`2 | 3`).
     let ok = if video_mode {
         shape[0] == 17
             && matches!(shape[1], 0x106 | 0x206)
-            && shape[4] == 2
+            && matches!(shape[4], 2 | 3)
             && matches!(shape[5], 0 | 3)
     } else {
-        matches!(shape, [17, 0x106 | 0x206, 0x800000, 0, 2, 3])
+        matches!(
+            shape,
+            [17, 0x106 | 0x206, 0x800000 | 0x4800000, 0, 2 | 3, 3]
+        )
     };
     if !ok {
+        if std::env::var("WX_CALL_VIDEO_TRACE").as_deref() == Ok("1") {
+            let dec_mask = engine_video_dec_cap_mask(engine);
+            eprintln!(
+                "[wechat-call-video] profile_for_mode rejected video={video_mode} shape={shape:#x?} dec_mask=0x{dec_mask:08x}"
+            );
+        }
         return Err(UnsupportedCallMedia.into());
     }
     Ok(())
@@ -1580,6 +1593,30 @@ mod tests {
     pub(super) struct FakeTransport(
         pub(super) std::cell::RefCell<std::collections::VecDeque<(CallHostRoute, Vec<u8>)>>,
     );
+    pub(super) struct FakeVideoTransport(
+        pub(super) std::cell::RefCell<std::collections::VecDeque<(CallHostRoute, Vec<u8>)>>,
+    );
+    fn dispatch_fake_rpc(
+        queue: &std::cell::RefCell<std::collections::VecDeque<(CallHostRoute, Vec<u8>)>>,
+        state: &mut AccountState,
+        route: CallHostRoute,
+        request: &[u8],
+        expect_video: bool,
+    ) -> Result<Vec<u8>> {
+        let (expected, reply) = queue
+            .borrow_mut()
+            .pop_front()
+            .ok_or_else(|| anyhow::anyhow!("Unexpected fake call RPC"))?;
+        ensure!(route == expected, "Unexpected fake call route");
+        let request = CommonRequest::decode(request)?;
+        ensure!(
+            request.base_request.is_some() && request.body.is_some(),
+            "Missing host common wrapper"
+        );
+        source_request(route, &request, expect_video)?;
+        state.cookie = vec![route.command() as u8];
+        Ok(reply)
+    }
     impl PersonalTransport for FakeTransport {
         fn call_rpc(
             &self,
@@ -1587,26 +1624,27 @@ mod tests {
             route: CallHostRoute,
             request: &[u8],
         ) -> Result<Vec<u8>> {
-            let (expected, reply) = self
-                .0
-                .borrow_mut()
-                .pop_front()
-                .ok_or_else(|| anyhow::anyhow!("Unexpected fake call RPC"))?;
-            ensure!(route == expected, "Unexpected fake call route");
-            let request = CommonRequest::decode(request)?;
-            ensure!(
-                request.base_request.is_some() && request.body.is_some(),
-                "Missing host common wrapper"
-            );
-            source_request(route, &request)?;
-            state.cookie = vec![route.command() as u8];
-            Ok(reply)
+            dispatch_fake_rpc(&self.0, state, route, request, false)
+        }
+    }
+    impl PersonalTransport for FakeVideoTransport {
+        fn call_rpc(
+            &self,
+            state: &mut AccountState,
+            route: CallHostRoute,
+            request: &[u8],
+        ) -> Result<Vec<u8>> {
+            dispatch_fake_rpc(&self.0, state, route, request, true)
         }
     }
     /// Independent selected request contract at the actual session/transport
     /// boundary. Literal field numbers and command/path values are not obtained
     /// by serializing another production request or reading its enum accessors.
-    fn source_request(route: CallHostRoute, request: &CommonRequest) -> Result<()> {
+    fn source_request(
+        route: CallHostRoute,
+        request: &CommonRequest,
+        expect_video: bool,
+    ) -> Result<()> {
         let base = fields(
             request
                 .base_request
@@ -1665,7 +1703,7 @@ mod tests {
                 assert_eq!(number(&inner, 5, None)?, 7);
                 assert_eq!(number(&inner, 6, None)?, 9);
                 assert_eq!(number(&inner, 7, None)?, 0);
-                assert_eq!(number(&inner, 13, None)?, 1);
+                assert_eq!(number(&inner, 13, None)?, if expect_video { 3 } else { 1 });
                 let caps = fields(data(&inner, 12)?)?;
                 assert_eq!(number(&fields(data(&caps, 1)?)?, 5, None)?, 0x40000);
                 assert_eq!(data(&caps, 2)?.len(), 12);
@@ -1693,8 +1731,8 @@ mod tests {
                 assert_eq!(data(&app_base, 2)?, b"Ldeviceid");
                 let inner = fields(data(&cloud, 2)?)?;
                 if command == 3361 {
-                    assert_eq!(number(&inner, 5, None)?, 2);
-                    assert_eq!(number(&inner, 6, None)?, 1);
+                    assert_eq!(number(&inner, 5, None)?, if expect_video { 1 } else { 2 });
+                    assert_eq!(number(&inner, 6, None)?, if expect_video { 3 } else { 1 });
                     assert_eq!(number(&inner, 8, None)?, 0);
                     assert_eq!(number(&inner, 11, None)?, 7);
                     assert_eq!(number(&inner, 12, None)?, 9);
@@ -2953,15 +2991,29 @@ mod tests {
         assert_eq!(parsed.get(&0).map(|(s, _)| *s), Some(3));
         assert_eq!(parsed.get(&1).map(|(s, _)| *s), Some(3));
 
-        let engine = p::message(&[
-            p::uint(5, 17),
-            p::uint(6, 0x206),
-            p::uint(7, 0x800000),
-            p::uint(33, 0x8808_0800),
-            p::bytes(41, &[8, 1]),
-        ])
-        .unwrap();
-        let channel = p::message(&[p::uint(1, 2), p::uint(2, 3)]).unwrap();
-        assert!(profile_for_mode(&engine, &channel, true).is_ok());
+        for channel_flags in [2, 3] {
+            let engine = p::message(&[
+                p::uint(5, 17),
+                p::uint(6, 0x106),
+                p::uint(7, 0x482_0000),
+                p::uint(33, 0x8808_0800),
+                p::bytes(41, &[8, 1]),
+            ])
+            .unwrap();
+            let channel = p::message(&[p::uint(1, channel_flags), p::uint(2, 3)]).unwrap();
+            assert!(profile_for_mode(&engine, &channel, true).is_ok());
+
+            let voice_engine =
+                p::message(&[p::uint(5, 17), p::uint(6, 0x106), p::uint(7, 0x480_0000)]).unwrap();
+            assert!(profile_for_mode(&voice_engine, &channel, false).is_ok());
+        }
+        for bad_flags in [0, 1, 4, 6] {
+            let engine =
+                p::message(&[p::uint(5, 17), p::uint(6, 0x106), p::uint(7, 0x482_0000)]).unwrap();
+            let channel = p::message(&[p::uint(1, bad_flags), p::uint(2, 3)]).unwrap();
+            assert!(profile_for_mode(&engine, &channel, true)
+                .unwrap_err()
+                .is::<UnsupportedCallMedia>());
+        }
     }
 }
