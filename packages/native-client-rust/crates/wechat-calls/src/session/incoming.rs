@@ -889,7 +889,7 @@ fn bind_owner_group(raw: &[u8], owner: &[u8]) -> Result<Vec<u8>> {
 mod tests {
     use super::super::tests::{
         auth_reply, authority, av_status, capabilities_for_codec, exit_reply, host_reply, member,
-        parameters, state, FakeTransport,
+        parameters, state, FakeTransport, FakeVideoTransport,
     };
     use super::*;
     fn notification() -> InviteNotification {
@@ -1614,11 +1614,14 @@ mod tests {
         };
 
         // Incoming video call with caller channel flags = 3 (relay + lite-access bit) succeeds.
-        let wire = transport(vec![
-            (CallHostRoute::AppAuth, auth_reply()),
-            (CallHostRoute::RingingAck, ack_reply()),
-            (CallHostRoute::Transfer, join_with_channel(true, 3)),
-        ]);
+        let wire = FakeVideoTransport(std::cell::RefCell::new(
+            vec![
+                (CallHostRoute::AppAuth, auth_reply()),
+                (CallHostRoute::RingingAck, ack_reply()),
+                (CallHostRoute::Transfer, join_with_channel(true, 3)),
+            ]
+            .into(),
+        ));
         let mut st = state();
         let mut video_params = parameters();
         video_params.apply_offer(
@@ -1666,11 +1669,14 @@ mod tests {
         assert!(voice_s.take_media(&voice_st, authority(), 0, 0).is_ok());
 
         // Unknown channel flag bits (e.g. 6) remain rejected with UnsupportedCallMedia.
-        let bad_wire = transport(vec![
-            (CallHostRoute::AppAuth, auth_reply()),
-            (CallHostRoute::RingingAck, ack_reply()),
-            (CallHostRoute::Transfer, join_with_channel(true, 6)),
-        ]);
+        let bad_wire = FakeVideoTransport(std::cell::RefCell::new(
+            vec![
+                (CallHostRoute::AppAuth, auth_reply()),
+                (CallHostRoute::RingingAck, ack_reply()),
+                (CallHostRoute::Transfer, join_with_channel(true, 6)),
+            ]
+            .into(),
+        ));
         let mut bad_st = state();
         let mut bad_params = parameters();
         bad_params.apply_offer(

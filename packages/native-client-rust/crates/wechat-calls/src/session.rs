@@ -1593,6 +1593,30 @@ mod tests {
     pub(super) struct FakeTransport(
         pub(super) std::cell::RefCell<std::collections::VecDeque<(CallHostRoute, Vec<u8>)>>,
     );
+    pub(super) struct FakeVideoTransport(
+        pub(super) std::cell::RefCell<std::collections::VecDeque<(CallHostRoute, Vec<u8>)>>,
+    );
+    fn dispatch_fake_rpc(
+        queue: &std::cell::RefCell<std::collections::VecDeque<(CallHostRoute, Vec<u8>)>>,
+        state: &mut AccountState,
+        route: CallHostRoute,
+        request: &[u8],
+        expect_video: bool,
+    ) -> Result<Vec<u8>> {
+        let (expected, reply) = queue
+            .borrow_mut()
+            .pop_front()
+            .ok_or_else(|| anyhow::anyhow!("Unexpected fake call RPC"))?;
+        ensure!(route == expected, "Unexpected fake call route");
+        let request = CommonRequest::decode(request)?;
+        ensure!(
+            request.base_request.is_some() && request.body.is_some(),
+            "Missing host common wrapper"
+        );
+        source_request(route, &request, expect_video)?;
+        state.cookie = vec![route.command() as u8];
+        Ok(reply)
+    }
     impl PersonalTransport for FakeTransport {
         fn call_rpc(
             &self,
@@ -1600,26 +1624,27 @@ mod tests {
             route: CallHostRoute,
             request: &[u8],
         ) -> Result<Vec<u8>> {
-            let (expected, reply) = self
-                .0
-                .borrow_mut()
-                .pop_front()
-                .ok_or_else(|| anyhow::anyhow!("Unexpected fake call RPC"))?;
-            ensure!(route == expected, "Unexpected fake call route");
-            let request = CommonRequest::decode(request)?;
-            ensure!(
-                request.base_request.is_some() && request.body.is_some(),
-                "Missing host common wrapper"
-            );
-            source_request(route, &request)?;
-            state.cookie = vec![route.command() as u8];
-            Ok(reply)
+            dispatch_fake_rpc(&self.0, state, route, request, false)
+        }
+    }
+    impl PersonalTransport for FakeVideoTransport {
+        fn call_rpc(
+            &self,
+            state: &mut AccountState,
+            route: CallHostRoute,
+            request: &[u8],
+        ) -> Result<Vec<u8>> {
+            dispatch_fake_rpc(&self.0, state, route, request, true)
         }
     }
     /// Independent selected request contract at the actual session/transport
     /// boundary. Literal field numbers and command/path values are not obtained
     /// by serializing another production request or reading its enum accessors.
-    fn source_request(route: CallHostRoute, request: &CommonRequest) -> Result<()> {
+    fn source_request(
+        route: CallHostRoute,
+        request: &CommonRequest,
+        expect_video: bool,
+    ) -> Result<()> {
         let base = fields(
             request
                 .base_request
@@ -1678,7 +1703,7 @@ mod tests {
                 assert_eq!(number(&inner, 5, None)?, 7);
                 assert_eq!(number(&inner, 6, None)?, 9);
                 assert_eq!(number(&inner, 7, None)?, 0);
-                assert!([1, 3].contains(&number(&inner, 13, None)?));
+                assert_eq!(number(&inner, 13, None)?, if expect_video { 3 } else { 1 });
                 let caps = fields(data(&inner, 12)?)?;
                 assert_eq!(number(&fields(data(&caps, 1)?)?, 5, None)?, 0x40000);
                 assert_eq!(data(&caps, 2)?.len(), 12);
@@ -1706,12 +1731,8 @@ mod tests {
                 assert_eq!(data(&app_base, 2)?, b"Ldeviceid");
                 let inner = fields(data(&cloud, 2)?)?;
                 if command == 3361 {
-                    let room_type = number(&inner, 5, None)?;
-                    let av_status = number(&inner, 6, None)?;
-                    assert!(
-                        matches!((room_type, av_status), (2, 1) | (1, 1 | 3)),
-                        "unexpected JoinReq room_type={room_type} av_status={av_status}"
-                    );
+                    assert_eq!(number(&inner, 5, None)?, if expect_video { 1 } else { 2 });
+                    assert_eq!(number(&inner, 6, None)?, if expect_video { 3 } else { 1 });
                     assert_eq!(number(&inner, 8, None)?, 0);
                     assert_eq!(number(&inner, 11, None)?, 7);
                     assert_eq!(number(&inner, 12, None)?, 9);
