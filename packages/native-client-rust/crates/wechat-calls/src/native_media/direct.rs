@@ -92,19 +92,31 @@ pub fn run_direct_media_with_preconnected_relay<H: DirectMediaHost>(
             }
             ready.into_parts()
         }
-        _ => connect_relay_with_early(
-            &selected,
-            relay_epoch,
-            started,
-            || host.current(),
-            |socket, endpoint, packet| {
-                ensure!(
-                    host.submit(socket, endpoint, packet, &[])?,
-                    "Call relay handoff stopped"
+        _ => {
+            let (sock, early) = connect_relay_with_early(
+                &selected,
+                relay_epoch,
+                started,
+                || host.current(),
+                |socket, endpoint, packet| {
+                    ensure!(
+                        host.submit(socket, endpoint, packet, &[])?,
+                        "Call relay handoff stopped"
+                    );
+                    Ok(())
+                },
+            )?;
+            if video_trace {
+                eprintln!(
+                    "[wechat-call-video] direct relay connected fresh endpoint={} conn={} elapsed_ms={} early_pkts={}",
+                    selected.endpoint,
+                    selected.connection_id,
+                    started.elapsed().as_millis(),
+                    early.len()
                 );
-                Ok(())
-            },
-        )?,
+            }
+            (sock, early)
+        }
     };
     let mut buffer = [0u8; 8198];
     let mut channel = Live96::new(
@@ -458,7 +470,19 @@ pub fn run_direct_media_with_preconnected_relay<H: DirectMediaHost>(
                                                 );
                                                 last_rx_video_stream_id = frame.stream_id;
                                                 rx_video_seen = true;
-                                                rx_telemetry.observe_frame(frame.codec, pkt_now);
+                                                record_rx_video_frame_sync(
+                                                    &mut rx_codec_config_seen,
+                                                    &mut rx_keyframe_seen,
+                                                    frame.is_keyframe,
+                                                    frame.has_codec_config,
+                                                );
+                                                rx_telemetry.observe_reassembled_frame(
+                                                    frame.codec,
+                                                    frame.is_keyframe,
+                                                    frame.prior_frames_dropped,
+                                                    rx_keyframe_seen,
+                                                    pkt_now,
+                                                );
                                                 trace_frames_ok += 1;
                                                 if frame.fec_recovered {
                                                     trace_fec_ok += 1;
@@ -501,12 +525,6 @@ pub fn run_direct_media_with_preconnected_relay<H: DirectMediaHost>(
                                                         frame.payload.len()
                                                     );
                                                 }
-                                                record_rx_video_frame_sync(
-                                                    &mut rx_codec_config_seen,
-                                                    &mut rx_keyframe_seen,
-                                                    frame.is_keyframe,
-                                                    frame.has_codec_config,
-                                                );
                                                 if frame.prior_frames_dropped && !frame.is_keyframe
                                                 {
                                                     need_keyframe = true;
@@ -740,7 +758,7 @@ pub fn run_direct_media_with_preconnected_relay<H: DirectMediaHost>(
                     pending_local_irequest = Some((member, 3));
                 }
                 if pending_local_irequest.is_none()
-                    && !rx_video_seen
+                    && !rx_keyframe_seen
                     && initial_irequests_sent < 6
                     && connected_at.elapsed() >= Duration::from_millis(500)
                     && last_irequest_tx.is_none_or(|t| t.elapsed() >= Duration::from_millis(1500))
@@ -825,7 +843,12 @@ pub fn run_direct_media_with_preconnected_relay<H: DirectMediaHost>(
                             (remaining > 1).then_some((target_member, remaining.saturating_sub(1)));
                     }
                 }
-                if last_p2s_tx.is_none_or(|t| t.elapsed() >= Duration::from_secs(1)) {
+                let p2s_interval = if rx_video_seen && !rx_keyframe_seen {
+                    Duration::from_millis(550)
+                } else {
+                    Duration::from_secs(1)
+                };
+                if last_p2s_tx.is_none_or(|t| t.elapsed() >= p2s_interval) {
                     let report = rx_telemetry.snapshot_p2s(
                         media.peer_member,
                         last_rx_video_stream_id,
@@ -1286,8 +1309,12 @@ impl VideoNackTracker {
     }
 }
 
+/// Maximum duration P-frames are held awaiting a clean recovery IDR after an
+/// unrecovered packet drop (aligned with `POST_DROP_IDR_HOLD` in `wechat-core`).
+const TELEMETRY_POST_DROP_IDR_HOLD: Duration = Duration::from_millis(1200);
+
 /// 1-second sliding-window video receiver/sender telemetry feeding `0x0b` MP P2S QoS reports.
-struct DirectVideoRxTelemetry {
+pub(crate) struct DirectVideoRxTelemetry {
     window_start: Instant,
     ever_received_video: bool,
     rx_pkts_in_window: u32,
@@ -1300,9 +1327,12 @@ struct DirectVideoRxTelemetry {
     prev_pkt_gap_ms: Option<u32>,
     max_pkt_gap_ms: u32,
     jitter_ms_x16: u32,
-    frames_in_window: u32,
+    rx_frames_in_window: u32,
+    play_frames_in_window: u32,
     total_play_frames: u32,
+    first_rx_video_at: Option<Instant>,
     last_frame_at: Option<Instant>,
+    post_drop_hold_until: Option<Instant>,
     freeze_cursor: Option<Instant>,
     counted_light_stall: bool,
     counted_heavy_stall: bool,
@@ -1317,7 +1347,7 @@ struct DirectVideoRxTelemetry {
 }
 
 impl DirectVideoRxTelemetry {
-    fn new(now: Instant) -> Self {
+    pub(crate) fn new(now: Instant) -> Self {
         Self {
             window_start: now,
             ever_received_video: false,
@@ -1331,9 +1361,12 @@ impl DirectVideoRxTelemetry {
             prev_pkt_gap_ms: None,
             max_pkt_gap_ms: 0,
             jitter_ms_x16: 0,
-            frames_in_window: 0,
+            rx_frames_in_window: 0,
+            play_frames_in_window: 0,
             total_play_frames: 0,
+            first_rx_video_at: None,
             last_frame_at: None,
+            post_drop_hold_until: None,
             freeze_cursor: None,
             counted_light_stall: false,
             counted_heavy_stall: false,
@@ -1348,7 +1381,11 @@ impl DirectVideoRxTelemetry {
         }
     }
 
-    fn observe_raw_packet(&mut self, raw: &[u8], arq_recovered: bool, now: Instant) {
+    pub(crate) fn has_active_window(&self) -> bool {
+        self.rx_pkts_in_window > 0 || self.rx_frames_in_window > 0
+    }
+
+    pub(crate) fn observe_raw_packet(&mut self, raw: &[u8], arq_recovered: bool, now: Instant) {
         if raw.is_empty() {
             return;
         }
@@ -1360,6 +1397,7 @@ impl DirectVideoRxTelemetry {
             self.last_rx_codec = codec;
         }
         self.ever_received_video = true;
+        self.first_rx_video_at.get_or_insert(now);
         self.rx_pkts_in_window = self.rx_pkts_in_window.saturating_add(1);
         self.rx_bytes_in_window = self.rx_bytes_in_window.saturating_add(raw.len() as u64);
         if arq_recovered {
@@ -1401,32 +1439,65 @@ impl DirectVideoRxTelemetry {
         }
     }
 
-    fn observe_frame(&mut self, codec: VideoWireCodec, now: Instant) {
+    pub(crate) fn observe_reassembled_frame(
+        &mut self,
+        codec: VideoWireCodec,
+        is_keyframe: bool,
+        prior_frames_dropped: bool,
+        keyframe_synced: bool,
+        now: Instant,
+    ) {
         if matches!(codec, VideoWireCodec::H264 | VideoWireCodec::H265) {
             self.last_rx_codec = codec;
         }
         self.ever_received_video = true;
+        self.first_rx_video_at.get_or_insert(now);
+        self.rx_frames_in_window = self.rx_frames_in_window.saturating_add(1);
+
+        if is_keyframe {
+            self.post_drop_hold_until = None;
+        } else if keyframe_synced && prior_frames_dropped {
+            self.post_drop_hold_until
+                .get_or_insert_with(|| now + TELEMETRY_POST_DROP_IDR_HOLD);
+        }
+
+        let holding_after_drop = match self.post_drop_hold_until {
+            Some(until) if now < until => true,
+            Some(_) => {
+                self.post_drop_hold_until = None;
+                false
+            }
+            None => false,
+        };
+        if !keyframe_synced || holding_after_drop {
+            // Undecodable P-frames (before initial SPS/PPS+IDR sync or during post-drop
+            // IDR hold) count toward network `recv_fps`, never toward `play_fps` or
+            // stall recovery, so WeChat's QoS server sees `play_fps = 0` + heavy freeze
+            // and commands `video_s2p.u8IRequestFlag = 1` for hardware H.264 senders.
+            return;
+        }
+
         self.account_freeze_until(now);
         self.last_frame_at = Some(now);
         self.freeze_cursor = Some(now);
         self.counted_light_stall = false;
         self.counted_heavy_stall = false;
-        self.frames_in_window = self.frames_in_window.saturating_add(1);
+        self.play_frames_in_window = self.play_frames_in_window.saturating_add(1);
         self.total_play_frames = self.total_play_frames.saturating_add(1);
     }
 
-    fn observe_tx_frame(&mut self, bytes: usize) {
+    pub(crate) fn observe_tx_frame(&mut self, bytes: usize) {
         self.tx_bytes_in_window = self.tx_bytes_in_window.saturating_add(bytes as u64);
         self.tx_frames_in_window = self.tx_frames_in_window.saturating_add(1);
     }
 
     fn account_freeze_until(&mut self, now: Instant) {
-        let Some(last_frame) = self.last_frame_at else {
+        let Some(anchor) = self.last_frame_at.or(self.first_rx_video_at) else {
             return;
         };
-        let total_gap_ms = u32::try_from(now.saturating_duration_since(last_frame).as_millis())
-            .unwrap_or(u32::MAX);
-        let cursor = self.freeze_cursor.unwrap_or(last_frame);
+        let total_gap_ms =
+            u32::try_from(now.saturating_duration_since(anchor).as_millis()).unwrap_or(u32::MAX);
+        let cursor = self.freeze_cursor.unwrap_or(anchor);
         let slice_ms =
             u32::try_from(now.saturating_duration_since(cursor).as_millis()).unwrap_or(u32::MAX);
         if total_gap_ms >= 500 {
@@ -1445,7 +1516,7 @@ impl DirectVideoRxTelemetry {
         self.freeze_cursor = Some(now);
     }
 
-    fn snapshot_p2s(
+    pub(crate) fn snapshot_p2s(
         &mut self,
         remote_member: u16,
         stream_id: u8,
@@ -1463,7 +1534,8 @@ impl DirectVideoRxTelemetry {
             .div_ceil(window_ms)
             .min(60);
 
-        if !self.ever_received_video || (self.rx_pkts_in_window == 0 && self.frames_in_window == 0)
+        if !self.ever_received_video
+            || (self.rx_pkts_in_window == 0 && self.rx_frames_in_window == 0)
         {
             // No inbound video packets arrived during this reporting window (either video
             // has not started or the remote camera is off/paused). Report idle instead of
@@ -1480,8 +1552,11 @@ impl DirectVideoRxTelemetry {
             self.prev_pkt_gap_ms = None;
             self.max_pkt_gap_ms = 0;
             self.jitter_ms_x16 = 0;
-            self.frames_in_window = 0;
+            self.rx_frames_in_window = 0;
+            self.play_frames_in_window = 0;
+            self.first_rx_video_at = None;
             self.last_frame_at = None;
+            self.post_drop_hold_until = None;
             self.freeze_cursor = None;
             self.counted_light_stall = false;
             self.counted_heavy_stall = false;
@@ -1525,7 +1600,12 @@ impl DirectVideoRxTelemetry {
         self.account_freeze_until(now);
         let recv_kbps = ((self.rx_bytes_in_window.saturating_mul(8)) / u64::from(window_ms)) as u32;
         let recv_fps = self
-            .frames_in_window
+            .rx_frames_in_window
+            .saturating_mul(1000)
+            .div_ceil(window_ms)
+            .min(60);
+        let play_fps = self
+            .play_frames_in_window
             .saturating_mul(1000)
             .div_ceil(window_ms)
             .min(60);
@@ -1578,7 +1658,7 @@ impl DirectVideoRxTelemetry {
             let retention = 100u32.saturating_sub(short_loss_pct.min(70));
             let base = recv_kbps.max(self.est_bw_kbps / 2).max(100);
             self.est_bw_kbps = ((base.saturating_mul(retention)) / 100).clamp(100, 1500);
-        } else if self.rx_pkts_in_window > 0 && self.frames_in_window > 0 {
+        } else if self.rx_pkts_in_window > 0 && self.play_frames_in_window > 0 {
             let target = (recv_kbps.saturating_mul(12) / 10).clamp(300, 1500);
             self.est_bw_kbps = if self.est_bw_kbps < target {
                 self.est_bw_kbps.saturating_add(50).min(target)
@@ -1603,7 +1683,7 @@ impl DirectVideoRxTelemetry {
             codec_support_mask,
             loss_pkts,
             decode_type: u32::from(self.last_rx_codec.wire()),
-            play_fps: recv_fps,
+            play_fps,
             play_frames: self.total_play_frames,
             light_freeze_cnt: self.light_freeze_cnt,
             heavy_freeze_cnt: self.heavy_freeze_cnt,
@@ -1623,7 +1703,8 @@ impl DirectVideoRxTelemetry {
         self.arq_recovered_in_window = 0;
         self.window_base_seq = self.highest_seq.map(|h| h.saturating_add(1));
         self.max_pkt_gap_ms = 0;
-        self.frames_in_window = 0;
+        self.rx_frames_in_window = 0;
+        self.play_frames_in_window = 0;
         self.light_freeze_cnt = 0;
         self.heavy_freeze_cnt = 0;
         self.light_freeze_ms = 0;
@@ -2157,8 +2238,20 @@ mod tests {
             let ts = t0 + Duration::from_millis(i as u64 * 150);
             tel.observe_raw_packet(&make_pkt(9, seq), seq == 5, ts);
         }
-        tel.observe_frame(VideoWireCodec::H264, t0 + Duration::from_millis(100));
-        tel.observe_frame(VideoWireCodec::H264, t0 + Duration::from_millis(750));
+        tel.observe_reassembled_frame(
+            VideoWireCodec::H264,
+            true,
+            false,
+            true,
+            t0 + Duration::from_millis(100),
+        );
+        tel.observe_reassembled_frame(
+            VideoWireCodec::H264,
+            false,
+            false,
+            true,
+            t0 + Duration::from_millis(750),
+        );
 
         let report = tel.snapshot_p2s(7, 1, 99, 0x1d, t0 + Duration::from_secs(1));
         assert_eq!(report.remote_member_id, 7);
@@ -2197,7 +2290,7 @@ mod tests {
         for i in 0..10u16 {
             let ts = t0 + Duration::from_millis(u64::from(i) * 100);
             tel.observe_raw_packet(&make_pkt(15, 1 + i), false, ts);
-            tel.observe_frame(VideoWireCodec::H265, ts);
+            tel.observe_reassembled_frame(VideoWireCodec::H265, i == 0, false, true, ts);
         }
         let active = tel.snapshot_p2s(7, 1, 99, 0x1d, t0 + Duration::from_secs(1));
         assert_eq!(active.loss_pct, 0);
@@ -2226,7 +2319,7 @@ mod tests {
         for i in 0..5u16 {
             let ts = t0 + Duration::from_millis(6200 + u64::from(i) * 100);
             tel.observe_raw_packet(&make_pkt(15, 50 + i), false, ts);
-            tel.observe_frame(VideoWireCodec::H265, ts);
+            tel.observe_reassembled_frame(VideoWireCodec::H265, i == 0, false, true, ts);
         }
         let resumed = tel.snapshot_p2s(7, 1, 99, 0x1d, t0 + Duration::from_secs(7));
         assert_eq!(resumed.loss_pct, 0);
@@ -2560,5 +2653,106 @@ mod tests {
         assert!(tracker.observe_seq(0xffff, t0 + Duration::from_millis(260)));
         assert!(tracker.observe_seq(0x0000, t0 + Duration::from_millis(265)));
         assert_eq!(tracker.arq_recovered_total, 2);
+    }
+
+    #[test]
+    fn rx_telemetry_reports_zero_play_fps_and_heavy_freeze_until_keyframe_sync() {
+        let t0 = Instant::now();
+        let mut tel = DirectVideoRxTelemetry::new(t0);
+        let mut pktz = RsmVideoPacketizer::new(7, 1).with_orientation(1);
+        let p_frame = vec![0, 0, 0, 1, 0x41, 0x9a, 0x11, 0x22, 0x33, 0x44];
+        let idr_frame = vec![
+            0, 0, 0, 1, 0x67, 0x64, 0x00, 0x16, 0, 0, 0, 1, 0x68, 0xee, 0, 0, 0, 1, 0x65, 0x88,
+        ];
+
+        // 9 H.264 P-frames arrive over 560 ms BEFORE initial keyframe sync (`keyframe_synced = false`).
+        for i in 0..9u32 {
+            let at = t0 + Duration::from_millis(40 + u64::from(i) * 65);
+            let pkts = pktz
+                .packetize(VideoWireCodec::H264, &p_frame, i * 66, 15, 500)
+                .unwrap();
+            for pkt in &pkts {
+                tel.observe_raw_packet(pkt, false, at);
+            }
+            tel.observe_reassembled_frame(VideoWireCodec::H264, false, false, false, at);
+        }
+        let r1 = tel.snapshot_p2s(7, 1, 1, 0x1d, t0 + Duration::from_millis(600));
+        assert_eq!(r1.decode_type, 9);
+        assert!(r1.recv_kbps > 0);
+        assert_eq!(r1.recv_fps, 15);
+        assert_eq!(r1.play_fps, 0);
+        assert_eq!(r1.play_frames, 0);
+        assert_eq!(r1.heavy_freeze_cnt, 1);
+        assert!(r1.heavy_freeze_time_ratio >= 85);
+
+        // Next 600 ms window still without keyframe sync reports 100% heavy freeze and play_fps = 0.
+        for i in 9..18u32 {
+            let at = t0 + Duration::from_millis(640 + u64::from(i - 9) * 65);
+            let pkts = pktz
+                .packetize(VideoWireCodec::H264, &p_frame, i * 66, 15, 500)
+                .unwrap();
+            for pkt in &pkts {
+                tel.observe_raw_packet(pkt, false, at);
+            }
+            tel.observe_reassembled_frame(VideoWireCodec::H264, false, false, false, at);
+        }
+        let r2 = tel.snapshot_p2s(7, 1, 1, 0x1d, t0 + Duration::from_millis(1200));
+        assert_eq!(r2.recv_fps, 15);
+        assert_eq!(r2.play_fps, 0);
+        assert_eq!(r2.play_frames, 0);
+        assert_eq!(r2.heavy_freeze_time_ratio, 100);
+
+        // Recovery IDR arrives at 1250 ms (`keyframe_synced = true`), followed by clean P-frames.
+        let idr_at = t0 + Duration::from_millis(1250);
+        let idr_pkts = pktz
+            .packetize(VideoWireCodec::H264, &idr_frame, 1250, 15, 500)
+            .unwrap();
+        for pkt in &idr_pkts {
+            tel.observe_raw_packet(pkt, false, idr_at);
+        }
+        tel.observe_reassembled_frame(VideoWireCodec::H264, true, false, true, idr_at);
+        for i in 1..15u32 {
+            let at = idr_at + Duration::from_millis(u64::from(i) * 66);
+            let pkts = pktz
+                .packetize(VideoWireCodec::H264, &p_frame, 1250 + i * 66, 15, 500)
+                .unwrap();
+            for pkt in &pkts {
+                tel.observe_raw_packet(pkt, false, at);
+            }
+            tel.observe_reassembled_frame(VideoWireCodec::H264, false, false, true, at);
+        }
+        let _ = tel.snapshot_p2s(7, 1, 1, 0x1d, t0 + Duration::from_millis(2250));
+
+        // Subsequent clean 1s window has smooth play_fps and 0% freeze.
+        for i in 0..15u32 {
+            let at = t0 + Duration::from_millis(2300 + u64::from(i) * 66);
+            let pkts = pktz
+                .packetize(VideoWireCodec::H264, &p_frame, 2300 + i * 66, 15, 500)
+                .unwrap();
+            for pkt in &pkts {
+                tel.observe_raw_packet(pkt, false, at);
+            }
+            tel.observe_reassembled_frame(VideoWireCodec::H264, false, false, true, at);
+        }
+        let r_clean = tel.snapshot_p2s(7, 1, 1, 0x1d, t0 + Duration::from_millis(3250));
+        assert_eq!(r_clean.play_fps, 15);
+        assert_eq!(r_clean.heavy_freeze_cnt, 0);
+        assert_eq!(r_clean.heavy_freeze_time_ratio, 0);
+
+        // Mid-stream unrecovered drop holds P-frames (`play_fps = 0`, heavy freeze) until IDR arrives.
+        for i in 0..10u32 {
+            let at = t0 + Duration::from_millis(3310 + u64::from(i) * 66);
+            let pkts = pktz
+                .packetize(VideoWireCodec::H264, &p_frame, 3310 + i * 66, 15, 500)
+                .unwrap();
+            for pkt in &pkts {
+                tel.observe_raw_packet(pkt, false, at);
+            }
+            tel.observe_reassembled_frame(VideoWireCodec::H264, false, i == 0, true, at);
+        }
+        let r_hold = tel.snapshot_p2s(7, 1, 1, 0x1d, t0 + Duration::from_millis(4000));
+        assert!(r_hold.recv_fps > 0);
+        assert_eq!(r_hold.play_fps, 0);
+        assert_eq!(r_hold.heavy_freeze_cnt, 1);
     }
 }

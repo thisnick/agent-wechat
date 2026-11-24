@@ -26,8 +26,8 @@ use wechat_protocol::calls::{
     audio_packet::{self, Live96, MediaEpoch},
     relay::{RelayEpoch, SelectedRelay},
     video_packet::{
-        encode_irequest_with_force, encode_p2s, encode_video_nack, parse_s2p, RsmVideoPacketizer,
-        VideoS2pCommand,
+        encode_irequest_with_force, encode_p2s, encode_p2s_report, encode_video_nack, parse_s2p,
+        RsmVideoPacketizer, VideoS2pCommand,
     },
 };
 #[path = "conference_tone.rs"]
@@ -146,6 +146,9 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
     let mut rx_keyframes_seen = BTreeSet::<u16>::new();
     let mut last_p2s_tx: Option<Instant> = None;
     let mut p2s_seq = 1u16;
+    let mut conf_tx_window_start = started;
+    let mut conf_tx_video_bytes = 0u64;
+    let mut conf_tx_video_frames = 0u32;
     let video_enabled = options.video_enabled || video.is_some();
     let video_trace = std::env::var("WX_CALL_VIDEO_TRACE").as_deref() == Ok("1");
     let mut trace_last_s2p: Option<VideoS2pCommand> = None;
@@ -469,13 +472,77 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                                     .insert(target_member, remaining.saturating_sub(1));
                             }
                         }
-                        if last_p2s_tx.is_none_or(|t| t.elapsed() >= Duration::from_secs(1)) {
-                            if let Ok(p2s) = encode_p2s(p2s_seq, 2, 0x1d, 15) {
+                        let awaiting_sync = receivers.iter().any(|(&mid, b)| {
+                            b.active
+                                && b.receiver.has_active_video_window()
+                                && !rx_keyframes_seen.contains(&mid)
+                        });
+                        let p2s_interval = if awaiting_sync {
+                            Duration::from_millis(550)
+                        } else {
+                            Duration::from_secs(1)
+                        };
+                        if last_p2s_tx.is_none_or(|t| t.elapsed() >= p2s_interval) {
+                            let tx_window_ms = u32::try_from(
+                                video_now
+                                    .saturating_duration_since(conf_tx_window_start)
+                                    .as_millis(),
+                            )
+                            .unwrap_or(1000)
+                            .max(1);
+                            let send_kbps = ((conf_tx_video_bytes.saturating_mul(8))
+                                / u64::from(tx_window_ms))
+                                as u32;
+                            let send_fps = conf_tx_video_frames
+                                .saturating_mul(1000)
+                                .div_ceil(tx_window_ms)
+                                .min(60);
+                            conf_tx_window_start = video_now;
+                            conf_tx_video_bytes = 0;
+                            conf_tx_video_frames = 0;
+
+                            // Snapshot every active bound receiver so paused/camera-off streams
+                            // clear stale gap anchors and multi-sender streams roll their 1s
+                            // windows evenly without starving higher member IDs.
+                            let mut active_reports = Vec::new();
+                            for (&mid, b) in &mut receivers {
+                                if !b.active {
+                                    continue;
+                                }
+                                let was_active = b.receiver.has_active_video_window();
+                                let mut rep = b.receiver.snapshot_video_p2s(
+                                    mid,
+                                    u32::from(selected.connection_id),
+                                    0x1d,
+                                    video_now,
+                                );
+                                rep.send_kbps = send_kbps;
+                                rep.send_fps = send_fps;
+                                rep.capt_fps = send_fps;
+                                if was_active {
+                                    active_reports.push((mid, rep));
+                                }
+                            }
+                            let selected_rep = active_reports
+                                .iter()
+                                .find(|(mid, _)| !rx_keyframes_seen.contains(mid))
+                                .or_else(|| {
+                                    (!active_reports.is_empty()).then(|| {
+                                        &active_reports[usize::from(p2s_seq) % active_reports.len()]
+                                    })
+                                })
+                                .map(|(_, rep)| rep);
+                            let encoded = if let Some(p2s_rep) = selected_rep {
+                                encode_p2s_report(p2s_seq, 2, p2s_rep)
+                            } else {
+                                encode_p2s(p2s_seq, 2, 0x1d, 15)
+                            };
+                            if let Ok(p2s) = encoded {
                                 p2s_seq = p2s_seq.wrapping_add(1);
                                 if let Ok(datagram) = sender.seal_qos_p2s(ready_at.elapsed(), &p2s)
                                 {
                                     let _ = host.submit(&socket, selected.endpoint, &datagram, &[]);
-                                    last_p2s_tx = Some(Instant::now());
+                                    last_p2s_tx = Some(video_now);
                                 }
                             }
                         }
@@ -492,6 +559,9 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                                 if let Some(frame) =
                                     tx_video_queue.next_frame(video_rx_ch, current_vgen)
                                 {
+                                    conf_tx_video_bytes = conf_tx_video_bytes
+                                        .saturating_add(frame.annexb.len() as u64);
+                                    conf_tx_video_frames = conf_tx_video_frames.saturating_add(1);
                                     if let Ok(pkts) = video_tx.packetize(
                                         frame.codec,
                                         &frame.annexb,
@@ -701,6 +771,11 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                                 if kf_seen {
                                     rx_keyframes_seen.insert(member);
                                 }
+                                bound.receiver.observe_reassembled_video_frame(
+                                    &video_frame,
+                                    kf_seen,
+                                    Instant::now(),
+                                );
                                 if video_frame.prior_frames_dropped && !video_frame.is_keyframe {
                                     need_keyframe = true;
                                 } else if video_frame.is_keyframe {

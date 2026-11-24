@@ -1055,12 +1055,18 @@ struct PendingAssembly {
     is_iframe: bool,
     frame_count: u8,
     x_groups: usize,
-    s_per_group: usize,
-    r_per_group: usize,
     y_groups: usize,
     xps_len_hi: u8,
     slice_len_hi: u8,
-    /// Per-horizontal-group packets keyed by `slot_in_group` (`0..s` source, `s..s+r` parity).
+    /// Per-horizontal-group source packet counts (`s_per_group` per `group_idx_x`).
+    /// In 1D multi-group frames (`x_groups >= 2, y_groups == 0`), the trailing group
+    /// carries fewer source packets when total source chunks is not divisible by `x_groups`.
+    group_s: Vec<Option<usize>>,
+    /// Per-horizontal-group RS parity packet counts (`r_per_group` per `group_idx_x`).
+    group_r: Vec<Option<usize>>,
+    /// Uniform `s_per_group` advertised on 2D (`y_groups > 0`) packets, when present.
+    vert_s_per_group: Option<usize>,
+    /// Per-horizontal-group packets keyed by `slot_in_group` (`0..s_g` source, `s_g..s_g+r_g` parity).
     groups: Vec<BTreeMap<usize, Vec<u8>>>,
     /// 2D vertical parity packets keyed by `(vert_group_idx, col)` where `col in 0..s`.
     vert_parity: BTreeMap<(usize, usize), Vec<u8>>,
@@ -1079,14 +1085,27 @@ fn grace_frames_for(is_iframe: bool, r_per_group: usize, y_groups: usize) -> u32
 }
 
 impl PendingAssembly {
+    fn max_r(&self) -> usize {
+        self.group_r.iter().flatten().copied().max().unwrap_or(0)
+    }
+
     fn grace_frames(&self) -> u32 {
-        grace_frames_for(self.is_iframe, self.r_per_group, self.y_groups)
+        grace_frames_for(self.is_iframe, self.max_r(), self.y_groups)
+    }
+
+    fn effective_group_s(&self, g: usize) -> Option<usize> {
+        self.group_s
+            .get(g)
+            .copied()
+            .flatten()
+            .or(self.vert_s_per_group)
     }
 
     fn source_chunks_complete(&self) -> bool {
-        self.groups
-            .iter()
-            .all(|g| (0..self.s_per_group).all(|col| g.contains_key(&col)))
+        (0..self.x_groups).all(|g| {
+            self.effective_group_s(g)
+                .is_some_and(|s_g| s_g > 0 && (0..s_g).all(|col| self.groups[g].contains_key(&col)))
+        })
     }
 
     /// Attempt horizontal (and, when present, 2D vertical) systematic RS erasure recovery.
@@ -1106,21 +1125,23 @@ impl PendingAssembly {
     }
 
     fn recover_horizontal_groups(&mut self) -> bool {
-        if self.r_per_group == 0
-            || self.s_per_group == 0
-            || self.s_per_group + self.r_per_group > 255
-        {
-            return false;
-        }
         let mut recovered = false;
-        for group in &mut self.groups {
-            let missing_src = (0..self.s_per_group)
-                .filter(|col| !group.contains_key(col))
-                .count();
-            if missing_src == 0 || group.len() < self.s_per_group {
+        for g in 0..self.x_groups {
+            let Some(s_g) = self.group_s[g].or(self.vert_s_per_group) else {
+                continue;
+            };
+            let Some(r_g) = self.group_r[g] else {
+                continue;
+            };
+            if r_g == 0 || s_g == 0 || s_g + r_g > 255 {
                 continue;
             }
-            if rs_recover_group(self.s_per_group, self.r_per_group, group) {
+            let group = &mut self.groups[g];
+            let missing_src = (0..s_g).filter(|col| !group.contains_key(col)).count();
+            if missing_src == 0 || group.len() < s_g {
+                continue;
+            }
+            if rs_recover_group(s_g, r_g, group) {
                 recovered = true;
             }
         }
@@ -1128,11 +1149,18 @@ impl PendingAssembly {
     }
 
     fn recover_vertical_columns(&mut self) -> bool {
-        if self.y_groups == 0 || self.x_groups < 2 || self.x_groups + self.y_groups > 255 {
+        let Some(s_vert) = self.vert_s_per_group else {
+            return false;
+        };
+        if self.y_groups == 0
+            || self.x_groups < 2
+            || s_vert == 0
+            || self.x_groups + self.y_groups > 255
+        {
             return false;
         }
         let mut recovered = false;
-        for col in 0..self.s_per_group {
+        for col in 0..s_vert {
             let mut col_map = BTreeMap::<usize, Vec<u8>>::new();
             let mut missing_src = 0usize;
             for g in 0..self.x_groups {
@@ -1158,6 +1186,7 @@ impl PendingAssembly {
                     if !self.groups[g].contains_key(&col) {
                         if let Some(pkt) = col_map.remove(&g) {
                             self.groups[g].insert(col, pkt);
+                            self.group_s[g] = Some(s_vert);
                             recovered = true;
                         }
                     }
@@ -1412,9 +1441,8 @@ impl StreamReassembler {
         if f_tot_pkts == 0 || f_pkt_idx == 0 || s_per_group == 0 {
             return Ok(RsmIngestOutcome::Pending);
         }
-        let total_source_pkts = x_groups.saturating_mul(s_per_group);
-        if total_source_pkts == 0
-            || total_source_pkts > MAX_FRAGMENTS_PER_FRAME
+        if s_per_group > MAX_FRAGMENTS_PER_FRAME
+            || (y_groups > 0 && x_groups.saturating_mul(s_per_group) > MAX_FRAGMENTS_PER_FRAME)
             || r_full > MAX_FEC_PARITY
             || pkg_idx_in_group == 0
         {
@@ -1550,26 +1578,60 @@ impl StreamReassembler {
                 is_iframe,
                 frame_count,
                 x_groups,
-                s_per_group,
-                r_per_group: r_full,
                 y_groups,
                 xps_len_hi,
                 slice_len_hi,
+                group_s: vec![None; x_groups],
+                group_r: vec![None; x_groups],
+                vert_s_per_group: (y_groups > 0 || is_vert_parity).then_some(s_per_group),
                 groups: (0..x_groups).map(|_| BTreeMap::new()).collect(),
                 vert_parity: BTreeMap::new(),
                 fec_recovered: false,
                 arrival_order: arrival,
             });
-        // Reject inconsistent stream/group geometry for the same frame index.
-        if entry.stream_id != stream_id
-            || entry.x_groups != x_groups
-            || entry.s_per_group != s_per_group
-        {
+        // Reject inconsistent stream/group geometry for the same frame index while
+        // permitting per-group `s_per_group` / `r_per_group` in 1D multi-group frames
+        // (where the trailing group carries the remainder of source chunks).
+        if entry.stream_id != stream_id || entry.x_groups != x_groups {
             return Ok(RsmIngestOutcome::Pending);
         }
+        if y_groups > 0 || is_vert_parity {
+            if entry.vert_s_per_group.is_some_and(|vs| vs != s_per_group)
+                || entry.group_s.iter().flatten().any(|&gs| gs != s_per_group)
+            {
+                return Ok(RsmIngestOutcome::Pending);
+            }
+            entry.vert_s_per_group = Some(s_per_group);
+        }
+        if !is_vert_parity {
+            if entry.vert_s_per_group.is_some_and(|vs| vs != s_per_group)
+                || entry.group_s[group_idx_x].is_some_and(|gs| gs != s_per_group)
+                || entry.group_r[group_idx_x].is_some_and(|gr| gr != r_full)
+            {
+                return Ok(RsmIngestOutcome::Pending);
+            }
+            let other_chunks: usize = entry
+                .group_s
+                .iter()
+                .enumerate()
+                .filter(|&(g, _)| g != group_idx_x)
+                .filter_map(|(_, &gs)| gs)
+                .sum();
+            if other_chunks.saturating_add(s_per_group) > MAX_FRAGMENTS_PER_FRAME {
+                return Ok(RsmIngestOutcome::Pending);
+            }
+            entry.group_s[group_idx_x] = Some(s_per_group);
+            entry.group_r[group_idx_x] = Some(r_full);
+        }
         entry.is_iframe |= is_iframe;
-        entry.r_per_group = entry.r_per_group.max(r_full);
         entry.y_groups = entry.y_groups.max(y_groups);
+        entry.frame_count = entry.frame_count.max(frame_count);
+        if xps_len_hi != 0 {
+            entry.xps_len_hi = xps_len_hi;
+        }
+        if slice_len_hi != 0 {
+            entry.slice_len_hi = slice_len_hi;
+        }
         if is_vert_parity {
             entry
                 .vert_parity
@@ -1597,20 +1659,26 @@ impl StreamReassembler {
 
         let completed = self.active.remove(&full_frame_idx).expect("just inserted");
 
-        let total_bytes: usize = completed
-            .groups
-            .iter()
-            .flat_map(|g| (0..completed.s_per_group).filter_map(|col| g.get(&col)))
-            .map(Vec::len)
-            .sum();
-        if total_bytes > MAX_VIDEO_FRAME_BYTES + 4096 {
+        let mut total_chunks = 0usize;
+        let mut total_bytes = 0usize;
+        for g in 0..completed.x_groups {
+            let s_g = completed.effective_group_s(g).unwrap_or(0);
+            total_chunks = total_chunks.saturating_add(s_g);
+            for col in 0..s_g {
+                if let Some(chunk) = completed.groups[g].get(&col) {
+                    total_bytes = total_bytes.saturating_add(chunk.len());
+                }
+            }
+        }
+        if total_chunks > MAX_FRAGMENTS_PER_FRAME || total_bytes > MAX_VIDEO_FRAME_BYTES + 4096 {
             self.record_drop(full_frame_idx);
             bail!("Reassembled video frame exceeds budget");
         }
         let mut assembled = Vec::with_capacity(total_bytes);
-        for group in &completed.groups {
-            for col in 0..completed.s_per_group {
-                if let Some(chunk) = group.get(&col) {
+        for g in 0..completed.x_groups {
+            let s_g = completed.effective_group_s(g).unwrap_or(0);
+            for col in 0..s_g {
+                if let Some(chunk) = completed.groups[g].get(&col) {
                     assembled.extend_from_slice(chunk);
                 }
             }
@@ -4063,5 +4131,341 @@ mod tests {
             baseline_vp2s_tags,
             vec![1, 2, 4, 8, 9, 10, 11, 12, 15, 16, 17, 19, 20, 24, 29]
         );
+    }
+
+    #[test]
+    fn multi_group_uneven_tail_s_per_group_reassembles_and_recovers_fec() {
+        let mut annexb = vec![0, 0, 0, 1, 0x41, 0x9a];
+        for i in 0..480u16 {
+            annexb.push(((i * 43 + 17) & 0xff) as u8);
+        }
+        let framed = frame_annexb_access_unit(VideoWireCodec::H264, &annexb).unwrap();
+        // 5 total source chunks across x_groups = 2: group 0 has s = 3, group 1 has s = 2.
+        let s0 = 3usize;
+        let s1 = 2usize;
+        let r = 1usize;
+        let total_src = s0 + s1;
+        let chunk_len = framed.bytes.len().div_ceil(total_src);
+        let mut padded = framed.bytes.clone();
+        padded.resize(total_src * chunk_len, 0);
+        let total_pkts = (s0 + r) + (s1 + r);
+
+        let g0_srcs: Vec<Vec<u8>> = (0..s0)
+            .map(|c| padded[c * chunk_len..(c + 1) * chunk_len].to_vec())
+            .collect();
+        let g1_srcs: Vec<Vec<u8>> = (0..s1)
+            .map(|c| padded[(s0 + c) * chunk_len..(s0 + c + 1) * chunk_len].to_vec())
+            .collect();
+        let g0_par = test_rs_encode(&g0_srcs, r);
+        let g1_par = test_rs_encode(&g1_srcs, r);
+
+        let g0_pkts: Vec<Vec<u8>> = g0_srcs
+            .iter()
+            .enumerate()
+            .map(|(c, src)| {
+                build_2d_rsm_pkt(
+                    VideoWireCodec::H264,
+                    80,
+                    2,
+                    0,
+                    s0,
+                    r,
+                    c + 1,
+                    c + 1,
+                    total_pkts,
+                    0,
+                    false,
+                    0,
+                    src,
+                )
+            })
+            .chain(std::iter::once(build_2d_rsm_pkt(
+                VideoWireCodec::H264,
+                80,
+                2,
+                0,
+                s0,
+                r,
+                s0 + 1,
+                s0 + 1,
+                total_pkts,
+                0,
+                false,
+                0,
+                &g0_par[0],
+            )))
+            .collect();
+        let g1_pkts: Vec<Vec<u8>> = g1_srcs
+            .iter()
+            .enumerate()
+            .map(|(c, src)| {
+                build_2d_rsm_pkt(
+                    VideoWireCodec::H264,
+                    80,
+                    2,
+                    1,
+                    s1,
+                    r,
+                    c + 1,
+                    s0 + r + c + 1,
+                    total_pkts,
+                    0,
+                    false,
+                    0,
+                    src,
+                )
+            })
+            .chain(std::iter::once(build_2d_rsm_pkt(
+                VideoWireCodec::H264,
+                80,
+                2,
+                1,
+                s1,
+                r,
+                s1 + 1,
+                total_pkts,
+                total_pkts,
+                0,
+                false,
+                0,
+                &g1_par[0],
+            )))
+            .collect();
+
+        // 1. In-order group 0 (s=3) -> group 1 (s=2) source packets reassemble without drop.
+        let mut rx = RsmVideoReassembler::new();
+        let mut out = None;
+        for pkt in g0_pkts[..s0].iter().chain(g1_pkts[..s1].iter()) {
+            if let RsmIngestOutcome::Frame(f) = rx.ingest(pkt).unwrap() {
+                out = Some(f);
+            }
+        }
+        let f = out.expect("uneven multi-group P-frame must reassemble in order");
+        assert!(!f.fec_recovered);
+        assert!(!f.prior_frames_dropped);
+        assert_eq!(f.payload, annexb);
+
+        // 2. Out-of-order arrival: group 1 (s=2) arrives completely BEFORE group 0 (s=3);
+        // must stay Pending until group 0 arrives, then emit exact payload.
+        let mut rx_ooo = RsmVideoReassembler::new();
+        for pkt in &g1_pkts[..s1] {
+            assert_eq!(rx_ooo.ingest(pkt).unwrap(), RsmIngestOutcome::Pending);
+        }
+        let mut out_ooo = None;
+        for pkt in &g0_pkts[..s0] {
+            if let RsmIngestOutcome::Frame(f) = rx_ooo.ingest(pkt).unwrap() {
+                out_ooo = Some(f);
+            }
+        }
+        let f_ooo = out_ooo.expect("out-of-order uneven multi-group frame must reassemble");
+        assert!(!f_ooo.prior_frames_dropped);
+        assert_eq!(f_ooo.payload, annexb);
+
+        // 3. Lose 1 source packet in trailing group 1 and recover via group 1's (s=2, r=1) parity.
+        let mut rx_fec = RsmVideoReassembler::new();
+        let mut out_fec = None;
+        for pkt in [
+            &g0_pkts[0],
+            &g0_pkts[1],
+            &g0_pkts[2],
+            &g1_pkts[0], // g1_pkts[1] lost
+            &g1_pkts[2], // g1 parity
+        ] {
+            if let RsmIngestOutcome::Frame(f) = rx_fec.ingest(pkt).unwrap() {
+                out_fec = Some(f);
+            }
+        }
+        let f_fec = out_fec.expect("trailing uneven group must recover lost packet via RS parity");
+        assert!(f_fec.fec_recovered);
+        assert!(!f_fec.prior_frames_dropped);
+        assert_eq!(f_fec.payload, annexb);
+    }
+
+    #[test]
+    fn two_dim_multi_group_full_first_group_loss_recovers_via_vertical_parity() {
+        let mut annexb = vec![0, 0, 0, 1, 0x02, 0x01];
+        for i in 0..300u16 {
+            annexb.push(((i * 19 + 5) & 0xff) as u8);
+        }
+        let framed = frame_annexb_access_unit(VideoWireCodec::H265, &annexb).unwrap();
+        let x_groups = 2usize;
+        let s = 3usize;
+        let y_groups = 1usize;
+        let chunk_len = framed.bytes.len().div_ceil(x_groups * s);
+        let mut padded = framed.bytes.clone();
+        padded.resize(x_groups * s * chunk_len, 0);
+        let total_pkts = x_groups * s + y_groups * s;
+
+        let srcs: Vec<Vec<Vec<u8>>> = (0..x_groups)
+            .map(|g| {
+                (0..s)
+                    .map(|col| {
+                        padded[(g * s + col) * chunk_len..(g * s + col + 1) * chunk_len].to_vec()
+                    })
+                    .collect()
+            })
+            .collect();
+        let v_par: Vec<Vec<u8>> = (0..s)
+            .map(|col| {
+                test_rs_encode(&[srcs[0][col].clone(), srcs[1][col].clone()], y_groups)
+                    .pop()
+                    .unwrap()
+            })
+            .collect();
+
+        // All packets of group 0 are lost; only group 1 + vertical parity arrive.
+        let mut rx = RsmVideoReassembler::new();
+        let mut out = None;
+        for (col, src) in srcs[1].iter().enumerate() {
+            assert_eq!(
+                rx.ingest(&build_2d_rsm_pkt(
+                    VideoWireCodec::H265,
+                    85,
+                    x_groups,
+                    1,
+                    s,
+                    0,
+                    col + 1,
+                    s + col + 1,
+                    total_pkts,
+                    y_groups,
+                    false,
+                    0,
+                    src,
+                ))
+                .unwrap(),
+                RsmIngestOutcome::Pending
+            );
+        }
+        for (col, vp) in v_par.iter().enumerate() {
+            if let RsmIngestOutcome::Frame(f) = rx
+                .ingest(&build_2d_rsm_pkt(
+                    VideoWireCodec::H265,
+                    85,
+                    x_groups,
+                    0,
+                    s,
+                    0,
+                    col + 1,
+                    2 * s + col + 1,
+                    total_pkts,
+                    y_groups,
+                    true,
+                    0,
+                    vp,
+                ))
+                .unwrap()
+            {
+                out = Some(f);
+            }
+        }
+        let f = out.expect("2D vertical parity must recover completely missing group 0");
+        assert!(f.fec_recovered);
+        assert_eq!(f.payload, annexb);
+    }
+
+    #[test]
+    fn multi_group_fec_p_frame_survives_reorder_across_adjacent_frame_without_false_drop() {
+        let mut p1 = vec![0, 0, 0, 1, 0x41, 0x9a];
+        p1.extend((0..320u16).map(|i| ((i * 3 + 1) & 0xff) as u8));
+        let f1 = frame_annexb_access_unit(VideoWireCodec::H264, &p1).unwrap();
+        // 5 source chunks across 2 horizontal groups: group 0 (s=3, r=1), group 1 (s=2, r=1).
+        let chunk_len = f1.bytes.len().div_ceil(5);
+        let mut pad1 = f1.bytes.clone();
+        pad1.resize(5 * chunk_len, 0);
+
+        let mut p2 = vec![0, 0, 0, 1, 0x41, 0x9a];
+        p2.extend((0..80u8).map(|i| i.wrapping_mul(7).wrapping_add(5)));
+        let f2 = frame_annexb_access_unit(VideoWireCodec::H264, &p2).unwrap();
+
+        let mut rx = RsmVideoReassembler::new();
+        for c in 0..3usize {
+            assert_eq!(
+                rx.ingest(&build_2d_rsm_pkt(
+                    VideoWireCodec::H264,
+                    60,
+                    2,
+                    0,
+                    3,
+                    1,
+                    c + 1,
+                    c + 1,
+                    7,
+                    0,
+                    false,
+                    0,
+                    &pad1[c * chunk_len..(c + 1) * chunk_len]
+                ))
+                .unwrap(),
+                RsmIngestOutcome::Pending
+            );
+        }
+        assert_eq!(
+            rx.ingest(&build_2d_rsm_pkt(
+                VideoWireCodec::H264,
+                60,
+                2,
+                1,
+                2,
+                1,
+                1,
+                5,
+                7,
+                0,
+                false,
+                0,
+                &pad1[3 * chunk_len..4 * chunk_len]
+            ))
+            .unwrap(),
+            RsmIngestOutcome::Pending
+        );
+        // Next frame 61 completes ahead of frame 60's trailing group-1 packet.
+        assert_eq!(
+            rx.ingest(&build_2d_rsm_pkt(
+                VideoWireCodec::H264,
+                61,
+                1,
+                0,
+                1,
+                1,
+                1,
+                1,
+                2,
+                0,
+                false,
+                0,
+                &f2.bytes
+            ))
+            .unwrap(),
+            RsmIngestOutcome::Pending
+        );
+        let RsmIngestOutcome::Frame(out60) = rx
+            .ingest(&build_2d_rsm_pkt(
+                VideoWireCodec::H264,
+                60,
+                2,
+                1,
+                2,
+                1,
+                2,
+                6,
+                7,
+                0,
+                false,
+                0,
+                &pad1[4 * chunk_len..5 * chunk_len],
+            ))
+            .unwrap()
+        else {
+            panic!("reordered trailing packet of uneven multi-group FEC frame 60 must complete");
+        };
+        assert_eq!(out60.frame_index, 60);
+        assert!(!out60.prior_frames_dropped);
+        assert_eq!(out60.payload, p1);
+
+        let out61 = rx.pop_ready().expect("buffered frame 61 must drain next");
+        assert_eq!(out61.frame_index, 61);
+        assert!(!out61.prior_frames_dropped);
+        assert_eq!(out61.payload, p2);
     }
 }
