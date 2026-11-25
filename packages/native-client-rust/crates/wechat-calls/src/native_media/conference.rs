@@ -24,6 +24,7 @@ use std::{
 use wechat_protocol::calls::{
     audio_packet::{self, Live96, MediaEpoch},
     relay::{RelayEpoch, SelectedRelay},
+    rudp,
     video_packet::{
         annexb_nalu_types, encode_p2s, encode_p2s_report, encode_video_nack, parse_s2p,
         VideoS2pCommand, P2S_CODEC_SUPPORT_H264_H265,
@@ -142,6 +143,7 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
     let mut trace_drop_logged = 0u32;
     let mut trace_fec_logged = 0u32;
     let mut trace_nack_tx_logged = 0u32;
+    let mut trace_rudp_acks = 0u32;
     let mut trace_last = Instant::now();
     let mut trace_total_fec = 0u64;
     let mut trace_total_drops = 0u64;
@@ -600,6 +602,33 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                             )?;
                             if consumed.peer_requested_keyframe {
                                 host.on_peer_keyframe_requested();
+                            }
+                            if let (Some((stream_id, max_pkt)), Some(sender)) =
+                                (consumed.rudp_ack, app_sender.as_mut())
+                            {
+                                if let Ok(feedback) = rudp::encode_rudp_feedback(
+                                    super::relay::epoch_ms32(),
+                                    stream_id,
+                                    max_pkt,
+                                    member,
+                                ) {
+                                    if let Ok(Some(datagram)) =
+                                        sender.seal_rudp(ready_at.elapsed(), &feedback)
+                                    {
+                                        let sent = host.submit(
+                                            &socket,
+                                            selected.endpoint,
+                                            &datagram,
+                                            &[],
+                                        )?;
+                                        if video_trace && sent && trace_rudp_acks < 16 {
+                                            trace_rudp_acks += 1;
+                                            eprintln!(
+                                                "[wechat-call-rudp] conf tx ack member={member} stream={stream_id} max_pkt={max_pkt}"
+                                            );
+                                        }
+                                    }
+                                }
                             }
                             if audio.is_some() {
                                 for frame in consumed.audio {
