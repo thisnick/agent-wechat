@@ -1,7 +1,7 @@
 ---
 title: Rust 开发库
 description: 在 Rust 中使用原生微信协议、Profile 与语音媒体库。
-sourceHash: "c4168ba49fdc"
+sourceHash: "597732f6b73e"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -114,6 +114,14 @@ cargo run --manifest-path packages/native-client-rust/Cargo.toml -p wechat-proto
 | 禁用默认特性 | 可移植的 PCM、队列、节拍控制与混音，包括 WebAssembly |
 
 高级 `client.calls()` 门面接口尚未完成。目前完整的通话操作请使用[通话 API](../calls-api/)。[Crate 架构](../../how-it-works/rust-crates/)说明了各库之间的依赖关系。
+
+## 可插拔异步传输与 WebAssembly \{#pluggable-async-transport-and-webassembly}
+
+`wechat-protocol` 通过 `wechat_protocol::transport` 支持自定义异步传输（`StreamTransport`、`HttpTransport`、`HttpOverStream`、`Clock`、`TaskSpawner` 与 `ProtocolTransport`）。仅提供原始 TCP 流的宿主（例如使用 Direct Sockets 的浏览器 Isolated Web App）可以通过 `ProtocolTransport::from_streams(streams, clock)` 包装 `StreamTransport`。在 `wasm32` 或非 Tokio 执行器上，请使用 `ProtocolTransport::with_spawner` 挂载任务派生器（例如 `wasm_bindgen_futures::spawn_local`），这样即使取消进行中的账号请求，仍会等待该次交换完成，并采纳经过校验的回复。
+
+- 异步登录请使用 `NativeClient::with_transport`（`start_qr_login_async`、`poll_login_async`、`complete_login_async`）。
+- 异步账号 RPC 与 `open_push_connection`（`AsyncPushConnection`）请使用 `NativeClient::from_account_with_transport`。
+- 在 `wasm32-unknown-unknown` 上，`wechat-media` 与 `wechat-protocol`（`default-features = false, features = ["pure-rust-crypto"]`）会自动省略操作系统套接字、`reqwest` 与原生媒体工具。在应用 crate 中，请配置 `getrandom` 0.4 的后端（浏览器中需添加 `getrandom = { version = "0.4", features = ["wasm_js"] }`，并使用 `RUSTFLAGS='--cfg getrandom_backend="wasm_js"'` 构建）。
 
 ## Profile 写入 \{#profile-writes}
 
