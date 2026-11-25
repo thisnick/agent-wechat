@@ -133,8 +133,8 @@ official client codec; `openssl-crypto` (default) uses vendored OpenSSL; and
 Disabling default features requires selecting at least one crypto backend
 (`openssl-crypto` or `pure-rust-crypto`). If both crypto features are enabled
 via Cargo feature unification (for example, when default features remain enabled
-or another dependency such as `wechat-calls`'s `native-runtime` enables
-`openssl-crypto`), `openssl-crypto` takes precedence. Omitting `voice-silk` skips the C
+or another crate in the dependency graph enables `openssl-crypto`),
+`openssl-crypto` takes precedence. Omitting `voice-silk` skips the C
 SILK build while keeping `silk::validate_framing`, `silk::wav`, voice bounds,
 and all protocol codecs. Portable callers can use `crypto::Curve`,
 `Ecdh::generate_for`, `Ecdh::from_private_for`, `crypto::cbc_encrypt`, and

@@ -32,9 +32,10 @@ connecting to a running daemon can use the [HTTP API](/use/api/).
    default. To skip compiling C SILK or vendored OpenSSL, set
    `default-features = false` and enable either `openssl-crypto` or
    `pure-rust-crypto` (plus `voice-silk` if you need `silk::encode` or
-   `silk::decode`). If both crypto features are enabled in the same dependency
-   graph (for example through `wechat-calls`'s `native-runtime`),
-   `openssl-crypto` takes precedence. Framing validation, WAV packaging, and
+   `silk::decode`). `wechat-calls`'s default `native-runtime` feature selects
+   `pure-rust-crypto` on `wechat-protocol`; if another crate in the same
+   dependency graph enables `openssl-crypto`, `openssl-crypto` takes
+   precedence. Framing validation, WAV packaging, and
    all protocol codecs stay available without `voice-silk`.
 
 From the release after 2.3.2, the Rust libraries have the same version number as

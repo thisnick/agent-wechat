@@ -21,7 +21,7 @@ schemars.workspace = true
 tokio = { workspace = true, features = ["sync", "time"] }
 wechat-store = { path = "../wechat-store" }
 wechat-profile = { path = "../wechat-profile" }
-wechat-protocol = { path = "../wechat-protocol" }
+wechat-protocol = { path = "../wechat-protocol", default-features = false, features = ["voice-silk", "pure-rust-crypto"] }
 wechat-media = { path = "../wechat-media" }
 uuid.workspace = true
 chrono.workspace = true

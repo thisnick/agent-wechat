@@ -35,7 +35,7 @@ wechat-profile = { path = "../wechat-profile" }
 wechat-core = { path = "../wechat-core" }
 wechat-api = { path = "../wechat-api" }
 wechat-store = { path = "../wechat-store" }
-wechat-protocol = { path = "../wechat-protocol" }
+wechat-protocol = { path = "../wechat-protocol", default-features = false, features = ["voice-silk", "pure-rust-crypto"] }
 wechat-platform = { path = "../wechat-platform" }
 qrcodegen = "1.8.0"
 base64.workspace = true

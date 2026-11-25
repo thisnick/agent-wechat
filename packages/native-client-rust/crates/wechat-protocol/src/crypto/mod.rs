@@ -6,8 +6,8 @@
 //! pure-Rust implementations with no OpenSSL build dependency. If both
 //! `openssl-crypto` and `pure-rust-crypto` are enabled via Cargo feature
 //! unification (for example, when default features stay enabled or another
-//! dependency such as `wechat-calls`'s `native-runtime` enables
-//! `openssl-crypto`), `openssl-crypto` takes precedence.
+//! crate in the dependency graph enables `openssl-crypto`), `openssl-crypto`
+//! takes precedence.
 use crate::MAX_MESSAGE_BYTES;
 use anyhow::{ensure, Result};
 use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
