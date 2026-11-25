@@ -173,8 +173,7 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
         stage = "receive_failed";
         let mut application_connected = false;
         let ready_at = Instant::now();
-        let mut video_tx =
-            VideoTxPacer::new(selected.own_member, 1, started.elapsed().as_millis() as u64);
+        let mut video_tx = VideoTxPacer::new(selected.own_member, 1);
         let mut observation_deadline = if audio.is_some() || options.multi_speaker {
             None
         } else {
@@ -432,7 +431,6 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                                 Duration::from_secs(1)
                             };
                             if last_p2s_tx.is_none_or(|t| t.elapsed() >= p2s_interval) {
-                                let (send_kbps, send_fps) = video_tx.take_window_stats(now_ms);
                                 // Snapshot every active bound receiver so paused/camera-off streams
                                 // clear stale gap anchors and multi-sender streams roll their 1s
                                 // windows evenly without starving higher member IDs.
@@ -443,15 +441,12 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                                     }
                                     let was_active = b.receiver.has_active_video_window();
                                     let synced = b.receiver.is_video_keyframe_synced();
-                                    let mut rep = b.receiver.snapshot_video_p2s(
+                                    let rep = b.receiver.snapshot_video_p2s(
                                         mid,
                                         u32::from(selected.connection_id),
                                         P2S_CODEC_SUPPORT_H264_H265,
                                         now_ms,
                                     );
-                                    rep.send_kbps = send_kbps;
-                                    rep.send_fps = send_fps;
-                                    rep.capt_fps = send_fps;
                                     if was_active {
                                         active_reports.push((synced, rep));
                                     }
@@ -603,6 +598,8 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                             if consumed.peer_requested_keyframe {
                                 host.on_peer_keyframe_requested();
                             }
+                            // Acknowledgements need the member-keyed sender. Data that arrives
+                            // before it exists is acknowledged when the member retransmits it.
                             if let (Some((stream_id, max_pkt)), Some(sender)) =
                                 (consumed.rudp_ack, app_sender.as_mut())
                             {
@@ -615,12 +612,17 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                                     if let Ok(Some(datagram)) =
                                         sender.seal_rudp(ready_at.elapsed(), &feedback)
                                     {
-                                        let sent = host.submit(
-                                            &socket,
-                                            selected.endpoint,
-                                            &datagram,
-                                            &[],
-                                        )?;
+                                        // Best effort, like NACK and P2S: a failed send
+                                        // is retried by the member's retransmission.
+                                        let sent = matches!(
+                                            host.submit(
+                                                &socket,
+                                                selected.endpoint,
+                                                &datagram,
+                                                &[],
+                                            ),
+                                            Ok(true)
+                                        );
                                         if video_trace && sent && trace_rudp_acks < 16 {
                                             trace_rudp_acks += 1;
                                             eprintln!(

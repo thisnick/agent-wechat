@@ -417,15 +417,18 @@ pub struct VideoP2sReport {
     pub delay_ms: u32,
     /// Estimated receive bandwidth in kbps (`field 7`).
     pub est_bw_kbps: u32,
-    /// Outbound video bitrate in kbps (`field 8`).
+    /// This client's outbound video bitrate in kbps. Not encoded: P2S field 8 carries the
+    /// remote sender's rate as received.
     pub send_kbps: u32,
     /// Inbound video bitrate in kbps (`field 9`).
     pub recv_kbps: u32,
-    /// Outbound video frame rate (`field 10`).
+    /// This client's outbound video frame rate. Not encoded: P2S field 10 carries the remote
+    /// sender's frame rate as received.
     pub send_fps: u32,
     /// Inbound video frame rate (`field 11`).
     pub recv_fps: u32,
-    /// Local capture frame rate (`field 12`).
+    /// This client's capture frame rate. Not encoded: P2S field 12 carries the remote
+    /// sender's frame rate as received.
     pub capt_fps: u32,
     /// Packet loss percentage (`0..=100`, `field 14`).
     pub loss_pct: u32,
@@ -435,7 +438,7 @@ pub struct VideoP2sReport {
     pub codec_support_mask: u32,
     /// Lost packet count in the reporting interval (`field 26`).
     pub loss_pkts: u32,
-    /// Active receive wire codec (`9` = H.264, `15` = H.265, `0` before any frame). The encoder
+    /// Active receive wire codec (`9` = H.264, `15` = H.265, `0` = Vcodec1). The encoder
     /// reports it as the decoder-type bit official clients use (`u32VDecodeType`, field 29).
     pub decode_type: u32,
     /// Rendered/delivered frame rate (`field 30`).
@@ -512,9 +515,12 @@ pub const P2S_CODEC_SUPPORT_H265: u32 = 0x14;
 /// `u8VCodecSupport` allowing only Vcodec1 (`0x02`), which this client rewraps as H.264.
 pub const P2S_CODEC_SUPPORT_VCODEC1: u32 = 0x02;
 
-/// `u8VCodecSupport` that keeps a sender on the codec it already uses: offering a codec
-/// the sender cannot encode (for example H.265 to an Android phone with only a hardware
-/// H.264 encoder) makes it fall back to proprietary Vcodec1. Before any frame, `fallback`.
+/// `u8VCodecSupport` that keeps a sender on the codec it already uses (`wire_codec`: `9`
+/// H.264, `15` H.265, `0` Vcodec1): offering a codec the sender cannot encode (for example
+/// H.265 to an Android phone with only a hardware H.264 encoder) makes it fall back to
+/// proprietary Vcodec1. A Vcodec1 sender is offered only Vcodec1: codec masks did not stop
+/// the server from selecting it, and whether offering H.264 again moves the sender back is
+/// untested. Other wire codecs get `fallback`.
 pub fn p2s_codec_support_for(wire_codec: u32, fallback: u32) -> u32 {
     match wire_codec {
         0x00 => P2S_CODEC_SUPPORT_VCODEC1,

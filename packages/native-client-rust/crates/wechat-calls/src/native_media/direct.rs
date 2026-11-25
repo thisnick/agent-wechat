@@ -173,7 +173,7 @@ pub fn run_direct_media_with_preconnected_relay<H: DirectMediaHost>(
     } else {
         VideoStreamReceiver::new(connected_ms)
     };
-    let mut video_tx = VideoTxPacer::new(selected.own_member, 1, connected_ms);
+    let mut video_tx = VideoTxPacer::new(selected.own_member, 1);
     let mut last_p2s_tx: Option<Instant> = None;
     let mut p2s_seq = 1u16;
     let mut last_peer_activity = Instant::now();
@@ -666,22 +666,21 @@ pub fn run_direct_media_with_preconnected_relay<H: DirectMediaHost>(
                 if video_enabled {
                     let p2s_interval =
                         Duration::from_millis(video_rx.recommended_p2s_interval_ms());
-                    if last_p2s_tx.is_none_or(|t| t.elapsed() >= p2s_interval) {
+                    // Report only once a video packet has shown the sender's codec, so the
+                    // server is never offered a codec the sender cannot encode. Packets, not
+                    // decoded frames, open the gate: P2S drives keyframe recovery even while
+                    // no frame can be decoded.
+                    if video_rx.has_rx_codec()
+                        && last_p2s_tx.is_none_or(|t| t.elapsed() >= p2s_interval)
+                    {
                         let report = video_rx.snapshot_p2s(
                             media.peer_member,
                             u32::from(selected.connection_id),
                             P2S_CODEC_SUPPORT_H264_H265,
                             now_ms,
                         );
-                        // Report only once video has arrived and the sender's codec is known,
-                        // so the server is never offered a codec the sender cannot encode.
-                        let encoded = if !video_rx.has_rx_video() {
-                            last_p2s_tx = Some(video_now);
-                            Err(anyhow::anyhow!("sender codec not known yet"))
-                        } else {
-                            encode_p2s_report(p2s_seq, 2, selected.own_member, &report)
-                        };
-                        if let Ok(p2s) = encoded {
+                        if let Ok(p2s) = encode_p2s_report(p2s_seq, 2, selected.own_member, &report)
+                        {
                             let sent_seq = p2s_seq;
                             p2s_seq = p2s_seq.wrapping_add(1);
                             if let Ok(datagram) = channel.seal_qos_p2s(epoch, now_ms, &p2s) {

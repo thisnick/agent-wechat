@@ -587,10 +587,10 @@ field wechat_protocol::calls::video_packet::VideoNack::ranges | alloc::vec::Vec<
 field wechat_protocol::calls::video_packet::VideoNack::target_member | u16 | Target member ID whose sender should retransmit the missing packets.
 field wechat_protocol::calls::video_packet::VideoNack::target_stream_id | u8 | Target video stream ID.
 field wechat_protocol::calls::video_packet::VideoP2sReport::actual_member_num | u32 | Actual active remote member count delivering video (`videoLink` field 5).
-field wechat_protocol::calls::video_packet::VideoP2sReport::capt_fps | u32 | Local capture frame rate (`field 12`).
+field wechat_protocol::calls::video_packet::VideoP2sReport::capt_fps | u32 | This client's capture frame rate. Not encoded: P2S field 12 carries the remote sender's frame rate as received.
 field wechat_protocol::calls::video_packet::VideoP2sReport::codec_support_mask | u32 | Codecs the remote sender may send us (`u8VCodecSupport`, field 24): `0x08` HW H.264, `0x04` HW H.265, `0x10` SW H.265 (Vcodec2), `0x02` proprietary Vcodec1. Bit `0x01` (SW H.264 decode) is never valid here.
 field wechat_protocol::calls::video_packet::VideoP2sReport::conn_id | u32 | Relay connection ID (`video_new_p2s.videoLink` field 1).
-field wechat_protocol::calls::video_packet::VideoP2sReport::decode_type | u32 | Active receive wire codec (`9` = H.264, `15` = H.265, `0` before any frame). The encoder reports it as the decoder-type bit official clients use (`u32VDecodeType`, field 29).
+field wechat_protocol::calls::video_packet::VideoP2sReport::decode_type | u32 | Active receive wire codec (`9` = H.264, `15` = H.265, `0` = Vcodec1). The encoder reports it as the decoder-type bit official clients use (`u32VDecodeType`, field 29).
 field wechat_protocol::calls::video_packet::VideoP2sReport::delay_ms | u32 | Smoothed inter-arrival delay/jitter estimate in milliseconds (`field 6`).
 field wechat_protocol::calls::video_packet::VideoP2sReport::est_bw_kbps | u32 | Estimated receive bandwidth in kbps (`field 7`).
 field wechat_protocol::calls::video_packet::VideoP2sReport::expected_member_num | u32 | Expected active remote member count (`videoLink` field 4).
@@ -610,8 +610,8 @@ field wechat_protocol::calls::video_packet::VideoP2sReport::recv_fps | u32 | Inb
 field wechat_protocol::calls::video_packet::VideoP2sReport::recv_kbps | u32 | Inbound video bitrate in kbps (`field 9`).
 field wechat_protocol::calls::video_packet::VideoP2sReport::recv_pkgs | u32 | Received packet count in the reporting interval (`videoLink` field 2).
 field wechat_protocol::calls::video_packet::VideoP2sReport::remote_member_id | u32 | Remote sender member ID (`video_p2s` field 1).
-field wechat_protocol::calls::video_packet::VideoP2sReport::send_fps | u32 | Outbound video frame rate (`field 10`).
-field wechat_protocol::calls::video_packet::VideoP2sReport::send_kbps | u32 | Outbound video bitrate in kbps (`field 8`).
+field wechat_protocol::calls::video_packet::VideoP2sReport::send_fps | u32 | This client's outbound video frame rate. Not encoded: P2S field 10 carries the remote sender's frame rate as received.
+field wechat_protocol::calls::video_packet::VideoP2sReport::send_kbps | u32 | This client's outbound video bitrate in kbps. Not encoded: P2S field 8 carries the remote sender's rate as received.
 field wechat_protocol::calls::video_packet::VideoP2sReport::short_loss_pct | u32 | Short-window packet loss percentage (`0..=100`, `field 47`).
 field wechat_protocol::calls::video_packet::VideoP2sReport::stream_id | u32 | Video stream ID (`video_p2s` field 2).
 field wechat_protocol::calls::video_packet::VideoS2pCommand::alg | u32 | QoS algorithm identifier (`field 1: u8Alg`).
@@ -1273,7 +1273,7 @@ fn wechat_protocol::calls::video_packet::encode_p2s_report | fn(sequence: u16, c
 fn wechat_protocol::calls::video_packet::encode_video_nack | fn(local_member: u16, target_member: u16, stream_id: u8, arq_seq: u8, ranges: &[(u16, u16)]) -> alloc::vec::Vec<u8> | Encode a `0x06` video ARQ/NACK payload for `packed_kind = 0x60 | stream_id`.
 fn wechat_protocol::calls::video_packet::frame_annexb_access_unit | fn(codec: wechat_protocol::calls::video_packet::VideoWireCodec, annexb: &[u8]) -> anyhow::Result<wechat_protocol::calls::video_packet::FramedAnnexB> | Frame a single standard Annex-B access unit (H.265 or H.264) with WeChat's 4-byte `[xps_len_be16, idr_len_be16]` / `[slice_len_be16, 0, 0]` prefix.
 fn wechat_protocol::calls::video_packet::is_annexb_keyframe | fn(codec: wechat_protocol::calls::video_packet::VideoWireCodec, annexb: &[u8]) -> bool | Return `true` when an Annex-B access unit contains an IDR/IRAP keyframe NALU for `codec`.
-fn wechat_protocol::calls::video_packet::p2s_codec_support_for | fn(wire_codec: u32, fallback: u32) -> u32 | `u8VCodecSupport` that keeps a sender on the codec it already uses: offering a codec the sender cannot encode (for example H.265 to an Android phone with only a hardware H.264 encoder) makes it fall back to proprietary Vcodec1. Before any frame, `fallback`.
+fn wechat_protocol::calls::video_packet::p2s_codec_support_for | fn(wire_codec: u32, fallback: u32) -> u32 | `u8VCodecSupport` that keeps a sender on the codec it already uses (`wire_codec`: `9` H.264, `15` H.265, `0` Vcodec1): offering a codec the sender cannot encode (for example H.265 to an Android phone with only a hardware H.264 encoder) makes it fall back to proprietary Vcodec1. A Vcodec1 sender is offered only Vcodec1: codec masks did not stop the server from selecting it, and whether offering H.264 again moves the sender back is untested. Other wire codecs get `fallback`.
 fn wechat_protocol::calls::video_packet::parse_irequest | fn(payload: &[u8]) -> anyhow::Result<wechat_protocol::calls::video_packet::VideoIRequest> | Parse a 58-byte `0x66` `IRequest` keyframe request packet.
 fn wechat_protocol::calls::video_packet::parse_rsm_packet_header | fn(packet: &[u8]) -> anyhow::Result<wechat_protocol::calls::video_packet::RsmPacketHeader> | Parse the 3-byte MP/iLink prefix, 21-byte kind-3 `EncFecHeader`, and TLV extensions of a decrypted RSM video packet without mutating reassembly state.
 fn wechat_protocol::calls::video_packet::parse_s2p | fn(payload: &[u8]) -> anyhow::Result<wechat_protocol::calls::video_packet::ParsedS2p> | Parse a `0x0c` MP S2P packet arriving on `packed_kind = 0x30`.
@@ -1311,6 +1311,7 @@ fn wechat_protocol::calls::video_qos::VideoP2sAccumulator::observe_frame | fn(&m
 fn wechat_protocol::calls::video_qos::VideoP2sAccumulator::observe_packet | fn(&mut self, header: &wechat_protocol::calls::video_packet::RsmPacketHeader, packet_bytes: usize, arq_recovered: bool, now_ms: u64) | Record one parsed inbound RSM video packet at `now_ms`.
 fn wechat_protocol::calls::video_qos::VideoP2sAccumulator::observe_tx_frame | fn(&mut self, bytes: usize) | Record one outbound video frame encoded into the current reporting interval.
 fn wechat_protocol::calls::video_qos::VideoP2sAccumulator::reset | fn(&mut self, now_ms: u64) | Reset all window counters, freeze anchors and bandwidth estimates at `now_ms`.
+fn wechat_protocol::calls::video_qos::VideoP2sAccumulator::rx_codec | fn(&self) -> core::option::Option<wechat_protocol::calls::video_packet::VideoWireCodec> | The sender's wire codec (H.264, H.265 or Vcodec1) from the latest inbound media packet, or `None` before any.
 fn wechat_protocol::calls::video_qos::VideoP2sAccumulator::snapshot | fn(&mut self, remote_member: u16, stream_id: u8, conn_id: u32, codec_support_mask: u32, now_ms: u64) -> wechat_protocol::calls::video_packet::VideoP2sReport | Close the current telemetry window at `now_ms`, advance window anchors and return a [`VideoP2sReport`] ready for [`crate::calls::video_packet::encode_p2s_report`].
 fn wechat_protocol::calls::voice_offer::VoiceOffer::advertised_channel_identity | fn(&self) -> &[u8; 12] | MISSING DOC
 fn wechat_protocol::calls::voice_offer::VoiceOffer::engine_advertisement | fn(&self) -> &[u8] | MISSING DOC

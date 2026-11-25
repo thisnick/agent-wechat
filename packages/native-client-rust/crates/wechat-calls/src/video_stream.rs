@@ -85,9 +85,9 @@ impl VideoStreamReceiver {
         self.telemetry.has_active_window()
     }
 
-    /// Return `true` once at least one inbound video frame has been reassembled.
-    pub(crate) fn has_rx_video(&self) -> bool {
-        self.keyframe_policy.has_rx_video()
+    /// Return `true` once an inbound media packet has shown which codec the sender uses.
+    pub(crate) fn has_rx_codec(&self) -> bool {
+        self.telemetry.rx_codec().is_some()
     }
 
     /// Return `true` once codec parameter sets and a keyframe have been observed.
@@ -261,14 +261,11 @@ pub(crate) struct VideoTxPacer {
     pending_packets: VecDeque<(u32, Vec<u8>)>,
     exhausted: bool,
     last_vf_tx_ms: Option<u64>,
-    window_start_ms: u64,
-    window_tx_bytes: u64,
-    window_tx_frames: u32,
 }
 
 impl VideoTxPacer {
     /// Construct a pacer bound to `own_member` and `stream_id` with default `+90° CW` orientation.
-    pub(crate) fn new(own_member: u16, stream_id: u8, now_ms: u64) -> Self {
+    pub(crate) fn new(own_member: u16, stream_id: u8) -> Self {
         // Outgoing wire frames are pre-rotated 90° CCW to match mobile/conference WeChat
         // receivers, which apply +90° CW display rotation; orientation = 1 signals +90° CW
         // for desktop/native peers.
@@ -278,9 +275,6 @@ impl VideoTxPacer {
             pending_packets: VecDeque::new(),
             exhausted: false,
             last_vf_tx_ms: None,
-            window_start_ms: now_ms,
-            window_tx_bytes: 0,
-            window_tx_frames: 0,
         }
     }
 
@@ -316,10 +310,6 @@ impl VideoTxPacer {
                     frame.fps,
                     frame.kbps,
                 ) {
-                    self.window_tx_bytes = self
-                        .window_tx_bytes
-                        .saturating_add(frame.annexb.len() as u64);
-                    self.window_tx_frames = self.window_tx_frames.saturating_add(1);
                     on_new_frame(frame.annexb.len());
                     for pkt in pkts {
                         self.pending_packets.push_back((current_vgen, pkt));
@@ -359,25 +349,6 @@ impl VideoTxPacer {
             }
         }
         Ok(())
-    }
-
-    /// Snapshot and reset outbound `(send_kbps, send_fps)` over the elapsed window at `now_ms`.
-    pub(crate) fn take_window_stats(&mut self, now_ms: u64) -> (u32, u32) {
-        let window_ms = u32::try_from(now_ms.saturating_sub(self.window_start_ms))
-            .unwrap_or(u32::MAX)
-            .max(1);
-        let send_kbps =
-            u32::try_from(self.window_tx_bytes.saturating_mul(8) / u64::from(window_ms))
-                .unwrap_or(u32::MAX);
-        let send_fps = self
-            .window_tx_frames
-            .saturating_mul(1000)
-            .div_ceil(window_ms)
-            .min(60);
-        self.window_start_ms = now_ms;
-        self.window_tx_bytes = 0;
-        self.window_tx_frames = 0;
-        (send_kbps, send_fps)
     }
 }
 
@@ -464,7 +435,7 @@ mod tests {
     #[test]
     fn video_tx_pacer_paces_bursts_emits_orientation_vf_and_handles_exhaustion() {
         let (tx, rx) = mpsc::channel();
-        let mut pacer = VideoTxPacer::new(3, 1, 0);
+        let mut pacer = VideoTxPacer::new(3, 1);
 
         // Build a large keyframe that splits into >= 6 packets so burst=4 spans two ticks.
         let mut big_idr = vec![0, 0, 0, 1, 0x65, 0x88];
@@ -516,10 +487,6 @@ mod tests {
         let last_hdr = parse_rsm_packet_header(sent.last().unwrap()).unwrap();
         assert!(last_hdr.is_virtual_frame);
         assert_eq!(last_hdr.virtual_frame_orientation, Some(1));
-
-        let (send_kbps, send_fps) = pacer.take_window_stats(1000);
-        assert!(send_kbps > 0);
-        assert_eq!(send_fps, 1);
 
         // Sequence exhaustion clears pending queues and stops further sends cleanly.
         tx.send(DirectVideoTx {

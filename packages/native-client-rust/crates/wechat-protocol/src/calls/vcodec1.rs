@@ -23,12 +23,14 @@ use std::collections::BTreeMap;
 
 /// Separator before each Vcodec1 unit.
 const UNIT_SEPARATOR: [u8; 4] = [0x00, 0x01, 0x00, 0x01];
-/// Vcodec1 frame numbers wrap at 252.
+/// Vcodec1 frame numbers are 8 bits wide (`log2_max_frame_num_minus4 = 4`) and wrap at 252.
+const VCODEC1_LOG2_MAX_FRAME_NUM_MINUS4: u32 = 4;
 const VCODEC1_FRAME_NUM_MODULO: u32 = 252;
-/// Reference frames declared in the synthesized SPS; covers hierarchical-P distances.
-const MAX_NUM_REF_FRAMES: u32 = 16;
-/// Recent reference pictures remembered for distance-based references.
-const MAX_TRACKED_REFS: usize = 64;
+/// Longest reference distance a Vcodec1 P slice can name (`ref_delta_minus1` is `0..=15`).
+const MAX_REF_DELTA: u32 = 16;
+/// Reference frames declared in the synthesized SPS. The converter remembers exactly as many
+/// as the decoder's sliding window keeps, so every distance it can resolve is still decodable.
+const MAX_NUM_REF_FRAMES: u32 = MAX_REF_DELTA;
 /// Largest picture accepted from a Vcodec1 header (in macroblocks per side).
 const MAX_MBS_PER_SIDE: u32 = 256;
 
@@ -96,55 +98,61 @@ impl Vcodec1Converter {
     }
 
     /// Convert one reassembled Vcodec1 frame (including WeChat's 4-byte framing prefix).
+    ///
+    /// A frame whose reference picture is unavailable (lost, or before the last IDR) fails
+    /// instead of predicting from the wrong picture, so the caller can wait for a keyframe.
     pub fn convert_frame(&mut self, framed: &[u8]) -> Result<ConvertedFrame> {
         let units = split_units(framed)?;
         ensure!(!units.is_empty(), "Vcodec1 frame has no units");
+        // Parse every unit before changing any state, so a malformed frame leaves the
+        // reference bookkeeping as it was.
+        let mut header = self.header;
         let mut out = Vec::with_capacity(framed.len() + 64);
-        let mut has_codec_config = false;
-        let mut picture: Option<PictureNumbers> = None;
-        let mut is_keyframe = false;
+        let mut slices = Vec::new();
         for unit in units {
             ensure!(!unit.is_empty(), "Empty Vcodec1 unit");
             match (unit[0] >> 1) & 0x1f {
                 1 => {
-                    let header = parse_header(&unit[1..])?;
-                    self.header = Some(header);
-                    out.extend(build_sps(&header));
-                    out.extend(build_pps(&header));
-                    has_codec_config = true;
+                    ensure!(slices.is_empty(), "Vcodec1 parameter header after a slice");
+                    let parsed = parse_header(&unit[1..])?;
+                    out.extend(build_sps(&parsed));
+                    out.extend(build_pps(&parsed));
+                    header = Some(parsed);
                 }
                 2 | 3 => {
-                    let header = self
-                        .header
-                        .context("Vcodec1 slice before any parameter header")?;
-                    let slice = parse_slice(unit, &header)?;
-                    let numbers = match picture {
-                        Some(numbers) => numbers,
-                        None => {
-                            let numbers = self.number_picture(&slice, &header);
-                            picture = Some(numbers);
-                            numbers
-                        }
-                    };
-                    is_keyframe |= slice.intra;
-                    out.extend(build_slice(&slice, &header, numbers)?);
+                    let header = header.context("Vcodec1 slice before any parameter header")?;
+                    slices.push(parse_slice(unit, &header)?);
                 }
                 other => bail!("Unsupported Vcodec1 unit type {other}"),
             }
         }
+        let has_codec_config = !out.is_empty();
         ensure!(
-            picture.is_some() || has_codec_config,
+            !slices.is_empty() || has_codec_config,
             "Vcodec1 frame has no slices"
         );
+        // All slices of a picture share its numbering and NAL type.
+        let intra = slices.first().map(|slice| slice.intra);
+        ensure!(
+            slices.iter().all(|slice| Some(slice.intra) == intra),
+            "Vcodec1 frame mixes intra and inter slices"
+        );
+        self.header = header;
+        if let (Some(first), Some(header)) = (slices.first(), header) {
+            let numbers = self.number_picture(first, &header)?;
+            for slice in &slices {
+                out.extend(build_slice(slice, &header, numbers)?);
+            }
+        }
         Ok(ConvertedFrame {
             annexb: out,
-            is_keyframe,
+            is_keyframe: intra == Some(true),
             has_codec_config,
         })
     }
 
     /// Assign H.264 numbering to the picture whose first slice is `slice`.
-    fn number_picture(&mut self, slice: &Slice<'_>, header: &Header) -> PictureNumbers {
+    fn number_picture(&mut self, slice: &Slice<'_>, header: &Header) -> Result<PictureNumbers> {
         let mask = (1u32 << (header.log2_max_frame_num_minus4 + 4)) - 1;
         if slice.intra {
             self.refs.clear();
@@ -153,30 +161,37 @@ impl Vcodec1Converter {
             self.idr_pic_id = (self.idr_pic_id + 1) & 0xffff;
             self.prev_ref_frame_num = 0;
             self.remember_ref(slice.frame_num, 0);
-            return PictureNumbers {
+            return Ok(PictureNumbers {
                 frame_num: 0,
                 idr_pic_id,
                 ref_pic_num_diff: None,
-            };
+            });
         }
         let frame_num = (self.prev_ref_frame_num + 1) & mask;
-        let ref_pic_num_diff = slice.ref_delta.and_then(|delta| {
-            let target = (slice.frame_num + VCODEC1_FRAME_NUM_MODULO
-                - delta % VCODEC1_FRAME_NUM_MODULO)
-                % VCODEC1_FRAME_NUM_MODULO;
-            self.refs
-                .get(&target)
-                .map(|&ref_frame_num| frame_num.wrapping_sub(ref_frame_num) & mask)
-        });
+        let ref_pic_num_diff = match slice.ref_delta {
+            Some(delta) => {
+                let target =
+                    (slice.frame_num + VCODEC1_FRAME_NUM_MODULO - delta) % VCODEC1_FRAME_NUM_MODULO;
+                let ref_frame_num = self
+                    .refs
+                    .get(&target)
+                    .context("Vcodec1 reference picture unavailable")?;
+                Some(frame_num.wrapping_sub(*ref_frame_num) & mask)
+            }
+            None => {
+                ensure!(!self.refs.is_empty(), "Vcodec1 P slice without a reference");
+                None
+            }
+        };
         if slice.nal_ref_idc != 0 {
             self.prev_ref_frame_num = frame_num;
             self.remember_ref(slice.frame_num, frame_num);
         }
-        PictureNumbers {
+        Ok(PictureNumbers {
             frame_num,
             idr_pic_id: 0,
             ref_pic_num_diff,
-        }
+        })
     }
 
     fn remember_ref(&mut self, vcodec1_frame_num: u32, h264_frame_num: u32) {
@@ -187,7 +202,7 @@ impl Vcodec1Converter {
         {
             self.ref_order.push(vcodec1_frame_num);
         }
-        while self.ref_order.len() > MAX_TRACKED_REFS {
+        while self.ref_order.len() > MAX_NUM_REF_FRAMES as usize {
             let oldest = self.ref_order.remove(0);
             self.refs.remove(&oldest);
         }
@@ -238,9 +253,10 @@ fn parse_header(bits: &[u8]) -> Result<Header> {
     let _seq_id = r.ue()?;
     r.skip(4)?;
     let log2_max_frame_num_minus4 = r.ue()?;
+    // Distance references wrap at 252, which assumes 8-bit frame numbers.
     ensure!(
-        log2_max_frame_num_minus4 <= 12,
-        "Invalid Vcodec1 frame number width"
+        log2_max_frame_num_minus4 == VCODEC1_LOG2_MAX_FRAME_NUM_MINUS4,
+        "Unsupported Vcodec1 frame number width"
     );
     if r.bit()? {
         r.ue()?;
@@ -290,13 +306,22 @@ fn parse_slice<'a>(unit: &'a [u8], header: &Header) -> Result<Slice<'a>> {
     );
     let intra = slice_type == 1;
     let frame_num = r.bits(header.log2_max_frame_num_minus4 + 4)?;
+    ensure!(
+        frame_num < VCODEC1_FRAME_NUM_MODULO,
+        "Vcodec1 frame number out of range"
+    );
     r.ue()?;
     if intra && r.ue()? == 1 {
         r.skip(1)?;
     }
     let mut ref_delta = None;
     if !intra && r.ue()? == 0 {
-        ref_delta = Some(r.ue()? + 1);
+        let delta = r.ue()?.saturating_add(1);
+        ensure!(
+            delta <= MAX_REF_DELTA,
+            "Vcodec1 reference distance out of range"
+        );
+        ref_delta = Some(delta);
     }
     let cabac_init_idc = if header.cabac && !intra { r.ue()? } else { 0 };
     ensure!(cabac_init_idc <= 2, "Invalid Vcodec1 CABAC init index");
@@ -572,9 +597,6 @@ impl BitWriter {
 mod tests {
     use super::*;
 
-    /// A parameter-header unit seen from an official Android sender (320x176, CABAC, QP 27).
-    const OFFICIAL_HEADER: [u8; 8] = [0xc2, 0x81, 0x40, 0xa0, 0xbc, 0x02, 0xda, 0x10];
-
     fn frame(units: &[Vec<u8>]) -> Vec<u8> {
         let mut body = Vec::new();
         for unit in units {
@@ -625,8 +647,43 @@ mod tests {
         unit
     }
 
+    /// Build a synthetic Vcodec1 parameter-header unit per the documented header syntax.
+    fn header_unit_with(
+        log2_max_frame_num_minus4: u32,
+        width_mbs_minus1: u32,
+        height_mbs_minus1: u32,
+        cabac: bool,
+        pic_init_qp_minus26: i32,
+    ) -> Vec<u8> {
+        let mut w = BitWriter::default();
+        w.ue(0); // seq_id
+        w.bits(0, 4);
+        w.ue(log2_max_frame_num_minus4);
+        w.bit(false); // no optional field
+        w.bit(false);
+        w.ue(width_mbs_minus1);
+        w.ue(height_mbs_minus1);
+        w.bit(true);
+        w.bits(if cabac { 2 } else { 0 }, 2); // entropy coding mode
+        w.bits(0, 6);
+        w.se(pic_init_qp_minus26);
+        w.se(0); // chroma_qp_index_offset
+        w.bit(true); // deblocking control
+        w.bit(false);
+        w.se(0);
+        w.se(0);
+        w.bit(false);
+        w.ue(0);
+        w.bits(0, 4); // deblocking enabled, reserved bits
+        w.rbsp_trailing();
+        let mut unit = vec![(3 << 6) | (1 << 1)];
+        unit.extend(w.into_bytes());
+        unit
+    }
+
+    /// A 320x176 CABAC stream with base QP 27.
     fn header_unit() -> Vec<u8> {
-        OFFICIAL_HEADER.to_vec()
+        header_unit_with(4, 19, 10, true, 1)
     }
 
     /// Split Annex-B output into NAL units (header byte first, escapes removed).
@@ -660,13 +717,24 @@ mod tests {
     }
 
     #[test]
-    fn official_header_parses_as_320x176_cabac() {
-        let header = parse_header(&OFFICIAL_HEADER[1..]).unwrap();
+    fn header_parses_picture_size_entropy_and_quantizer() {
+        let header = parse_header(&header_unit()[1..]).unwrap();
         assert_eq!((header.width_mbs_minus1 + 1) * 16, 320);
         assert_eq!((header.height_mbs_minus1 + 1) * 16, 176);
         assert!(header.cabac);
         assert_eq!(header.pic_init_qp_minus26, 1);
+        assert_eq!(header.chroma_qp_index_offset, 0);
+        assert!(!header.disable_deblocking);
         assert_eq!(header.log2_max_frame_num_minus4, 4);
+
+        let cavlc = parse_header(&header_unit_with(4, 39, 29, false, -3)[1..]).unwrap();
+        assert_eq!((cavlc.width_mbs_minus1 + 1) * 16, 640);
+        assert_eq!((cavlc.height_mbs_minus1 + 1) * 16, 480);
+        assert!(!cavlc.cabac);
+        assert_eq!(cavlc.pic_init_qp_minus26, -3);
+
+        // Distance references assume 8-bit frame numbers wrapping at 252.
+        assert!(parse_header(&header_unit_with(5, 19, 10, true, 1)[1..]).is_err());
     }
 
     #[test]
@@ -771,6 +839,119 @@ mod tests {
             "picture-number distance 2 (frame_num 2 -> 0)"
         );
         assert_eq!(r.ue().unwrap(), 3);
+    }
+
+    #[test]
+    fn unavailable_or_out_of_window_references_fail_without_changing_state() {
+        let mut converter = Vcodec1Converter::new();
+        converter
+            .convert_frame(&frame(&[
+                header_unit(),
+                slice_unit(3, true, 0, None, 0, &[1]),
+            ]))
+            .unwrap();
+        // Frame 2 is lost: frame 3 names it by distance 1 and must fail.
+        converter
+            .convert_frame(&frame(&[slice_unit(2, false, 1, Some(1), 0, &[2])]))
+            .unwrap();
+        assert!(converter
+            .convert_frame(&frame(&[slice_unit(2, false, 3, Some(1), 0, &[3])]))
+            .is_err());
+        // The failed frame was not remembered, so frame 4 cannot use it either,
+        // while frame 4 naming frame 1 (distance 3) still converts.
+        assert!(converter
+            .convert_frame(&frame(&[slice_unit(2, false, 4, Some(1), 0, &[4])]))
+            .is_err());
+        converter
+            .convert_frame(&frame(&[slice_unit(2, false, 4, Some(3), 0, &[4])]))
+            .unwrap();
+
+        // A distance longer than the sliding window is rejected while parsing.
+        assert!(converter
+            .convert_frame(&frame(&[slice_unit(2, false, 30, Some(17), 0, &[5])]))
+            .is_err());
+
+        // The 16 remembered reference frames match the decoder's sliding window, so the
+        // longest distance still resolves to a picture the decoder holds.
+        for n in 5..=20 {
+            converter
+                .convert_frame(&frame(&[slice_unit(2, false, n, Some(1), 0, &[6])]))
+                .unwrap();
+        }
+        let p = converter
+            .convert_frame(&frame(&[slice_unit(2, false, 21, Some(16), 0, &[7])]))
+            .unwrap();
+        let nals = nal_units(&p.annexb);
+        let mut r = BitReader::new(&nals[0][1..]);
+        r.ue().unwrap();
+        r.ue().unwrap();
+        r.ue().unwrap();
+        assert_eq!(r.bits(8).unwrap(), 19);
+        assert!(!r.bit().unwrap());
+        assert!(r.bit().unwrap(), "explicit reference");
+        assert_eq!(r.ue().unwrap(), 0);
+        assert_eq!(r.ue().unwrap(), 15, "picture-number distance 16");
+        assert_eq!(converter.refs.len(), MAX_NUM_REF_FRAMES as usize);
+    }
+
+    #[test]
+    fn reference_distances_wrap_at_252() {
+        let mut converter = Vcodec1Converter::new();
+        converter
+            .convert_frame(&frame(&[
+                header_unit(),
+                slice_unit(3, true, 250, None, 0, &[1]),
+            ]))
+            .unwrap();
+        converter
+            .convert_frame(&frame(&[slice_unit(2, false, 251, Some(1), 0, &[2])]))
+            .unwrap();
+        // Frame 0 follows 251; distance 2 names frame 250, the IDR (H.264 frame_num 0).
+        let p = converter
+            .convert_frame(&frame(&[slice_unit(2, false, 0, Some(2), 0, &[3])]))
+            .unwrap();
+        let nals = nal_units(&p.annexb);
+        let mut r = BitReader::new(&nals[0][1..]);
+        r.ue().unwrap();
+        r.ue().unwrap();
+        r.ue().unwrap();
+        assert_eq!(r.bits(8).unwrap(), 2);
+        assert!(!r.bit().unwrap());
+        assert!(r.bit().unwrap(), "explicit reference");
+        assert_eq!(r.ue().unwrap(), 0);
+        assert_eq!(r.ue().unwrap(), 1, "picture-number distance 2");
+        // Frame numbers 252..=255 are invalid.
+        assert!(converter
+            .convert_frame(&frame(&[slice_unit(2, false, 252, None, 0, &[4])]))
+            .is_err());
+    }
+
+    #[test]
+    fn frames_mixing_intra_and_inter_slices_are_rejected() {
+        let mut converter = Vcodec1Converter::new();
+        converter
+            .convert_frame(&frame(&[
+                header_unit(),
+                slice_unit(3, true, 0, None, 0, &[1]),
+            ]))
+            .unwrap();
+        assert!(converter
+            .convert_frame(&frame(&[
+                slice_unit(2, false, 1, Some(1), 0, &[2]),
+                slice_unit(3, true, 1, None, 0, &[3]),
+            ]))
+            .is_err());
+        assert!(converter
+            .convert_frame(&frame(&[
+                header_unit(),
+                slice_unit(3, true, 5, None, 0, &[2]),
+                slice_unit(2, false, 5, Some(1), 0, &[3]),
+            ]))
+            .is_err());
+        // The rejected frames changed nothing: frame 1 still predicts from the first IDR.
+        converter
+            .convert_frame(&frame(&[slice_unit(2, false, 1, Some(1), 0, &[4])]))
+            .unwrap();
     }
 
     #[test]

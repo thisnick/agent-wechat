@@ -261,7 +261,7 @@ pub struct VideoP2sAccumulator {
     heavy_freeze_cnt: u32,
     light_freeze_ms: u32,
     heavy_freeze_ms: u32,
-    last_rx_codec: VideoWireCodec,
+    last_rx_codec: Option<VideoWireCodec>,
     est_bw_kbps: u32,
     tx_bytes_in_window: u64,
     tx_frames_in_window: u32,
@@ -295,7 +295,7 @@ impl VideoP2sAccumulator {
             heavy_freeze_cnt: 0,
             light_freeze_ms: 0,
             heavy_freeze_ms: 0,
-            last_rx_codec: VideoWireCodec::H265,
+            last_rx_codec: None,
             est_bw_kbps: 500,
             tx_bytes_in_window: 0,
             tx_frames_in_window: 0,
@@ -305,6 +305,17 @@ impl VideoP2sAccumulator {
     /// Reset all window counters, freeze anchors and bandwidth estimates at `now_ms`.
     pub fn reset(&mut self, now_ms: u64) {
         *self = Self::new(now_ms);
+    }
+
+    /// The sender's wire codec (H.264, H.265 or Vcodec1) from the latest inbound media packet,
+    /// or `None` before any.
+    pub fn rx_codec(&self) -> Option<VideoWireCodec> {
+        self.last_rx_codec
+    }
+
+    /// Wire codec reported in P2S `decode_type`: the sender's codec, or H.265 before any packet.
+    fn decode_type(&self) -> u32 {
+        u32::from(self.last_rx_codec.unwrap_or(VideoWireCodec::H265).wire())
     }
 
     /// Return `true` when at least one inbound video packet or frame arrived in the current window.
@@ -331,7 +342,7 @@ impl VideoP2sAccumulator {
             header.codec,
             VideoWireCodec::H264 | VideoWireCodec::H265 | VideoWireCodec::Vcodec1
         ) {
-            self.last_rx_codec = header.codec;
+            self.last_rx_codec = Some(header.codec);
         }
         self.ever_received_video = true;
         self.first_rx_video_ms.get_or_insert(now_ms);
@@ -514,7 +525,7 @@ impl VideoP2sAccumulator {
                 loss_pct: 0,
                 codec_support_mask,
                 loss_pkts: 0,
-                decode_type: u32::from(self.last_rx_codec.wire()),
+                decode_type: self.decode_type(),
                 play_fps: 0,
                 play_frames: 0,
                 max_size_format: P2S_MAX_SIZE_FORMAT_640,
@@ -620,7 +631,7 @@ impl VideoP2sAccumulator {
             loss_pct: short_loss_pct,
             codec_support_mask,
             loss_pkts,
-            decode_type: u32::from(self.last_rx_codec.wire()),
+            decode_type: self.decode_type(),
             play_fps,
             play_frames: self.play_frames_in_window,
             max_size_format: P2S_MAX_SIZE_FORMAT_640,
