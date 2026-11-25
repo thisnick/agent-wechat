@@ -6,19 +6,27 @@
 
 pub mod channels;
 mod image;
+#[cfg(not(target_arch = "wasm32"))]
 mod sticker_archive;
+#[cfg(not(target_arch = "wasm32"))]
 mod sticker_export;
+#[cfg(not(target_arch = "wasm32"))]
 mod sticker_video;
 mod stickers;
 mod video;
+#[cfg(not(target_arch = "wasm32"))]
 mod wxgf;
 
 pub use image::ImageInspection;
+#[cfg(not(target_arch = "wasm32"))]
 pub use sticker_archive::*;
+#[cfg(not(target_arch = "wasm32"))]
 pub use sticker_export::*;
+#[cfg(not(target_arch = "wasm32"))]
 pub use sticker_video::{prepare_sticker, prepare_sticker_file};
 pub use stickers::*;
 pub use video::{inspect_video_container, inspect_video_reader};
+#[cfg(not(target_arch = "wasm32"))]
 pub use wxgf::wxgf_preview;
 
 pub const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
@@ -39,10 +47,15 @@ pub struct DecodedImage {
 /// `frames` does not establish the source's animation frame count.
 pub fn inspect_image(bytes: &[u8]) -> anyhow::Result<ImageInspection> {
     if bytes.starts_with(b"wxgf") {
-        let mut inspection = wxgf_preview(bytes)?.inspection;
-        inspection.content_type = "image/x-wxgf".into();
-        inspection.animation_preserved = false;
-        return Ok(inspection);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut inspection = wxgf_preview(bytes)?.inspection;
+            inspection.content_type = "image/x-wxgf".into();
+            inspection.animation_preserved = false;
+            return Ok(inspection);
+        }
+        #[cfg(target_arch = "wasm32")]
+        anyhow::bail!("wxgf_decoder_unavailable");
     }
     image::inspect_standard_image(bytes)
 }

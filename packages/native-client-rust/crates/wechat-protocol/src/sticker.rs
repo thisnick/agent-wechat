@@ -1,11 +1,9 @@
 //! Original type-47 bytes from the verified CDN host. Signed URLs remain private.
 use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
-use std::{
-    io::Read,
-    net::{IpAddr, ToSocketAddrs},
-    time::Duration,
-};
+use std::net::IpAddr;
+#[cfg(not(target_arch = "wasm32"))]
+use std::{io::Read, net::ToSocketAddrs, time::Duration};
 pub use wechat_media::{inspect_image, ImageInspection};
 #[derive(Clone, Serialize, Deserialize)]
 pub struct StickerDescriptor {
@@ -37,7 +35,7 @@ const VWEIXINF_STICKER_HOST: &str = "vweixinf.tc.qq.com";
 pub const STICKER_HOSTS: &[&str] = &["snsvideo.c2c.wechat.com", "wxapp.tc.qq.com"];
 
 /// Restricts the vweixinf CDN to its numeric sticker download endpoint.
-fn allowed_sticker_source(url: &reqwest::Url) -> bool {
+fn allowed_sticker_source(url: &url::Url) -> bool {
     let Some(host) = url.host_str() else {
         return false;
     };
@@ -60,13 +58,12 @@ fn allowed_sticker_source(url: &reqwest::Url) -> bool {
 /// Validates a sticker source URL before download: HTTP or HTTPS on `STICKER_HOSTS` or
 /// `vweixinf.tc.qq.com/<region>/<id>/stodownload`, default port only, with no credentials or
 /// fragment.
-pub fn validate_sticker_url(value: &str) -> Result<reqwest::Url> {
+pub fn validate_sticker_url(value: &str) -> Result<url::Url> {
     ensure!(
         value.len() <= 8192 && !value.chars().any(|c| c.is_control()),
         "sticker_source_not_allowed"
     );
-    let url =
-        reqwest::Url::parse(value).map_err(|_| anyhow::anyhow!("sticker_source_not_allowed"))?;
+    let url = url::Url::parse(value).map_err(|_| anyhow::anyhow!("sticker_source_not_allowed"))?;
     ensure!(
         ["http", "https"].contains(&url.scheme())
             && allowed_sticker_source(&url)
@@ -80,6 +77,8 @@ pub fn validate_sticker_url(value: &str) -> Result<reqwest::Url> {
     );
     Ok(url)
 }
+/// Download and verify one sticker image from a validated sticker CDN host.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn fetch_sticker(
     descriptor: &StickerDescriptor,
     mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
@@ -101,6 +100,7 @@ pub fn fetch_sticker(
 
 /// Fetch an original whose metadata has no advertised length. Enforces the same
 /// host, DNS, stream-size, MD5 and image checks without inventing a source length.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn fetch_sticker_original(
     url: &str,
     expected_md5: &str,
@@ -108,6 +108,7 @@ pub fn fetch_sticker_original(
 ) -> Result<(Vec<u8>, ImageInspection)> {
     fetch_sticker_source(url, expected_md5, None, progress)
 }
+#[cfg(not(target_arch = "wasm32"))]
 fn fetch_sticker_source(
     url: &str,
     expected_md5: &str,

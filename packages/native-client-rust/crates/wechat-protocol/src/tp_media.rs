@@ -6,15 +6,24 @@
 //! message's 16-byte `aeskey` (or `tpthumbaeskey`). The server caps single responses at 512 KiB
 //! and returns `206 Partial Content`, so transfers loop over contiguous byte ranges and decrypt
 //! directly into a streaming sink.
+use super::MediaQuality;
+#[cfg(not(target_arch = "wasm32"))]
 use super::{
-    DownloadReceipt, DownloadedMedia, MediaQuality, MAX_CDN_TRANSFER_BYTES, MAX_LARGE_FILE_BYTES,
+    DownloadReceipt, DownloadedMedia, MAX_CDN_TRANSFER_BYTES, MAX_LARGE_FILE_BYTES,
     MAX_VIDEO_DOWNLOAD_BYTES,
 };
+#[cfg(not(target_arch = "wasm32"))]
 use crate::crypto::{Aes128EcbDecryptor, Md5Hasher, Sha256Hasher};
-use anyhow::{bail, ensure, Result};
+#[cfg(not(target_arch = "wasm32"))]
+use anyhow::bail;
+use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
-use std::{fmt, io::Read, net::SocketAddr, time::Duration};
-use zeroize::{Zeroize, Zeroizing};
+use std::{fmt, time::Duration};
+#[cfg(not(target_arch = "wasm32"))]
+use std::{io::Read, net::SocketAddr};
+use zeroize::Zeroize;
+#[cfg(not(target_arch = "wasm32"))]
+use zeroize::Zeroizing;
 
 /// Approved Enterprise WeChat (WeCom) media download hosts.
 pub const TP_MEDIA_HOSTS: &[&str] = &["wwfile.work.weixin.qq.com"];
@@ -66,13 +75,12 @@ impl fmt::Debug for TpMediaDescriptor {
 
 /// Validate an Enterprise WeChat media URL: HTTPS on an approved host, default port 443,
 /// with no credentials, control characters, or fragment.
-pub fn validate_tp_media_url(value: &str) -> Result<reqwest::Url> {
+pub fn validate_tp_media_url(value: &str) -> Result<url::Url> {
     ensure!(
         !value.is_empty() && value.len() <= 8192 && !value.chars().any(|c| c.is_control()),
         "tp_media_source_not_allowed"
     );
-    let url =
-        reqwest::Url::parse(value).map_err(|_| anyhow::anyhow!("tp_media_source_not_allowed"))?;
+    let url = url::Url::parse(value).map_err(|_| anyhow::anyhow!("tp_media_source_not_allowed"))?;
     ensure!(
         url.scheme() == "https"
             && url.host_str().is_some_and(|h| TP_MEDIA_HOSTS.contains(&h))
@@ -98,6 +106,7 @@ pub fn validate_tp_auth_key(value: &str) -> Result<()> {
 }
 
 /// Download and decrypt an Enterprise WeChat media object into memory.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn fetch_tp_media(
     descriptor: &TpMediaDescriptor,
     progress: impl FnMut(u64, Option<u64>) -> Result<()>,
@@ -110,6 +119,7 @@ pub fn fetch_tp_media(
 /// Download and decrypt an Enterprise WeChat media object directly into `sink`, verifying range
 /// framing, PKCS#7 padding, size limits, and any advertised length or MD5 digest. Until this
 /// returns `Ok`, bytes written to `sink` are unverified and must be discarded on error.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn fetch_tp_media_to(
     descriptor: &TpMediaDescriptor,
     progress: impl FnMut(u64, Option<u64>) -> Result<()>,
@@ -125,6 +135,7 @@ pub fn fetch_tp_media_to(
     fetch_tp_media_at(url, address, descriptor, progress, sink)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn plaintext_limit(quality: MediaQuality) -> usize {
     match quality {
         MediaQuality::LargeFile => MAX_LARGE_FILE_BYTES,
@@ -136,6 +147,7 @@ fn plaintext_limit(quality: MediaQuality) -> usize {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn parse_content_range(value: &str) -> Result<(usize, usize, usize)> {
     let trimmed = value.trim();
     let rest = trimmed
@@ -165,8 +177,9 @@ fn parse_content_range(value: &str) -> Result<(usize, usize, usize)> {
     Ok((start, end, total))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn fetch_tp_media_at(
-    url: reqwest::Url,
+    url: url::Url,
     address: SocketAddr,
     descriptor: &TpMediaDescriptor,
     mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
@@ -535,7 +548,7 @@ mod tests {
             stream.write_all(head.as_bytes()).unwrap();
             stream.write_all(&body).unwrap();
         });
-        let url = reqwest::Url::parse(&format!(
+        let url = url::Url::parse(&format!(
             "http://wwfile.example.invalid:{}/cgi-bin/download?f=a&p=5",
             address.port()
         ))
@@ -596,7 +609,7 @@ mod tests {
             }
             requests
         });
-        let url = reqwest::Url::parse(&format!(
+        let url = url::Url::parse(&format!(
             "http://wwfile.example.invalid:{}/cgi-bin/download?f=b&p=2",
             address.port()
         ))
@@ -711,7 +724,7 @@ mod tests {
                 );
                 let _ = stream.write_all(&body);
             });
-            let url = reqwest::Url::parse(&format!(
+            let url = url::Url::parse(&format!(
                 "http://wwfile.example.invalid:{}/cgi-bin/download?f=e",
                 address.port()
             ))
@@ -764,7 +777,7 @@ mod tests {
                 }
             }
         });
-        let url = reqwest::Url::parse(&format!(
+        let url = url::Url::parse(&format!(
             "http://wwfile.example.invalid:{}/cgi-bin/download?f=tamper",
             address.port()
         ))
@@ -806,7 +819,7 @@ mod tests {
                 offset += len;
             }
         });
-        let url = reqwest::Url::parse(&format!(
+        let url = url::Url::parse(&format!(
             "http://wwfile.example.invalid:{}/cgi-bin/download?f=unaligned",
             address.port()
         ))
@@ -994,7 +1007,7 @@ mod tests {
                 let _ = read_http_request(&mut stream);
                 let _ = stream.write_all(&raw_response);
             });
-            let url = reqwest::Url::parse(&format!(
+            let url = url::Url::parse(&format!(
                 "http://wwfile.example.invalid:{}/cgi-bin/download?f=edge",
                 address.port()
             ))
@@ -1041,7 +1054,7 @@ mod tests {
                 }
             }
         });
-        let url = reqwest::Url::parse(&format!(
+        let url = url::Url::parse(&format!(
             "http://wwfile.example.invalid:{}/cgi-bin/download?f=cont200",
             address.port()
         ))
@@ -1053,7 +1066,7 @@ mod tests {
         assert_eq!(err.to_string(), "media_integrity_failed");
 
         // 4. Pre-flight expiry, size limit, and progress cancellation checks (no network needed).
-        let dummy_url = reqwest::Url::parse("http://wwfile.example.invalid:443/f").unwrap();
+        let dummy_url = url::Url::parse("http://wwfile.example.invalid:443/f").unwrap();
         let dummy_addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
 
         let mut expired = synthetic_descriptor(

@@ -242,23 +242,29 @@ pub fn decode_contact_request(reply: &[u8]) -> Result<ContactRequestReply> {
     ServiceRejected::check(Service::Contact, service_code)?;
     Ok(ContactRequestReply { service_code })
 }
+pub(crate) fn validate_contact_rpc(request: &ContactRpc) -> Result<()> {
+    let expected = match request.cgi {
+        106 => "searchcontact",
+        137 => "verifyuser",
+        3990 => "batchmodcontacttype",
+        681 => "oplog",
+        _ => bail!("invalid_contact_rpc"),
+    };
+    ensure!(
+        request.path == format!("/cgi-bin/micromsg-bin/{expected}"),
+        "invalid_contact_rpc"
+    );
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 impl NativeClient {
     pub(crate) fn contact_rpc_raw_snapshot(
         &self,
         state: &mut AccountState,
         request: &ContactRpc,
     ) -> Result<Vec<u8>> {
-        let expected = match request.cgi {
-            106 => "searchcontact",
-            137 => "verifyuser",
-            3990 => "batchmodcontacttype",
-            681 => "oplog",
-            _ => bail!("invalid_contact_rpc"),
-        };
-        ensure!(
-            request.path == format!("/cgi-bin/micromsg-bin/{expected}"),
-            "invalid_contact_rpc"
-        );
+        validate_contact_rpc(request)?;
         self.authenticated_rpc(state, request.cgi, &request.path, &request.body)
     }
     pub(crate) fn search_contact_snapshot(

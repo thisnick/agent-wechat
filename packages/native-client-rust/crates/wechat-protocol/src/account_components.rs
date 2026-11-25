@@ -1,6 +1,8 @@
 //! Shared extension state belongs to the account owner. Weak entries avoid an
 //! owner -> runtime -> client -> owner cycle without introducing global caches.
+#[cfg(not(target_arch = "wasm32"))]
 use super::*;
+#[cfg(not(target_arch = "wasm32"))]
 use std::{
     any::{Any, TypeId},
     collections::HashMap,
@@ -9,9 +11,11 @@ use std::{
 
 #[derive(Default)]
 pub(super) struct AccountComponents {
+    #[cfg(not(target_arch = "wasm32"))]
     entries: Mutex<HashMap<TypeId, Weak<dyn Any + Send + Sync>>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl NativeClient {
     /// Resolve one typed component shared by handles of this account owner.
     ///
@@ -49,7 +53,7 @@ impl NativeClient {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use std::{sync::Barrier, thread};

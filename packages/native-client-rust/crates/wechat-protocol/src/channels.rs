@@ -10,14 +10,14 @@ use super::*;
 use base64::Engine as _;
 use zeroize::Zeroizing;
 
-const H5_AUTH_CGI: u16 = 5805;
-const H5_AUTH_PATH: &str = "/cgi-bin/micromsg-bin/h5auth";
+pub(super) const H5_AUTH_CGI: u16 = 5805;
+pub(super) const H5_AUTH_PATH: &str = "/cgi-bin/micromsg-bin/h5auth";
 /// Unsigned H5 context the client sends with its H5 ticket request.
 const H5_AUTH_CONTEXT: u64 = 0xe100_1000;
-const PAGE_CGI: u16 = 233;
-const PAGE_PATH: &str = "/cgi-bin/micromsg-bin/geta8key";
-const TRANSFER_CGI: u16 = 6673;
-const TRANSFER_PATH: &str = "/cgi-bin/micromsg-bin/transfer/h5exttransfer";
+pub(super) const PAGE_CGI: u16 = 233;
+pub(super) const PAGE_PATH: &str = "/cgi-bin/micromsg-bin/geta8key";
+pub(super) const TRANSFER_CGI: u16 = 6673;
+pub(super) const TRANSFER_PATH: &str = "/cgi-bin/micromsg-bin/transfer/h5exttransfer";
 const TRANSFER_SCOPE: &str = "finderLive";
 /// Proxy control value; unrelated to the H5 context above.
 const TRANSFER_CONTROL: u64 = 400;
@@ -96,6 +96,12 @@ impl Clone for ChannelsTicket {
 
 /// The authenticated page address for one post. Credential material, not a share link.
 pub struct ChannelsPage(Zeroizing<Vec<u8>>);
+
+impl ChannelsPage {
+    pub(super) fn clone_inner(&self) -> Self {
+        Self(Zeroizing::new(self.0.to_vec()))
+    }
+}
 
 impl fmt::Debug for ChannelsPage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -206,7 +212,7 @@ fn route_entries(fields: &[p::Field]) -> Vec<Vec<p::Field>> {
     entries
 }
 
-fn h5_auth_request(state: &AccountState) -> Result<Vec<u8>> {
+pub(super) fn h5_auth_request(state: &AccountState) -> Result<Vec<u8>> {
     state.validate()?;
     p::message(&[
         p::bytes(1, &wire::base_request(&state.device, state.uin, 0)?),
@@ -214,7 +220,7 @@ fn h5_auth_request(state: &AccountState) -> Result<Vec<u8>> {
     ])
 }
 
-fn h5_auth_response(bytes: &[u8]) -> Result<ChannelsTicket> {
+pub(super) fn h5_auth_response(bytes: &[u8]) -> Result<ChannelsTicket> {
     let fields = p::decode(bytes)?;
     ServiceRejected::check(Service::ChannelsAuthorization, p::base_code(&fields)?)?;
     let ticket = opaque(
@@ -256,7 +262,7 @@ fn h5_auth_response(bytes: &[u8]) -> Result<ChannelsTicket> {
     })
 }
 
-fn page_request(state: &AccountState, post: &ChannelsPost) -> Result<Vec<u8>> {
+pub(super) fn page_request(state: &AccountState, post: &ChannelsPost) -> Result<Vec<u8>> {
     state.validate()?;
     let url = post.page_url()?;
     p::message(&[
@@ -276,7 +282,7 @@ fn page_request(state: &AccountState, post: &ChannelsPost) -> Result<Vec<u8>> {
     ])
 }
 
-fn page_response(bytes: &[u8]) -> Result<ChannelsPage> {
+pub(super) fn page_response(bytes: &[u8]) -> Result<ChannelsPage> {
     let fields = p::decode(bytes)?;
     ServiceRejected::check(Service::ChannelsPage, p::base_code(&fields)?)?;
     Ok(ChannelsPage(opaque(
@@ -286,14 +292,22 @@ fn page_response(bytes: &[u8]) -> Result<ChannelsPage> {
     )?))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn detail_json(post: &ChannelsPost) -> Result<String> {
-    // Milliseconds since the epoch followed by six random digits, as the web client forms it.
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| anyhow::anyhow!("channels_unsupported_media"))?
         .as_millis() as u64;
+    detail_json_at(post, millis)
+}
+
+pub(super) fn detail_json_at(post: &ChannelsPost, millis: u64) -> Result<String> {
+    // Milliseconds since the epoch followed by six random digits, as the web client forms it.
     let suffix = u64::from(u32::from_be_bytes(crate::crypto::random::<4>()?)) % 1_000_000;
-    let request_id = millis * 1_000_000 + suffix;
+    let request_id = millis
+        .checked_mul(1_000_000)
+        .and_then(|v| v.checked_add(suffix))
+        .ok_or_else(|| anyhow::anyhow!("Clock timestamp overflow"))?;
     Ok(serde_json::json!({
         "direction": 2,
         "finder_basereq": {
@@ -315,7 +329,7 @@ fn detail_json(post: &ChannelsPost) -> Result<String> {
     .to_string())
 }
 
-fn transfer_request(
+pub(super) fn transfer_request(
     state: &AccountState,
     ticket: &ChannelsTicket,
     page: &ChannelsPage,
@@ -338,7 +352,7 @@ fn transfer_request(
     ])?))
 }
 
-fn transfer_response(bytes: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+pub(super) fn transfer_response(bytes: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
     let fields = p::decode(bytes)?;
     ServiceRejected::check(Service::Channels, p::base_code(&fields)?)?;
     let inner = bytes_field(&fields, 2)
@@ -375,7 +389,7 @@ fn json_u32(value: Option<&serde_json::Value>) -> Option<u32> {
 
 /// Read the detail reply. It must name the requested post and carry exactly one video entry with
 /// usable playback material.
-fn parse_detail(json: &[u8], post: &ChannelsPost) -> Result<ChannelsMedia> {
+pub(super) fn parse_detail(json: &[u8], post: &ChannelsPost) -> Result<ChannelsMedia> {
     let reply: serde_json::Value =
         serde_json::from_slice(json).map_err(|_| anyhow::anyhow!("channels_detail_unreadable"))?;
     let ret = reply
@@ -427,6 +441,7 @@ fn parse_detail(json: &[u8], post: &ChannelsPost) -> Result<ChannelsMedia> {
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl NativeClient {
     /// Request a new H5 ticket. Submitted once, without renewal or retry.
     #[doc(hidden)]

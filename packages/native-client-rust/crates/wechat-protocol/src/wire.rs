@@ -3,15 +3,23 @@ use crate::errors::{Service, ServiceRejected};
 use crate::{crypto::random, protobuf as p, AccountState, DeviceProfile};
 use anyhow::{bail, ensure, Result};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{BTreeMap, HashSet},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::collections::{BTreeMap, HashSet};
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Current Unix timestamp in seconds from `SystemTime::now()`.
+///
+/// On `wasm32-unknown-unknown`, `SystemTime::now()` panics; use a [`crate::transport::Clock`] instead.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn unix_time() -> Result<u32> {
     Ok(u32::try_from(
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
     )?)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn unix_time() -> Result<u32> {
+    bail!("SystemTime::now() is unavailable on wasm32; supply a Clock via ProtocolTransport")
 }
 fn text(value: &str, max: usize, empty: bool) -> Result<&[u8]> {
     ensure!(
@@ -40,12 +48,31 @@ pub fn qr_request(profile: &DeviceProfile, computer_name: &str) -> Result<Vec<u8
     ])
 }
 pub fn poll_request(profile: &DeviceProfile, identifier: &[u8]) -> Result<Vec<u8>> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let ms = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())
+            .map_err(|_| anyhow::anyhow!("Clock timestamp overflow"))?;
+        poll_request_at(profile, identifier, ms)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (profile, identifier);
+        bail!("SystemTime::now() is unavailable on wasm32; use poll_request_at with a Clock")
+    }
+}
+
+/// Build a QR/saved-device poll request using a caller-supplied Unix timestamp
+/// in milliseconds (usable on `wasm32-unknown-unknown` with a [`crate::transport::Clock`]).
+pub fn poll_request_at(
+    profile: &DeviceProfile,
+    identifier: &[u8],
+    unix_time_ms: u64,
+) -> Result<Vec<u8>> {
     ensure!(
         !identifier.is_empty() && identifier.len() <= 4096,
         "Invalid login identifier"
     );
-    let ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
-    let timestamp = ((ms & 0xffffffff) / 1000) as u64;
+    let timestamp = (u128::from(unix_time_ms) & 0xffffffff) as u64 / 1000;
     p::message(&[
         p::bytes(1, &base_request(profile, 0, 0)?),
         p::bytes(2, &p::buffer(&random::<16>()?)),
@@ -487,9 +514,19 @@ pub struct Heartbeat {
     pub selector: u32,
 }
 pub fn heartbeat_request(state: &AccountState, cursor: &[u8]) -> Result<Vec<u8>> {
+    heartbeat_request_at(state, cursor, unix_time()?)
+}
+
+/// Build an authenticated heartbeat request using a caller-supplied Unix
+/// timestamp in seconds (usable on `wasm32-unknown-unknown` with a [`crate::transport::Clock`]).
+pub fn heartbeat_request_at(
+    state: &AccountState,
+    cursor: &[u8],
+    unix_time_secs: u32,
+) -> Result<Vec<u8>> {
     p::message(&[
         p::bytes(1, &base_request(&state.device, state.uin, 0)?),
-        p::uint(2, unix_time()? as u64),
+        p::uint(2, unix_time_secs as u64),
         p::bytes(3, &p::buffer(cursor)),
     ])
 }

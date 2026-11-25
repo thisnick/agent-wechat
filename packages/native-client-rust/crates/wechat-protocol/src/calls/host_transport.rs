@@ -94,17 +94,14 @@ impl CallHostRpcError {
         });
         if cause.is::<crate::mmtls::UnsupportedNativeRoute>() {
             result.code = "unsupported_route";
-        } else if let Some(http) = cause.downcast_ref::<reqwest::Error>() {
-            result.code = if http.is_timeout() {
-                "timeout"
-            } else if http.is_connect() {
-                "connect"
-            } else if let Some(status) = http.status() {
-                result.value = Some(i64::from(status.as_u16()));
-                "http_status"
-            } else {
-                "http_transport"
+        } else if let Some(transport) = cause.downcast_ref::<crate::transport::TransportError>() {
+            result.code = match transport {
+                crate::transport::TransportError::Timeout => "timeout",
+                crate::transport::TransportError::Disconnected => "connection_closed",
             };
+        } else if let Some((code, value)) = classify_reqwest_error(cause) {
+            result.code = code;
+            result.value = value;
         } else if let Some(io) = cause.downcast_ref::<std::io::Error>() {
             result.code = match io.kind() {
                 std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => "timeout",
@@ -131,6 +128,27 @@ impl CallHostRpcError {
             result.value = value;
         }
         result
+    }
+}
+
+fn classify_reqwest_error(cause: &anyhow::Error) -> Option<(&'static str, Option<i64>)> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let http = cause.downcast_ref::<reqwest::Error>()?;
+        if http.is_timeout() {
+            Some(("timeout", None))
+        } else if http.is_connect() {
+            Some(("connect", None))
+        } else if let Some(status) = http.status() {
+            Some(("http_status", Some(i64::from(status.as_u16()))))
+        } else {
+            Some(("http_transport", None))
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = cause;
+        None
     }
 }
 

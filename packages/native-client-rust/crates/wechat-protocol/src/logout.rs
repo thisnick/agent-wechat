@@ -6,8 +6,8 @@
 //! device revocation or deletion from the phone's device inventory.
 use super::*;
 
-const CGI: u16 = 282;
-const PATH: &str = "/cgi-bin/micromsg-bin/logout";
+pub(crate) const CGI: u16 = 282;
+pub(crate) const PATH: &str = "/cgi-bin/micromsg-bin/logout";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogoutReply {
@@ -15,7 +15,7 @@ pub struct LogoutReply {
     pub accepted: bool,
 }
 
-fn request(state: &AccountState) -> Result<Vec<u8>> {
+pub(crate) fn request(state: &AccountState) -> Result<Vec<u8>> {
     state.validate()?;
     Ok(p::bytes(
         1,
@@ -23,7 +23,7 @@ fn request(state: &AccountState) -> Result<Vec<u8>> {
     ))
 }
 
-fn response(bytes: &[u8]) -> Result<LogoutReply> {
+pub(crate) fn response(bytes: &[u8]) -> Result<LogoutReply> {
     let fields = p::decode(bytes)?;
     let base = p::decode(p::data(&fields, 1)?)?;
     let raw = p::scalar(&base, 1)?;
@@ -38,6 +38,7 @@ fn response(bytes: &[u8]) -> Result<LogoutReply> {
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl NativeClient {
     /// Submit one authenticated logout without renewal, retry or login fallback.
     /// An error can follow submission and must be treated as an unknown outcome.

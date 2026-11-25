@@ -17,6 +17,7 @@ fn acknowledged_bitmap(next_block: usize) -> Vec<u8> {
     bitmap
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl CdnClient {
     /// Upload one ordinary file using previously persisted source/key material.
     /// Object readback and business-message submission remain separate operations.

@@ -693,3 +693,693 @@ fn logout_guard_passes_once_and_marks_every_refusal_as_not_submitted() {
     assert!(cancelled().unwrap_err().is::<NativeRequestNotSubmitted>());
     assert_eq!(guard_calls.load(Ordering::SeqCst), 1);
 }
+
+fn synthetic_business_reply(
+    state: &AccountState,
+    cgi: u64,
+    cookie: &[u8],
+    plain: &[u8],
+) -> Vec<u8> {
+    let cipher = crate::crypto::envelope_seal(plain, &state.response_key, b"", [0x77; 12]).unwrap();
+    let mut tail = Vec::new();
+    for value in [cgi, plain.len() as u64, plain.len() as u64, 0, 0] {
+        tail.extend(crate::protobuf::varint(value));
+    }
+    let size = 10 + cookie.len() + tail.len();
+    let flags = (13u16 << 12) | ((cookie.len() as u16) << 8) | ((size as u16) << 2) | 2;
+    let mut reply = flags.to_le_bytes().to_vec();
+    reply.extend(0i32.to_be_bytes());
+    reply.extend(state.uin.to_be_bytes());
+    reply.extend(cookie);
+    reply.extend(tail);
+    reply.extend(cipher);
+    reply
+}
+
+struct UnusedStreamTransport;
+impl crate::transport::StreamTransport for UnusedStreamTransport {
+    fn connect<'a>(
+        &'a self,
+        _host: &'a str,
+        _port: u16,
+        _timeout: Duration,
+    ) -> crate::transport::TransportFuture<'a, Result<Box<dyn crate::transport::AsyncByteStream>>>
+    {
+        Box::pin(async {
+            Err(anyhow::Error::new(
+                crate::transport::TransportError::Disconnected,
+            ))
+        })
+    }
+}
+
+struct MockClock(AtomicU64);
+impl crate::transport::Clock for MockClock {
+    fn monotonic_ms(&self) -> u64 {
+        self.0.load(Ordering::Acquire)
+    }
+    fn unix_time_ms(&self) -> Result<u64> {
+        Ok(1_700_000_000_000 + self.monotonic_ms())
+    }
+}
+
+struct ScriptedShortHttp {
+    session: crate::mmtls::ShortSession,
+    responses: Mutex<std::collections::VecDeque<Result<Vec<u8>>>>,
+    seen_paths: Mutex<Vec<String>>,
+    seen_packets: Mutex<Vec<Vec<u8>>>,
+}
+
+impl crate::transport::HttpTransport for ScriptedShortHttp {
+    fn send<'a>(
+        &'a self,
+        request: crate::transport::HttpRequest,
+    ) -> crate::transport::TransportFuture<'a, Result<crate::transport::HttpResponse>> {
+        let next = self
+            .responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Err(anyhow::anyhow!("unexpected extra HTTP request")));
+        let outcome = next.and_then(|reply_payload| {
+            let (path, host, packet, wire) = crate::mmtls::tests::handle_mock_short_exchange(
+                &self.session,
+                &request.body,
+                &reply_payload,
+            )?;
+            ensure!(host == "short.weixin.qq.com", "unexpected host");
+            self.seen_paths.lock().unwrap().push(path);
+            self.seen_packets.lock().unwrap().push(packet);
+            Ok(crate::transport::HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: wire,
+            })
+        });
+        Box::pin(async move { outcome })
+    }
+}
+
+fn synthetic_short_session() -> crate::mmtls::ShortSession {
+    crate::mmtls::ShortSession {
+        access_psk: vec![0x42; 32],
+        ticket: crate::mmtls::Ticket {
+            kind: 1,
+            lifetime: 3600,
+            reserved: 0,
+            nonce: vec![0x24; 12],
+            opaque: vec![0x17; 32],
+        },
+    }
+}
+
+#[tokio::test]
+async fn async_transport_reuses_short_ticket_persists_cookie_and_enforces_fences() {
+    use crate::protobuf as p;
+
+    let initial = client().export_account_state().unwrap();
+    let short_session = synthetic_short_session();
+    let hb_plain =
+        p::message(&[p::bytes(1, &p::uint(1, 0)), p::uint(2, 90), p::uint(3, 0)]).unwrap();
+    let hb_reply = synthetic_business_reply(&initial, 518, b"c1", &hb_plain);
+
+    let send_item = p::message(&[
+        p::int32(1, 0),
+        p::bytes(2, &p::bytes(1, b"peer_user")),
+        p::uint(3, 1001),
+        p::uint(4, 777),
+        p::uint(5, 1_700_000_010),
+        p::uint(6, 1),
+        p::uint(7, 1),
+        p::uint(8, 9_000_000_001),
+    ])
+    .unwrap();
+    let send_plain = p::message(&[
+        p::bytes(1, &p::uint(1, 0)),
+        p::uint(2, 1),
+        p::bytes(3, &send_item),
+    ])
+    .unwrap();
+    let send_reply = synthetic_business_reply(&initial, 522, b"c2", &send_plain);
+
+    let openim_plain = p::message(&[
+        p::int32(1, 0),
+        p::bytes(
+            2,
+            &p::message(&[p::bytes(1, b"123@openim"), p::bytes(2, b"WeCom User")]).unwrap(),
+        ),
+    ])
+    .unwrap();
+    let openim_reply = synthetic_business_reply(&initial, 881, b"c2", &openim_plain);
+
+    let http = Arc::new(ScriptedShortHttp {
+        session: short_session.clone(),
+        responses: Mutex::new(
+            [
+                Ok(hb_reply),
+                Ok(send_reply),
+                Ok(openim_reply),
+                Err(anyhow::Error::new(
+                    crate::transport::TransportError::Timeout,
+                )),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        seen_paths: Mutex::new(Vec::new()),
+        seen_packets: Mutex::new(Vec::new()),
+    });
+    let clock = Arc::new(MockClock(AtomicU64::new(100)));
+    let transport = crate::transport::ProtocolTransport::new(
+        Arc::new(UnusedStreamTransport),
+        http.clone(),
+        clock.clone(),
+    );
+    let storage = Arc::new(RecordingPersistence {
+        fail: AtomicBool::new(false),
+        cookies: Mutex::new(vec![]),
+    });
+    let client = NativeClient::from_account_with_transport_and_persistence(
+        initial.clone(),
+        NativeOptions::default(),
+        transport.clone(),
+        storage.clone(),
+    )
+    .unwrap();
+
+    // Blocking helpers must refuse to bypass the configured async transport,
+    // and logout_blocking refusal must leave the account Active.
+    assert!(client.request_blocking(|_| Ok(())).is_err());
+    assert!(client.open_push_connection_blocking().is_err());
+    assert!(client.renew_session_blocking("synthetic").is_err());
+    assert!(client.logout_blocking().is_err());
+    assert_eq!(
+        client.account_status().unwrap().lifecycle,
+        AccountLifecycle::Active
+    );
+    let bootstrap = NativeClient::with_transport(NativeOptions::default(), transport).unwrap();
+    assert!(bootstrap
+        .start_qr_login(initial.device.clone(), "synthetic")
+        .is_err());
+
+    // Pre-seed the short-link ticket cache so RPCs reuse it without opening a long link.
+    client
+        .owned_account()
+        .unwrap()
+        .short_link
+        .put_at_ms("long.weixin.qq.com", short_session, 100);
+
+    let hb = client.heartbeat(&[]).await.unwrap();
+    assert_eq!(hb.next_interval, 90);
+    assert_eq!(client.export_account_state().unwrap().cookie, b"c1");
+    // Verify outgoing heartbeat timestamp came from MockClock (1_700_000_000), not SystemTime.
+    let sent_hb = http.seen_packets.lock().unwrap()[0].clone();
+    let hb_env = crate::business::split(&sent_hb).unwrap();
+    let hb_req_plain =
+        crate::crypto::envelope_open(&hb_env.payload, &initial.request_key, b"").unwrap();
+    let hb_req_fields = p::decode(&hb_req_plain).unwrap();
+    assert_eq!(p::scalar(&hb_req_fields, 2).unwrap(), 1_700_000_000);
+
+    // Pre-submit caller guard refuses before HTTP handoff.
+    let refused = client
+        .send_text_guarded(
+            "peer_user",
+            "blocked",
+            TextSendOptions {
+                created_at: 1_700_000_010,
+                client_message_id: 777,
+                source: None,
+            },
+            || anyhow::bail!("guard refused"),
+        )
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("guard refused"));
+    assert_eq!(http.seen_paths.lock().unwrap().len(), 1);
+
+    let sent = client
+        .send_text(
+            "peer_user",
+            "hello wasm",
+            TextSendOptions {
+                created_at: 1_700_000_010,
+                client_message_id: 777,
+                source: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(sent.server_message_id.as_deref(), Some("9000000001"));
+    assert_eq!(client.export_account_state().unwrap().cookie, b"c2");
+
+    let openim = client
+        .lookup_openim_contact("123@openim", None, None)
+        .await
+        .unwrap();
+    assert_eq!(openim.nickname.as_deref(), Some("WeCom User"));
+
+    // Persistence observed both cookie transitions in order (unchanged c2 skipped).
+    assert_eq!(
+        *storage.cookies.lock().unwrap(),
+        vec![(vec![], b"c1".to_vec()), (b"c1".to_vec(), b"c2".to_vec())]
+    );
+
+    // Transport failure invalidates cached short-link ticket without retrying.
+    assert!(client.heartbeat(&[]).await.is_err());
+    assert!(client
+        .owned_account()
+        .unwrap()
+        .short_link
+        .get_at_ms("long.weixin.qq.com", 100)
+        .is_none());
+
+    // Blocking logout refuses to bypass async transport and reports NativeRequestNotSubmitted;
+    // stop fences future submissions.
+    let pending = client.prepare_logout().unwrap();
+    let blocking_logout_err = pending.submit_blocking().unwrap_err();
+    assert!(blocking_logout_err.is::<NativeRequestNotSubmitted>());
+    let stopped_err = client.heartbeat(&[]).await.unwrap_err();
+    assert!(stopped_err.is::<NativeRequestNotSubmitted>());
+
+    // Options override preserves account owner and configured transport.
+    let updated = client
+        .with_request_options(NativeOptions {
+            timeout: Duration::from_secs(10),
+            ..NativeOptions::default()
+        })
+        .unwrap();
+    assert!(updated.transport.is_some());
+    assert_eq!(
+        updated.account_status().unwrap().lifecycle,
+        AccountLifecycle::Stopped
+    );
+}
+
+#[tokio::test]
+async fn async_transport_multichunk_voice_stop_between_chunks_omits_not_submitted() {
+    use crate::protobuf as p;
+
+    let initial = client().export_account_state().unwrap();
+    let short_session = synthetic_short_session();
+    // Chunk 1 reply: accepted non-final acknowledgement (offset=0, length=32768, end_flag=0).
+    let chunk1_plain = p::message(&[
+        p::bytes(1, b"synthetic_self"),
+        p::bytes(2, b"peer_user"),
+        p::uint(3, 0),
+        p::uint(4, 32768),
+        p::uint(5, 1_700_000_020),
+        p::bytes(6, b"voice-client-id-01"),
+        p::uint(7, 101),
+        p::uint(8, 2000),
+        p::uint(9, 0),
+        p::bytes(10, &p::uint(1, 0)),
+        p::uint(12, 9_000_000_055),
+    ])
+    .unwrap();
+    let chunk1_reply = synthetic_business_reply(&initial, 127, b"v1", &chunk1_plain);
+
+    struct StopAfterFirstHttp {
+        session: crate::mmtls::ShortSession,
+        first_reply: Mutex<Option<Vec<u8>>>,
+        on_first: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    }
+    impl crate::transport::HttpTransport for StopAfterFirstHttp {
+        fn send<'a>(
+            &'a self,
+            request: crate::transport::HttpRequest,
+        ) -> crate::transport::TransportFuture<'a, Result<crate::transport::HttpResponse>> {
+            let reply = self
+                .first_reply
+                .lock()
+                .unwrap()
+                .take()
+                .expect("second chunk must not be sent after stop");
+            let (_, _, _, wire) = crate::mmtls::tests::handle_mock_short_exchange(
+                &self.session,
+                &request.body,
+                &reply,
+            )
+            .unwrap();
+            if let Some(cb) = self.on_first.lock().unwrap().take() {
+                cb();
+            }
+            Box::pin(async move {
+                Ok(crate::transport::HttpResponse {
+                    status: 200,
+                    headers: vec![],
+                    body: wire,
+                })
+            })
+        }
+    }
+
+    let http = Arc::new(StopAfterFirstHttp {
+        session: short_session.clone(),
+        first_reply: Mutex::new(Some(chunk1_reply)),
+        on_first: Mutex::new(None),
+    });
+    let clock = Arc::new(MockClock(AtomicU64::new(100)));
+    let transport = crate::transport::ProtocolTransport::new(
+        Arc::new(UnusedStreamTransport),
+        http.clone(),
+        clock,
+    );
+    let client =
+        NativeClient::from_account_with_transport(initial, NativeOptions::default(), transport)
+            .unwrap();
+    client
+        .owned_account()
+        .unwrap()
+        .short_link
+        .put_at_ms("long.weixin.qq.com", short_session, 100);
+    let stop_handle = client.clone();
+    *http.on_first.lock().unwrap() = Some(Box::new(move || {
+        stop_handle.stop().unwrap();
+    }));
+
+    // Build a valid 2-chunk SILK-framed payload (> 32 KiB).
+    let mut encoded = b"\x02#!SILK_V3".to_vec();
+    encoded.resize(40_000, 0x11);
+    let err = client
+        .send_voice(
+            "peer_user",
+            "voice-client-id-01",
+            1_700_000_020,
+            2000,
+            &encoded,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        !err.is::<NativeRequestNotSubmitted>(),
+        "stopping after chunk 1 must preserve uncertain submission"
+    );
+    assert_eq!(
+        AccountInterrupted::find(&err),
+        Some(AccountInterrupted::Stopped)
+    );
+}
+
+#[tokio::test]
+async fn async_transport_channels_media_rejects_overflow_clock() {
+    let initial = client().export_account_state().unwrap();
+    let clock = Arc::new(MockClock(AtomicU64::new(u64::MAX - 1_700_000_000_000)));
+    let transport = crate::transport::ProtocolTransport::new(
+        Arc::new(UnusedStreamTransport),
+        Arc::new(ScriptedShortHttp {
+            session: synthetic_short_session(),
+            responses: Mutex::new(Default::default()),
+            seen_paths: Mutex::new(Vec::new()),
+            seen_packets: Mutex::new(Vec::new()),
+        }),
+        clock,
+    );
+    let client =
+        NativeClient::from_account_with_transport(initial, NativeOptions::default(), transport)
+            .unwrap();
+    let post = crate::ChannelsPost {
+        object_id: 1,
+        nonce: "123_0_1_1_1_ctx".into(),
+    };
+    let route_entry = crate::protobuf::message(&[
+        crate::protobuf::bytes(1, b"finderLive"),
+        crate::protobuf::uint(2, 6673),
+        crate::protobuf::bytes(3, b"/cgi-bin/micromsg-bin/transfer/h5exttransfer"),
+    ])
+    .unwrap();
+    let ticket = crate::client::channels::h5_auth_response(
+        &crate::protobuf::message(&[
+            crate::protobuf::bytes(1, &crate::protobuf::uint(1, 0)),
+            crate::protobuf::bytes(2, b"ticket"),
+            crate::protobuf::bytes(5, &route_entry),
+        ])
+        .unwrap(),
+    )
+    .unwrap();
+    let page = crate::client::channels::page_response(
+        &crate::protobuf::message(&[
+            crate::protobuf::bytes(1, &crate::protobuf::uint(1, 0)),
+            crate::protobuf::bytes(2, b"https://channels.weixin.qq.com/web/pages/feed?a=1"),
+        ])
+        .unwrap(),
+    )
+    .unwrap();
+    let err = client
+        .channels_media(&post, &ticket, &page)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("Clock timestamp overflow"));
+}
+
+#[tokio::test]
+async fn async_transport_cancelled_rpc_keeps_barrier_and_adopts_cookie() {
+    use crate::protobuf as p;
+
+    struct CountingTokioSpawner(std::sync::atomic::AtomicUsize);
+    impl crate::transport::TaskSpawner for CountingTokioSpawner {
+        fn spawn(&self, task: crate::transport::TransportFuture<'static, ()>) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+            tokio::spawn(task);
+        }
+    }
+
+    struct DelayedShortHttp {
+        session: crate::mmtls::ShortSession,
+        reply: Mutex<Option<Vec<u8>>>,
+        submitted: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    }
+    impl crate::transport::HttpTransport for DelayedShortHttp {
+        fn send<'a>(
+            &'a self,
+            request: crate::transport::HttpRequest,
+        ) -> crate::transport::TransportFuture<'a, Result<crate::transport::HttpResponse>> {
+            let reply = self.reply.lock().unwrap().take().unwrap();
+            let (_, _, _, wire) = crate::mmtls::tests::handle_mock_short_exchange(
+                &self.session,
+                &request.body,
+                &reply,
+            )
+            .unwrap();
+            if let Some(tx) = self.submitted.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            let release = self.release.lock().unwrap().take().unwrap();
+            Box::pin(async move {
+                let _ = release.await;
+                Ok(crate::transport::HttpResponse {
+                    status: 200,
+                    headers: vec![],
+                    body: wire,
+                })
+            })
+        }
+    }
+
+    for use_custom_spawner in [false, true] {
+        let initial = client().export_account_state().unwrap();
+        let short_session = synthetic_short_session();
+        let hb_plain =
+            p::message(&[p::bytes(1, &p::uint(1, 0)), p::uint(2, 90), p::uint(3, 0)]).unwrap();
+        let hb_reply = synthetic_business_reply(&initial, 518, b"c-detached", &hb_plain);
+        let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let http = Arc::new(DelayedShortHttp {
+            session: short_session.clone(),
+            reply: Mutex::new(Some(hb_reply)),
+            submitted: Mutex::new(Some(submitted_tx)),
+            release: Mutex::new(Some(release_rx)),
+        });
+        let clock = Arc::new(MockClock(AtomicU64::new(100)));
+        let spawner = Arc::new(CountingTokioSpawner(std::sync::atomic::AtomicUsize::new(0)));
+        let mut transport =
+            crate::transport::ProtocolTransport::new(Arc::new(UnusedStreamTransport), http, clock);
+        if use_custom_spawner {
+            transport = transport.with_spawner(spawner.clone());
+        }
+        let client =
+            NativeClient::from_account_with_transport(initial, NativeOptions::default(), transport)
+                .unwrap();
+        client.owned_account().unwrap().short_link.put_at_ms(
+            "long.weixin.qq.com",
+            short_session,
+            100,
+        );
+
+        let worker_client = client.clone();
+        let worker = tokio::spawn(async move { worker_client.heartbeat(&[]).await });
+        submitted_rx.await.unwrap();
+        worker.abort();
+        let _ = worker.await;
+
+        assert_eq!(client.account_status().unwrap().in_flight, 1);
+        let handoff_client = client.clone();
+        let handoff = tokio::spawn(async move { handoff_client.quiesce_and_export().await });
+        tokio::task::yield_now().await;
+        assert!(
+            !handoff.is_finished(),
+            "handoff must wait for detached transport exchange"
+        );
+
+        // Unblock the in-flight HTTP response after stopping; wait for barrier release.
+        // Because stop() already happened during quiesce_and_export(), verify barrier
+        // waited AND let's verify cookie adoption when caller cancels without stopping!
+        release_tx.send(()).unwrap();
+        let _ = handoff.await.unwrap().unwrap();
+        assert_eq!(
+            spawner.0.load(Ordering::Acquire),
+            usize::from(use_custom_spawner)
+        );
+    }
+
+    // Verify rotated cookie IS adopted when caller drops the future while account stays active.
+    let initial = client().export_account_state().unwrap();
+    let short_session = synthetic_short_session();
+    let hb_plain =
+        p::message(&[p::bytes(1, &p::uint(1, 0)), p::uint(2, 90), p::uint(3, 0)]).unwrap();
+    let hb_reply = synthetic_business_reply(&initial, 518, b"c-adopted", &hb_plain);
+    let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let http = Arc::new(DelayedShortHttp {
+        session: short_session.clone(),
+        reply: Mutex::new(Some(hb_reply)),
+        submitted: Mutex::new(Some(submitted_tx)),
+        release: Mutex::new(Some(release_rx)),
+    });
+    let clock = Arc::new(MockClock(AtomicU64::new(100)));
+    let transport =
+        crate::transport::ProtocolTransport::new(Arc::new(UnusedStreamTransport), http, clock);
+    let client =
+        NativeClient::from_account_with_transport(initial, NativeOptions::default(), transport)
+            .unwrap();
+    client
+        .owned_account()
+        .unwrap()
+        .short_link
+        .put_at_ms("long.weixin.qq.com", short_session, 100);
+    let worker_client = client.clone();
+    let worker = tokio::spawn(async move { worker_client.heartbeat(&[]).await });
+    submitted_rx.await.unwrap();
+    worker.abort();
+    let _ = worker.await;
+    assert_eq!(client.account_status().unwrap().in_flight, 1);
+    release_tx.send(()).unwrap();
+    while client.account_status().unwrap().in_flight != 0 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(client.export_account_state().unwrap().cookie, b"c-adopted");
+    assert_eq!(client.account_status().unwrap().revision, 1);
+}
+
+#[tokio::test]
+async fn async_transport_cancelled_multichunk_voice_adopts_chunk1_cookie_and_stops_before_chunk2() {
+    use crate::protobuf as p;
+
+    let initial = client().export_account_state().unwrap();
+    let short_session = synthetic_short_session();
+    let chunk1_plain = p::message(&[
+        p::bytes(1, b"synthetic_self"),
+        p::bytes(2, b"peer_user"),
+        p::uint(3, 0),
+        p::uint(4, 32768),
+        p::uint(5, 1_700_000_020),
+        p::bytes(6, b"voice-client-id-02"),
+        p::uint(7, 102),
+        p::uint(8, 2000),
+        p::uint(9, 0),
+        p::bytes(10, &p::uint(1, 0)),
+        p::uint(12, 9_000_000_056),
+    ])
+    .unwrap();
+    let chunk1_reply = synthetic_business_reply(&initial, 127, b"v-chunk1", &chunk1_plain);
+
+    struct DelayedFirstChunkHttp {
+        session: crate::mmtls::ShortSession,
+        first_reply: Mutex<Option<Vec<u8>>>,
+        submitted: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    impl crate::transport::HttpTransport for DelayedFirstChunkHttp {
+        fn send<'a>(
+            &'a self,
+            request: crate::transport::HttpRequest,
+        ) -> crate::transport::TransportFuture<'a, Result<crate::transport::HttpResponse>> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            let reply = self
+                .first_reply
+                .lock()
+                .unwrap()
+                .take()
+                .expect("second chunk must not be sent after caller cancellation");
+            let (_, _, _, wire) = crate::mmtls::tests::handle_mock_short_exchange(
+                &self.session,
+                &request.body,
+                &reply,
+            )
+            .unwrap();
+            if let Some(tx) = self.submitted.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            let release = self.release.lock().unwrap().take().unwrap();
+            Box::pin(async move {
+                let _ = release.await;
+                Ok(crate::transport::HttpResponse {
+                    status: 200,
+                    headers: vec![],
+                    body: wire,
+                })
+            })
+        }
+    }
+
+    let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let http = Arc::new(DelayedFirstChunkHttp {
+        session: short_session.clone(),
+        first_reply: Mutex::new(Some(chunk1_reply)),
+        submitted: Mutex::new(Some(submitted_tx)),
+        release: Mutex::new(Some(release_rx)),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let clock = Arc::new(MockClock(AtomicU64::new(100)));
+    let transport = crate::transport::ProtocolTransport::new(
+        Arc::new(UnusedStreamTransport),
+        http.clone(),
+        clock,
+    );
+    let client =
+        NativeClient::from_account_with_transport(initial, NativeOptions::default(), transport)
+            .unwrap();
+    client
+        .owned_account()
+        .unwrap()
+        .short_link
+        .put_at_ms("long.weixin.qq.com", short_session, 100);
+
+    let mut encoded = b"\x02#!SILK_V3".to_vec();
+    encoded.resize(40_000, 0x11);
+    let worker_client = client.clone();
+    let worker = tokio::spawn(async move {
+        worker_client
+            .send_voice(
+                "peer_user",
+                "voice-client-id-02",
+                1_700_000_020,
+                2000,
+                &encoded,
+            )
+            .await
+    });
+    submitted_rx.await.unwrap();
+    worker.abort();
+    let _ = worker.await;
+
+    assert_eq!(client.account_status().unwrap().in_flight, 1);
+    release_tx.send(()).unwrap();
+    while client.account_status().unwrap().in_flight != 0 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(http.calls.load(Ordering::Acquire), 1);
+    assert_eq!(client.export_account_state().unwrap().cookie, b"v-chunk1");
+}

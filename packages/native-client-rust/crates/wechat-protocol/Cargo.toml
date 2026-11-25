@@ -43,12 +43,12 @@ experimental-calls = []
 
 [dependencies]
 wechat-media = { path = "../wechat-media", version = "=3.0.0" }
-wechat-platform = { path = "../wechat-platform", version = "=3.0.0" }
 anyhow.workspace = true
 roxmltree = "0.21"
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+tokio = { version = "1", default-features = false, features = ["sync", "macros"] }
+url = "2"
 openssl = { version = "0.10", features = ["vendored"], optional = true }
 aes = { version = "0.8", features = ["zeroize"], optional = true }
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc", "zeroize"], optional = true }
@@ -69,9 +69,13 @@ subtle = { version = "2", default-features = false, optional = true }
 flate2 = "1"
 base64 = "0.22"
 hex = "0.4"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 zeroize = { version = "1", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+wechat-platform = { path = "../wechat-platform", version = "=3.0.0" }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread"] }
 
 [build-dependencies]
 cc = { version = "1", optional = true }

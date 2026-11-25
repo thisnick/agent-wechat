@@ -1,24 +1,6 @@
 //! Temporary, attempt-scoped LAN QR-login challenge. No account authorization
 //! is granted by the local connection; normal polling/manual authentication wins.
-use crate::{protobuf as p, wire, DeviceProfile};
-use anyhow::{ensure, Result};
-use std::{
-    fmt,
-    io::{self, Write},
-    net::{Ipv4Addr, TcpListener, TcpStream},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Mutex,
-    },
-    thread::{self, JoinHandle},
-    time::{Duration, Instant},
-};
-use zeroize::Zeroizing;
-
-pub(crate) const CGI: u16 = 22312;
-pub(crate) const PATH: &str = "/cgi-bin/micromsg-bin/extdeviceuploadlaninfo";
-const MAX_TOKEN: usize = 4096;
-const TICK: Duration = Duration::from_millis(20);
+use std::fmt;
 
 #[derive(Debug)]
 struct LanError(&'static str);
@@ -35,11 +17,40 @@ pub fn login_lan_error_reason(error: &anyhow::Error) -> Option<&'static str> {
     error.downcast_ref::<LanError>().map(|e| e.0)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::{protobuf as p, wire, DeviceProfile};
+#[cfg(not(target_arch = "wasm32"))]
+use anyhow::{ensure, Result};
+#[cfg(not(target_arch = "wasm32"))]
+use std::{
+    io::{self, Write},
+    net::{Ipv4Addr, TcpListener, TcpStream},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex,
+    },
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
+};
+#[cfg(not(target_arch = "wasm32"))]
+use zeroize::Zeroizing;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const CGI: u16 = 22312;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const PATH: &str = "/cgi-bin/micromsg-bin/extdeviceuploadlaninfo";
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_TOKEN: usize = 4096;
+#[cfg(not(target_arch = "wasm32"))]
+const TICK: Duration = Duration::from_millis(20);
+
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone)]
 pub(crate) struct Scope {
     deadline: Instant,
     cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
 }
+#[cfg(not(target_arch = "wasm32"))]
 impl Scope {
     pub(crate) fn new(
         deadline: Instant,
@@ -54,18 +65,21 @@ impl Scope {
         Instant::now() < self.deadline && !(self.cancelled)()
     }
 }
+#[cfg(not(target_arch = "wasm32"))]
 struct State {
     stop: AtomicBool,
     sent: AtomicBool,
     done: AtomicBool,
     scope: Scope,
 }
+#[cfg(not(target_arch = "wasm32"))]
 impl State {
     fn active(&self) -> bool {
         !self.stop.load(Ordering::Acquire) && self.scope.active()
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct Challenge {
     addresses: Vec<Ipv4Addr>,
     port: u16,
@@ -73,6 +87,7 @@ pub(crate) struct Challenge {
     token: Mutex<Option<mpsc::SyncSender<Zeroizing<Vec<u8>>>>>,
     worker: Option<JoinHandle<()>>,
 }
+#[cfg(not(target_arch = "wasm32"))]
 impl Challenge {
     pub(crate) fn bind(scope: Scope) -> Result<Self> {
         if !scope.active() {
@@ -179,6 +194,7 @@ impl Challenge {
         self.state.stop.store(true, Ordering::Release);
     }
 }
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for Challenge {
     fn drop(&mut self) {
         self.stop();
@@ -187,6 +203,7 @@ impl Drop for Challenge {
         }
     }
 }
+#[cfg(not(target_arch = "wasm32"))]
 fn bind_ports(ports: impl IntoIterator<Item = u16>) -> Result<TcpListener> {
     for port in ports {
         match TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)) {
@@ -197,6 +214,7 @@ fn bind_ports(ports: impl IntoIterator<Item = u16>) -> Result<TcpListener> {
     }
     Err(failure("ports_unavailable"))
 }
+#[cfg(not(target_arch = "wasm32"))]
 fn write_frame(stream: &mut TcpStream, frame: &[u8], state: &State) -> io::Result<()> {
     stream.set_nonblocking(true)?;
     let deadline = (Instant::now() + Duration::from_secs(1)).min(state.scope.deadline);
@@ -216,6 +234,7 @@ fn write_frame(stream: &mut TcpStream, frame: &[u8], state: &State) -> io::Resul
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn request(
     device: &DeviceProfile,
     identifier: &[u8],
@@ -246,6 +265,7 @@ pub(crate) fn request(
         p::bytes(4, &p::buffer(random)),
     ])
 }
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn response(input: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
     ensure!(input.len() <= 16384, "LAN upload response too large");
     let fields = p::decode(input)?;
@@ -258,6 +278,7 @@ pub(crate) fn response(input: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
     std::str::from_utf8(token)?;
     Ok(Zeroizing::new(token.to_vec()))
 }
+#[cfg(not(target_arch = "wasm32"))]
 fn reply_frame(token: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
     ensure!(
         !token.is_empty() && token.len() <= MAX_TOKEN,
@@ -280,6 +301,6 @@ fn reply_frame(token: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
     Ok(frame)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "lan_login_tests.rs"]
 mod tests;

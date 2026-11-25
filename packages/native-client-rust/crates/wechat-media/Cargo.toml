@@ -14,15 +14,17 @@ categories = ["network-programming"]
 include = ["src/**", "tests/**", "examples/**", "README.md", "LICENSE", "NOTICE", "build.rs", "fixtures/**", "vendor/silk/**"]
 
 [dependencies]
-wechat-platform = { path = "../wechat-platform", version = "=3.0.0" }
 anyhow.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 gif = "0.14"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+jpeg-decoder = { version = "0.3.2", default-features = false }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+wechat-platform = { path = "../wechat-platform", version = "=3.0.0" }
+serde_json.workspace = true
 zip = { version = "9.5.1", default-features = false, features = ["deflate"] }
 md-5 = "0.10"
 sha2.workspace = true
 tempfile.workspace = true
 libc.workspace = true
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
-jpeg-decoder = { version = "0.3.2", default-features = false }

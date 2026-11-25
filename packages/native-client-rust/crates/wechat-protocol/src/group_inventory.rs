@@ -74,6 +74,7 @@ pub fn decode_group_inventory(raw: &[u8]) -> Result<GroupMetadataPage> {
         raw: raw.to_vec(),
     })
 }
+#[cfg(not(target_arch = "wasm32"))]
 impl NativeClient {
     #[doc(hidden)]
     pub(crate) fn group_inventory_snapshot(

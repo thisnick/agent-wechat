@@ -6,8 +6,8 @@
 //! be considered; an I/O error is never permission to submit it again.
 use super::*;
 
-const CGI: u16 = 251;
-const PATH: &str = "/cgi-bin/micromsg-bin/statusnotify";
+pub(crate) const CGI: u16 = 251;
+pub(crate) const PATH: &str = "/cgi-bin/micromsg-bin/statusnotify";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -29,7 +29,10 @@ fn bounded_identity(value: &str, max: usize) -> bool {
     !value.is_empty() && value.len() <= max && !value.chars().any(char::is_control)
 }
 
-fn request(state: &AccountState, notification: &SessionReadNotification) -> Result<Vec<u8>> {
+pub(crate) fn request(
+    state: &AccountState,
+    notification: &SessionReadNotification,
+) -> Result<Vec<u8>> {
     state.validate()?;
     ensure!(
         bounded_identity(&state.own_username, 256)
@@ -60,7 +63,7 @@ fn request(state: &AccountState, notification: &SessionReadNotification) -> Resu
     ])
 }
 
-fn response(bytes: &[u8]) -> Result<SessionReadReply> {
+pub(crate) fn response(bytes: &[u8]) -> Result<SessionReadReply> {
     let fields = p::decode(bytes)?;
     let base = p::decode(p::data(&fields, 1)?)?;
     let raw = p::scalar(&base, 1)?;
@@ -75,6 +78,7 @@ fn response(bytes: &[u8]) -> Result<SessionReadReply> {
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl NativeClient {
     /// Submit once, with no renewal, retry, or login fallback. A caller must
     /// retain the boundary and request identity before invoking this method.

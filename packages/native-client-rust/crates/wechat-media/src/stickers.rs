@@ -301,6 +301,7 @@ pub struct StickerPreview {
 /// this does not claim that its full animation was watched or sampled.
 pub fn sticker_preview(bytes: &[u8]) -> Result<StickerPreview> {
     let info = crate::inspect_image(bytes)?;
+    #[cfg(not(target_arch = "wasm32"))]
     if info.content_type == "image/x-wxgf" {
         let still = crate::wxgf_preview(bytes)?;
         let contact_sheet = crate::DecodedImage {

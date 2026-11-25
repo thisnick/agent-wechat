@@ -107,6 +107,7 @@ pub fn decode_group_detail(raw: &[u8], group: &str) -> Result<GroupDetail> {
         xml: text(12)?,
     })
 }
+#[cfg(not(target_arch = "wasm32"))]
 impl NativeClient {
     #[doc(hidden)]
     pub(crate) fn group_detail_raw_snapshot(

@@ -1,5 +1,6 @@
 //! Bounded native CDN transport. This uses the observed HTTP carrier on port 443,
 //! not HTTPS. Media encryption and advertised size/digests are checked separately.
+#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 use crate::errors::{Service, ServiceRejected};
 use crate::{
     crypto::{
@@ -11,13 +12,10 @@ use crate::{
 use anyhow::{bail, ensure, Result};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
-    fmt,
-    io::Read,
-    net::{Ipv4Addr, SocketAddr},
-    sync::atomic::{AtomicUsize, Ordering},
-    time::{Duration, Instant},
+    collections::BTreeMap, fmt, io::Read, net::Ipv4Addr, sync::atomic::AtomicUsize, time::Duration,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use std::{net::SocketAddr, sync::atomic::Ordering, time::Instant};
 use zeroize::Zeroize;
 pub type CdnFields = BTreeMap<String, Vec<u8>>;
 const MAX_CDN_BODY: usize = 2 * 1024 * 1024;
@@ -586,6 +584,7 @@ fn is_retryable_http_status(status: u16) -> bool {
     matches!(status, 408 | 429 | 500..=599)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn sleep_with_fence(
     delay: Duration,
     slice: Duration,
@@ -608,6 +607,7 @@ fn sleep_with_fence(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn build_cdn_http_client(timeout: Duration) -> Result<reqwest::blocking::Client> {
     Ok(reqwest::blocking::Client::builder()
         .timeout(timeout)
@@ -619,6 +619,7 @@ fn build_cdn_http_client(timeout: Duration) -> Result<reqwest::blocking::Client>
         .build()?)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct CdnSession<'a> {
     client: &'a CdnClient,
     endpoints: Vec<SocketAddr>,
@@ -628,6 +629,7 @@ pub(crate) struct CdnSession<'a> {
     had_success_on_current_ip: bool,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<'a> CdnSession<'a> {
     fn new(client: &'a CdnClient, endpoints: Vec<SocketAddr>, policy: RetryPolicy) -> Self {
         let current_ip = if endpoints.is_empty() {
@@ -784,6 +786,7 @@ impl CdnClient {
             preferred_ip: AtomicUsize::new(0),
         })
     }
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn session(&self) -> CdnSession<'_> {
         let mut endpoints = Vec::with_capacity(self.config.server_ips.len());
         for ip in &self.config.server_ips {
@@ -794,9 +797,14 @@ impl CdnClient {
         }
         CdnSession::new(self, endpoints, RetryPolicy::DEFAULT)
     }
+    /// Download and decrypt one bounded CDN media object into memory.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn download(&self, descriptor: &MediaDescriptor) -> Result<DownloadedMedia> {
         self.download_with_progress(descriptor, |_, _| Ok(()))
     }
+    /// Download and decrypt one bounded CDN media object into memory while
+    /// reporting cumulative ciphertext progress before each chunk.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn download_with_progress(
         &self,
         descriptor: &MediaDescriptor,
@@ -817,6 +825,7 @@ impl CdnClient {
     /// is never held in memory. Every check [`Self::download_with_progress`]
     /// makes is made on the returned receipt. Until this returns `Ok`, the
     /// bytes in `sink` are unverified: on an error the caller must discard them.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn download_to_with_progress(
         &self,
         descriptor: &MediaDescriptor,
@@ -839,6 +848,7 @@ impl CdnClient {
     /// for the object; it correlates requests and is not a credential. Only
     /// whole-file descriptors are accepted; the downloaded bytes get the same
     /// size and integrity checks as an ordinary file download.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn download_storage_with_progress(
         &self,
         descriptor: &MediaDescriptor,
@@ -859,6 +869,7 @@ impl CdnClient {
     /// Download an incoming voice note over CDN (`POST /download` with `filetype = 15`),
     /// bounded to [`MAX_VOICE_CDN_BYTES`] (16 MiB) and tolerating transcoded length
     /// differences from `expected_bytes`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn download_voice_with_progress(
         &self,
         descriptor: &VoiceCdnDescriptor,
@@ -1289,9 +1300,14 @@ impl CdnClient {
             advertised_size_matches: size_matches,
         })
     }
+    /// Upload one prepared in-memory media object to WeChat CDN.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn upload(&self, prepared: &PreparedUpload) -> Result<UploadedMedia> {
         self.upload_with_progress(prepared, |_, _| Ok(()))
     }
+    /// Upload one prepared in-memory media object to WeChat CDN while reporting
+    /// cumulative encrypted bytes sent before each chunk.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn upload_with_progress(
         &self,
         prepared: &PreparedUpload,
@@ -1306,6 +1322,7 @@ impl CdnClient {
     }
     /// [`Self::upload_with_progress`] for an upload read from a file in steps.
     /// The requests are the same as for the equivalent in-memory upload.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn upload_file_with_progress(
         &self,
         prepared: &PreparedFileUpload,
@@ -2111,11 +2128,14 @@ fn uploaded_variant(
     }
 }
 impl CdnClient {
+    /// Upload an image's prepared copies (standard, thumbnail, and optional original).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn upload_image(&self, p: &PreparedImageUpload) -> Result<UploadedImage> {
         self.upload_image_with_progress(p, |_, _| Ok(()))
     }
     /// Upload an image's original, standard and thumbnail copies, reporting the encrypted bytes
     /// of the original sent so far and their total before each request.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn upload_image_with_progress(
         &self,
         p: &PreparedImageUpload,
@@ -2195,9 +2215,13 @@ impl CdnClient {
             thumbnail: uploaded_variant(&p.original, &p.thumbnail, &id, MediaQuality::Thumbnail),
         })
     }
+    /// Upload a video's prepared playback, thumbnail, and optional original copies.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn upload_video(&self, p: &PreparedVideoUpload) -> Result<UploadedVideo> {
         self.upload_video_with_progress(p, |_, _| Ok(()))
     }
+    /// Upload a video's prepared copies while reporting cumulative encrypted bytes sent.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn upload_video_with_progress(
         &self,
         p: &PreparedVideoUpload,
