@@ -10,7 +10,7 @@ version when combining them.
 
 | Cargo configuration | Available modules | Build requirements |
 | --- | --- | --- |
-| Default (`native-runtime`) | PCM utilities, Opus, native session/media implementation and `wechat-protocol` | Rust 1.93.1+, C/C++ compiler, CMake, Make and Perl |
+| Default (`native-runtime`) | PCM utilities, Opus, native session/media implementation and `wechat-protocol` (`pure-rust-crypto`) | Rust 1.93.1+, C/C++ compiler and CMake |
 | `default-features = false, features = ["native-opus"]` | PCM utilities and Opus, without protocol/account dependencies | Rust 1.93.1+, C/C++ compiler and CMake |
 | `default-features = false` | PCM formats, queues, ordering, pacing, tones and mixing | Rust 1.93.1+; also builds for `wasm32-unknown-unknown` |
 

@@ -3,7 +3,6 @@
 //! does not change request selection or authorize Ax/app/media key substitution.
 
 use crate::{business, crypto, AccountState, MAX_MESSAGE_BYTES};
-use openssl::symm::Mode;
 use zeroize::Zeroizing;
 
 /// A pre-answer LiveSync was superseded locally. The transport may have sent
@@ -120,8 +119,10 @@ impl CallHostRpcError {
                 std::io::ErrorKind::BrokenPipe => "broken_pipe",
                 _ => "io",
             };
-        } else if cause.is::<openssl::error::ErrorStack>() {
+        } else if is_openssl_crypto_error(cause) {
             result.code = "openssl_crypto";
+        } else if cause.is::<crate::crypto::CryptoBackendError>() {
+            result.code = "crypto";
         } else if let Some((code, value)) = cause
             .chain()
             .find_map(|error| known_transport_literal(&error.to_string()))
@@ -130,6 +131,18 @@ impl CallHostRpcError {
             result.value = value;
         }
         result
+    }
+}
+
+fn is_openssl_crypto_error(cause: &anyhow::Error) -> bool {
+    #[cfg(feature = "openssl-crypto")]
+    {
+        cause.is::<openssl::error::ErrorStack>()
+    }
+    #[cfg(not(feature = "openssl-crypto"))]
+    {
+        let _ = cause;
+        false
     }
 }
 
@@ -241,7 +254,7 @@ pub(crate) fn decode_verified_reply(
                 crypto::envelope_open(&envelope.payload, &state.response_key, b"")
             }
             5 if state.session_key.len() == 16 => {
-                crypto::cbc(&envelope.payload, &state.session_key, Mode::Decrypt)
+                crypto::cbc_decrypt(&envelope.payload, &state.session_key)
             }
             5 | 13 => {
                 return Err(decode_error(
@@ -303,7 +316,7 @@ mod tests {
         };
         let cipher = match mode {
             13 => crypto::envelope_seal(&body, &state.response_key, b"", [3; 12]).unwrap(),
-            _ => crypto::cbc(&body, &state.session_key, Mode::Encrypt).unwrap(),
+            _ => crypto::cbc_encrypt(&body, &state.session_key).unwrap(),
         };
         let cookie = b"new";
         let mut tail = Vec::new();
@@ -416,16 +429,31 @@ mod tests {
 
     #[test]
     fn crypto_diagnostics_preserve_only_fixed_phase_labels() {
-        let cause = anyhow::Error::new(openssl::error::ErrorStack::get())
+        let cause = anyhow::Error::new(crate::crypto::CryptoBackendError)
             .context("MMTLS signature record authentication")
             .context("synthetic private response and credentials");
         let diagnostic = CallHostRpcError::from_cause(CallHostStage::Handshake, &cause);
-        assert_eq!(diagnostic.code, "openssl_crypto");
+        assert_eq!(diagnostic.code, "crypto");
         assert_eq!(
             diagnostic.crypto_step,
             Some("signature_record_authentication")
         );
         assert!(!diagnostic.to_string().contains("private"));
         assert!(!diagnostic.may_have_submitted());
+
+        #[cfg(feature = "openssl-crypto")]
+        {
+            let cause = anyhow::Error::new(openssl::error::ErrorStack::get())
+                .context("MMTLS signature record authentication")
+                .context("synthetic private response and credentials");
+            let diagnostic = CallHostRpcError::from_cause(CallHostStage::Handshake, &cause);
+            assert_eq!(diagnostic.code, "openssl_crypto");
+            assert_eq!(
+                diagnostic.crypto_step,
+                Some("signature_record_authentication")
+            );
+            assert!(!diagnostic.to_string().contains("private"));
+            assert!(!diagnostic.may_have_submitted());
+        }
     }
 }

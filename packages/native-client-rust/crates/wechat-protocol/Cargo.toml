@@ -14,9 +14,30 @@ categories = ["network-programming"]
 include = ["src/**", "tests/**", "examples/**", "README.md", "LICENSE", "NOTICE", "build.rs", "fixtures/**", "vendor/silk/**"]
 
 [features]
-default = ["voice-silk"]
+default = ["voice-silk", "openssl-crypto"]
 # Compile the bundled C SILK voice codec (`silk::encode` and `silk::decode`).
 voice-silk = ["dep:cc"]
+# Use vendored OpenSSL as the cryptographic backend (default for 3.x).
+openssl-crypto = ["dep:openssl"]
+# Use pure-Rust cryptographic primitives (`RustCrypto` + `getrandom`) without OpenSSL.
+pure-rust-crypto = [
+    "dep:aes",
+    "dep:aes-gcm",
+    "dep:cbc",
+    "dep:chacha20",
+    "dep:digest",
+    "dep:getrandom",
+    "dep:hmac",
+    "dep:md-5",
+    "dep:p224",
+    "dep:p256",
+    "dep:pkcs8",
+    "dep:poly1305",
+    "dep:rand_core",
+    "dep:rsa",
+    "dep:sha2",
+    "dep:subtle",
+]
 # Compatibility alias; this feature no longer selects a different build.
 experimental-calls = []
 
@@ -28,7 +49,23 @@ roxmltree = "0.21"
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["sync"] }
-openssl = { version = "0.10", features = ["vendored"] }
+openssl = { version = "0.10", features = ["vendored"], optional = true }
+aes = { version = "0.8", features = ["zeroize"], optional = true }
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc", "zeroize"], optional = true }
+cbc = { version = "0.1", default-features = false, features = ["alloc", "block-padding", "zeroize"], optional = true }
+chacha20 = { version = "0.9", default-features = false, features = ["zeroize"], optional = true }
+digest = { version = "0.10", optional = true }
+getrandom = { version = "0.4", optional = true }
+hmac = { version = "0.12", optional = true }
+md-5 = { version = "0.10", optional = true }
+p224 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdh"], optional = true }
+p256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdh", "ecdsa", "pem", "pkcs8"], optional = true }
+pkcs8 = { version = "0.10", default-features = false, features = ["alloc", "pem"], optional = true }
+poly1305 = { version = "0.8", default-features = false, features = ["zeroize"], optional = true }
+rand_core = { version = "0.6", default-features = false, optional = true }
+rsa = { version = "0.9", default-features = false, features = ["pem", "u64_digit"], optional = true }
+sha2 = { workspace = true, optional = true }
+subtle = { version = "2", default-features = false, optional = true }
 flate2 = "1"
 base64 = "0.22"
 hex = "0.4"

@@ -31,7 +31,7 @@ pub use crate::wire::{
 };
 use crate::{
     business::{self, AuthenticatedPacket, Prelogin},
-    crypto::Ecdh,
+    crypto::{Curve, Ecdh},
     mmtls::{self, Session},
     protobuf as p, wire,
 };
@@ -43,7 +43,6 @@ pub use account::{
 use anyhow::{bail, ensure, Result};
 pub use channels::{ChannelsMedia, ChannelsPage, ChannelsPost, ChannelsTicket};
 pub use logout::*;
-use openssl::{nid::Nid, pkey::PKey, rsa::Rsa};
 pub use revoke::*;
 use serde::{Deserialize, Serialize};
 pub use status_notify::*;
@@ -726,8 +725,7 @@ impl NativeClient {
                 && key_info.len() <= 1024 * 1024,
             "Invalid saved-device credentials"
         );
-        let rsa = Rsa::generate(1024)?;
-        let public = PKey::from_rsa(rsa)?.public_key_to_pem()?;
+        let public = crate::crypto::generate_rsa_1024_public_pem()?;
         let request = wire::push_login(device, username, auto_auth_key, &public)?;
         let (reply, cookie, key_version) = self.prelogin_rpc(
             long_host,
@@ -864,7 +862,7 @@ impl NativeClient {
             attempt.status == LoginStatus::Approved,
             "Login has not been approved"
         );
-        let inner = Ecdh::generate(Nid::SECP224R1)?;
+        let inner = Ecdh::generate_for(Curve::P224)?;
         let request = attempt.manual_auth_request(&inner.public()?)?;
         let mut long_host = attempt.long_host.clone();
         let mut short_host = attempt.short_host.clone();
@@ -925,7 +923,7 @@ impl NativeClient {
         computer_name: &str,
     ) -> Result<AccountState> {
         previous.validate()?;
-        let inner = Ecdh::generate(Nid::SECP224R1)?;
+        let inner = Ecdh::generate_for(Curve::P224)?;
         let request = wire::auto_auth(previous, &inner.public()?, computer_name)?;
         let mut long = previous.long_host.clone();
         let mut short = previous.short_host.clone();
@@ -1677,7 +1675,7 @@ mod tests {
     }
     #[test]
     fn final_approval_request_restores_key_info_for_both_saved_device_and_qr() {
-        let inner = Ecdh::generate(Nid::SECP224R1).unwrap();
+        let inner = Ecdh::generate_for(Curve::P224).unwrap();
         for qr in [false, true] {
             let attempt = attempt(LoginStatus::Approved, qr);
             let restored: LoginAttempt =
@@ -1918,7 +1916,7 @@ mod tests {
     fn database_password_follows_auth_update_gate_and_optional_presence() {
         let mut old = state();
         old.database_password = vec![11; 32];
-        let inner = Ecdh::generate(Nid::SECP224R1).unwrap();
+        let inner = Ecdh::generate_for(Curve::P224).unwrap();
         let response = |mask, password: Option<&[u8]>| {
             let mut fields = vec![
                 p::uint(1, old.uin as u64),
@@ -1987,7 +1985,7 @@ mod tests {
     #[test]
     fn refresh_identity_and_clear_tokens() {
         let old = state();
-        let inner = Ecdh::generate(Nid::SECP224R1).unwrap();
+        let inner = Ecdh::generate_for(Curve::P224).unwrap();
         let auth = p::message(&[
             p::uint(1, old.uin as u64),
             p::bytes(3, &p::buffer(&[1; 16])),

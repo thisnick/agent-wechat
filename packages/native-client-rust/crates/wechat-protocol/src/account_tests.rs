@@ -32,8 +32,7 @@ pub(super) fn client() -> NativeClient {
 // calls/host_transport.rs; it does not use the request serializer.
 fn call_reply(state: &AccountState) -> Vec<u8> {
     let plain = b"synthetic call reply";
-    let cipher =
-        crate::crypto::cbc(plain, &state.session_key, openssl::symm::Mode::Encrypt).unwrap();
+    let cipher = crate::crypto::cbc_encrypt(plain, &state.session_key).unwrap();
     let cookie = b"new";
     let mut tail = Vec::new();
     for value in [7994, plain.len() as u64, plain.len() as u64, 0, 0] {

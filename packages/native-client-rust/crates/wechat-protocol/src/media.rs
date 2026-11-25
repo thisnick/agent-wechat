@@ -2,14 +2,13 @@
 //! not HTTPS. Media encryption and advertised size/digests are checked separately.
 use crate::errors::{Service, ServiceRejected};
 use crate::{
-    crypto::{md5, random, sha256},
+    crypto::{
+        aes_128_cbc_encrypt, aes_128_ecb_decrypt, aes_128_ecb_encrypt, md5, random, sha256,
+        Aes128EcbDecryptor, Md5Hasher, Sha256Hasher,
+    },
     protobuf as p, AccountState,
 };
 use anyhow::{bail, ensure, Result};
-use openssl::{
-    hash::{Hasher, MessageDigest},
-    symm::{Cipher, Crypter, Mode},
-};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -255,22 +254,11 @@ pub fn encrypt_recipient(destination: &str) -> Result<String> {
         "Invalid CDN recipient"
     );
     let key = b"wxusrname2016cdn";
-    let encrypted = openssl::symm::encrypt(
-        Cipher::aes_128_cbc(),
-        key,
-        Some(key),
-        destination.as_bytes(),
-    )?;
+    let encrypted = aes_128_cbc_encrypt(key, key, destination.as_bytes())?;
     Ok(format!("@cdn2_{}", hex::encode(encrypted)))
 }
 fn ecb_encrypt(raw: &[u8], key: &[u8]) -> Result<Vec<u8>> {
-    ensure!(key.len() == 16, "Invalid CDN key");
-    Ok(openssl::symm::encrypt(
-        Cipher::aes_128_ecb(),
-        key,
-        None,
-        raw,
-    )?)
+    aes_128_ecb_encrypt(key, raw)
 }
 pub fn decrypt_cdn(encrypted: &[u8], key: &[u8]) -> Result<Vec<u8>> {
     ensure!(
@@ -280,12 +268,7 @@ pub fn decrypt_cdn(encrypted: &[u8], key: &[u8]) -> Result<Vec<u8>> {
             && encrypted.len() <= MAX_LARGE_FILE_BYTES + 16,
         "Invalid CDN ciphertext"
     );
-    Ok(openssl::symm::decrypt(
-        Cipher::aes_128_ecb(),
-        key,
-        None,
-        encrypted,
-    )?)
+    aes_128_ecb_decrypt(key, encrypted)
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -502,11 +485,10 @@ impl PreparedUpload {
             "Invalid prepared upload"
         );
         // Validate persisted ciphertext without allocating a second whole file.
-        let mut decryptor =
-            Crypter::new(Cipher::aes_128_ecb(), Mode::Decrypt, &self.aes_key, None)?;
+        let mut decryptor = Aes128EcbDecryptor::new(&self.aes_key)?;
         let mut buffer = zeroize::Zeroizing::new(vec![0; 128 * 1024 + 16]);
-        let mut md5 = Hasher::new(MessageDigest::md5())?;
-        let mut sha256 = Hasher::new(MessageDigest::sha256())?;
+        let mut md5 = Md5Hasher::new()?;
+        let mut sha256 = Sha256Hasher::new()?;
         let mut plaintext_bytes = 0usize;
         for chunk in self.encrypted.chunks(128 * 1024) {
             let written = decryptor.update(chunk, &mut buffer)?;
@@ -933,16 +915,11 @@ impl CdnClient {
         let mut total = 0usize;
         // Pieces are decrypted as they arrive. The decryptor keeps the last
         // block back until the padding is known.
-        let mut decryptor = Crypter::new(
-            Cipher::aes_128_ecb(),
-            Mode::Decrypt,
-            &descriptor.aes_key,
-            None,
-        )?;
+        let mut decryptor = Aes128EcbDecryptor::new(&descriptor.aes_key)?;
         let mut plain = zeroize::Zeroizing::new(vec![]);
         let mut plaintext_bytes = 0usize;
-        let mut plaintext_md5 = Hasher::new(MessageDigest::md5())?;
-        let mut plaintext_sha256 = Hasher::new(MessageDigest::sha256())?;
+        let mut plaintext_md5 = Md5Hasher::new()?;
+        let mut plaintext_sha256 = Sha256Hasher::new()?;
         let mut substituted_filetype = None;
         let mut picture_format = None;
         let mut server_md5 = None;
@@ -2817,22 +2794,10 @@ mod tests {
             let (descriptor, _, ciphertext) =
                 download_fixture(512 * 1024 + 17, MediaQuality::LargeFile);
             let mut invalid_padding = ciphertext.clone();
-            let mut encoder = openssl::symm::Crypter::new(
-                Cipher::aes_128_ecb(),
-                openssl::symm::Mode::Encrypt,
-                &descriptor.aes_key,
-                None,
-            )
-            .unwrap();
-            encoder.pad(false);
-            let mut block = [0u8; 32];
-            let written = encoder.update(&[0u8; 16], &mut block).unwrap();
-            assert_eq!(
-                written + encoder.finalize(&mut block[written..]).unwrap(),
-                16
-            );
+            let block =
+                crate::crypto::aes_128_ecb_encrypt_no_pad(&descriptor.aes_key, &[0u8; 16]).unwrap();
             let last = invalid_padding.len() - 16;
-            invalid_padding[last..].copy_from_slice(&block[..16]);
+            invalid_padding[last..].copy_from_slice(&block);
             assert!(client()
                 .download_with_transport(
                     &descriptor,

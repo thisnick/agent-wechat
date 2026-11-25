@@ -289,8 +289,8 @@ impl<'a> UploadRef<'a> {
 pub(super) struct CiphertextChunks<'a> {
     upload: UploadRef<'a>,
     position: usize,
-    md5: Option<Hasher>,
-    sha256: Option<Hasher>,
+    md5: Option<Md5Hasher>,
+    sha256: Option<Sha256Hasher>,
 }
 impl CiphertextChunks<'_> {
     /// Ciphertext offset of the next chunk.
@@ -320,12 +320,12 @@ impl CiphertextChunks<'_> {
         prepared.read_at(self.position as u64, &mut block[..read])?;
         let md5 = match &mut self.md5 {
             Some(hasher) => hasher,
-            None => self.md5.insert(Hasher::new(MessageDigest::md5())?),
+            None => self.md5.insert(Md5Hasher::new()?),
         };
         md5.update(&block[..read])?;
         let sha256 = match &mut self.sha256 {
             Some(hasher) => hasher,
-            None => self.sha256.insert(Hasher::new(MessageDigest::sha256())?),
+            None => self.sha256.insert(Sha256Hasher::new()?),
         };
         sha256.update(&block[..read])?;
         if end == total {
@@ -339,17 +339,7 @@ impl CiphertextChunks<'_> {
                 "Prepared upload digest mismatch"
             );
         }
-        let mut crypter = Crypter::new(
-            Cipher::aes_128_ecb(),
-            Mode::Encrypt,
-            &prepared.aes_key,
-            None,
-        )?;
-        crypter.pad(false);
-        let mut encrypted = Zeroizing::new(vec![0u8; block.len() + 16]);
-        let count = crypter.update(&block, &mut encrypted)?;
-        let rest = crypter.finalize(&mut encrypted[count..])?;
-        encrypted.truncate(count + rest);
+        let encrypted = crate::crypto::aes_128_ecb_encrypt_no_pad(&prepared.aes_key, &block)?;
         ensure!(encrypted.len() == block.len(), "Invalid upload range");
         self.position = end;
         Ok(encrypted)

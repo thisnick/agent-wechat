@@ -61,6 +61,7 @@ enum wechat_protocol::calls::video_packet::VideoChannelPayload | enum<'a> | Disp
 enum wechat_protocol::calls::video_packet::VideoRotation | enum | Clockwise display rotation derived from the `EncFecHeader` kind-3 orientation code.
 enum wechat_protocol::calls::video_packet::VideoWireCodec | enum | Wire codec identifier in byte 0 of an MP/iLink video payload.
 enum wechat_protocol::calls::video_qos::KeyframeRequestReason | enum | Reason a video keyframe request (`0x66 IRequest`) was scheduled.
+enum wechat_protocol::crypto::Curve | enum | Named elliptic curves used by WeChat transport and authentication key agreement.
 enum wechat_protocol::custom_stickers::CustomStickerMutation | enum | One membership or placement intent. It is not an automatic retry policy.
 enum wechat_protocol::media::LargeCdnRoute | enum | MISSING DOC
 enum wechat_protocol::media::LargeFileDownloadControl | enum | Only these fixed, nonsecret numeric controls can enter a stored diagnostic.
@@ -1328,23 +1329,27 @@ fn wechat_protocol::contact_sync::decode | fn(input: &[u8]) -> anyhow::Result<we
 fn wechat_protocol::contact_sync::request | fn(state: &wechat_protocol::client::AccountState, cursor: &[u8], message_cursor: &[u8], continuation: bool) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
 fn wechat_protocol::contact_sync::validate_cursor | fn(input: &[u8]) -> anyhow::Result<()> | SyncKeyBuffer: repeated field1 SyncKeyPair { key1:u32, value2:u64 }. Keep the supplied encoding intact, including unknown fields, for publication.
 fn wechat_protocol::controlled_contact_fields | fn(raw: &[u8]) -> anyhow::Result<alloc::vec::Vec<u32>> | Extract only the proved field-control IDs. Version ordering is deliberately not guessed: callers preserve these fields and retain the unresolved update.
-fn wechat_protocol::crypto::Ecdh::derive | fn(&self, point: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
-fn wechat_protocol::crypto::Ecdh::from_private | fn(nid: openssl::nid::Nid, private: &[u8]) -> anyhow::Result<Self> | MISSING DOC
-fn wechat_protocol::crypto::Ecdh::generate | fn(nid: openssl::nid::Nid) -> anyhow::Result<Self> | MISSING DOC
-fn wechat_protocol::crypto::Ecdh::public | fn(&self) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
-fn wechat_protocol::crypto::cbc | fn(plain: &[u8], key: &[u8], mode: openssl::symm::Mode) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
-fn wechat_protocol::crypto::deflate | fn(plain: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
-fn wechat_protocol::crypto::envelope_open | fn(input: &[u8], key: &[u8], aad: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
-fn wechat_protocol::crypto::envelope_seal | fn(plain: &[u8], key: &[u8], aad: &[u8], iv: [u8; 12]) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
-fn wechat_protocol::crypto::expand | fn(secret: &[u8], info: &[u8], size: usize) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
-fn wechat_protocol::crypto::gcm_open | fn(key: &[u8], iv: &[u8], aad: &[u8], encrypted: &[u8], tag: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
-fn wechat_protocol::crypto::gcm_seal | fn(key: &[u8], iv: &[u8], aad: &[u8], plain: &[u8]) -> anyhow::Result<(alloc::vec::Vec<u8>, [u8; 16])> | MISSING DOC
-fn wechat_protocol::crypto::hmac | fn(key: &[u8], input: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
-fn wechat_protocol::crypto::inflate | fn(zipped: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
-fn wechat_protocol::crypto::md5 | fn(b: &[u8]) -> alloc::vec::Vec<u8> | MISSING DOC
-fn wechat_protocol::crypto::random | fn<const N: usize>() -> anyhow::Result<[u8; N]> | MISSING DOC
-fn wechat_protocol::crypto::sha256 | fn(b: &[u8]) -> alloc::vec::Vec<u8> | MISSING DOC
-fn wechat_protocol::crypto::verify_signature | fn(pem: &str, data: &[u8], signature: &[u8]) -> anyhow::Result<()> | MISSING DOC
+fn wechat_protocol::crypto::Ecdh::derive | fn(&self, point: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Derive the fixed-width shared secret `x`-coordinate with a peer's SEC1 point.
+fn wechat_protocol::crypto::Ecdh::from_private | #[cfg(feature = \"openssl-crypto\")] fn(nid: openssl::nid::Nid, private: &[u8]) -> anyhow::Result<Self> | Construct an ECDH key pair from a big-endian private scalar using an OpenSSL curve `Nid`. Requires the `openssl-crypto` feature; portable callers can use [`Self::from_private_for`].
+fn wechat_protocol::crypto::Ecdh::from_private_for | fn(curve: wechat_protocol::crypto::Curve, private: &[u8]) -> anyhow::Result<Self> | Construct an ECDH key pair from a big-endian private scalar on `curve`.
+fn wechat_protocol::crypto::Ecdh::generate | #[cfg(feature = \"openssl-crypto\")] fn(nid: openssl::nid::Nid) -> anyhow::Result<Self> | Generate a fresh ECDH key pair using an OpenSSL curve `Nid`. Requires the `openssl-crypto` feature; portable callers can use [`Self::generate_for`].
+fn wechat_protocol::crypto::Ecdh::generate_for | fn(curve: wechat_protocol::crypto::Curve) -> anyhow::Result<Self> | Generate a fresh ECDH key pair for `curve`.
+fn wechat_protocol::crypto::Ecdh::public | fn(&self) -> anyhow::Result<alloc::vec::Vec<u8>> | Return the uncompressed SEC1 public point (`0x04 || x || y`).
+fn wechat_protocol::crypto::cbc | #[cfg(feature = \"openssl-crypto\")] fn(plain: &[u8], key: &[u8], mode: openssl::symm::Mode) -> anyhow::Result<alloc::vec::Vec<u8>> | Encrypt or decrypt with AES-128-CBC (PKCS#7 padding) using OpenSSL's `Mode`. Requires the `openssl-crypto` feature; portable callers can use [`cbc_encrypt`] and [`cbc_decrypt`].
+fn wechat_protocol::crypto::cbc_decrypt | fn(ciphertext: &[u8], key: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Decrypt `ciphertext` with AES-128-CBC (PKCS#7 padding), normalizing `key` to 16 zero-padded bytes used as both key and IV.
+fn wechat_protocol::crypto::cbc_encrypt | fn(plain: &[u8], key: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Encrypt `plain` with AES-128-CBC (PKCS#7 padding), normalizing `key` to 16 zero-padded bytes used as both key and IV.
+fn wechat_protocol::crypto::deflate | fn(plain: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Compress `plain` with zlib within [`MAX_MESSAGE_BYTES`].
+fn wechat_protocol::crypto::envelope_open | fn(input: &[u8], key: &[u8], aad: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Open and decompress an AES-192-GCM business envelope.
+fn wechat_protocol::crypto::envelope_seal | fn(plain: &[u8], key: &[u8], aad: &[u8], iv: [u8; 12]) -> anyhow::Result<alloc::vec::Vec<u8>> | Compress and seal a business payload using AES-192-GCM.
+fn wechat_protocol::crypto::expand | fn(secret: &[u8], info: &[u8], size: usize) -> anyhow::Result<alloc::vec::Vec<u8>> | HKDF-Expand (RFC 5869) using HMAC-SHA256.
+fn wechat_protocol::crypto::gcm_open | fn(key: &[u8], iv: &[u8], aad: &[u8], encrypted: &[u8], tag: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Decrypt and authenticate `encrypted` with AES-128-GCM or AES-192-GCM.
+fn wechat_protocol::crypto::gcm_seal | fn(key: &[u8], iv: &[u8], aad: &[u8], plain: &[u8]) -> anyhow::Result<(alloc::vec::Vec<u8>, [u8; 16])> | Encrypt and authenticate `plain` with AES-128-GCM or AES-192-GCM.
+fn wechat_protocol::crypto::hmac | fn(key: &[u8], input: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Compute HMAC-SHA256 over `input` using `key`.
+fn wechat_protocol::crypto::inflate | fn(zipped: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Decompress zlib data, enforcing [`MAX_MESSAGE_BYTES`] and rejecting trailing bytes.
+fn wechat_protocol::crypto::md5 | fn(b: &[u8]) -> alloc::vec::Vec<u8> | Compute the MD5 digest of `b`.
+fn wechat_protocol::crypto::random | fn<const N: usize>() -> anyhow::Result<[u8; N]> | Generate `N` cryptographically secure random bytes.
+fn wechat_protocol::crypto::sha256 | fn(b: &[u8]) -> alloc::vec::Vec<u8> | Compute the SHA-256 digest of `b`.
+fn wechat_protocol::crypto::verify_signature | fn(pem: &str, data: &[u8], signature: &[u8]) -> anyhow::Result<()> | Verify an ASN.1 DER ECDSA-SHA256 signature against a pinned P-256 SPKI PEM public key.
 fn wechat_protocol::custom_stickers::custom_sticker_list_request | fn(index: u32, data: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Encode a custom-list page. Initial cursor is index zero with empty data.
 fn wechat_protocol::custom_stickers::custom_sticker_metadata_request | fn(ids: &[alloc::string::String]) -> anyhow::Result<alloc::vec::Vec<u8>> | Encode a bounded metadata request for known collection identities.
 fn wechat_protocol::custom_stickers::custom_sticker_mutation_request | fn(id: &str, action: &wechat_protocol::custom_stickers::CustomStickerMutation) -> anyhow::Result<alloc::vec::Vec<u8>> | Encode one custom membership/placement operation, without a BaseRequest.
@@ -1622,6 +1627,7 @@ impl core::clone::Clone for wechat_protocol::calls::video_qos::KeyframeRequestRe
 impl core::clone::Clone for wechat_protocol::calls::video_qos::ScheduledIRequest | impl | -
 impl core::clone::Clone for wechat_protocol::calls::voice_offer::VideoOfferOptions | impl | -
 impl core::clone::Clone for wechat_protocol::contact_sync::ContactSyncBatch | impl | -
+impl core::clone::Clone for wechat_protocol::crypto::Curve | impl | -
 impl core::clone::Clone for wechat_protocol::custom_stickers::CustomStickerMetadata | impl | -
 impl core::clone::Clone for wechat_protocol::custom_stickers::CustomStickerMutation | impl | -
 impl core::clone::Clone for wechat_protocol::custom_stickers::CustomStickerPage | impl | -
@@ -1737,6 +1743,7 @@ impl core::cmp::Eq for wechat_protocol::calls::video_packet::VideoWireCodec | im
 impl core::cmp::Eq for wechat_protocol::calls::video_qos::KeyframeRequestReason | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::video_qos::ScheduledIRequest | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::voice_offer::VideoOfferOptions | impl | -
+impl core::cmp::Eq for wechat_protocol::crypto::Curve | impl | -
 impl core::cmp::Eq for wechat_protocol::media::ChannelsDownloadFacts | impl | -
 impl core::cmp::Eq for wechat_protocol::media::LargeCdnRoute | impl | -
 impl core::cmp::Eq for wechat_protocol::media::LargeFileDownloadControl | impl | -
@@ -1811,6 +1818,7 @@ impl core::cmp::PartialEq for wechat_protocol::calls::video_packet::VideoWireCod
 impl core::cmp::PartialEq for wechat_protocol::calls::video_qos::KeyframeRequestReason | impl | -
 impl core::cmp::PartialEq for wechat_protocol::calls::video_qos::ScheduledIRequest | impl | -
 impl core::cmp::PartialEq for wechat_protocol::calls::voice_offer::VideoOfferOptions | impl | -
+impl core::cmp::PartialEq for wechat_protocol::crypto::Curve | impl | -
 impl core::cmp::PartialEq for wechat_protocol::media::ChannelsDownloadFacts | impl | -
 impl core::cmp::PartialEq for wechat_protocol::media::LargeCdnRoute | impl | -
 impl core::cmp::PartialEq for wechat_protocol::media::LargeFileDownloadControl | impl | -
@@ -1932,6 +1940,7 @@ impl core::fmt::Debug for wechat_protocol::calls::video_packet::VideoWireCodec |
 impl core::fmt::Debug for wechat_protocol::calls::video_qos::KeyframeRequestReason | impl | -
 impl core::fmt::Debug for wechat_protocol::calls::video_qos::ScheduledIRequest | impl | -
 impl core::fmt::Debug for wechat_protocol::calls::voice_offer::VideoOfferOptions | impl | -
+impl core::fmt::Debug for wechat_protocol::crypto::Curve | impl | -
 impl core::fmt::Debug for wechat_protocol::file_upload::FileUploadReservation | impl | -
 impl core::fmt::Debug for wechat_protocol::media::CdnConfig | impl | -
 impl core::fmt::Debug for wechat_protocol::media::ChannelsDownloadFacts | impl | -
@@ -2007,6 +2016,7 @@ impl core::marker::Copy for wechat_protocol::calls::video_packet::VideoS2pComman
 impl core::marker::Copy for wechat_protocol::calls::video_packet::VideoWireCodec | impl | -
 impl core::marker::Copy for wechat_protocol::calls::video_qos::KeyframeRequestReason | impl | -
 impl core::marker::Copy for wechat_protocol::calls::voice_offer::VideoOfferOptions | impl | -
+impl core::marker::Copy for wechat_protocol::crypto::Curve | impl | -
 impl core::marker::Copy for wechat_protocol::media::CdnLocation | impl | -
 impl core::marker::Copy for wechat_protocol::media::LargeCdnRoute | impl | -
 impl core::marker::Copy for wechat_protocol::media::LargeFileDownloadControl | impl | -
@@ -2073,6 +2083,7 @@ impl core::marker::StructuralPartialEq for wechat_protocol::calls::video_packet:
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::video_qos::KeyframeRequestReason | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::video_qos::ScheduledIRequest | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::voice_offer::VideoOfferOptions | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::crypto::Curve | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::media::ChannelsDownloadFacts | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::media::LargeCdnRoute | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::media::LargeFileDownloadControl | impl | -
@@ -2297,7 +2308,7 @@ mod wechat_protocol::calls::video_packet | - | Video packetization, reassembly a
 mod wechat_protocol::calls::video_qos | - | Deterministic video ARQ/NACK, P2S QoS telemetry and keyframe-recovery state machines.
 mod wechat_protocol::calls::voice_offer | - | Local voice advertisements are distinct from returned selected capabilities. A fresh offer advertises only the supported Opus17 bit. The server's selected codec number, packet format and channel flags require separate admission.
 mod wechat_protocol::contact_sync | - | Linux 4.1.13.26 contact stream (CGI8674). This stream has its own `rs_config`/`sync_11` cursor; the message SyncKey is only request context.
-mod wechat_protocol::crypto | - | MISSING DOC
+mod wechat_protocol::crypto | - | Cryptographic primitives shared by MMTLS, business envelopes, media transfers and call packets.
 mod wechat_protocol::custom_stickers | - | Custom collection reads and mutations, separate from sticker chat sends.
 mod wechat_protocol::file_upload | - | File-upload message reservation. This authenticated request can affect the account's message state; callers must persist its receipt and never retry an uncertain response automatically.
 mod wechat_protocol::media | - | Bounded native CDN transport. This uses the observed HTTP carrier on port 443, not HTTPS. Media encryption and advertised size/digests are checked separately.
@@ -2432,7 +2443,7 @@ struct wechat_protocol::calls::video_qos::VideoP2sAccumulator | struct { private
 struct wechat_protocol::calls::voice_offer::VideoOfferOptions | struct { public fields } | Advertised standard video codec capabilities for an engine capability offer.
 struct wechat_protocol::calls::voice_offer::VoiceOffer | struct { private fields } | Owned request metadata for one call generation. It intentionally has no `Clone` or `Debug`: create a fresh identity for each new call. The embedding owner must supply new random bytes and keep this value until that call ends.
 struct wechat_protocol::contact_sync::ContactSyncBatch | struct { public fields } | MISSING DOC
-struct wechat_protocol::crypto::Ecdh | struct { private fields } | MISSING DOC
+struct wechat_protocol::crypto::Ecdh | struct { private fields } | Ephemeral or fixed-scalar ECDH key pair for NIST P-224 or P-256.
 struct wechat_protocol::custom_stickers::CustomStickerMetadata | struct { public fields } | Private transport metadata. These URLs and keys must not be exposed by an API.
 struct wechat_protocol::custom_stickers::CustomStickerPage | struct { public fields } | One custom-collection response, retained before profile writeback.
 struct wechat_protocol::file_upload::FileUploadReservation | struct { public fields } | MISSING DOC
@@ -2612,6 +2623,8 @@ variant wechat_protocol::calls::video_packet::VideoWireCodec::Vcodec1 | - | Prop
 variant wechat_protocol::calls::video_qos::KeyframeRequestReason::FrameDrop | - | Triggered by a dropped or unrecoverable frame assembly.
 variant wechat_protocol::calls::video_qos::KeyframeRequestReason::InitialSync | - | Triggered proactively before initial keyframe synchronization completes.
 variant wechat_protocol::calls::video_qos::KeyframeRequestReason::LocalRequest | - | Triggered by an explicit local decoder or client request.
+variant wechat_protocol::crypto::Curve::P224 | - | NIST P-224 (`secp224r1`), used for account authentication key agreement.
+variant wechat_protocol::crypto::Curve::P256 | - | NIST P-256 (`prime256v1`), used for MMTLS and HybridECDH prelogin.
 variant wechat_protocol::custom_stickers::CustomStickerMutation::Add | - | Save an uploaded/existing sticker identity.
 variant wechat_protocol::custom_stickers::CustomStickerMutation::After | { public fields } | Move after an anchor using a fresh complete-list server version.
 variant wechat_protocol::custom_stickers::CustomStickerMutation::First | - | Move the identity to the front.

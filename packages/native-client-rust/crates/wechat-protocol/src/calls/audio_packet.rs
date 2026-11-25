@@ -2,14 +2,10 @@
 //! bytes does not establish negotiated capabilities, room ownership or permission
 //! to send. Media transmission requires a separately admitted generation/scope.
 
-use anyhow::{bail, ensure, Result};
-use openssl::{
-    hash::MessageDigest,
-    memcmp,
-    pkey::{Id, PKey},
-    sign::Signer,
-    symm::{Cipher, Crypter, Mode},
+use crate::crypto::{
+    chacha20_xor, constant_time_eq, hmac_sha256_slices, poly1305_mac, sha256_array,
 };
+use anyhow::{bail, ensure, Result};
 use std::collections::BTreeMap;
 use zeroize::Zeroizing;
 
@@ -312,25 +308,19 @@ impl Live96 {
         Ok(())
     }
     fn legacy_start(&self, domain: &[u8]) -> Result<u16> {
-        let key = PKey::hmac(&self.key[..])?;
-        let mut mac = Signer::new(MessageDigest::sha256(), &key)?;
-        mac.update(domain)?;
-        mac.update(&self.context.room_id.to_le_bytes())?;
-        mac.update(&self.base.to_le_bytes())?;
-        mac.update(&self.context.own_member.to_le_bytes())?;
-        let digest = Zeroizing::new(mac.sign_to_vec()?);
+        let room = self.context.room_id.to_le_bytes();
+        let base = self.base.to_le_bytes();
+        let member = self.context.own_member.to_le_bytes();
+        let digest = hmac_sha256_slices(&self.key[..], &[domain, &room, &base, &member])?;
         let prefix = u32::from_le_bytes(digest[..4].try_into()?);
         Ok((prefix % u32::from(MAX_LEGACY_AUDIO_START) + 1) as u16)
     }
     /// Derive a sender start sequence for a low-rate kind (`0x70` control, `0x50` RUDP).
     fn legacy_reserved_start(&self, domain: &[u8]) -> Result<u16> {
-        let key = PKey::hmac(&self.key[..])?;
-        let mut mac = Signer::new(MessageDigest::sha256(), &key)?;
-        mac.update(domain)?;
-        mac.update(&self.context.room_id.to_le_bytes())?;
-        mac.update(&self.base.to_le_bytes())?;
-        mac.update(&self.context.own_member.to_le_bytes())?;
-        let digest = Zeroizing::new(mac.sign_to_vec()?);
+        let room = self.context.room_id.to_le_bytes();
+        let base = self.base.to_le_bytes();
+        let member = self.context.own_member.to_le_bytes();
+        let digest = hmac_sha256_slices(&self.key[..], &[domain, &room, &base, &member])?;
         let prefix = u32::from_le_bytes(digest[..4].try_into()?);
         // Reserve 0..1024 for peers that start these kinds at 0 while keeping
         // >31,000 sequences available below u16::MAX.
@@ -623,7 +613,7 @@ impl Live96 {
                 && u16::from_le_bytes(clear[..2].try_into()?) == self.context.peer_member,
             "Protected media member mismatch or extent"
         );
-        let digest: [u8; 32] = openssl::sha::sha256(&packet[hdr_len..]);
+        let digest: [u8; 32] = sha256_array(&packet[hdr_len..]);
         if let Some(previous) = self.rx.get(&nonce) {
             if previous.contains(&digest) {
                 return Ok(None);
@@ -903,29 +893,14 @@ pub fn parse_ordinary95(payload: &[u8]) -> Result<OrdinaryAudio<'_>> {
     })
 }
 fn xor(key: &[u8; 32], nonce: [u8; 8], counter: u64, input: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-    let mut iv = Zeroizing::new([0; 16]);
-    iv[..8].copy_from_slice(&counter.to_le_bytes());
-    iv[8..].copy_from_slice(&nonce);
-    let cipher = Cipher::chacha20();
-    let mut crypter = Crypter::new(cipher, Mode::Encrypt, key, Some(&*iv))?;
-    crypter.pad(false);
-    let mut out = Zeroizing::new(vec![0; input.len() + cipher.block_size()]);
-    let n = crypter.update(input, &mut out)?;
-    let end = crypter.finalize(&mut out[n..])?;
-    out.truncate(n + end);
-    ensure!(out.len() == input.len(), "Unexpected call cipher size");
-    Ok(out)
+    chacha20_xor(key, nonce, counter, input)
 }
 fn tag(key: &[u8; 32], nonce: [u8; 8], cipher: &[u8]) -> Result<[u8; 16]> {
     let one = xor(key, nonce, 0, &[0; 32])?;
-    let key = PKey::private_key_from_raw_bytes(&one, Id::POLY1305)?;
-    let mut signer = Signer::new_without_digest(&key)?;
-    signer.update(&0u64.to_le_bytes())?;
-    signer.update(cipher)?;
-    signer.update(&(cipher.len() as u64).to_le_bytes())?;
-    let mut tag = [0; 16];
-    ensure!(signer.sign(&mut tag)? == 16, "Unexpected call tag size");
-    Ok(tag)
+    let one_key: [u8; 32] = one.as_slice().try_into()?;
+    let zero = 0u64.to_le_bytes();
+    let length = (cipher.len() as u64).to_le_bytes();
+    poly1305_mac(&one_key, &[&zero, cipher, &length])
 }
 fn seal_original(key: &[u8; 32], nonce: [u8; 8], clear: &[u8]) -> Result<Vec<u8>> {
     ensure!(clear.len() <= 1484, "Call cipher input too large");
@@ -944,7 +919,7 @@ fn open_original(key: &[u8; 32], nonce: [u8; 8], sealed: &[u8]) -> Result<Zeroiz
     let (cipher, expected) = sealed.split_at(sealed.len() - 16);
     let actual = tag(key, nonce, cipher)?;
     ensure!(
-        memcmp::eq(&actual, expected),
+        constant_time_eq(&actual, expected),
         "Call media authentication failed"
     );
     xor(key, nonce, 1, cipher)
