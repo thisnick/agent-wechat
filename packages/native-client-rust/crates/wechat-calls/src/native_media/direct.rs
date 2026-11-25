@@ -673,9 +673,9 @@ pub fn run_direct_media_with_preconnected_relay<H: DirectMediaHost>(
                             P2S_CODEC_SUPPORT_H264_H265,
                             now_ms,
                         );
-                        // Report only once the sender's codec is known, so the server is
-                        // never offered a codec the sender cannot encode.
-                        let encoded = if report.decode_type == 0 {
+                        // Report only once video has arrived and the sender's codec is known,
+                        // so the server is never offered a codec the sender cannot encode.
+                        let encoded = if !video_rx.has_rx_video() {
                             last_p2s_tx = Some(video_now);
                             Err(anyhow::anyhow!("sender codec not known yet"))
                         } else {

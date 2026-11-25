@@ -325,7 +325,12 @@ impl VideoP2sAccumulator {
         let Some(seq16) = header.pkg_seq else {
             return;
         };
-        if matches!(header.codec, VideoWireCodec::H264 | VideoWireCodec::H265) {
+        // Track the sender's wire codec from packets: frames from Vcodec1 reach
+        // `observe_frame` already rewrapped as H.264.
+        if matches!(
+            header.codec,
+            VideoWireCodec::H264 | VideoWireCodec::H265 | VideoWireCodec::Vcodec1
+        ) {
             self.last_rx_codec = header.codec;
         }
         self.ever_received_video = true;
@@ -380,9 +385,6 @@ impl VideoP2sAccumulator {
         keyframe_synced: bool,
         now_ms: u64,
     ) {
-        if matches!(frame.codec, VideoWireCodec::H264 | VideoWireCodec::H265) {
-            self.last_rx_codec = frame.codec;
-        }
         self.ever_received_video = true;
         self.first_rx_video_ms.get_or_insert(now_ms);
         self.rx_frames_in_window = self.rx_frames_in_window.saturating_add(1);

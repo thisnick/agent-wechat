@@ -9,9 +9,10 @@ use crate::native_media::{DirectVideoTx, TxVideoQueue};
 use anyhow::Result;
 use std::{collections::VecDeque, sync::mpsc::Receiver};
 use wechat_protocol::calls::{
+    vcodec1::Vcodec1Converter,
     video_packet::{
         p2s_codec_support_for, parse_rsm_packet_header, ReassembledVideoFrame, RsmIngestOutcome,
-        RsmPacketHeader, RsmVideoPacketizer, RsmVideoReassembler, VideoP2sReport,
+        RsmPacketHeader, RsmVideoPacketizer, RsmVideoReassembler, VideoP2sReport, VideoWireCodec,
     },
     video_qos::{ScheduledIRequest, VideoKeyframePolicy, VideoNackTracker, VideoP2sAccumulator},
 };
@@ -36,6 +37,7 @@ pub(crate) struct VideoStreamReceiver {
     nack_tracker: VideoNackTracker,
     telemetry: VideoP2sAccumulator,
     keyframe_policy: VideoKeyframePolicy,
+    vcodec1: Vcodec1Converter,
 }
 
 impl VideoStreamReceiver {
@@ -46,6 +48,7 @@ impl VideoStreamReceiver {
             nack_tracker: VideoNackTracker::new(),
             telemetry: VideoP2sAccumulator::new(now_ms),
             keyframe_policy: VideoKeyframePolicy::new(now_ms),
+            vcodec1: Vcodec1Converter::new(),
         }
     }
 
@@ -63,6 +66,7 @@ impl VideoStreamReceiver {
         self.nack_tracker.reset();
         self.telemetry.reset(now_ms);
         self.keyframe_policy.reset(now_ms);
+        self.vcodec1 = Vcodec1Converter::new();
     }
 
     /// Last video stream ID observed on an authenticated inbound RSM video packet or frame.
@@ -79,6 +83,11 @@ impl VideoStreamReceiver {
     /// Return `true` when inbound video packets or frames arrived in the active telemetry window.
     pub(crate) fn has_active_video_window(&self) -> bool {
         self.telemetry.has_active_window()
+    }
+
+    /// Return `true` once at least one inbound video frame has been reassembled.
+    pub(crate) fn has_rx_video(&self) -> bool {
+        self.keyframe_policy.has_rx_video()
     }
 
     /// Return `true` once codec parameter sets and a keyframe have been observed.
@@ -140,6 +149,30 @@ impl VideoStreamReceiver {
         while let Some(next_frame) = self.reassembler.pop_ready() {
             frames.push(next_frame);
         }
+
+        // Official senders switch to Vcodec1 when the server's QoS selects it; rewrap it as
+        // standard H.264 so keyframe tracking, decoding and passthrough treat it as H.264.
+        let mut normalized = Vec::with_capacity(frames.len());
+        for mut frame in frames {
+            if frame.codec == VideoWireCodec::Vcodec1 {
+                match self.vcodec1.convert_frame(&frame.payload) {
+                    Ok(converted) => {
+                        frame.codec = VideoWireCodec::H264;
+                        frame.payload = converted.annexb;
+                        frame.is_keyframe = converted.is_keyframe;
+                        frame.has_codec_config = converted.has_codec_config;
+                    }
+                    Err(err) => {
+                        assembly_dropped = true;
+                        self.keyframe_policy.note_assembly_drop();
+                        ingest_error.get_or_insert(err);
+                        continue;
+                    }
+                }
+            }
+            normalized.push(frame);
+        }
+        let frames = normalized;
 
         for frame in &frames {
             if self.keyframe_policy.observe_frame(frame) {

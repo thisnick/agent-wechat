@@ -509,12 +509,15 @@ pub const P2S_CODEC_SUPPORT_H264_H265: u32 = 0x1c;
 pub const P2S_CODEC_SUPPORT_H264: u32 = 0x08;
 /// `u8VCodecSupport` allowing only H.265 (`0x04` HW | `0x10` SW).
 pub const P2S_CODEC_SUPPORT_H265: u32 = 0x14;
+/// `u8VCodecSupport` allowing only Vcodec1 (`0x02`), which this client rewraps as H.264.
+pub const P2S_CODEC_SUPPORT_VCODEC1: u32 = 0x02;
 
 /// `u8VCodecSupport` that keeps a sender on the codec it already uses: offering a codec
 /// the sender cannot encode (for example H.265 to an Android phone with only a hardware
 /// H.264 encoder) makes it fall back to proprietary Vcodec1. Before any frame, `fallback`.
 pub fn p2s_codec_support_for(wire_codec: u32, fallback: u32) -> u32 {
     match wire_codec {
+        0x00 => P2S_CODEC_SUPPORT_VCODEC1,
         0x09 => P2S_CODEC_SUPPORT_H264,
         0x0f => P2S_CODEC_SUPPORT_H265,
         _ => fallback,
@@ -526,9 +529,11 @@ pub const P2S_MAX_SIZE_FORMAT_640: u32 = 8;
 pub const P2S_MAX_SIZE_FORMAT_480: u32 = 6;
 
 /// Map an RSM wire codec byte to the decoder-type bit official receivers report in
-/// `u32VDecodeType`: H.264 → `8` (HW H.264), H.265 → `4` (HW H.265), anything else → `0`.
+/// `u32VDecodeType`: Vcodec1 → `2`, H.264 → `8` (HW H.264), H.265 → `4` (HW H.265),
+/// anything else → `0`.
 fn p2s_decoder_type(wire_codec: u32) -> u32 {
     match wire_codec {
+        0x00 => 2,
         0x09 => 8,
         0x0f => 4,
         _ => 0,
