@@ -127,6 +127,31 @@ pub fn fetch_channels_video(
     download_at(url, address, media, max_bytes, progress)
 }
 
+fn split_http_list_unquoted(value: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut in_quotes = false;
+    let mut escaped = false;
+    for (idx, ch) in value.char_indices() {
+        if in_quotes {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_quotes = false;
+            }
+        } else if ch == '"' {
+            in_quotes = true;
+        } else if ch == ',' {
+            parts.push(&value[start..idx]);
+            start = idx + 1;
+        }
+    }
+    parts.push(&value[start..]);
+    parts
+}
+
 /// Asynchronously download one Channels post's video and return the decoded MP4
 /// bytes using a pluggable [`HttpTransport`].
 ///
@@ -190,7 +215,7 @@ pub async fn fetch_channels_video_async(
     let raw_content_types = response.header_values("content-type");
     let content_type_parts: Vec<&str> = raw_content_types
         .iter()
-        .flat_map(|value| value.split(','))
+        .flat_map(|value| split_http_list_unquoted(value))
         .collect();
     ensure!(
         content_type_parts.iter().all(|kind| {
@@ -608,7 +633,10 @@ mod tests {
 
         let folded_bad_type = StaticHttp(crate::transport::HttpResponse {
             status: 200,
-            headers: vec![("Content-Type".into(), "video/mp4, text/html".into())],
+            headers: vec![(
+                "Content-Type".into(),
+                "video/mp4; codecs=\"avc1.4d401f, mp4a.40.2\", text/html".into(),
+            )],
             body: encrypted.clone(),
         });
         assert_eq!(
@@ -617,6 +645,28 @@ mod tests {
                 .unwrap_err()
                 .to_string(),
             "channels_download_failed"
+        );
+
+        let quoted_codecs_ok = StaticHttp(crate::transport::HttpResponse {
+            status: 200,
+            headers: vec![
+                (
+                    "Content-Type".into(),
+                    "video/mp4; codecs=\"avc1.4d401f, mp4a.40.2\"".into(),
+                ),
+                ("X-ErrNo".into(), "0".into()),
+                ("Content-Length".into(), encrypted.len().to_string()),
+            ],
+            body: encrypted.clone(),
+        });
+        let quoted_video =
+            fetch_channels_video_async(&info, usize::MAX, &quoted_codecs_ok, |_, _| Ok(()))
+                .await
+                .unwrap();
+        assert_eq!(quoted_video.bytes, plain);
+        assert_eq!(
+            quoted_video.facts.content_type.as_deref(),
+            Some("video/mp4")
         );
 
         struct TooLargeHttp;

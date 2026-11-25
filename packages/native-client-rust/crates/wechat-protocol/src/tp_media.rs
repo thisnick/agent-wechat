@@ -151,7 +151,18 @@ pub async fn fetch_tp_media_async(
 /// written to `sink` are unverified and must be discarded on error.
 ///
 /// The caller's [`HttpTransport`] must not follow HTTP redirects and is
-/// responsible for network/SSRF boundaries.
+/// responsible for network/SSRF boundaries. Because [`HttpTransport::send`]
+/// buffers each response up to `max_response_bytes` before status and headers
+/// are inspected, chunk 0 sets `max_response_bytes` to the larger of 512 KiB
+/// and the object's ciphertext limit (so a server that ignores `Range` with a
+/// whole-body `200 OK` still works), while later chunks cap at 512 KiB. If a
+/// server ignores `Range` with a body exceeding that receive budget—for example
+/// a strict-size mismatch above `ciphertext_limit` or a `200 OK` on a later
+/// chunk—a budget-enforcing transport fails closed with
+/// [`crate::transport::TransportError::ResponseTooLarge`], mapped here to
+/// `"tp_media_size_limit"` rather than `"Advertised media size mismatch"` or
+/// `"media_integrity_failed"`. Similarly, a misbehaving `206` on chunk 0 can be
+/// buffered up to chunk 0's receive budget before the range check rejects it.
 pub async fn fetch_tp_media_to_async(
     descriptor: &TpMediaDescriptor,
     http: &dyn HttpTransport,

@@ -43,6 +43,7 @@ pub type TransportFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 /// Typed transport failure categories shared across native and custom
 /// transports for retryable login-poll, call-RPC, CDN failover, and media
 /// receive-budget classification.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransportError {
     /// Connection, read, or write deadline elapsed.

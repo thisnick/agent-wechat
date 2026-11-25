@@ -73,7 +73,7 @@ enum wechat_protocol::protobuf::Value | enum | MISSING DOC
 enum wechat_protocol::sticker_packs::StickerPackFeed | enum | Feed selected by the supported Linux pack-list producer.
 enum wechat_protocol::transport::HttpMethod | enum | HTTP request method supported by protocol and media exchanges.
 enum wechat_protocol::transport::ReadOutcome | enum | Result of a bounded [`AsyncByteStream::read`] call.
-enum wechat_protocol::transport::TransportError | enum | Typed transport failure categories shared across native and custom transports for retryable login-poll, call-RPC, CDN failover, and media receive-budget classification.
+enum wechat_protocol::transport::TransportError | #[non_exhaustive] enum | Typed transport failure categories shared across native and custom transports for retryable login-poll, call-RPC, CDN failover, and media receive-budget classification.
 field wechat_protocol::AcceptContactRequest::privacy | core::option::Option<wechat_protocol::client::contact_privacy::ContactPrivacySettings> | Optional privacy selections applied while accepting this request.
 field wechat_protocol::AcceptContactRequest::target | wechat_protocol::client::contact_requests::ContactRequestTarget | Exact resolved verification target and private ticket.
 field wechat_protocol::AccountIdentity::own_username | alloc::string::String | MISSING DOC
