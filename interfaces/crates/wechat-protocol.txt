@@ -1221,7 +1221,7 @@ fn wechat_protocol::calls::relay::decrypt_checkin | fn(cipher: &[u8], key: &[u8;
 fn wechat_protocol::calls::relay::encrypt_checkin | fn(plain: &[u8], key: &[u8; 16], random: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Selector0 TEA chaining with its structural trailer. This is not an AEAD.
 fn wechat_protocol::calls::relay::frame_outer | fn(body: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
 fn wechat_protocol::calls::relay::unframe_outer | fn(packet: &[u8]) -> anyhow::Result<&[u8]> | MISSING DOC
-fn wechat_protocol::calls::rudp::RudpAckTracker::record | fn(&mut self, stream_id: u32, pkt_num: u64) -> u64 | Record one data packet and return the packet number to acknowledge on its stream (the highest seen so far), or 0 when the stream limit is reached.
+fn wechat_protocol::calls::rudp::RudpAckTracker::record | fn(&mut self, stream_id: u32, pkt_num: u64) -> core::option::Option<u64> | Record one data packet and return the packet number to acknowledge on its stream (the highest seen so far), or `None` when a new stream exceeds the stream limit.
 fn wechat_protocol::calls::rudp::encode_rudp_feedback | fn(timestamp_ms: u32, stream_id: u32, max_pkt_num: u64, receiver_member: u16) -> anyhow::Result<alloc::vec::Vec<u8>> | Build a feedback packet acknowledging every packet up to `max_pkt_num` on `stream_id`.
 fn wechat_protocol::calls::rudp::parse_rudp_data | fn(payload: &[u8]) -> anyhow::Result<core::option::Option<wechat_protocol::calls::rudp::RudpData>> | Parse an authenticated `0x50` payload. Returns `Ok(None)` for feedback packets and any other head sign, which need no acknowledgement.
 fn wechat_protocol::calls::signaling::CallOperation::command_id | const fn(self) -> u32 | MISSING DOC

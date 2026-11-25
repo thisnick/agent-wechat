@@ -141,6 +141,7 @@ pub struct Live96 {
     first_tx_audio: u16,
     first_tx_video: u16,
     first_tx_control: u16,
+    first_tx_rudp: u16,
     next_audio: u32,
     next_video: u32,
     next_qos: u32,
@@ -247,6 +248,7 @@ impl Live96 {
             first_tx_audio: 0,
             first_tx_video: 0,
             first_tx_control: 0,
+            first_tx_rudp: 0,
             next_audio: 0,
             next_video: 0,
             next_qos: 0,
@@ -301,8 +303,9 @@ impl Live96 {
             self.first_tx_control =
                 self.legacy_reserved_start(b"agent-wechat/live96/control-start/v1")?;
             self.next_control = u32::from(self.first_tx_control);
-            self.next_rudp =
-                u32::from(self.legacy_reserved_start(b"agent-wechat/live96/rudp-start/v1")?);
+            self.first_tx_rudp =
+                self.legacy_reserved_start(b"agent-wechat/live96/rudp-start/v1")?;
+            self.next_rudp = u32::from(self.first_tx_rudp);
             self.legacy_receive_nonce_reuse = true;
         }
         self.tx_scope = Some(scope);
@@ -480,15 +483,8 @@ impl Live96 {
         payload: &[u8],
     ) -> Result<Option<Vec<u8>>> {
         self.check(current)?;
-        let peer_used = |rx_seen: &BTreeMap<u8, Box<[u64; 1024]>>, sequence: u32| {
-            sequence <= u32::from(u16::MAX)
-                && rx_seen.get(&0x50).is_some_and(|seen| {
-                    let s = sequence as usize;
-                    seen[s / 64] & (1u64 << (s % 64)) != 0
-                })
-        };
         for _ in 0..MAX_RUDP_SEQUENCE_SKIP {
-            if !peer_used(&self.rx_seen, self.next_rudp) {
+            if !self.rx_seen_contains(0x50, self.next_rudp) {
                 return Ok(Some(self.seal(current, now_ms, 0x50, payload)?));
             }
             self.next_rudp = self.next_rudp.saturating_add(1);
@@ -547,10 +543,7 @@ impl Live96 {
         *next += 1;
         let nonce = self.nonce32(nonce_kind, sequence);
         let seen_overlap = if sequence <= u32::from(u16::MAX) {
-            self.rx_seen.get(&nonce_kind).is_some_and(|seen| {
-                let s = sequence as usize;
-                seen[s / 64] & (1u64 << (s % 64)) != 0
-            })
+            self.rx_seen_contains(nonce_kind, sequence)
         } else {
             self.rx_high_overflow
                 .get(&nonce_kind)
@@ -649,6 +642,7 @@ impl Live96 {
             0x10 => (self.next_audio, u32::from(self.first_tx_audio)),
             0x20 => (self.next_video, u32::from(self.first_tx_video)),
             0x30 => (self.next_qos, 0),
+            0x50 => (self.next_rudp, u32::from(self.first_tx_rudp)),
             0x70 => (self.next_control, u32::from(self.first_tx_control)),
             _ => (0, 0),
         };
@@ -738,12 +732,7 @@ impl Live96 {
             [8, 1, 18, 2, 8, 1] => {
                 // Leave the probe unanswered if a reply would consume an
                 // inbound nonce. The sender's reuse fence stays unchanged.
-                if self.next_control <= u32::from(u16::MAX)
-                    && self.rx_seen.get(&0x70).is_some_and(|seen| {
-                        let sequence = self.next_control as usize;
-                        seen[sequence / 64] & (1u64 << (sequence % 64)) != 0
-                    })
-                {
+                if self.rx_seen_contains(0x70, self.next_control) {
                     return Ok(None);
                 }
                 Ok(Some(self.seal(
@@ -758,6 +747,14 @@ impl Live96 {
             // Ignore them without inventing a response or stopping audio.
             _ => Ok(None),
         }
+    }
+    /// True when the peer already used `sequence` for `nonce_kind` (16-bit ledger only).
+    fn rx_seen_contains(&self, nonce_kind: u8, sequence: u32) -> bool {
+        sequence <= u32::from(u16::MAX)
+            && self.rx_seen.get(&nonce_kind).is_some_and(|seen| {
+                let s = sequence as usize;
+                seen[s / 64] & (1u64 << (s % 64)) != 0
+            })
     }
     pub fn close(&mut self) {
         self.key = Zeroizing::new([0; 32]);
@@ -1159,6 +1156,32 @@ mod tests {
         assert!(receive.open(epoch(), &first).unwrap().is_none());
         let next = sending.seal(epoch(), 0, 0x70, &[8, 3]).unwrap();
         assert!(receive.open(epoch(), &next).unwrap().is_some());
+    }
+
+    #[test]
+    fn rudp_sealing_skips_peer_sequences_and_detects_cross_direction_reuse() {
+        let mut local = receiver();
+        local
+            .authorize_transmit(
+                epoch(),
+                TransmitScope::LegacyRelayAudio { key_generation: 1 },
+            )
+            .unwrap();
+        let mut remote = peer();
+        assert!(local.first_tx_rudp >= 1024);
+        let start = local.first_tx_rudp;
+
+        // A peer 0x50 packet at our next sequence makes the ack skip that nonce.
+        remote.next_rudp = u32::from(start);
+        let peer_data = remote.seal(epoch(), 0, 0x50, &[8, 1]).unwrap();
+        assert!(local.open(epoch(), &peer_data).unwrap().is_some());
+        let ack = local.seal_rudp(epoch(), 0, &[8, 2]).unwrap().unwrap();
+        assert_eq!(u16::from_le_bytes([ack[15], ack[16]]), start + 1);
+
+        // A later peer 0x50 packet reusing the sequence we sent on is rejected.
+        remote.next_rudp = u32::from(start) + 1;
+        let reused = remote.seal(epoch(), 0, 0x50, &[8, 3]).unwrap();
+        assert!(local.open(epoch(), &reused).is_err());
     }
 
     #[test]

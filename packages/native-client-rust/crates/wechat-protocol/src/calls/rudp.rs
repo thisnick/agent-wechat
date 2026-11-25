@@ -92,14 +92,14 @@ pub struct RudpAckTracker {
 
 impl RudpAckTracker {
     /// Record one data packet and return the packet number to acknowledge on its stream
-    /// (the highest seen so far), or 0 when the stream limit is reached.
-    pub fn record(&mut self, stream_id: u32, pkt_num: u64) -> u64 {
+    /// (the highest seen so far), or `None` when a new stream exceeds the stream limit.
+    pub fn record(&mut self, stream_id: u32, pkt_num: u64) -> Option<u64> {
         if !self.highest.contains_key(&stream_id) && self.highest.len() >= MAX_STREAMS {
-            return 0;
+            return None;
         }
-        let highest = self.highest.entry(stream_id).or_default();
+        let highest = self.highest.entry(stream_id).or_insert(pkt_num);
         *highest = (*highest).max(pkt_num);
-        *highest
+        Some(*highest)
     }
 }
 
@@ -162,21 +162,21 @@ mod tests {
     fn tracker_acknowledges_highest_packet_seen() {
         let mut acks = RudpAckTracker::default();
         // Packets 1..=4 were sent before check-in and never arrive.
-        assert_eq!(acks.record(0, 5), 5);
+        assert_eq!(acks.record(0, 5), Some(5));
         // Late or retransmitted lower packets keep the same acknowledgement.
-        assert_eq!(acks.record(0, 2), 5);
-        assert_eq!(acks.record(0, 6), 6);
-        // Streams are independent.
-        assert_eq!(acks.record(7, 1), 1);
+        assert_eq!(acks.record(0, 2), Some(5));
+        assert_eq!(acks.record(0, 6), Some(6));
+        // Streams are independent, and a stream numbered from 0 is still acknowledged.
+        assert_eq!(acks.record(7, 0), Some(0));
     }
 
     #[test]
     fn tracker_bounds_streams() {
         let mut acks = RudpAckTracker::default();
         for stream in 0..MAX_STREAMS as u32 {
-            assert_eq!(acks.record(stream, 1), 1);
+            assert_eq!(acks.record(stream, 1), Some(1));
         }
-        assert_eq!(acks.record(MAX_STREAMS as u32, 1), 0);
-        assert_eq!(acks.record(0, 2), 2);
+        assert_eq!(acks.record(MAX_STREAMS as u32, 1), None);
+        assert_eq!(acks.record(0, 2), Some(2));
     }
 }

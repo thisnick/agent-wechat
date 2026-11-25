@@ -19,7 +19,7 @@ const MAX_EARLY_DRAIN_PER_CALL: usize = MAX_EARLY_MEDIA_PACKETS * 4;
 
 /// Unix-epoch milliseconds truncated to 32 bits, as official clients put in check-in
 /// header and body timestamps.
-fn epoch_ms32() -> u32 {
+pub(super) fn epoch_ms32() -> u32 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_millis() as u32)

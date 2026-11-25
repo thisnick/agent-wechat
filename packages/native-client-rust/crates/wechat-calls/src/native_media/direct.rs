@@ -537,20 +537,23 @@ pub fn run_direct_media_with_preconnected_relay<H: DirectMediaHost>(
                                 // retransmitting it; the payloads are not interpreted.
                                 if let Ok(Some(data)) = rudp::parse_rudp_data(opened.payload()) {
                                     rx_trace.rudp_data(&data);
-                                    let acked = rudp_acks.record(data.stream_id, data.pkt_num);
-                                    if acked > 0 {
-                                        let now_ms = clock();
+                                    if let Some(acked) =
+                                        rudp_acks.record(data.stream_id, data.pkt_num)
+                                    {
+                                        // Official clients stamp RUDP packets with wall-clock
+                                        // milliseconds, as in relay check-in.
                                         if let Ok(feedback) = rudp::encode_rudp_feedback(
-                                            now_ms as u32,
+                                            super::relay::epoch_ms32(),
                                             data.stream_id,
                                             acked,
                                             media.peer_member,
                                         ) {
                                             if let Ok(Some(datagram)) =
-                                                channel.seal_rudp(epoch, now_ms, &feedback)
+                                                channel.seal_rudp(epoch, clock(), &feedback)
                                             {
-                                                host.submit(&socket, endpoint, &datagram, &[])?;
-                                                rx_trace.rudp_ack(data.stream_id, acked);
+                                                if host.submit(&socket, endpoint, &datagram, &[])? {
+                                                    rx_trace.rudp_ack(data.stream_id, acked);
+                                                }
                                             }
                                         }
                                     }
