@@ -122,11 +122,8 @@ jobs:
           cargo clippy --workspace "${packages[@]}" --all-targets --locked -- -D warnings
           cargo clippy --all-targets --locked -p wechat-protocol --no-default-features --features pure-rust-crypto -- -D warnings
           cargo clippy --all-targets --locked -p wechat-protocol --features pure-rust-crypto -- -D warnings
-          pure_rust_pkgs=(-p wx-native -p wechat-calls)
-          if [ "$SIMULATOR_CHECKS" = true ]; then
-            pure_rust_pkgs+=(-p wechat-simulator)
-          fi
-          protocol_features="$(cargo tree --locked "${pure_rust_pkgs[@]}" --prefix none -f '{p} [{f}]' | grep '^wechat-protocol ' | sort -u)"
+          shipped_excludes=(--exclude wechat-protocol "${packages[@]}")
+          protocol_features="$(cargo tree --locked --workspace "${shipped_excludes[@]}" --prefix none -f '{p} [{f}]' | grep '^wechat-protocol ' | sort -u)"
           echo "$protocol_features"
           if echo "$protocol_features" | grep -q 'openssl-crypto'; then
             echo "Unexpected wechat-protocol/openssl-crypto feature in shipped workspace crates" >&2
@@ -136,7 +133,7 @@ jobs:
             echo "Missing wechat-protocol/pure-rust-crypto feature in shipped workspace crates" >&2
             exit 1
           fi
-          cargo clippy --all-targets --locked "${pure_rust_pkgs[@]}" -- -D warnings
+          cargo clippy --workspace "${shipped_excludes[@]}" --all-targets --locked -- -D warnings
       - name: Restore pinned image decoder runtime
         if: matrix.suite == 'test'
         id: ffmpeg-cache
@@ -169,27 +166,29 @@ jobs:
           "$RUNNER_TEMP/native-ffmpeg/bin/ffmpeg" -version
           "$RUNNER_TEMP/native-ffmpeg/bin/ffprobe" -version
           echo "$RUNNER_TEMP/native-ffmpeg/bin" >> "$GITHUB_PATH"
-      # Cargo chooses dependency features once per command. A command limited
-      # to one package (-p), or one that builds no tests or examples, leaves out
-      # features the rest of the workspace and its dev-dependencies turn on, so
-      # it recompiled crates such as tokio, hyper, axum and every workspace
-      # crate. Build every binary, example and test here in one command; the
-      # tests and smoke checks below reuse these outputs from target/debug.
+      # Cargo chooses dependency features once per command. Exclude
+      # wechat-protocol from the workspace build/test pass so its default
+      # openssl-crypto feature is not unified into wx, wechat-core,
+      # wechat-calls or the simulator; every unit test and smoke check below
+      # then exercises the pure-rust-crypto backend that ships. Test
+      # wechat-protocol itself separately without rebuilding downstream binaries.
       - name: Build workspace binaries, examples and tests
         if: matrix.suite == 'test'
         run: |
-          packages=()
+          packages=(--exclude wechat-protocol)
           if [ "$SIMULATOR_CHECKS" != true ]; then
             packages+=(--exclude wechat-simulator)
           fi
           cargo build --workspace "${packages[@]}" --all-targets --profile test --locked
       - if: matrix.suite == 'test'
         run: |
-          packages=()
+          packages=(--exclude wechat-protocol)
           if [ "$SIMULATOR_CHECKS" != true ]; then
             packages+=(--exclude wechat-simulator)
           fi
           cargo test --workspace "${packages[@]}" --locked
+          cargo test --locked -p wechat-protocol --no-default-features --features voice-silk,pure-rust-crypto
+          cargo test --locked -p wechat-protocol
       # Workspace default-feature tests above already cover the native codec and
       # audio libraries. Keep the virtual-device and portable-target checks here
       # instead of scheduling another Linux runner for the same unit tests.
