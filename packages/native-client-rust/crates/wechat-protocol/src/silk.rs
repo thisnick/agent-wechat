@@ -28,8 +28,13 @@ pub const FRAME_MS: u32 = 20;
 /// Longest single voice note: the official 60-second voice-message limit.
 pub const MAX_NOTE_MS: u32 = 60_000;
 pub const MAX_SAMPLES: usize = (MAX_NOTE_MS / 1000 * SAMPLE_RATE) as usize;
-/// Largest stream accepted by framing validation and decoding.
+/// Largest encoded stream buffer produced by [`encode`] for outgoing notes.
 pub const MAX_STREAM_BYTES: usize = 512 * 1024;
+/// Longest incoming voice note accepted by SILK decoding (5 minutes, exceeding
+/// mobile clients' 70-second recording ceiling while staying bounded).
+const MAX_DECODE_MS: u32 = 300_000;
+const MAX_DECODE_SAMPLES: usize = (MAX_DECODE_MS / 1000 * SAMPLE_RATE) as usize;
+const MAX_DECODE_STREAM_BYTES: usize = 4 * 1024 * 1024;
 /// Encoded-size bound for one maximum-length note from the bundled profile:
 /// the 10-byte header plus, per 20 ms packet, a 2-byte length prefix and the
 /// 40 kbit/s payload budget (100 bytes) with 1.5x headroom. SILK rate control
@@ -38,6 +43,23 @@ pub const MAX_STREAM_BYTES: usize = 512 * 1024;
 pub const MAX_NOTE_BYTES: usize = 10
     + (MAX_NOTE_MS / FRAME_MS) as usize * (2 + (BIT_RATE / 8 * FRAME_MS / 1000) as usize * 3 / 2);
 const _: () = assert!(MAX_NOTE_BYTES <= MAX_STREAM_BYTES);
+
+fn header_offset(input: &[u8]) -> Option<usize> {
+    if input.len() >= 10 && input[1..10] == *b"#!SILK_V3" {
+        Some(10)
+    } else if input.len() >= 9 && input[0..9] == *b"#!SILK_V3" {
+        Some(9)
+    } else {
+        None
+    }
+}
+
+/// Returns true when `input` begins with a WeChat SILK v3 header (either with
+/// its leading byte prefix or bare `#!SILK_V3`).
+pub fn is_silk(input: &[u8]) -> bool {
+    header_offset(input).is_some()
+}
+
 pub fn encode(pcm: &[i16]) -> Result<Vec<u8>> {
     ensure!(
         !pcm.is_empty() && pcm.len() <= MAX_SAMPLES,
@@ -65,33 +87,40 @@ pub fn encode(pcm: &[i16]) -> Result<Vec<u8>> {
     Ok(out)
 }
 pub fn validate_framing(input: &[u8]) -> Result<u32> {
+    let Some(mut p) = header_offset(input) else {
+        anyhow::bail!("invalid_silk_stream");
+    };
     ensure!(
-        input.len() >= 12
-            && input.len() <= MAX_STREAM_BYTES
-            && input[0] <= 3
-            && input[1..10] == *b"#!SILK_V3",
+        input.len() >= p + 2 && input.len() <= MAX_DECODE_STREAM_BYTES,
         "invalid_silk_stream"
     );
-    let mut p = 10;
     let mut packets = 0u32;
     while p < input.len() {
         ensure!(p + 2 <= input.len(), "invalid_silk_packet");
         let n = i16::from_le_bytes(input[p..p + 2].try_into()?) as i32;
         p += 2;
+        // Negative signed lengths (such as 0xFFFF = -1) mark end-of-stream.
+        if n < 0 {
+            break;
+        }
+        // Length 0 (0x0000) is a valid DTX silence / comfort-noise frame.
         ensure!(
-            n > 0 && n <= 5120 && n as usize <= input.len() - p,
+            n <= 5120 && n as usize <= input.len() - p,
             "invalid_silk_packet"
         );
         p += n as usize;
         packets += 1;
-        ensure!(packets <= MAX_NOTE_MS / FRAME_MS, "voice_duration_limit");
+        ensure!(packets <= MAX_DECODE_MS / FRAME_MS, "voice_duration_limit");
     }
     ensure!(packets > 0, "empty_silk_stream");
     Ok(packets * FRAME_MS)
 }
 pub fn decode(input: &[u8]) -> Result<Vec<i16>> {
-    validate_framing(input)?;
-    let mut pcm = vec![0i16; MAX_SAMPLES];
+    let duration_ms = validate_framing(input)?;
+    let packets = (duration_ms / FRAME_MS) as usize;
+    // Each SILK packet carries up to 5 internal 20 ms frames (1600 samples at 16 kHz).
+    let capacity = packets.saturating_mul(1600).clamp(480, MAX_DECODE_SAMPLES);
+    let mut pcm = vec![0i16; capacity];
     let mut samples = 0i32;
     // SAFETY: Framing and total sizes were checked above. The C bridge bounds each
     // decoder frame and copy to the supplied PCM capacity.
@@ -112,7 +141,7 @@ pub fn decode(input: &[u8]) -> Result<Vec<i16>> {
     Ok(pcm)
 }
 pub fn wav(pcm: &[i16]) -> Result<Vec<u8>> {
-    ensure!(pcm.len() <= MAX_SAMPLES, "voice_duration_limit");
+    ensure!(pcm.len() <= MAX_DECODE_SAMPLES, "voice_duration_limit");
     let n = u32::try_from(pcm.len() * 2)?;
     let mut out = Vec::with_capacity(44 + n as usize);
     out.extend(b"RIFF");
@@ -184,10 +213,51 @@ mod tests {
     fn malformed_packet_refused_before_ffi() {
         for input in [
             vec![],
-            [vec![2], b"#!SILK_V3".to_vec(), vec![0, 0]].concat(),
+            b"not-silk-at-all".to_vec(),
             [vec![2], b"#!SILK_V3".to_vec(), vec![255, 255]].concat(),
+            [vec![2], b"#!SILK_V3".to_vec(), vec![10, 0, 1, 2]].concat(),
+            [vec![2], b"#!SILK_V3".to_vec(), vec![1]].concat(),
         ] {
-            assert!(decode(&input).is_err());
+            assert!(decode(&input).is_err(), "expected error for {input:?}");
         }
+    }
+
+    #[test]
+    fn dtx_eof_headerless_and_over_sixty_second_streams_decode() {
+        let tone = (0..3200)
+            .map(|i| ((i as f64 * 440.0 * std::f64::consts::TAU / 16000.0).sin() * 8000.0) as i16)
+            .collect::<Vec<_>>();
+        let encoded = encode(&tone).unwrap();
+
+        // Interleave DTX silence frames (0x0000) and append a -1 (0xFFFF) EOF trailer.
+        let mut with_dtx_and_eof = encoded[..10].to_vec();
+        with_dtx_and_eof.extend([0u8, 0]);
+        with_dtx_and_eof.extend(&encoded[10..]);
+        with_dtx_and_eof.extend([0u8, 0, 0, 0]);
+        with_dtx_and_eof.extend([0xffu8, 0xff]);
+        assert_eq!(validate_framing(&with_dtx_and_eof).unwrap(), 260);
+        let decoded = decode(&with_dtx_and_eof).unwrap();
+        assert_eq!(decoded.len(), 260 * 16);
+        assert!(decoded.iter().any(|s| s.abs() > 1000));
+
+        // Leading byte outside 0..=3 is tolerated when #!SILK_V3 is at offset 1.
+        let mut alt_prefix = encoded.clone();
+        alt_prefix[0] = 7;
+        assert_eq!(decode(&alt_prefix).unwrap().len(), tone.len());
+
+        // Headerless #!SILK_V3 at offset 0 decodes cleanly.
+        let headerless = encoded[1..].to_vec();
+        assert!(is_silk(&headerless));
+        assert_eq!(decode(&headerless).unwrap().len(), tone.len());
+
+        // Streams longer than 60 seconds (e.g., 65 seconds = 3250 frames) decode to PCM and WAV.
+        let mut long_stream = encoded[..10].to_vec();
+        for _ in 0..325 {
+            long_stream.extend(&encoded[10..]);
+        }
+        assert_eq!(validate_framing(&long_stream).unwrap(), 65_000);
+        let long_pcm = decode(&long_stream).unwrap();
+        assert_eq!(long_pcm.len(), 65 * 16000);
+        assert_eq!(&wav(&long_pcm).unwrap()[..4], b"RIFF");
     }
 }

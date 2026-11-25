@@ -621,9 +621,10 @@ pub fn aged_runtime(key: &str) -> RuntimeRetention {
         "friend-attention-stage:projected:",
     ];
     // Once-only event receipts for one message, command, operation or minute.
-    const EVENT: [&str; 31] = [
+    const EVENT: [&str; 32] = [
         "message:",
         "message-expanded:",
+        "voice-updated:",
         "remote-thread-read:",
         "control-observed:",
         "control-no-local-effect:",

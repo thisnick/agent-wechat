@@ -137,6 +137,67 @@ pub fn cache_voice_projection(
     })
 }
 
+/// Update an existing type-34 voice message row's `message_content` in place when a
+/// streaming voice upload (`endflag="0"`) settles with its finalized `<voicemsg>` XML.
+///
+/// Touches only a matching `local_type = 34` row in `message_0.db`, so recalled or
+/// unrelated rows are never overwritten. Returns `Ok(None)` when no matching type-34
+/// row exists. Replaying the same `content` against the same row is idempotent and
+/// keeps `create_time`, `sort_seq`, and `local_id` unchanged.
+///
+/// Caller obligations: the caller must hold exclusive profile ownership (checked via
+/// `options`) and persist its own durable operational receipt before and after calling
+/// this function so crash recovery does not drop follow-up events or media downloads.
+pub fn apply_voice_message_update(
+    location: &ProfileLocation,
+    keys: &KeyFile,
+    peer: &str,
+    server_id: &str,
+    content: &str,
+    options: &WriteOptions,
+) -> Result<Option<SourceMessageId>> {
+    ownership(location, keys, options)?;
+    if content.is_empty() || content.len() > 1024 * 1024 || content.contains('\0') {
+        return Err(ProfileError::InvalidMetadata);
+    }
+    let Some(source) = find_projected_message(location, keys, peer, server_id, options)? else {
+        return Ok(None);
+    };
+    let sid = server_id
+        .parse::<u64>()
+        .map_err(|_| ProfileError::InvalidMetadata)?;
+    let local = source
+        .local_id
+        .parse::<i64>()
+        .map_err(|_| ProfileError::InvalidMetadata)?;
+    let mut messages = open_write(location, &source.database, keys, options.allow_plaintext)?;
+    crate::writer::exact_columns(
+        &messages,
+        &source.database,
+        &source.table,
+        crate::writer::MESSAGE_COLUMNS,
+    )?;
+    let table = crate::schema::quote_identifier(&source.table);
+    let compressed = match compressed_profile_field(content.as_bytes())? {
+        SqlValue::Blob(encoded) => {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|_| ProfileError::InvalidMetadata)?
+        }
+        _ => return Err(ProfileError::InvalidMetadata),
+    };
+    let tx = messages.transaction()?;
+    let updated = tx.execute(
+        &format!(
+            "UPDATE {table} SET message_content=?3,WCDB_CT_message_content=4 WHERE local_id=?1 AND server_id=?2 AND (local_type & 0x7fffffff)=34"
+        ),
+        params![local, sid as i64, compressed],
+    )?;
+    tx.commit()?;
+    Ok((updated > 0).then_some(source))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HardlinkKind {

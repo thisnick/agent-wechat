@@ -17,6 +17,16 @@ pub trait MediaTransport {
         descriptor: &MediaDescriptor,
         progress: Progress<'_>,
     ) -> Result<DownloadedMedia>;
+    /// Download an incoming voice note over CDN (`filetype = 15`), bounded to
+    /// [`wechat_protocol::media::MAX_VOICE_CDN_BYTES`].
+    fn download_voice_cdn(
+        &self,
+        descriptor: &wechat_protocol::media::VoiceCdnDescriptor,
+        progress: Progress<'_>,
+    ) -> Result<Vec<u8>> {
+        self.native()?
+            .download_voice_with_progress(descriptor, progress)
+    }
     /// Download into `sink` with the same checks as [`Self::download`]. The
     /// bytes in `sink` are unverified until this returns `Ok`. A transport that
     /// cannot stream downloads whole and then writes.

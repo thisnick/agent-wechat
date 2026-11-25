@@ -134,10 +134,16 @@ impl Core {
                     let encoded = reader
                         .cached_voice(&shards[0].database, chat, &source.local_id, Some(server))?
                         .bytes;
+                    let voice_format = message
+                        .content
+                        .text
+                        .as_deref()
+                        .and_then(|t| voice::parse_voice_xml(t, message.peer.as_deref()))
+                        .and_then(|v| v.voice_format);
                     match asset.variant {
                         MediaVariant::Encoded => encoded,
                         MediaVariant::Normal => {
-                            wechat_protocol::silk::wav(&wechat_protocol::silk::decode(&encoded)?)?
+                            voice::decode_voice_to_wav(&encoded, voice_format, || Ok(()))?
                         }
                         _ => bail!("unsupported_media_variant"),
                     }

@@ -463,6 +463,18 @@ impl From<anyhow::Error> for ApiError {
                 StatusCode::NOT_FOUND,
                 "login_challenge_unavailable",
             ),
+            (
+                "media_job_not_retryable",
+                StatusCode::CONFLICT,
+                "media_job_not_retryable",
+            ),
+            (
+                "media_queue_full",
+                StatusCode::SERVICE_UNAVAILABLE,
+                "media_queue_full",
+            ),
+            ("voice_cancelled", StatusCode::GONE, "voice_cancelled"),
+            ("media_cancelled", StatusCode::GONE, "media_cancelled"),
             ("unsupported", StatusCode::CONFLICT, "unsupported_profile"),
             ("not supported", StatusCode::CONFLICT, "unsupported_profile"),
             ("invalid", StatusCode::BAD_REQUEST, "invalid_request"),
@@ -3008,5 +3020,14 @@ mod tests {
         fs::set_permissions(&p, fs::Permissions::from_mode(0o644)).unwrap();
         assert!(provision_token(&p, true).is_err());
         assert_eq!(fs::read_to_string(p).unwrap().trim(), first);
+    }
+    #[test]
+    fn media_retry_errors_map_to_expected_http_statuses() {
+        let not_retryable = ApiError::from(anyhow::anyhow!("media_job_not_retryable"));
+        assert_eq!(not_retryable.0, StatusCode::CONFLICT);
+        assert_eq!(not_retryable.1, "media_job_not_retryable");
+        let queue_full = ApiError::from(anyhow::anyhow!("media_queue_full"));
+        assert_eq!(queue_full.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(queue_full.1, "media_queue_full");
     }
 }

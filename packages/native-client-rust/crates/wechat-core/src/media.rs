@@ -55,6 +55,8 @@ mod sticker_sync;
 mod storage;
 #[path = "media_video.rs"]
 mod video;
+#[path = "media_voice.rs"]
+pub(crate) mod voice;
 
 use crate::account_network::AccountNetworkPermit as MediaAccountPermit;
 
@@ -148,6 +150,10 @@ enum DownloadPlan {
         length: u32,
         inline: Option<Vec<u8>>,
         as_wav: bool,
+        #[serde(default)]
+        voice_format: Option<u32>,
+        #[serde(default)]
+        cdn: Option<wechat_protocol::media::VoiceCdnDescriptor>,
     },
     CachedOnly,
 }
@@ -1308,6 +1314,15 @@ impl Core {
                     && m.created_at as i64 == msg.create_time
                     && !m.inline_data.is_empty()
                 {
+                    if m.message_type == 34 {
+                        let incomplete = std::str::from_utf8(&m.content)
+                            .ok()
+                            .and_then(|text| voice::parse_voice_xml(text, Some(&m.peer)))
+                            .is_some_and(|v| v.end_flag == Some(0) || v.cancel_flag == Some(1));
+                        if incomplete {
+                            continue;
+                        }
+                    }
                     return Ok(Some(m.inline_data));
                 }
             }
@@ -1358,7 +1373,8 @@ impl Core {
         }
         let mut asset = asset;
         let mut key = format!("download:{}", asset.id);
-        if self.channels_asset(account, &asset.id)? {
+        let is_channels = self.channels_asset(account, &asset.id)?;
+        if is_channels {
             // A Channels video is renewable: when its cached file is gone, or its last transfer
             // failed, an explicit new request resolves fresh material in one new job. Nothing
             // retries automatically; each new job comes from a separate request.
@@ -1378,11 +1394,20 @@ impl Core {
                     None,
                 )?;
             }
+        }
+        if is_channels || asset.kind == MediaKind::Voice {
             while let Ok(previous) = self.store.media_job_by_key(account, &key) {
-                let renewable = match previous.state.as_str() {
-                    "available" => asset.state != "available",
-                    "failed" | "cancelled" | "expired" => true,
-                    _ => false,
+                let renewable = if is_channels {
+                    match previous.state.as_str() {
+                        "available" => asset.state != "available",
+                        "failed" | "cancelled" | "expired" => true,
+                        _ => false,
+                    }
+                } else {
+                    // Explicit voice re-download starts a fresh job when the prior attempt
+                    // failed (e.g. after upgrading or transient server drift), while keeping
+                    // cancelled jobs respected so automatic downloads do not restart them.
+                    previous.state == "failed" && asset.state != "available"
                 };
                 if !renewable {
                     break;
@@ -1411,6 +1436,9 @@ impl Core {
         }
         if created {
             let mut metadata = asset;
+            metadata.state = "pending".into();
+            metadata.reason = None;
+            metadata.retryable = false;
             metadata.job_id = Some(row.id.clone());
             self.store.save_media_asset(
                 account,
@@ -1726,7 +1754,8 @@ impl Core {
         let service = service_diagnostic(error);
         let cdn = cdn_download_failure(error);
         let channels = channels_download_failure(error);
-        if service.is_none() && cdn.is_none() && channels.is_none() {
+        let voice = voice::voice_download_failure(error);
+        if service.is_none() && cdn.is_none() && channels.is_none() && voice.is_none() {
             return Ok(());
         }
         let mut row = self.store.media_job(account, id)?;
@@ -1739,6 +1768,9 @@ impl Core {
         }
         if let Some(detail) = channels {
             row.data["result"]["channelsDownloadFailure"] = detail;
+        }
+        if let Some(detail) = voice {
+            row.data["result"]["voiceDownloadFailure"] = detail;
         }
         self.store.save_media_job(account, &row)?;
         Ok(())
@@ -1841,7 +1873,7 @@ impl Core {
                 ));
         row.state = if uncertain {
             "needs_review"
-        } else if code == "media_cancelled" {
+        } else if matches!(code, "media_cancelled" | "voice_cancelled") {
             "cancelled"
         } else if code == "media_expired" {
             "expired"
@@ -2226,18 +2258,112 @@ impl Core {
                 length,
                 inline,
                 as_wav,
+                voice_format,
+                cdn,
             } => {
                 // The profile's copy first: plans no longer keep audio the
-                // profile holds.
-                let complete = |v: &Vec<u8>| v.len() == length as usize;
+                // profile holds. Both official clients accept inline/profile
+                // voice bytes even when their byte length differs from XML.
+                let mut from_profile = false;
                 let mut bytes = inline
-                    .filter(complete)
-                    .or_else(|| self.profile_voice_for(account, &asset).filter(complete))
+                    .filter(|v| voice::is_usable_inline_voice(v, length, voice_format))
+                    .or_else(|| {
+                        self.profile_voice_for(account, &asset)
+                            .filter(|v| v.len() > 1 && v.len() <= 16 * 1024 * 1024)
+                            .inspect(|_| from_profile = true)
+                    })
                     .unwrap_or_default();
+                let mut transport: &'static str = if bytes.is_empty() { "cgi" } else { "inline" };
+                let mut cdn_fallback = false;
+                let mut chunk_count = 0usize;
+                let mut offset_mismatch = false;
+                let mut early_eof = false;
+
                 if bytes.is_empty() {
+                    // Official Linux and Android clients try CDN (filetype=15) first
+                    // when `voiceurl` and `aeskey` are present, falling back to CGI 128
+                    // on non-fatal transfer failures.
+                    if let Some(descriptor) = cdn {
+                        let cdn_attempt = (|| -> Result<Vec<u8>> {
+                            let mut state = self.account_state(account)?;
+                            let client = self
+                                .account_upstream(account)?
+                                .media_transport_route(&mut state, None)?;
+                            self.save_state(account, &state)?;
+                            let unlocked = permit.is_some();
+                            let fence = unlocked
+                                .then(|| self.media_authorization_fence(account))
+                                .transpose()?;
+                            let reply = cdn_transfer(
+                                if unlocked {
+                                    permit.as_deref_mut()
+                                } else {
+                                    None
+                                },
+                                self,
+                                account,
+                                || client.download_voice_cdn(&descriptor, &progress),
+                            );
+                            if let Some(fence) = fence {
+                                self.resume_media_state(account, id, &fence)?;
+                            }
+                            let downloaded = reply?;
+                            ensure!(!downloaded.is_empty(), "empty_cdn_voice");
+                            ensure!(
+                                downloaded.len() <= wechat_protocol::media::MAX_VOICE_CDN_BYTES,
+                                "unsupported_voice_size"
+                            );
+                            Ok(downloaded)
+                        })();
+                        match cdn_attempt {
+                            Ok(downloaded) => {
+                                bytes = downloaded;
+                                transport = "cdn";
+                            }
+                            Err(error) => {
+                                let fatal = is_media_auth_rejected(&error)
+                                    || error.chain().any(|cause| {
+                                        matches!(
+                                            cause.to_string().as_str(),
+                                            "media_cancelled"
+                                                | "media_worker_stopping"
+                                                | "media_disconnected"
+                                                | "auth_required"
+                                                | "media_authorization_changed"
+                                        )
+                                    });
+                                if fatal {
+                                    return Err(error);
+                                }
+                                cdn_fallback = true;
+                            }
+                        }
+                    }
+                }
+
+                if bytes.is_empty() {
+                    transport = "cgi";
                     let mut state = self.account_state(account)?;
                     let mut renewed = false;
+                    let mut consecutive_empty = 0u8;
+                    const MAX_VOICE_CHUNKS: usize = 512;
                     while bytes.len() < length as usize {
+                        ensure!(
+                            chunk_count < MAX_VOICE_CHUNKS,
+                            voice::VoiceDownloadFailure {
+                                stage: "cgi_chunk_limit",
+                                transport,
+                                cdn_fallback,
+                                advertised_bytes: length,
+                                received_bytes: bytes.len(),
+                                chunk_count,
+                                offset_mismatch,
+                                voice_format,
+                                detected_format: voice::detect_voice_format(&bytes, voice_format)
+                                    .as_str(),
+                                reason: "media_processing_failed".into(),
+                            }
+                        );
                         progress(bytes.len() as u64, Some(length as u64))?;
                         let fence = permit
                             .as_ref()
@@ -2270,26 +2396,149 @@ impl Core {
                                 renewed = true;
                                 continue;
                             }
-                            Err(error) => return Err(error),
+                            Err(error) => {
+                                let already_classified = service_diagnostic(&error).is_some()
+                                    || error.chain().any(|cause| {
+                                        matches!(
+                                            cause.to_string().as_str(),
+                                            "media_cancelled"
+                                                | "media_worker_stopping"
+                                                | "media_disconnected"
+                                                | "auth_required"
+                                                | "media_authorization_changed"
+                                        )
+                                    });
+                                if already_classified {
+                                    return Err(error);
+                                }
+                                let reason = classify_error(&error);
+                                return Err(error.context(voice::VoiceDownloadFailure {
+                                    stage: "cgi_chunk",
+                                    transport,
+                                    cdn_fallback,
+                                    advertised_bytes: length,
+                                    received_bytes: bytes.len(),
+                                    chunk_count,
+                                    offset_mismatch,
+                                    voice_format,
+                                    detected_format: voice::detect_voice_format(
+                                        &bytes,
+                                        voice_format,
+                                    )
+                                    .as_str(),
+                                    reason,
+                                }));
+                            }
                         };
-                        ensure!(chunk.offset_matches, "media_integrity_failed");
+                        chunk_count += 1;
+                        if !chunk.offset_matches {
+                            offset_mismatch = true;
+                        }
+                        if chunk.bytes.is_empty() {
+                            consecutive_empty = consecutive_empty.saturating_add(1);
+                            if consecutive_empty >= 3 {
+                                if !bytes.is_empty() {
+                                    // Match Android VoiceDownloadTask: treat repeated empty
+                                    // trailing chunks (e.g. shorter transcoded stream) as EOF.
+                                    early_eof = true;
+                                    break;
+                                }
+                                return Err(anyhow::Error::new(voice::VoiceDownloadFailure {
+                                    stage: "cgi_empty",
+                                    transport,
+                                    cdn_fallback,
+                                    advertised_bytes: length,
+                                    received_bytes: 0,
+                                    chunk_count,
+                                    offset_mismatch,
+                                    voice_format,
+                                    detected_format: "unknown",
+                                    reason: "media_processing_failed".into(),
+                                }));
+                            }
+                            continue;
+                        }
+                        consecutive_empty = 0;
                         bytes.extend(chunk.bytes);
+                        ensure!(bytes.len() <= 16 * 1024 * 1024, "unsupported_voice_size");
+                        progress(
+                            bytes.len() as u64,
+                            Some((length as u64).max(bytes.len() as u64)),
+                        )?;
                     }
                     self.save_state(account, &state)?;
                 }
-                let pcm = wechat_protocol::silk::decode(&bytes)?;
-                official_writeback = Some(self.project_received_voice(account, id, &asset, &bytes));
+
+                let bytes = if from_profile {
+                    bytes
+                } else {
+                    voice::normalize_encoded_voice(bytes, voice_format)
+                };
+                let detected = voice::detect_voice_format(&bytes, voice_format);
                 if as_wav {
+                    let wav = voice::decode_voice_to_wav(&bytes, voice_format, || {
+                        self.active_media_job(account, id)?;
+                        Ok(())
+                    })
+                    .map_err(|error| {
+                        let classified = classify_error(&error);
+                        let reason = match classified.as_str() {
+                            "voice_duration_limit"
+                            | "media_encoder_unavailable"
+                            | "media_cancelled"
+                            | "media_disconnected"
+                            | "auth_required"
+                            | "media_worker_stopping" => classified,
+                            "unsupported_media" => "unsupported_voice_codec".into(),
+                            _ => "voice_decode_failed".into(),
+                        };
+                        error.context(voice::VoiceDownloadFailure {
+                            stage: "decode",
+                            transport,
+                            cdn_fallback,
+                            advertised_bytes: length,
+                            received_bytes: bytes.len(),
+                            chunk_count,
+                            offset_mismatch,
+                            voice_format,
+                            detected_format: detected.as_str(),
+                            reason,
+                        })
+                    })?;
+                    official_writeback =
+                        Some(self.project_received_voice(account, id, &asset, &bytes));
                     (
-                        OwnedPayload::Bytes(wechat_protocol::silk::wav(&pcm)?),
+                        OwnedPayload::Bytes(wav),
                         "audio/wav".into(),
                         Some(MediaVariant::Normal),
                         None,
                     )
                 } else {
+                    // Match official clients: store raw encoded voice bytes without
+                    // requiring SILK decoding on `--quality encoded`, while checking
+                    // known container framing and rejecting early-EOF unknown payloads
+                    // before persisting into write-once `VoiceInfo`.
+                    voice::validate_encoded_voice(&bytes, voice_format, early_eof, from_profile)
+                        .map_err(|error| {
+                            let reason = classify_error(&error);
+                            error.context(voice::VoiceDownloadFailure {
+                                stage: "validate",
+                                transport,
+                                cdn_fallback,
+                                advertised_bytes: length,
+                                received_bytes: bytes.len(),
+                                chunk_count,
+                                offset_mismatch,
+                                voice_format,
+                                detected_format: detected.as_str(),
+                                reason,
+                            })
+                        })?;
+                    official_writeback =
+                        Some(self.project_received_voice(account, id, &asset, &bytes));
                     (
                         OwnedPayload::Bytes(bytes),
-                        "audio/silk".into(),
+                        detected.content_type().into(),
                         Some(MediaVariant::Encoded),
                         None,
                     )
@@ -2437,8 +2686,13 @@ impl Core {
                             .native_inline(account, &message)?
                             .context("media_encoded_voice_missing")?,
                     };
-                    let wav =
-                        wechat_protocol::silk::wav(&wechat_protocol::silk::decode(&encoded)?)?;
+                    let voice_format = message
+                        .content
+                        .text
+                        .as_deref()
+                        .and_then(|t| voice::parse_voice_xml(t, message.peer.as_deref()))
+                        .and_then(|v| v.voice_format);
+                    let wav = voice::decode_voice_to_wav(&encoded, voice_format, || Ok(()))?;
                     ensure!(wav.as_slice() == bytes.as_slice(), "media_integrity_failed");
                     Ok(encoded)
                 })();
@@ -2811,6 +3065,7 @@ pub(crate) fn classify_error(error: &anyhow::Error) -> String {
         "message_recalled",
         "media_identity_unavailable",
         "media_source_changed",
+        "voice_cancelled",
         "media_cancelled",
         "media_disconnected",
         "auth_required",
@@ -2962,8 +3217,13 @@ fn validate_media_bytes(kind: MediaKind, bytes: &[u8]) -> Result<(String, Option
         }
         MediaKind::File => Ok(("application/octet-stream".into(), None)),
         MediaKind::Voice => {
-            wechat_protocol::silk::decode(bytes)?;
-            Ok(("audio/silk".into(), None))
+            ensure!(!bytes.is_empty(), "empty_voice_payload");
+            Ok((
+                voice::detect_voice_format(bytes, None)
+                    .content_type()
+                    .into(),
+                None,
+            ))
         }
     }
 }
@@ -3358,6 +3618,14 @@ fn discover(msg: &wechat_profile::Message, content: &str) -> Result<Vec<Discover
         }
         34 => {
             let n = element("voicemsg")?;
+            if number(n.attribute("cancelflag")) == Some(1)
+                || number(n.attribute("endflag")) == Some(0)
+            {
+                // Cancelled recordings have no downloadable audio, and in-progress
+                // streaming voice uploads (endflag="0") are not downloadable until
+                // finalized with endflag="1".
+                return Ok(vec![]);
+            }
             let length = u32::try_from(
                 number(n.attribute("length")).context("media_voice_length_missing")?,
             )?;
@@ -3365,6 +3633,24 @@ fn discover(msg: &wechat_profile::Message, content: &str) -> Result<Vec<Discover
                 length > 0 && length <= 16 * 1024 * 1024,
                 "unsupported_voice_size"
             );
+            let voice_format =
+                number(n.attribute("voiceformat")).and_then(|v| u32::try_from(v).ok());
+            let cdn = n
+                .attribute("voiceurl")
+                .map(str::trim)
+                .filter(|v| !v.is_empty() && v.len() <= 8192 && !v.chars().any(char::is_control))
+                .and_then(|file_id| {
+                    let aes_key = key(n
+                        .attribute("aeskey")
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty()))
+                    .ok()?;
+                    Some(wechat_protocol::media::VoiceCdnDescriptor {
+                        file_id: file_id.into(),
+                        aes_key,
+                        expected_bytes: Some(u64::from(length)),
+                    })
+                });
             let server_id = msg
                 .server_message_id
                 .as_ref()
@@ -3380,6 +3666,8 @@ fn discover(msg: &wechat_profile::Message, content: &str) -> Result<Vec<Discover
                         length,
                         inline: None,
                         as_wav,
+                        voice_format,
+                        cdn: cdn.clone(),
                     },
                     None,
                 ));

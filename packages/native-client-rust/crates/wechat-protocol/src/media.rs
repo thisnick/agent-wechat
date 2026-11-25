@@ -303,6 +303,38 @@ impl MediaQuality {
         }
     }
 }
+/// Largest voice payload accepted on the CDN download path (16 MiB, matching
+/// official profile `VoiceInfo` storage bounds).
+pub const MAX_VOICE_CDN_BYTES: usize = 16 * 1024 * 1024;
+/// Descriptor for an incoming voice note downloaded over WeChat CDN (`filetype = 15`).
+#[derive(Clone, Serialize, Deserialize)]
+pub struct VoiceCdnDescriptor {
+    /// CDN file identifier from `<voicemsg voiceurl="..."/>`.
+    pub file_id: String,
+    /// 16-byte AES-128-ECB key from `<voicemsg aeskey="..."/>`.
+    pub aes_key: Vec<u8>,
+    /// Advertised byte length from `<voicemsg length="..."/>`, if present.
+    pub expected_bytes: Option<u64>,
+}
+impl Drop for VoiceCdnDescriptor {
+    fn drop(&mut self) {
+        self.aes_key.zeroize();
+        self.file_id.zeroize();
+    }
+}
+impl fmt::Debug for VoiceCdnDescriptor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VoiceCdnDescriptor")
+            .field("expected_bytes", &self.expected_bytes)
+            .field("metadata", &"[redacted]")
+            .finish()
+    }
+}
+enum DownloadRoute<'a> {
+    Standard,
+    Storage(&'a str),
+    Voice,
+}
 fn upload_plaintext_limit(kind: MediaQuality) -> usize {
     match kind {
         MediaQuality::File => MAX_CDN_TRANSFER_BYTES,
@@ -611,7 +643,7 @@ impl CdnClient {
     ) -> Result<DownloadReceipt> {
         self.download_on_route(
             descriptor,
-            None,
+            DownloadRoute::Standard,
             progress,
             |path, fields| self.post(path, fields),
             sink,
@@ -633,12 +665,43 @@ impl CdnClient {
         let mut bytes = vec![];
         let receipt = self.download_on_route(
             descriptor,
-            Some(file_key),
+            DownloadRoute::Storage(file_key),
             progress,
             |path, fields| self.post(path, fields),
             &mut bytes,
         )?;
         Ok(DownloadedMedia::from_receipt(receipt, bytes))
+    }
+    /// Download an incoming voice note over CDN (`POST /download` with `filetype = 15`),
+    /// bounded to [`MAX_VOICE_CDN_BYTES`] (16 MiB) and tolerating transcoded length
+    /// differences from `expected_bytes`.
+    pub fn download_voice_with_progress(
+        &self,
+        descriptor: &VoiceCdnDescriptor,
+        progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+    ) -> Result<Vec<u8>> {
+        self.download_voice_with_transport(descriptor, progress, |path, fields| {
+            self.post(path, fields)
+        })
+    }
+    fn download_voice_with_transport(
+        &self,
+        descriptor: &VoiceCdnDescriptor,
+        progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+        post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
+    ) -> Result<Vec<u8>> {
+        let internal = MediaDescriptor {
+            file_id: descriptor.file_id.clone(),
+            aes_key: descriptor.aes_key.clone(),
+            quality: MediaQuality::File,
+            expected_bytes: descriptor.expected_bytes,
+            expected_md5: None,
+            strict_size: false,
+            expires_at: None,
+        };
+        let mut bytes = vec![];
+        self.download_on_route(&internal, DownloadRoute::Voice, progress, post, &mut bytes)?;
+        Ok(bytes)
     }
     fn download_with_transport(
         &self,
@@ -647,17 +710,28 @@ impl CdnClient {
         post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
     ) -> Result<DownloadedMedia> {
         let mut bytes = vec![];
-        let receipt = self.download_on_route(descriptor, None, progress, post, &mut bytes)?;
+        let receipt = self.download_on_route(
+            descriptor,
+            DownloadRoute::Standard,
+            progress,
+            post,
+            &mut bytes,
+        )?;
         Ok(DownloadedMedia::from_receipt(receipt, bytes))
     }
     fn download_on_route(
         &self,
         descriptor: &MediaDescriptor,
-        storage_key: Option<&str>,
+        route: DownloadRoute<'_>,
         mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
         mut post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
         sink: &mut dyn std::io::Write,
     ) -> Result<DownloadReceipt> {
+        let storage_key = match route {
+            DownloadRoute::Storage(key) => Some(key),
+            _ => None,
+        };
+        let voice = matches!(route, DownloadRoute::Voice);
         if let Some(key) = storage_key {
             ensure!(
                 descriptor.quality == MediaQuality::File
@@ -677,11 +751,14 @@ impl CdnClient {
         if let Some(expiry) = descriptor.expires_at {
             ensure!(expiry > crate::wire::unix_time()? as u64, "media_expired");
         }
-        let large = descriptor.quality == MediaQuality::LargeFile;
-        let large_video = descriptor.quality == MediaQuality::Video
+        let large = !voice && descriptor.quality == MediaQuality::LargeFile;
+        let large_video = !voice
+            && descriptor.quality == MediaQuality::Video
             && descriptor.expected_bytes.unwrap_or(0) > MAX_CDN_TRANSFER_BYTES as u64;
         let strict_transfer = large || large_video;
-        let plaintext_limit = if large {
+        let plaintext_limit = if voice {
+            MAX_VOICE_CDN_BYTES
+        } else if large {
             MAX_LARGE_FILE_BYTES
         } else if large_video {
             MAX_VIDEO_DOWNLOAD_BYTES
@@ -747,7 +824,12 @@ impl CdnClient {
                 position as u64,
                 if total == 0 { None } else { Some(total as u64) },
             )?;
-            let mut fields = shared(&self.config, sequence, descriptor.quality.filetype());
+            let filetype = if voice {
+                15
+            } else {
+                descriptor.quality.filetype()
+            };
+            let mut fields = shared(&self.config, sequence, filetype);
             let requested_end = if total == 0 {
                 chunk_bytes - 1
             } else {
@@ -2452,7 +2534,7 @@ mod tests {
         let result = client()
             .download_on_route(
                 &descriptor,
-                Some("2_pack.fixture"),
+                DownloadRoute::Storage("2_pack.fixture"),
                 |_, _| Ok(()),
                 |path, fields| {
                     paths.push(path.to_string());
@@ -2491,13 +2573,19 @@ mod tests {
         // Storage keys must be usable and only whole-file descriptors qualify.
         let unused = |_: &str, _: &CdnFields| -> Result<CdnFields> { unreachable!() };
         assert!(client()
-            .download_on_route(&descriptor, Some(""), |_, _| Ok(()), unused, &mut vec![])
+            .download_on_route(
+                &descriptor,
+                DownloadRoute::Storage(""),
+                |_, _| Ok(()),
+                unused,
+                &mut vec![]
+            )
             .is_err());
         let (video, _, _) = download_fixture(1000, MediaQuality::Video);
         assert!(client()
             .download_on_route(
                 &video,
-                Some("2_pack.fixture"),
+                DownloadRoute::Storage("2_pack.fixture"),
                 |_, _| Ok(()),
                 unused,
                 &mut vec![]
@@ -3563,5 +3651,45 @@ mod tests {
                     .is_err());
             }
         }
+    }
+
+    #[test]
+    fn voice_cdn_download_uses_filetype_15_and_enforces_16_mib_limit() {
+        let (media_desc, raw, encrypted) = download_fixture(120, MediaQuality::File);
+        let voice_desc = VoiceCdnDescriptor {
+            file_id: media_desc.file_id.clone(),
+            aes_key: media_desc.aes_key.clone(),
+            // Deliberately differ from actual length to confirm non-strict tolerance.
+            expected_bytes: Some((raw.len() + 32) as u64),
+        };
+        let mut saw_filetype = None;
+        let mut saw_path = None;
+        let received = client()
+            .download_voice_with_transport(
+                &voice_desc,
+                |_, _| Ok(()),
+                |path, fields| {
+                    saw_path = Some(path.to_string());
+                    saw_filetype = Some(integer(fields, "filetype")?);
+                    Ok(download_reply(fields, &media_desc, &encrypted))
+                },
+            )
+            .unwrap();
+        assert_eq!(saw_path.as_deref(), Some("/download"));
+        assert_eq!(saw_filetype, Some(15));
+        assert_eq!(received, raw);
+
+        let oversized = VoiceCdnDescriptor {
+            file_id: media_desc.file_id.clone(),
+            aes_key: media_desc.aes_key.clone(),
+            expected_bytes: Some(MAX_VOICE_CDN_BYTES as u64 + 1),
+        };
+        assert!(client()
+            .download_voice_with_transport(
+                &oversized,
+                |_, _| Ok(()),
+                |_, fields| Ok(download_reply(fields, &media_desc, &encrypted)),
+            )
+            .is_err());
     }
 }
