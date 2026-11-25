@@ -539,7 +539,7 @@ pub struct UploadedMedia {
 }
 const CDN_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const CDN_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
-const CDN_RETRY_SLEEP_SLICE: Duration = Duration::from_millis(50);
+const CDN_RETRY_SLEEP_SLICE: Duration = Duration::from_millis(100);
 const CDN_RETRY_BACKOFFS: [Duration; 4] = [
     Duration::from_millis(150),
     Duration::from_millis(400),

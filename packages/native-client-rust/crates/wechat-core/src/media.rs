@@ -1745,8 +1745,15 @@ impl Core {
     }
     fn progress_media(&self, account: &str, id: &str, done: u64, total: Option<u64>) -> Result<()> {
         let mut row = self.active_media_job(account, id)?;
-        row.data["completedBytes"] = done.into();
-        row.data["totalBytes"] = total.into();
+        let completed = serde_json::Value::from(done);
+        let total_value = serde_json::Value::from(total);
+        if row.data.get("completedBytes") == Some(&completed)
+            && row.data.get("totalBytes") == Some(&total_value)
+        {
+            return Ok(());
+        }
+        row.data["completedBytes"] = completed;
+        row.data["totalBytes"] = total_value;
         self.store.save_media_job(account, &row)?;
         Ok(())
     }
@@ -6166,6 +6173,39 @@ mod tests {
                 }
             );
         }
+    }
+    #[test]
+    fn progress_media_skips_redundant_writes_while_enforcing_fences() {
+        let (_dir, core) = test_core();
+        let mut plan = file_plan();
+        initialize_file_upload_ids(&mut plan, MAX_SOURCE_BYTES).unwrap();
+        let id = "progress-dedupe";
+        plan_job(&core, id, &plan);
+
+        core.progress_media("one", id, 65_536, Some(131_072))
+            .unwrap();
+        let first = core.store.media_job("one", id).unwrap();
+        assert_eq!(first.data["completedBytes"], 65_536);
+        assert_eq!(first.data["totalBytes"], 131_072);
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        core.progress_media("one", id, 65_536, Some(131_072))
+            .unwrap();
+        let unchanged = core.store.media_job("one", id).unwrap();
+        assert_eq!(unchanged.updated_at, first.updated_at);
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        core.progress_media("one", id, 131_072, Some(131_072))
+            .unwrap();
+        let advanced = core.store.media_job("one", id).unwrap();
+        assert_eq!(advanced.data["completedBytes"], 131_072);
+        assert_ne!(advanced.updated_at, first.updated_at);
+
+        core.store.cancel_media_job("one", id).unwrap();
+        let err = core
+            .progress_media("one", id, 131_072, Some(131_072))
+            .unwrap_err();
+        assert!(err.to_string().contains("media_cancelled"), "{err:#}");
     }
     #[test]
     fn logout_during_reservation_retains_receipt_and_blocks_transfer() {
