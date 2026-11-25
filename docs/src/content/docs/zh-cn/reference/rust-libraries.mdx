@@ -1,7 +1,7 @@
 ---
 title: Rust 开发库
 description: 在 Rust 中使用原生微信协议、Profile 与语音媒体库。
-sourceHash: "adc67e440a89"
+sourceHash: "c4168ba49fdc"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -24,7 +24,8 @@ import { Aside } from '@astrojs/starlight/components';
    cargo add wechat-protocol@=VERSION wechat-profile@=VERSION
    ```
 
-2. 使用 Rust 1.93.1+、C 编译器、Make 与 Perl 进行构建。Cargo 会自动解析所依赖的支持库。原生 Opus 还需要 CMake 与 C++ 编译器。若要跳过编译 `wechat-protocol` 内置的 C 语言 SILK 语音编码器/解码器（`voice-silk`），请禁用默认特性（`default-features = false`）；帧校验、WAV 封装以及所有协议编解码功能仍然可用。
+2. 使用 Rust 1.93.1+、C 编译器、Make 与 Perl 进行构建。Cargo 会自动解析所依赖的支持库。原生 Opus 还需要 CMake 与 C++ 编译器。
+   在 `wechat-protocol` 中，`voice-silk` 与 `openssl-crypto` 默认启用。若要跳过编译 C 语言 SILK 或内置（vendored）的 OpenSSL，请设置 `default-features = false`，并启用 `openssl-crypto` 或 `pure-rust-crypto` 之一（若需要 `silk::encode` 或 `silk::decode`，还需启用 `voice-silk`）。`wechat-calls` 的默认特性 `native-runtime` 会在 `wechat-protocol` 上选择 `pure-rust-crypto`；若同一依赖图中的其他 crate 启用了 `openssl-crypto`，则以 `openssl-crypto` 为准。不启用 `voice-silk` 时，帧校验、WAV 封装以及所有协议编解码功能仍然可用。
 
 自 2.3.2 之后的版本起，Rust 库的版本号与 CLI、Daemon 和 OpenClaw 插件保持一致，且每次发布都会同时发布全部五个库。此前的库版本（直至 2.2.0）单独编号；请选择 crates.io 上列出的版本。
 
