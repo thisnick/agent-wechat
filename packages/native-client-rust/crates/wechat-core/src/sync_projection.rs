@@ -992,6 +992,13 @@ impl Core {
                 return Ok(());
             }
         }
+        let incoming_voice = if message.message_type == 34 {
+            std::str::from_utf8(&message.content)
+                .ok()
+                .and_then(|text| crate::media::voice::parse_voice_xml(text, Some(&message.peer)))
+        } else {
+            None
+        };
         let planned_sort = match wechat_profile::choose_message_sort_sequence(
             &location,
             &keys,
@@ -1002,28 +1009,68 @@ impl Core {
         ) {
             Ok(sort) => sort,
             // The profile already holds this server message, saved with a
-            // different time. There is nothing to write, so finish it instead
-            // of holding the batch; its raw bytes are kept.
-            Err(wechat_profile::ProfileError::InvalidMetadata)
-                if wechat_profile::find_projected_message(
+            // different time. Allow streaming voice updates (endflag=0 -> 1)
+            // and their crash-recovery or duplicate replays through; otherwise
+            // finish without holding the batch while keeping its raw bytes.
+            Err(wechat_profile::ProfileError::InvalidMetadata) => {
+                let Some(existing_id) = wechat_profile::find_projected_message(
                     &location,
                     &keys,
                     &message.peer,
                     sid,
                     &options,
                 )?
-                .is_some() =>
-            {
-                let blocked = ProjectionBlocked {
-                    command_id: command.id,
-                    message_type: Some(message.message_type),
-                    classification: "message",
-                    operation_ids: vec![],
-                    system_kind: None,
-                    peer_kind: None,
-                    reason: "message_already_in_profile",
+                else {
+                    return Err(wechat_profile::ProfileError::InvalidMetadata.into());
                 };
-                return self.skip_unsupported_command(account, command, receipt, origin, &blocked);
+                let expected_text = std::str::from_utf8(&message.content).ok();
+                let voice_update_candidate = message.message_type == 34
+                    && incoming_voice.is_some()
+                    && self
+                        .profile_reader(account)
+                        .and_then(|reader| {
+                            reader
+                                .message(&existing_id, Some(&state.own_username))
+                                .map_err(anyhow::Error::from)
+                        })
+                        .is_ok_and(|stored| {
+                            if stored.message_type != 34
+                                || stored.sender.as_deref().is_some_and(|s| s != sender)
+                            {
+                                return false;
+                            }
+                            let stored_streaming = stored
+                                .content
+                                .text
+                                .as_deref()
+                                .and_then(|t| {
+                                    crate::media::voice::parse_voice_xml(t, Some(&message.peer))
+                                })
+                                .is_some_and(|v| v.end_flag == Some(0));
+                            let incoming_streaming = incoming_voice
+                                .as_ref()
+                                .is_some_and(|v| v.end_flag == Some(0));
+                            let same_finalized = !stored_streaming
+                                && !incoming_streaming
+                                && expected_text.is_some()
+                                && stored.content.text.as_deref() == expected_text;
+                            stored_streaming || incoming_streaming || same_finalized
+                        });
+                if voice_update_candidate {
+                    0
+                } else {
+                    let blocked = ProjectionBlocked {
+                        command_id: command.id,
+                        message_type: Some(message.message_type),
+                        classification: "message",
+                        operation_ids: vec![],
+                        system_kind: None,
+                        peer_kind: None,
+                        reason: "message_already_in_profile",
+                    };
+                    return self
+                        .skip_unsupported_command(account, command, receipt, origin, &blocked);
+                }
             }
             Err(error) => return Err(error.into()),
         };
@@ -1046,6 +1093,8 @@ impl Core {
             wechat_profile::find_projected_message(&location, &keys, &message.peer, sid, &options)?;
         let own_phase = format!("{receipt}:message-started");
         let started = self.store.runtime(account, &own_phase)?.is_some();
+        let voice_phase = format!("{receipt}:voice-updated");
+        let voice_updated_by_intent = self.store.runtime(account, &voice_phase)?.is_some();
         let expected_local_type = match stored_fields.get("local_type") {
             Some(SqlValue::Integer(n)) => n.clone(),
             _ => bail!("invalid_stored_message_type"),
@@ -1053,6 +1102,9 @@ impl Core {
         let incoming_big_xml =
             message.message_type == 49 && expected_local_type == ((40u64 << 32) | 49).to_string();
         let mut already_expanded = false;
+        let mut voice_stream_updated = false;
+        let mut voice_stream_replay = false;
+        let mut already_finalized_voice = false;
         let (source, created_by_intent) = if let Some(id) = existing {
             let stored = self
                 .profile_reader(account)?
@@ -1075,15 +1127,57 @@ impl Core {
             } else {
                 false
             };
-            if stored.create_time != message.created_at as i64
-                || (!already_expanded
-                    && (stored.content.text.as_deref() != Some(expected)
-                        || stored.local_type != expected_local_type))
-            {
-                bail!("message_identity_conflict")
-            }
             if stored.sender.as_deref().is_some_and(|s| s != sender) {
                 bail!("message_sender_conflict")
+            }
+            if message.message_type == 34
+                && stored.message_type == 34
+                && stored.local_type == expected_local_type
+                && incoming_voice.is_some()
+            {
+                let stored_voice = stored.content.text.as_deref().and_then(|text| {
+                    crate::media::voice::parse_voice_xml(text, Some(&message.peer))
+                });
+                let stored_streaming = stored_voice.as_ref().is_some_and(|v| v.end_flag == Some(0));
+                let incoming_streaming = incoming_voice
+                    .as_ref()
+                    .is_some_and(|v| v.end_flag == Some(0));
+                if stored_streaming && stored.content.text.as_deref() != Some(expected) {
+                    // Persist before mutating `message_0.db` so a crash-recovery replay of
+                    // this receipt still queues media download and emits `message.updated`.
+                    self.store.put_runtime(account, &voice_phase, b"1")?;
+                    wechat_profile::apply_voice_message_update(
+                        &location,
+                        &keys,
+                        &message.peer,
+                        sid,
+                        expected,
+                        &options,
+                    )?;
+                    voice_stream_updated = true;
+                } else if !stored_streaming && incoming_streaming {
+                    // Out-of-order replay of a streaming chunk after finalization.
+                    already_finalized_voice = true;
+                } else if !stored_streaming
+                    && !incoming_streaming
+                    && stored.content.text.as_deref() == Some(expected)
+                {
+                    if voice_updated_by_intent {
+                        voice_stream_updated = true;
+                    } else {
+                        voice_stream_replay = true;
+                    }
+                }
+            }
+            if !voice_stream_updated
+                && !already_finalized_voice
+                && !voice_stream_replay
+                && (stored.create_time != message.created_at as i64
+                    || (!already_expanded
+                        && (stored.content.text.as_deref() != Some(expected)
+                            || stored.local_type != expected_local_type)))
+            {
+                bail!("message_identity_conflict")
             }
             (id, started)
         } else {
@@ -1128,15 +1222,40 @@ impl Core {
             self.store.put_runtime(account, receipt, b"1")?;
             return Ok(());
         }
-        if message.message_type == 34 && !message.inline_data.is_empty() {
-            wechat_profile::cache_voice_projection(
-                &location,
-                &keys,
-                &source,
-                &message.peer,
+        let voice_cancelled = message.message_type == 34
+            && incoming_voice
+                .as_ref()
+                .is_some_and(|v| v.cancel_flag == Some(1));
+        let voice_streaming = message.message_type == 34
+            && incoming_voice
+                .as_ref()
+                .is_some_and(|v| v.end_flag == Some(0) && v.cancel_flag != Some(1));
+        let voice_incomplete = voice_streaming || voice_cancelled;
+        if message.message_type == 34
+            && !voice_incomplete
+            && !already_finalized_voice
+            && !message.inline_data.is_empty()
+        {
+            let voice_format = incoming_voice.as_ref().and_then(|v| v.voice_format);
+            let advertised = incoming_voice.as_ref().and_then(|v| v.length).unwrap_or(0);
+            if crate::media::voice::is_usable_inline_voice(
                 &message.inline_data,
-                &options,
-            )?;
+                advertised,
+                voice_format,
+            ) {
+                let normalized = crate::media::voice::normalize_encoded_voice(
+                    message.inline_data.clone(),
+                    voice_format,
+                );
+                wechat_profile::cache_voice_projection(
+                    &location,
+                    &keys,
+                    &source,
+                    &message.peer,
+                    &normalized,
+                    &options,
+                )?;
+            }
         }
         if !already_expanded {
             wechat_profile::apply_message_session_projection(
@@ -1161,8 +1280,50 @@ impl Core {
             defer_commit =
                 self.queue_big_xml_expansion(account, &message, body, &sender, &id, origin)?;
         }
+        let streaming_key = streaming_voice_key(&id);
+        if voice_streaming && !already_finalized_voice && origin != "profile_import" {
+            let now = chrono::Utc::now().timestamp();
+            let recent_for_deferral = origin == "live"
+                || now.saturating_sub(message.created_at as i64) < STREAMING_VOICE_SETTLE_SECS;
+            if recent_for_deferral {
+                // Defer `message.committed` for up to STREAMING_VOICE_SETTLE_SECS while
+                // waiting for `endflag="1"` (or `cancelflag="1"`). If no final update
+                // arrives, `settle_stale_streaming_voices` emits `message.committed`
+                // and exposes any pending asset once the bounded window expires.
+                if let Some(raw) = self.store.runtime(account, &streaming_key)? {
+                    if let Ok(existing) = serde_json::from_slice::<PendingStreamingVoice>(&raw) {
+                        if !existing.settled && now < existing.settle_after {
+                            defer_commit = true;
+                        }
+                    }
+                } else {
+                    let pending = PendingStreamingVoice {
+                        message_id: id.clone(),
+                        thread_id: message.peer.clone(),
+                        origin: origin.to_string(),
+                        direction: if message.outgoing {
+                            "outgoing".into()
+                        } else {
+                            "incoming".into()
+                        },
+                        settle_after: now.saturating_add(STREAMING_VOICE_SETTLE_SECS),
+                        settled: false,
+                    };
+                    self.store.put_runtime(
+                        account,
+                        &streaming_key,
+                        &serde_json::to_vec(&pending)?,
+                    )?;
+                    defer_commit = true;
+                }
+            }
+        } else if message.message_type == 34 {
+            self.store.clear_runtime(account, &streaming_key)?;
+        }
         if download_media
             && !defer_commit
+            && !voice_cancelled
+            && !already_finalized_voice
             && matches!(message.message_type, 3 | 34 | 43 | 47 | 49)
             && origin != "profile_import"
         {
@@ -1170,10 +1331,106 @@ impl Core {
         }
         if !defer_commit {
             self.store.append_event_once(account,&format!("message:{id}"),"message.committed",&json!({"messageId":id,"threadId":message.peer,"origin":origin,"direction":if message.outgoing{"outgoing"}else{"incoming"}}))?;
+            if voice_stream_updated {
+                let version = crate::media::digest(&message.content);
+                self.store.append_event_once(account,&format!("voice-updated:{id}:{version}"),"message.updated",&json!({"messageId":id,"threadId":message.peer,"origin":origin,"direction":if message.outgoing{"outgoing"}else{"incoming"}}))?;
+            }
         }
         self.store.put_runtime(account, receipt, b"1")?;
         Ok(())
     }
+
+    /// Whether a streaming type-34 voice message (`endflag="0"`) is still inside its
+    /// bounded deferral window waiting for a finalized `endflag="1"` update.
+    pub(crate) fn streaming_voice_active(&self, account: &str, message_id: &str) -> Result<bool> {
+        let Some(raw) = self
+            .store
+            .runtime(account, &streaming_voice_key(message_id))?
+        else {
+            return Ok(false);
+        };
+        let Ok(pending) = serde_json::from_slice::<PendingStreamingVoice>(&raw) else {
+            return Ok(false);
+        };
+        Ok(!pending.settled && chrono::Utc::now().timestamp() < pending.settle_after)
+    }
+
+    /// Commit and clear any streaming voice stubs whose bounded wait window expired
+    /// without a finalized `endflag="1"` or `cancelflag="1"` update.
+    pub(crate) fn settle_stale_streaming_voices(&self, account: &str, now: i64) -> Result<usize> {
+        let entries = self
+            .store
+            .runtime_prefix(account, STREAMING_VOICE_PREFIX, 100)?;
+        let mut settled = 0usize;
+        for (key, raw) in entries {
+            let Ok(mut pending) = serde_json::from_slice::<PendingStreamingVoice>(&raw) else {
+                self.store.clear_runtime(account, &key)?;
+                continue;
+            };
+            if now < pending.settle_after {
+                continue;
+            }
+            let Ok(source) = crate::source_message_id(&pending.message_id) else {
+                self.store.clear_runtime(account, &key)?;
+                continue;
+            };
+            let Ok(reader) = self.profile_reader_owned(account) else {
+                // Keep the marker while the profile cannot be opened so a later
+                // sweep retries settlement instead of dropping `message.committed`.
+                continue;
+            };
+            let Ok(own) = self.profile_username(account) else {
+                continue;
+            };
+            let still_voice = match reader.message(&source, own.as_deref()) {
+                Ok(msg) => msg.message_type == 34,
+                Err(wechat_profile::ProfileError::NotCached) => false,
+                Err(_) => continue,
+            };
+            if still_voice {
+                if !pending.settled {
+                    pending.settled = true;
+                    self.store
+                        .put_runtime(account, &key, &serde_json::to_vec(&pending)?)?;
+                }
+                let _ = self.queue_received_media(account, &pending.message_id);
+                self.store.append_event_once(
+                    account,
+                    &format!("message:{}", pending.message_id),
+                    "message.committed",
+                    &json!({
+                        "messageId": pending.message_id,
+                        "threadId": pending.thread_id,
+                        "origin": pending.origin,
+                        "direction": pending.direction,
+                    }),
+                )?;
+                settled += 1;
+            }
+            self.store.clear_runtime(account, &key)?;
+        }
+        Ok(settled)
+    }
+}
+
+/// Bounded grace window (seconds) to wait for a streaming voice message (`endflag="0"`)
+/// to settle with `endflag="1"` or `cancelflag="1"` before announcing it anyway.
+const STREAMING_VOICE_SETTLE_SECS: i64 = 90;
+const STREAMING_VOICE_PREFIX: &str = "streaming-voice:";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PendingStreamingVoice {
+    message_id: String,
+    thread_id: String,
+    origin: String,
+    direction: String,
+    settle_after: i64,
+    #[serde(default)]
+    settled: bool,
+}
+
+fn streaming_voice_key(message_id: &str) -> String {
+    format!("{STREAMING_VOICE_PREFIX}{message_id}")
 }
 #[cfg(test)]
 mod tests {
@@ -3992,5 +4249,251 @@ mod automatic_voice_tests {
             .any(
                 |event| event.kind == "media.auto-download" && event.data["state"] == "unavailable"
             ));
+    }
+    #[test]
+    fn streaming_voice_updates_in_place_from_endflag_zero_to_one_and_queues_on_completion() {
+        let (_temporary, store, core) = fixture();
+        // `add(34, ...)` includes inline SILK bytes; endflag=0 must not cache them into VoiceInfo.
+        let partial = add(
+            34,
+            "peer",
+            "synthetic_self",
+            b"<msg><voicemsg voiceformat='4' length='6000' voicelength='1200' endflag='0'/></msg>",
+            250,
+            100,
+        );
+        core.apply_received_sync_command("one", &partial, "voice-stream-0", "live")
+            .unwrap();
+        // Streaming endflag=0 defers `message.committed`, queues no auto-download,
+        // and exposes no downloadable assets yet.
+        assert!(store
+            .runtime_prefix("one", "received-voice:", 100)
+            .unwrap()
+            .is_empty());
+        assert!(!store
+            .events("one", 0, 200)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "message.committed"));
+        let partial_msg_id = core.messages("one", "peer", Some(10), None).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["serverId"].as_str() == Some("250"))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(core
+            .media_assets("one", &partial_msg_id)
+            .unwrap()
+            .is_empty());
+
+        let finalized = add(
+            34,
+            "peer",
+            "synthetic_self",
+            b"<msg><voicemsg voiceformat='4' length='18432' voicelength='3400' endflag='1' voiceurl='cdn-id' aeskey='0102030405060708090a0b0c0d0e0f10'/></msg>",
+            250,
+            102,
+        );
+        core.apply_received_sync_command("one", &finalized, "voice-stream-1", "live")
+            .unwrap();
+        let queued = store.runtime_prefix("one", "received-voice:", 100).unwrap();
+        assert_eq!(queued.len(), 1);
+        let value: Value = serde_json::from_slice(&queued[0].1).unwrap();
+        let asset = core
+            .media_asset("one", value["request"]["assetId"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(asset.advertised_byte_length, Some(18432));
+        let events = store.events("one", 0, 200).unwrap();
+        assert!(events.iter().any(|e| e.kind == "message.committed"));
+        assert!(events.iter().any(|e| e.kind == "message.updated"));
+
+        // Crash-recovery replay of the finalized receipt after message_0.db was updated
+        // (with receipt missing but voice-updated marker present) must still succeed
+        // without skipping as `message_already_in_profile`.
+        store.clear_runtime("one", "voice-stream-1").unwrap();
+        core.apply_received_sync_command("one", &finalized, "voice-stream-1", "live")
+            .unwrap();
+        assert!(store.runtime("one", "voice-stream-1").unwrap().is_some());
+        assert!(store
+            .runtime_prefix("one", "skipped-control:", 100)
+            .unwrap()
+            .is_empty());
+
+        // Out-of-order replay of endflag=0 (even with origin="live") after endflag=1
+        // must be a no-op and must not create a new deferral marker or hide finalized assets.
+        core.apply_received_sync_command("one", &partial, "voice-stream-replay-0", "live")
+            .unwrap();
+        assert!(store
+            .runtime_prefix("one", STREAMING_VOICE_PREFIX, 100)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            core.media_assets("one", asset.message_id.as_deref().unwrap())
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            store
+                .runtime_prefix("one", "received-voice:", 100)
+                .unwrap()
+                .len(),
+            1
+        );
+        let source = crate::source_message_id(asset.message_id.as_deref().unwrap()).unwrap();
+        let stored = core
+            .profile_reader("one")
+            .unwrap()
+            .message(&source, Some("synthetic_self"))
+            .unwrap();
+        assert!(stored
+            .content
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("length='18432'"));
+    }
+
+    #[test]
+    fn stale_streaming_voice_settles_after_bounded_delay_and_old_catchup_commits_immediately() {
+        let (_temporary, store, core) = fixture();
+        // Live streaming voice whose final endflag="1" never arrives.
+        let stalled = add(
+            34,
+            "peer",
+            "synthetic_self",
+            b"<msg><voicemsg voiceformat='4' length='4096' voicelength='1500' endflag='0'/></msg>",
+            260,
+            100,
+        );
+        core.apply_received_sync_command("one", &stalled, "voice-stalled-0", "live")
+            .unwrap();
+        let now = chrono::Utc::now().timestamp();
+        assert_eq!(core.settle_stale_streaming_voices("one", now).unwrap(), 0);
+        assert!(!store
+            .events("one", 0, 200)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "message.committed"));
+
+        // If the profile is temporarily unreadable when the settle window expires,
+        // the marker must be retained and retried once readable again.
+        let profile_root = store.account("one").unwrap().profile_path;
+        let hidden = profile_root.with_extension("away");
+        std::fs::rename(&profile_root, &hidden).unwrap();
+        core.profile_readers.lock().unwrap().remove("one");
+        assert_eq!(
+            core.settle_stale_streaming_voices("one", now + STREAMING_VOICE_SETTLE_SECS + 1)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .runtime_prefix("one", STREAMING_VOICE_PREFIX, 100)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(!store
+            .events("one", 0, 200)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "message.committed"));
+        std::fs::rename(&hidden, &profile_root).unwrap();
+        core.profile_readers.lock().unwrap().remove("one");
+
+        // Once the profile is readable and the bounded 90-second window passes,
+        // settlement emits `message.committed`, queues auto-download, exposes
+        // pending assets, and removes the marker.
+        assert_eq!(
+            core.settle_stale_streaming_voices("one", now + STREAMING_VOICE_SETTLE_SECS + 1)
+                .unwrap(),
+            1
+        );
+        assert!(store
+            .events("one", 0, 200)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "message.committed"));
+        let queued = store.runtime_prefix("one", "received-voice:", 100).unwrap();
+        assert_eq!(queued.len(), 1);
+        let msg_id = core.messages("one", "peer", Some(10), None).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["serverId"].as_str() == Some("260"))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let assets = core.media_assets("one", &msg_id).unwrap();
+        assert_eq!(assets.len(), 2);
+        assert!(assets.iter().all(|a| a.state == "pending"));
+        assert!(store
+            .runtime_prefix("one", STREAMING_VOICE_PREFIX, 100)
+            .unwrap()
+            .is_empty());
+
+        // A zero-length stalled streaming voice settles cleanly with message.committed and no assets.
+        let zero_stalled = add(
+            34,
+            "peer",
+            "synthetic_self",
+            b"<msg><voicemsg voiceformat='4' length='0' voicelength='0' endflag='0'/></msg>",
+            261,
+            101,
+        );
+        core.apply_received_sync_command("one", &zero_stalled, "voice-stalled-zero", "live")
+            .unwrap();
+        assert_eq!(
+            core.settle_stale_streaming_voices("one", now + STREAMING_VOICE_SETTLE_SECS + 1)
+                .unwrap(),
+            1
+        );
+        let zero_msg_id = core.messages("one", "peer", Some(10), None).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["serverId"].as_str() == Some("261"))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(core.media_assets("one", &zero_msg_id).unwrap().is_empty());
+
+        // An already-old endflag="0" message arriving on catchup commits immediately without waiting.
+        let old_catchup = add(
+            34,
+            "peer",
+            "synthetic_self",
+            b"<msg><voicemsg voiceformat='4' length='2048' voicelength='900' endflag='0'/></msg>",
+            262,
+            102,
+        );
+        core.apply_received_sync_command("one", &old_catchup, "voice-old-catchup", "catchup")
+            .unwrap();
+        assert!(store
+            .runtime_prefix("one", STREAMING_VOICE_PREFIX, 100)
+            .unwrap()
+            .is_empty());
+        let catchup_msg_id = core.messages("one", "peer", Some(10), None).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["serverId"].as_str() == Some("262"))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(store
+            .events("one", 0, 200)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "message.committed"
+                && e.data["messageId"].as_str() == Some(catchup_msg_id.as_str())));
+        assert_eq!(core.media_assets("one", &catchup_msg_id).unwrap().len(), 2);
     }
 }

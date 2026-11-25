@@ -1,6 +1,7 @@
 # Public API of the wechat-calls crate (default features, x86_64-unknown-linux-gnu). Generated from rustdoc JSON; do not edit.
 # Run `pnpm interfaces` after changing the crate. Format: ITEM | SIGNATURE | DOC SUMMARY
 const wechat_calls::opus::MAX_OPUS_PACKET_BYTES | usize | Local allocation/input budget for a single raw Opus packet.
+const wechat_calls::opus::RAW_OPUS_V1_MAGIC | &[u8; 13] | Header magic for WeChat's `#!OPUS_RAW_V1` length-prefixed Opus voice container.
 enum wechat_calls::audio::MediaError | enum | MISSING DOC
 enum wechat_calls::ordering::RtpOrderError | enum | MISSING DOC
 enum wechat_calls::playout::OverflowPolicy | enum | Overflow is chosen per stream. Incoming playback can discard stale frames; outgoing audio rejects overflow so a producer cannot silently outrun pacing.
@@ -17,6 +18,9 @@ field wechat_calls::mixer::MixedFrame::samples | alloc::vec::Vec<i16> | MISSING 
 field wechat_calls::mixer::MixerMetrics::late_frames | u64 | MISSING DOC
 field wechat_calls::mixer::MixerMetrics::missing_frames | u64 | MISSING DOC
 field wechat_calls::mixer::MixerMetrics::overflow_frames | u64 | MISSING DOC
+field wechat_calls::opus::DecodedOpusAudio::channels | u16 | Channel count (`1` for mono, `2` for stereo).
+field wechat_calls::opus::DecodedOpusAudio::sample_rate | u32 | Output sample rate in Hz (`8000`, `12000`, `16000`, `24000`, or `48000`).
+field wechat_calls::opus::DecodedOpusAudio::samples | alloc::vec::Vec<i16> | Interleaved signed 16-bit PCM samples.
 field wechat_calls::ordering::PrimaryAdmission::gap | u16 | Missing primaries before the first newly admitted primary in this packet.
 field wechat_calls::ordering::PrimaryAdmission::skip | usize | Leading primaries that are duplicate or older than the high-water mark.
 field wechat_calls::playout::QueueMetrics::cleared_frames | u64 | MISSING DOC
@@ -65,6 +69,7 @@ fn wechat_calls::mixer::PcmMixer::render | fn(&mut self, sample_offset: u64) -> 
 fn wechat_calls::mixer::PcmMixer::set_muted | fn(&mut self, track_id: u32, muted: bool) -> core::result::Result<(), wechat_calls::audio::MediaError> | MISSING DOC
 fn wechat_calls::opus::OpusDecoder::new | fn(format: wechat_calls::audio::AudioFormat) -> core::result::Result<Self, wechat_calls::audio::MediaError> | MISSING DOC
 fn wechat_calls::opus::OpusEncoder::new | fn(format: wechat_calls::audio::AudioFormat, bitrate: u32) -> core::result::Result<Self, wechat_calls::audio::MediaError> | Construct a VOIP encoder. Bitrate is an application-selected value; passing this range check does not establish remote negotiation.
+fn wechat_calls::opus::decode_raw_opus_v1 | fn(input: &[u8]) -> core::result::Result<wechat_calls::opus::DecodedOpusAudio, wechat_calls::audio::MediaError> | Decode a WeChat `#!OPUS_RAW_V1` voice container into signed 16-bit PCM.
 fn wechat_calls::ordering::RtpOrder::admit | fn(&mut self, last_sequence: u16, last_timestamp: u32, primary_count: usize) -> core::result::Result<wechat_calls::ordering::PrimaryAdmission, wechat_calls::ordering::RtpOrderError> | Call only after transport authentication and ordinary95 extent checks. Feed `primaries.iter().skip(admission.skip)` to the decoder in order.
 fn wechat_calls::ordering::RtpOrder::new | fn() -> Self | MISSING DOC
 fn wechat_calls::pcm_output::PcmOutput::new | fn(format: wechat_calls::audio::AudioFormat, capacity_samples: usize) -> core::result::Result<Self, wechat_calls::audio::MediaError> | MISSING DOC
@@ -114,6 +119,7 @@ impl core::clone::Clone for wechat_calls::audio::AudioFrame | impl | -
 impl core::clone::Clone for wechat_calls::audio::MediaError | impl | -
 impl core::clone::Clone for wechat_calls::mixer::MixedFrame | impl | -
 impl core::clone::Clone for wechat_calls::mixer::MixerMetrics | impl | -
+impl core::clone::Clone for wechat_calls::opus::DecodedOpusAudio | impl | -
 impl core::clone::Clone for wechat_calls::ordering::PrimaryAdmission | impl | -
 impl core::clone::Clone for wechat_calls::ordering::RtpOrderError | impl | -
 impl core::clone::Clone for wechat_calls::playout::OverflowPolicy | impl | -
@@ -127,6 +133,7 @@ impl core::cmp::Eq for wechat_calls::audio::AudioFrame | impl | -
 impl core::cmp::Eq for wechat_calls::audio::MediaError | impl | -
 impl core::cmp::Eq for wechat_calls::mixer::MixedFrame | impl | -
 impl core::cmp::Eq for wechat_calls::mixer::MixerMetrics | impl | -
+impl core::cmp::Eq for wechat_calls::opus::DecodedOpusAudio | impl | -
 impl core::cmp::Eq for wechat_calls::ordering::PrimaryAdmission | impl | -
 impl core::cmp::Eq for wechat_calls::ordering::RtpOrderError | impl | -
 impl core::cmp::Eq for wechat_calls::playout::OverflowPolicy | impl | -
@@ -140,6 +147,7 @@ impl core::cmp::PartialEq for wechat_calls::audio::AudioFrame | impl | -
 impl core::cmp::PartialEq for wechat_calls::audio::MediaError | impl | -
 impl core::cmp::PartialEq for wechat_calls::mixer::MixedFrame | impl | -
 impl core::cmp::PartialEq for wechat_calls::mixer::MixerMetrics | impl | -
+impl core::cmp::PartialEq for wechat_calls::opus::DecodedOpusAudio | impl | -
 impl core::cmp::PartialEq for wechat_calls::ordering::PrimaryAdmission | impl | -
 impl core::cmp::PartialEq for wechat_calls::ordering::RtpOrderError | impl | -
 impl core::cmp::PartialEq for wechat_calls::playout::OverflowPolicy | impl | -
@@ -159,6 +167,7 @@ impl core::fmt::Debug for wechat_calls::audio::AudioFrame | impl | -
 impl core::fmt::Debug for wechat_calls::audio::MediaError | impl | -
 impl core::fmt::Debug for wechat_calls::mixer::MixedFrame | impl | -
 impl core::fmt::Debug for wechat_calls::mixer::MixerMetrics | impl | -
+impl core::fmt::Debug for wechat_calls::opus::DecodedOpusAudio | impl | -
 impl core::fmt::Debug for wechat_calls::ordering::PrimaryAdmission | impl | -
 impl core::fmt::Debug for wechat_calls::ordering::RtpOrderError | impl | -
 impl core::fmt::Debug for wechat_calls::playout::OverflowPolicy | impl | -
@@ -182,6 +191,7 @@ impl core::marker::StructuralPartialEq for wechat_calls::audio::AudioFrame | imp
 impl core::marker::StructuralPartialEq for wechat_calls::audio::MediaError | impl | -
 impl core::marker::StructuralPartialEq for wechat_calls::mixer::MixedFrame | impl | -
 impl core::marker::StructuralPartialEq for wechat_calls::mixer::MixerMetrics | impl | -
+impl core::marker::StructuralPartialEq for wechat_calls::opus::DecodedOpusAudio | impl | -
 impl core::marker::StructuralPartialEq for wechat_calls::ordering::PrimaryAdmission | impl | -
 impl core::marker::StructuralPartialEq for wechat_calls::ordering::RtpOrderError | impl | -
 impl core::marker::StructuralPartialEq for wechat_calls::playout::OverflowPolicy | impl | -
@@ -208,6 +218,7 @@ struct wechat_calls::audio::AudioFrame | struct { public fields } | An owned fra
 struct wechat_calls::mixer::MixedFrame | struct { public fields } | MISSING DOC
 struct wechat_calls::mixer::MixerMetrics | struct { public fields } | MISSING DOC
 struct wechat_calls::mixer::PcmMixer | struct { private fields } | A fixed-format mixer with separate queue budgets for each receive track. Missing/muted tracks contribute silence. Rendering never waits for a source.
+struct wechat_calls::opus::DecodedOpusAudio | struct { public fields } | Decoded PCM audio extracted from a `#!OPUS_RAW_V1` voice container.
 struct wechat_calls::opus::OpusDecoder | struct { private fields } | MISSING DOC
 struct wechat_calls::opus::OpusEncoder | struct { private fields } | MISSING DOC
 struct wechat_calls::ordering::PrimaryAdmission | struct { public fields } | MISSING DOC

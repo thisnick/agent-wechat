@@ -207,19 +207,28 @@ impl Core {
         own: Option<&str>,
     ) -> Result<Option<Vec<u8>>> {
         let mut authorized = self.asset_plan(account, row)?;
-        let DownloadPlan::Voice { length, inline, .. } = &mut authorized.plan else {
+        let DownloadPlan::Voice {
+            length,
+            inline,
+            voice_format,
+            ..
+        } = &mut authorized.plan
+        else {
             return Ok(None);
         };
         let Some(audio) = inline.as_deref() else {
             return Ok(None);
         };
-        if audio.len() == *length as usize {
+        if voice::is_usable_inline_voice(audio, *length, *voice_format) {
             // The asset must still name the message it was captured from.
             self.authorize_media_record(account, row)?;
             let source =
                 source_message_id(row.message_id.as_deref().context("media_message_missing")?)?;
             let message = reader.message(&source, own)?;
-            if profile_voice(reader, &message).as_deref() != Some(audio) {
+            let stored = profile_voice(reader, &message);
+            let normalized = voice::normalize_encoded_voice(audio.to_vec(), *voice_format);
+            if stored.as_deref() != Some(audio) && stored.as_deref() != Some(normalized.as_slice())
+            {
                 return Ok(None);
             }
         }

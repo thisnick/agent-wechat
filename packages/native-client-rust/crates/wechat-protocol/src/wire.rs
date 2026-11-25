@@ -1049,40 +1049,56 @@ pub fn voice_request(
     ])
 }
 pub fn decode_voice(input: &[u8], server_id: u64, total: u32, offset: u32) -> Result<VoiceChunk> {
-    let requested = voice_range(total, offset)?;
+    let _requested = voice_range(total, offset)?;
     let f = p::decode(input)?;
     let base = p::decode(p::data(&f, 9)?)?;
     let code = p::scalar(&base, 1)? as u32 as i32;
     ServiceRejected::check(Service::Voice, code)?;
-    for n in [1, 2, 3, 5, 8] {
-        u32::try_from(p::scalar(&f, n)?)?;
+    if matches!(p::optional(&f, 10)?, Some(p::Value::Varint(1))) {
+        bail!("voice_cancelled");
     }
-    let bytes = p::unbuffer(p::data(&f, 7)?)?;
+    // Official clients read the payload bytes directly without requiring
+    // `SKBuiltinBuffer_t.iLen` to match `Buffer.len()`, and tolerate length
+    // drift or empty trailing chunks when the server transcodes audio.
+    let bytes = match p::optional_data(&f, 7)? {
+        Some(buf) => {
+            let inner = p::decode(buf)?;
+            p::optional_data(&inner, 2)?.unwrap_or_default().to_vec()
+        }
+        None => Vec::new(),
+    };
     ensure!(
-        p::scalar(&f, 3)? == bytes.len() as u64
-            && !bytes.is_empty()
-            && bytes.len() <= requested as usize,
+        bytes.len() <= crate::MAX_MESSAGE_BYTES,
         "Voice response length invalid"
     );
     let echoed = match p::optional(&f, 11)? {
-        Some(p::Value::Varint(id)) => Some(*id),
-        None => None,
+        Some(p::Value::Varint(id)) if *id != 0 => Some(*id),
+        Some(p::Value::Varint(0)) | None => None,
         _ => bail!("Invalid voice server ID echo"),
     };
     ensure!(
         echoed.is_none_or(|id| id == server_id),
         "Foreign voice server ID"
     );
-    let next_offset = offset + bytes.len() as u32;
-    ensure!(next_offset <= total, "Voice chunk overflow");
+    let chunk_len =
+        u32::try_from(bytes.len()).map_err(|_| anyhow::anyhow!("Voice chunk overflow"))?;
+    let next_offset = offset
+        .checked_add(chunk_len)
+        .filter(|&n| n <= crate::MAX_MESSAGE_BYTES as u32)
+        .ok_or_else(|| anyhow::anyhow!("Voice chunk overflow"))?;
+    let offset_matches = match p::optional(&f, 2)? {
+        Some(p::Value::Varint(v)) => *v == u64::from(offset),
+        None => true,
+        _ => false,
+    };
     Ok(VoiceChunk {
         offset,
         next_offset,
-        total_length: total,
-        complete: next_offset == total,
+        total_length: total.max(next_offset),
+        complete: !bytes.is_empty() && next_offset >= total,
         bytes,
         echoed_server_id: echoed.map(|v| v.to_string()),
-        offset_matches: p::scalar(&f, 2)? == offset as u64,
+        offset_matches,
     })
 }
 
@@ -1742,5 +1758,66 @@ mod tests {
         ])
         .unwrap();
         assert!(decode_app_attach(&bad_len_wire, &req).is_err());
+    }
+
+    #[test]
+    fn decode_voice_matches_official_tolerance_and_rejects_foreign_or_cancelled() {
+        let ok_base = p::bytes(9, &p::int32(1, 0));
+
+        // Offset mismatch, iLen mismatch, and transcoded overflow all succeed.
+        let mismatched_buf = p::message(&[p::uint(1, 99), p::bytes(2, b"1234567890ab")]).unwrap();
+        let reply = p::message(&[
+            ok_base.clone(),
+            p::uint(2, 0),
+            p::uint(3, 12),
+            p::bytes(7, &mismatched_buf),
+            p::uint(11, 0),
+        ])
+        .unwrap();
+        let chunk = decode_voice(&reply, 777, 10, 4).unwrap();
+        assert_eq!(chunk.bytes, b"1234567890ab");
+        assert!(!chunk.offset_matches);
+        assert_eq!(chunk.next_offset, 16);
+        assert_eq!(chunk.total_length, 16);
+        assert!(chunk.complete);
+        assert!(chunk.echoed_server_id.is_none());
+
+        // Empty trailing chunk returns an empty VoiceChunk (not an error) so the caller can complete.
+        let empty_reply = p::message(&[
+            ok_base.clone(),
+            p::uint(2, 10),
+            p::uint(3, 0),
+            p::bytes(7, &p::buffer(&[])),
+            p::uint(11, 777),
+        ])
+        .unwrap();
+        let empty = decode_voice(&empty_reply, 777, 20, 10).unwrap();
+        assert!(empty.bytes.is_empty());
+        assert!(!empty.complete);
+        assert!(empty.offset_matches);
+        assert_eq!(empty.echoed_server_id.as_deref(), Some("777"));
+
+        // CancelFlag = 1 maps cleanly to voice_cancelled (terminal, non-retryable).
+        let cancelled = p::message(&[ok_base.clone(), p::uint(10, 1)]).unwrap();
+        assert_eq!(
+            decode_voice(&cancelled, 777, 20, 0)
+                .err()
+                .unwrap()
+                .to_string(),
+            "voice_cancelled"
+        );
+
+        // Non-zero foreign NewMsgId is still refused.
+        let foreign =
+            p::message(&[ok_base, p::bytes(7, &p::buffer(b"abc")), p::uint(11, 888)]).unwrap();
+        assert!(decode_voice(&foreign, 777, 20, 0).is_err());
+
+        // Non-zero BaseResponse still reports ServiceRejected(Service::Voice).
+        let rejected = p::message(&[p::bytes(9, &p::int32(1, -13))]).unwrap();
+        let err = decode_voice(&rejected, 777, 20, 0).err().unwrap();
+        assert_eq!(
+            ServiceRejected::find(&err),
+            Some(&ServiceRejected::new(Service::Voice, -13))
+        );
     }
 }

@@ -24,6 +24,7 @@ const wechat_protocol::media::MAX_LARGE_FILE_BYTES | usize | MISSING DOC
 const wechat_protocol::media::MAX_LINK_THUMBNAIL_BYTES | usize | MISSING DOC
 const wechat_protocol::media::MAX_NATIVE_UPLOAD_BYTES | usize | MISSING DOC
 const wechat_protocol::media::MAX_VIDEO_DOWNLOAD_BYTES | usize | Incoming video plaintext limit, matching the ordinary-file download and automatic-download ceiling. Every such transfer stays bound to the advertised length and MD5. Outgoing preparation keeps the separate `wechat_media::MAX_VIDEO_SOURCE_BYTES` source limit.
+const wechat_protocol::media::MAX_VOICE_CDN_BYTES | usize | Largest voice payload accepted on the CDN download path (16 MiB, matching official profile `VoiceInfo` storage bounds).
 const wechat_protocol::media::STICKER_HOSTS | &[&str] | Tencent CDN hosts accepted for received sticker downloads regardless of path. Callers must use `validate_sticker_url` for the full policy, which also accepts `vweixinf.tc.qq.com` for its numeric `/stodownload` endpoint.
 const wechat_protocol::media::TP_MEDIA_HOSTS | &[&str] | Approved Enterprise WeChat (WeCom) media download hosts.
 const wechat_protocol::media_send::VOICE_UPLOAD_CHUNK_BYTES | usize | Encoded SILK bytes carried by one `uploadvoice` request. A short-link request travels in one MMTLS record of at most 65,519 plaintext bytes, including the route, packet header and envelope, so a 60-second note (about 126-131 KB from the bundled 16 kbit/s profile) cannot use one request. 32 KiB matches the `downloadvoice` range size and leaves room for that overhead.
@@ -35,7 +36,7 @@ const wechat_protocol::silk::FRAME_MS | u32 | Duration of one encoded SILK packe
 const wechat_protocol::silk::MAX_NOTE_BYTES | usize | Encoded-size bound for one maximum-length note from the bundled profile: the 10-byte header plus, per 20 ms packet, a 2-byte length prefix and the 40 kbit/s payload budget (100 bytes) with 1.5x headroom. SILK rate control is soft, so single packets may exceed the budget; the observed 60-second worst case (full-scale white noise) averages about 2.2 KB/s, or 131 KB.
 const wechat_protocol::silk::MAX_NOTE_MS | u32 | Longest single voice note: the official 60-second voice-message limit.
 const wechat_protocol::silk::MAX_SAMPLES | usize | MISSING DOC
-const wechat_protocol::silk::MAX_STREAM_BYTES | usize | Largest stream accepted by framing validation and decoding.
+const wechat_protocol::silk::MAX_STREAM_BYTES | usize | Largest encoded stream buffer produced by [`encode`] for outgoing notes.
 const wechat_protocol::silk::SAMPLE_RATE | u32 | MISSING DOC
 const wechat_protocol::sticker_send::STICKER_SEND_CHUNK | usize | Maximum native byte continuation; the initial probe has a present empty buffer.
 const wechat_protocol::sticker_upload::STICKER_UPLOAD_CHUNK_BYTES | usize | Maximum plaintext bytes carried by one direct sticker upload request.
@@ -767,6 +768,9 @@ field wechat_protocol::media::VideoRepresentationMismatch::rawfilemd5 | core::op
 field wechat_protocol::media::VideoRepresentationMismatch::rawfilesize | core::option::Option<wechat_protocol::media::SourceEvidence> | MISSING DOC
 field wechat_protocol::media::VideoRepresentationMismatch::substituted_filetype | core::option::Option<u32> | MISSING DOC
 field wechat_protocol::media::VideoRepresentationMismatch::videoformat | core::option::Option<i64> | MISSING DOC
+field wechat_protocol::media::VoiceCdnDescriptor::aes_key | alloc::vec::Vec<u8> | 16-byte AES-128-ECB key from `<voicemsg aeskey="..."/>`.
+field wechat_protocol::media::VoiceCdnDescriptor::expected_bytes | core::option::Option<u64> | Advertised byte length from `<voicemsg length="..."/>`, if present.
+field wechat_protocol::media::VoiceCdnDescriptor::file_id | alloc::string::String | CDN file identifier from `<voicemsg voiceurl="..."/>`.
 field wechat_protocol::media_send::MediaSendResult::client_id_matches | core::option::Option<bool> | MISSING DOC
 field wechat_protocol::media_send::MediaSendResult::server_message_id | core::option::Option<alloc::string::String> | MISSING DOC
 field wechat_protocol::media_send::MediaSendResult::service_code | i32 | MISSING DOC
@@ -1373,6 +1377,7 @@ fn wechat_protocol::login_lan_error_reason | fn(error: &anyhow::Error) -> core::
 fn wechat_protocol::media::CdnClient::download | fn(&self, descriptor: &wechat_protocol::media::MediaDescriptor) -> anyhow::Result<wechat_protocol::media::DownloadedMedia> | MISSING DOC
 fn wechat_protocol::media::CdnClient::download_storage_with_progress | fn(&self, descriptor: &wechat_protocol::media::MediaDescriptor, file_key: &str, progress: impl core::ops::function::FnMut(u64, core::option::Option<u64>) -> anyhow::Result<()>) -> anyhow::Result<wechat_protocol::media::DownloadedMedia> | Download a storage object, as the official client does for sticker pack archives: `POST /downloadstorage` with the storage request fields (`apptype` 10, `isstorevideo` 0, `nocheckaeskey` 1, `enablehit` 1, `existancecheck` 0 and `filekey`). `file_key` is the caller's task ID for the object; it correlates requests and is not a credential. Only whole-file descriptors are accepted; the downloaded bytes get the same size and integrity checks as an ordinary file download.
 fn wechat_protocol::media::CdnClient::download_to_with_progress | fn(&self, descriptor: &wechat_protocol::media::MediaDescriptor, progress: impl core::ops::function::FnMut(u64, core::option::Option<u64>) -> anyhow::Result<()>, sink: &mut dyn std::io::Write) -> anyhow::Result<wechat_protocol::media::DownloadReceipt> | Download into `sink`, decrypting each piece as it arrives, so the object is never held in memory. Every check [`Self::download_with_progress`] makes is made on the returned receipt. Until this returns `Ok`, the bytes in `sink` are unverified: on an error the caller must discard them.
+fn wechat_protocol::media::CdnClient::download_voice_with_progress | fn(&self, descriptor: &wechat_protocol::media::VoiceCdnDescriptor, progress: impl core::ops::function::FnMut(u64, core::option::Option<u64>) -> anyhow::Result<()>) -> anyhow::Result<alloc::vec::Vec<u8>> | Download an incoming voice note over CDN (`POST /download` with `filetype = 15`), bounded to [`MAX_VOICE_CDN_BYTES`] (16 MiB) and tolerating transcoded length differences from `expected_bytes`.
 fn wechat_protocol::media::CdnClient::download_with_progress | fn(&self, descriptor: &wechat_protocol::media::MediaDescriptor, progress: impl core::ops::function::FnMut(u64, core::option::Option<u64>) -> anyhow::Result<()>) -> anyhow::Result<wechat_protocol::media::DownloadedMedia> | MISSING DOC
 fn wechat_protocol::media::CdnClient::new | fn(config: wechat_protocol::media::CdnConfig, timeout: core::time::Duration) -> anyhow::Result<Self> | MISSING DOC
 fn wechat_protocol::media::CdnClient::upload | fn(&self, prepared: &wechat_protocol::media::PreparedUpload) -> anyhow::Result<wechat_protocol::media::UploadedMedia> | MISSING DOC
@@ -1488,6 +1493,7 @@ fn wechat_protocol::remove_contact_request | fn(username: &str) -> anyhow::Resul
 fn wechat_protocol::send_contact_request_rpc | fn(state: &wechat_protocol::client::AccountState, input: &wechat_protocol::client::contact_requests::SendContactRequest) -> anyhow::Result<wechat_protocol::client::contact_requests::ContactRpc> | Prepare operation 2 using the discovery ticket; no automatic fallback or retry.
 fn wechat_protocol::silk::decode | #[cfg(feature = \"voice-silk\")] fn(input: &[u8]) -> anyhow::Result<alloc::vec::Vec<i16>> | Decode a validated `#!SILK_V3` voice note into mono 16 kHz signed 16-bit PCM using the bundled SILK C decoder. Requires the `voice-silk` feature.
 fn wechat_protocol::silk::encode | #[cfg(feature = \"voice-silk\")] fn(pcm: &[i16]) -> anyhow::Result<alloc::vec::Vec<u8>> | Encode mono 16 kHz signed 16-bit PCM into a framed `#!SILK_V3` voice note using the bundled SILK C encoder. Requires the `voice-silk` feature.
+fn wechat_protocol::silk::is_silk | fn(input: &[u8]) -> bool | Returns true when `input` begins with a WeChat SILK v3 header (either with its leading byte prefix or bare `#!SILK_V3`).
 fn wechat_protocol::silk::validate_framing | fn(input: &[u8]) -> anyhow::Result<u32> | Validate a WeChat-prefixed `#!SILK_V3` stream's header, packet lengths and duration bounds, returning the total duration in milliseconds.
 fn wechat_protocol::silk::wav | fn(pcm: &[i16]) -> anyhow::Result<alloc::vec::Vec<u8>> | Wrap mono 16 kHz signed 16-bit PCM samples in an uncompressed RIFF/WAVE container.
 fn wechat_protocol::sticker_packs::decode_sticker_pack_acquisition | fn(raw: &[u8]) -> anyhow::Result<wechat_protocol::media::MediaDescriptor> | Decode the response-bound file-ID, AES key and exact plaintext archive size. The result contains credentials and must not appear in logs or public results.
@@ -1654,6 +1660,7 @@ impl core::clone::Clone for wechat_protocol::media::UploadedImage | impl | -
 impl core::clone::Clone for wechat_protocol::media::UploadedMedia | impl | -
 impl core::clone::Clone for wechat_protocol::media::UploadedVideo | impl | -
 impl core::clone::Clone for wechat_protocol::media::VideoRepresentationMismatch | impl | -
+impl core::clone::Clone for wechat_protocol::media::VoiceCdnDescriptor | impl | -
 impl core::clone::Clone for wechat_protocol::media_send::MediaSendResult | impl | -
 impl core::clone::Clone for wechat_protocol::media_send::SendStatus | impl | -
 impl core::clone::Clone for wechat_protocol::mmtls::Record | impl | -
@@ -1957,6 +1964,7 @@ impl core::fmt::Debug for wechat_protocol::media::PreparedUpload | impl | -
 impl core::fmt::Debug for wechat_protocol::media::SourceEvidence | impl | -
 impl core::fmt::Debug for wechat_protocol::media::TpMediaDescriptor | impl | -
 impl core::fmt::Debug for wechat_protocol::media::VideoRepresentationMismatch | impl | -
+impl core::fmt::Debug for wechat_protocol::media::VoiceCdnDescriptor | impl | -
 impl core::fmt::Debug for wechat_protocol::media_send::MediaSendResult | impl | -
 impl core::fmt::Debug for wechat_protocol::media_send::SendStatus | impl | -
 impl core::fmt::Debug for wechat_protocol::openim::OpenImContact | impl | -
@@ -2114,6 +2122,7 @@ impl core::ops::drop::Drop for wechat_protocol::media::MediaDescriptor | impl | 
 impl core::ops::drop::Drop for wechat_protocol::media::PreparedFileUpload | impl | -
 impl core::ops::drop::Drop for wechat_protocol::media::PreparedUpload | impl | -
 impl core::ops::drop::Drop for wechat_protocol::media::TpMediaDescriptor | impl | -
+impl core::ops::drop::Drop for wechat_protocol::media::VoiceCdnDescriptor | impl | -
 impl core::ops::drop::Drop for wechat_protocol::mmtls::ShortSession | impl | -
 impl core::str::traits::FromStr for wechat_protocol::StickerId | impl | -
 impl core::str::traits::FromStr for wechat_protocol::StickerPackId | impl | -
@@ -2177,6 +2186,7 @@ impl serde_core::de::Deserialize<'de> for wechat_protocol::media::TpMediaDescrip
 impl serde_core::de::Deserialize<'de> for wechat_protocol::media::UploadedImage | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::media::UploadedMedia | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::media::UploadedVideo | impl<'de> | -
+impl serde_core::de::Deserialize<'de> for wechat_protocol::media::VoiceCdnDescriptor | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::media_send::MediaSendResult | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::media_send::SendStatus | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_protocol::mmtls::ShortSession | impl<'de> | -
@@ -2263,6 +2273,7 @@ impl serde_core::ser::Serialize for wechat_protocol::media::TpMediaDescriptor | 
 impl serde_core::ser::Serialize for wechat_protocol::media::UploadedImage | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::media::UploadedMedia | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::media::UploadedVideo | impl | -
+impl serde_core::ser::Serialize for wechat_protocol::media::VoiceCdnDescriptor | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::media_send::MediaSendResult | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::media_send::SendStatus | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::mmtls::ShortSession | impl | -
@@ -2468,6 +2479,7 @@ struct wechat_protocol::media::UploadedImage | struct { public fields } | Upload
 struct wechat_protocol::media::UploadedMedia | struct { public fields } | MISSING DOC
 struct wechat_protocol::media::UploadedVideo | struct { public fields } | MISSING DOC
 struct wechat_protocol::media::VideoRepresentationMismatch | struct { public fields } | A complete video transfer at or below the ordinary transfer threshold decrypted successfully but did not match the selected message tuple. The download is still rejected. Only fixed numeric controls and comparison results are kept, so a caller can store a diagnostic without reply bytes or digests. Fields use wire key names; their meanings are not established.
+struct wechat_protocol::media::VoiceCdnDescriptor | struct { public fields } | Descriptor for an incoming voice note downloaded over WeChat CDN (`filetype = 15`).
 struct wechat_protocol::media_send::MediaSendResult | struct { public fields } | MISSING DOC
 struct wechat_protocol::media_send::VoiceUpload | struct<'a> { private fields } | One voice note submitted through `uploadvoice`. A note of at most [`VOICE_UPLOAD_CHUNK_BYTES`] uses a single request with the end flag set. A larger note is sent as consecutive byte ranges (offset/length) under the same client message ID; only the last range sets the end flag, and later ranges carry a server message ID returned for an earlier range. Each range is submitted once: an error after any submission is an uncertain outcome.
 struct wechat_protocol::mmtls::Cursor | struct<'a> { private fields } | MISSING DOC

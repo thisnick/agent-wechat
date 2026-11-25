@@ -440,6 +440,7 @@ impl Core {
             let _ = core.repair_contact_mutations(&account.id);
             let _ = core.refresh_incoming_groups(&account.id, false);
             let _ = core.refresh_big_xml(&account.id, false);
+            let _ = core.settle_stale_streaming_voices(&account.id, chrono::Utc::now().timestamp());
         }
         Ok(core)
     }
@@ -1357,6 +1358,7 @@ impl Core {
                 }
                 Err(_) => {}
             }
+            let _ = core.settle_stale_streaming_voices(&account, chrono::Utc::now().timestamp());
             Ok(result)
         })
         .await
@@ -2040,6 +2042,7 @@ impl Core {
         self.repair_contact_mutations(account)?;
         self.refresh_incoming_groups(account, false)?;
         self.refresh_big_xml(account, false)?;
+        self.settle_stale_streaming_voices(account, chrono::Utc::now().timestamp())?;
         if self.store.pending_sync(account)?.is_empty() {
             self.store.retry_blocked(account)?;
         }
@@ -2488,6 +2491,7 @@ impl Core {
                 {
                     core.publish_profile_checkpoint(&owned)?;
                 }
+                let _ = core.settle_stale_streaming_voices(&owned, chrono::Utc::now().timestamp());
                 Ok(())
             })
             .await?;
@@ -2537,6 +2541,8 @@ impl Core {
                 {
                     let _ = core.publish_profile_checkpoint(&account);
                 }
+                let _ =
+                    core.settle_stale_streaming_voices(&account, chrono::Utc::now().timestamp());
                 let expected = core
                     .store
                     .runtime(&account, "account-state")?
