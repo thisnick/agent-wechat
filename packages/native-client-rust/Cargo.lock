@@ -2833,7 +2833,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-api"
-version = "3.0.0-beta.6"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2862,7 +2862,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-audio"
-version = "3.0.0-beta.6"
+version = "3.0.0"
 dependencies = [
  "coreaudio-rs",
  "coreaudio-sys",
@@ -2874,7 +2874,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-call-client"
-version = "3.0.0-beta.6"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -2892,7 +2892,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-call-contracts"
-version = "3.0.0-beta.6"
+version = "3.0.0"
 dependencies = [
  "schemars",
  "serde",
@@ -2902,7 +2902,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-calls"
-version = "3.0.0-beta.6"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "opusic-c",
@@ -2913,7 +2913,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-core"
-version = "3.0.0-beta.6"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2947,7 +2947,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-media"
-version = "3.0.0-beta.6"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "gif",
@@ -2965,7 +2965,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-platform"
-version = "3.0.0-beta.6"
+version = "3.0.0"
 dependencies = [
  "libc",
  "tempfile",
@@ -2974,7 +2974,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-profile"
-version = "3.0.0-beta.6"
+version = "3.0.0"
 dependencies = [
  "aes",
  "base64 0.22.1",
@@ -3003,7 +3003,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-protocol"
-version = "3.0.0-beta.6"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3024,7 +3024,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-simulator"
-version = "3.0.0-beta.6"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3052,7 +3052,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-store"
-version = "3.0.0-beta.6"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3325,7 +3325,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "wx-native"
-version = "3.0.0-beta.6"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "axum",
