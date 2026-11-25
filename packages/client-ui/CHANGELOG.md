@@ -1,5 +1,11 @@
 # @agent-wechat/client-ui
 
+## 0.7.1
+
+### Patch Changes
+
+- [#696](https://github.com/thisnick/agent-wechat/pull/696) [`e30326b`](https://github.com/thisnick/agent-wechat/commit/e30326b94aa3cc4589fa1cbfa3d7c9b764a02ade) Thanks [@thisnick](https://github.com/thisnick)! - Fix the voice message player's layout in the macOS app and Safari, where the time labels overlapped the progress bar and the play button rendered incorrectly.
+
 ## 0.7.0
 
 ### Minor Changes

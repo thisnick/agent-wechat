@@ -1,5 +1,21 @@
 # @agent-wechat/cli
 
+## 3.1.0
+
+### Patch Changes
+
+- [#697](https://github.com/thisnick/agent-wechat/pull/697) [`30df28c`](https://github.com/thisnick/agent-wechat/commit/30df28cc1f9c7263910f69288ce3b57bc9efc73f) Thanks [@thisnick](https://github.com/thisnick)! - Align incoming voice message downloads and decoding with official WeChat clients to fix intermittent `media_processing_failed` and `media_integrity_failed` errors (#681).
+
+  - Support SILK DTX silence frames (`0x0000` via `lostFlag = 1`), `0xFFFF` EOF trailers, headerless `#!SILK_V3` and relaxed leading bytes, and incoming voice notes over 60 seconds in `wechat-protocol::silk`.
+  - Add `#!OPUS_RAW_V1` decoding (`decode_raw_opus_v1`) in `wechat-calls::opus`, plus AMR/WAV/MP3 FFmpeg fallback for playable WAV conversion.
+  - Store raw downloaded voice bytes on `--quality encoded` without forcing SILK decode, matching official clients, and add additive CDN voice download support (`VoiceCdnDescriptor` / `CdnClient::download_voice_with_progress`, `filetype = 15`, 16 MiB cap) with fallback to CGI 128 (`downloadvoice`).
+  - Relax CGI 128 response validation to tolerate server offset/buffer-length drift, shorter transcoded responses (via 3 consecutive empty chunks), and single-chunk overflow past the advertised XML length; handle `cancelflag=1` and streaming `endflag=0 -> 1` in-place updates (`wechat_profile::apply_voice_message_update`); and emit download progress after each chunk.
+  - Record non-secret `voiceDownloadFailure` diagnostics on failed voice jobs, allow explicit re-download of failed voice assets, and map `media_job_not_retryable` (`409`), `media_queue_full` (`503`), and `voice_cancelled` / `media_cancelled` (`410`) instead of `500 operation_failed`.
+
+- [#692](https://github.com/thisnick/agent-wechat/pull/692) [`4718a4d`](https://github.com/thisnick/agent-wechat/commit/4718a4d972fd3893ff83834fac0872b12a100ab5) Thanks [@thisnick](https://github.com/thisnick)! - Add an opt-in `pure-rust-crypto` Cargo feature to `wechat-protocol` alongside the default-enabled `openssl-crypto` backend so consumers can build without vendored OpenSSL (`default-features = false, features = ["pure-rust-crypto"]`), and switch `wechat-calls` (`native-runtime`), the shipped `wx` CLI/daemon, and the desktop sidecar build to use `wechat-protocol`'s `pure-rust-crypto` backend (SQLCipher profile and store encryption continue to use OpenSSL). Add portable `crypto::Curve`, `crypto::Ecdh::generate_for`, `crypto::Ecdh::from_private_for`, `crypto::cbc_encrypt`, and `crypto::cbc_decrypt` APIs; OpenSSL-typed `Ecdh::generate`, `Ecdh::from_private`, and `crypto::cbc` remain available when `openssl-crypto` is enabled. Callers setting `default-features = false` must select at least one crypto backend (`openssl-crypto` or `pure-rust-crypto`).
+
+- [#695](https://github.com/thisnick/agent-wechat/pull/695) [`92e543e`](https://github.com/thisnick/agent-wechat/commit/92e543e3bac1305213dccebd5ed02340f9ab7433) Thanks [@thisnick](https://github.com/thisnick)! - Make native CDN chunked uploads and downloads reuse a pooled HTTP/1.1 connection per transfer instead of creating a new client with `Connection: close` per chunk, retry transient transport drops and 5xx/408/429 responses with bounded backoff while honoring cancellation/logout fences, and fail over across authenticated CDN server IPs.
+
 ## 3.0.0
 
 ### Major Changes
