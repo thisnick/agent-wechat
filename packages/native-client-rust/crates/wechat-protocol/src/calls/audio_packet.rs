@@ -646,7 +646,11 @@ impl Live96 {
             0x70 => (self.next_control, u32::from(self.first_tx_control)),
             _ => (0, 0),
         };
-        if sequence32 < own_next && sequence32 >= first_tx {
+        // A sequence the peer already used before this packet was either skipped by our
+        // sender (`seal_rudp`) or caught when we sealed (`seal_inner`), so a later peer
+        // packet at that sequence is not a new cross-direction reuse.
+        let peer_used_first = self.rx_seen_contains(nonce_kind, sequence32);
+        if !peer_used_first && sequence32 < own_next && sequence32 >= first_tx {
             self.diagnostic_overlap(nonce_kind)?;
         }
         // Retire every authenticated, sender-bound nonce before payload classification.
@@ -1177,6 +1181,11 @@ mod tests {
         assert!(local.open(epoch(), &peer_data).unwrap().is_some());
         let ack = local.seal_rudp(epoch(), 0, &[8, 2]).unwrap().unwrap();
         assert_eq!(u16::from_le_bytes([ack[15], ack[16]]), start + 1);
+
+        // Another peer packet at the sequence we skipped is not mistaken for reuse of ours.
+        remote.next_rudp = u32::from(start);
+        let late_variant = remote.seal(epoch(), 0, 0x50, &[8, 4]).unwrap();
+        assert!(local.open(epoch(), &late_variant).unwrap().is_some());
 
         // A later peer 0x50 packet reusing the sequence we sent on is rejected.
         remote.next_rudp = u32::from(start) + 1;
