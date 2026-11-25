@@ -1,7 +1,6 @@
 //! Fresh pinned MMTLS handshake and authenticated shortlink exchange.
 use crate::crypto::*;
 use anyhow::{ensure, Context, Result};
-use openssl::{memcmp, nid::Nid};
 use serde::{Deserialize, Serialize};
 use std::{
     io::{Read, Write},
@@ -311,8 +310,8 @@ impl Session {
         let mut socket = socket.ok_or_else(|| anyhow::anyhow!("Native connection failed"))?;
         socket.set_write_timeout(Some(timeout))?;
         let keys = [
-            Ecdh::generate(Nid::X9_62_PRIME256V1).context("MMTLS key generation")?,
-            Ecdh::generate(Nid::X9_62_PRIME256V1).context("MMTLS key generation")?,
+            Ecdh::generate_for(Curve::P256).context("MMTLS key generation")?,
+            Ecdh::generate_for(Curve::P256).context("MMTLS key generation")?,
         ];
         let mut shares = vec![];
         for (i, k) in keys.iter().enumerate() {
@@ -400,7 +399,7 @@ impl Session {
             &sha256(&transcript),
         )?;
         ensure!(
-            finish.len() == expected.len() && memcmp::eq(&finish, &expected),
+            constant_time_eq(&finish, &expected),
             "Server Finished verification failed"
         );
         let client_finish = hmac(
@@ -986,7 +985,7 @@ fn decode_short_reply(
         &sha256(&transcript),
     )?;
     ensure!(
-        finish.len() == expected.len() && memcmp::eq(&finish, &expected),
+        constant_time_eq(&finish, &expected),
         "Shortlink Finished failed"
     );
     let mut plain = vec![];
@@ -1134,8 +1133,8 @@ mod tests {
         // Synthetic P256 private scalars 1 and 379. The shared coordinate and
         // record were calculated independently using Python cryptography,
         // hashlib and hmac. No account data or captured traffic is used.
-        let own = Ecdh::from_private(Nid::X9_62_PRIME256V1, &[1]).unwrap();
-        let peer = Ecdh::from_private(Nid::X9_62_PRIME256V1, &[1, 123]).unwrap();
+        let own = Ecdh::from_private_for(Curve::P256, &[1]).unwrap();
+        let peer = Ecdh::from_private_for(Curve::P256, &[1, 123]).unwrap();
         let shared = own.derive(&peer.public().unwrap()).unwrap();
         assert_eq!(
             hex::encode(&shared),

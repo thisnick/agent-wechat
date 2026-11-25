@@ -120,6 +120,8 @@ jobs:
             packages+=(--exclude wechat-simulator)
           fi
           cargo clippy --workspace "${packages[@]}" --all-targets --locked -- -D warnings
+          cargo clippy --all-targets --locked -p wechat-protocol --no-default-features --features pure-rust-crypto -- -D warnings
+          cargo clippy --all-targets --locked -p wechat-protocol --features pure-rust-crypto -- -D warnings
       - name: Restore pinned image decoder runtime
         if: matrix.suite == 'test'
         id: ffmpeg-cache

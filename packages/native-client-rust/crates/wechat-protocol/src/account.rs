@@ -500,7 +500,7 @@ fn non_cookie_digest(state: &AccountState) -> Result<[u8; 32]> {
     zeroize::Zeroize::zeroize(&mut without_cookie.cookie);
     without_cookie.cookie.clear();
     let encoded = Zeroizing::new(serde_json::to_vec(&without_cookie)?);
-    Ok(openssl::sha::sha256(&encoded))
+    Ok(crate::crypto::sha256_array(&encoded))
 }
 
 impl NativeClient {

@@ -15,7 +15,7 @@ fn device() -> DeviceProfile {
     }
 }
 fn poll(plain: &[u8]) -> Result<wire::PollResponse> {
-    let ciphertext = crypto::cbc(plain, &[7; 16], openssl::symm::Mode::Encrypt).unwrap();
+    let ciphertext = crypto::cbc_encrypt(plain, &[7; 16]).unwrap();
     let reply = p::message(&[
         p::bytes(1, &p::uint(1, 0)),
         p::bytes(

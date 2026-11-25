@@ -49,10 +49,18 @@ jobs:
           RELEASE_VERSION: ${{ inputs.version }}
       - name: Build public examples from the libraries
         run: |
+          if cargo tree --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol --no-default-features --features pure-rust-crypto | grep -i openssl; then
+            echo "Unexpected OpenSSL dependency under pure-rust-crypto" >&2
+            exit 1
+          fi
           cargo check --examples --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol -p wechat-profile -p wechat-calls
-          cargo check --examples --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol --no-default-features
+          cargo check --examples --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol --no-default-features --features openssl-crypto
+          cargo check --examples --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol --no-default-features --features pure-rust-crypto
           cargo test --doc --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol -p wechat-profile -p wechat-calls
-          cargo test --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol --no-default-features
+          cargo test --doc --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol --no-default-features --features pure-rust-crypto
+          cargo test --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol --no-default-features --features openssl-crypto
+          cargo test --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol --no-default-features --features pure-rust-crypto
+          cargo test --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol --features pure-rust-crypto -- parity_tests
           cargo run --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-calls --no-default-features --example portable_mix
           cargo run --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-calls --no-default-features --features native-opus --example tone_roundtrip
           cargo test --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-calls --no-default-features

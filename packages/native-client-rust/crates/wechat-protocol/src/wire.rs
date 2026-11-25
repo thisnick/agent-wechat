@@ -115,7 +115,7 @@ pub fn decode_poll(input: &[u8], notify_key: &[u8]) -> Result<PollResponse> {
     let pkg = p::decode(pkg)?;
     let ciphertext = p::unbuffer(p::data(&pkg, 1)?)?;
     p::scalar(&pkg, 2)?;
-    let plain = crate::crypto::cbc(&ciphertext, notify_key, openssl::symm::Mode::Decrypt)?;
+    let plain = crate::crypto::cbc_decrypt(&ciphertext, notify_key)?;
     let notify = p::decode(&plain)?;
     // LoginQRCodeNotifyData.f17 is an SKBuffer containing
     // LoginQRCodeNonStoreExtNotifyData; its f1 is the risk state.

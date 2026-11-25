@@ -10,11 +10,8 @@ use super::{
     DownloadReceipt, DownloadedMedia, MediaQuality, MAX_CDN_TRANSFER_BYTES, MAX_LARGE_FILE_BYTES,
     MAX_VIDEO_DOWNLOAD_BYTES,
 };
+use crate::crypto::{Aes128EcbDecryptor, Md5Hasher, Sha256Hasher};
 use anyhow::{bail, ensure, Result};
-use openssl::{
-    hash::{Hasher, MessageDigest},
-    symm::{Cipher, Crypter, Mode},
-};
 use serde::{Deserialize, Serialize};
 use std::{fmt, io::Read, net::SocketAddr, time::Duration};
 use zeroize::{Zeroize, Zeroizing};
@@ -226,17 +223,12 @@ fn fetch_tp_media_at(
         .resolve(&host, address)
         .build()?;
 
-    let mut decryptor = Crypter::new(
-        Cipher::aes_128_ecb(),
-        Mode::Decrypt,
-        &descriptor.aes_key,
-        None,
-    )?;
+    let mut decryptor = Aes128EcbDecryptor::new(&descriptor.aes_key)?;
     let mut plain = Zeroizing::new(vec![0u8; TP_READ_STEP + 16]);
     let mut buf = [0u8; TP_READ_STEP];
     let mut plaintext_bytes = 0usize;
-    let mut plaintext_md5 = Hasher::new(MessageDigest::md5())?;
-    let mut plaintext_sha256 = Hasher::new(MessageDigest::sha256())?;
+    let mut plaintext_md5 = Md5Hasher::new()?;
+    let mut plaintext_sha256 = Sha256Hasher::new()?;
 
     let mut position = 0usize;
     let mut total = 0usize;
@@ -445,7 +437,7 @@ mod tests {
     }
 
     fn encrypt_ecb(plain: &[u8], key: &[u8]) -> Vec<u8> {
-        openssl::symm::encrypt(Cipher::aes_128_ecb(), key, None, plain).unwrap()
+        crate::crypto::aes_128_ecb_encrypt(key, plain).unwrap()
     }
 
     fn read_http_request(stream: &mut std::net::TcpStream) -> String {

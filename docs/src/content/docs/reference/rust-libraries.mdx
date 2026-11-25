@@ -28,9 +28,14 @@ connecting to a running daemon can use the [HTTP API](/use/api/).
 
 2. Build with Rust 1.93.1+, a C compiler, Make and Perl. Cargo resolves supporting
    crates automatically. Native Opus also needs CMake and a C++ compiler.
-   To skip compiling the bundled C SILK voice encoder/decoder (`voice-silk`) in
-   `wechat-protocol`, disable default features (`default-features = false`);
-   framing validation, WAV packaging, and all protocol codecs stay available.
+   In `wechat-protocol`, `voice-silk` and `openssl-crypto` are enabled by
+   default. To skip compiling C SILK or vendored OpenSSL, set
+   `default-features = false` and enable either `openssl-crypto` or
+   `pure-rust-crypto` (plus `voice-silk` if you need `silk::encode` or
+   `silk::decode`). If both crypto features are enabled in the same dependency
+   graph (for example through `wechat-calls`'s `native-runtime`),
+   `openssl-crypto` takes precedence. Framing validation, WAV packaging, and
+   all protocol codecs stay available without `voice-silk`.
 
 From the release after 2.3.2, the Rust libraries have the same version number as
 the CLI, daemon and OpenClaw plugin, and every release publishes all five. Earlier

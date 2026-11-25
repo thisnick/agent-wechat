@@ -721,8 +721,9 @@ fn parse_relay_ip_text(raw: &[u8], allow_empty: bool) -> Result<(&str, Option<Ip
 }
 fn checkin_key(room_key: u64) -> Result<Zeroizing<[u8; 16]>> {
     ensure!(room_key != 0, "Missing relay key");
-    let digest = openssl::hash::hash(openssl::hash::MessageDigest::md5(), &room_key.to_le_bytes())?;
-    Ok(Zeroizing::new(digest.as_ref().try_into()?))
+    Ok(Zeroizing::new(crate::crypto::md5_array(
+        &room_key.to_le_bytes(),
+    )))
 }
 
 pub fn frame_outer(body: &[u8]) -> Result<Vec<u8>> {

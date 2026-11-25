@@ -2,7 +2,6 @@
 use crate::errors::{Service, ServiceRejected};
 use crate::{crypto::*, protobuf as p, MAX_MESSAGE_BYTES};
 use anyhow::{bail, ensure, Result};
-use openssl::{nid::Nid, symm::Mode};
 use zeroize::Zeroize;
 
 pub struct PublicProfile {
@@ -59,7 +58,7 @@ impl Prelogin {
             auth_key.is_empty() || auth_key.len() >= 24,
             "Invalid saved Hybrid auth key"
         );
-        let local = Ecdh::generate(Nid::X9_62_PRIME256V1)?;
+        let local = Ecdh::generate_for(Curve::P256)?;
         let point = local.public()?;
         let prefix = [b"1415".as_slice(), &point].concat();
         let aad = sha256(&prefix);
@@ -314,7 +313,7 @@ impl AuthenticatedPacket {
         let encrypted = if mode == 13 {
             envelope_seal(body, &state.request_key, b"", random()?)?
         } else {
-            cbc(body, &key, Mode::Encrypt)?
+            cbc_encrypt(body, &key)?
         };
         let packet = pack(
             PacketPolicy {
@@ -354,7 +353,7 @@ impl AuthenticatedPacket {
         let body = if self.mode == 13 {
             envelope_open(&envelope.payload, &self.key, b"")?
         } else {
-            cbc(&envelope.payload, &self.key, Mode::Decrypt)?
+            cbc_decrypt(&envelope.payload, &self.key)?
         };
         ensure!(
             body.len() == envelope.pre_encryption_length,
@@ -389,7 +388,7 @@ pub fn account_keys(inner: &Ecdh, auth: &[u8]) -> Result<(Vec<u8>, Vec<u8>, Vec<
         ensure!(secret.len() == 28, "Invalid P224 secret");
         let mut key = md5(&secret);
         secret.zeroize();
-        let result = cbc(&raw, &key, Mode::Decrypt);
+        let result = cbc_decrypt(&raw, &key);
         key.zeroize();
         result?
     } else {
@@ -446,21 +445,12 @@ mod tests {
     }
     #[test]
     fn synthetic_signed_peer_and_saved_credential() {
-        use openssl::{
-            ec::{EcGroup, EcKey},
-            hash::MessageDigest,
-            pkey::PKey,
-            sign::Signer,
-        };
-        let static_key = Ecdh::generate(Nid::X9_62_PRIME256V1).unwrap();
-        let signing = PKey::from_ec_key(
-            EcKey::generate(&EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap()).unwrap(),
-        )
-        .unwrap();
+        let static_key = Ecdh::generate_for(Curve::P256).unwrap();
+        let signing = TestP256Signer::generate().unwrap();
         let profile = PublicProfile {
             version: 1,
             point: static_key.public().unwrap(),
-            signature_pem: String::from_utf8(signing.public_key_to_pem().unwrap()).unwrap(),
+            signature_pem: signing.public_pem().unwrap(),
         };
         for credential in [1, 2] {
             let auth = if credential == 2 {
@@ -505,7 +495,7 @@ mod tests {
                     random
                 );
             }
-            let ephemeral = Ecdh::generate(Nid::X9_62_PRIME256V1).unwrap();
+            let ephemeral = Ecdh::generate_for(Curve::P256).unwrap();
             let server_point = ephemeral.public().unwrap();
             let response_aad = sha256(
                 &[
@@ -533,11 +523,10 @@ mod tests {
                 p::bytes(3, &ciphertext),
             ];
             if credential == 1 {
-                let mut signer = Signer::new(MessageDigest::sha256(), &signing).unwrap();
-                signer
-                    .update(&sha256(&[p::data(&f, 5).unwrap(), &ciphertext].concat()))
+                let sig = signing
+                    .sign_sha256(&sha256(&[p::data(&f, 5).unwrap(), &ciphertext].concat()))
                     .unwrap();
-                fields.push(p::bytes(4, &signer.sign_to_vec().unwrap()));
+                fields.push(p::bytes(4, &sig));
             }
             let response = p::message(&fields).unwrap();
             assert_eq!(

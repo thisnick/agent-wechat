@@ -1,7 +1,8 @@
 # wechat-protocol
 
 Native protocol library for the Linux 4.1.13.26 profile. This is Rust
-protocol code using OpenSSL primitives; it does not execute Node or load an
+protocol code using vendored OpenSSL primitives by default (`openssl-crypto`)
+or an opt-in pure-Rust backend (`pure-rust-crypto`); it does not execute Node or load an
 official WeChat executable/library. Account-owned requests use async methods
 backed by blocking transport workers. Login bootstrap
 and remaining low-level operations require a blocking worker in async applications.
@@ -124,11 +125,22 @@ known contact and group lookups, contact bootstrap pages, avatar bytes and voice
 download chunks. The CDN module implements authenticated routing bootstrap,
 encrypted range downloads, ordinary-file uploads with an initial 32 MiB plaintext
 ceiling, supplied JPEG image variants and MP4/thumbnail uploads. Metadata finalizers cover
-files, images, videos and bounded SILK voice notes. The default-enabled
-`voice-silk` feature compiles the bundled portable SILK C SDK for
-`silk::encode` and `silk::decode` without loading an official client codec;
-building with `default-features = false` skips the C SILK build while keeping
-`silk::validate_framing`, `silk::wav`, voice bounds, and all protocol codecs. A separate core layer owns resizing, input conversion,
+files, images, videos and bounded SILK voice notes. Cargo features control the
+bundled native dependencies: `voice-silk` (default) compiles the bundled
+portable SILK C SDK for `silk::encode` and `silk::decode` without loading an
+official client codec; `openssl-crypto` (default) uses vendored OpenSSL; and
+`pure-rust-crypto` uses pure-Rust cryptographic primitives without OpenSSL.
+Disabling default features requires selecting at least one crypto backend
+(`openssl-crypto` or `pure-rust-crypto`). If both crypto features are enabled
+via Cargo feature unification (for example, when default features remain enabled
+or another dependency such as `wechat-calls`'s `native-runtime` enables
+`openssl-crypto`), `openssl-crypto` takes precedence. Omitting `voice-silk` skips the C
+SILK build while keeping `silk::validate_framing`, `silk::wav`, voice bounds,
+and all protocol codecs. Portable callers can use `crypto::Curve`,
+`Ecdh::generate_for`, `Ecdh::from_private_for`, `crypto::cbc_encrypt`, and
+`crypto::cbc_decrypt`; the OpenSSL-typed `Ecdh::generate`,
+`Ecdh::from_private`, and `crypto::cbc` wrappers remain available under
+`openssl-crypto`. A separate core layer owns resizing, input conversion,
 durable jobs, upload readback and uncertain-send handling. Sticker retrieval is
 restricted to the verified original-byte CDN host, with pinned public DNS,
 redirect refusal, MD5 validation and bounded full image decoding.
