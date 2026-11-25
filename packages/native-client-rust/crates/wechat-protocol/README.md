@@ -124,9 +124,11 @@ known contact and group lookups, contact bootstrap pages, avatar bytes and voice
 download chunks. The CDN module implements authenticated routing bootstrap,
 encrypted range downloads, ordinary-file uploads with an initial 32 MiB plaintext
 ceiling, supplied JPEG image variants and MP4/thumbnail uploads. Metadata finalizers cover
-files, images, videos and bounded SILK voice notes. The bundled portable SILK SDK
-encodes fresh mono 16 kHz audio and decodes incoming voice bytes without loading
-an official client codec. A separate core layer owns resizing, input conversion,
+files, images, videos and bounded SILK voice notes. The default-enabled
+`voice-silk` feature compiles the bundled portable SILK C SDK for
+`silk::encode` and `silk::decode` without loading an official client codec;
+building with `default-features = false` skips the C SILK build while keeping
+`silk::validate_framing`, `silk::wav`, voice bounds, and all protocol codecs. A separate core layer owns resizing, input conversion,
 durable jobs, upload readback and uncertain-send handling. Sticker retrieval is
 restricted to the verified original-byte CDN host, with pinned public DNS,
 redirect refusal, MD5 validation and bounded full image decoding.

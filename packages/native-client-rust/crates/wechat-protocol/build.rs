@@ -1,4 +1,11 @@
 fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    #[cfg(feature = "voice-silk")]
+    build_silk();
+}
+
+#[cfg(feature = "voice-silk")]
+fn build_silk() {
     let mut build = cc::Build::new();
     build
         .include("vendor/silk/interface")

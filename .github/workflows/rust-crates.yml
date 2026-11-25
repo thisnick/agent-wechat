@@ -50,7 +50,9 @@ jobs:
       - name: Build public examples from the libraries
         run: |
           cargo check --examples --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol -p wechat-profile -p wechat-calls
+          cargo check --examples --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol --no-default-features
           cargo test --doc --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol -p wechat-profile -p wechat-calls
+          cargo test --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol --no-default-features
           cargo run --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-calls --no-default-features --example portable_mix
           cargo run --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-calls --no-default-features --features native-opus --example tone_roundtrip
           cargo test --locked --manifest-path packages/native-client-rust/Cargo.toml -p wechat-calls --no-default-features
