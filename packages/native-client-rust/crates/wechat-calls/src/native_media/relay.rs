@@ -176,6 +176,17 @@ fn connect_target_with_early(
         .context("Relay check-in preparation failed")?;
     submit(&socket, endpoint, &active_packet).context("Relay UDP send failed")?;
     let mut last_tx = Instant::now();
+    // Timestamped handshake steps for `WX_CALL_VIDEO_TRACE=1`, to see how long the
+    // relay takes to answer the first check-in.
+    let trace = std::env::var("WX_CALL_VIDEO_TRACE").as_deref() == Ok("1");
+    let handshake_start = Instant::now();
+    let mut steps: Vec<String> = Vec::new();
+    let mut note = |step: &str| {
+        if trace && steps.len() < 32 {
+            steps.push(format!("{step}@{}", handshake_start.elapsed().as_millis()));
+        }
+    };
+    note("tx_initial");
     // One extra byte distinguishes a maximum-size datagram from truncation.
     let mut buffer = [0u8; 8198];
     let mut early_packets = VecDeque::<Vec<u8>>::new();
@@ -194,6 +205,7 @@ fn connect_target_with_early(
             }
             submit(&socket, endpoint, &active_packet).context("Relay UDP send failed")?;
             last_tx = Instant::now();
+            note("tx_retry");
         }
         match socket.recv_from(&mut buffer) {
             Ok((n, source))
@@ -204,6 +216,7 @@ fn connect_target_with_early(
                     .context("Relay check-in response failed")?
                 {
                     RelayProgress::FirstCheckin => {
+                        note("rx_first");
                         let header = clock() as u32;
                         let body = clock() as u32;
                         let random = crypto::random::<10>()?;
@@ -214,13 +227,17 @@ fn connect_target_with_early(
                         submit(&socket, endpoint, &active_packet)
                             .context("Relay UDP send failed")?;
                         last_tx = Instant::now();
+                        note("tx_continuation");
                     }
-                    RelayProgress::Ready
-                    | RelayProgress::Opaque
-                    | RelayProgress::DuplicateCheckin => {}
+                    RelayProgress::Ready => note("rx_ready"),
+                    RelayProgress::Opaque => note("rx_opaque"),
+                    RelayProgress::DuplicateCheckin => note("rx_duplicate"),
                 }
             }
             Ok((n, source)) if source == endpoint && n > 0 && n <= 8197 => {
+                if early_packets.is_empty() {
+                    note("rx_first_media");
+                }
                 push_early_packet(&mut early_packets, &buffer[..n]);
             }
             Ok(_) => {}
@@ -234,6 +251,12 @@ fn connect_target_with_early(
             }
             Err(e) => return Err(e).context("Relay UDP receive failed"),
         }
+    }
+    if trace {
+        eprintln!(
+            "[wechat-call-video] relay checkin endpoint={endpoint} steps=[{}]",
+            steps.join(",")
+        );
     }
     Ok((socket, early_packets))
 }

@@ -15,6 +15,8 @@ pub mod host_transport;
 pub mod incoming;
 pub mod personal;
 pub mod relay;
+/// In-band reliable `0x50` messages and their acknowledgements.
+pub mod rudp;
 pub mod signaling;
 /// Video packetization, reassembly and video RTCP/QoS codecs.
 pub mod video_packet;
