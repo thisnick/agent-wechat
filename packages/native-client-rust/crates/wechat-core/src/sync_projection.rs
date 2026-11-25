@@ -1281,7 +1281,7 @@ impl Core {
                 self.queue_big_xml_expansion(account, &message, body, &sender, &id, origin)?;
         }
         let streaming_key = streaming_voice_key(&id);
-        if voice_streaming && origin != "profile_import" {
+        if voice_streaming && !already_finalized_voice && origin != "profile_import" {
             let now = chrono::Utc::now().timestamp();
             let recent_for_deferral = origin == "live"
                 || now.saturating_sub(message.created_at as i64) < STREAMING_VOICE_SETTLE_SECS;
@@ -1370,14 +1370,23 @@ impl Core {
             if now < pending.settle_after {
                 continue;
             }
-            let still_voice = crate::source_message_id(&pending.message_id)
-                .ok()
-                .and_then(|source| {
-                    let reader = self.profile_reader(account).ok()?;
-                    let own = self.profile_username(account).ok().flatten();
-                    reader.message(&source, own.as_deref()).ok()
-                })
-                .is_some_and(|msg| msg.message_type == 34);
+            let Ok(source) = crate::source_message_id(&pending.message_id) else {
+                self.store.clear_runtime(account, &key)?;
+                continue;
+            };
+            let Ok(reader) = self.profile_reader_owned(account) else {
+                // Keep the marker while the profile cannot be opened so a later
+                // sweep retries settlement instead of dropping `message.committed`.
+                continue;
+            };
+            let Ok(own) = self.profile_username(account) else {
+                continue;
+            };
+            let still_voice = match reader.message(&source, own.as_deref()) {
+                Ok(msg) => msg.message_type == 34,
+                Err(wechat_profile::ProfileError::NotCached) => false,
+                Err(_) => continue,
+            };
             if still_voice {
                 if !pending.settled {
                     pending.settled = true;
@@ -4313,9 +4322,27 @@ mod automatic_voice_tests {
             .unwrap()
             .is_empty());
 
-        // Out-of-order replay of endflag=0 (even with inline bytes) after endflag=1 is a no-op.
-        core.apply_received_sync_command("one", &partial, "voice-stream-replay-0", "catchup")
+        // Out-of-order replay of endflag=0 (even with origin="live") after endflag=1
+        // must be a no-op and must not create a new deferral marker or hide finalized assets.
+        core.apply_received_sync_command("one", &partial, "voice-stream-replay-0", "live")
             .unwrap();
+        assert!(store
+            .runtime_prefix("one", STREAMING_VOICE_PREFIX, 100)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            core.media_assets("one", asset.message_id.as_deref().unwrap())
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            store
+                .runtime_prefix("one", "received-voice:", 100)
+                .unwrap()
+                .len(),
+            1
+        );
         let source = crate::source_message_id(asset.message_id.as_deref().unwrap()).unwrap();
         let stored = core
             .profile_reader("one")
@@ -4352,8 +4379,35 @@ mod automatic_voice_tests {
             .iter()
             .any(|e| e.kind == "message.committed"));
 
-        // Once the bounded 90-second window passes, settlement emits `message.committed`,
-        // queues auto-download, exposes pending assets, and removes the marker.
+        // If the profile is temporarily unreadable when the settle window expires,
+        // the marker must be retained and retried once readable again.
+        let profile_root = store.account("one").unwrap().profile_path;
+        let hidden = profile_root.with_extension("away");
+        std::fs::rename(&profile_root, &hidden).unwrap();
+        core.profile_readers.lock().unwrap().remove("one");
+        assert_eq!(
+            core.settle_stale_streaming_voices("one", now + STREAMING_VOICE_SETTLE_SECS + 1)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .runtime_prefix("one", STREAMING_VOICE_PREFIX, 100)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(!store
+            .events("one", 0, 200)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "message.committed"));
+        std::fs::rename(&hidden, &profile_root).unwrap();
+        core.profile_readers.lock().unwrap().remove("one");
+
+        // Once the profile is readable and the bounded 90-second window passes,
+        // settlement emits `message.committed`, queues auto-download, exposes
+        // pending assets, and removes the marker.
         assert_eq!(
             core.settle_stale_streaming_voices("one", now + STREAMING_VOICE_SETTLE_SECS + 1)
                 .unwrap(),
