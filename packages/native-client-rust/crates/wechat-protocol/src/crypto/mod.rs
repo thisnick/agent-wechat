@@ -217,6 +217,8 @@ pub fn cbc_decrypt(ciphertext: &[u8], key: &[u8]) -> Result<Vec<u8>> {
     active::aes_128_cbc_decrypt(&normalized, &normalized, ciphertext)
 }
 
+// Legacy OpenSSL-typed helper kept only for 3.x compatibility (#701).
+// Prefer `cbc_encrypt` / `cbc_decrypt` in all new code.
 /// Encrypt or decrypt with AES-128-CBC (PKCS#7 padding) using OpenSSL's `Mode`.
 /// Requires the `openssl-crypto` feature; portable callers can use
 /// [`cbc_encrypt`] and [`cbc_decrypt`].
@@ -339,6 +341,8 @@ impl Ecdh {
         })
     }
 
+    // Legacy OpenSSL-typed constructors kept only for 3.x compatibility (#701).
+    // Prefer `Ecdh::generate_for` and `Ecdh::from_private_for` in all new code.
     /// Generate a fresh ECDH key pair using an OpenSSL curve `Nid`.
     /// Requires the `openssl-crypto` feature; portable callers can use
     /// [`Self::generate_for`].

@@ -1,3 +1,6 @@
+// Legacy OpenSSL crypto backend kept only for 3.x backwards compatibility (#701).
+// Prefer `pure_rust_backend` (`pure-rust-crypto`) for all new work; do not add new
+// callers or features that depend on OpenSSL here.
 use super::Curve;
 use anyhow::{ensure, Result};
 use openssl::{

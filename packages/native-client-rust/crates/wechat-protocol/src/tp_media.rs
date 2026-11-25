@@ -99,6 +99,8 @@ pub fn validate_tp_auth_key(value: &str) -> Result<()> {
     Ok(())
 }
 
+// Legacy blocking WeCom downloaders kept for 3.x native compatibility (#701).
+// Prefer `fetch_tp_media_async` and `fetch_tp_media_to_async` for new code.
 /// Download and decrypt an Enterprise WeChat media object into memory.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn fetch_tp_media(

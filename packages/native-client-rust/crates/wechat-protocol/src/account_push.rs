@@ -4,6 +4,8 @@ use crate::{errors::AccountInterrupted, push, wire};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 
+// Legacy blocking push handle kept for 3.x native compatibility (#701).
+// Prefer `AsyncPushConnection` (`NativeClient::open_push_connection`) for new code.
 /// Persistent account connection for callers that already own blocking workers.
 /// Requests and notification waits use the same account admission and handoff
 /// barriers as ordinary operations. Reconnect after a credential generation

@@ -19,6 +19,8 @@ fn ciphertext_len(plaintext: usize) -> usize {
     (plaintext / 16 + 1) * 16
 }
 
+// Legacy synchronous file upload wrapper kept for 3.x native compatibility (#701).
+// Prefer `PreparedAsyncUpload` + `AsyncUploadSource` for new code.
 /// One object ready to upload from a private file. The file is read in steps
 /// while the object is sent; its length, MD5 and SHA-256 are checked again on
 /// the way, and the request that ends the object is only made once every byte

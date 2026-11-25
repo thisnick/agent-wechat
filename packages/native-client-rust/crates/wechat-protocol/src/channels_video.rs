@@ -108,6 +108,8 @@ pub fn channels_video_url(media: &crate::ChannelsMedia) -> Result<url::Url> {
     Ok(address)
 }
 
+// Legacy blocking Channels video downloader kept for 3.x native compatibility (#701).
+// Prefer `fetch_channels_video_async` over `HttpTransport` for new code.
 /// Download the post's video and return the decoded MP4 bytes.
 ///
 /// `max_bytes` caps the transfer below [`MAX_CHANNELS_VIDEO_BYTES`]. The advertised size, when

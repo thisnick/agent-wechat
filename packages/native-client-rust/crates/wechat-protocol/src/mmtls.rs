@@ -567,6 +567,8 @@ impl HandshakeEstablished {
     }
 }
 
+// Legacy blocking MMTLS session kept for 3.x native compatibility (#701).
+// Prefer `AsyncSession` over `StreamTransport` for new code.
 /// Blocking MMTLS long-link session backed by `std::net::TcpStream`.
 #[cfg(not(target_arch = "wasm32"))]
 pub struct Session {
@@ -1178,6 +1180,8 @@ pub(crate) fn validate_short_route(path: &str) -> Result<()> {
     }
 }
 
+// Legacy blocking short-link helper kept for 3.x native compatibility (#701).
+// Prefer `short_exchange_async` over `HttpTransport` for new code.
 /// Blocking MMTLS short-link exchange using `reqwest::blocking`.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn short_exchange(

@@ -78,6 +78,8 @@ pub fn validate_sticker_url(value: &str) -> Result<url::Url> {
     );
     Ok(url)
 }
+// Legacy blocking sticker downloaders kept for 3.x native compatibility (#701).
+// Prefer `fetch_sticker_async` and `fetch_sticker_original_async` for new code.
 /// Download and verify one sticker image from a validated sticker CDN host.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn fetch_sticker(

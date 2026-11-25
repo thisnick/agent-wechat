@@ -39,6 +39,8 @@ pub fn validate_link_thumbnail_url(value: &str) -> Result<url::Url> {
     }
     Ok(url)
 }
+// Legacy blocking thumbnail downloader kept for 3.x native compatibility (#701).
+// Prefer `fetch_link_thumbnail_async` over `HttpTransport` for new code.
 /// Download one bounded link-card thumbnail from a validated public host without redirects.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn fetch_link_thumbnail(

@@ -17,6 +17,8 @@ fn acknowledged_bitmap(next_block: usize) -> Vec<u8> {
     bitmap
 }
 
+// Legacy blocking large-file upload methods kept for 3.x native compatibility (#701).
+// Prefer `upload_large_file*_async` and `upload_video_original*_async` for new code.
 #[cfg(not(target_arch = "wasm32"))]
 impl CdnClient {
     /// Upload one ordinary file using previously persisted source/key material.

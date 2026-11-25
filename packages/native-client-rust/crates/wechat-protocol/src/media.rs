@@ -629,6 +629,9 @@ fn build_cdn_http_client(timeout: Duration) -> Result<reqwest::blocking::Client>
         .build()?)
 }
 
+// Legacy blocking `reqwest::blocking` CDN session and blocking `CdnClient` methods
+// are kept for 3.x native compatibility (#701). Prefer `AsyncCdnSession` and the
+// `CdnClient::*_async` methods over `HttpTransport` + `Clock` for new code.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct CdnSession<'a> {
     client: &'a CdnClient,
