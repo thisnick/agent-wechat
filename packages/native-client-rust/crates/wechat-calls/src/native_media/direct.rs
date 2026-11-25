@@ -23,7 +23,7 @@ use wechat_protocol::calls::{
     rudp::{self, RudpAckTracker},
     video_packet::{
         classify_video_channel_payload, encode_p2s_report, encode_video_nack, parse_s2p,
-        parse_video_nack, VideoChannelPayload, VideoS2pCommand,
+        parse_video_nack, VideoChannelPayload, VideoS2pCommand, P2S_CODEC_SUPPORT_H264_H265,
     },
     video_qos::KeyframeRequestReason,
 };
@@ -670,10 +670,18 @@ pub fn run_direct_media_with_preconnected_relay<H: DirectMediaHost>(
                         let report = video_rx.snapshot_p2s(
                             media.peer_member,
                             u32::from(selected.connection_id),
-                            0x1d,
+                            P2S_CODEC_SUPPORT_H264_H265,
                             now_ms,
                         );
-                        if let Ok(p2s) = encode_p2s_report(p2s_seq, 2, &report) {
+                        // Report only once the sender's codec is known, so the server is
+                        // never offered a codec the sender cannot encode.
+                        let encoded = if report.decode_type == 0 {
+                            last_p2s_tx = Some(video_now);
+                            Err(anyhow::anyhow!("sender codec not known yet"))
+                        } else {
+                            encode_p2s_report(p2s_seq, 2, selected.own_member, &report)
+                        };
+                        if let Ok(p2s) = encoded {
                             let sent_seq = p2s_seq;
                             p2s_seq = p2s_seq.wrapping_add(1);
                             if let Ok(datagram) = channel.seal_qos_p2s(epoch, now_ms, &p2s) {
@@ -687,10 +695,11 @@ pub fn run_direct_media_with_preconnected_relay<H: DirectMediaHost>(
                                         || sent_seq.is_multiple_of(2))
                                 {
                                     eprintln!(
-                                        "[wechat-call-video] tx p2s seq={sent_seq} peer={} stream={} codec={} rx_kbps={} est_bw={} rx_fps={} play_fps={} loss={}%({}pkts,long={}%) arq={} freeze=L{}/{}%,H{}/{}% gap={}ms",
+                                        "[wechat-call-video] tx p2s seq={sent_seq} peer={} stream={} codec={} size={} rx_kbps={} est_bw={} rx_fps={} play_fps={} loss={}%({}pkts,long={}%) arq={} freeze=L{}/{}%,H{}/{}% gap={}ms",
                                         report.remote_member_id,
                                         report.stream_id,
                                         report.decode_type,
+                                        report.max_size_format,
                                         report.recv_kbps,
                                         report.est_bw_kbps,
                                         report.recv_fps,

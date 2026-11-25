@@ -429,16 +429,22 @@ pub struct VideoP2sReport {
     pub capt_fps: u32,
     /// Packet loss percentage (`0..=100`, `field 14`).
     pub loss_pct: u32,
-    /// Supported video codec capability bitmask (`field 24`).
+    /// Codecs the remote sender may send us (`u8VCodecSupport`, field 24): `0x08` HW H.264,
+    /// `0x04` HW H.265, `0x10` SW H.265 (Vcodec2), `0x02` proprietary Vcodec1. Bit `0x01`
+    /// (SW H.264 decode) is never valid here.
     pub codec_support_mask: u32,
     /// Lost packet count in the reporting interval (`field 26`).
     pub loss_pkts: u32,
-    /// Active receive wire codec (`9` = H.264, `15` = H.265, `field 29`).
+    /// Active receive wire codec (`9` = H.264, `15` = H.265, `0` before any frame). The encoder
+    /// reports it as the decoder-type bit official clients use (`u32VDecodeType`, field 29).
     pub decode_type: u32,
     /// Rendered/delivered frame rate (`field 30`).
     pub play_fps: u32,
-    /// Cumulative delivered frame count (`field 31`).
+    /// Frames delivered in the reporting interval (`u32PlayFrames`, field 31).
     pub play_frames: u32,
+    /// Largest picture size this receiver asks for (`u8MaxSizeFormat`, field 16): `4` = 320,
+    /// `6` = 480, `8` = 640 wide. Lowering it makes the sender restart its encoder.
+    pub max_size_format: u32,
     /// Light freeze event count (`200..500 ms` gaps, `field 32`).
     pub light_freeze_cnt: u32,
     /// Heavy freeze event count (`>= 500 ms` gaps, `field 33`).
@@ -476,11 +482,12 @@ impl Default for VideoP2sReport {
             recv_fps: 15,
             capt_fps: 15,
             loss_pct: 0,
-            codec_support_mask: 0x1d,
+            codec_support_mask: P2S_CODEC_SUPPORT_H264_H265,
             loss_pkts: 0,
             decode_type: 15,
             play_fps: 15,
             play_frames: 0,
+            max_size_format: P2S_MAX_SIZE_FORMAT_640,
             light_freeze_cnt: 0,
             heavy_freeze_cnt: 0,
             light_freeze_time_ratio: 0,
@@ -495,12 +502,47 @@ impl Default for VideoP2sReport {
     }
 }
 
-fn encode_p2s_client_header() -> Result<Vec<u8>> {
+/// `u8VCodecSupport` for a receiver that decodes H.264 and H.265 (`0x08` HW H.264 |
+/// `0x04` HW H.265 | `0x10` SW H.265). Proprietary Vcodec1 (`0x02`) stays unset.
+pub const P2S_CODEC_SUPPORT_H264_H265: u32 = 0x1c;
+/// `u8VCodecSupport` allowing only H.264 (`0x08`).
+pub const P2S_CODEC_SUPPORT_H264: u32 = 0x08;
+/// `u8VCodecSupport` allowing only H.265 (`0x04` HW | `0x10` SW).
+pub const P2S_CODEC_SUPPORT_H265: u32 = 0x14;
+
+/// `u8VCodecSupport` that keeps a sender on the codec it already uses: offering a codec
+/// the sender cannot encode (for example H.265 to an Android phone with only a hardware
+/// H.264 encoder) makes it fall back to proprietary Vcodec1. Before any frame, `fallback`.
+pub fn p2s_codec_support_for(wire_codec: u32, fallback: u32) -> u32 {
+    match wire_codec {
+        0x09 => P2S_CODEC_SUPPORT_H264,
+        0x0f => P2S_CODEC_SUPPORT_H265,
+        _ => fallback,
+    }
+}
+/// `u8MaxSizeFormat` asking for pictures up to 640 wide (the normal request).
+pub const P2S_MAX_SIZE_FORMAT_640: u32 = 8;
+/// `u8MaxSizeFormat` asking for pictures up to 480 wide.
+pub const P2S_MAX_SIZE_FORMAT_480: u32 = 6;
+
+/// Map an RSM wire codec byte to the decoder-type bit official receivers report in
+/// `u32VDecodeType`: H.264 → `8` (HW H.264), H.265 → `4` (HW H.265), anything else → `0`.
+fn p2s_decoder_type(wire_codec: u32) -> u32 {
+    match wire_codec {
+        0x09 => 8,
+        0x0f => 4,
+        _ => 0,
+    }
+}
+
+/// `head_p2s`: `{1: u8Type = 11, 2: u8Version = 0 (video/combined), 3: u16Seq,
+/// 4: u32LocalMemberID, 5..7: client fields}`.
+fn encode_p2s_client_header(sequence: u16, local_member: u16) -> Result<Vec<u8>> {
     p::message(&[
         p::uint(1, 11),
         p::uint(2, 0),
-        p::uint(3, 0),
-        p::uint(4, 1),
+        p::uint(3, u64::from(sequence)),
+        p::uint(4, u64::from(local_member)),
         p::uint(5, 4),
         p::uint(6, 111),
         p::uint(7, 0x050000cb),
@@ -509,11 +551,31 @@ fn encode_p2s_client_header() -> Result<Vec<u8>> {
 
 /// Encode an `0x0b` MP P2S QoS heartbeat payload for `packed_kind = 0x30`
 /// using the supplied live receiver/sender telemetry (`inner.f1` + `inner.f3.f1` + `inner.f6.f1`).
-pub fn encode_p2s_report(sequence: u16, cap_seq: u32, report: &VideoP2sReport) -> Result<Vec<u8>> {
-    let client_hdr = encode_p2s_client_header()?;
+///
+/// This is a video P2S: like official clients, it leaves the outer `p2s_type` (field 4)
+/// unset. `p2s_type = 2` marks an audio P2S carrying `audio_p2s` (inner field 2).
+pub fn encode_p2s_report(
+    sequence: u16,
+    cap_seq: u32,
+    local_member: u16,
+    report: &VideoP2sReport,
+) -> Result<Vec<u8>> {
+    let client_hdr = encode_p2s_client_header(sequence, local_member)?;
     let loss_clamped = report.loss_pct.min(100);
     let short_loss = report.short_loss_pct.min(100);
     let long_loss = report.long_loss_pct.min(100);
+    // Fields 8/10/12 describe the remote sender's stream as received (official defaults
+    // 500 kbps / 15 fps before any packet), not this client's own transmission.
+    let remote_kbps = if report.recv_kbps > 0 {
+        report.recv_kbps
+    } else {
+        500
+    };
+    let remote_fps = if report.recv_fps > 0 {
+        report.recv_fps.clamp(3, 30)
+    } else {
+        15
+    };
     let video_p2s = p::message(&[
         p::uint(1, u64::from(report.remote_member_id)),
         p::uint(2, u64::from(report.stream_id)),
@@ -521,20 +583,21 @@ pub fn encode_p2s_report(sequence: u16, cap_seq: u32, report: &VideoP2sReport) -
         p::uint(5, u64::from(report.recv_data_interval_ms)),
         p::uint(6, u64::from(report.delay_ms)),
         p::uint(7, u64::from(report.est_bw_kbps.min(u32::from(u16::MAX)))),
-        p::uint(8, u64::from(report.send_kbps.min(u32::from(u16::MAX)))),
+        p::uint(8, u64::from(remote_kbps.min(u32::from(u16::MAX)))),
         p::uint(9, u64::from(report.recv_kbps.min(u32::from(u16::MAX)))),
-        p::uint(10, u64::from(report.send_fps.min(255))),
+        p::uint(10, u64::from(remote_fps)),
         p::uint(11, u64::from(report.recv_fps.min(255))),
-        p::uint(12, u64::from(report.capt_fps.min(255))),
+        p::uint(12, u64::from(remote_fps)),
         p::uint(14, u64::from(loss_clamped)),
         p::uint(15, 15),
-        p::uint(16, 8),
-        p::uint(17, 1),
-        p::uint(19, 1),
-        p::uint(20, 1),
-        p::uint(24, u64::from(report.codec_support_mask)),
+        p::uint(16, u64::from(report.max_size_format.min(255))),
+        // u8Cabac / u8Hpp / u8Denoise: 0, as official receivers report for H.264.
+        p::uint(17, 0),
+        p::uint(19, 0),
+        p::uint(20, 0),
+        p::uint(24, u64::from(report.codec_support_mask & 0xfe)),
         p::uint(26, u64::from(report.loss_pkts)),
-        p::uint(29, u64::from(report.decode_type)),
+        p::uint(29, u64::from(p2s_decoder_type(report.decode_type))),
         p::uint(30, u64::from(report.play_fps.min(255))),
         p::uint(31, u64::from(report.play_frames)),
         p::uint(32, u64::from(report.light_freeze_cnt)),
@@ -566,7 +629,6 @@ pub fn encode_p2s_report(sequence: u16, cap_seq: u32, report: &VideoP2sReport) -
         p::uint(1, u64::from(sequence)),
         p::uint(2, u64::from(cap_seq)),
         p::bytes(3, &inner),
-        p::uint(4, 2),
     ])?;
     let mut out = Vec::with_capacity(1 + outer.len());
     out.push(0x0b);
@@ -576,13 +638,15 @@ pub fn encode_p2s_report(sequence: u16, cap_seq: u32, report: &VideoP2sReport) -
 
 /// Encode an `0x0b` MP P2S QoS heartbeat payload for `packed_kind = 0x30`
 /// matching the nested `inner.f1` (client header) + `inner.f3.f1` (`video_p2s`) wire layout.
+/// Like [`encode_p2s_report`], this video P2S leaves the outer `p2s_type` unset.
 pub fn encode_p2s(
     sequence: u16,
     cap_seq: u32,
+    local_member: u16,
     codec_support_mask: u32,
     decode_type: u32,
 ) -> Result<Vec<u8>> {
-    let client_hdr = encode_p2s_client_header()?;
+    let client_hdr = encode_p2s_client_header(sequence, local_member)?;
     let video_p2s = p::message(&[
         p::uint(1, 0),
         p::uint(2, 1),
@@ -593,12 +657,12 @@ pub fn encode_p2s(
         p::uint(11, 15),
         p::uint(12, 15),
         p::uint(15, 15),
-        p::uint(16, 8),
-        p::uint(17, 1),
-        p::uint(19, 1),
-        p::uint(20, 1),
-        p::uint(24, u64::from(codec_support_mask)),
-        p::uint(29, u64::from(decode_type)),
+        p::uint(16, u64::from(P2S_MAX_SIZE_FORMAT_640)),
+        p::uint(17, 0),
+        p::uint(19, 0),
+        p::uint(20, 0),
+        p::uint(24, u64::from(codec_support_mask & 0xfe)),
+        p::uint(29, u64::from(p2s_decoder_type(decode_type))),
     ])?;
     let video_wrapper = p::message(&[p::bytes(1, &video_p2s)])?;
     let inner = p::message(&[p::bytes(1, &client_hdr), p::bytes(3, &video_wrapper)])?;
@@ -606,7 +670,6 @@ pub fn encode_p2s(
         p::uint(1, u64::from(sequence)),
         p::uint(2, u64::from(cap_seq)),
         p::bytes(3, &inner),
-        p::uint(4, 2),
     ])?;
     let mut out = Vec::with_capacity(1 + outer.len());
     out.push(0x0b);
@@ -2220,18 +2283,24 @@ mod tests {
         assert_eq!(parsed.video_commands[0].codec_type, 4);
         assert_eq!(parsed.video_commands[0].i_request_flag, 1);
 
-        let p2s = encode_p2s(5, 2, 0x1d, 15).unwrap();
+        let p2s = encode_p2s(5, 2, 3, 0x1d, 15).unwrap();
         assert_eq!(p2s[0], 0x0b);
         let decoded = p::decode(&p2s[1..]).unwrap();
         assert_eq!(opt_u32(&decoded, 1).unwrap(), Some(5));
         assert_eq!(opt_u32(&decoded, 2).unwrap(), Some(2));
-        assert_eq!(opt_u32(&decoded, 4).unwrap(), Some(2));
+        // Video P2S leaves `p2s_type` unset; `2` would mark an audio P2S.
+        assert_eq!(opt_u32(&decoded, 4).unwrap(), None);
         let inner = p::decode(p::optional_data(&decoded, 3).unwrap().unwrap()).unwrap();
-        assert!(p::optional_data(&inner, 1).unwrap().is_some());
+        let head = p::decode(p::optional_data(&inner, 1).unwrap().unwrap()).unwrap();
+        assert_eq!(opt_u32(&head, 1).unwrap(), Some(11));
+        assert_eq!(opt_u32(&head, 2).unwrap(), Some(0));
+        assert_eq!(opt_u32(&head, 3).unwrap(), Some(5));
+        assert_eq!(opt_u32(&head, 4).unwrap(), Some(3));
+        assert!(p::optional_data(&inner, 2).unwrap().is_none());
         let wrapper = p::decode(p::optional_data(&inner, 3).unwrap().unwrap()).unwrap();
         let video_p2s = p::decode(p::optional_data(&wrapper, 1).unwrap().unwrap()).unwrap();
-        assert_eq!(opt_u32(&video_p2s, 24).unwrap(), Some(0x1d));
-        assert_eq!(opt_u32(&video_p2s, 29).unwrap(), Some(15));
+        assert_eq!(opt_u32(&video_p2s, 24).unwrap(), Some(0x1c));
+        assert_eq!(opt_u32(&video_p2s, 29).unwrap(), Some(4));
     }
 
     #[test]
@@ -4211,6 +4280,7 @@ mod tests {
             decode_type: 9,
             play_fps: 8,
             play_frames: 123,
+            max_size_format: 6,
             light_freeze_cnt: 2,
             heavy_freeze_cnt: 1,
             light_freeze_time_ratio: 35,
@@ -4222,11 +4292,15 @@ mod tests {
             actual_member_num: 1,
             recv_arq_resp_pkgs: 5,
         };
-        let raw = encode_p2s_report(19, 2, &report).unwrap();
+        let raw = encode_p2s_report(19, 2, 4, &report).unwrap();
         assert_eq!(raw[0], 0x0b);
         let outer = p::decode(&raw[1..]).unwrap();
         assert_eq!(opt_u32(&outer, 1).unwrap(), Some(19));
+        assert_eq!(opt_u32(&outer, 4).unwrap(), None);
         let inner = p::decode(p::optional_data(&outer, 3).unwrap().unwrap()).unwrap();
+        let head = p::decode(p::optional_data(&inner, 1).unwrap().unwrap()).unwrap();
+        assert_eq!(opt_u32(&head, 3).unwrap(), Some(19));
+        assert_eq!(opt_u32(&head, 4).unwrap(), Some(4));
         let v_wrap = p::decode(p::optional_data(&inner, 3).unwrap().unwrap()).unwrap();
         let vp2s = p::decode(p::optional_data(&v_wrap, 1).unwrap().unwrap()).unwrap();
         assert_eq!(opt_u32(&vp2s, 1).unwrap(), Some(7));
@@ -4234,15 +4308,22 @@ mod tests {
         assert_eq!(opt_u32(&vp2s, 5).unwrap(), Some(420));
         assert_eq!(opt_u32(&vp2s, 6).unwrap(), Some(65));
         assert_eq!(opt_u32(&vp2s, 7).unwrap(), Some(240));
-        assert_eq!(opt_u32(&vp2s, 8).unwrap(), Some(310));
+        // Fields 8/10/12 describe the remote sender's stream as received.
+        assert_eq!(opt_u32(&vp2s, 8).unwrap(), Some(185));
         assert_eq!(opt_u32(&vp2s, 9).unwrap(), Some(185));
-        assert_eq!(opt_u32(&vp2s, 10).unwrap(), Some(12));
+        assert_eq!(opt_u32(&vp2s, 10).unwrap(), Some(8));
         assert_eq!(opt_u32(&vp2s, 11).unwrap(), Some(8));
-        assert_eq!(opt_u32(&vp2s, 12).unwrap(), Some(12));
+        assert_eq!(opt_u32(&vp2s, 12).unwrap(), Some(8));
+        assert_eq!(opt_u32(&vp2s, 16).unwrap(), Some(6));
+        for field in [17, 19, 20] {
+            assert_eq!(opt_u32(&vp2s, field).unwrap(), Some(0));
+        }
         assert_eq!(opt_u32(&vp2s, 14).unwrap(), Some(18));
-        assert_eq!(opt_u32(&vp2s, 24).unwrap(), Some(0x1d));
+        // Bit 0x01 is never valid in u8VCodecSupport.
+        assert_eq!(opt_u32(&vp2s, 24).unwrap(), Some(0x1c));
         assert_eq!(opt_u32(&vp2s, 26).unwrap(), Some(14));
-        assert_eq!(opt_u32(&vp2s, 29).unwrap(), Some(9));
+        // Wire H.264 (9) is reported as the HW H.264 decoder bit.
+        assert_eq!(opt_u32(&vp2s, 29).unwrap(), Some(8));
         assert_eq!(opt_u32(&vp2s, 30).unwrap(), Some(8));
         assert_eq!(opt_u32(&vp2s, 31).unwrap(), Some(123));
         assert_eq!(opt_u32(&vp2s, 32).unwrap(), Some(2));
@@ -4261,13 +4342,13 @@ mod tests {
         assert_eq!(opt_u32(&vlink, 5).unwrap(), Some(1));
         assert_eq!(opt_u32(&vlink, 6).unwrap(), Some(5));
 
-        // Baseline encode_p2s keeps the exact original 15-field video_p2s wire layout
-        // and omits inner.f6 (videoLink) so conference P2S heartbeats stay byte-identical.
-        let baseline = encode_p2s(7, 2, 0x1d, 15).unwrap();
+        // Baseline encode_p2s keeps the 15-field video_p2s wire layout and omits
+        // inner.f6 (videoLink); the header carries the sequence and local member.
+        let baseline = encode_p2s(7, 2, 1, 0x1d, 15).unwrap();
         let expected_client_hdr = p::message(&[
             p::uint(1, 11),
             p::uint(2, 0),
-            p::uint(3, 0),
+            p::uint(3, 7),
             p::uint(4, 1),
             p::uint(5, 4),
             p::uint(6, 111),
@@ -4285,11 +4366,11 @@ mod tests {
             p::uint(12, 15),
             p::uint(15, 15),
             p::uint(16, 8),
-            p::uint(17, 1),
-            p::uint(19, 1),
-            p::uint(20, 1),
-            p::uint(24, 0x1d),
-            p::uint(29, 15),
+            p::uint(17, 0),
+            p::uint(19, 0),
+            p::uint(20, 0),
+            p::uint(24, 0x1c),
+            p::uint(29, 4),
         ])
         .unwrap();
         let expected_video_wrap = p::message(&[p::bytes(1, &expected_video_p2s)]).unwrap();
@@ -4298,13 +4379,8 @@ mod tests {
             p::bytes(3, &expected_video_wrap),
         ])
         .unwrap();
-        let expected_outer = p::message(&[
-            p::uint(1, 7),
-            p::uint(2, 2),
-            p::bytes(3, &expected_inner),
-            p::uint(4, 2),
-        ])
-        .unwrap();
+        let expected_outer =
+            p::message(&[p::uint(1, 7), p::uint(2, 2), p::bytes(3, &expected_inner)]).unwrap();
         let mut expected_baseline = Vec::with_capacity(1 + expected_outer.len());
         expected_baseline.push(0x0b);
         expected_baseline.extend_from_slice(&expected_outer);

@@ -26,7 +26,7 @@ use wechat_protocol::calls::{
     relay::{RelayEpoch, SelectedRelay},
     video_packet::{
         annexb_nalu_types, encode_p2s, encode_p2s_report, encode_video_nack, parse_s2p,
-        VideoS2pCommand,
+        VideoS2pCommand, P2S_CODEC_SUPPORT_H264_H265,
     },
     video_qos::KeyframeRequestReason,
 };
@@ -444,7 +444,7 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                                     let mut rep = b.receiver.snapshot_video_p2s(
                                         mid,
                                         u32::from(selected.connection_id),
-                                        0x1d,
+                                        P2S_CODEC_SUPPORT_H264_H265,
                                         now_ms,
                                     );
                                     rep.send_kbps = send_kbps;
@@ -476,9 +476,15 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                                     None
                                 };
                                 let encoded = if let Some(p2s_rep) = selected_rep {
-                                    encode_p2s_report(p2s_seq, 2, p2s_rep)
+                                    encode_p2s_report(p2s_seq, 2, selected.own_member, p2s_rep)
                                 } else {
-                                    encode_p2s(p2s_seq, 2, 0x1d, 15)
+                                    encode_p2s(
+                                        p2s_seq,
+                                        2,
+                                        selected.own_member,
+                                        P2S_CODEC_SUPPORT_H264_H265,
+                                        15,
+                                    )
                                 };
                                 if let Ok(p2s) = encoded {
                                     p2s_seq = p2s_seq.wrapping_add(1);

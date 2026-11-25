@@ -10,8 +10,8 @@ use anyhow::Result;
 use std::{collections::VecDeque, sync::mpsc::Receiver};
 use wechat_protocol::calls::{
     video_packet::{
-        parse_rsm_packet_header, ReassembledVideoFrame, RsmIngestOutcome, RsmPacketHeader,
-        RsmVideoPacketizer, RsmVideoReassembler, VideoP2sReport,
+        p2s_codec_support_for, parse_rsm_packet_header, ReassembledVideoFrame, RsmIngestOutcome,
+        RsmPacketHeader, RsmVideoPacketizer, RsmVideoReassembler, VideoP2sReport,
     },
     video_qos::{ScheduledIRequest, VideoKeyframePolicy, VideoNackTracker, VideoP2sAccumulator},
 };
@@ -103,6 +103,7 @@ impl VideoStreamReceiver {
             Ok(h) => h,
             Err(err) => {
                 self.keyframe_policy.note_assembly_drop();
+                self.keyframe_policy.track_keyframe_wait(now_ms);
                 return VideoIngestBatch {
                     header: None,
                     frames: Vec::new(),
@@ -148,6 +149,7 @@ impl VideoStreamReceiver {
                 .observe_frame(frame, self.keyframe_policy.is_keyframe_synced(), now_ms);
         }
 
+        self.keyframe_policy.track_keyframe_wait(now_ms);
         VideoIngestBatch {
             header: Some(header),
             frames,
@@ -196,13 +198,16 @@ impl VideoStreamReceiver {
         codec_support_mask: u32,
         now_ms: u64,
     ) -> VideoP2sReport {
-        self.telemetry.snapshot(
+        let mut report = self.telemetry.snapshot(
             remote_member,
             self.last_stream_id().unwrap_or(1),
             conn_id,
             codec_support_mask,
             now_ms,
-        )
+        );
+        report.max_size_format = self.keyframe_policy.requested_max_size_format(now_ms);
+        report.codec_support_mask = p2s_codec_support_for(report.decode_type, codec_support_mask);
+        report
     }
 }
 

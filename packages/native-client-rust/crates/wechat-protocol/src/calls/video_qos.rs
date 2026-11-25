@@ -8,7 +8,8 @@
 
 use crate::calls::video_packet::{
     advance_seq16, encode_irequest_with_force, ReassembledVideoFrame, RsmPacketHeader,
-    VideoP2sReport, VideoWireCodec, MAX_VIDEO_NACK_RANGES,
+    VideoP2sReport, VideoWireCodec, MAX_VIDEO_NACK_RANGES, P2S_MAX_SIZE_FORMAT_480,
+    P2S_MAX_SIZE_FORMAT_640,
 };
 use std::collections::BTreeMap;
 
@@ -30,6 +31,13 @@ const INITIAL_IREQUEST_DELAY_MS: u64 = 500;
 const INITIAL_IREQUEST_INTERVAL_MS: u64 = 1500;
 const PRESYNC_P2S_INTERVAL_MS: u64 = 550;
 const STEADY_P2S_INTERVAL_MS: u64 = 1000;
+/// How long a stream may wait for a keyframe before P2S asks the sender for a smaller
+/// picture. Official Android senders ignore `0x66` keyframe requests on their hardware
+/// encoder, but restart it with a fresh IDR whenever the server changes their resolution.
+const KEYFRAME_SIZE_STEP_AFTER_MS: u64 = 1200;
+/// While still waiting, alternate the requested picture size this often so each change
+/// prompts another encoder restart.
+const KEYFRAME_SIZE_TOGGLE_MS: u64 = 4000;
 
 #[derive(Clone, Copy, Debug)]
 struct PendingNack {
@@ -243,7 +251,6 @@ pub struct VideoP2sAccumulator {
     jitter_ms_x16: u32,
     rx_frames_in_window: u32,
     play_frames_in_window: u32,
-    total_play_frames: u32,
     first_rx_video_ms: Option<u64>,
     last_frame_ms: Option<u64>,
     post_drop_hold_until_ms: Option<u64>,
@@ -278,7 +285,6 @@ impl VideoP2sAccumulator {
             jitter_ms_x16: 0,
             rx_frames_in_window: 0,
             play_frames_in_window: 0,
-            total_play_frames: 0,
             first_rx_video_ms: None,
             last_frame_ms: None,
             post_drop_hold_until_ms: None,
@@ -406,7 +412,6 @@ impl VideoP2sAccumulator {
         self.counted_light_stall = false;
         self.counted_heavy_stall = false;
         self.play_frames_in_window = self.play_frames_in_window.saturating_add(1);
-        self.total_play_frames = self.total_play_frames.saturating_add(1);
     }
 
     /// Record one outbound video frame encoded into the current reporting interval.
@@ -509,7 +514,8 @@ impl VideoP2sAccumulator {
                 loss_pkts: 0,
                 decode_type: u32::from(self.last_rx_codec.wire()),
                 play_fps: 0,
-                play_frames: self.total_play_frames,
+                play_frames: 0,
+                max_size_format: P2S_MAX_SIZE_FORMAT_640,
                 light_freeze_cnt: 0,
                 heavy_freeze_cnt: 0,
                 light_freeze_time_ratio: 0,
@@ -587,7 +593,9 @@ impl VideoP2sAccumulator {
             let base = recv_kbps.max(self.est_bw_kbps / 2).max(100);
             self.est_bw_kbps = ((base.saturating_mul(retention)) / 100).clamp(100, 1500);
         } else if self.rx_pkts_in_window > 0 && self.play_frames_in_window > 0 {
-            let target = (recv_kbps.saturating_mul(12) / 10).clamp(300, 1500);
+            // Keep the estimate at or above 500 kbps while loss is 0%, as official receivers
+            // do, so a slow first window does not ask the server to cut the sender's quality.
+            let target = (recv_kbps.saturating_mul(12) / 10).clamp(500, 1500);
             self.est_bw_kbps = if self.est_bw_kbps < target {
                 self.est_bw_kbps.saturating_add(50).min(target)
             } else {
@@ -612,7 +620,8 @@ impl VideoP2sAccumulator {
             loss_pkts,
             decode_type: u32::from(self.last_rx_codec.wire()),
             play_fps,
-            play_frames: self.total_play_frames,
+            play_frames: self.play_frames_in_window,
+            max_size_format: P2S_MAX_SIZE_FORMAT_640,
             light_freeze_cnt: self.light_freeze_cnt,
             heavy_freeze_cnt: self.heavy_freeze_cnt,
             light_freeze_time_ratio: light_ratio,
@@ -692,6 +701,8 @@ pub struct VideoKeyframePolicy {
     drop_recovery_pending: bool,
     pending_local_retries: u8,
     local_target_override: Option<u16>,
+    keyframe_wanted: bool,
+    keyframe_wanted_since_ms: Option<u64>,
 }
 
 impl VideoKeyframePolicy {
@@ -711,6 +722,8 @@ impl VideoKeyframePolicy {
             drop_recovery_pending: false,
             pending_local_retries: 0,
             local_target_override: None,
+            keyframe_wanted: false,
+            keyframe_wanted_since_ms: None,
         }
     }
 
@@ -799,11 +812,14 @@ impl VideoKeyframePolicy {
             self.local_target_override = None;
             self.irequest_streak = 0;
             self.drop_recovery_pending = false;
+            self.keyframe_wanted = !self.keyframe_seen;
             false
         } else if frame.prior_frames_dropped {
             self.drop_recovery_pending = true;
+            self.keyframe_wanted = true;
             true
         } else {
+            self.keyframe_wanted |= !self.keyframe_seen;
             false
         }
     }
@@ -811,6 +827,36 @@ impl VideoKeyframePolicy {
     /// Record an unrecovered frame assembly drop or ingest error needing a keyframe request.
     pub fn note_assembly_drop(&mut self) {
         self.drop_recovery_pending = true;
+        self.keyframe_wanted = true;
+    }
+
+    /// Stamp at `now_ms` when the stream started waiting for a keyframe, or clear it once a
+    /// keyframe arrived. Call after each ingest pass.
+    pub fn track_keyframe_wait(&mut self, now_ms: u64) {
+        if self.keyframe_wanted {
+            self.keyframe_wanted_since_ms.get_or_insert(now_ms);
+        } else {
+            self.keyframe_wanted_since_ms = None;
+        }
+    }
+
+    /// `u8MaxSizeFormat` to report in P2S at `now_ms`: 640 normally; after waiting
+    /// [`KEYFRAME_SIZE_STEP_AFTER_MS`] for a keyframe, 480, alternating with 640 every
+    /// [`KEYFRAME_SIZE_TOGGLE_MS`] until one arrives. Each change makes the server change the
+    /// sender's resolution, which restarts its encoder with a fresh IDR.
+    pub fn requested_max_size_format(&self, now_ms: u64) -> u32 {
+        let Some(since) = self.keyframe_wanted_since_ms else {
+            return P2S_MAX_SIZE_FORMAT_640;
+        };
+        let waited = now_ms.saturating_sub(since);
+        if waited < KEYFRAME_SIZE_STEP_AFTER_MS {
+            return P2S_MAX_SIZE_FORMAT_640;
+        }
+        if ((waited - KEYFRAME_SIZE_STEP_AFTER_MS) / KEYFRAME_SIZE_TOGGLE_MS).is_multiple_of(2) {
+            P2S_MAX_SIZE_FORMAT_480
+        } else {
+            P2S_MAX_SIZE_FORMAT_640
+        }
     }
 
     /// Queue a bounded local client/decoder keyframe request retry budget (for example `3`).
@@ -1237,5 +1283,69 @@ mod tests {
         let drop4 = policy.poll_due(3, 7, 10_000);
         assert_eq!(drop4[0].reason, KeyframeRequestReason::FrameDrop);
         assert_eq!(drop4[0].target_member, 7);
+    }
+
+    #[test]
+    fn missing_keyframe_steps_requested_picture_size_down_until_one_arrives() {
+        let frame = |is_keyframe: bool, prior_frames_dropped: bool| ReassembledVideoFrame {
+            codec: VideoWireCodec::H264,
+            member_id: 7,
+            stream_id: 1,
+            frame_index: 1,
+            timestamp_ms: 0,
+            orientation: 1,
+            prior_frames_dropped,
+            fec_recovered: false,
+            is_keyframe,
+            has_codec_config: is_keyframe,
+            payload: vec![],
+        };
+        let mut policy = VideoKeyframePolicy::new(0);
+        assert_eq!(
+            policy.requested_max_size_format(5_000),
+            P2S_MAX_SIZE_FORMAT_640
+        );
+
+        // Joined mid-stream: P-frames without a keyframe start the wait.
+        policy.observe_frame(&frame(false, false));
+        policy.track_keyframe_wait(1_000);
+        policy.observe_frame(&frame(false, false));
+        policy.track_keyframe_wait(1_100);
+        assert_eq!(
+            policy.requested_max_size_format(2_100),
+            P2S_MAX_SIZE_FORMAT_640
+        );
+        assert_eq!(
+            policy.requested_max_size_format(2_200),
+            P2S_MAX_SIZE_FORMAT_480
+        );
+        assert_eq!(
+            policy.requested_max_size_format(6_200),
+            P2S_MAX_SIZE_FORMAT_640
+        );
+        assert_eq!(
+            policy.requested_max_size_format(10_200),
+            P2S_MAX_SIZE_FORMAT_480
+        );
+
+        // A keyframe ends the wait and restores the normal size.
+        policy.observe_frame(&frame(true, false));
+        policy.track_keyframe_wait(10_300);
+        assert_eq!(
+            policy.requested_max_size_format(12_000),
+            P2S_MAX_SIZE_FORMAT_640
+        );
+
+        // A later drop starts a new wait from that moment.
+        policy.observe_frame(&frame(false, true));
+        policy.track_keyframe_wait(20_000);
+        assert_eq!(
+            policy.requested_max_size_format(21_000),
+            P2S_MAX_SIZE_FORMAT_640
+        );
+        assert_eq!(
+            policy.requested_max_size_format(21_300),
+            P2S_MAX_SIZE_FORMAT_480
+        );
     }
 }
