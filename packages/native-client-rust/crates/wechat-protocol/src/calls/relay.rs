@@ -249,16 +249,17 @@ impl RoomInputs {
     }
 
     /// Build initial check-in inputs from a [`RelayTarget`] without requiring media keys.
+    ///
+    /// Like official clients, the initial request leaves the server address fields
+    /// (`svrIp`, `svrPort`, `svrIpStr`) empty; the relay's first check-in response
+    /// supplies them for the continuation. Timestamps are Unix-epoch milliseconds
+    /// truncated to 32 bits.
     pub fn initial_for_target(
         target: &RelayTarget,
         network_type: u16,
         header_timestamp: u32,
         body_timestamp: u32,
     ) -> Self {
-        let (server_ip, server_text) = match target.endpoint.ip() {
-            IpAddr::V4(ip) => (u32::from_le_bytes(ip.octets()), ip.to_string()),
-            IpAddr::V6(ip) => (0, ip.to_string()),
-        };
         Self {
             room_id: target.room_id,
             own_member: target.own_member,
@@ -266,9 +267,9 @@ impl RoomInputs {
             client_ip: 0,
             client_text: String::new(),
             client_port: 0,
-            server_ip,
-            server_text,
-            server_port: target.endpoint.port(),
+            server_ip: 0,
+            server_text: String::new(),
+            server_port: 0,
             checkin_sequence: 1,
             network_type,
             arq_flag: 0,
@@ -393,10 +394,13 @@ impl TwoRttRelay {
             IpAddr::V4(ip) => u32::from_le_bytes(ip.octets()),
             IpAddr::V6(_) => 0,
         };
+        let unaddressed =
+            room.server_text.is_empty() && room.server_ip == 0 && room.server_port == 0;
         ensure!(
-            room.server_text == endpoint.ip().to_string()
-                && room.server_ip == expected_server_ip
-                && room.server_port == endpoint.port(),
+            unaddressed
+                || (room.server_text == endpoint.ip().to_string()
+                    && room.server_ip == expected_server_ip
+                    && room.server_port == endpoint.port()),
             "Relay request endpoint mismatch"
         );
         let merge_requested = room.merge_mode;
@@ -1129,11 +1133,17 @@ mod tests {
                 .unwrap()
         );
         assert!(selected_v6.merge_mode);
+        // The initial check-in leaves the server address empty until the relay answers.
         let initial_v6 = RoomInputs::initial(&selected_v6, 0, 0, 0);
         assert_eq!(initial_v6.server_ip, 0);
-        assert_eq!(initial_v6.server_text, "2001:db8:10:2212:2e::");
-        assert_eq!(initial_v6.server_port, 16285);
+        assert_eq!(initial_v6.server_text, "");
+        assert_eq!(initial_v6.server_port, 0);
         assert!(TwoRttRelay::new(initial_v6, 9, selected_v6.endpoint, epoch(), 100).is_ok());
+        // A request naming a different server than the endpoint is still rejected.
+        let mut misaddressed = RoomInputs::initial(&selected_v6, 0, 0, 0);
+        misaddressed.server_text = "198.51.100.7".to_owned();
+        misaddressed.server_port = 8080;
+        assert!(TwoRttRelay::new(misaddressed, 9, selected_v6.endpoint, epoch(), 100).is_err());
 
         let selected_v4 = SelectedRelay::from_strategy(7, 9, 0, &strategy, 0, 1).unwrap();
         assert_eq!(

@@ -17,6 +17,14 @@ const RELAY_RETRANSMIT_INTERVAL: Duration = Duration::from_millis(200);
 const MAX_EARLY_MEDIA_PACKETS: usize = 256;
 const MAX_EARLY_DRAIN_PER_CALL: usize = MAX_EARLY_MEDIA_PACKETS * 4;
 
+/// Unix-epoch milliseconds truncated to 32 bits, as official clients put in check-in
+/// header and body timestamps.
+fn epoch_ms32() -> u32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as u32)
+}
+
 fn push_early_packet(early_packets: &mut VecDeque<Vec<u8>>, packet: &[u8]) {
     if early_packets.len() >= MAX_EARLY_MEDIA_PACKETS {
         early_packets.pop_front();
@@ -164,7 +172,7 @@ fn connect_target_with_early(
     socket
         .set_nonblocking(true)
         .context("Relay UDP socket setup failed")?;
-    let room = RoomInputs::initial_for_target(target, 4, clock() as u32, clock() as u32);
+    let room = RoomInputs::initial_for_target(target, 4, epoch_ms32(), epoch_ms32());
     let mut checkin = TwoRttRelay::new(room, target.room_key, endpoint, relay_epoch, 15_000)?;
     let random = crypto::random::<10>()?;
     let mut active_packet = checkin
@@ -195,8 +203,8 @@ fn connect_target_with_early(
         ensure!(clock() < 15_000, "Call relay deadline exceeded");
         if last_tx.elapsed() >= RELAY_RETRANSMIT_INTERVAL {
             if checkin.room().merge_mode {
-                let header = clock() as u32;
-                let body = clock() as u32;
+                let header = epoch_ms32();
+                let body = epoch_ms32();
                 let random = crypto::random::<10>()?;
                 let n = checkin.merge_fallback_random_bytes_needed(header, body)?;
                 active_packet = checkin
@@ -217,8 +225,8 @@ fn connect_target_with_early(
                 {
                     RelayProgress::FirstCheckin => {
                         note("rx_first");
-                        let header = clock() as u32;
-                        let body = clock() as u32;
+                        let header = epoch_ms32();
+                        let body = epoch_ms32();
                         let random = crypto::random::<10>()?;
                         let n = checkin.continuation_random_bytes_needed(header, body)?;
                         active_packet = checkin
@@ -397,8 +405,10 @@ mod tests {
                 // Drop first 1-RTT packet (f21 = 1) to exercise 2-RTT retransmit fallback.
                 let (n, src) = server6.recv_from(&mut buf).unwrap();
                 let first = decode_checkin_body(&buf[..n], 9);
+                // The initial check-in leaves svrIp/svrPort/svrIpStr empty, like official clients.
                 assert_eq!(p::scalar(&first, 4).unwrap(), 0);
-                assert_eq!(p::data(&first, 15).unwrap(), b"::1");
+                assert_eq!(p::scalar(&first, 6).unwrap(), 0);
+                assert_eq!(p::data(&first, 15).unwrap(), b"");
                 assert_eq!(p::scalar(&first, 21).unwrap(), 1);
 
                 let (n, src2) = server6.recv_from(&mut buf).unwrap();
