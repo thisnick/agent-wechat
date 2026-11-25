@@ -30,11 +30,12 @@ impl CdnClient {
             matches!(prepared.kind, MediaQuality::File | MediaQuality::LargeFile),
             "Expected an ordinary file upload"
         );
+        let mut session = self.session();
         upload_large_file(
             &self.config,
             UploadRef::Memory(prepared),
             task_id,
-            |path, fields| self.post(path, fields),
+            |path, fields, fence| session.post(path, fields, fence),
             progress,
         )
     }
@@ -52,11 +53,12 @@ impl CdnClient {
             matches!(prepared.kind, MediaQuality::File | MediaQuality::LargeFile),
             "Expected an ordinary file upload"
         );
+        let mut session = self.session();
         upload_large_file(
             &self.config,
             UploadRef::File(prepared),
             task_id,
-            |path, fields| self.post(path, fields),
+            |path, fields, fence| session.post(path, fields, fence),
             progress,
         )
     }
@@ -70,11 +72,12 @@ impl CdnClient {
         task_id: u64,
         progress: impl FnMut(u64, Option<u64>) -> Result<()>,
     ) -> Result<UploadedMedia> {
+        let mut session = self.session();
         upload_video_original(
             self,
             UploadRef::Memory(prepared),
             task_id,
-            |path, fields| self.post(path, fields),
+            |path, fields, fence| session.post(path, fields, fence),
             progress,
         )
     }
@@ -87,11 +90,12 @@ impl CdnClient {
         task_id: u64,
         progress: impl FnMut(u64, Option<u64>) -> Result<()>,
     ) -> Result<UploadedMedia> {
+        let mut session = self.session();
         upload_video_original(
             self,
             UploadRef::File(prepared),
             task_id,
-            |path, fields| self.post(path, fields),
+            |path, fields, fence| session.post(path, fields, fence),
             progress,
         )
     }
@@ -101,7 +105,7 @@ fn upload_video_original(
     client: &CdnClient,
     prepared: UploadRef<'_>,
     task_id: u64,
-    post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
+    post: impl FnMut(&str, &CdnFields, &mut dyn FnMut() -> Result<()>) -> Result<CdnFields>,
     progress: impl FnMut(u64, Option<u64>) -> Result<()>,
 ) -> Result<UploadedMedia> {
     ensure!(
@@ -200,7 +204,7 @@ fn upload_large_file(
     conf: &CdnConfig,
     prepared: UploadRef<'_>,
     task_id: u64,
-    mut post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
+    mut post: impl FnMut(&str, &CdnFields, &mut dyn FnMut() -> Result<()>) -> Result<CdnFields>,
     mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
 ) -> Result<UploadedMedia> {
     ensure!(
@@ -225,8 +229,10 @@ fn upload_large_file(
     prepared.validate()?;
     let total = prepared.encrypted_len() as u64;
     let mut sequence = 0u32;
-    // No automatic retries: a failed request leaves the caller's persisted
-    // source/key material intact and never submits a business message.
+    // Protocol rejections and unexpected controls are never retried; transient
+    // HTTP/TCP transport failures are handled inside the session layer while
+    // leaving the caller's persisted source/key material intact and never
+    // submitting a business message.
     let mut exchange =
         |phase: &str,
          extra: CdnFields,
@@ -241,7 +247,7 @@ fn upload_large_file(
                 conf.uin,
                 prepared.kind().filetype()
             );
-            let reply = post(&path, &fields)?;
+            let reply = post(&path, &fields, &mut || progress(acknowledged, Some(total)))?;
             validate_reply(&reply, sequence, conf.version)?;
             Ok::<_, anyhow::Error>(reply)
         };
@@ -356,19 +362,31 @@ mod tests {
         conf: &CdnConfig,
         prepared: &PreparedUpload,
         task_id: u64,
-        post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
+        mut post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
         progress: impl FnMut(u64, Option<u64>) -> Result<()>,
     ) -> Result<UploadedMedia> {
-        super::upload_large_file(conf, UploadRef::Memory(prepared), task_id, post, progress)
+        super::upload_large_file(
+            conf,
+            UploadRef::Memory(prepared),
+            task_id,
+            |path, fields, _| post(path, fields),
+            progress,
+        )
     }
     fn upload_video_original(
         client: &CdnClient,
         prepared: &PreparedUpload,
         task_id: u64,
-        post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
+        mut post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
         progress: impl FnMut(u64, Option<u64>) -> Result<()>,
     ) -> Result<UploadedMedia> {
-        super::upload_video_original(client, UploadRef::Memory(prepared), task_id, post, progress)
+        super::upload_video_original(
+            client,
+            UploadRef::Memory(prepared),
+            task_id,
+            |path, fields, _| post(path, fields),
+            progress,
+        )
     }
 
     #[test]
@@ -637,7 +655,7 @@ mod tests {
             &config(),
             UploadRef::File(&file),
             987654321,
-            |path, fields| peer.respond(path, fields),
+            |path, fields, _| peer.respond(path, fields),
             |_, _| Ok(()),
         )
         .unwrap();
@@ -657,7 +675,7 @@ mod tests {
             &config(),
             UploadRef::File(&file),
             987654321,
-            |path, fields| {
+            |path, fields, _| {
                 phases.push(path.rsplit('/').next().unwrap().to_string());
                 peer.respond(path, fields)
             },
@@ -1133,5 +1151,55 @@ mod tests {
             .is_err());
         }
         assert_eq!(requests, 0);
+    }
+
+    #[test]
+    fn large_file_session_reuses_keepalive_and_recovers_from_uploadblock_drop() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, Mutex,
+        };
+        let memory = prepared();
+        let peer = Arc::new(Mutex::new(Peer::new(memory, 1024 * 1024)));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let peer_ref = peer.clone();
+        let drop_once = dropped.clone();
+        let server = super::super::tests::MockCdnServer::start(move |_req, path, fields| {
+            if path.ends_with("/uploadblock")
+                && integer(fields, "offset").unwrap() == 1024 * 1024
+                && !drop_once.swap(true, Ordering::SeqCst)
+            {
+                return super::super::tests::MockCdnAction::DropBeforeResponse;
+            }
+            let reply = peer_ref.lock().unwrap().respond(path, fields).unwrap();
+            super::super::tests::MockCdnAction::Ok {
+                reply,
+                close: false,
+            }
+        });
+        let conf = config();
+        let cdn = CdnClient::new(conf.clone(), Duration::from_secs(5)).unwrap();
+        let mut session = CdnSession::new(
+            &cdn,
+            vec![server.addr],
+            super::super::tests::FAST_RETRY_POLICY,
+        );
+        let result = super::upload_large_file(
+            &conf,
+            UploadRef::Memory(memory),
+            987654321,
+            |path, fields, fence| session.post(path, fields, fence),
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(result.descriptor.file_id, "completed-object");
+        assert_eq!(result.sha256, memory.sha256);
+        let expected_blocks = memory.encrypted.len().div_ceil(1024 * 1024);
+        assert_eq!(server.requests(), expected_blocks + 4);
+        assert_eq!(
+            server.connections(),
+            2,
+            "initial keep-alive connection + 1 fresh socket after drop"
+        );
     }
 }

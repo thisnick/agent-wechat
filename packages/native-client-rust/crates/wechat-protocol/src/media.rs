@@ -11,7 +11,14 @@ use openssl::{
     symm::{Cipher, Crypter, Mode},
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fmt, io::Read, net::Ipv4Addr, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    io::Read,
+    net::{Ipv4Addr, SocketAddr},
+    sync::atomic::{AtomicUsize, Ordering},
+    time::{Duration, Instant},
+};
 use zeroize::Zeroize;
 pub type CdnFields = BTreeMap<String, Vec<u8>>;
 const MAX_CDN_BODY: usize = 2 * 1024 * 1024;
@@ -530,9 +537,214 @@ pub struct UploadedMedia {
     pub width: Option<u32>,
     pub height: Option<u32>,
 }
+const CDN_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const CDN_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
+const CDN_RETRY_SLEEP_SLICE: Duration = Duration::from_millis(100);
+const CDN_RETRY_BACKOFFS: [Duration; 4] = [
+    Duration::from_millis(150),
+    Duration::from_millis(400),
+    Duration::from_millis(1_000),
+    Duration::from_millis(2_000),
+];
+
+#[derive(Clone, Copy)]
+struct RetryPolicy {
+    backoffs: &'static [Duration],
+    sleep_slice: Duration,
+}
+
+impl RetryPolicy {
+    const DEFAULT: Self = Self {
+        backoffs: &CDN_RETRY_BACKOFFS,
+        sleep_slice: CDN_RETRY_SLEEP_SLICE,
+    };
+}
+
+enum PostAttemptError {
+    Retryable {
+        error: anyhow::Error,
+        prefer_failover: bool,
+    },
+    Fatal(anyhow::Error),
+}
+
+fn is_retryable_http_status(status: u16) -> bool {
+    matches!(status, 408 | 429 | 500..=599)
+}
+
+fn sleep_with_fence(
+    delay: Duration,
+    slice: Duration,
+    check_fence: &mut dyn FnMut() -> Result<()>,
+) -> Result<()> {
+    if delay.is_zero() {
+        return check_fence();
+    }
+    let slice = slice.max(Duration::from_millis(1));
+    let deadline = Instant::now() + delay;
+    loop {
+        check_fence()?;
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return Ok(());
+        };
+        if remaining.is_zero() {
+            return Ok(());
+        }
+        std::thread::sleep(remaining.min(slice));
+    }
+}
+
+fn build_cdn_http_client(timeout: Duration) -> Result<reqwest::blocking::Client> {
+    Ok(reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(timeout.min(CDN_CONNECT_TIMEOUT))
+        .pool_max_idle_per_host(1)
+        .pool_idle_timeout(CDN_POOL_IDLE_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()?)
+}
+
+pub(crate) struct CdnSession<'a> {
+    client: &'a CdnClient,
+    endpoints: Vec<SocketAddr>,
+    policy: RetryPolicy,
+    http: Option<reqwest::blocking::Client>,
+    current_ip: usize,
+    had_success_on_current_ip: bool,
+}
+
+impl<'a> CdnSession<'a> {
+    fn new(client: &'a CdnClient, endpoints: Vec<SocketAddr>, policy: RetryPolicy) -> Self {
+        let current_ip = if endpoints.is_empty() {
+            0
+        } else {
+            client.preferred_ip.load(Ordering::Relaxed) % endpoints.len()
+        };
+        Self {
+            client,
+            endpoints,
+            policy,
+            http: None,
+            current_ip,
+            had_success_on_current_ip: false,
+        }
+    }
+
+    fn http_client(&mut self) -> Result<&reqwest::blocking::Client> {
+        if self.http.is_none() {
+            self.http = Some(build_cdn_http_client(self.client.timeout)?);
+        }
+        Ok(self.http.as_ref().unwrap())
+    }
+
+    fn post_once(
+        &mut self,
+        endpoint: SocketAddr,
+        path: &str,
+        sequence: u32,
+        body: &[u8],
+    ) -> std::result::Result<CdnFields, PostAttemptError> {
+        let http = self.http_client().map_err(PostAttemptError::Fatal)?;
+        let mut response = http
+            .post(format!("http://{endpoint}{path}"))
+            .header("Accept", "*/*")
+            .header("Content-Type", "application/octet-stream")
+            .header("User-Agent", "MicroMessenger Client")
+            .header("C-Seq", sequence)
+            .body(body.to_vec())
+            .send()
+            .map_err(|error| {
+                let prefer_failover = error.is_connect();
+                PostAttemptError::Retryable {
+                    error: anyhow::Error::new(error),
+                    prefer_failover,
+                }
+            })?;
+        let status = response.status().as_u16();
+        if status != 200 {
+            let error = anyhow::anyhow!("CDN HTTP status {status}");
+            return if is_retryable_http_status(status) {
+                Err(PostAttemptError::Retryable {
+                    error,
+                    prefer_failover: true,
+                })
+            } else {
+                Err(PostAttemptError::Fatal(error))
+            };
+        }
+        let mut raw = vec![];
+        response
+            .by_ref()
+            .take((MAX_CDN_BODY + 1) as u64)
+            .read_to_end(&mut raw)
+            .map_err(|error| PostAttemptError::Retryable {
+                error: anyhow::Error::new(error).context("CDN connection read failed"),
+                prefer_failover: false,
+            })?;
+        unpack_cdn(&raw).map_err(PostAttemptError::Fatal)
+    }
+
+    pub(crate) fn post(
+        &mut self,
+        path: &str,
+        fields: &CdnFields,
+        check_fence: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<CdnFields> {
+        let sequence = u32::try_from(integer(fields, "seq")?)?;
+        ensure!(sequence != 0, "Invalid CDN sequence");
+        ensure!(
+            ["/download", "/downloadbig", "/downloadstorage", "/uploadv3"].contains(&path)
+                || large_file_path(path, self.client.config.uin, sequence),
+            "Invalid CDN path"
+        );
+        ensure!(!self.endpoints.is_empty(), "Invalid CDN config");
+        let body = pack_cdn(fields)?;
+        let mut ip_index = self.current_ip % self.endpoints.len();
+        let mut retried_same_ip = false;
+        let max_attempts = self.policy.backoffs.len() + 1;
+        for attempt in 0..max_attempts {
+            let endpoint = self.endpoints[ip_index];
+            match self.post_once(endpoint, path, sequence, &body) {
+                Ok(reply) => {
+                    self.current_ip = ip_index;
+                    self.had_success_on_current_ip = true;
+                    self.client.preferred_ip.store(ip_index, Ordering::Relaxed);
+                    return Ok(reply);
+                }
+                Err(PostAttemptError::Fatal(error)) => return Err(error),
+                Err(PostAttemptError::Retryable {
+                    error,
+                    prefer_failover,
+                }) => {
+                    // Drop any pooled socket before retrying so a stale or half-open
+                    // keep-alive connection is never reused.
+                    self.http = None;
+                    let Some(&delay) = self.policy.backoffs.get(attempt) else {
+                        return Err(error);
+                    };
+                    let retry_same_ip =
+                        !prefer_failover && self.had_success_on_current_ip && !retried_same_ip;
+                    if retry_same_ip {
+                        retried_same_ip = true;
+                    } else if self.endpoints.len() > 1 {
+                        ip_index = (ip_index + 1) % self.endpoints.len();
+                        self.current_ip = ip_index;
+                        self.had_success_on_current_ip = false;
+                        retried_same_ip = false;
+                    }
+                    sleep_with_fence(delay, self.policy.sleep_slice, check_fence)?;
+                }
+            }
+        }
+        unreachable!("max_attempts is always at least 1")
+    }
+}
+
 pub struct CdnClient {
     config: CdnConfig,
     timeout: Duration,
+    preferred_ip: AtomicUsize,
 }
 fn large_file_path(path: &str, uin: u64, sequence: u32) -> bool {
     let parts: Vec<_> = path.split('/').collect();
@@ -552,42 +764,21 @@ impl CdnClient {
             !timeout.is_zero() && timeout <= Duration::from_secs(120),
             "Invalid CDN timeout"
         );
-        Ok(Self { config, timeout })
+        Ok(Self {
+            config,
+            timeout,
+            preferred_ip: AtomicUsize::new(0),
+        })
     }
-    fn post(&self, path: &str, fields: &CdnFields) -> Result<CdnFields> {
-        let sequence = u32::try_from(integer(fields, "seq")?)?;
-        ensure!(sequence != 0, "Invalid CDN sequence");
-        ensure!(
-            ["/download", "/downloadbig", "/downloadstorage", "/uploadv3"].contains(&path)
-                || large_file_path(path, self.config.uin, sequence),
-            "Invalid CDN path"
-        );
-        let body = pack_cdn(fields)?;
-        let client = reqwest::blocking::Client::builder()
-            .timeout(self.timeout)
-            .redirect(reqwest::redirect::Policy::none())
-            .no_proxy()
-            .build()?;
-        let mut response = client
-            .post(format!("http://{}:443{path}", self.config.server_ips[0]))
-            .header("Accept", "*/*")
-            .header("Content-Type", "application/octet-stream")
-            .header("User-Agent", "MicroMessenger Client")
-            .header("Connection", "close")
-            .header("C-Seq", sequence)
-            .body(body)
-            .send()?;
-        ensure!(
-            response.status() == 200,
-            "CDN HTTP status {}",
-            response.status().as_u16()
-        );
-        let mut raw = vec![];
-        response
-            .by_ref()
-            .take((MAX_CDN_BODY + 1) as u64)
-            .read_to_end(&mut raw)?;
-        unpack_cdn(&raw)
+    pub(crate) fn session(&self) -> CdnSession<'_> {
+        let mut endpoints = Vec::with_capacity(self.config.server_ips.len());
+        for ip in &self.config.server_ips {
+            let endpoint = SocketAddr::from((*ip, 443));
+            if !endpoints.contains(&endpoint) {
+                endpoints.push(endpoint);
+            }
+        }
+        CdnSession::new(self, endpoints, RetryPolicy::DEFAULT)
     }
     pub fn download(&self, descriptor: &MediaDescriptor) -> Result<DownloadedMedia> {
         self.download_with_progress(descriptor, |_, _| Ok(()))
@@ -597,7 +788,16 @@ impl CdnClient {
         descriptor: &MediaDescriptor,
         progress: impl FnMut(u64, Option<u64>) -> Result<()>,
     ) -> Result<DownloadedMedia> {
-        self.download_with_transport(descriptor, progress, |path, fields| self.post(path, fields))
+        let mut session = self.session();
+        let mut bytes = vec![];
+        let receipt = self.download_on_route(
+            descriptor,
+            None,
+            progress,
+            |path, fields, fence| session.post(path, fields, fence),
+            &mut bytes,
+        )?;
+        Ok(DownloadedMedia::from_receipt(receipt, bytes))
     }
     /// Download into `sink`, decrypting each piece as it arrives, so the object
     /// is never held in memory. Every check [`Self::download_with_progress`]
@@ -609,11 +809,12 @@ impl CdnClient {
         progress: impl FnMut(u64, Option<u64>) -> Result<()>,
         sink: &mut dyn std::io::Write,
     ) -> Result<DownloadReceipt> {
+        let mut session = self.session();
         self.download_on_route(
             descriptor,
             None,
             progress,
-            |path, fields| self.post(path, fields),
+            |path, fields, fence| session.post(path, fields, fence),
             sink,
         )
     }
@@ -630,24 +831,32 @@ impl CdnClient {
         file_key: &str,
         progress: impl FnMut(u64, Option<u64>) -> Result<()>,
     ) -> Result<DownloadedMedia> {
+        let mut session = self.session();
         let mut bytes = vec![];
         let receipt = self.download_on_route(
             descriptor,
             Some(file_key),
             progress,
-            |path, fields| self.post(path, fields),
+            |path, fields, fence| session.post(path, fields, fence),
             &mut bytes,
         )?;
         Ok(DownloadedMedia::from_receipt(receipt, bytes))
     }
+    #[cfg(test)]
     fn download_with_transport(
         &self,
         descriptor: &MediaDescriptor,
         progress: impl FnMut(u64, Option<u64>) -> Result<()>,
-        post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
+        mut post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
     ) -> Result<DownloadedMedia> {
         let mut bytes = vec![];
-        let receipt = self.download_on_route(descriptor, None, progress, post, &mut bytes)?;
+        let receipt = self.download_on_route(
+            descriptor,
+            None,
+            progress,
+            |path, fields, _| post(path, fields),
+            &mut bytes,
+        )?;
         Ok(DownloadedMedia::from_receipt(receipt, bytes))
     }
     fn download_on_route(
@@ -655,7 +864,7 @@ impl CdnClient {
         descriptor: &MediaDescriptor,
         storage_key: Option<&str>,
         mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
-        mut post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
+        mut post: impl FnMut(&str, &CdnFields, &mut dyn FnMut() -> Result<()>) -> Result<CdnFields>,
         sink: &mut dyn std::io::Write,
     ) -> Result<DownloadReceipt> {
         if let Some(key) = storage_key {
@@ -784,7 +993,12 @@ impl CdnClient {
             } else {
                 "/download"
             };
-            let reply = post(path, &fields)?;
+            let reply = post(path, &fields, &mut || {
+                progress(
+                    position as u64,
+                    if total == 0 { None } else { Some(total as u64) },
+                )
+            })?;
             let code = integer(&reply, "retcode")?;
             ServiceRejected::check_wide(Service::CdnDownload, code)?;
             let response_digest = reply
@@ -1007,9 +1221,12 @@ impl CdnClient {
         prepared: &PreparedUpload,
         progress: impl FnMut(u64, Option<u64>) -> Result<()>,
     ) -> Result<UploadedMedia> {
-        self.upload_with_transport(UploadRef::Memory(prepared), progress, |path, fields| {
-            self.post(path, fields)
-        })
+        let mut session = self.session();
+        self.upload_with_transport(
+            UploadRef::Memory(prepared),
+            progress,
+            |path, fields, fence| session.post(path, fields, fence),
+        )
     }
     /// [`Self::upload_with_progress`] for an upload read from a file in steps.
     /// The requests are the same as for the equivalent in-memory upload.
@@ -1018,15 +1235,18 @@ impl CdnClient {
         prepared: &PreparedFileUpload,
         progress: impl FnMut(u64, Option<u64>) -> Result<()>,
     ) -> Result<UploadedMedia> {
-        self.upload_with_transport(UploadRef::File(prepared), progress, |path, fields| {
-            self.post(path, fields)
-        })
+        let mut session = self.session();
+        self.upload_with_transport(
+            UploadRef::File(prepared),
+            progress,
+            |path, fields, fence| session.post(path, fields, fence),
+        )
     }
     fn upload_with_transport(
         &self,
         prepared: UploadRef<'_>,
         mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
-        mut post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
+        mut post: impl FnMut(&str, &CdnFields, &mut dyn FnMut() -> Result<()>) -> Result<CdnFields>,
     ) -> Result<UploadedMedia> {
         prepared.validate()?;
         let total = prepared.encrypted_len();
@@ -1042,7 +1262,9 @@ impl CdnClient {
             let end = start + chunk.len() - 1;
             let mut fields = upload_fields(&self.config, prepared, sequence, start, &chunk)?;
             fields.insert("filedata".into(), chunk.to_vec());
-            let reply = post(path, &fields)?;
+            let reply = post(path, &fields, &mut || {
+                progress(start as u64, Some(total as u64))
+            })?;
             validate_upload_reply(&reply, sequence, start, end, &mut file_id)?;
             // The final correlated acknowledgement must reach the caller so it
             // can save completion before applying cancellation/logout fences.
@@ -1823,16 +2045,28 @@ impl CdnClient {
         p: &PreparedImageUpload,
         progress: impl FnMut(u64, Option<u64>) -> Result<()>,
     ) -> Result<UploadedImage> {
-        self.upload_image_with_transport(p, progress, |path, fields| self.post(path, fields))
+        let mut session = self.session();
+        self.upload_image_with_checked_transport(p, progress, |path, fields, fence| {
+            session.post(path, fields, fence)
+        })
+    }
+    #[cfg(test)]
+    fn upload_image_with_transport(
+        &self,
+        p: &PreparedImageUpload,
+        progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+        mut post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
+    ) -> Result<UploadedImage> {
+        self.upload_image_with_checked_transport(p, progress, |path, fields, _| post(path, fields))
     }
     /// Upload the original in 64 KiB ranges like a video. The first request
     /// also carries the standard and thumbnail copies and the image metadata,
     /// so an original that fits one range is still a single request.
-    fn upload_image_with_transport(
+    fn upload_image_with_checked_transport(
         &self,
         p: &PreparedImageUpload,
         mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
-        mut post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
+        mut post: impl FnMut(&str, &CdnFields, &mut dyn FnMut() -> Result<()>) -> Result<CdnFields>,
     ) -> Result<UploadedImage> {
         p.validate()?;
         let original = UploadRef::Memory(&p.original);
@@ -1864,7 +2098,9 @@ impl CdnClient {
                 f.insert("midimgmd5".into(), p.standard.md5.as_bytes().to_vec());
                 f.insert("midimgdata".into(), p.standard.encrypted.clone());
             }
-            let reply = post("/uploadv3", &f)?;
+            let reply = post("/uploadv3", &f, &mut || {
+                progress(start as u64, Some(total as u64))
+            })?;
             validate_upload_reply(&reply, sequence, start, end, &mut file_id)?;
             if end + 1 < total {
                 progress((end + 1) as u64, Some(total as u64))?;
@@ -1891,13 +2127,16 @@ impl CdnClient {
         p: &PreparedVideoUpload,
         progress: impl FnMut(u64, Option<u64>) -> Result<()>,
     ) -> Result<UploadedVideo> {
-        self.upload_video_with_transport(p, progress, |path, fields| self.post(path, fields))
+        let mut session = self.session();
+        self.upload_video_with_transport(p, progress, |path, fields, fence| {
+            session.post(path, fields, fence)
+        })
     }
     fn upload_video_with_transport(
         &self,
         p: &PreparedVideoUpload,
         mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
-        mut post: impl FnMut(&str, &CdnFields) -> Result<CdnFields>,
+        mut post: impl FnMut(&str, &CdnFields, &mut dyn FnMut() -> Result<()>) -> Result<CdnFields>,
     ) -> Result<UploadedVideo> {
         p.video.validate()?;
         ensure!(
@@ -1927,7 +2166,9 @@ impl CdnClient {
                 add_thumbnail(&mut fields, &p.thumbnail);
             }
             put(&mut fields, "smallvideoflag", 0);
-            let reply = post("/uploadv3", &fields)?;
+            let reply = post("/uploadv3", &fields, &mut || {
+                progress(start as u64, Some(total as u64))
+            })?;
             validate_upload_reply(&reply, sequence, start, end, &mut file_id)?;
             if end + 1 < total {
                 progress((end + 1) as u64, Some(total as u64))?;
@@ -2454,7 +2695,7 @@ mod tests {
                 &descriptor,
                 Some("2_pack.fixture"),
                 |_, _| Ok(()),
-                |path, fields| {
+                |path, fields, _| {
                     paths.push(path.to_string());
                     assert_eq!(integer(fields, "filetype")?, 5);
                     for (key, value) in [
@@ -2489,7 +2730,10 @@ mod tests {
             )
             .unwrap();
         // Storage keys must be usable and only whole-file descriptors qualify.
-        let unused = |_: &str, _: &CdnFields| -> Result<CdnFields> { unreachable!() };
+        let unused = |_: &str,
+                      _: &CdnFields,
+                      _: &mut dyn FnMut() -> Result<()>|
+         -> Result<CdnFields> { unreachable!() };
         assert!(client()
             .download_on_route(&descriptor, Some(""), |_, _| Ok(()), unused, &mut vec![])
             .is_err());
@@ -2775,7 +3019,7 @@ mod tests {
                     ensure!(!cancelled.get(), "cancelled");
                     Ok(())
                 },
-                |path, fields| {
+                |path, fields, _| {
                     assert_eq!(path, "/uploadv3");
                     calls.set(calls.get() + 1);
                     let mut reply = CdnFields::new();
@@ -2817,7 +3061,7 @@ mod tests {
                     ensure!(!cancelled.get(), "cancelled");
                     Ok(())
                 },
-                |path, fields| {
+                |path, fields, _| {
                     assert_eq!(path, "/uploadv3");
                     assert!(fields.contains_key("thumbdata"));
                     assert_eq!(integer(fields, "filetype")?, 4);
@@ -2841,7 +3085,7 @@ mod tests {
             .upload_video_with_transport(
                 &altered,
                 |_, _| Ok(()),
-                |_, _| { panic!("Large normal video reached legacy transport") }
+                |_, _, _| { panic!("Large normal video reached legacy transport") }
             )
             .is_err());
     }
@@ -3563,5 +3807,697 @@ mod tests {
                     .is_err());
             }
         }
+    }
+
+    pub(super) const ZERO_BACKOFFS: [Duration; 4] = [Duration::ZERO; 4];
+    pub(super) const FAST_RETRY_POLICY: RetryPolicy = RetryPolicy {
+        backoffs: &ZERO_BACKOFFS,
+        sleep_slice: Duration::from_millis(5),
+    };
+
+    pub(super) enum MockCdnAction {
+        Ok { reply: CdnFields, close: bool },
+        Status(u16),
+        DropBeforeResponse,
+        TruncateMidBody,
+    }
+
+    pub(super) struct MockCdnServer {
+        pub(super) addr: SocketAddr,
+        connections: std::sync::Arc<AtomicUsize>,
+        requests: std::sync::Arc<AtomicUsize>,
+        saw_connection_close: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl MockCdnServer {
+        pub(super) fn start<F>(handler: F) -> Self
+        where
+            F: Fn(usize, &str, &CdnFields) -> MockCdnAction + Send + Sync + 'static,
+        {
+            use std::io::{BufRead, BufReader, Write};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let connections = std::sync::Arc::new(AtomicUsize::new(0));
+            let requests = std::sync::Arc::new(AtomicUsize::new(0));
+            let saw_connection_close =
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let handler = std::sync::Arc::new(handler);
+
+            let c_conn = connections.clone();
+            let c_req = requests.clone();
+            let c_close = saw_connection_close.clone();
+            let c_stop = stop.clone();
+
+            let handle = std::thread::spawn(move || {
+                while !c_stop.load(Ordering::Relaxed) {
+                    let stream = match listener.accept() {
+                        Ok((stream, _)) => stream,
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(2));
+                            continue;
+                        }
+                        Err(_) => break,
+                    };
+                    // macOS and Windows inherit non-blocking mode from the listening socket.
+                    stream.set_nonblocking(false).unwrap();
+                    c_conn.fetch_add(1, Ordering::SeqCst);
+                    let req_counter = c_req.clone();
+                    let close_flag = c_close.clone();
+                    let stop_flag = c_stop.clone();
+                    let handler = handler.clone();
+                    std::thread::spawn(move || {
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                        let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+                        let mut writer = stream.try_clone().unwrap();
+                        let mut reader = BufReader::new(stream);
+                        while !stop_flag.load(Ordering::Relaxed) {
+                            let mut request_line = String::new();
+                            match reader.read_line(&mut request_line) {
+                                Ok(0) | Err(_) => break,
+                                Ok(_) => {}
+                            }
+                            let path = request_line
+                                .split_whitespace()
+                                .nth(1)
+                                .unwrap_or("")
+                                .to_string();
+                            let mut content_length = 0usize;
+                            loop {
+                                let mut line = String::new();
+                                match reader.read_line(&mut line) {
+                                    Ok(0) | Err(_) => return,
+                                    Ok(_) => {}
+                                }
+                                let trimmed = line.trim();
+                                if trimmed.is_empty() {
+                                    break;
+                                }
+                                if let Some((k, v)) = trimmed.split_once(':') {
+                                    if k.eq_ignore_ascii_case("content-length") {
+                                        content_length = v.trim().parse().unwrap_or(0);
+                                    } else if k.eq_ignore_ascii_case("connection")
+                                        && v.trim().eq_ignore_ascii_case("close")
+                                    {
+                                        close_flag.store(true, Ordering::SeqCst);
+                                    }
+                                }
+                            }
+                            let mut body = vec![0u8; content_length];
+                            if reader.read_exact(&mut body).is_err() {
+                                break;
+                            }
+                            let fields = unpack_cdn(&body).unwrap();
+                            let req_num = req_counter.fetch_add(1, Ordering::SeqCst) + 1;
+                            match handler(req_num, &path, &fields) {
+                                MockCdnAction::Ok { reply, close } => {
+                                    let payload = pack_cdn(&reply).unwrap();
+                                    let conn = if close { "close" } else { "keep-alive" };
+                                    let header = format!(
+                                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: {conn}\r\n\r\n",
+                                        payload.len()
+                                    );
+                                    if writer.write_all(header.as_bytes()).is_err()
+                                        || writer.write_all(&payload).is_err()
+                                        || writer.flush().is_err()
+                                    {
+                                        break;
+                                    }
+                                    if close {
+                                        break;
+                                    }
+                                }
+                                MockCdnAction::Status(code) => {
+                                    let header = format!(
+                                        "HTTP/1.1 {code} Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                                    );
+                                    let _ = writer.write_all(header.as_bytes());
+                                    let _ = writer.flush();
+                                    break;
+                                }
+                                MockCdnAction::DropBeforeResponse => {
+                                    let _ = writer.shutdown(std::net::Shutdown::Both);
+                                    break;
+                                }
+                                MockCdnAction::TruncateMidBody => {
+                                    let header =
+                                        "HTTP/1.1 200 OK\r\nContent-Length: 500\r\nConnection: close\r\n\r\npartial";
+                                    let _ = writer.write_all(header.as_bytes());
+                                    let _ = writer.flush();
+                                    let _ = writer.shutdown(std::net::Shutdown::Both);
+                                    break;
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+
+            Self {
+                addr,
+                connections,
+                requests,
+                saw_connection_close,
+                stop,
+                handle: Some(handle),
+            }
+        }
+
+        pub(super) fn connections(&self) -> usize {
+            self.connections.load(Ordering::SeqCst)
+        }
+
+        pub(super) fn requests(&self) -> usize {
+            self.requests.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for MockCdnServer {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    fn upload_ok_reply(fields: &CdnFields, file_id: &str) -> CdnFields {
+        let mut reply = CdnFields::new();
+        put(&mut reply, "retcode", 0);
+        for key in ["seq", "rangestart", "rangeend"] {
+            reply.insert(key.into(), fields[key].clone());
+        }
+        reply.insert("fileid".into(), file_id.as_bytes().to_vec());
+        reply
+    }
+
+    fn record_chunk(store: &std::sync::Mutex<Vec<u8>>, total: usize, fields: &CdnFields) {
+        let start = integer(fields, "rangestart").unwrap() as usize;
+        let end = integer(fields, "rangeend").unwrap() as usize;
+        let data = &fields["filedata"];
+        assert_eq!(end - start + 1, data.len());
+        let mut buf = store.lock().unwrap();
+        if buf.len() < total {
+            buf.resize(total, 0);
+        }
+        buf[start..=end].copy_from_slice(data);
+    }
+
+    fn multi_chunk_file_fixture(chunks: usize) -> (PreparedUpload, Vec<u8>) {
+        let size = chunks * UPLOAD_CHUNK + 123;
+        let raw: Vec<u8> = (0..size).map(|i| ((i * 31 + 7) & 0xff) as u8).collect();
+        let prepared = PreparedUpload::with_material(
+            &raw,
+            MediaQuality::File,
+            "resilient.bin",
+            "filehelper",
+            &[0x42; 16],
+            "00112233445566778899aabbccddeeff",
+        )
+        .unwrap();
+        (prepared, raw)
+    }
+
+    #[test]
+    fn cdn_upload_reuses_single_keepalive_connection_across_chunks() {
+        let (prepared, raw) = multi_chunk_file_fixture(4);
+        let total = prepared.encrypted.len();
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let store = received.clone();
+        let server = MockCdnServer::start(move |_req, path, fields| {
+            assert_eq!(path, "/uploadv3");
+            record_chunk(&store, total, fields);
+            MockCdnAction::Ok {
+                reply: upload_ok_reply(fields, "keepalive-file-id"),
+                close: false,
+            }
+        });
+        let cdn = client();
+        let mut session = CdnSession::new(&cdn, vec![server.addr], FAST_RETRY_POLICY);
+        let uploaded = cdn
+            .upload_with_transport(
+                UploadRef::Memory(&prepared),
+                |_, _| Ok(()),
+                |path, fields, fence| session.post(path, fields, fence),
+            )
+            .unwrap();
+        assert_eq!(uploaded.descriptor.file_id, "keepalive-file-id");
+        assert_eq!(server.requests(), total.div_ceil(UPLOAD_CHUNK));
+        assert_eq!(
+            server.connections(),
+            1,
+            "expected one keep-alive TCP connection"
+        );
+        assert!(!server.saw_connection_close.load(Ordering::SeqCst));
+        let decrypted = decrypt_cdn(&received.lock().unwrap(), &prepared.aes_key).unwrap();
+        assert_eq!(decrypted, raw);
+    }
+
+    #[test]
+    fn cdn_upload_handles_server_connection_close_cleanly() {
+        let (prepared, raw) = multi_chunk_file_fixture(3);
+        let total = prepared.encrypted.len();
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let store = received.clone();
+        let server = MockCdnServer::start(move |_req, _path, fields| {
+            record_chunk(&store, total, fields);
+            MockCdnAction::Ok {
+                reply: upload_ok_reply(fields, "close-header-file-id"),
+                close: true,
+            }
+        });
+        let cdn = client();
+        let mut session = CdnSession::new(&cdn, vec![server.addr], FAST_RETRY_POLICY);
+        let uploaded = cdn
+            .upload_with_transport(
+                UploadRef::Memory(&prepared),
+                |_, _| Ok(()),
+                |path, fields, fence| session.post(path, fields, fence),
+            )
+            .unwrap();
+        assert_eq!(uploaded.descriptor.file_id, "close-header-file-id");
+        assert_eq!(server.requests(), total.div_ceil(UPLOAD_CHUNK));
+        let decrypted = decrypt_cdn(&received.lock().unwrap(), &prepared.aes_key).unwrap();
+        assert_eq!(decrypted, raw);
+    }
+
+    #[test]
+    fn cdn_upload_retries_tcp_drop_mid_body_eof_and_transient_http_errors() {
+        let (prepared, raw) = multi_chunk_file_fixture(4);
+        let total = prepared.encrypted.len();
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let store = received.clone();
+        let seq_attempts =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::<
+                i64,
+                usize,
+            >::new()));
+        let attempts_map = seq_attempts.clone();
+        let server = MockCdnServer::start(move |_req, _path, fields| {
+            let seq = integer(fields, "seq").unwrap();
+            let attempt = {
+                let mut map = attempts_map.lock().unwrap();
+                let entry = map.entry(seq).or_insert(0);
+                *entry += 1;
+                *entry
+            };
+            match (seq, attempt) {
+                (2, 1) => MockCdnAction::DropBeforeResponse,
+                (3, 1) => MockCdnAction::TruncateMidBody,
+                (4, 1) => MockCdnAction::Status(503),
+                (4, 2) => MockCdnAction::Status(429),
+                (5, 1) => MockCdnAction::Status(408),
+                _ => {
+                    record_chunk(&store, total, fields);
+                    MockCdnAction::Ok {
+                        reply: upload_ok_reply(fields, "retried-file-id"),
+                        close: false,
+                    }
+                }
+            }
+        });
+        let cdn = client();
+        let mut session = CdnSession::new(&cdn, vec![server.addr], FAST_RETRY_POLICY);
+        let uploaded = cdn
+            .upload_with_transport(
+                UploadRef::Memory(&prepared),
+                |_, _| Ok(()),
+                |path, fields, fence| session.post(path, fields, fence),
+            )
+            .unwrap();
+        assert_eq!(uploaded.descriptor.file_id, "retried-file-id");
+        assert_eq!(server.requests(), total.div_ceil(UPLOAD_CHUNK) + 5);
+        assert!(
+            server.connections() >= 5,
+            "expected fresh connections after failures"
+        );
+        let decrypted = decrypt_cdn(&received.lock().unwrap(), &prepared.aes_key).unwrap();
+        assert_eq!(decrypted, raw);
+    }
+
+    #[test]
+    fn cdn_fails_over_across_ips_and_remembers_healthy_endpoint() {
+        let (prepared, raw) = multi_chunk_file_fixture(3);
+        let total = prepared.encrypted.len();
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let store = received.clone();
+
+        // Endpoint 0 always fails with 503; endpoint 1 serves uploads and downloads cleanly.
+        let dead = MockCdnServer::start(|_, _, _| MockCdnAction::Status(503));
+        let ciphertext = prepared.encrypted.clone();
+        let raw_len = raw.len() as u64;
+        let healthy = MockCdnServer::start(move |_req, path, fields| {
+            if path == "/uploadv3" {
+                record_chunk(&store, total, fields);
+                MockCdnAction::Ok {
+                    reply: upload_ok_reply(fields, "failover-file-id"),
+                    close: false,
+                }
+            } else {
+                let descriptor = MediaDescriptor {
+                    file_id: "failover-file-id".into(),
+                    aes_key: vec![0x42; 16],
+                    quality: MediaQuality::File,
+                    expected_bytes: Some(raw_len),
+                    expected_md5: None,
+                    strict_size: true,
+                    expires_at: None,
+                };
+                MockCdnAction::Ok {
+                    reply: download_reply(fields, &descriptor, &ciphertext),
+                    close: false,
+                }
+            }
+        });
+
+        let cdn = client();
+        let endpoints = vec![dead.addr, healthy.addr];
+        let mut upload_session = CdnSession::new(&cdn, endpoints.clone(), FAST_RETRY_POLICY);
+        let uploaded = cdn
+            .upload_with_transport(
+                UploadRef::Memory(&prepared),
+                |_, _| Ok(()),
+                |path, fields, fence| upload_session.post(path, fields, fence),
+            )
+            .unwrap();
+        assert_eq!(uploaded.descriptor.file_id, "failover-file-id");
+        assert_eq!(dead.requests(), 1, "dead IP should only be tried once");
+        assert_eq!(healthy.requests(), total.div_ceil(UPLOAD_CHUNK));
+        assert_eq!(healthy.connections(), 1);
+
+        // Next session on the same CdnClient starts directly on endpoint 1 (readback).
+        let mut readback_session = CdnSession::new(&cdn, endpoints, FAST_RETRY_POLICY);
+        let mut sink = Vec::new();
+        let receipt = cdn
+            .download_on_route(
+                &uploaded.descriptor,
+                None,
+                |_, _| Ok(()),
+                |path, fields, fence| readback_session.post(path, fields, fence),
+                &mut sink,
+            )
+            .unwrap();
+        assert_eq!(
+            dead.requests(),
+            1,
+            "readback should stay on preferred healthy IP"
+        );
+        assert_eq!(receipt.sha256, prepared.sha256);
+        assert_eq!(sink, raw);
+    }
+
+    #[test]
+    fn cdn_mid_upload_drop_retries_same_ip_once_then_fails_over() {
+        let (prepared, raw) = multi_chunk_file_fixture(3);
+        let total = prepared.encrypted.len();
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let store0 = received.clone();
+        let store1 = received.clone();
+
+        // Endpoint 0 succeeds on chunks 1..2, then always drops on chunk 3+.
+        let ep0 = MockCdnServer::start(move |_req, _path, fields| {
+            let seq = integer(fields, "seq").unwrap();
+            if seq <= 2 {
+                record_chunk(&store0, total, fields);
+                MockCdnAction::Ok {
+                    reply: upload_ok_reply(fields, "affinity-file-id"),
+                    close: false,
+                }
+            } else {
+                MockCdnAction::DropBeforeResponse
+            }
+        });
+        let ep1 = MockCdnServer::start(move |_req, _path, fields| {
+            record_chunk(&store1, total, fields);
+            MockCdnAction::Ok {
+                reply: upload_ok_reply(fields, "affinity-file-id"),
+                close: false,
+            }
+        });
+
+        let cdn = client();
+        let mut session = CdnSession::new(&cdn, vec![ep0.addr, ep1.addr], FAST_RETRY_POLICY);
+        let uploaded = cdn
+            .upload_with_transport(
+                UploadRef::Memory(&prepared),
+                |_, _| Ok(()),
+                |path, fields, fence| session.post(path, fields, fence),
+            )
+            .unwrap();
+        assert_eq!(uploaded.descriptor.file_id, "affinity-file-id");
+        // Chunks 1 & 2 succeeded on ep0 (2), chunk 3 attempted twice on ep0 (initial + 1 fresh retry = 4).
+        assert_eq!(ep0.requests(), 4);
+        // Chunks 3 & 4 succeeded on ep1 without going back to ep0.
+        assert_eq!(ep1.requests(), total.div_ceil(UPLOAD_CHUNK) - 2);
+        let decrypted = decrypt_cdn(&received.lock().unwrap(), &prepared.aes_key).unwrap();
+        assert_eq!(decrypted, raw);
+    }
+
+    #[test]
+    fn cdn_does_not_retry_non_retryable_http_4xx_or_service_rejection() {
+        let (prepared, _) = multi_chunk_file_fixture(1);
+        for status in [400u16, 401, 403, 404] {
+            let server = MockCdnServer::start(move |_, _, _| MockCdnAction::Status(status));
+            let cdn = client();
+            let mut session = CdnSession::new(&cdn, vec![server.addr], FAST_RETRY_POLICY);
+            let error = cdn
+                .upload_with_transport(
+                    UploadRef::Memory(&prepared),
+                    |_, _| Ok(()),
+                    |path, fields, fence| session.post(path, fields, fence),
+                )
+                .err()
+                .unwrap();
+            assert_eq!(error.to_string(), format!("CDN HTTP status {status}"));
+            assert_eq!(server.requests(), 1, "HTTP {status} must not retry");
+        }
+        let rejected_server = MockCdnServer::start(|_, _, fields| {
+            let mut reply = CdnFields::new();
+            put(&mut reply, "retcode", -1);
+            reply.insert("seq".into(), fields["seq"].clone());
+            MockCdnAction::Ok {
+                reply,
+                close: false,
+            }
+        });
+        let cdn = client();
+        let mut session = CdnSession::new(&cdn, vec![rejected_server.addr], FAST_RETRY_POLICY);
+        let error = cdn
+            .upload_with_transport(
+                UploadRef::Memory(&prepared),
+                |_, _| Ok(()),
+                |path, fields, fence| session.post(path, fields, fence),
+            )
+            .err()
+            .unwrap();
+        assert_eq!(
+            ServiceRejected::find(&error),
+            Some(&ServiceRejected::new(Service::CdnUpload, -1))
+        );
+        assert_eq!(
+            rejected_server.requests(),
+            1,
+            "ServiceRejected must not retry"
+        );
+    }
+
+    #[test]
+    fn cdn_retry_aborts_immediately_when_fence_cancels() {
+        const LONG_BACKOFFS: [Duration; 2] = [Duration::from_secs(5), Duration::from_secs(5)];
+        const LONG_POLICY: RetryPolicy = RetryPolicy {
+            backoffs: &LONG_BACKOFFS,
+            sleep_slice: Duration::from_millis(10),
+        };
+        let (prepared, _) = multi_chunk_file_fixture(2);
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let trigger = cancelled.clone();
+        let server = MockCdnServer::start(move |_req, _path, fields| {
+            let seq = integer(fields, "seq").unwrap();
+            if seq == 1 {
+                MockCdnAction::Ok {
+                    reply: upload_ok_reply(fields, "cancel-file-id"),
+                    close: false,
+                }
+            } else {
+                // Cancel arrives while chunk 2 drops; retry must stop without resending.
+                trigger.store(true, Ordering::SeqCst);
+                MockCdnAction::DropBeforeResponse
+            }
+        });
+        let cdn = client();
+        let mut session = CdnSession::new(&cdn, vec![server.addr], LONG_POLICY);
+        let started = Instant::now();
+        let error = cdn
+            .upload_with_transport(
+                UploadRef::Memory(&prepared),
+                |_, _| {
+                    ensure!(!cancelled.load(Ordering::SeqCst), "media_cancelled");
+                    Ok(())
+                },
+                |path, fields, fence| session.post(path, fields, fence),
+            )
+            .err()
+            .unwrap();
+        assert_eq!(error.to_string(), "media_cancelled");
+        assert_eq!(
+            server.requests(),
+            2,
+            "must not retry chunk 2 after fence triggers"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "cancellation must not wait for retry backoff"
+        );
+    }
+
+    #[test]
+    fn cdn_exhausted_retries_preserve_transport_error_code() {
+        let (prepared, _) = multi_chunk_file_fixture(1);
+        let server = MockCdnServer::start(|_, _, _| MockCdnAction::Status(503));
+        let cdn = client();
+        let mut session = CdnSession::new(&cdn, vec![server.addr], FAST_RETRY_POLICY);
+        let error = cdn
+            .upload_with_transport(
+                UploadRef::Memory(&prepared),
+                |_, _| Ok(()),
+                |path, fields, fence| session.post(path, fields, fence),
+            )
+            .err()
+            .unwrap();
+        assert_eq!(error.to_string(), "CDN HTTP status 503");
+        assert_eq!(server.requests(), ZERO_BACKOFFS.len() + 1);
+    }
+
+    #[test]
+    fn cdn_file_backed_streaming_upload_recovers_from_mid_stream_drop() {
+        let (memory, raw) = multi_chunk_file_fixture(4);
+        let total = memory.encrypted.len();
+        let dir = wechat_platform::private_tempdir("wechat-cdn-file-retry-").unwrap();
+        let file_path = dir.path().join("source.bin");
+        std::fs::write(&file_path, &raw).unwrap();
+        let prepared = PreparedFileUpload::new(
+            std::fs::File::open(&file_path).unwrap(),
+            raw.len() as u64,
+            &memory.md5,
+            &memory.sha256,
+            MediaQuality::File,
+            &memory.file_name,
+            &memory.destination,
+            &memory.aes_key,
+            &memory.file_key,
+        )
+        .unwrap();
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let store = received.clone();
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let drop_once = dropped.clone();
+        let server = MockCdnServer::start(move |_req, path, fields| {
+            assert_eq!(path, "/uploadv3");
+            let seq = integer(fields, "seq").unwrap();
+            if seq == 3 && !drop_once.swap(true, Ordering::SeqCst) {
+                return MockCdnAction::DropBeforeResponse;
+            }
+            record_chunk(&store, total, fields);
+            MockCdnAction::Ok {
+                reply: upload_ok_reply(fields, "streamed-file-id"),
+                close: false,
+            }
+        });
+        let cdn = client();
+        let mut session = CdnSession::new(&cdn, vec![server.addr], FAST_RETRY_POLICY);
+        let uploaded = cdn
+            .upload_with_transport(
+                UploadRef::File(&prepared),
+                |_, _| Ok(()),
+                |path, fields, fence| session.post(path, fields, fence),
+            )
+            .unwrap();
+        assert_eq!(uploaded.descriptor.file_id, "streamed-file-id");
+        assert_eq!(uploaded.sha256, memory.sha256);
+        assert_eq!(server.requests(), total.div_ceil(UPLOAD_CHUNK) + 1);
+        assert_eq!(
+            server.connections(),
+            2,
+            "initial keep-alive + 1 fresh socket after drop"
+        );
+        let decrypted = decrypt_cdn(&received.lock().unwrap(), &memory.aes_key).unwrap();
+        assert_eq!(decrypted, raw);
+    }
+
+    #[test]
+    fn cdn_retry_sleep_interrupts_promptly_when_fence_triggers_mid_backoff() {
+        const SLOW_BACKOFFS: [Duration; 1] = [Duration::from_secs(5)];
+        const SLOW_POLICY: RetryPolicy = RetryPolicy {
+            backoffs: &SLOW_BACKOFFS,
+            sleep_slice: Duration::from_millis(15),
+        };
+        let (prepared, _) = multi_chunk_file_fixture(1);
+        let (dropped_tx, dropped_rx) = std::sync::mpsc::sync_channel(1);
+        let server = MockCdnServer::start(move |_, _, _| {
+            let _ = dropped_tx.try_send(());
+            MockCdnAction::DropBeforeResponse
+        });
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let signal = cancelled.clone();
+        let cancel_thread = std::thread::spawn(move || {
+            dropped_rx.recv().unwrap();
+            std::thread::sleep(Duration::from_millis(60));
+            signal.store(true, Ordering::SeqCst);
+        });
+        let cdn = client();
+        let mut session = CdnSession::new(&cdn, vec![server.addr], SLOW_POLICY);
+        let started = Instant::now();
+        let error = cdn
+            .upload_with_transport(
+                UploadRef::Memory(&prepared),
+                |_, _| {
+                    ensure!(!cancelled.load(Ordering::SeqCst), "auth_required");
+                    Ok(())
+                },
+                |path, fields, fence| session.post(path, fields, fence),
+            )
+            .err()
+            .unwrap();
+        cancel_thread.join().unwrap();
+        assert_eq!(error.to_string(), "auth_required");
+        assert_eq!(server.requests(), 1);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "mid-backoff cancellation took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn cdn_session_deduplicates_server_ips_preserving_order() {
+        let ip_a = Ipv4Addr::new(1, 1, 1, 1);
+        let ip_b = Ipv4Addr::new(8, 8, 8, 8);
+        let ip_c = Ipv4Addr::new(9, 9, 9, 9);
+        let cdn = CdnClient::new(
+            CdnConfig {
+                version: 1,
+                uin: 12345,
+                client_version: 456,
+                client_os_type: "synthetic-client".into(),
+                auth_key: b"synthetic-auth".to_vec(),
+                server_ips: vec![ip_a, ip_a, ip_b, ip_a, ip_c, ip_b],
+                front_id: 0,
+                location: None,
+            },
+            Duration::from_secs(25),
+        )
+        .unwrap();
+        let session = cdn.session();
+        assert_eq!(
+            session.endpoints,
+            vec![
+                SocketAddr::from((ip_a, 443)),
+                SocketAddr::from((ip_b, 443)),
+                SocketAddr::from((ip_c, 443)),
+            ]
+        );
     }
 }
