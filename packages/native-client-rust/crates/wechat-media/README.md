@@ -6,7 +6,9 @@ and handles supported WeChat image containers.
 
 This supporting crate follows the same release version as those libraries.
 It does not download attachments, enqueue transfers or manage message delivery.
-Some decoding paths need FFmpeg on `PATH`.
+Some decoding paths need FFmpeg on `PATH`. On `wasm32-unknown-unknown`, standard
+image inspection and PNG/JPEG/GIF/WebP handling stay available while native
+FFmpeg, WXGF, and filesystem archive/export helpers are omitted automatically.
 
 `prepare_sticker` validates image/GIF/MOV/MP4 input and produces a GIF plus still
 and sampled-frame previews. Fit and trim are caller choices; compliant GIFs retain

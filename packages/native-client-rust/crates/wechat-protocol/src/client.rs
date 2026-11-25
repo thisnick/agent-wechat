@@ -23,29 +23,33 @@ mod logout;
 mod revoke;
 #[path = "status_notify.rs"]
 mod status_notify;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::business::AuthenticatedPacket;
 use crate::errors::{Service, ServiceRejected};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::mmtls::Session;
 pub use crate::wire::{
     AddMessage, AppAttachChunk, AppAttachRequest, AvatarBytes, ContactLookup, ContactRecord,
     Heartbeat, InitContactPage, RoomMember, RoomRoster, SyncBatch, SyncCommand, TextSendResult,
     VoiceChunk,
 };
 use crate::{
-    business::{self, AuthenticatedPacket, Prelogin},
+    business::{self, Prelogin},
     crypto::{Curve, Ecdh},
-    mmtls::{self, Session},
-    protobuf as p, wire,
+    mmtls, protobuf as p, wire,
 };
 pub use account::{
     AccountIdentity, AccountLease, AccountLifecycle, AccountPersistence, AccountPersistenceFailed,
-    AccountPushConnection, AccountRequest, AccountStatus, NativeRequestNotSubmitted, PendingLogout,
-    TextSendOptions,
+    AccountStatus, AsyncPushConnection, NativeRequestNotSubmitted, PendingLogout, TextSendOptions,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use account::{AccountPushConnection, AccountRequest};
 use anyhow::{bail, ensure, Result};
 pub use channels::{ChannelsMedia, ChannelsPage, ChannelsPost, ChannelsTicket};
-pub use logout::*;
-pub use revoke::*;
+pub use logout::LogoutReply;
+pub use revoke::{MessageRecall, MessageRecallReply};
 use serde::{Deserialize, Serialize};
-pub use status_notify::*;
+pub use status_notify::{SessionReadNotification, SessionReadReply};
 use std::{fmt, time::Duration};
 use zeroize::Zeroize;
 
@@ -353,6 +357,7 @@ pub struct LoginAttempt {
     #[serde(default)]
     lan_upload_attempted: bool,
     // Socket/token ownership never survives serialization or daemon restart.
+    #[cfg(not(target_arch = "wasm32"))]
     #[serde(skip)]
     lan_challenge: Option<std::sync::Arc<crate::lan_login::Challenge>>,
 }
@@ -379,11 +384,19 @@ impl Drop for LoginAttempt {
 }
 impl LoginAttempt {
     pub fn lan_login_state(&self) -> Option<&'static str> {
-        self.lan_challenge
-            .as_ref()
-            .map(|challenge| challenge.status())
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.lan_challenge
+                .as_ref()
+                .map(|challenge| challenge.status())
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            None
+        }
     }
     fn stop_lan_login(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(challenge) = self.lan_challenge.take() {
             challenge.stop();
         }
@@ -397,6 +410,7 @@ impl LoginAttempt {
         let encoded = base64::engine::general_purpose::STANDARD.encode(&self.qr_png);
         Ok(format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"530\" height=\"530\" viewBox=\"0 0 265 265\"><rect width=\"265\" height=\"265\" fill=\"white\"/><image x=\"40\" y=\"40\" width=\"185\" height=\"185\" style=\"image-rendering:pixelated\" href=\"data:image/png;base64,{encoded}\"/></svg>"))
     }
+    #[cfg(not(target_arch = "wasm32"))]
     fn validate(&self) -> Result<()> {
         self.validate_at(wire::unix_time()?)
     }
@@ -491,11 +505,16 @@ impl Default for NativeOptions {
 pub struct NativeClient {
     options: NativeOptions,
     account: Option<std::sync::Arc<account::OwnedAccount>>,
+    transport: Option<crate::transport::ProtocolTransport>,
+    #[cfg(not(target_arch = "wasm32"))]
     submission_guard: Option<std::sync::Arc<dyn Fn() -> Result<()> + Send + Sync>>,
+    #[cfg(not(target_arch = "wasm32"))]
     call_reply_observer: Option<std::sync::Arc<CallReplyObserver>>,
     /// The account owner's reusable short-link ticket, set on request transports.
+    #[cfg(not(target_arch = "wasm32"))]
     short_link: Option<std::sync::Arc<mmtls::ShortLinkCache>>,
 }
+#[cfg(not(target_arch = "wasm32"))]
 type CallReplyObserver = dyn Fn(&[u8]) -> Result<()> + Send + Sync;
 /// Polling an issued login challenge is repeatable. This does not authorize
 /// retrying QR creation, credential exchange, sends or rejected authentication.
@@ -504,6 +523,13 @@ pub fn is_retryable_login_poll_error(error: &anyhow::Error) -> bool {
         return false;
     }
     error.chain().any(|cause| {
+        if let Some(transport) = cause.downcast_ref::<crate::transport::TransportError>() {
+            return matches!(
+                transport,
+                crate::transport::TransportError::Timeout
+                    | crate::transport::TransportError::Disconnected
+            );
+        }
         if let Some(io) = cause.downcast_ref::<std::io::Error>() {
             return matches!(
                 io.kind(),
@@ -517,6 +543,7 @@ pub fn is_retryable_login_poll_error(error: &anyhow::Error) -> bool {
                     | std::io::ErrorKind::NotConnected
             );
         }
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(http) = cause.downcast_ref::<reqwest::Error>() {
             return http.is_timeout() || http.is_connect();
         }
@@ -530,27 +557,446 @@ pub fn is_retryable_login_poll_error(error: &anyhow::Error) -> bool {
             .is_some_and(|status| matches!(status, 408 | 429 | 500 | 502 | 503 | 504))
     })
 }
+
+fn validate_native_options(options: &NativeOptions) -> Result<()> {
+    mmtls::validate_host(&options.long_host)?;
+    mmtls::validate_host(&options.short_host)?;
+    ensure!(
+        !options.timeout.is_zero() && options.timeout <= Duration::from_secs(120),
+        "Invalid native timeout"
+    );
+    ensure!(
+        (1024..=crate::MAX_MESSAGE_BYTES).contains(&options.receive_budget),
+        "Invalid receive budget"
+    );
+    Ok(())
+}
+
 impl NativeClient {
-    /// Validate transport options. Construction itself makes no network request.
-    pub fn new(options: NativeOptions) -> Result<Self> {
-        mmtls::validate_host(&options.long_host)?;
-        mmtls::validate_host(&options.short_host)?;
-        ensure!(
-            !options.timeout.is_zero() && options.timeout <= Duration::from_secs(120),
-            "Invalid native timeout"
-        );
-        ensure!(
-            (1024..=crate::MAX_MESSAGE_BYTES).contains(&options.receive_budget),
-            "Invalid receive budget"
-        );
+    pub(crate) fn from_validated_options(
+        options: NativeOptions,
+        transport: Option<crate::transport::ProtocolTransport>,
+    ) -> Result<Self> {
+        validate_native_options(&options)?;
         Ok(Self {
             options,
             account: None,
+            transport,
+            #[cfg(not(target_arch = "wasm32"))]
             submission_guard: None,
+            #[cfg(not(target_arch = "wasm32"))]
             call_reply_observer: None,
+            #[cfg(not(target_arch = "wasm32"))]
             short_link: None,
         })
     }
+
+    /// Validate transport options. Construction itself makes no network request.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new(options: NativeOptions) -> Result<Self> {
+        Self::from_validated_options(options, None)
+    }
+
+    /// Validate transport options and bind a pluggable
+    /// [`crate::transport::ProtocolTransport`] for asynchronous login
+    /// bootstrap. Construction itself makes no network request.
+    pub fn with_transport(
+        options: NativeOptions,
+        transport: crate::transport::ProtocolTransport,
+    ) -> Result<Self> {
+        Self::from_validated_options(options, Some(transport))
+    }
+
+    pub(crate) fn require_transport(&self) -> Result<&crate::transport::ProtocolTransport> {
+        self.transport
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Native client has no async transport configured"))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn prelogin_rpc_async_with_guard<F>(
+        &self,
+        transport: &crate::transport::ProtocolTransport,
+        long_host: &str,
+        short_host: &str,
+        cgi: u16,
+        path: &str,
+        plain: &[u8],
+        cookie: &[u8],
+        auth_key: &[u8],
+        fixed_version: Option<u16>,
+        before_submit: F,
+    ) -> Result<(Vec<u8>, Vec<u8>, u16)>
+    where
+        F: FnOnce() -> Result<()>,
+    {
+        let session = mmtls::AsyncSession::connect(
+            long_host,
+            self.options.timeout,
+            self.options.receive_budget,
+            &*transport.streams,
+            transport.clock.clone(),
+        )
+        .await?;
+        let short = session.short.clone();
+        let region = session.certificate_region;
+        let _ = session.close().await;
+        let profile = if let Some(version) = fixed_version {
+            business::profile_for_region(if version == 50005 { 2 } else { 1 })?
+        } else {
+            business::profile_for_region(region)?
+        };
+        let prepared = Prelogin::prepare(plain, &profile, auth_key)?;
+        let packet = business::prelogin_packet(&prepared, cgi, profile.version, cookie)?;
+        before_submit()?;
+        let reply = mmtls::short_exchange_async(
+            &short,
+            short_host,
+            path,
+            &packet,
+            self.options.timeout,
+            &*transport.http,
+            &*transport.clock,
+        )
+        .await?;
+        let envelope = business::split(&reply)?;
+        ServiceRejected::check(Service::NativeEnvelope, envelope.return_code)?;
+        ensure!(
+            envelope.cgi == cgi as u64 && envelope.encryption == 12,
+            "Unexpected prelogin response policy"
+        );
+        let plain = prepared.decrypt_reply(&envelope.payload)?;
+        Ok((plain, envelope.cookie, profile.version))
+    }
+
+    /// Asynchronously request one QR challenge for the supplied device using
+    /// this client's [`crate::transport::ProtocolTransport`]. Display
+    /// [`LoginAttempt::qr_png`] privately, poll with [`Self::poll_login_async`],
+    /// then call [`Self::complete_login_async`].
+    pub async fn start_qr_login_async(
+        &self,
+        device: DeviceProfile,
+        computer_name: &str,
+    ) -> Result<LoginAttempt> {
+        self.start_profile_qr_login_async(device, computer_name, &[])
+            .await
+    }
+
+    /// Asynchronously request one QR challenge for an existing installation
+    /// while retaining its selected key-info.
+    pub async fn start_profile_qr_login_async(
+        &self,
+        device: DeviceProfile,
+        computer_name: &str,
+        key_info: &[u8],
+    ) -> Result<LoginAttempt> {
+        ensure!(
+            self.account.is_none(),
+            "Explicit-state transport cannot use a bound account client"
+        );
+        let transport = self.require_transport()?;
+        device.validate()?;
+        ensure!(key_info.len() <= 1024 * 1024, "Invalid saved key-info");
+        let plain = wire::qr_request(&device, computer_name)?;
+        let (reply, cookie, key_version) = self
+            .prelogin_rpc_async_with_guard(
+                transport,
+                &self.options.long_host,
+                &self.options.short_host,
+                502,
+                "/cgi-bin/micromsg-bin/getloginqrcode",
+                &plain,
+                &[],
+                &[],
+                None,
+                || Ok(()),
+            )
+            .await?;
+        let qr = wire::decode_qr(&reply)?;
+        let now = transport.clock.unix_time_secs()?;
+        Ok(LoginAttempt {
+            schema: 1,
+            device,
+            computer_name: computer_name.to_string(),
+            qr_png: qr.image,
+            width: qr.width,
+            height: qr.height,
+            created_at: now,
+            expires_at: now.saturating_add(240),
+            identifier: qr.identifier,
+            notify_key: qr.notify_key,
+            cookie,
+            key_version,
+            long_host: self.options.long_host.clone(),
+            short_host: self.options.short_host.clone(),
+            status: LoginStatus::Pending,
+            key_info: key_info.to_vec(),
+            credential3: None,
+            credential4: None,
+            lan_upload_attempted: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            lan_challenge: None,
+        })
+    }
+
+    /// Asynchronously initiate phone approval for an existing remembered device
+    /// without a QR using this client's [`crate::transport::ProtocolTransport`].
+    pub async fn start_saved_device_login_async(
+        &self,
+        state: &AccountState,
+        computer_name: &str,
+    ) -> Result<LoginAttempt> {
+        state.validate()?;
+        self.start_saved_login_async(
+            &state.device,
+            &state.own_username,
+            &state.auto_auth_key,
+            &state.cookie,
+            &state.key_info,
+            &state.long_host,
+            &state.short_host,
+            computer_name,
+        )
+        .await
+    }
+
+    /// Asynchronously initiate phone approval from remembered official-profile
+    /// trust without inventing active session keys.
+    pub async fn start_profile_saved_device_login_async(
+        &self,
+        device: &DeviceProfile,
+        username: &str,
+        auto_auth_key: &[u8],
+        cookie: &[u8],
+        key_info: &[u8],
+        computer_name: &str,
+    ) -> Result<LoginAttempt> {
+        self.start_saved_login_async(
+            device,
+            username,
+            auto_auth_key,
+            cookie,
+            key_info,
+            &self.options.long_host,
+            &self.options.short_host,
+            computer_name,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn start_saved_login_async(
+        &self,
+        device: &DeviceProfile,
+        username: &str,
+        auto_auth_key: &[u8],
+        cookie: &[u8],
+        key_info: &[u8],
+        long_host: &str,
+        short_host: &str,
+        computer_name: &str,
+    ) -> Result<LoginAttempt> {
+        ensure!(
+            self.account.is_none(),
+            "Explicit-state transport cannot use a bound account client"
+        );
+        let transport = self.require_transport()?;
+        device.validate()?;
+        ensure!(
+            !username.is_empty()
+                && username.len() <= 256
+                && !username.contains('\0')
+                && !auto_auth_key.is_empty()
+                && auto_auth_key.len() <= 1024 * 1024
+                && cookie.len() <= 15
+                && key_info.len() <= 1024 * 1024,
+            "Invalid saved-device credentials"
+        );
+        let public = crate::crypto::generate_rsa_1024_public_pem()?;
+        let request = wire::push_login(device, username, auto_auth_key, &public)?;
+        let (reply, cookie, key_version) = self
+            .prelogin_rpc_async_with_guard(
+                transport,
+                long_host,
+                short_host,
+                654,
+                "/cgi-bin/micromsg-bin/pushloginurl",
+                &request,
+                cookie,
+                &[],
+                None,
+                || Ok(()),
+            )
+            .await?;
+        let (identifier, notify_key) = wire::decode_push(&reply)?;
+        let now = transport.clock.unix_time_secs()?;
+        Ok(LoginAttempt {
+            schema: 1,
+            device: device.clone(),
+            computer_name: computer_name.to_string(),
+            qr_png: vec![],
+            width: 0,
+            height: 0,
+            created_at: now,
+            expires_at: now.saturating_add(240),
+            identifier,
+            notify_key,
+            cookie,
+            key_version,
+            long_host: long_host.into(),
+            short_host: short_host.into(),
+            status: LoginStatus::Pending,
+            key_info: key_info.to_vec(),
+            credential3: None,
+            credential4: None,
+            lan_upload_attempted: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            lan_challenge: None,
+        })
+    }
+
+    /// Asynchronously poll an issued login challenge using this client's
+    /// [`crate::transport::ProtocolTransport`].
+    ///
+    /// Pluggable async transports cannot open a local LAN TCP listener; if the
+    /// server requests a LAN risk challenge, this fails closed with a
+    /// non-retryable LAN login error (see [`crate::login_lan_error_reason`]).
+    pub async fn poll_login_async(&self, attempt: &mut LoginAttempt) -> Result<LoginStatus> {
+        ensure!(
+            self.account.is_none(),
+            "Explicit-state transport cannot use a bound account client"
+        );
+        let transport = self.require_transport()?;
+        let now_ms = transport.clock.unix_time_ms()?;
+        let now = u32::try_from(now_ms / 1000)
+            .map_err(|_| anyhow::anyhow!("Clock timestamp out of u32 range"))?;
+        if attempt.locally_expired(now) {
+            attempt.stop_lan_login();
+            attempt.status = LoginStatus::Expired;
+            return Ok(attempt.status);
+        }
+        attempt.validate_at(now)?;
+        ensure!(
+            !matches!(
+                attempt.status,
+                LoginStatus::Completed | LoginStatus::Cancelled | LoginStatus::Rejected
+            ),
+            "Login attempt is terminal"
+        );
+        let request = wire::poll_request_at(&attempt.device, &attempt.identifier, now_ms)?;
+        let (reply, cookie, _) = self
+            .prelogin_rpc_async_with_guard(
+                transport,
+                &attempt.long_host,
+                &attempt.short_host,
+                503,
+                "/cgi-bin/micromsg-bin/checkloginqrcode",
+                &request,
+                &attempt.cookie,
+                &[],
+                Some(attempt.key_version),
+                || Ok(()),
+            )
+            .await?;
+        let response = wire::decode_poll(&reply, &attempt.notify_key)?;
+        if !cookie.is_empty() {
+            attempt.cookie = cookie;
+        }
+        if response.lan_challenge && matches!(response.status, Some(0..=2)) {
+            attempt.credential3.zeroize();
+            attempt.credential4.zeroize();
+            attempt.credential3 = None;
+            attempt.credential4 = None;
+            attempt.status = LoginStatus::Scanned;
+            return Err(crate::lan_login::failure("unsupported_transport"));
+        }
+        apply_ordinary_login_notification(attempt, response);
+        Ok(attempt.status)
+    }
+
+    /// Asynchronously exchange an approved challenge for secret account
+    /// credentials once using this client's [`crate::transport::ProtocolTransport`].
+    pub async fn complete_login_async(&self, attempt: &mut LoginAttempt) -> Result<AccountState> {
+        ensure!(
+            self.account.is_none(),
+            "Explicit-state transport cannot use a bound account client"
+        );
+        let transport = self.require_transport()?;
+        attempt.stop_lan_login();
+        attempt.validate_at(transport.clock.unix_time_secs()?)?;
+        ensure!(
+            attempt.status == LoginStatus::Approved,
+            "Login has not been approved"
+        );
+        let inner = Ecdh::generate_for(Curve::P224)?;
+        let request = attempt.manual_auth_request(&inner.public()?)?;
+        let mut long_host = attempt.long_host.clone();
+        let mut short_host = attempt.short_host.clone();
+        let mut cookie = attempt.cookie.clone();
+        for redirected in 0..=1 {
+            let (reply, next_cookie, _) = self
+                .prelogin_rpc_async_with_guard(
+                    transport,
+                    &long_host,
+                    &short_host,
+                    252,
+                    "/cgi-bin/micromsg-bin/secmanualauth",
+                    &request,
+                    &cookie,
+                    &[],
+                    None,
+                    || Ok(()),
+                )
+                .await?;
+            let fields = p::decode(&reply)?;
+            let code = p::base_code(&fields)?;
+            if code == -301 && redirected == 0 {
+                (long_host, short_host) = redirect(&fields)?;
+                cookie = next_cookie;
+                continue;
+            }
+            ServiceRejected::check(Service::AccountAuthentication, code)?;
+            let mut state = reduce_auth(&reply, None, &inner, &attempt.device, &next_cookie)?;
+            state.long_host = long_host;
+            state.short_host = short_host;
+            state.validate()?;
+            attempt.status = LoginStatus::Completed;
+            attempt.credential3.zeroize();
+            attempt.credential4.zeroize();
+            return Ok(state);
+        }
+        bail!("Native authentication redirect limit reached")
+    }
+
+    /// Asynchronously replace an expired, unscanned QR challenge while
+    /// preserving installation key-info.
+    pub async fn refresh_qr_login_async(&self, attempt: &LoginAttempt) -> Result<LoginAttempt> {
+        ensure!(
+            self.account.is_none(),
+            "Explicit-state transport cannot use a bound account client"
+        );
+        let transport = self.require_transport()?.clone();
+        ensure!(
+            attempt.status == LoginStatus::Expired && !attempt.qr_png.is_empty(),
+            "Only an expired QR may be refreshed"
+        );
+        let options = NativeOptions {
+            long_host: attempt.long_host.clone(),
+            short_host: attempt.short_host.clone(),
+            ..self.options.clone()
+        };
+        Self::with_transport(options, transport)?
+            .start_profile_qr_login_async(
+                attempt.device.clone(),
+                &attempt.computer_name,
+                &attempt.key_info,
+            )
+            .await
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeClient {
     fn session(&self, host: &str) -> Result<Session> {
         self.check_snapshot_transport()?;
         Session::connect(host, self.options.timeout, self.options.receive_budget)
@@ -899,6 +1345,7 @@ impl NativeClient {
     }
     /// Replace an expired, unscanned QR while preserving installation key-info.
     pub fn refresh_qr_login(&self, attempt: &LoginAttempt) -> Result<LoginAttempt> {
+        self.check_snapshot_transport()?;
         ensure!(
             attempt.status == LoginStatus::Expired && !attempt.qr_png.is_empty(),
             "Only an expired QR may be refreshed"
@@ -1586,6 +2033,30 @@ fn reduce_auth(
     Ok(state)
 }
 
+fn apply_ordinary_login_notification(attempt: &mut LoginAttempt, response: wire::PollResponse) {
+    if let Some(status) = response.status {
+        attempt.status = match status {
+            0 if attempt.status == LoginStatus::Scanned => LoginStatus::Scanned,
+            0 => LoginStatus::Pending,
+            1 => LoginStatus::Scanned,
+            2 => LoginStatus::Approved,
+            // Unknown terminal states never count as approval or local expiry.
+            _ => LoginStatus::Rejected,
+        };
+        if attempt.status == LoginStatus::Approved {
+            attempt.credential3 = response.credential3;
+            attempt.credential4 = response.credential4;
+        }
+        if matches!(
+            attempt.status,
+            LoginStatus::Approved | LoginStatus::Rejected
+        ) {
+            attempt.stop_lan_login();
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn apply_login_notification(
     attempt: &mut LoginAttempt,
     response: wire::PollResponse,
@@ -1615,26 +2086,7 @@ fn apply_login_notification(
         attempt.lan_challenge = Some(start_lan(attempt)?);
         return Ok(attempt.status);
     }
-    if let Some(status) = response.status {
-        attempt.status = match status {
-            0 if attempt.status == LoginStatus::Scanned => LoginStatus::Scanned,
-            0 => LoginStatus::Pending,
-            1 => LoginStatus::Scanned,
-            2 => LoginStatus::Approved,
-            // Unknown terminal states never count as approval or local expiry.
-            _ => LoginStatus::Rejected,
-        };
-        if attempt.status == LoginStatus::Approved {
-            attempt.credential3 = response.credential3;
-            attempt.credential4 = response.credential4;
-        }
-        if matches!(
-            attempt.status,
-            LoginStatus::Approved | LoginStatus::Rejected
-        ) {
-            attempt.stop_lan_login();
-        }
-    }
+    apply_ordinary_login_notification(attempt, response);
     if attempt
         .lan_challenge
         .as_ref()
@@ -1670,6 +2122,7 @@ mod tests {
             credential3: Some(vec![4; 16]),
             credential4: Some(vec![5; 16]),
             lan_upload_attempted: false,
+            #[cfg(not(target_arch = "wasm32"))]
             lan_challenge: None,
         }
     }
@@ -1892,6 +2345,17 @@ mod tests {
                 "{message}"
             )));
         }
+        for transport_error in [
+            crate::transport::TransportError::Timeout,
+            crate::transport::TransportError::Disconnected,
+        ] {
+            assert!(is_retryable_login_poll_error(&anyhow::Error::new(
+                transport_error
+            )));
+        }
+        assert!(!is_retryable_login_poll_error(&crate::lan_login::failure(
+            "unsupported_transport"
+        )));
         assert!(!is_retryable_login_poll_error(
             &Error::from(ErrorKind::PermissionDenied).into()
         ));

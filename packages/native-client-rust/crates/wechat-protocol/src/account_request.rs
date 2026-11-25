@@ -329,15 +329,6 @@ impl AccountRequest<'_> {
 }
 
 impl NativeClient {
-    /// Change transport deadlines/budgets for a handle while retaining the same
-    /// account owner and admission rules. This never imports credential state.
-    pub fn with_request_options(&self, options: NativeOptions) -> Result<Self> {
-        // Reuse constructor validation without replacing the account owner.
-        let mut handle = Self::new(options)?;
-        handle.account = Some(self.owned_account()?.clone());
-        Ok(handle)
-    }
-
     /// Execute one scoped account operation on the caller's blocking worker.
     /// Uses the same admission, generation, storage and handoff barriers as async
     /// operations. No executor or independent credential owner is constructed.
@@ -357,6 +348,10 @@ impl NativeClient {
     /// Explicit authentication renewal on an existing blocking worker. This
     /// never retries the operation whose rejection prompted the caller to renew.
     pub fn renew_session_blocking(&self, computer_name: &str) -> Result<()> {
+        ensure!(
+            self.transport.is_none(),
+            "Blocking renewal cannot bypass a configured async transport"
+        );
         let (exchange, state) = self
             .owned_account()?
             .begin()
@@ -377,6 +372,10 @@ impl NativeClient {
     /// is needed. Logout is submitted at most once and the owner stays stopped
     /// after rejection or uncertainty.
     pub fn logout_blocking(&self) -> Result<crate::LogoutReply> {
+        ensure!(
+            self.transport.is_none(),
+            "Blocking logout cannot bypass a configured async transport"
+        );
         self.prepare_logout()?.submit_blocking()
     }
 

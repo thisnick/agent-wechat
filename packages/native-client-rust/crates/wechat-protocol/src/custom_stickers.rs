@@ -1,5 +1,5 @@
 //! Custom collection reads and mutations, separate from sticker chat sends.
-use crate::{protobuf as p, AccountState, NativeClient};
+use crate::protobuf as p;
 use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
 
@@ -187,21 +187,6 @@ pub fn custom_sticker_mutation_request(
         ]);
     }
     p::message(&fields)
-}
-impl NativeClient {
-    pub(crate) fn custom_sticker_read_snapshot(
-        &self,
-        state: &mut AccountState,
-        request: &[u8],
-    ) -> Result<CustomStickerPage> {
-        let raw = self.authenticated_rpc(
-            state,
-            697,
-            "/cgi-bin/micromsg-bin/mmbatchemojidownload",
-            request,
-        )?;
-        decode_custom_stickers(&raw)
-    }
 }
 #[cfg(test)]
 mod tests {

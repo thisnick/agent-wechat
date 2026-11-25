@@ -1,8 +1,9 @@
 //! Exact server-advertised avatar sources, with bounded pinned public DNS.
 use super::*;
+#[cfg(not(target_arch = "wasm32"))]
 use std::net::ToSocketAddrs;
-pub fn validate_avatar_url(value: &str) -> Result<reqwest::Url> {
-    let u = reqwest::Url::parse(value).map_err(|_| anyhow::anyhow!("avatar_source_invalid"))?;
+pub fn validate_avatar_url(value: &str) -> Result<url::Url> {
+    let u = url::Url::parse(value).map_err(|_| anyhow::anyhow!("avatar_source_invalid"))?;
     ensure!(
         matches!(u.scheme(), "http" | "https")
             && u.host_str().is_some_and(|h| [
@@ -20,6 +21,8 @@ pub fn validate_avatar_url(value: &str) -> Result<reqwest::Url> {
     );
     Ok(u)
 }
+/// Download one contact avatar from a validated WeChat avatar host without redirects.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn download_advertised_avatar(value: &str) -> Result<Vec<u8>> {
     let url = validate_avatar_url(value)?;
     let host = url.host_str().unwrap().to_string();

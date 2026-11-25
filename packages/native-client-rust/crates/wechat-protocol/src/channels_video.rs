@@ -4,7 +4,9 @@
 //! goes only to the Channels video host, pinned to a checked public address, without redirects or
 //! proxies. The first 128 KiB are decoded while bytes arrive; the rest is stored as received.
 use anyhow::{ensure, Result};
+#[cfg(not(target_arch = "wasm32"))]
 use std::{io::Read, net::SocketAddr, time::Duration};
+#[cfg(not(target_arch = "wasm32"))]
 use wechat_media::channels::{apply_channels_prefix, channels_prefix_keystream};
 
 /// Upper bound on a Channels video download.
@@ -80,9 +82,9 @@ pub fn channels_box_type(bytes: &[u8]) -> Option<String> {
 
 /// Build the download address the way the official player does: the returned address with its
 /// token appended, over HTTPS, on the video host.
-pub fn channels_video_url(media: &crate::ChannelsMedia) -> Result<reqwest::Url> {
+pub fn channels_video_url(media: &crate::ChannelsMedia) -> Result<url::Url> {
     let (url, token) = media.transport();
-    let mut address = reqwest::Url::parse(&format!("{url}{token}"))
+    let mut address = url::Url::parse(&format!("{url}{token}"))
         .map_err(|_| anyhow::anyhow!("channels_unsupported_media"))?;
     ensure!(
         matches!(address.scheme(), "http" | "https")
@@ -109,6 +111,7 @@ pub fn channels_video_url(media: &crate::ChannelsMedia) -> Result<reqwest::Url> 
 ///
 /// `max_bytes` caps the transfer below [`MAX_CHANNELS_VIDEO_BYTES`]. The advertised size, when
 /// the reply gives one, must fit the cap and match the received length.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn fetch_channels_video(
     media: &crate::ChannelsMedia,
     max_bytes: usize,
@@ -123,14 +126,16 @@ pub fn fetch_channels_video(
     download_at(url, address, media, max_bytes, progress)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn timeout_for(expected: Option<u64>) -> Duration {
     // At least two minutes, plus one second per MiB, at most thirty minutes.
     let seconds = expected.map_or(0, |bytes| bytes / (1024 * 1024));
     Duration::from_secs((120 + seconds).min(30 * 60))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn download_at(
-    url: reqwest::Url,
+    url: url::Url,
     address: SocketAddr,
     media: &crate::ChannelsMedia,
     max_bytes: usize,
@@ -279,7 +284,7 @@ mod tests {
     fn serve(
         head: String,
         body: Vec<u8>,
-    ) -> (reqwest::Url, SocketAddr, std::thread::JoinHandle<String>) {
+    ) -> (url::Url, SocketAddr, std::thread::JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
@@ -298,7 +303,7 @@ mod tests {
             String::from_utf8(request).unwrap()
         });
         let url =
-            reqwest::Url::parse(&format!("http://127.0.0.1:{}/video?x=1", address.port())).unwrap();
+            url::Url::parse(&format!("http://127.0.0.1:{}/video?x=1", address.port())).unwrap();
         (url, address, server)
     }
 
@@ -402,7 +407,7 @@ mod tests {
     #[test]
     fn an_oversized_advertised_size_fails_before_connecting() {
         let address: SocketAddr = "127.0.0.1:9".parse().unwrap();
-        let url = reqwest::Url::parse("http://127.0.0.1:9/v").unwrap();
+        let url = url::Url::parse("http://127.0.0.1:9/v").unwrap();
         let error = download_at(url, address, &media("u", "", 1, Some(100)), 99, |_, _| {
             Ok(())
         })

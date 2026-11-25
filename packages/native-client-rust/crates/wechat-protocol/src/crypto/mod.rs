@@ -245,6 +245,7 @@ pub(crate) fn aes_128_ecb_decrypt(key: &[u8], encrypted: &[u8]) -> Result<Vec<u8
     active::aes_128_ecb_decrypt(key, encrypted)
 }
 
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn aes_128_ecb_encrypt_no_pad(key: &[u8], blocks: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
     ensure!(
         key.len() == 16 && blocks.len().is_multiple_of(16),

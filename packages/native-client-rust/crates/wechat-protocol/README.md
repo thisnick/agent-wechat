@@ -15,14 +15,16 @@ The crate-level Functions list mainly contains helper functions.
 
 | Task | API |
 | --- | --- |
-| Login | `start_qr_login`, `poll_login`, `complete_login` |
-| Receive | `sync`, `sync_scene`, `heartbeat`, `open_push_connection_blocking` |
+| Login | `start_qr_login`, `poll_login`, `complete_login` (or `*_async` with `with_transport`) |
+| Receive | `sync`, `sync_scene`, `heartbeat`, `open_push_connection` / `open_push_connection_blocking` |
 | Send | `send_text`, `send_share`, `send_quote`, `send_file`, `send_image`, `send_video`, `send_voice` |
-| Contacts | `lookup_contacts`, `lookup_room`, `init_contacts` |
-| Lower-level operations | `wire`, `media`, group request builders and response decoders |
+| Contacts | `lookup_contacts`, `lookup_openim_contact`, `lookup_room`, `init_contacts` |
+| Lower-level operations | `transport`, `wire`, `media`, group request builders and response decoders |
 
 After login, move the accepted `AccountState` into
-`NativeClient::from_account(state, options)`. Cloned handles share that account
+`NativeClient::from_account(state, options)` (or
+`NativeClient::from_account_with_transport(state, options, transport)` for a
+custom async transport). Cloned handles share that account
 owner. Async sync, text and call requests take temporary request snapshots and
 adopt accepted cookie updates without holding a state lock over network waits.
 Explicit renewal fences older credential generations. `shutdown().await` stops
@@ -31,6 +33,33 @@ updated secret state out once for handoff. Exporting a persistence snapshot alon
 does not transfer ownership. Ordinary operations no longer accept a separate
 mutable `AccountState`. The daemon shares this same owner and stores accepted
 updates through its encrypted persistence callback.
+
+### Pluggable async transport and WebAssembly
+
+Use the `transport` module (`StreamTransport`, `AsyncByteStream`,
+`HttpTransport`, `HttpOverStream`, `Clock`, and `ProtocolTransport`) to supply
+your own async sockets, HTTP client and clock instead of OS sockets and
+`reqwest`. Hosts with only raw TCP streams (such as a browser Isolated Web App
+using Direct Sockets) can build a bundle with
+`ProtocolTransport::from_streams(streams, clock)`, which layers strict plaintext
+HTTP/1.1 (`HttpOverStream`) over the byte stream for MMTLS short-link exchanges.
+
+Bind the transport with `NativeClient::with_transport` for async login bootstrap
+(`start_qr_login_async`, `start_saved_device_login_async`, `poll_login_async`,
+`complete_login_async`, `refresh_qr_login_async`) and
+`NativeClient::from_account_with_transport` /
+`from_account_with_transport_and_persistence` for authenticated RPCs and
+`open_push_connection` (`AsyncPushConnection`).
+
+On `wasm32-unknown-unknown`, blocking OS-socket methods and `reqwest` are
+omitted automatically (`cfg(not(target_arch = "wasm32"))`) with no extra Cargo
+features. Build with `default-features = false, features = ["pure-rust-crypto"]`
+and select a `getrandom` 0.4 backend in the application crate (for browser/IWA
+targets, add `getrandom = { version = "0.4", features = ["wasm_js"] }` and
+`RUSTFLAGS='--cfg getrandom_backend="wasm_js"'`; for custom runtimes, use
+`RUSTFLAGS='--cfg getrandom_backend="custom"'`). Async CDN media transfers are
+planned in a follow-up change; blocking CDN download/upload methods remain
+native-only for now.
 
 Embedders that already use blocking workers can use `request_blocking` for one
 scoped operation, or `open_push_connection_blocking` for persistent notifications.

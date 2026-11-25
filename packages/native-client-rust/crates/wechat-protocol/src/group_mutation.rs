@@ -547,6 +547,26 @@ pub fn decode_group_mutation(
     out.accepted = true;
     Ok(out)
 }
+pub(crate) fn validate_group_rpc(request: &GroupRpc) -> Result<()> {
+    ensure!(
+        matches!(request.cgi, 119 | 120 | 179 | 681 | 993),
+        "invalid_group_rpc"
+    );
+    let expected = match request.cgi {
+        119 => "createchatroom",
+        120 => "addchatroommember",
+        179 => "delchatroommember",
+        681 => "oplog",
+        _ => "setchatroomannouncement",
+    };
+    ensure!(
+        request.path == format!("/cgi-bin/micromsg-bin/{expected}"),
+        "invalid_group_rpc"
+    );
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 impl NativeClient {
     #[doc(hidden)]
     pub(crate) fn group_mutation_raw_snapshot(
@@ -554,21 +574,7 @@ impl NativeClient {
         state: &mut AccountState,
         request: &GroupRpc,
     ) -> Result<Vec<u8>> {
-        ensure!(
-            matches!(request.cgi, 119 | 120 | 179 | 681 | 993),
-            "invalid_group_rpc"
-        );
-        let expected = match request.cgi {
-            119 => "createchatroom",
-            120 => "addchatroommember",
-            179 => "delchatroommember",
-            681 => "oplog",
-            _ => "setchatroomannouncement",
-        };
-        ensure!(
-            request.path == format!("/cgi-bin/micromsg-bin/{expected}"),
-            "invalid_group_rpc"
-        );
+        validate_group_rpc(request)?;
         self.authenticated_rpc(state, request.cgi, &request.path, &request.body)
     }
 }

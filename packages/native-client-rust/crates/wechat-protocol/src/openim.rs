@@ -1,10 +1,12 @@
 //! Read one exact OpenIM contact through the supported native contact operation.
-use crate::{protobuf as p, AccountState, NativeClient};
+use crate::protobuf as p;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::{AccountState, NativeClient};
 use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
 
-const CGI: u16 = 881;
-const PATH: &str = "/cgi-bin/micromsg-bin/getopenimcontact";
+pub(crate) const CGI: u16 = 881;
+pub(crate) const PATH: &str = "/cgi-bin/micromsg-bin/getopenimcontact";
 const MAX_ID_BYTES: usize = 256;
 const MAX_LABEL_BYTES: usize = 4096;
 const MAX_URL_BYTES: usize = 16384;
@@ -120,6 +122,7 @@ pub fn decode_response(bytes: &[u8], requested_username: &str) -> Result<OpenImC
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl NativeClient {
     pub(crate) fn openim_contact_raw_snapshot(
         &self,

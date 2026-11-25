@@ -1,5 +1,7 @@
 //! Direct custom-sticker upload chunks. This operation does not send a chat message.
-use crate::{protobuf as p, NativeClient};
+use crate::protobuf as p;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::NativeClient;
 use anyhow::{ensure, Result};
 
 /// Maximum plaintext bytes carried by one direct sticker upload request.
@@ -79,6 +81,7 @@ pub fn decode_sticker_upload(
         raw: raw.into(),
     })
 }
+#[cfg(not(target_arch = "wasm32"))]
 impl NativeClient {
     pub(crate) fn upload_sticker_chunk_snapshot(
         &self,

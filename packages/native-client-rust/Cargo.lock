@@ -3417,6 +3417,7 @@ dependencies = [
  "sha2",
  "subtle",
  "tokio",
+ "url",
  "wechat-media",
  "wechat-platform",
  "zeroize",

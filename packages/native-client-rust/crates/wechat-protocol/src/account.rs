@@ -4,17 +4,21 @@ use super::{AccountState, NativeClient, NativeOptions};
 use crate::errors::AccountInterrupted;
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Condvar;
 use std::{
+    borrow::Cow,
     future::Future,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Condvar, Mutex, MutexGuard,
+        Arc, Mutex, MutexGuard,
     },
     time::Duration,
 };
 use tokio::sync::Notify;
 use zeroize::Zeroizing;
 
+#[cfg(not(target_arch = "wasm32"))]
 #[path = "account_components.rs"]
 mod components;
 
@@ -89,7 +93,17 @@ pub struct TextSendOptions {
 /// operations. Implementations store data only: they must not call back into the
 /// client, perform network operations, or implement authentication/retry policy.
 /// A failed write leaves in-memory state unchanged and never retries a request.
+#[cfg(not(target_arch = "wasm32"))]
 pub trait AccountPersistence: Send + Sync {
+    fn persist(&self, previous: &AccountState, accepted: &AccountState) -> Result<()>;
+}
+
+/// Persist an accepted account update before it becomes visible to other client
+/// operations. Implementations store data only: they must not call back into the
+/// client, perform network operations, or implement authentication/retry policy.
+/// A failed write leaves in-memory state unchanged and never retries a request.
+#[cfg(target_arch = "wasm32")]
+pub trait AccountPersistence {
     fn persist(&self, previous: &AccountState, accepted: &AccountState) -> Result<()>;
 }
 
@@ -112,11 +126,12 @@ pub struct PendingLogout {
     exchange: Arc<Exchange>,
     state: AccountState,
     options: NativeOptions,
+    transport: Option<crate::transport::ProtocolTransport>,
 }
 
 impl PendingLogout {
     /// Wait for requests admitted before the reservation, then submit the logout
-    /// once on Tokio's blocking pool.
+    /// once on the configured async transport or Tokio's blocking pool.
     pub async fn submit(self) -> Result<super::LogoutReply> {
         self.submit_guarded(|| Ok(())).await
     }
@@ -124,11 +139,15 @@ impl PendingLogout {
     /// Recheck the embedding application's committed logout operation immediately
     /// before business handoff. This token is consumed even on failure; neither
     /// a cancelled waiter nor an uncertain response permits automatic resubmission.
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn submit_guarded<F>(self, before_submit: F) -> Result<super::LogoutReply>
     where
         F: FnOnce() -> Result<()> + Send + 'static,
     {
         self.exchange.account.drain_to(1).await?;
+        if self.transport.is_some() {
+            return self.submit_async(before_submit).await;
+        }
         let cancellation = Arc::new(AtomicBool::new(false));
         let _cancel_on_drop = CancelOnDrop(cancellation.clone());
         tokio::task::spawn_blocking(move || self.submit_on_worker(cancellation, before_submit))
@@ -136,9 +155,67 @@ impl PendingLogout {
             .context("Account logout worker failed")?
     }
 
+    /// Recheck the embedding application's committed logout operation immediately
+    /// before business handoff. This token is consumed even on failure; neither
+    /// a cancelled waiter nor an uncertain response permits automatic resubmission.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn submit_guarded<F>(self, before_submit: F) -> Result<super::LogoutReply>
+    where
+        F: FnOnce() -> Result<()> + 'static,
+    {
+        self.exchange.account.drain_to(1).await?;
+        self.submit_async(before_submit).await
+    }
+
+    async fn submit_async<F>(self, before_submit: F) -> Result<super::LogoutReply>
+    where
+        F: FnOnce() -> Result<()>,
+    {
+        let Self {
+            exchange,
+            mut state,
+            options,
+            transport,
+        } = self;
+        let transport = transport.context("Native client has no async transport configured")?;
+        let request = super::logout::request(&state)?;
+        let session = crate::mmtls::AsyncSession::connect(
+            &state.long_host,
+            options.timeout,
+            options.receive_budget,
+            &*transport.streams,
+            transport.clock.clone(),
+        )
+        .await?;
+        let short = session.short.clone();
+        let _ = session.close().await;
+        let packet =
+            crate::business::AuthenticatedPacket::prepare(&state, super::logout::CGI, &request)?;
+        exchange
+            .check_logout()
+            .map_err(|error| error.context(NativeRequestNotSubmitted))?;
+        before_submit().map_err(|error| error.context(NativeRequestNotSubmitted))?;
+        let reply = crate::mmtls::short_exchange_async(
+            &short,
+            &state.short_host,
+            super::logout::PATH,
+            &packet.packet,
+            options.timeout,
+            &*transport.http,
+            &*transport.clock,
+        )
+        .await?;
+        let (plain, cookie) = packet.decode_verified_transport_reply(&reply)?;
+        if !cookie.is_empty() {
+            state.cookie = cookie;
+        }
+        super::logout::response(&plain)
+    }
+
     /// As [`Self::submit`], on the caller's blocking worker. No Tokio runtime is
     /// needed. Do not call it on an async executor thread or from inside an
     /// account request: it waits for every earlier request to finish.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn submit_blocking(self) -> Result<super::LogoutReply> {
         self.submit_guarded_blocking(|| Ok(()))
     }
@@ -146,14 +223,20 @@ impl PendingLogout {
     /// As [`Self::submit_guarded`], on the caller's blocking worker. The token
     /// is consumed even on failure, and an uncertain response never permits
     /// automatic resubmission.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn submit_guarded_blocking<F>(self, before_submit: F) -> Result<super::LogoutReply>
     where
         F: FnOnce() -> Result<()> + Send + 'static,
     {
+        ensure!(
+            self.transport.is_none(),
+            "Blocking logout cannot bypass a configured async transport"
+        );
         self.exchange.account.drain_to_blocking(1)?;
         self.submit_on_worker(Arc::new(AtomicBool::new(false)), before_submit)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn submit_on_worker<F>(
         self,
         cancellation: Arc<AtomicBool>,
@@ -166,6 +249,7 @@ impl PendingLogout {
             exchange,
             mut state,
             options,
+            transport: _,
         } = self;
         let mut transport = NativeClient::new(options)?;
         transport.submission_guard = Some(logout_guard(exchange, cancellation, before_submit));
@@ -175,6 +259,7 @@ impl PendingLogout {
 
 /// Final check before the logout bytes are handed to transport. It passes at
 /// most once; every refusal is marked as not submitted.
+#[cfg(not(target_arch = "wasm32"))]
 fn logout_guard<F>(
     exchange: Arc<Exchange>,
     cancellation: Arc<AtomicBool>,
@@ -206,8 +291,10 @@ pub(super) struct OwnedAccount {
     data: Mutex<AccountData>,
     changed: Notify,
     // Wakes blocking waiters for the same changes as `changed`.
+    #[cfg(not(target_arch = "wasm32"))]
     changed_blocking: Condvar,
     authority: Arc<Authority>,
+    #[cfg(not(target_arch = "wasm32"))]
     components: components::AccountComponents,
     /// Short-link ticket shared by this owner's request transports.
     short_link: Arc<crate::mmtls::ShortLinkCache>,
@@ -251,8 +338,10 @@ struct Exchange {
     non_cookie: [u8; 32],
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 struct CancelOnDrop(Arc<AtomicBool>);
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
         self.0.store(true, Ordering::Release);
@@ -260,6 +349,30 @@ impl Drop for CancelOnDrop {
 }
 
 impl OwnedAccount {
+    #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
+    fn new(state: AccountState, persistence: Option<Arc<dyn AccountPersistence>>) -> Arc<Self> {
+        Arc::new(Self {
+            data: Mutex::new(AccountData {
+                state: Some(state),
+                revision: 0,
+                credential_generation: 0,
+                lifecycle: AccountLifecycle::Active,
+                in_flight: 0,
+                persistence,
+            }),
+            changed: Notify::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            changed_blocking: Condvar::new(),
+            authority: Arc::new(Authority {
+                active: AtomicBool::new(true),
+                credential_generation: AtomicU64::new(0),
+            }),
+            #[cfg(not(target_arch = "wasm32"))]
+            components: components::AccountComponents::default(),
+            short_link: Arc::default(),
+        })
+    }
+
     fn lock(&self) -> Result<MutexGuard<'_, AccountData>> {
         self.data
             .lock()
@@ -269,6 +382,7 @@ impl OwnedAccount {
     /// Call after releasing the data lock, once lifecycle or `in_flight` changed.
     fn notify_changed(&self) {
         self.changed.notify_waiters();
+        #[cfg(not(target_arch = "wasm32"))]
         self.changed_blocking.notify_all();
     }
 
@@ -350,6 +464,7 @@ impl OwnedAccount {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl OwnedAccount {
     /// Blocking form of `drain_to`. Counts only change under the data lock, so
     /// a waiter cannot miss the wakeup that follows a change.
@@ -504,49 +619,41 @@ fn non_cookie_digest(state: &AccountState) -> Result<[u8; 32]> {
 }
 
 impl NativeClient {
+    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn check_snapshot_transport(&self) -> Result<()> {
         ensure!(
             self.account.is_none(),
             "Explicit-state transport cannot use a bound account client"
         );
+        ensure!(
+            self.transport.is_none(),
+            "Blocking transport methods cannot bypass a configured async transport"
+        );
         Ok(())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn check_submission(&self) -> Result<()> {
         if let Some(check) = &self.submission_guard {
             check()?;
         }
         Ok(())
     }
+
     /// Bind an accepted account to this client. Clones share the same owner;
     /// construction performs no network operation or credential persistence.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn from_account(state: AccountState, options: NativeOptions) -> Result<Self> {
         state.validate()?;
         let mut client = Self::new(options)?;
-        client.account = Some(Arc::new(OwnedAccount {
-            data: Mutex::new(AccountData {
-                state: Some(state),
-                revision: 0,
-                credential_generation: 0,
-                lifecycle: AccountLifecycle::Active,
-                in_flight: 0,
-                persistence: None,
-            }),
-            changed: Notify::new(),
-            changed_blocking: Condvar::new(),
-            authority: Arc::new(Authority {
-                active: AtomicBool::new(true),
-                credential_generation: AtomicU64::new(0),
-            }),
-            components: components::AccountComponents::default(),
-            short_link: Arc::default(),
-        }));
+        client.account = Some(OwnedAccount::new(state, None));
         Ok(client)
     }
 
     /// Use a data-only storage callback for accepted updates. The supplied state
     /// must already be loaded from accepted storage; construction does not write
     /// it back or treat importing bytes as a new authentication acceptance.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn from_account_with_persistence(
         state: AccountState,
         options: NativeOptions,
@@ -555,6 +662,46 @@ impl NativeClient {
         let client = Self::from_account(state, options)?;
         client.owned_account()?.lock()?.persistence = Some(persistence);
         Ok(client)
+    }
+
+    /// Bind an accepted account to a client backed by a pluggable
+    /// [`crate::transport::ProtocolTransport`].
+    ///
+    /// Clones share the same account owner, short-link ticket cache, and
+    /// transport. Construction performs no network operation or persistence.
+    pub fn from_account_with_transport(
+        state: AccountState,
+        options: NativeOptions,
+        transport: crate::transport::ProtocolTransport,
+    ) -> Result<Self> {
+        state.validate()?;
+        let mut client = Self::with_transport(options, transport)?;
+        client.account = Some(OwnedAccount::new(state, None));
+        Ok(client)
+    }
+
+    /// Bind an accepted account with both a pluggable
+    /// [`crate::transport::ProtocolTransport`] and a data-only persistence
+    /// callback. Construction performs no network operation or initial write.
+    pub fn from_account_with_transport_and_persistence(
+        state: AccountState,
+        options: NativeOptions,
+        transport: crate::transport::ProtocolTransport,
+        persistence: Arc<dyn AccountPersistence>,
+    ) -> Result<Self> {
+        state.validate()?;
+        let mut client = Self::with_transport(options, transport)?;
+        client.account = Some(OwnedAccount::new(state, Some(persistence)));
+        Ok(client)
+    }
+
+    /// Change transport deadlines/budgets for a handle while retaining the same
+    /// account owner, configured transport, and admission rules. This never
+    /// imports credential state.
+    pub fn with_request_options(&self, options: NativeOptions) -> Result<Self> {
+        let mut handle = Self::from_validated_options(options, self.transport.clone())?;
+        handle.account = Some(self.owned_account()?.clone());
+        Ok(handle)
     }
 
     fn owned_account(&self) -> Result<&Arc<OwnedAccount>> {
@@ -620,6 +767,7 @@ impl NativeClient {
 
     /// Reserve one terminal operation before the embedding application commits
     /// its own local inhibition. No network work is started by reservation.
+    #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
     pub fn prepare_logout(&self) -> Result<PendingLogout> {
         let account = self.owned_account()?;
         let (exchange, state) = account
@@ -629,6 +777,7 @@ impl NativeClient {
             exchange: Arc::new(exchange),
             state,
             options: self.options.clone(),
+            transport: self.transport.clone(),
         })
     }
 
@@ -652,6 +801,159 @@ impl NativeClient {
         Ok(state)
     }
 
+    async fn async_short_session(
+        &self,
+        transport: &crate::transport::ProtocolTransport,
+        short_link: &crate::mmtls::ShortLinkCache,
+        host: &str,
+    ) -> Result<crate::mmtls::ShortSession> {
+        let now_ms = transport.clock.monotonic_ms();
+        if let Some(short) = short_link.get_at_ms(host, now_ms) {
+            return Ok(short);
+        }
+        let session = crate::mmtls::AsyncSession::connect(
+            host,
+            self.options.timeout,
+            self.options.receive_budget,
+            &*transport.streams,
+            transport.clock.clone(),
+        )
+        .await?;
+        let short = session.short.clone();
+        let _ = session.close().await;
+        let issued_ms = transport.clock.monotonic_ms();
+        short_link.put_at_ms(host, short.clone(), issued_ms);
+        Ok(short)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn async_authenticated_rpc_step<F>(
+        &self,
+        transport: &crate::transport::ProtocolTransport,
+        short_link: &crate::mmtls::ShortLinkCache,
+        exchange: &Exchange,
+        state: &mut AccountState,
+        prior_admission: &mut bool,
+        cgi: u16,
+        path: &str,
+        request: &[u8],
+        before_submit: F,
+    ) -> Result<Vec<u8>>
+    where
+        F: FnOnce() -> Result<()>,
+    {
+        let short = self
+            .async_short_session(transport, short_link, &state.long_host)
+            .await?;
+        let packet = crate::business::AuthenticatedPacket::prepare(state, cgi, request)?;
+        match exchange.check() {
+            Ok(()) => {}
+            Err(error) if !*prior_admission => {
+                return Err(error.context(NativeRequestNotSubmitted));
+            }
+            Err(error) => return Err(error),
+        }
+        before_submit()?;
+        *prior_admission = true;
+        let reply = crate::mmtls::short_exchange_async(
+            &short,
+            &state.short_host,
+            path,
+            &packet.packet,
+            self.options.timeout,
+            &*transport.http,
+            &*transport.clock,
+        )
+        .await
+        .inspect_err(|_| {
+            // Never retried here: the request may have reached the server.
+            // The next request performs a new handshake instead.
+            short_link.invalidate();
+        })?;
+        let (plain, cookie) = packet.decode_verified_transport_reply(&reply)?;
+        if !cookie.is_empty() {
+            state.cookie = cookie;
+        }
+        Ok(plain)
+    }
+
+    async fn account_single_rpc<T, Build, Decode>(&self, build: Build, decode: Decode) -> Result<T>
+    where
+        T: crate::transport::MaybeSend + 'static,
+        Build: FnOnce(&AccountState) -> Result<(u16, Cow<'static, str>, Vec<u8>)>
+            + crate::transport::MaybeSend
+            + 'static,
+        Decode: FnOnce(&AccountState, Vec<u8>) -> Result<T> + crate::transport::MaybeSend + 'static,
+    {
+        self.account_single_rpc_guarded(build, decode, || Ok(()))
+            .await
+    }
+
+    async fn account_single_rpc_guarded<T, Build, Decode, Guard>(
+        &self,
+        build: Build,
+        decode: Decode,
+        before_submit: Guard,
+    ) -> Result<T>
+    where
+        T: crate::transport::MaybeSend + 'static,
+        Build: FnOnce(&AccountState) -> Result<(u16, Cow<'static, str>, Vec<u8>)>
+            + crate::transport::MaybeSend
+            + 'static,
+        Decode: FnOnce(&AccountState, Vec<u8>) -> Result<T> + crate::transport::MaybeSend + 'static,
+        Guard: FnOnce() -> Result<()> + crate::transport::MaybeSend + 'static,
+    {
+        if let Some(transport) = self.transport.clone() {
+            let owner = self.owned_account()?;
+            let (exchange, mut state) = owner
+                .begin()
+                .map_err(|error| error.context(NativeRequestNotSubmitted))?;
+            let mut prior_admission = false;
+            let result = async {
+                let (cgi, path, request) = build(&state)?;
+                let request = Zeroizing::new(request);
+                let reply = self
+                    .async_authenticated_rpc_step(
+                        &transport,
+                        &owner.short_link,
+                        &exchange,
+                        &mut state,
+                        &mut prior_admission,
+                        cgi,
+                        path.as_ref(),
+                        &request,
+                        before_submit,
+                    )
+                    .await?;
+                decode(&state, reply)
+            }
+            .await;
+            return finish_account_exchange(exchange, &state, result);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.account_request(move |transport, state, _| {
+                let (cgi, path, request) = build(state)?;
+                let request = Zeroizing::new(request);
+                let reply = transport.authenticated_rpc_guarded(
+                    state,
+                    cgi,
+                    path.as_ref(),
+                    &request,
+                    before_submit,
+                )?;
+                decode(state, reply)
+            })
+            .await
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (build, decode, before_submit);
+            anyhow::bail!("Native client has no async transport configured")
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     async fn account_request<T, F>(&self, operation: F) -> Result<T>
     where
         T: Send + 'static,
@@ -681,10 +983,15 @@ impl NativeClient {
         .context("Account request worker failed")?
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn account_request_blocking<T, F>(&self, operation: F) -> Result<T>
     where
         F: FnOnce(&NativeClient, &mut AccountState, &dyn Fn() -> Result<()>) -> Result<T>,
     {
+        ensure!(
+            self.transport.is_none(),
+            "Blocking account operations cannot bypass a configured async transport"
+        );
         let owner = self.owned_account()?;
         let (exchange, state) = owner
             .begin()
@@ -699,6 +1006,7 @@ impl NativeClient {
         )
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn execute_account_request<T, F>(
         options: NativeOptions,
         exchange: Exchange,
@@ -754,13 +1062,37 @@ impl NativeClient {
     }
 }
 
+fn finish_account_exchange<T>(
+    exchange: Exchange,
+    state: &AccountState,
+    result: Result<T>,
+) -> Result<T> {
+    // Cookie adoption still follows verified transport when a decoded
+    // application result rejects the operation. Preserve original uncertainty.
+    let accepted = exchange.accept_cookie(state);
+    match result {
+        Ok(value) => {
+            accepted?;
+            Ok(value)
+        }
+        Err(error) => match accepted {
+            Ok(()) => Err(error),
+            Err(account_error) => Err(error.context(account_error)),
+        },
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 #[path = "account_request.rs"]
 mod request;
+#[cfg(not(target_arch = "wasm32"))]
 pub use request::AccountRequest;
 
 #[path = "account_push.rs"]
 mod push;
+#[cfg(not(target_arch = "wasm32"))]
 pub use push::AccountPushConnection;
+pub use push::AsyncPushConnection;
 
 #[path = "account_operations.rs"]
 mod operations;
@@ -779,6 +1111,6 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "account_tests.rs"]
 mod tests;

@@ -1,12 +1,18 @@
 //! Fresh pinned MMTLS handshake and authenticated shortlink exchange.
 use crate::crypto::*;
+use crate::transport::{
+    AsyncByteStream, Clock, HttpMethod, HttpRequest, HttpTransport, ReadOutcome, StreamTransport,
+    TransportError,
+};
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_arch = "wasm32"))]
 use std::{
     io::{Read, Write},
     net::TcpStream,
-    time::{Duration, Instant},
+    time::Instant,
 };
+use std::{sync::Arc, time::Duration};
 use zeroize::Zeroize;
 
 pub const VERSION: u16 = 0xf104;
@@ -174,29 +180,32 @@ const SHORT_LINK_EXPIRY_MARGIN: Duration = Duration::from_secs(60);
 /// in memory and zeroized with the session when replaced.
 #[derive(Default)]
 pub(crate) struct ShortLinkCache {
-    entry: std::sync::Mutex<Option<(String, ShortSession, Instant)>>,
+    entry: std::sync::Mutex<Option<(String, ShortSession, u64)>>,
 }
 impl ShortLinkCache {
     /// A clone of the cached ticket for `host` while it is still reusable.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn get(&self, host: &str) -> Option<ShortSession> {
-        self.get_at(host, Instant::now())
+        self.get_at_ms(host, crate::transport::native_monotonic_ms())
     }
-    fn get_at(&self, host: &str, now: Instant) -> Option<ShortSession> {
+    pub(crate) fn get_at_ms(&self, host: &str, now_ms: u64) -> Option<ShortSession> {
         let entry = self.entry.lock().ok()?;
-        let (cached_host, session, issued) = entry.as_ref()?;
-        let lifetime = Duration::from_secs(u64::from(session.ticket.lifetime))
-            .saturating_sub(SHORT_LINK_EXPIRY_MARGIN)
-            .min(SHORT_LINK_MAX_REUSE);
-        (cached_host == host && now.saturating_duration_since(*issued) < lifetime)
+        let (cached_host, session, issued_ms) = entry.as_ref()?;
+        let lifetime_ms = u64::from(session.ticket.lifetime)
+            .saturating_mul(1000)
+            .saturating_sub(SHORT_LINK_EXPIRY_MARGIN.as_millis() as u64)
+            .min(SHORT_LINK_MAX_REUSE.as_millis() as u64);
+        (cached_host == host && now_ms.saturating_sub(*issued_ms) < lifetime_ms)
             .then(|| session.clone())
     }
     /// Remember the ticket a long-link handshake to `host` just issued.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn put(&self, host: &str, session: ShortSession) {
-        self.put_at(host, session, Instant::now());
+        self.put_at_ms(host, session, crate::transport::native_monotonic_ms());
     }
-    fn put_at(&self, host: &str, session: ShortSession, issued: Instant) {
+    pub(crate) fn put_at_ms(&self, host: &str, session: ShortSession, issued_ms: u64) {
         if let Ok(mut entry) = self.entry.lock() {
-            *entry = Some((host.to_string(), session, issued));
+            *entry = Some((host.to_string(), session, issued_ms));
         }
     }
     /// Forget the cached ticket so the next request performs a handshake.
@@ -206,14 +215,15 @@ impl ShortLinkCache {
         }
     }
 }
-pub struct Session {
-    socket: TcpStream,
-    deadline: Instant,
-    received: usize,
+
+/// Sans-I/O cryptographic and framing state for an established MMTLS long-link
+/// session, shared between the blocking [`Session`] and async [`AsyncSession`].
+struct SessionCore {
+    #[cfg(not(target_arch = "wasm32"))]
     receive_budget: usize,
-    pub short: ShortSession,
-    pub certificate_region: u32,
-    pub certificate_version: u32,
+    short: ShortSession,
+    certificate_region: u32,
+    certificate_version: u32,
     traffic: Traffic,
     outgoing: u64,
     incoming: u64,
@@ -221,94 +231,121 @@ pub struct Session {
     application_pending: LonglinkDecoder,
 }
 
-fn host_valid(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 253
-        && name.is_ascii()
-        && name.split('.').all(|s| {
-            !s.is_empty()
-                && s.len() <= 63
-                && s.bytes()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
-                && !s.starts_with('-')
-                && !s.ends_with('-')
-        })
-        && (name.ends_with(".wechat.com") || name.ends_with(".weixin.qq.com"))
-}
-pub fn validate_host(name: &str) -> Result<()> {
-    ensure!(host_valid(name), "Unsupported native server host");
-    Ok(())
-}
-fn read_exact_deadline(
-    socket: &mut TcpStream,
-    mut bytes: &mut [u8],
-    deadline: Instant,
-) -> Result<()> {
-    while !bytes.is_empty() {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        ensure!(!remaining.is_zero(), "MMTLS deadline exceeded");
-        socket.set_read_timeout(Some(remaining))?;
-        match socket.read(bytes) {
-            Ok(0) => anyhow::bail!("MMTLS connection closed"),
-            Ok(n) => bytes = &mut bytes[n..],
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e.into()),
+impl SessionCore {
+    fn seal_application(&mut self, command: u32, sequence: u32, payload: &[u8]) -> Result<Vec<u8>> {
+        let bytes = seal(
+            0x17,
+            &pack_longlink(command, sequence, payload)?,
+            &self.traffic.client_key,
+            &self.traffic.client_iv,
+            self.outgoing,
+        )?;
+        self.outgoing = self
+            .outgoing
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("Sequence exhausted"))?;
+        Ok(bytes)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn open_application_record(&mut self, record: &Record) -> Result<Longlink> {
+        ensure!(record.header[0] == 0x17, "Expected application record");
+        let plain = open(
+            record,
+            &self.traffic.server_key,
+            &self.traffic.server_iv,
+            self.incoming,
+        )?;
+        self.incoming = self
+            .incoming
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("Sequence exhausted"))?;
+        unpack_longlink(&plain)
+    }
+
+    fn drain_pending_packet(&mut self) -> Result<Option<Longlink>> {
+        loop {
+            if let Some(packet) = self.application_pending.next_packet()? {
+                return Ok(Some(packet));
+            }
+            if self.record_pending.len() < 5 {
+                return Ok(None);
+            }
+            let h: [u8; 5] = self.record_pending[..5].try_into()?;
+            ensure!(
+                (0x15..=0x19).contains(&h[0]) && u16::from_be_bytes([h[1], h[2]]) == VERSION,
+                "Unexpected MMTLS header"
+            );
+            let n = u16::from_be_bytes([h[3], h[4]]) as usize;
+            if self.record_pending.len() < n + 5 {
+                return Ok(None);
+            }
+            ensure!(h[0] == 0x17, "Unexpected persistent MMTLS record");
+            let record = Record {
+                header: h,
+                body: self.record_pending[5..n + 5].to_vec(),
+            };
+            let plain = open(
+                &record,
+                &self.traffic.server_key,
+                &self.traffic.server_iv,
+                self.incoming,
+            )?;
+            self.incoming = self
+                .incoming
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("Sequence exhausted"))?;
+            self.record_pending.drain(..n + 5);
+            self.application_pending.feed(&plain)?;
         }
     }
-    Ok(())
-}
-fn read_record(
-    socket: &mut TcpStream,
-    deadline: Instant,
-    received: &mut usize,
-    budget: usize,
-) -> Result<Record> {
-    let mut h = [0; 5];
-    read_exact_deadline(socket, &mut h, deadline)?;
-    ensure!(
-        (0x15..=0x19).contains(&h[0]) && u16::from_be_bytes([h[1], h[2]]) == VERSION,
-        "Unexpected MMTLS header"
-    );
-    let n = u16::from_be_bytes([h[3], h[4]]) as usize;
-    *received = received
-        .checked_add(n + 5)
-        .ok_or_else(|| anyhow::anyhow!("Receive overflow"))?;
-    ensure!(*received <= budget, "MMTLS receive budget exceeded");
-    let mut body = vec![0; n];
-    read_exact_deadline(socket, &mut body, deadline)?;
-    ensure!(h[0] != 0x15, "Server returned MMTLS alert");
-    Ok(Record { header: h, body })
+
+    fn push_pending_bytes(&mut self, chunk: &[u8]) -> Result<()> {
+        // At most one incomplete record precedes a socket read.
+        ensure!(
+            self.record_pending.len().saturating_add(chunk.len()) <= 131080,
+            "MMTLS pending record limit"
+        );
+        self.record_pending.extend_from_slice(chunk);
+        Ok(())
+    }
 }
 
-impl Session {
-    pub fn connect(host: &str, timeout: Duration, receive_budget: usize) -> Result<Self> {
-        validate_host(host)?;
-        ensure!(
-            (1024..=crate::MAX_MESSAGE_BYTES).contains(&receive_budget),
-            "Invalid receive budget"
-        );
-        ensure!(
-            !timeout.is_zero() && timeout <= Duration::from_secs(120),
-            "Invalid MMTLS timeout"
-        );
-        let deadline = Instant::now() + timeout;
-        // Resolver and connect are constrained by the caller's blocking worker. Socket
-        // read/write deadlines bound every subsequent protocol operation.
-        use std::net::ToSocketAddrs;
-        let addresses = (host, 80).to_socket_addrs()?;
-        let mut socket = None;
-        for addr in addresses {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            if let Ok(s) = TcpStream::connect_timeout(&addr, remaining) {
-                socket = Some(s);
-                break;
-            }
+struct HandshakeClient {
+    keys: [Ecdh; 2],
+    hello: Vec<u8>,
+}
+
+struct HandshakeVerify {
+    server: ServerHello,
+    secret: Vec<u8>,
+    handshake: Traffic,
+    transcript: Vec<u8>,
+    access_psk: Option<Vec<u8>>,
+    ticket: Option<Ticket>,
+}
+
+impl Drop for HandshakeVerify {
+    fn drop(&mut self) {
+        self.secret.zeroize();
+        if let Some(psk) = &mut self.access_psk {
+            psk.zeroize();
         }
-        let mut socket = socket.ok_or_else(|| anyhow::anyhow!("Native connection failed"))?;
-        socket.set_write_timeout(Some(timeout))?;
+        if let Some(ticket) = &mut self.ticket {
+            ticket.opaque.zeroize();
+            ticket.nonce.zeroize();
+        }
+    }
+}
+
+struct HandshakeEstablished {
+    server: ServerHello,
+    short: ShortSession,
+    application: Traffic,
+}
+
+impl HandshakeClient {
+    fn start(now_secs: u32) -> Result<(Self, Vec<u8>)> {
         let keys = [
             Ecdh::generate_for(Curve::P256).context("MMTLS key generation")?,
             Ecdh::generate_for(Curve::P256).context("MMTLS key generation")?,
@@ -332,14 +369,16 @@ impl Session {
                 vec![1],
                 0xc02bu16.to_be_bytes().to_vec(),
                 random::<32>().context("MMTLS hello random")?.to_vec(),
-                crate::wire::unix_time()?.to_be_bytes().to_vec(),
+                now_secs.to_be_bytes().to_vec(),
                 section(&[vec![1], extension].concat()),
             ]
             .concat(),
         );
-        socket.write_all(&frame(0x16, &hello)?)?;
-        let mut received = 0;
-        let server_record = read_record(&mut socket, deadline, &mut received, receive_budget)?;
+        let wire = frame(0x16, &hello)?;
+        Ok((Self { keys, hello }, wire))
+    }
+
+    fn process_server_hello(self, server_record: Record) -> Result<HandshakeVerify> {
         ensure!(server_record.header[0] == 0x16, "Expected handshake");
         let server = parse_server_hello(&server_record.body)?;
         let index = server
@@ -347,18 +386,35 @@ impl Session {
             .checked_sub(5)
             .ok_or_else(|| anyhow::anyhow!("Unoffered key"))? as usize;
         ensure!(index < 2, "Unoffered key");
-        let mut x = keys[index]
+        let mut x = self.keys[index]
             .derive(&server.point)
             .context("MMTLS shared secret derivation")?;
-        let mut secret = handshake_secret(&x)?;
+        let secret = handshake_secret(&x)?;
         x.zeroize();
-        let mut transcript = [hello, server_record.body].concat();
+        let transcript = [self.hello, server_record.body].concat();
         let handshake = traffic(&secret, "handshake key expansion", &transcript)
             .context("MMTLS handshake key derivation")?;
-        let r = read_record(&mut socket, deadline, &mut received, receive_budget)?;
-        ensure!(r.header[0] == 0x16, "Expected signature record");
-        let signature_body = open(&r, &handshake.server_key, &handshake.server_iv, 1)
-            .context("MMTLS signature record authentication")?;
+        Ok(HandshakeVerify {
+            server,
+            secret,
+            handshake,
+            transcript,
+            access_psk: None,
+            ticket: None,
+        })
+    }
+}
+
+impl HandshakeVerify {
+    fn verify_signature(&mut self, record: Record) -> Result<()> {
+        ensure!(record.header[0] == 0x16, "Expected signature record");
+        let signature_body = open(
+            &record,
+            &self.handshake.server_key,
+            &self.handshake.server_iv,
+            1,
+        )
+        .context("MMTLS signature record authentication")?;
         let signature = signed_payload(&signature_body, 0x0f)?;
         let pins: serde_json::Value =
             serde_json::from_str(include_str!("../fixtures/mmtls-public-keys.json"))?;
@@ -366,95 +422,140 @@ impl Session {
             .as_array()
             .unwrap()
             .iter()
-            .find(|p| p["version"].as_u64() == Some(server.version as u64))
+            .find(|p| p["version"].as_u64() == Some(self.server.version as u64))
             .ok_or_else(|| anyhow::anyhow!("Unsupported MMTLS certificate version"))?;
-        ensure!([5, 1000].contains(&server.version), "Unoffered MMTLS pin");
+        ensure!(
+            [5, 1000].contains(&self.server.version),
+            "Unoffered MMTLS pin"
+        );
         verify_signature(
             pin["ecdsaPEM"].as_str().unwrap(),
-            &sha256(&transcript),
+            &sha256(&self.transcript),
             &signature,
         )
         .context("MMTLS signature verification")?;
-        transcript.extend(signature_body);
-        let r = read_record(&mut socket, deadline, &mut received, receive_budget)?;
-        ensure!(r.header[0] == 0x16, "Expected ticket record");
-        let ticket_body = open(&r, &handshake.server_key, &handshake.server_iv, 2)
-            .context("MMTLS ticket record authentication")?;
+        self.transcript.extend(signature_body);
+        Ok(())
+    }
+
+    fn process_tickets(&mut self, record: Record) -> Result<()> {
+        ensure!(record.header[0] == 0x16, "Expected ticket record");
+        let ticket_body = open(
+            &record,
+            &self.handshake.server_key,
+            &self.handshake.server_iv,
+            2,
+        )
+        .context("MMTLS ticket record authentication")?;
         let tickets = parse_tickets(&ticket_body)?;
         let access_psk = expand(
-            &secret,
-            &[b"PSK_ACCESS".as_slice(), &sha256(&transcript)].concat(),
+            &self.secret,
+            &[b"PSK_ACCESS".as_slice(), &sha256(&self.transcript)].concat(),
             32,
         )?;
-        transcript.extend(ticket_body);
-        let r = read_record(&mut socket, deadline, &mut received, receive_budget)?;
-        ensure!(r.header[0] == 0x16, "Expected Finished");
+        self.transcript.extend(ticket_body);
+        self.access_psk = Some(access_psk);
+        self.ticket = Some(tickets[0].clone());
+        Ok(())
+    }
+
+    fn finish(mut self, record: Record) -> Result<(HandshakeEstablished, Vec<u8>, Vec<u8>)> {
+        ensure!(record.header[0] == 0x16, "Expected Finished");
         let finish = signed_payload(
-            &open(&r, &handshake.server_key, &handshake.server_iv, 3)
-                .context("MMTLS finished record authentication")?,
+            &open(
+                &record,
+                &self.handshake.server_key,
+                &self.handshake.server_iv,
+                3,
+            )
+            .context("MMTLS finished record authentication")?,
             0x14,
         )?;
         let expected = hmac(
-            &expand(&secret, b"server finished", 32)?,
-            &sha256(&transcript),
+            &expand(&self.secret, b"server finished", 32)?,
+            &sha256(&self.transcript),
         )?;
         ensure!(
             constant_time_eq(&finish, &expected),
             "Server Finished verification failed"
         );
         let client_finish = hmac(
-            &expand(&secret, b"client finished", 32)?,
-            &sha256(&transcript),
+            &expand(&self.secret, b"client finished", 32)?,
+            &sha256(&self.transcript),
         )?;
-        socket.write_all(&seal(
+        let client_finish_wire = seal(
             0x16,
             &section(&[vec![0x14], sized(&client_finish)?].concat()),
-            &handshake.client_key,
-            &handshake.client_iv,
+            &self.handshake.client_key,
+            &self.handshake.client_iv,
             1,
-        )?)?;
+        )?;
         let mut expanded = expand(
-            &secret,
-            &[b"expanded secret".as_slice(), &sha256(&transcript)].concat(),
+            &self.secret,
+            &[b"expanded secret".as_slice(), &sha256(&self.transcript)].concat(),
             32,
         )?;
-        let application = traffic(&expanded, "application data key expansion", &transcript)
-            .context("MMTLS application key derivation")?;
-        secret.zeroize();
+        let application = traffic(
+            &expanded,
+            "application data key expansion",
+            &self.transcript,
+        )
+        .context("MMTLS application key derivation")?;
         expanded.zeroize();
         let noop = pack_longlink(6, u32::MAX, &[])?;
-        socket.write_all(
-            &seal(
-                0x17,
-                &noop,
-                &application.client_key,
-                &application.client_iv,
-                2,
-            )
-            .context("MMTLS noop record sealing")?,
-        )?;
-        let r = read_record(&mut socket, deadline, &mut received, receive_budget)?;
-        ensure!(r.header[0] == 0x17, "Expected NOOP reply");
+        let noop_wire = seal(
+            0x17,
+            &noop,
+            &application.client_key,
+            &application.client_iv,
+            2,
+        )
+        .context("MMTLS noop record sealing")?;
+        let access_psk = self
+            .access_psk
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("Missing MMTLS access PSK"))?;
+        let ticket = self
+            .ticket
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("Missing MMTLS shortlink ticket"))?;
+        let established = HandshakeEstablished {
+            server: ServerHello {
+                key_id: self.server.key_id,
+                point: std::mem::take(&mut self.server.point),
+                region: self.server.region,
+                version: self.server.version,
+            },
+            short: ShortSession { access_psk, ticket },
+            application,
+        };
+        Ok((established, client_finish_wire, noop_wire))
+    }
+}
+
+impl HandshakeEstablished {
+    fn verify_noop(self, record: Record, receive_budget: usize) -> Result<SessionCore> {
+        ensure!(record.header[0] == 0x17, "Expected NOOP reply");
         let p = unpack_longlink(
-            &open(&r, &application.server_key, &application.server_iv, 4)
-                .context("MMTLS noop record authentication")?,
+            &open(
+                &record,
+                &self.application.server_key,
+                &self.application.server_iv,
+                4,
+            )
+            .context("MMTLS noop record authentication")?,
         )?;
         ensure!(
             p.command == 0x3b9aca06 && p.sequence == u32::MAX && p.payload.is_empty(),
             "Unexpected NOOP reply"
         );
-        Ok(Self {
-            socket,
-            deadline,
-            received,
+        Ok(SessionCore {
+            #[cfg(not(target_arch = "wasm32"))]
             receive_budget,
-            short: ShortSession {
-                access_psk,
-                ticket: tickets[0].clone(),
-            },
-            certificate_region: server.region,
-            certificate_version: server.version,
-            traffic: application,
+            short: self.short,
+            certificate_region: self.server.region,
+            certificate_version: self.server.version,
+            traffic: self.application,
             outgoing: 3,
             incoming: 5,
             record_pending: Vec::new(),
@@ -464,19 +565,227 @@ impl Session {
             },
         })
     }
+}
+
+/// Blocking MMTLS long-link session backed by `std::net::TcpStream`.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct Session {
+    socket: TcpStream,
+    deadline: Instant,
+    received: usize,
+    pub short: ShortSession,
+    pub certificate_region: u32,
+    pub certificate_version: u32,
+    core: SessionCore,
+}
+
+/// Asynchronous MMTLS long-link session backed by a pluggable [`AsyncByteStream`].
+pub struct AsyncSession {
+    stream: Box<dyn AsyncByteStream>,
+    clock: Arc<dyn Clock>,
+    timeout: Duration,
+    /// Resumption ticket and access PSK issued by this long-link handshake.
+    pub short: ShortSession,
+    /// Server certificate region advertised during the handshake.
+    pub certificate_region: u32,
+    /// Server certificate pin version verified during the handshake.
+    pub certificate_version: u32,
+    core: SessionCore,
+}
+
+fn host_valid(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 253
+        && name.is_ascii()
+        && name.split('.').all(|s| {
+            !s.is_empty()
+                && s.len() <= 63
+                && s.bytes()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+                && !s.starts_with('-')
+                && !s.ends_with('-')
+        })
+        && (name.ends_with(".wechat.com") || name.ends_with(".weixin.qq.com"))
+}
+pub fn validate_host(name: &str) -> Result<()> {
+    ensure!(host_valid(name), "Unsupported native server host");
+    Ok(())
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn read_exact_deadline(
+    socket: &mut TcpStream,
+    mut bytes: &mut [u8],
+    deadline: Instant,
+) -> Result<()> {
+    while !bytes.is_empty() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        ensure!(!remaining.is_zero(), "MMTLS deadline exceeded");
+        socket.set_read_timeout(Some(remaining))?;
+        match socket.read(bytes) {
+            Ok(0) => anyhow::bail!("MMTLS connection closed"),
+            Ok(n) => bytes = &mut bytes[n..],
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn read_record(
+    socket: &mut TcpStream,
+    deadline: Instant,
+    received: &mut usize,
+    budget: usize,
+) -> Result<Record> {
+    let mut h = [0; 5];
+    read_exact_deadline(socket, &mut h, deadline)?;
+    ensure!(
+        (0x15..=0x19).contains(&h[0]) && u16::from_be_bytes([h[1], h[2]]) == VERSION,
+        "Unexpected MMTLS header"
+    );
+    let n = u16::from_be_bytes([h[3], h[4]]) as usize;
+    *received = received
+        .checked_add(n + 5)
+        .ok_or_else(|| anyhow::anyhow!("Receive overflow"))?;
+    ensure!(*received <= budget, "MMTLS receive budget exceeded");
+    let mut body = vec![0; n];
+    read_exact_deadline(socket, &mut body, deadline)?;
+    ensure!(h[0] != 0x15, "Server returned MMTLS alert");
+    Ok(Record { header: h, body })
+}
+
+async fn read_exact_async_deadline(
+    stream: &mut dyn AsyncByteStream,
+    mut bytes: &mut [u8],
+    clock: &dyn Clock,
+    deadline_ms: u64,
+) -> Result<()> {
+    while !bytes.is_empty() {
+        let now = clock.monotonic_ms();
+        ensure!(now < deadline_ms, "MMTLS deadline exceeded");
+        let remaining = Duration::from_millis(deadline_ms - now);
+        match stream.read(bytes, remaining).await? {
+            ReadOutcome::Bytes(0) => anyhow::bail!("Empty transport stream read"),
+            ReadOutcome::Bytes(n) => {
+                ensure!(n <= bytes.len(), "Transport stream read exceeded buffer");
+                bytes = &mut bytes[n..];
+            }
+            ReadOutcome::Eof => {
+                return Err(anyhow::Error::new(TransportError::Disconnected)
+                    .context("MMTLS connection closed"));
+            }
+            ReadOutcome::TimedOut => {
+                return Err(
+                    anyhow::Error::new(TransportError::Timeout).context("MMTLS deadline exceeded")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn read_record_async(
+    stream: &mut dyn AsyncByteStream,
+    clock: &dyn Clock,
+    deadline_ms: u64,
+    received: &mut usize,
+    budget: usize,
+) -> Result<Record> {
+    let mut h = [0; 5];
+    read_exact_async_deadline(stream, &mut h, clock, deadline_ms).await?;
+    ensure!(
+        (0x15..=0x19).contains(&h[0]) && u16::from_be_bytes([h[1], h[2]]) == VERSION,
+        "Unexpected MMTLS header"
+    );
+    let n = u16::from_be_bytes([h[3], h[4]]) as usize;
+    *received = received
+        .checked_add(n + 5)
+        .ok_or_else(|| anyhow::anyhow!("Receive overflow"))?;
+    ensure!(*received <= budget, "MMTLS receive budget exceeded");
+    let mut body = vec![0; n];
+    read_exact_async_deadline(stream, &mut body, clock, deadline_ms).await?;
+    ensure!(h[0] != 0x15, "Server returned MMTLS alert");
+    Ok(Record { header: h, body })
+}
+
+fn validate_connect_params(host: &str, timeout: Duration, receive_budget: usize) -> Result<()> {
+    validate_host(host)?;
+    ensure!(
+        (1024..=crate::MAX_MESSAGE_BYTES).contains(&receive_budget),
+        "Invalid receive budget"
+    );
+    ensure!(
+        !timeout.is_zero() && timeout <= Duration::from_secs(120),
+        "Invalid MMTLS timeout"
+    );
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Session {
+    pub fn connect(host: &str, timeout: Duration, receive_budget: usize) -> Result<Self> {
+        validate_connect_params(host, timeout, receive_budget)?;
+        let deadline = Instant::now() + timeout;
+        // Resolver and connect are constrained by the caller's blocking worker. Socket
+        // read/write deadlines bound every subsequent protocol operation.
+        use std::net::ToSocketAddrs;
+        let addresses = (host, 80).to_socket_addrs()?;
+        let mut socket = None;
+        for addr in addresses {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            if let Ok(s) = TcpStream::connect_timeout(&addr, remaining) {
+                socket = Some(s);
+                break;
+            }
+        }
+        let mut socket = socket.ok_or_else(|| anyhow::anyhow!("Native connection failed"))?;
+        socket.set_write_timeout(Some(timeout))?;
+        let (client, hello_wire) = HandshakeClient::start(crate::wire::unix_time()?)?;
+        socket.write_all(&hello_wire)?;
+        let mut received = 0;
+        let server_record = read_record(&mut socket, deadline, &mut received, receive_budget)?;
+        let mut verify = client.process_server_hello(server_record)?;
+        verify.verify_signature(read_record(
+            &mut socket,
+            deadline,
+            &mut received,
+            receive_budget,
+        )?)?;
+        verify.process_tickets(read_record(
+            &mut socket,
+            deadline,
+            &mut received,
+            receive_budget,
+        )?)?;
+        let (established, client_finish_wire, noop_wire) = verify.finish(read_record(
+            &mut socket,
+            deadline,
+            &mut received,
+            receive_budget,
+        )?)?;
+        socket.write_all(&client_finish_wire)?;
+        socket.write_all(&noop_wire)?;
+        let noop_reply = read_record(&mut socket, deadline, &mut received, receive_budget)?;
+        let core = established.verify_noop(noop_reply, receive_budget)?;
+        let short = core.short.clone();
+        let certificate_region = core.certificate_region;
+        let certificate_version = core.certificate_version;
+        Ok(Self {
+            socket,
+            deadline,
+            received,
+            short,
+            certificate_region,
+            certificate_version,
+            core,
+        })
+    }
     pub fn send_application(&mut self, command: u32, sequence: u32, payload: &[u8]) -> Result<()> {
-        let bytes = seal(
-            0x17,
-            &pack_longlink(command, sequence, payload)?,
-            &self.traffic.client_key,
-            &self.traffic.client_iv,
-            self.outgoing,
-        )?;
+        let bytes = self.core.seal_application(command, sequence, payload)?;
         self.socket.write_all(&bytes)?;
-        self.outgoing = self
-            .outgoing
-            .checked_add(1)
-            .ok_or_else(|| anyhow::anyhow!("Sequence exhausted"))?;
         Ok(())
     }
     pub fn receive_application(&mut self) -> Result<Longlink> {
@@ -484,20 +793,9 @@ impl Session {
             &mut self.socket,
             self.deadline,
             &mut self.received,
-            self.receive_budget,
+            self.core.receive_budget,
         )?;
-        ensure!(r.header[0] == 0x17, "Expected application record");
-        let plain = open(
-            &r,
-            &self.traffic.server_key,
-            &self.traffic.server_iv,
-            self.incoming,
-        )?;
-        self.incoming = self
-            .incoming
-            .checked_add(1)
-            .ok_or_else(|| anyhow::anyhow!("Sequence exhausted"))?;
-        unpack_longlink(&plain)
+        self.core.open_application_record(&r)
     }
 
     /// A bounded idle wait on an established connection. Partial encrypted
@@ -510,36 +808,8 @@ impl Session {
         );
         let deadline = Instant::now() + timeout;
         loop {
-            if let Some(packet) = self.application_pending.next_packet()? {
+            if let Some(packet) = self.core.drain_pending_packet()? {
                 return Ok(Some(packet));
-            }
-            if self.record_pending.len() >= 5 {
-                let h: [u8; 5] = self.record_pending[..5].try_into()?;
-                ensure!(
-                    (0x15..=0x19).contains(&h[0]) && u16::from_be_bytes([h[1], h[2]]) == VERSION,
-                    "Unexpected MMTLS header"
-                );
-                let n = u16::from_be_bytes([h[3], h[4]]) as usize;
-                if self.record_pending.len() >= n + 5 {
-                    ensure!(h[0] == 0x17, "Unexpected persistent MMTLS record");
-                    let record = Record {
-                        header: h,
-                        body: self.record_pending[5..n + 5].to_vec(),
-                    };
-                    let plain = open(
-                        &record,
-                        &self.traffic.server_key,
-                        &self.traffic.server_iv,
-                        self.incoming,
-                    )?;
-                    self.incoming = self
-                        .incoming
-                        .checked_add(1)
-                        .ok_or_else(|| anyhow::anyhow!("Sequence exhausted"))?;
-                    self.record_pending.drain(..n + 5);
-                    self.application_pending.feed(&plain)?;
-                    continue;
-                }
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -549,14 +819,7 @@ impl Session {
             let mut bytes = [0u8; 65540];
             match self.socket.read(&mut bytes) {
                 Ok(0) => anyhow::bail!("MMTLS connection closed"),
-                Ok(n) => {
-                    // At most one incomplete record precedes a socket read.
-                    ensure!(
-                        self.record_pending.len() + n <= 131080,
-                        "MMTLS pending record limit"
-                    );
-                    self.record_pending.extend_from_slice(&bytes[..n]);
-                }
+                Ok(n) => self.core.push_pending_bytes(&bytes[..n])?,
                 Err(e)
                     if matches!(
                         e.kind(),
@@ -569,6 +832,168 @@ impl Session {
                 Err(e) => return Err(e.into()),
             }
         }
+    }
+}
+
+impl AsyncSession {
+    /// Open and authenticate an MMTLS long-link session over `streams`,
+    /// enforcing host allowlists, pinned ECDSA verification, Finished MACs,
+    /// and the handshake receive budget.
+    pub async fn connect(
+        host: &str,
+        timeout: Duration,
+        receive_budget: usize,
+        streams: &dyn StreamTransport,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self> {
+        validate_connect_params(host, timeout, receive_budget)?;
+        let timeout_ms = u64::try_from(timeout.as_millis())
+            .unwrap_or(u64::MAX)
+            .max(1);
+        let deadline_ms = clock.monotonic_ms().saturating_add(timeout_ms);
+        let remaining_for = |clock: &dyn Clock| -> Result<Duration> {
+            let now = clock.monotonic_ms();
+            ensure!(now < deadline_ms, "MMTLS deadline exceeded");
+            Ok(Duration::from_millis(deadline_ms - now))
+        };
+        let mut stream = streams
+            .connect(host, 80, remaining_for(&*clock)?)
+            .await
+            .context("Native connection failed")?;
+        let core_result: Result<SessionCore> = async {
+            let (client, hello_wire) = HandshakeClient::start(clock.unix_time_secs()?)?;
+            stream
+                .write_all(&hello_wire, remaining_for(&*clock)?)
+                .await?;
+            let mut received = 0usize;
+            let server_record = read_record_async(
+                &mut *stream,
+                &*clock,
+                deadline_ms,
+                &mut received,
+                receive_budget,
+            )
+            .await?;
+            let mut verify = client.process_server_hello(server_record)?;
+            verify.verify_signature(
+                read_record_async(
+                    &mut *stream,
+                    &*clock,
+                    deadline_ms,
+                    &mut received,
+                    receive_budget,
+                )
+                .await?,
+            )?;
+            verify.process_tickets(
+                read_record_async(
+                    &mut *stream,
+                    &*clock,
+                    deadline_ms,
+                    &mut received,
+                    receive_budget,
+                )
+                .await?,
+            )?;
+            let (established, client_finish_wire, noop_wire) = verify.finish(
+                read_record_async(
+                    &mut *stream,
+                    &*clock,
+                    deadline_ms,
+                    &mut received,
+                    receive_budget,
+                )
+                .await?,
+            )?;
+            stream
+                .write_all(&client_finish_wire, remaining_for(&*clock)?)
+                .await?;
+            stream
+                .write_all(&noop_wire, remaining_for(&*clock)?)
+                .await?;
+            let noop_reply = read_record_async(
+                &mut *stream,
+                &*clock,
+                deadline_ms,
+                &mut received,
+                receive_budget,
+            )
+            .await?;
+            established.verify_noop(noop_reply, receive_budget)
+        }
+        .await;
+        let core = match core_result {
+            Ok(core) => core,
+            Err(error) => {
+                let _ = stream.close().await;
+                return Err(error);
+            }
+        };
+        let short = core.short.clone();
+        let certificate_region = core.certificate_region;
+        let certificate_version = core.certificate_version;
+        Ok(Self {
+            stream,
+            clock,
+            timeout,
+            short,
+            certificate_region,
+            certificate_version,
+            core,
+        })
+    }
+
+    /// Seal and send one encrypted MMTLS application record containing a
+    /// long-link frame.
+    pub async fn send_application(
+        &mut self,
+        command: u32,
+        sequence: u32,
+        payload: &[u8],
+    ) -> Result<()> {
+        let bytes = self.core.seal_application(command, sequence, payload)?;
+        self.stream.write_all(&bytes, self.timeout).await
+    }
+
+    /// Bounded async wait for the next decrypted long-link packet. Partial
+    /// encrypted records and application packets survive a timeout.
+    pub async fn poll_application(&mut self, timeout: Duration) -> Result<Option<Longlink>> {
+        ensure!(
+            !timeout.is_zero() && timeout <= Duration::from_secs(120),
+            "Invalid longlink poll timeout"
+        );
+        let timeout_ms = u64::try_from(timeout.as_millis())
+            .unwrap_or(u64::MAX)
+            .max(1);
+        let deadline_ms = self.clock.monotonic_ms().saturating_add(timeout_ms);
+        let mut bytes = vec![0u8; 65540];
+        loop {
+            if let Some(packet) = self.core.drain_pending_packet()? {
+                return Ok(Some(packet));
+            }
+            let now = self.clock.monotonic_ms();
+            if now >= deadline_ms {
+                return Ok(None);
+            }
+            let remaining = Duration::from_millis(deadline_ms - now);
+            match self.stream.read(&mut bytes, remaining).await? {
+                ReadOutcome::Bytes(0) => anyhow::bail!("Empty transport stream read"),
+                ReadOutcome::Bytes(n) => {
+                    ensure!(n <= bytes.len(), "Transport stream read exceeded buffer");
+                    self.core.push_pending_bytes(&bytes[..n])?;
+                }
+                ReadOutcome::TimedOut => return Ok(None),
+                ReadOutcome::Eof => {
+                    return Err(anyhow::Error::new(TransportError::Disconnected)
+                        .context("MMTLS connection closed"));
+                }
+            }
+        }
+    }
+
+    /// Best-effort graceful close of the underlying stream.
+    pub async fn close(mut self) -> Result<()> {
+        self.stream.close().await
     }
 }
 struct ServerHello {
@@ -753,6 +1178,8 @@ pub(crate) fn validate_short_route(path: &str) -> Result<()> {
     }
 }
 
+/// Blocking MMTLS short-link exchange using `reqwest::blocking`.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn short_exchange(
     session: &ShortSession,
     host: &str,
@@ -760,7 +1187,8 @@ pub fn short_exchange(
     payload: &[u8],
     timeout: Duration,
 ) -> Result<Vec<u8>> {
-    let (hello, extensions, wire) = prepare_short_exchange(session, host, path, payload)?;
+    let (hello, extensions, wire) =
+        prepare_short_exchange_at(session, host, path, payload, crate::wire::unix_time()?)?;
     let client = reqwest::blocking::Client::builder()
         .timeout(timeout)
         .connect_timeout(timeout.min(Duration::from_secs(10)))
@@ -796,11 +1224,59 @@ pub fn short_exchange(
     );
     decode_short_reply(&bytes, session, &hello, &extensions)
 }
-fn prepare_short_exchange(
+
+/// Asynchronous MMTLS short-link exchange using a pluggable [`HttpTransport`]
+/// and [`Clock`].
+pub async fn short_exchange_async(
     session: &ShortSession,
     host: &str,
     path: &str,
     payload: &[u8],
+    timeout: Duration,
+    http: &dyn HttpTransport,
+    clock: &dyn Clock,
+) -> Result<Vec<u8>> {
+    let (hello, extensions, wire) =
+        prepare_short_exchange_at(session, host, path, payload, clock.unix_time_secs()?)?;
+    let url = url::Url::parse(&format!(
+        "http://{host}/mmtls/{}",
+        hex::encode(random::<4>()?)
+    ))?;
+    let response = http
+        .send(HttpRequest {
+            method: HttpMethod::Post,
+            url,
+            headers: vec![
+                ("Content-Type".into(), "application/octet-stream".into()),
+                ("User-Agent".into(), "MicroMessenger Client".into()),
+                ("Upgrade".into(), "mmtls".into()),
+                ("Accept".into(), "*/*".into()),
+                ("Cache-Control".into(), "no-cache".into()),
+                ("Connection".into(), "close".into()),
+            ],
+            body: wire,
+            timeout,
+            max_response_bytes: crate::MAX_MESSAGE_BYTES,
+        })
+        .await?;
+    ensure!(
+        response.status == 200,
+        "Native shortlink HTTP status {}",
+        response.status
+    );
+    ensure!(
+        response.body.len() <= crate::MAX_MESSAGE_BYTES,
+        "Shortlink receive budget exceeded"
+    );
+    decode_short_reply(&response.body, session, &hello, &extensions)
+}
+
+fn prepare_short_exchange_at(
+    session: &ShortSession,
+    host: &str,
+    path: &str,
+    payload: &[u8],
+    now_secs: u32,
 ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
     validate_host(host)?;
     validate_short_route(path)?;
@@ -808,7 +1284,7 @@ fn prepare_short_exchange(
         payload.len() <= crate::MAX_MESSAGE_BYTES,
         "Payload too large"
     );
-    let (hello, extensions) = early_hello(&session.ticket)?;
+    let (hello, extensions) = early_hello_at(&session.ticket, now_secs)?;
     let keys = expand(
         &session.access_psk,
         &[b"early data key expansion".as_slice(), &sha256(&hello)].concat(),
@@ -845,6 +1321,7 @@ fn prepare_short_exchange(
 }
 
 /// The pre-answer poll can stop waiting without applying a late reply.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) async fn short_exchange_interruptible(
     session: &ShortSession,
     host: &str,
@@ -852,7 +1329,8 @@ pub(crate) async fn short_exchange_interruptible(
     payload: &[u8],
     timeout: Duration,
 ) -> Result<Vec<u8>> {
-    let (hello, extensions, wire) = prepare_short_exchange(session, host, path, payload)?;
+    let (hello, extensions, wire) =
+        prepare_short_exchange_at(session, host, path, payload, crate::wire::unix_time()?)?;
     let client = reqwest::Client::builder()
         .timeout(timeout)
         .connect_timeout(timeout.min(Duration::from_secs(10)))
@@ -888,12 +1366,11 @@ pub(crate) async fn short_exchange_interruptible(
     }
     decode_short_reply(&bytes, session, &hello, &extensions)
 }
-fn early_hello(ticket: &Ticket) -> Result<(Vec<u8>, Vec<u8>)> {
+fn early_hello_at(ticket: &Ticket, now: u32) -> Result<(Vec<u8>, Vec<u8>)> {
     ensure!(
         ticket.nonce.len() == 12 && !ticket.opaque.is_empty(),
         "Invalid short ticket"
     );
-    let now = crate::wire::unix_time()?;
     let encoded = [
         vec![ticket.kind],
         ticket.lifetime.to_be_bytes().to_vec(),
@@ -1009,7 +1486,7 @@ fn decode_short_reply(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     #[test]
     fn short_link_tickets_are_reused_per_host_within_their_lifetime() {
         use super::*;
@@ -1023,31 +1500,25 @@ mod tests {
                 opaque: vec![1],
             },
         };
-        let start = Instant::now();
+        let start = 10_000u64;
         let cache = ShortLinkCache::default();
-        assert!(cache.get_at("long.example", start).is_none());
-        cache.put_at("long.example", session(600), start);
+        assert!(cache.get_at_ms("long.example", start).is_none());
+        cache.put_at_ms("long.example", session(600), start);
         let reused = cache
-            .get_at("long.example", start + Duration::from_secs(539))
+            .get_at_ms("long.example", start + 539_000)
             .expect("reused inside the lifetime margin");
         assert_eq!(reused.access_psk, vec![0x42; 32]);
         // Another host, the expiry margin and invalidation all force a handshake.
-        assert!(cache.get_at("other.example", start).is_none());
-        assert!(cache
-            .get_at("long.example", start + Duration::from_secs(540))
-            .is_none());
+        assert!(cache.get_at_ms("other.example", start).is_none());
+        assert!(cache.get_at_ms("long.example", start + 540_000).is_none());
         cache.invalidate();
-        assert!(cache.get_at("long.example", start).is_none());
+        assert!(cache.get_at_ms("long.example", start).is_none());
         // Reuse is capped at an hour, and a ticket without lifetime is not reused.
-        cache.put_at("long.example", session(86_400), start);
-        assert!(cache
-            .get_at("long.example", start + Duration::from_secs(3599))
-            .is_some());
-        assert!(cache
-            .get_at("long.example", start + Duration::from_secs(3600))
-            .is_none());
-        cache.put_at("long.example", session(0), start);
-        assert!(cache.get_at("long.example", start).is_none());
+        cache.put_at_ms("long.example", session(86_400), start);
+        assert!(cache.get_at_ms("long.example", start + 3_599_000).is_some());
+        assert!(cache.get_at_ms("long.example", start + 3_600_000).is_none());
+        cache.put_at_ms("long.example", session(0), start);
+        assert!(cache.get_at_ms("long.example", start).is_none());
     }
     #[test]
     fn short_requests_split_large_uploads_and_authenticate_the_close_sequence() {
@@ -1063,11 +1534,12 @@ mod tests {
         };
         for size in [0, 60_000, 98_400, 200_000] {
             let payload = vec![0xa5; size];
-            let (hello, extensions, wire) = prepare_short_exchange(
+            let (hello, extensions, wire) = prepare_short_exchange_at(
                 &session,
                 "short.weixin.qq.com",
                 "/cgi-bin/micromsg-bin/mmemojiupload",
                 &payload,
+                1_700_000_000,
             )
             .unwrap();
             let keys = expand(
@@ -1229,6 +1701,7 @@ mod tests {
         }
         assert_eq!(decoder.next_packet().unwrap().unwrap().payload, payload);
     }
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn encrypted_idle_timeout_keeps_partial_record_and_packet_bytes() {
         use std::{net::TcpListener, sync::mpsc, thread};
@@ -1253,40 +1726,46 @@ mod tests {
             peer.write_all(&r2).unwrap();
             peer.write_all(&corrupt).unwrap();
         });
+        let short = ShortSession {
+            access_psk: vec![],
+            ticket: Ticket {
+                kind: 1,
+                lifetime: 0,
+                reserved: 0,
+                nonce: vec![],
+                opaque: vec![],
+            },
+        };
         let mut session = Session {
             socket,
             deadline: Instant::now(),
             received: 0,
-            receive_budget: 1024,
-            short: ShortSession {
-                access_psk: vec![],
-                ticket: Ticket {
-                    kind: 1,
-                    lifetime: 0,
-                    reserved: 0,
-                    nonce: vec![],
-                    opaque: vec![],
-                },
-            },
+            short: short.clone(),
             certificate_region: 0,
             certificate_version: 0,
-            traffic: Traffic {
-                client_key: key.clone(),
-                server_key: key,
-                client_iv: iv.clone(),
-                server_iv: iv,
+            core: SessionCore {
+                receive_budget: 1024,
+                short,
+                certificate_region: 0,
+                certificate_version: 0,
+                traffic: Traffic {
+                    client_key: key.clone(),
+                    server_key: key,
+                    client_iv: iv.clone(),
+                    server_iv: iv,
+                },
+                outgoing: 3,
+                incoming: 5,
+                record_pending: Vec::new(),
+                application_pending: LonglinkDecoder::default(),
             },
-            outgoing: 3,
-            incoming: 5,
-            record_pending: Vec::new(),
-            application_pending: LonglinkDecoder::default(),
         };
         observed.recv().unwrap();
         assert!(session
             .poll_application(Duration::from_millis(10))
             .unwrap()
             .is_none());
-        assert_eq!(session.record_pending.len(), 3);
+        assert_eq!(session.core.record_pending.len(), 3);
         resume.send(()).unwrap();
         assert_eq!(
             session
@@ -1305,7 +1784,7 @@ mod tests {
             u32::MAX
         );
         assert!(session.poll_application(Duration::from_secs(1)).is_err());
-        assert_eq!(session.incoming, 7);
+        assert_eq!(session.core.incoming, 7);
         writer.join().unwrap();
     }
     #[test]
@@ -1346,5 +1825,390 @@ mod tests {
         let mut v = pack_longlink(6, 123, &[1, 2]).unwrap();
         v[3] ^= 1;
         assert!(unpack_longlink(&v).is_err());
+    }
+
+    /// Decrypt one client MMTLS short-link request and build an authenticated
+    /// synthetic MMTLS short-link reply for `reply_payload`.
+    pub(crate) fn handle_mock_short_exchange(
+        session: &ShortSession,
+        wire: &[u8],
+        reply_payload: &[u8],
+    ) -> Result<(String, String, Vec<u8>, Vec<u8>)> {
+        let mut c = Cursor::new(wire);
+        let mut records = Vec::new();
+        while c.offset < wire.len() {
+            let h: [u8; 5] = c.take(5)?.try_into()?;
+            let n = u16::from_be_bytes([h[3], h[4]]) as usize;
+            records.push(Record {
+                header: h,
+                body: c.take(n)?.to_vec(),
+            });
+        }
+        ensure!(records.len() >= 4, "Shortlink request too short");
+        let hello = &records[0].body;
+        let early_keys = expand(
+            &session.access_psk,
+            &[b"early data key expansion".as_slice(), &sha256(hello)].concat(),
+            28,
+        )?;
+        let extensions = open(&records[1], &early_keys[..16], &early_keys[16..], 1)?;
+        let mut route_bytes = Vec::new();
+        for (i, rec) in records[2..records.len() - 1].iter().enumerate() {
+            route_bytes.extend(open(
+                rec,
+                &early_keys[..16],
+                &early_keys[16..],
+                i as u64 + 2,
+            )?);
+        }
+        let close = open(
+            records.last().unwrap(),
+            &early_keys[..16],
+            &early_keys[16..],
+            records.len() as u64 - 1,
+        )?;
+        ensure!(close == section(&[0, 1, 1]), "Unexpected request close");
+        let mut top = Cursor::new(&route_bytes);
+        let mut route = Cursor::new(top.sized(4)?);
+        top.end()?;
+        let path = std::str::from_utf8(route.sized(2)?)?.to_string();
+        let host = std::str::from_utf8(route.sized(2)?)?.to_string();
+        let payload = route.sized(4)?.to_vec();
+        route.end()?;
+
+        let server_hello = section(
+            &[
+                vec![2],
+                VERSION.to_le_bytes().to_vec(),
+                0xa8u16.to_be_bytes().to_vec(),
+                vec![0x55; 32],
+                section(&[0]),
+            ]
+            .concat(),
+        );
+        let transcript = [
+            hello.as_slice(),
+            extensions.as_slice(),
+            server_hello.as_slice(),
+        ]
+        .concat();
+        let reply_keys = expand(
+            &session.access_psk,
+            &[b"handshake key expansion".as_slice(), &sha256(&transcript)].concat(),
+            28,
+        )?;
+        let finish = hmac(
+            &expand(&session.access_psk, b"server finished", 32)?,
+            &sha256(&transcript),
+        )?;
+        let finish_body = section(&[vec![0x14], sized(&finish)?].concat());
+        let mut out = Vec::new();
+        out.extend(frame(0x16, &server_hello)?);
+        out.extend(seal(
+            0x16,
+            &finish_body,
+            &reply_keys[..16],
+            &reply_keys[16..],
+            1,
+        )?);
+        let mut seq = 2u64;
+        if reply_payload.is_empty() {
+            out.extend(seal(0x17, &[], &reply_keys[..16], &reply_keys[16..], seq)?);
+            seq += 1;
+        } else {
+            for chunk in reply_payload.chunks(MAX_RECORD_PLAINTEXT) {
+                out.extend(seal(
+                    0x17,
+                    chunk,
+                    &reply_keys[..16],
+                    &reply_keys[16..],
+                    seq,
+                )?);
+                seq += 1;
+            }
+        }
+        out.extend(seal(
+            0x15,
+            &section(&[0, 1, 1]),
+            &reply_keys[..16],
+            &reply_keys[16..],
+            seq,
+        )?);
+        Ok((path, host, payload, out))
+    }
+
+    pub(crate) fn async_session_for_test(
+        stream: Box<dyn AsyncByteStream>,
+        clock: Arc<dyn Clock>,
+        key: Vec<u8>,
+        iv: Vec<u8>,
+    ) -> AsyncSession {
+        let short = ShortSession {
+            access_psk: vec![0x42; 32],
+            ticket: Ticket {
+                kind: 1,
+                lifetime: 3600,
+                reserved: 0,
+                nonce: vec![0x24; 12],
+                opaque: vec![0x17; 32],
+            },
+        };
+        AsyncSession {
+            stream,
+            clock,
+            timeout: Duration::from_secs(5),
+            short: short.clone(),
+            certificate_region: 1,
+            certificate_version: 5,
+            core: SessionCore {
+                #[cfg(not(target_arch = "wasm32"))]
+                receive_budget: 65536,
+                short,
+                certificate_region: 1,
+                certificate_version: 5,
+                traffic: Traffic {
+                    client_key: key.clone(),
+                    server_key: key,
+                    client_iv: iv.clone(),
+                    server_iv: iv,
+                },
+                outgoing: 3,
+                incoming: 5,
+                record_pending: Vec::new(),
+                application_pending: LonglinkDecoder::default(),
+            },
+        }
+    }
+
+    struct ScriptedClock(std::sync::atomic::AtomicU64);
+    impl Clock for ScriptedClock {
+        fn monotonic_ms(&self) -> u64 {
+            self.0.load(std::sync::atomic::Ordering::Acquire)
+        }
+        fn unix_time_ms(&self) -> Result<u64> {
+            Ok(1_700_000_000_000 + self.monotonic_ms())
+        }
+    }
+
+    enum StreamStep {
+        Bytes(Vec<u8>),
+        TimedOut,
+    }
+
+    struct ScriptedStream {
+        steps: std::collections::VecDeque<StreamStep>,
+        written: Arc<std::sync::Mutex<Vec<u8>>>,
+        closed: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl AsyncByteStream for ScriptedStream {
+        fn read<'a>(
+            &'a mut self,
+            buf: &'a mut [u8],
+            _timeout: Duration,
+        ) -> crate::transport::TransportFuture<'a, Result<ReadOutcome>> {
+            let outcome = match self.steps.pop_front() {
+                Some(StreamStep::Bytes(mut chunk)) => {
+                    let take = chunk.len().min(buf.len());
+                    buf[..take].copy_from_slice(&chunk[..take]);
+                    if take < chunk.len() {
+                        chunk.drain(..take);
+                        self.steps.push_front(StreamStep::Bytes(chunk));
+                    }
+                    ReadOutcome::Bytes(take)
+                }
+                Some(StreamStep::TimedOut) => ReadOutcome::TimedOut,
+                None => ReadOutcome::Eof,
+            };
+            Box::pin(async move { Ok(outcome) })
+        }
+
+        fn write_all<'a>(
+            &'a mut self,
+            buf: &'a [u8],
+            _timeout: Duration,
+        ) -> crate::transport::TransportFuture<'a, Result<()>> {
+            self.written.lock().unwrap().extend_from_slice(buf);
+            Box::pin(async { Ok(()) })
+        }
+
+        fn close<'a>(&'a mut self) -> crate::transport::TransportFuture<'a, Result<()>> {
+            self.closed
+                .store(true, std::sync::atomic::Ordering::Release);
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn async_session_idle_timeout_keeps_partial_record_and_packet_bytes() {
+        let first = pack_longlink(24, 0, &6u32.to_be_bytes()).unwrap();
+        let second = pack_longlink(1000000006, u32::MAX, &[]).unwrap();
+        let key = vec![1; 16];
+        let iv = vec![2; 12];
+        let r1 = seal(0x17, &first[..10], &key, &iv, 5).unwrap();
+        let r2 = seal(0x17, &[first[10..].to_vec(), second].concat(), &key, &iv, 6).unwrap();
+        let mut corrupt = seal(0x17, &first, &key, &iv, 7).unwrap();
+        *corrupt.last_mut().unwrap() ^= 1;
+
+        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stream = ScriptedStream {
+            steps: [
+                StreamStep::Bytes(r1[..3].to_vec()),
+                StreamStep::TimedOut,
+                StreamStep::Bytes(r1[3..].to_vec()),
+                StreamStep::Bytes(r2),
+                StreamStep::Bytes(corrupt),
+            ]
+            .into_iter()
+            .collect(),
+            written: written.clone(),
+            closed: closed.clone(),
+        };
+        let clock = Arc::new(ScriptedClock(std::sync::atomic::AtomicU64::new(100)));
+        let mut session = async_session_for_test(Box::new(stream), clock, key, iv);
+
+        session.send_application(6, u32::MAX, &[]).await.unwrap();
+        assert!(!written.lock().unwrap().is_empty());
+        assert!(session
+            .poll_application(Duration::from_millis(50))
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(session.core.record_pending.len(), 3);
+        assert_eq!(
+            session
+                .poll_application(Duration::from_secs(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .command,
+            24
+        );
+        assert_eq!(
+            session
+                .poll_application(Duration::from_secs(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .sequence,
+            u32::MAX
+        );
+        assert!(session
+            .poll_application(Duration::from_secs(1))
+            .await
+            .is_err());
+        assert_eq!(session.core.incoming, 7);
+        session.close().await.unwrap();
+        assert!(closed.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn short_exchange_async_roundtrips_over_http_over_stream() {
+        let session = ShortSession {
+            access_psk: vec![0x42; 32],
+            ticket: Ticket {
+                kind: 1,
+                lifetime: 3600,
+                reserved: 0,
+                nonce: vec![0x24; 12],
+                opaque: vec![0x17; 32],
+            },
+        };
+        let session_for_server = session.clone();
+        struct ShortLinkServerStream {
+            session: ShortSession,
+            written: Vec<u8>,
+            reply_bytes: Option<Vec<u8>>,
+            offset: usize,
+        }
+        impl AsyncByteStream for ShortLinkServerStream {
+            fn write_all<'a>(
+                &'a mut self,
+                buf: &'a [u8],
+                _timeout: Duration,
+            ) -> crate::transport::TransportFuture<'a, Result<()>> {
+                self.written.extend_from_slice(buf);
+                Box::pin(async { Ok(()) })
+            }
+            fn read<'a>(
+                &'a mut self,
+                buf: &'a mut [u8],
+                _timeout: Duration,
+            ) -> crate::transport::TransportFuture<'a, Result<ReadOutcome>> {
+                if self.reply_bytes.is_none() {
+                    let sep = self
+                        .written
+                        .windows(4)
+                        .position(|w| w == b"\r\n\r\n")
+                        .expect("http header separator");
+                    let wire = &self.written[sep + 4..];
+                    let (path, host, payload, reply_wire) =
+                        handle_mock_short_exchange(&self.session, wire, b"synthetic-short-reply")
+                            .expect("valid shortlink request");
+                    assert_eq!(path, "/cgi-bin/micromsg-bin/heartbeat");
+                    assert_eq!(host, "short.weixin.qq.com");
+                    assert_eq!(payload, b"synthetic-short-req");
+                    let mut http = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        reply_wire.len()
+                    )
+                    .into_bytes();
+                    http.extend_from_slice(&reply_wire);
+                    self.reply_bytes = Some(http);
+                }
+                let data = self.reply_bytes.as_ref().unwrap();
+                let outcome = if self.offset >= data.len() {
+                    ReadOutcome::Eof
+                } else {
+                    let take = (data.len() - self.offset).min(buf.len());
+                    buf[..take].copy_from_slice(&data[self.offset..self.offset + take]);
+                    self.offset += take;
+                    ReadOutcome::Bytes(take)
+                };
+                Box::pin(async move { Ok(outcome) })
+            }
+            fn close<'a>(&'a mut self) -> crate::transport::TransportFuture<'a, Result<()>> {
+                Box::pin(async { Ok(()) })
+            }
+        }
+        struct ShortLinkServerTransport(ShortSession);
+        impl StreamTransport for ShortLinkServerTransport {
+            fn connect<'a>(
+                &'a self,
+                host: &'a str,
+                port: u16,
+                _timeout: Duration,
+            ) -> crate::transport::TransportFuture<'a, Result<Box<dyn AsyncByteStream>>>
+            {
+                assert_eq!(host, "short.weixin.qq.com");
+                assert_eq!(port, 80);
+                let stream: Box<dyn AsyncByteStream> = Box::new(ShortLinkServerStream {
+                    session: self.0.clone(),
+                    written: Vec::new(),
+                    reply_bytes: None,
+                    offset: 0,
+                });
+                Box::pin(async move { Ok(stream) })
+            }
+        }
+
+        let clock: Arc<dyn Clock> = Arc::new(ScriptedClock(std::sync::atomic::AtomicU64::new(500)));
+        let transport = crate::transport::ProtocolTransport::from_streams(
+            Arc::new(ShortLinkServerTransport(session_for_server)),
+            clock.clone(),
+        );
+        let reply = short_exchange_async(
+            &session,
+            "short.weixin.qq.com",
+            "/cgi-bin/micromsg-bin/heartbeat",
+            b"synthetic-short-req",
+            Duration::from_secs(5),
+            &*transport.http,
+            &*clock,
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply, b"synthetic-short-reply");
     }
 }

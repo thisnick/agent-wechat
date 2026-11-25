@@ -1,7 +1,9 @@
 //! Linux 4.1.13.26 contact stream (CGI8674). This stream has its own
 //! `rs_config`/`sync_11` cursor; the message SyncKey is only request context.
 use crate::errors::{Service, ServiceRejected};
-use crate::{protobuf as p, wire, AccountState, NativeClient};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::NativeClient;
+use crate::{protobuf as p, wire, AccountState};
 use anyhow::{bail, ensure, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -106,6 +108,7 @@ pub fn decode(input: &[u8]) -> Result<ContactSyncBatch> {
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl NativeClient {
     #[doc(hidden)]
     pub(crate) fn contact_sync_snapshot(

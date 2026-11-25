@@ -195,9 +195,12 @@ jobs:
       - name: Exercise generated audio through an isolated sound server
         if: matrix.suite == 'test' && runner.arch == 'X64'
         run: bash crates/wechat-audio/tests/pulse-loopback.sh target/debug/examples/isolated_loopback
-      - name: Check portable call media for WebAssembly
+      - name: Check portable crates for WebAssembly
         if: matrix.suite == 'test' && runner.arch == 'X64'
-        run: cargo check --locked -p wechat-calls --no-default-features --target wasm32-unknown-unknown
+        run: |
+          cargo check --locked -p wechat-calls --no-default-features --target wasm32-unknown-unknown
+          cargo clippy --locked -p wechat-media --target wasm32-unknown-unknown -- -D warnings
+          RUSTFLAGS='--cfg getrandom_backend="custom"' cargo clippy --locked -p wechat-protocol --no-default-features --features pure-rust-crypto --target wasm32-unknown-unknown -- -D warnings
       - if: matrix.suite == 'test'
         uses: actions/setup-node@v7
         with:

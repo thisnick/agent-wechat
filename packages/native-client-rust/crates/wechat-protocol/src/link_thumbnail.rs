@@ -1,18 +1,20 @@
 //! Fetch only a card's advertised thumbnail, without opening its target page.
 use anyhow::{ensure, Result};
+use std::net::IpAddr;
+#[cfg(not(target_arch = "wasm32"))]
 use std::{
     io::Read,
-    net::{IpAddr, SocketAddr, ToSocketAddrs},
+    net::{SocketAddr, ToSocketAddrs},
     time::Duration,
 };
 pub const MAX_LINK_THUMBNAIL_BYTES: usize = 8 * 1024 * 1024;
 
-pub fn validate_shared_link_url(value: &str) -> Result<reqwest::Url> {
+pub fn validate_shared_link_url(value: &str) -> Result<url::Url> {
     ensure!(
         !value.is_empty() && value.len() <= 8192 && !value.chars().any(|c| c.is_control()),
         "link_source_not_allowed"
     );
-    let url = reqwest::Url::parse(value).map_err(|_| anyhow::anyhow!("link_source_not_allowed"))?;
+    let url = url::Url::parse(value).map_err(|_| anyhow::anyhow!("link_source_not_allowed"))?;
     ensure!(
         matches!(url.scheme(), "http" | "https")
             && url.host_str().is_some()
@@ -22,7 +24,7 @@ pub fn validate_shared_link_url(value: &str) -> Result<reqwest::Url> {
     );
     Ok(url)
 }
-pub fn validate_link_thumbnail_url(value: &str) -> Result<reqwest::Url> {
+pub fn validate_link_thumbnail_url(value: &str) -> Result<url::Url> {
     let url = validate_shared_link_url(value)?;
     ensure!(
         url.fragment().is_none() && url.port().is_none(),
@@ -37,6 +39,8 @@ pub fn validate_link_thumbnail_url(value: &str) -> Result<reqwest::Url> {
     }
     Ok(url)
 }
+/// Download one bounded link-card thumbnail from a validated public host without redirects.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn fetch_link_thumbnail(
     value: &str,
     progress: impl FnMut(u64, Option<u64>) -> Result<()>,
@@ -51,8 +55,9 @@ pub fn fetch_link_thumbnail(
 }
 /// Resolve a URL's host once and require every address to be public, so a fetch can pin its
 /// connection to the checked address. Returns an IPv4 address when one exists.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn public_address(
-    url: &reqwest::Url,
+    url: &url::Url,
     dns_failed: &'static str,
     not_public: &'static str,
 ) -> Result<SocketAddr> {
@@ -80,8 +85,9 @@ pub(crate) fn public_address(
         .or_else(|| addresses.first())
         .unwrap())
 }
+#[cfg(not(target_arch = "wasm32"))]
 fn fetch_at(
-    url: reqwest::Url,
+    url: url::Url,
     address: SocketAddr,
     mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
 ) -> Result<Vec<u8>> {
@@ -156,6 +162,7 @@ mod tests {
             assert!(validate_link_thumbnail_url(value).is_err(), "{value}");
         }
     }
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn http_thumbnail_checks_status_encoding_bounds_and_image_bytes_without_redirects() {
         use std::{io::Write, net::TcpListener};
@@ -222,7 +229,7 @@ mod tests {
             // Only this private transport helper accepts a local test socket;
             // the public entry point validates and pins public DNS answers.
             let result = fetch_at(
-                reqwest::Url::parse(&format!(
+                url::Url::parse(&format!(
                     "http://preview.example.invalid:{}/preview",
                     address.port()
                 ))

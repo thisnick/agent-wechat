@@ -101,6 +101,7 @@ pub mod protobuf;
 pub mod push;
 pub mod quote_send;
 pub mod silk;
+pub mod transport;
 pub mod wire;
 pub use client::*;
 

@@ -5,8 +5,8 @@
 //! Callers must persist admission before calling; errors never authorize retry.
 use super::*;
 
-const CGI: u16 = 594;
-const PATH: &str = "/cgi-bin/micromsg-bin/revokemsg";
+pub(crate) const CGI: u16 = 594;
+pub(crate) const PATH: &str = "/cgi-bin/micromsg-bin/revokemsg";
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -64,7 +64,7 @@ impl MessageRecall {
     }
 }
 
-fn request(state: &AccountState, recall: &MessageRecall) -> Result<Vec<u8>> {
+pub(crate) fn request(state: &AccountState, recall: &MessageRecall) -> Result<Vec<u8>> {
     state.validate()?;
     recall.validate()?;
     ensure!(
@@ -86,7 +86,7 @@ fn request(state: &AccountState, recall: &MessageRecall) -> Result<Vec<u8>> {
     ])
 }
 
-fn response(bytes: &[u8]) -> Result<MessageRecallReply> {
+pub(crate) fn response(bytes: &[u8]) -> Result<MessageRecallReply> {
     let fields = p::decode(bytes)?;
     let base = p::decode(p::data(&fields, 1)?)?;
     let raw = p::scalar(&base, 1)?;
@@ -105,6 +105,7 @@ fn response(bytes: &[u8]) -> Result<MessageRecallReply> {
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl NativeClient {
     /// Submit once without credential renewal, login fallback or automatic retry.
     #[doc(hidden)]

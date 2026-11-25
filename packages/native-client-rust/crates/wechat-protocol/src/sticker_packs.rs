@@ -1,6 +1,8 @@
 //! Official pack metadata reads and membership requests. Media acquisition and
 //! profile installation are separate operations; these records contain private URLs.
-use crate::{protobuf as p, AccountState, NativeClient};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::NativeClient;
+use crate::{protobuf as p, AccountState};
 use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
 
@@ -313,6 +315,18 @@ pub fn decode_sticker_pack_acquisition(raw: &[u8]) -> Result<crate::media::Media
         expires_at: None,
     })
 }
+pub(crate) fn sticker_pack_rpc_path(cgi: u16) -> Result<&'static str> {
+    match cgi {
+        411 => Ok("/cgi-bin/micromsg-bin/getemotionlist"),
+        412 => Ok("/cgi-bin/micromsg-bin/getemotiondetail"),
+        521 => Ok("/cgi-bin/micromsg-bin/getemotiondesc"),
+        413 => Ok("/cgi-bin/micromsg-bin/modemotionpack"),
+        423 => Ok("/cgi-bin/micromsg-bin/exchangeemotionpack"),
+        _ => anyhow::bail!("unsupported_sticker_pack_request"),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 impl NativeClient {
     pub(crate) fn sticker_pack_rpc_snapshot(
         &self,
@@ -320,14 +334,7 @@ impl NativeClient {
         cgi: u16,
         request: &[u8],
     ) -> Result<Vec<u8>> {
-        let path = match cgi {
-            411 => "/cgi-bin/micromsg-bin/getemotionlist",
-            412 => "/cgi-bin/micromsg-bin/getemotiondetail",
-            521 => "/cgi-bin/micromsg-bin/getemotiondesc",
-            413 => "/cgi-bin/micromsg-bin/modemotionpack",
-            423 => "/cgi-bin/micromsg-bin/exchangeemotionpack",
-            _ => anyhow::bail!("unsupported_sticker_pack_request"),
-        };
+        let path = sticker_pack_rpc_path(cgi)?;
         self.authenticated_rpc(state, cgi, path, request)
     }
 }
