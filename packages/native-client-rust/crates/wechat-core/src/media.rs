@@ -2721,7 +2721,7 @@ pub(crate) fn classify_error(error: &anyhow::Error) -> String {
         if is_media_auth_rejected(error) {
             return "auth_required".into();
         }
-        if stage == "http" && (500..600).contains(&code) {
+        if stage == "http" && matches!(code, 408 | 429 | 500..=599) {
             return "transport_unavailable".into();
         }
         if stage.starts_with("channels") {
@@ -7331,10 +7331,12 @@ mod tests {
         assert_eq!(classify_error(&expired_auth), "auth_required");
         let denied = anyhow::anyhow!("CDN HTTP status 403");
         assert_eq!(classify_error(&denied), "media_service_rejected");
-        assert_eq!(
-            classify_error(&anyhow::anyhow!("CDN HTTP status 503")),
-            "transport_unavailable"
-        );
+        for status in [408, 429, 503] {
+            assert_eq!(
+                classify_error(&anyhow::anyhow!("CDN HTTP status {status}")),
+                "transport_unavailable"
+            );
+        }
         // Message text alone is not a service diagnostic.
         assert!(service_diagnostic(&anyhow::anyhow!("CDN bootstrap returned -13")).is_none());
         assert!(service_diagnostic(&anyhow::anyhow!(
