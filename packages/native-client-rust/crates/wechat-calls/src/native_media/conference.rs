@@ -26,8 +26,8 @@ use wechat_protocol::calls::{
     relay::{RelayEpoch, SelectedRelay},
     rudp,
     video_packet::{
-        annexb_nalu_types, encode_p2s, encode_p2s_report, encode_video_nack, parse_s2p,
-        VideoS2pCommand, P2S_CODEC_SUPPORT_H264_H265,
+        annexb_nalu_types, encode_p2s_report, encode_video_nack, parse_s2p, VideoS2pCommand,
+        P2S_CODEC_SUPPORT_H264_H265,
     },
     video_qos::KeyframeRequestReason,
 };
@@ -472,16 +472,17 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                                 } else {
                                     None
                                 };
-                                let encoded = if let Some(p2s_rep) = selected_rep {
-                                    encode_p2s_report(p2s_seq, 2, selected.own_member, p2s_rep)
-                                } else {
-                                    encode_p2s(
-                                        p2s_seq,
-                                        2,
-                                        selected.own_member,
-                                        P2S_CODEC_SUPPORT_H264_H265,
-                                        15,
-                                    )
+                                // Report only a member whose video arrived in this interval, as
+                                // direct calls do: a report without one would name no real
+                                // sender and offer codecs that sender may not encode.
+                                let encoded = match selected_rep {
+                                    Some(p2s_rep) => {
+                                        encode_p2s_report(p2s_seq, 2, selected.own_member, p2s_rep)
+                                    }
+                                    None => {
+                                        last_p2s_tx = Some(video_now);
+                                        Err(anyhow::anyhow!("no member video in this interval"))
+                                    }
                                 };
                                 if let Ok(p2s) = encoded {
                                     p2s_seq = p2s_seq.wrapping_add(1);

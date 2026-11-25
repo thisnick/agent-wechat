@@ -33,6 +33,11 @@ const MAX_REF_DELTA: u32 = 16;
 const MAX_NUM_REF_FRAMES: u32 = MAX_REF_DELTA;
 /// Largest picture accepted from a Vcodec1 header (in macroblocks per side).
 const MAX_MBS_PER_SIDE: u32 = 256;
+/// `level_idc` of the synthesized SPS (5.1).
+const SPS_LEVEL_IDC: u32 = 51;
+/// Largest picture (in macroblocks) for which level 5.1's decoded picture buffer
+/// (MaxDpbMbs 184320) holds all [`MAX_NUM_REF_FRAMES`]: 11520 macroblocks, above 1080p.
+const MAX_PICTURE_MBS: u32 = 184_320 / MAX_NUM_REF_FRAMES;
 
 /// One Vcodec1 frame rewrapped as an H.264 Annex-B access unit.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -88,6 +93,8 @@ pub struct Vcodec1Converter {
     prev_ref_frame_num: u32,
     refs: BTreeMap<u32, u32>,
     ref_order: Vec<u32>,
+    /// Vcodec1 frame number of the last converted picture, to detect skipped frames.
+    last_frame_num: Option<u32>,
 }
 
 impl Vcodec1Converter {
@@ -99,8 +106,10 @@ impl Vcodec1Converter {
 
     /// Convert one reassembled Vcodec1 frame (including WeChat's 4-byte framing prefix).
     ///
-    /// A frame whose reference picture is unavailable (lost, or before the last IDR) fails
-    /// instead of predicting from the wrong picture, so the caller can wait for a keyframe.
+    /// A frame whose reference picture is unavailable fails instead of predicting from the
+    /// wrong picture, so the caller can wait for a keyframe. That covers a reference named by
+    /// distance that was lost, rejected or precedes the last IDR, and a P frame using the
+    /// default (most recent) reference right after a skipped frame.
     pub fn convert_frame(&mut self, framed: &[u8]) -> Result<ConvertedFrame> {
         let units = split_units(framed)?;
         ensure!(!units.is_empty(), "Vcodec1 frame has no units");
@@ -161,6 +170,7 @@ impl Vcodec1Converter {
             self.idr_pic_id = (self.idr_pic_id + 1) & 0xffff;
             self.prev_ref_frame_num = 0;
             self.remember_ref(slice.frame_num, 0);
+            self.last_frame_num = Some(slice.frame_num);
             return Ok(PictureNumbers {
                 frame_num: 0,
                 idr_pic_id,
@@ -179,7 +189,14 @@ impl Vcodec1Converter {
                 Some(frame_num.wrapping_sub(*ref_frame_num) & mask)
             }
             None => {
-                ensure!(!self.refs.is_empty(), "Vcodec1 P slice without a reference");
+                // The default list starts at the most recent reference, which is the intended
+                // one only if no frame was skipped since the last converted picture.
+                let previous =
+                    (slice.frame_num + VCODEC1_FRAME_NUM_MODULO - 1) % VCODEC1_FRAME_NUM_MODULO;
+                ensure!(
+                    self.last_frame_num == Some(previous),
+                    "Vcodec1 P slice follows a skipped frame without naming its reference"
+                );
                 None
             }
         };
@@ -187,6 +204,7 @@ impl Vcodec1Converter {
             self.prev_ref_frame_num = frame_num;
             self.remember_ref(slice.frame_num, frame_num);
         }
+        self.last_frame_num = Some(slice.frame_num);
         Ok(PictureNumbers {
             frame_num,
             idr_pic_id: 0,
@@ -265,7 +283,9 @@ fn parse_header(bits: &[u8]) -> Result<Header> {
     let width_mbs_minus1 = r.ue()?;
     let height_mbs_minus1 = r.ue()?;
     ensure!(
-        width_mbs_minus1 < MAX_MBS_PER_SIDE && height_mbs_minus1 < MAX_MBS_PER_SIDE,
+        width_mbs_minus1 < MAX_MBS_PER_SIDE
+            && height_mbs_minus1 < MAX_MBS_PER_SIDE
+            && (width_mbs_minus1 + 1) * (height_mbs_minus1 + 1) <= MAX_PICTURE_MBS,
         "Vcodec1 picture size out of range"
     );
     r.skip(1)?;
@@ -349,12 +369,12 @@ fn parse_slice<'a>(unit: &'a [u8], header: &Header) -> Result<Slice<'a>> {
 
 fn build_sps(header: &Header) -> Vec<u8> {
     let mut w = BitWriter::default();
-    // Main profile for CABAC, constrained Baseline for CAVLC; level 4.1 leaves room for
-    // the declared reference frames at up to 720p.
+    // Main profile for CABAC, constrained Baseline for CAVLC. Level 5.1 holds all declared
+    // reference frames for every picture size the header parser admits.
     let (profile_idc, constraints) = if header.cabac { (77, 0x40) } else { (66, 0xc0) };
     w.bits(profile_idc, 8);
     w.bits(constraints, 8);
-    w.bits(41, 8);
+    w.bits(SPS_LEVEL_IDC, 8);
     w.ue(0);
     w.ue(header.log2_max_frame_num_minus4);
     w.ue(2); // pic_order_cnt_type: output order follows decoding order
@@ -735,6 +755,9 @@ mod tests {
 
         // Distance references assume 8-bit frame numbers wrapping at 252.
         assert!(parse_header(&header_unit_with(5, 19, 10, true, 1)[1..]).is_err());
+        // 1080p fits level 5.1 with 16 reference frames; 4K does not.
+        assert!(parse_header(&header_unit_with(4, 119, 67, true, 0)[1..]).is_ok());
+        assert!(parse_header(&header_unit_with(4, 239, 134, true, 0)[1..]).is_err());
     }
 
     #[test]
@@ -754,6 +777,7 @@ mod tests {
         assert_eq!(nals.len(), 3);
         assert_eq!(nals[0][0], 0x67);
         assert_eq!(nals[0][1], 77, "Main profile for CABAC");
+        assert_eq!(nals[0][3], 51, "level 5.1");
         assert_eq!(nals[1][0], 0x68);
         assert_eq!(nals[2][0], 0x65, "IDR slice");
         let mut r = BitReader::new(&nals[2][1..]);
@@ -857,13 +881,21 @@ mod tests {
         assert!(converter
             .convert_frame(&frame(&[slice_unit(2, false, 3, Some(1), 0, &[3])]))
             .is_err());
-        // The failed frame was not remembered, so frame 4 cannot use it either,
-        // while frame 4 naming frame 1 (distance 3) still converts.
+        // The failed frame was not remembered, so frame 4 cannot use it either, by
+        // distance or through the default list, while frame 4 naming frame 1 (distance 3)
+        // still converts.
         assert!(converter
             .convert_frame(&frame(&[slice_unit(2, false, 4, Some(1), 0, &[4])]))
             .is_err());
+        assert!(converter
+            .convert_frame(&frame(&[slice_unit(2, false, 4, None, 0, &[4])]))
+            .is_err());
         converter
             .convert_frame(&frame(&[slice_unit(2, false, 4, Some(3), 0, &[4])]))
+            .unwrap();
+        // Back in sequence, the default list is safe again.
+        converter
+            .convert_frame(&frame(&[slice_unit(2, false, 5, None, 0, &[4])]))
             .unwrap();
 
         // A distance longer than the sliding window is rejected while parsing.
@@ -873,7 +905,7 @@ mod tests {
 
         // The 16 remembered reference frames match the decoder's sliding window, so the
         // longest distance still resolves to a picture the decoder holds.
-        for n in 5..=20 {
+        for n in 6..=20 {
             converter
                 .convert_frame(&frame(&[slice_unit(2, false, n, Some(1), 0, &[6])]))
                 .unwrap();
