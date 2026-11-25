@@ -80,8 +80,13 @@ struct Slice<'a> {
 enum SliceData<'a> {
     /// CABAC data starts on a byte boundary.
     Aligned(&'a [u8]),
-    /// CAVLC data continues from `bit_offset` within `bytes`.
-    Unaligned { bytes: &'a [u8], bit_offset: usize },
+    /// CAVLC data runs from `bit_offset` through the RBSP stop bit at `stop_bit` within
+    /// `bytes`. Both are found while parsing, so building the slice cannot fail.
+    Unaligned {
+        bytes: &'a [u8],
+        bit_offset: usize,
+        stop_bit: usize,
+    },
 }
 
 /// Stateful per-stream converter: parameter header, IDR numbering and the mapping from
@@ -150,7 +155,7 @@ impl Vcodec1Converter {
         if let (Some(first), Some(header)) = (slices.first(), header) {
             let numbers = self.number_picture(first, &header)?;
             for slice in &slices {
-                out.extend(build_slice(slice, &header, numbers)?);
+                out.extend(build_slice(slice, &header, numbers));
             }
         }
         Ok(ConvertedFrame {
@@ -350,9 +355,15 @@ fn parse_slice<'a>(unit: &'a [u8], header: &Header) -> Result<Slice<'a>> {
     let data = if header.cabac {
         SliceData::Aligned(&body[r.position().div_ceil(8)..])
     } else {
+        let bit_offset = r.position();
+        let stop_bit = (bit_offset..body.len() * 8)
+            .rev()
+            .find(|&bit| body[bit / 8] & (0x80 >> (bit % 8)) != 0)
+            .context("Vcodec1 CAVLC slice has no stop bit")?;
         SliceData::Unaligned {
             bytes: body,
-            bit_offset: r.position(),
+            bit_offset,
+            stop_bit,
         }
     };
     Ok(Slice {
@@ -411,7 +422,7 @@ fn build_pps(header: &Header) -> Vec<u8> {
     nal(0x68, &w.into_bytes())
 }
 
-fn build_slice(slice: &Slice<'_>, header: &Header, numbers: PictureNumbers) -> Result<Vec<u8>> {
+fn build_slice(slice: &Slice<'_>, header: &Header, numbers: PictureNumbers) -> Vec<u8> {
     let mut w = BitWriter::default();
     w.ue(slice.first_mb);
     w.ue(if slice.intra { 7 } else { 5 });
@@ -461,15 +472,14 @@ fn build_slice(slice: &Slice<'_>, header: &Header, numbers: PictureNumbers) -> R
             let mut rbsp = w.into_bytes();
             rbsp.extend_from_slice(data);
             let nal_type = if slice.intra { 5 } else { 1 };
-            Ok(nal((nal_ref_idc << 5) | nal_type, &rbsp))
+            nal((nal_ref_idc << 5) | nal_type, &rbsp)
         }
-        SliceData::Unaligned { bytes, bit_offset } => {
+        SliceData::Unaligned {
+            bytes,
+            bit_offset,
+            stop_bit,
+        } => {
             // Copy the slice data bits up to and including the RBSP stop bit, then pad.
-            let total_bits = bytes.len() * 8;
-            let stop_bit = (bit_offset..total_bits)
-                .rev()
-                .find(|&bit| bytes[bit / 8] & (0x80 >> (bit % 8)) != 0)
-                .context("Vcodec1 CAVLC slice has no stop bit")?;
             for bit in bit_offset..=stop_bit {
                 w.bit(bytes[bit / 8] & (0x80 >> (bit % 8)) != 0);
             }
@@ -477,7 +487,7 @@ fn build_slice(slice: &Slice<'_>, header: &Header, numbers: PictureNumbers) -> R
                 w.bit(false);
             }
             let nal_type = if slice.intra { 5 } else { 1 };
-            Ok(nal((nal_ref_idc << 5) | nal_type, &w.into_bytes()))
+            nal((nal_ref_idc << 5) | nal_type, &w.into_bytes())
         }
     }
 }
@@ -638,6 +648,19 @@ mod tests {
         qp_delta: i32,
         data: &[u8],
     ) -> Vec<u8> {
+        slice_unit_with(true, ref_idc, intra, frame_num, ref_delta, qp_delta, data)
+    }
+
+    /// Build a Vcodec1 slice unit for a CABAC or CAVLC stream.
+    fn slice_unit_with(
+        cabac: bool,
+        ref_idc: u8,
+        intra: bool,
+        frame_num: u32,
+        ref_delta: Option<u32>,
+        qp_delta: i32,
+        data: &[u8],
+    ) -> Vec<u8> {
         let unit_type = if intra { 2 } else { 3 };
         let mut w = BitWriter::default();
         w.ue(0); // first_mb
@@ -654,7 +677,9 @@ mod tests {
                 }
                 None => w.ue(1),
             }
-            w.ue(0); // cabac_init_idc
+            if cabac {
+                w.ue(0); // cabac_init_idc
+            }
         }
         w.se(qp_delta);
         w.bit(false);
@@ -984,6 +1009,49 @@ mod tests {
         converter
             .convert_frame(&frame(&[slice_unit(2, false, 1, Some(1), 0, &[4])]))
             .unwrap();
+    }
+
+    #[test]
+    fn cavlc_slice_without_a_stop_bit_fails_before_changing_state() {
+        let mut converter = Vcodec1Converter::new();
+        let idr = converter
+            .convert_frame(&frame(&[
+                header_unit_with(4, 19, 10, false, 1),
+                slice_unit_with(false, 3, true, 0, None, 0, &[0x80]),
+            ]))
+            .unwrap();
+        assert!(idr.is_keyframe);
+        assert_eq!(nal_units(&idr.annexb)[0][1], 66, "Baseline for CAVLC");
+        // P frame 1 whose slice data has no stop bit is rejected while parsing.
+        assert!(converter
+            .convert_frame(&frame(&[slice_unit_with(
+                false,
+                2,
+                false,
+                1,
+                None,
+                0,
+                &[0x00]
+            )]))
+            .is_err());
+        // Nothing was numbered or remembered: a valid frame 1 still follows the IDR.
+        let p = converter
+            .convert_frame(&frame(&[slice_unit_with(
+                false,
+                2,
+                false,
+                1,
+                None,
+                0,
+                &[0x80],
+            )]))
+            .unwrap();
+        let nals = nal_units(&p.annexb);
+        let mut r = BitReader::new(&nals[0][1..]);
+        r.ue().unwrap();
+        assert_eq!(r.ue().unwrap(), 5, "P slice");
+        r.ue().unwrap();
+        assert_eq!(r.bits(8).unwrap(), 1, "frame_num follows the IDR");
     }
 
     #[test]
