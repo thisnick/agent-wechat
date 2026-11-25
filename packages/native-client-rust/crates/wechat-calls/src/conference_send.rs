@@ -199,6 +199,13 @@ impl ConferenceSender {
             .seal_qos_p2s(self.epoch, u64::try_from(now.as_millis())?, payload)
     }
 
+    /// Seal one in-band RUDP packet (`0x50`), such as a feedback acknowledgement; `None`
+    /// when no free sequence number avoids a nonce the peer already used.
+    pub fn seal_rudp(&mut self, now: Duration, payload: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.channel
+            .seal_rudp(self.epoch, u64::try_from(now.as_millis())?, payload)
+    }
+
     /// Opt into `Live98` (`0x98`) framing on outbound packets.
     pub fn set_prefer_live98_tx(&mut self, enabled: bool) {
         self.channel.set_prefer_live98_tx(enabled);

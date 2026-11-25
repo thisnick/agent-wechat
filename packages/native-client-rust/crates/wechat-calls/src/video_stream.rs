@@ -9,9 +9,10 @@ use crate::native_media::{DirectVideoTx, TxVideoQueue};
 use anyhow::Result;
 use std::{collections::VecDeque, sync::mpsc::Receiver};
 use wechat_protocol::calls::{
+    vcodec1::Vcodec1Converter,
     video_packet::{
-        parse_rsm_packet_header, ReassembledVideoFrame, RsmIngestOutcome, RsmPacketHeader,
-        RsmVideoPacketizer, RsmVideoReassembler, VideoP2sReport,
+        p2s_codec_support_for, parse_rsm_packet_header, ReassembledVideoFrame, RsmIngestOutcome,
+        RsmPacketHeader, RsmVideoPacketizer, RsmVideoReassembler, VideoP2sReport, VideoWireCodec,
     },
     video_qos::{ScheduledIRequest, VideoKeyframePolicy, VideoNackTracker, VideoP2sAccumulator},
 };
@@ -36,6 +37,7 @@ pub(crate) struct VideoStreamReceiver {
     nack_tracker: VideoNackTracker,
     telemetry: VideoP2sAccumulator,
     keyframe_policy: VideoKeyframePolicy,
+    vcodec1: Vcodec1Converter,
 }
 
 impl VideoStreamReceiver {
@@ -46,6 +48,7 @@ impl VideoStreamReceiver {
             nack_tracker: VideoNackTracker::new(),
             telemetry: VideoP2sAccumulator::new(now_ms),
             keyframe_policy: VideoKeyframePolicy::new(now_ms),
+            vcodec1: Vcodec1Converter::new(),
         }
     }
 
@@ -63,6 +66,7 @@ impl VideoStreamReceiver {
         self.nack_tracker.reset();
         self.telemetry.reset(now_ms);
         self.keyframe_policy.reset(now_ms);
+        self.vcodec1 = Vcodec1Converter::new();
     }
 
     /// Last video stream ID observed on an authenticated inbound RSM video packet or frame.
@@ -79,6 +83,11 @@ impl VideoStreamReceiver {
     /// Return `true` when inbound video packets or frames arrived in the active telemetry window.
     pub(crate) fn has_active_video_window(&self) -> bool {
         self.telemetry.has_active_window()
+    }
+
+    /// Return `true` once an inbound media packet has shown which codec the sender uses.
+    pub(crate) fn has_rx_codec(&self) -> bool {
+        self.telemetry.rx_codec().is_some()
     }
 
     /// Return `true` once codec parameter sets and a keyframe have been observed.
@@ -103,6 +112,7 @@ impl VideoStreamReceiver {
             Ok(h) => h,
             Err(err) => {
                 self.keyframe_policy.note_assembly_drop();
+                self.keyframe_policy.track_keyframe_wait(now_ms);
                 return VideoIngestBatch {
                     header: None,
                     frames: Vec::new(),
@@ -140,6 +150,30 @@ impl VideoStreamReceiver {
             frames.push(next_frame);
         }
 
+        // Official senders switch to Vcodec1 when the server's QoS selects it; rewrap it as
+        // standard H.264 so keyframe tracking, decoding and passthrough treat it as H.264.
+        let mut normalized = Vec::with_capacity(frames.len());
+        for mut frame in frames {
+            if frame.codec == VideoWireCodec::Vcodec1 {
+                match self.vcodec1.convert_frame(&frame.payload) {
+                    Ok(converted) => {
+                        frame.codec = VideoWireCodec::H264;
+                        frame.payload = converted.annexb;
+                        frame.is_keyframe = converted.is_keyframe;
+                        frame.has_codec_config = converted.has_codec_config;
+                    }
+                    Err(err) => {
+                        assembly_dropped = true;
+                        self.keyframe_policy.note_assembly_drop();
+                        ingest_error.get_or_insert(err);
+                        continue;
+                    }
+                }
+            }
+            normalized.push(frame);
+        }
+        let frames = normalized;
+
         for frame in &frames {
             if self.keyframe_policy.observe_frame(frame) {
                 assembly_dropped = true;
@@ -148,6 +182,7 @@ impl VideoStreamReceiver {
                 .observe_frame(frame, self.keyframe_policy.is_keyframe_synced(), now_ms);
         }
 
+        self.keyframe_policy.track_keyframe_wait(now_ms);
         VideoIngestBatch {
             header: Some(header),
             frames,
@@ -196,13 +231,16 @@ impl VideoStreamReceiver {
         codec_support_mask: u32,
         now_ms: u64,
     ) -> VideoP2sReport {
-        self.telemetry.snapshot(
+        let mut report = self.telemetry.snapshot(
             remote_member,
             self.last_stream_id().unwrap_or(1),
             conn_id,
             codec_support_mask,
             now_ms,
-        )
+        );
+        report.max_size_format = self.keyframe_policy.requested_max_size_format(now_ms);
+        report.codec_support_mask = p2s_codec_support_for(report.decode_type, codec_support_mask);
+        report
     }
 }
 
@@ -223,14 +261,11 @@ pub(crate) struct VideoTxPacer {
     pending_packets: VecDeque<(u32, Vec<u8>)>,
     exhausted: bool,
     last_vf_tx_ms: Option<u64>,
-    window_start_ms: u64,
-    window_tx_bytes: u64,
-    window_tx_frames: u32,
 }
 
 impl VideoTxPacer {
     /// Construct a pacer bound to `own_member` and `stream_id` with default `+90° CW` orientation.
-    pub(crate) fn new(own_member: u16, stream_id: u8, now_ms: u64) -> Self {
+    pub(crate) fn new(own_member: u16, stream_id: u8) -> Self {
         // Outgoing wire frames are pre-rotated 90° CCW to match mobile/conference WeChat
         // receivers, which apply +90° CW display rotation; orientation = 1 signals +90° CW
         // for desktop/native peers.
@@ -240,9 +275,6 @@ impl VideoTxPacer {
             pending_packets: VecDeque::new(),
             exhausted: false,
             last_vf_tx_ms: None,
-            window_start_ms: now_ms,
-            window_tx_bytes: 0,
-            window_tx_frames: 0,
         }
     }
 
@@ -278,10 +310,6 @@ impl VideoTxPacer {
                     frame.fps,
                     frame.kbps,
                 ) {
-                    self.window_tx_bytes = self
-                        .window_tx_bytes
-                        .saturating_add(frame.annexb.len() as u64);
-                    self.window_tx_frames = self.window_tx_frames.saturating_add(1);
                     on_new_frame(frame.annexb.len());
                     for pkt in pkts {
                         self.pending_packets.push_back((current_vgen, pkt));
@@ -321,25 +349,6 @@ impl VideoTxPacer {
             }
         }
         Ok(())
-    }
-
-    /// Snapshot and reset outbound `(send_kbps, send_fps)` over the elapsed window at `now_ms`.
-    pub(crate) fn take_window_stats(&mut self, now_ms: u64) -> (u32, u32) {
-        let window_ms = u32::try_from(now_ms.saturating_sub(self.window_start_ms))
-            .unwrap_or(u32::MAX)
-            .max(1);
-        let send_kbps =
-            u32::try_from(self.window_tx_bytes.saturating_mul(8) / u64::from(window_ms))
-                .unwrap_or(u32::MAX);
-        let send_fps = self
-            .window_tx_frames
-            .saturating_mul(1000)
-            .div_ceil(window_ms)
-            .min(60);
-        self.window_start_ms = now_ms;
-        self.window_tx_bytes = 0;
-        self.window_tx_frames = 0;
-        (send_kbps, send_fps)
     }
 }
 
@@ -426,7 +435,7 @@ mod tests {
     #[test]
     fn video_tx_pacer_paces_bursts_emits_orientation_vf_and_handles_exhaustion() {
         let (tx, rx) = mpsc::channel();
-        let mut pacer = VideoTxPacer::new(3, 1, 0);
+        let mut pacer = VideoTxPacer::new(3, 1);
 
         // Build a large keyframe that splits into >= 6 packets so burst=4 spans two ticks.
         let mut big_idr = vec![0, 0, 0, 1, 0x65, 0x88];
@@ -478,10 +487,6 @@ mod tests {
         let last_hdr = parse_rsm_packet_header(sent.last().unwrap()).unwrap();
         assert!(last_hdr.is_virtual_frame);
         assert_eq!(last_hdr.virtual_frame_orientation, Some(1));
-
-        let (send_kbps, send_fps) = pacer.take_window_stats(1000);
-        assert!(send_kbps > 0);
-        assert_eq!(send_fps, 1);
 
         // Sequence exhaustion clears pending queues and stops further sends cleanly.
         tx.send(DirectVideoTx {

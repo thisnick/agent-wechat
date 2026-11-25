@@ -18,6 +18,8 @@ pub mod relay;
 /// In-band reliable `0x50` messages and their acknowledgements.
 pub mod rudp;
 pub mod signaling;
+/// Rewrap of WeChat's Vcodec1 video packaging as standard H.264.
+pub mod vcodec1;
 /// Video packetization, reassembly and video RTCP/QoS codecs.
 pub mod video_packet;
 pub mod video_qos;

@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, VecDeque};
 use wechat_protocol::calls::{
     audio_packet::{self, Live96, MediaContext, MediaEpoch},
     relay::SelectedRelay,
+    rudp::{self, RudpAckTracker},
     video_packet::{
         classify_video_channel_payload, ReassembledVideoFrame, VideoChannelPayload, VideoP2sReport,
     },
@@ -29,6 +30,9 @@ pub struct ConferenceConsumeOutput {
     pub peer_requested_keyframe: bool,
     /// True when a video frame assembly dropped and the local side should send `0x66 IRequest`.
     pub need_keyframe: bool,
+    /// `(stream_id, max_pkt_num)` to acknowledge when the datagram was in-band RUDP
+    /// (`0x50`) data from this member.
+    pub rudp_ack: Option<(u32, u64)>,
 }
 
 pub struct DecodedAudio {
@@ -80,6 +84,7 @@ pub struct ConferenceReceiver {
     timeline: Option<(u32, u64)>,
     sequence: u64,
     decoding: bool,
+    rudp_acks: RudpAckTracker,
 }
 
 impl ConferenceReceiver {
@@ -105,6 +110,7 @@ impl ConferenceReceiver {
             timeline: None,
             sequence: 0,
             decoding: true,
+            rudp_acks: RudpAckTracker::default(),
         })
     }
 
@@ -270,6 +276,17 @@ impl ConferenceReceiver {
                     }
                 }
             }
+            return Ok(out);
+        }
+        if opened.packed_kind == 0x50 {
+            // Official members retransmit in-band RUDP data until it is acknowledged.
+            if let Ok(Some(data)) = rudp::parse_rudp_data(opened.payload()) {
+                out.rudp_ack = self
+                    .rudp_acks
+                    .record(data.stream_id, data.pkt_num)
+                    .map(|max_pkt| (data.stream_id, max_pkt));
+            }
+            self.report.control_packets += 1;
             return Ok(out);
         }
         if opened.packed_kind != 0x10 {
@@ -512,6 +529,67 @@ mod tests {
         assert_eq!(rx.last_video_stream_id(), Some(2));
         assert_eq!(rx.last_video_total_pkg_seq(), Some(1));
         assert!(saw_frame);
+    }
+
+    #[test]
+    fn rudp_data_from_a_member_requests_an_acknowledgement() {
+        use wechat_protocol::{calls::rudp::encode_rudp_feedback, protobuf as p};
+        let selected = SelectedRelay {
+            room_id: 42,
+            room_key: 77,
+            own_member: 0,
+            connection_id: 1,
+            endpoint: "127.0.0.1:6000".parse().unwrap(),
+            media_key: zeroize::Zeroizing::new([7; 32]),
+            merge_mode: false,
+        };
+        let epoch = MediaEpoch {
+            account_generation: 1,
+            logout_epoch: 0,
+            call_generation: 1,
+            key_generation: 1,
+        };
+        let mut rx = ConferenceReceiver::new(&selected, 1, epoch).unwrap();
+        let mut peer_tx = Live96::new(
+            [7; 32],
+            77,
+            MediaContext {
+                room_id: 42,
+                own_member: 1,
+                peer_member: 0,
+                connection_id: 1,
+            },
+            epoch,
+        )
+        .unwrap();
+        peer_tx
+            .authorize_transmit(
+                epoch,
+                TransmitScope::LegacyRelayAudio {
+                    key_generation: epoch.key_generation,
+                },
+            )
+            .unwrap();
+
+        let cmd = [p::uint(1, 2), p::bytes(2, &[8, 9])].concat();
+        let raw = [p::uint(1, 0), p::uint(2, 5), p::bytes(3, &cmd)].concat();
+        let data = [
+            p::uint(1, 1),
+            p::uint(2, 0),
+            p::uint(3, 1234),
+            p::bytes(4, &raw),
+            p::uint(5, 0),
+        ]
+        .concat();
+        let packet = peer_tx.seal_rudp(epoch, 10, &data).unwrap().unwrap();
+        let out = rx.consume_media(epoch, &packet, 10, true).unwrap();
+        assert_eq!(out.rudp_ack, Some((0, 5)));
+
+        // A feedback packet from the member needs no acknowledgement.
+        let feedback = encode_rudp_feedback(1, 0, 3, 0).unwrap();
+        let packet = peer_tx.seal_rudp(epoch, 20, &feedback).unwrap().unwrap();
+        let out = rx.consume_media(epoch, &packet, 20, true).unwrap();
+        assert_eq!(out.rudp_ack, None);
     }
 
     #[test]

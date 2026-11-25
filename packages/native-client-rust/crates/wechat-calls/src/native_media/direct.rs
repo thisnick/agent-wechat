@@ -23,7 +23,7 @@ use wechat_protocol::calls::{
     rudp::{self, RudpAckTracker},
     video_packet::{
         classify_video_channel_payload, encode_p2s_report, encode_video_nack, parse_s2p,
-        parse_video_nack, VideoChannelPayload, VideoS2pCommand,
+        parse_video_nack, VideoChannelPayload, VideoS2pCommand, P2S_CODEC_SUPPORT_H264_H265,
     },
     video_qos::KeyframeRequestReason,
 };
@@ -173,7 +173,7 @@ pub fn run_direct_media_with_preconnected_relay<H: DirectMediaHost>(
     } else {
         VideoStreamReceiver::new(connected_ms)
     };
-    let mut video_tx = VideoTxPacer::new(selected.own_member, 1, connected_ms);
+    let mut video_tx = VideoTxPacer::new(selected.own_member, 1);
     let mut last_p2s_tx: Option<Instant> = None;
     let mut p2s_seq = 1u16;
     let mut last_peer_activity = Instant::now();
@@ -666,14 +666,21 @@ pub fn run_direct_media_with_preconnected_relay<H: DirectMediaHost>(
                 if video_enabled {
                     let p2s_interval =
                         Duration::from_millis(video_rx.recommended_p2s_interval_ms());
-                    if last_p2s_tx.is_none_or(|t| t.elapsed() >= p2s_interval) {
+                    // Report only once a video packet has shown the sender's codec, so the
+                    // server is never offered a codec the sender cannot encode. Packets, not
+                    // decoded frames, open the gate: P2S drives keyframe recovery even while
+                    // no frame can be decoded.
+                    if video_rx.has_rx_codec()
+                        && last_p2s_tx.is_none_or(|t| t.elapsed() >= p2s_interval)
+                    {
                         let report = video_rx.snapshot_p2s(
                             media.peer_member,
                             u32::from(selected.connection_id),
-                            0x1d,
+                            P2S_CODEC_SUPPORT_H264_H265,
                             now_ms,
                         );
-                        if let Ok(p2s) = encode_p2s_report(p2s_seq, 2, &report) {
+                        if let Ok(p2s) = encode_p2s_report(p2s_seq, 2, selected.own_member, &report)
+                        {
                             let sent_seq = p2s_seq;
                             p2s_seq = p2s_seq.wrapping_add(1);
                             if let Ok(datagram) = channel.seal_qos_p2s(epoch, now_ms, &p2s) {
@@ -687,10 +694,11 @@ pub fn run_direct_media_with_preconnected_relay<H: DirectMediaHost>(
                                         || sent_seq.is_multiple_of(2))
                                 {
                                     eprintln!(
-                                        "[wechat-call-video] tx p2s seq={sent_seq} peer={} stream={} codec={} rx_kbps={} est_bw={} rx_fps={} play_fps={} loss={}%({}pkts,long={}%) arq={} freeze=L{}/{}%,H{}/{}% gap={}ms",
+                                        "[wechat-call-video] tx p2s seq={sent_seq} peer={} stream={} codec={} size={} rx_kbps={} est_bw={} rx_fps={} play_fps={} loss={}%({}pkts,long={}%) arq={} freeze=L{}/{}%,H{}/{}% gap={}ms",
                                         report.remote_member_id,
                                         report.stream_id,
                                         report.decode_type,
+                                        report.max_size_format,
                                         report.recv_kbps,
                                         report.est_bw_kbps,
                                         report.recv_fps,

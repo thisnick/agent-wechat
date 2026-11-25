@@ -24,9 +24,10 @@ use std::{
 use wechat_protocol::calls::{
     audio_packet::{self, Live96, MediaEpoch},
     relay::{RelayEpoch, SelectedRelay},
+    rudp,
     video_packet::{
-        annexb_nalu_types, encode_p2s, encode_p2s_report, encode_video_nack, parse_s2p,
-        VideoS2pCommand,
+        annexb_nalu_types, encode_p2s_report, encode_video_nack, parse_s2p, VideoS2pCommand,
+        P2S_CODEC_SUPPORT_H264_H265,
     },
     video_qos::KeyframeRequestReason,
 };
@@ -142,6 +143,7 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
     let mut trace_drop_logged = 0u32;
     let mut trace_fec_logged = 0u32;
     let mut trace_nack_tx_logged = 0u32;
+    let mut trace_rudp_acks = 0u32;
     let mut trace_last = Instant::now();
     let mut trace_total_fec = 0u64;
     let mut trace_total_drops = 0u64;
@@ -171,8 +173,7 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
         stage = "receive_failed";
         let mut application_connected = false;
         let ready_at = Instant::now();
-        let mut video_tx =
-            VideoTxPacer::new(selected.own_member, 1, started.elapsed().as_millis() as u64);
+        let mut video_tx = VideoTxPacer::new(selected.own_member, 1);
         let mut observation_deadline = if audio.is_some() || options.multi_speaker {
             None
         } else {
@@ -430,7 +431,6 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                                 Duration::from_secs(1)
                             };
                             if last_p2s_tx.is_none_or(|t| t.elapsed() >= p2s_interval) {
-                                let (send_kbps, send_fps) = video_tx.take_window_stats(now_ms);
                                 // Snapshot every active bound receiver so paused/camera-off streams
                                 // clear stale gap anchors and multi-sender streams roll their 1s
                                 // windows evenly without starving higher member IDs.
@@ -441,15 +441,12 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                                     }
                                     let was_active = b.receiver.has_active_video_window();
                                     let synced = b.receiver.is_video_keyframe_synced();
-                                    let mut rep = b.receiver.snapshot_video_p2s(
+                                    let rep = b.receiver.snapshot_video_p2s(
                                         mid,
                                         u32::from(selected.connection_id),
-                                        0x1d,
+                                        P2S_CODEC_SUPPORT_H264_H265,
                                         now_ms,
                                     );
-                                    rep.send_kbps = send_kbps;
-                                    rep.send_fps = send_fps;
-                                    rep.capt_fps = send_fps;
                                     if was_active {
                                         active_reports.push((synced, rep));
                                     }
@@ -475,10 +472,17 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                                 } else {
                                     None
                                 };
-                                let encoded = if let Some(p2s_rep) = selected_rep {
-                                    encode_p2s_report(p2s_seq, 2, p2s_rep)
-                                } else {
-                                    encode_p2s(p2s_seq, 2, 0x1d, 15)
+                                // Report only a member whose video arrived in this interval, as
+                                // direct calls do: a report without one would name no real
+                                // sender and offer codecs that sender may not encode.
+                                let encoded = match selected_rep {
+                                    Some(p2s_rep) => {
+                                        encode_p2s_report(p2s_seq, 2, selected.own_member, p2s_rep)
+                                    }
+                                    None => {
+                                        last_p2s_tx = Some(video_now);
+                                        Err(anyhow::anyhow!("no member video in this interval"))
+                                    }
                                 };
                                 if let Ok(p2s) = encoded {
                                     p2s_seq = p2s_seq.wrapping_add(1);
@@ -594,6 +598,40 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                             )?;
                             if consumed.peer_requested_keyframe {
                                 host.on_peer_keyframe_requested();
+                            }
+                            // Acknowledgements need the member-keyed sender. Data that arrives
+                            // before it exists is acknowledged when the member retransmits it.
+                            if let (Some((stream_id, max_pkt)), Some(sender)) =
+                                (consumed.rudp_ack, app_sender.as_mut())
+                            {
+                                if let Ok(feedback) = rudp::encode_rudp_feedback(
+                                    super::relay::epoch_ms32(),
+                                    stream_id,
+                                    max_pkt,
+                                    member,
+                                ) {
+                                    if let Ok(Some(datagram)) =
+                                        sender.seal_rudp(ready_at.elapsed(), &feedback)
+                                    {
+                                        // Best effort, like NACK and P2S: a failed send
+                                        // is retried by the member's retransmission.
+                                        let sent = matches!(
+                                            host.submit(
+                                                &socket,
+                                                selected.endpoint,
+                                                &datagram,
+                                                &[],
+                                            ),
+                                            Ok(true)
+                                        );
+                                        if video_trace && sent && trace_rudp_acks < 16 {
+                                            trace_rudp_acks += 1;
+                                            eprintln!(
+                                                "[wechat-call-rudp] conf tx ack member={member} stream={stream_id} max_pkt={max_pkt}"
+                                            );
+                                        }
+                                    }
+                                }
                             }
                             if audio.is_some() {
                                 for frame in consumed.audio {
