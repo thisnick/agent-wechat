@@ -54,7 +54,20 @@ Bind the transport with `NativeClient::with_transport` for async login bootstrap
 `complete_login_async`, `refresh_qr_login_async`) and
 `NativeClient::from_account_with_transport` /
 `from_account_with_transport_and_persistence` for authenticated RPCs and
-`open_push_connection` (`AsyncPushConnection`).
+`open_push_connection` (`AsyncPushConnection`). For media transfers, use the
+async methods on `media::CdnClient` (`download_async`,
+`download_to_with_progress_async`, `download_storage_with_progress_async`,
+`download_voice_with_progress_async`,
+`upload_async`, `upload_source_with_progress_async`, `upload_image_async`,
+`upload_video_async`, `upload_large_file_with_progress_async`,
+`upload_large_file_from_source_with_progress_async`,
+`upload_video_original_with_progress_async`) together with `AsyncDownloadSink`
+and `PreparedAsyncUpload` (`AsyncUploadSource`) for streaming large downloads
+and uploads without full-file buffering, and the async standalone downloaders
+(`download_advertised_avatar_async`,
+`fetch_sticker_async`, `fetch_sticker_original_async`,
+`fetch_link_thumbnail_async`, `fetch_tp_media_async`,
+`fetch_tp_media_to_async`, `fetch_channels_video_async`).
 
 On `wasm32-unknown-unknown`, blocking OS-socket methods and `reqwest` are
 omitted automatically (`cfg(not(target_arch = "wasm32"))`) with no extra Cargo
@@ -62,9 +75,7 @@ features. Build with `default-features = false, features = ["pure-rust-crypto"]`
 and select a `getrandom` 0.4 backend in the application crate (for browser/IWA
 targets, add `getrandom = { version = "0.4", features = ["wasm_js"] }` and
 `RUSTFLAGS='--cfg getrandom_backend="wasm_js"'`; for custom runtimes, use
-`RUSTFLAGS='--cfg getrandom_backend="custom"'`). Async CDN media transfers are
-planned in a follow-up change; blocking CDN download/upload methods remain
-native-only for now.
+`RUSTFLAGS='--cfg getrandom_backend="custom"'`).
 
 Embedders that already use blocking workers can use `request_blocking` for one
 scoped operation, or `open_push_connection_blocking` for persistent notifications.

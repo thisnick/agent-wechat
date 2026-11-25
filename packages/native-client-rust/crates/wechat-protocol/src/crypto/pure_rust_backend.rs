@@ -234,7 +234,6 @@ pub(crate) fn aes_128_ecb_decrypt(key: &[u8], encrypted: &[u8]) -> Result<Vec<u8
     Ok(out)
 }
 
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn aes_128_ecb_encrypt_no_pad(key: &[u8], blocks: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
     ensure!(blocks.len().is_multiple_of(16), CryptoBackendError);
     let cipher = aes::Aes128::new_from_slice(key).map_err(|_| CryptoBackendError)?;

@@ -121,6 +121,8 @@ fn next_sequence(sequence: &mut u32) -> Result<u32> {
     Ok(current)
 }
 
+// Legacy blocking push connection kept for 3.x native compatibility (#701).
+// Prefer `AsyncConnection` for new code.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct Connection {
     session: Session,

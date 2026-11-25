@@ -41,13 +41,17 @@ pub type TransportFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub type TransportFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
 /// Typed transport failure categories shared across native and custom
-/// transports for retryable login-poll and call-RPC classification.
+/// transports for retryable login-poll, call-RPC, CDN failover, and media
+/// receive-budget classification.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransportError {
     /// Connection, read, or write deadline elapsed.
     Timeout,
     /// Connection attempt failed or the peer closed the connection unexpectedly.
     Disconnected,
+    /// The HTTP response body exceeded `HttpRequest::max_response_bytes`.
+    ResponseTooLarge,
 }
 
 impl fmt::Display for TransportError {
@@ -55,11 +59,18 @@ impl fmt::Display for TransportError {
         match self {
             Self::Timeout => f.write_str("Transport operation timed out"),
             Self::Disconnected => f.write_str("Transport disconnected"),
+            Self::ResponseTooLarge => f.write_str("HTTP response body exceeds receive budget"),
         }
     }
 }
 
 impl std::error::Error for TransportError {}
+
+pub(crate) fn find_transport_error(error: &anyhow::Error) -> Option<TransportError> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<TransportError>().copied())
+}
 
 /// Monotonic and wall-clock time source for deadlines, short-link ticket
 /// lifetimes, and wire timestamps.
@@ -80,9 +91,41 @@ pub trait Clock: MaybeSend + MaybeSync {
         u32::try_from(self.unix_time_ms()? / 1000)
             .map_err(|_| anyhow::anyhow!("Clock timestamp out of u32 range"))
     }
+
+    /// Asynchronously wait for `duration`.
+    ///
+    /// Hosts should override this when retry backoff is desired (for example
+    /// `setTimeout` on `wasm32` or a runtime timer on native). The default
+    /// implementation resolves immediately so minimal or test clocks do not
+    /// require a timer.
+    fn sleep<'a>(&'a self, _duration: Duration) -> TransportFuture<'a, ()> {
+        Box::pin(std::future::ready(()))
+    }
+}
+
+impl<T: Clock + ?Sized> Clock for Arc<T> {
+    fn monotonic_ms(&self) -> u64 {
+        (**self).monotonic_ms()
+    }
+
+    fn unix_time_ms(&self) -> Result<u64> {
+        (**self).unix_time_ms()
+    }
+
+    fn unix_time_secs(&self) -> Result<u32> {
+        (**self).unix_time_secs()
+    }
+
+    fn sleep<'a>(&'a self, duration: Duration) -> TransportFuture<'a, ()> {
+        (**self).sleep(duration)
+    }
 }
 
 /// System-backed [`Clock`] using `std::time::Instant` and `std::time::SystemTime`.
+///
+/// [`Clock::sleep`] uses `tokio::time::sleep` when called inside a Tokio
+/// runtime (requiring Tokio's time driver to be enabled on that runtime) and
+/// falls back to `std::thread::sleep` outside Tokio.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Debug)]
 pub struct SystemClock {
@@ -116,6 +159,19 @@ impl Clock for SystemClock {
         let elapsed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
         u64::try_from(elapsed.as_millis())
             .map_err(|_| anyhow::anyhow!("System clock timestamp overflow"))
+    }
+
+    fn sleep<'a>(&'a self, duration: Duration) -> TransportFuture<'a, ()> {
+        Box::pin(async move {
+            if duration.is_zero() {
+                return;
+            }
+            if tokio::runtime::Handle::try_current().is_ok() {
+                tokio::time::sleep(duration).await;
+            } else {
+                std::thread::sleep(duration);
+            }
+        })
     }
 }
 
@@ -245,15 +301,53 @@ impl HttpResponse {
             .find(|(key, _)| key.eq_ignore_ascii_case(name))
             .map(|(_, value)| value.as_str())
     }
+
+    /// Return all header values matching `name` (ASCII case-insensitive), in
+    /// wire order.
+    pub fn header_values(&self, name: &str) -> Vec<&str> {
+        self.headers
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+            .collect()
+    }
+
+    /// Parse and validate `Content-Length` if present. Rejects malformed values
+    /// and conflicting duplicate headers.
+    pub(crate) fn content_length(&self) -> Result<Option<u64>> {
+        let mut parsed = None;
+        for raw in self.header_values("content-length") {
+            let trimmed = raw.trim();
+            ensure!(
+                !trimmed.is_empty()
+                    && trimmed.len() <= 20
+                    && trimmed.bytes().all(|b| b.is_ascii_digit()),
+                "Invalid HTTP Content-Length header"
+            );
+            let value = trimmed
+                .parse::<u64>()
+                .map_err(|_| anyhow::anyhow!("Invalid HTTP Content-Length header"))?;
+            if let Some(prev) = parsed {
+                ensure!(prev == value, "Conflicting HTTP Content-Length headers");
+            } else {
+                parsed = Some(value);
+            }
+        }
+        Ok(parsed)
+    }
 }
 
 /// Asynchronous HTTP request/response transport.
 ///
 /// Implementations must disable automatic redirects and honor
-/// `request.timeout` and `request.max_response_bytes`. Callers with only raw
-/// TCP sockets can wrap a [`StreamTransport`] in [`HttpOverStream`] for
-/// plaintext WeChat endpoints (`http://{host}/mmtls/...` and
-/// `http://{ip}:443/...`).
+/// `request.timeout` and `request.max_response_bytes`. Returning
+/// [`TransportError::Disconnected`] or [`TransportError::Timeout`] classifies
+/// transient failures for CDN IP failover and retry backoff; returning
+/// [`TransportError::ResponseTooLarge`] lets media downloaders preserve their
+/// exact size-limit error classification when a response exceeds
+/// `request.max_response_bytes`. Callers with only raw TCP sockets can wrap a
+/// [`StreamTransport`] in [`HttpOverStream`] for plaintext WeChat endpoints
+/// (`http://{host}/mmtls/...` and `http://{ip}:443/...`).
 pub trait HttpTransport: MaybeSend + MaybeSync {
     /// Execute a single bounded HTTP request without automatic redirects.
     fn send<'a>(&'a self, request: HttpRequest) -> TransportFuture<'a, Result<HttpResponse>>;
@@ -696,7 +790,7 @@ async fn read_chunked_body(
         }
         ensure!(
             chunk_len <= max_bytes.saturating_sub(body.len()),
-            "HTTP response body exceeds receive budget"
+            TransportError::ResponseTooLarge
         );
         read_exact_buffered(stream, pending, chunk_len, &mut body, clock, deadline_ms).await?;
         crlf.clear();
@@ -758,7 +852,7 @@ impl<S: StreamTransport> HttpTransport for HttpOverStream<S> {
                 } else if let Some(length) = head.content_length {
                     ensure!(
                         length <= request.max_response_bytes,
-                        "HTTP response body exceeds receive budget"
+                        TransportError::ResponseTooLarge
                     );
                     let mut body = Vec::with_capacity(length.min(64 * 1024));
                     read_exact_buffered(
@@ -774,7 +868,7 @@ impl<S: StreamTransport> HttpTransport for HttpOverStream<S> {
                 } else {
                     ensure!(
                         pending.len() <= request.max_response_bytes,
-                        "HTTP response body exceeds receive budget"
+                        TransportError::ResponseTooLarge
                     );
                     let mut body = std::mem::take(&mut pending);
                     let mut buf = [0u8; 16384];
@@ -783,7 +877,7 @@ impl<S: StreamTransport> HttpTransport for HttpOverStream<S> {
                     {
                         ensure!(
                             n <= request.max_response_bytes.saturating_sub(body.len()),
-                            "HTTP response body exceeds receive budget"
+                            TransportError::ResponseTooLarge
                         );
                         body.extend_from_slice(&buf[..n]);
                     }
@@ -1247,5 +1341,42 @@ mod tests {
             Some(&TransportError::Disconnected)
         );
         assert!(*s_eof.closed.lock().unwrap());
+
+        // Oversized Content-Length, chunked, and close-delimited bodies classify as
+        // TransportError::ResponseTooLarge and close the stream.
+        let oversized_cases: &[&[u8]] = &[
+            b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n41\r\n",
+            b"HTTP/1.1 200 OK\r\n\r\n0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdefX",
+        ];
+        for raw in oversized_cases {
+            let s_big = Arc::new(SingleStreamTransport::new(
+                "short.weixin.qq.com",
+                80,
+                vec![ReadOutcomeOrBytes::Data(raw.to_vec())],
+            ));
+            let err =
+                HttpOverStream::new(s_big.clone(), Arc::new(FakeClock::new(1_700_000_000_000)))
+                    .send(HttpRequest {
+                        method: HttpMethod::Get,
+                        url: Url::parse("http://short.weixin.qq.com/x").unwrap(),
+                        headers: vec![],
+                        body: vec![],
+                        timeout: Duration::from_secs(5),
+                        max_response_bytes: 64,
+                    })
+                    .await
+                    .unwrap_err();
+            assert_eq!(
+                find_transport_error(&err),
+                Some(TransportError::ResponseTooLarge)
+            );
+            assert!(*s_big.closed.lock().unwrap());
+        }
+
+        // Arc<T: Clock> delegates Clock directly without dereferencing.
+        let arc_clock: Arc<dyn Clock> = Arc::new(FakeClock::new(1_700_000_000_000));
+        assert_eq!(arc_clock.unix_time_secs().unwrap(), 1_700_000_000);
+        arc_clock.sleep(Duration::from_millis(1)).await;
     }
 }

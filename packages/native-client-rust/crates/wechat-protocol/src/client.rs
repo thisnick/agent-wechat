@@ -1085,6 +1085,8 @@ impl NativeClient {
         let plain = prepared.decrypt_reply(&envelope.payload)?;
         Ok((plain, envelope.cookie, profile.version))
     }
+    // Legacy blocking login methods below are kept for 3.x native compatibility (#701).
+    // Prefer `NativeClient::with_transport` and the `*_login_async` methods for new code.
     /// Request one QR challenge for the supplied device. Display
     /// [`LoginAttempt::qr_png`] privately, poll for phone approval, then call
     /// [`Self::complete_login`]. This does not grant authorization by itself.

@@ -1,9 +1,10 @@
 //! Original type-47 bytes from the verified CDN host. Signed URLs remain private.
+use crate::transport::{Clock, HttpMethod, HttpRequest, HttpTransport};
 use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
-use std::net::IpAddr;
 #[cfg(not(target_arch = "wasm32"))]
-use std::{io::Read, net::ToSocketAddrs, time::Duration};
+use std::{io::Read, net::ToSocketAddrs};
+use std::{net::IpAddr, time::Duration};
 pub use wechat_media::{inspect_image, ImageInspection};
 #[derive(Clone, Serialize, Deserialize)]
 pub struct StickerDescriptor {
@@ -77,6 +78,8 @@ pub fn validate_sticker_url(value: &str) -> Result<url::Url> {
     );
     Ok(url)
 }
+// Legacy blocking sticker downloaders kept for 3.x native compatibility (#701).
+// Prefer `fetch_sticker_async` and `fetch_sticker_original_async` for new code.
 /// Download and verify one sticker image from a validated sticker CDN host.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn fetch_sticker(
@@ -107,6 +110,116 @@ pub fn fetch_sticker_original(
     progress: impl FnMut(u64, Option<u64>) -> Result<()>,
 ) -> Result<(Vec<u8>, ImageInspection)> {
     fetch_sticker_source(url, expected_md5, None, progress)
+}
+
+/// Asynchronously download and verify one sticker image from a validated
+/// sticker CDN host using a pluggable [`HttpTransport`] and [`Clock`].
+///
+/// The caller's [`HttpTransport`] must not follow HTTP redirects and is
+/// responsible for network/SSRF boundaries.
+pub async fn fetch_sticker_async(
+    descriptor: &StickerDescriptor,
+    http: &dyn HttpTransport,
+    clock: &dyn Clock,
+    mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+) -> Result<(Vec<u8>, ImageInspection)> {
+    ensure!(
+        descriptor.expected_bytes > 0 && descriptor.expected_bytes <= 16 * 1024 * 1024,
+        "sticker_metadata_invalid"
+    );
+    if let Some(expiry) = descriptor.expires_at {
+        ensure!(expiry > u64::from(clock.unix_time_secs()?), "media_expired");
+    }
+    fetch_sticker_source_async(
+        &descriptor.url,
+        &descriptor.expected_md5,
+        Some(descriptor.expected_bytes),
+        http,
+        &mut progress,
+    )
+    .await
+}
+
+/// Asynchronously fetch a sticker original whose metadata has no advertised
+/// length, enforcing the same host, size, MD5, and image checks.
+///
+/// The caller's [`HttpTransport`] must not follow HTTP redirects and is
+/// responsible for network/SSRF boundaries.
+pub async fn fetch_sticker_original_async(
+    url: &str,
+    expected_md5: &str,
+    http: &dyn HttpTransport,
+    progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+) -> Result<(Vec<u8>, ImageInspection)> {
+    fetch_sticker_source_async(url, expected_md5, None, http, progress).await
+}
+
+async fn fetch_sticker_source_async(
+    url: &str,
+    expected_md5: &str,
+    expected_bytes: Option<u64>,
+    http: &dyn HttpTransport,
+    mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+) -> Result<(Vec<u8>, ImageInspection)> {
+    let url = validate_sticker_url(url)?;
+    ensure!(
+        expected_md5.len() == 32 && expected_md5.bytes().all(|b| b.is_ascii_hexdigit()),
+        "sticker_metadata_invalid"
+    );
+    progress(0, expected_bytes)?;
+    let response = http
+        .send(HttpRequest {
+            method: HttpMethod::Get,
+            url,
+            headers: vec![("Accept-Encoding".into(), "identity".into())],
+            body: Vec::new(),
+            timeout: Duration::from_secs(20),
+            max_response_bytes: 16 * 1024 * 1024,
+        })
+        .await
+        .map_err(|error| {
+            if crate::transport::find_transport_error(&error)
+                == Some(crate::transport::TransportError::ResponseTooLarge)
+            {
+                anyhow::anyhow!("sticker_response_too_large")
+            } else {
+                anyhow::anyhow!("sticker_fetch_failed")
+            }
+        })?;
+    ensure!(
+        response.status == 200,
+        "sticker_http_status_{}",
+        response.status
+    );
+    ensure!(
+        response
+            .header_values("content-encoding")
+            .into_iter()
+            .all(|v| v.trim().eq_ignore_ascii_case("identity")),
+        "sticker_content_encoding_refused"
+    );
+    let content_length = response
+        .content_length()
+        .map_err(|_| anyhow::anyhow!("sticker_fetch_failed"))?;
+    if let Some(length) = content_length {
+        ensure!(length <= 16 * 1024 * 1024, "sticker_response_too_large");
+    }
+    ensure!(
+        response.body.len() <= 16 * 1024 * 1024,
+        "sticker_response_too_large"
+    );
+    ensure!(
+        content_length.is_none_or(|length| response.body.len() as u64 == length),
+        "media_integrity_failed"
+    );
+    progress(response.body.len() as u64, expected_bytes)?;
+    ensure!(
+        expected_bytes.is_none_or(|length| response.body.len() as u64 == length)
+            && hex::encode(crate::crypto::md5(&response.body)).eq_ignore_ascii_case(expected_md5),
+        "media_integrity_failed"
+    );
+    let inspection = inspect_image(&response.body)?;
+    Ok((response.body, inspection))
 }
 #[cfg(not(target_arch = "wasm32"))]
 fn fetch_sticker_source(
@@ -261,5 +374,99 @@ mod tests {
         for ip in ["127.0.0.1", "10.0.0.1", "::1", "2001:db8::1"] {
             assert!(!public_ip(ip.parse().unwrap()));
         }
+    }
+
+    #[tokio::test]
+    async fn async_sticker_download_checks_expiry_md5_status_and_original() {
+        let png = hex::decode("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c63606060f80f00010401005fe5c34b0000000049454e44ae426082").unwrap();
+        let md5_hex = hex::encode(crate::crypto::md5(&png));
+        struct FixedClock(u64);
+        impl Clock for FixedClock {
+            fn monotonic_ms(&self) -> u64 {
+                0
+            }
+            fn unix_time_ms(&self) -> Result<u64> {
+                Ok(self.0 * 1000)
+            }
+        }
+        struct StaticHttp(crate::transport::HttpResponse);
+        impl HttpTransport for StaticHttp {
+            fn send<'a>(
+                &'a self,
+                _req: HttpRequest,
+            ) -> crate::transport::TransportFuture<'a, Result<crate::transport::HttpResponse>>
+            {
+                let resp = self.0.clone();
+                Box::pin(async move { Ok(resp) })
+            }
+        }
+        let desc = StickerDescriptor {
+            url: "https://snsvideo.c2c.wechat.com/sticker".into(),
+            expected_bytes: png.len() as u64,
+            expected_md5: md5_hex.clone(),
+            expires_at: Some(2_000_000_000),
+        };
+        let ok_http = StaticHttp(crate::transport::HttpResponse {
+            status: 200,
+            headers: vec![("Content-Length".into(), png.len().to_string())],
+            body: png.clone(),
+        });
+        let (bytes, info) =
+            fetch_sticker_async(&desc, &ok_http, &FixedClock(1_700_000_000), |_, _| Ok(()))
+                .await
+                .unwrap();
+        assert_eq!(bytes, png);
+        assert_eq!(info.content_type, "image/png");
+
+        let (orig, _) = fetch_sticker_original_async(
+            "http://vweixinf.tc.qq.com/275/20304/stodownload?m=1",
+            &md5_hex,
+            &ok_http,
+            |_, _| Ok(()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(orig, png);
+
+        assert_eq!(
+            fetch_sticker_async(&desc, &ok_http, &FixedClock(2_000_000_000), |_, _| Ok(()))
+                .await
+                .unwrap_err()
+                .to_string(),
+            "media_expired"
+        );
+
+        let err_http = StaticHttp(crate::transport::HttpResponse {
+            status: 404,
+            headers: vec![],
+            body: vec![],
+        });
+        assert_eq!(
+            fetch_sticker_async(&desc, &err_http, &FixedClock(1_700_000_000), |_, _| Ok(()))
+                .await
+                .unwrap_err()
+                .to_string(),
+            "sticker_http_status_404"
+        );
+
+        struct TooLargeHttp;
+        impl HttpTransport for TooLargeHttp {
+            fn send<'a>(
+                &'a self,
+                _req: HttpRequest,
+            ) -> crate::transport::TransportFuture<'a, Result<crate::transport::HttpResponse>>
+            {
+                Box::pin(async { Err(crate::transport::TransportError::ResponseTooLarge.into()) })
+            }
+        }
+        assert_eq!(
+            fetch_sticker_async(&desc, &TooLargeHttp, &FixedClock(1_700_000_000), |_, _| Ok(
+                ()
+            ))
+            .await
+            .unwrap_err()
+            .to_string(),
+            "sticker_response_too_large"
+        );
     }
 }

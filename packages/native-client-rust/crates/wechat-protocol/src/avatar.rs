@@ -21,6 +21,8 @@ pub fn validate_avatar_url(value: &str) -> Result<url::Url> {
     );
     Ok(u)
 }
+// Legacy blocking downloader kept for 3.x native compatibility (#701).
+// Prefer `download_advertised_avatar_async` over `HttpTransport` for new code.
 /// Download one contact avatar from a validated WeChat avatar host without redirects.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn download_advertised_avatar(value: &str) -> Result<Vec<u8>> {
@@ -82,6 +84,64 @@ pub fn download_advertised_avatar(value: &str) -> Result<Vec<u8>> {
     );
     Ok(bytes)
 }
+
+/// Asynchronously download one contact avatar from a validated WeChat avatar
+/// host using a pluggable [`HttpTransport`].
+///
+/// The URL is validated against the WeChat avatar host allowlist before sending.
+/// The caller's [`HttpTransport`] must not follow HTTP redirects and is
+/// responsible for network/SSRF boundaries.
+pub async fn download_advertised_avatar_async(
+    value: &str,
+    http: &dyn HttpTransport,
+) -> Result<Vec<u8>> {
+    let url = validate_avatar_url(value)?;
+    let response = http
+        .send(HttpRequest {
+            method: HttpMethod::Get,
+            url,
+            headers: vec![("Accept-Encoding".into(), "identity".into())],
+            body: Vec::new(),
+            timeout: Duration::from_secs(20),
+            max_response_bytes: 8 * 1024 * 1024,
+        })
+        .await
+        .map_err(|error| {
+            if crate::transport::find_transport_error(&error)
+                == Some(crate::transport::TransportError::ResponseTooLarge)
+            {
+                anyhow::anyhow!("avatar_size_limit")
+            } else {
+                anyhow::anyhow!("avatar_fetch_failed")
+            }
+        })?;
+    ensure!(response.status == 200, "avatar_fetch_failed");
+    let content_length = response
+        .content_length()
+        .map_err(|_| anyhow::anyhow!("avatar_fetch_failed"))?;
+    ensure!(
+        content_length.is_none_or(|n| n <= 8 * 1024 * 1024),
+        "avatar_size_limit"
+    );
+    ensure!(
+        response
+            .header_values("content-encoding")
+            .into_iter()
+            .all(|v| v.trim().eq_ignore_ascii_case("identity")),
+        "avatar_content_encoding_refused"
+    );
+    ensure!(response.body.len() <= 8 * 1024 * 1024, "avatar_size_limit");
+    ensure!(
+        content_length.is_none_or(|n| n == response.body.len() as u64),
+        "avatar_fetch_failed"
+    );
+    let inspect = inspect_image(&response.body)?;
+    ensure!(
+        ["image/jpeg", "image/png"].contains(&inspect.content_type.as_str()),
+        "avatar_format_unsupported"
+    );
+    Ok(response.body)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,5 +159,94 @@ mod tests {
         ] {
             assert!(validate_avatar_url(url).is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn async_avatar_download_checks_status_encoding_size_and_format() {
+        let png = hex::decode("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c63606060f80f00010401005fe5c34b0000000049454e44ae426082").unwrap();
+        struct StaticHttp(crate::transport::HttpResponse);
+        impl HttpTransport for StaticHttp {
+            fn send<'a>(
+                &'a self,
+                req: HttpRequest,
+            ) -> crate::transport::TransportFuture<'a, Result<crate::transport::HttpResponse>>
+            {
+                assert_eq!(req.method, HttpMethod::Get);
+                assert_eq!(req.url.host_str(), Some("wx.qlogo.cn"));
+                let resp = self.0.clone();
+                Box::pin(async move { Ok(resp) })
+            }
+        }
+        let ok_http = StaticHttp(crate::transport::HttpResponse {
+            status: 200,
+            headers: vec![("Content-Length".into(), png.len().to_string())],
+            body: png.clone(),
+        });
+        assert_eq!(
+            download_advertised_avatar_async("https://wx.qlogo.cn/a", &ok_http)
+                .await
+                .unwrap(),
+            png
+        );
+
+        let gzip_http = StaticHttp(crate::transport::HttpResponse {
+            status: 200,
+            headers: vec![("Content-Encoding".into(), "gzip".into())],
+            body: png.clone(),
+        });
+        assert_eq!(
+            download_advertised_avatar_async("https://wx.qlogo.cn/a", &gzip_http)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "avatar_content_encoding_refused"
+        );
+
+        let redirect_http = StaticHttp(crate::transport::HttpResponse {
+            status: 302,
+            headers: vec![("Location".into(), "https://evil.invalid/x".into())],
+            body: vec![],
+        });
+        assert_eq!(
+            download_advertised_avatar_async("https://wx.qlogo.cn/a", &redirect_http)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "avatar_fetch_failed"
+        );
+
+        let gif_http = StaticHttp(crate::transport::HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: hex::decode(
+                "47494638396101000100800000ffffff0000002c00000000010001000002024401003b",
+            )
+            .unwrap(),
+        });
+        assert_eq!(
+            download_advertised_avatar_async("https://wx.qlogo.cn/a", &gif_http)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "avatar_format_unsupported"
+        );
+
+        struct TooLargeHttp;
+        impl HttpTransport for TooLargeHttp {
+            fn send<'a>(
+                &'a self,
+                _req: HttpRequest,
+            ) -> crate::transport::TransportFuture<'a, Result<crate::transport::HttpResponse>>
+            {
+                Box::pin(async { Err(crate::transport::TransportError::ResponseTooLarge.into()) })
+            }
+        }
+        assert_eq!(
+            download_advertised_avatar_async("https://wx.qlogo.cn/a", &TooLargeHttp)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "avatar_size_limit"
+        );
     }
 }

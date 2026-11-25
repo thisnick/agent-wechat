@@ -6,7 +6,7 @@ This repository provides a standalone native WeChat daemon, Rust CLI and OpenCla
 
 | Path | Responsibility |
 | --- | --- |
-| `packages/native-client-rust/` | Protocol, profile, sidecar store, account actors, HTTP daemon and Rust `wx` CLI |
+| `packages/native-client-rust/` | Protocol, profile, sidecar store, account actors, HTTP daemon and Rust `wx` CLI. See `packages/native-client-rust/AGENTS.md` |
 | `packages/shared/` | Private native TypeScript HTTP/SSE SDK and generated Rust contracts |
 | `packages/cli/` | npm `wx` launcher and verified executable installer |
 | `packages/openclaw-extension/` | OpenClaw native hosting, event custody, model handoff and media |
@@ -27,6 +27,7 @@ Native routes/contracts live in `packages/native-client-rust/crates/wechat-api/`
 - Add a changeset for user-facing behavior or package changes. Documentation-only edits do not need one.
 - UI text lives in `packages/client-ui/locales/en.json` and is shown with `t()`; docs are written in English under `docs/src/content/docs/`. Change only the English: translations, `<lang>.meta.json` and `sourceHash` are maintained by translators and the translation bot (see `docs/src/content/docs/reference/translate.mdx`). Run `pnpm i18n check` after changing UI text or docs.
 - Every PR must run `pnpm interfaces` and commit the result; see [Public interfaces](#public-interfaces).
+- For new Rust code in `wechat-protocol` and workspace callers, prefer the pure-Rust crypto backend (`pure-rust-crypto`, `crypto::Curve`, `Ecdh::generate_for`, `Ecdh::from_private_for`, `cbc_encrypt`, `cbc_decrypt`) and async `ProtocolTransport` / `HttpTransport` APIs (`NativeClient::*_async`, `open_push_connection`, `CdnClient::*_async`, `AsyncUploadSource`, `AsyncDownloadSink`, `fetch_*_async`). Do not add new callers or features on the legacy OpenSSL-typed crypto helpers or blocking `std::net` / `reqwest::blocking` backends tracked for retirement in `#701` (SQLCipher in `wechat-profile`/`wechat-store` remains OpenSSL-backed separately). See `packages/native-client-rust/AGENTS.md`.
 - Follow the official client's verified implementation and storage for existing WeChat features. Settled message/contact/group state belongs in the supported official profile; read or derive it there instead of creating a parallel settled-state model in a sidecar. Sidecars may track pending work, raw receipts, deduplication, idempotency and recovery. Keep those operational records separate from canonical state and document why each is needed. An API may derive additional information from existing evidence without persisting a second copy. Treat behavior or retention beyond the official client as a separate proposed feature, state that difference, and obtain user agreement before implementing it. Missing or incomplete analysis is not evidence that extra storage is necessary.
 
 ## Public interfaces
