@@ -1222,14 +1222,15 @@ impl Core {
             self.store.put_runtime(account, receipt, b"1")?;
             return Ok(());
         }
+        let voice_cancelled = message.message_type == 34
+            && incoming_voice
+                .as_ref()
+                .is_some_and(|v| v.cancel_flag == Some(1));
         let voice_streaming = message.message_type == 34
             && incoming_voice
                 .as_ref()
                 .is_some_and(|v| v.end_flag == Some(0) && v.cancel_flag != Some(1));
-        let voice_incomplete = message.message_type == 34
-            && incoming_voice
-                .as_ref()
-                .is_some_and(|v| v.end_flag == Some(0) || v.cancel_flag == Some(1));
+        let voice_incomplete = voice_streaming || voice_cancelled;
         if message.message_type == 34
             && !voice_incomplete
             && !already_finalized_voice
@@ -1279,15 +1280,49 @@ impl Core {
             defer_commit =
                 self.queue_big_xml_expansion(account, &message, body, &sender, &id, origin)?;
         }
+        let streaming_key = streaming_voice_key(&id);
         if voice_streaming && origin != "profile_import" {
-            // Defer `message.committed` until `endflag="1"` (or `cancelflag="1"`)
-            // settles the row, so downstream consumers like OpenClaw do not race
-            // with an incomplete streaming voice stub.
-            defer_commit = true;
+            let now = chrono::Utc::now().timestamp();
+            let recent_for_deferral = origin == "live"
+                || now.saturating_sub(message.created_at as i64) < STREAMING_VOICE_SETTLE_SECS;
+            if recent_for_deferral {
+                // Defer `message.committed` for up to STREAMING_VOICE_SETTLE_SECS while
+                // waiting for `endflag="1"` (or `cancelflag="1"`). If no final update
+                // arrives, `settle_stale_streaming_voices` emits `message.committed`
+                // and exposes any pending asset once the bounded window expires.
+                if let Some(raw) = self.store.runtime(account, &streaming_key)? {
+                    if let Ok(existing) = serde_json::from_slice::<PendingStreamingVoice>(&raw) {
+                        if !existing.settled && now < existing.settle_after {
+                            defer_commit = true;
+                        }
+                    }
+                } else {
+                    let pending = PendingStreamingVoice {
+                        message_id: id.clone(),
+                        thread_id: message.peer.clone(),
+                        origin: origin.to_string(),
+                        direction: if message.outgoing {
+                            "outgoing".into()
+                        } else {
+                            "incoming".into()
+                        },
+                        settle_after: now.saturating_add(STREAMING_VOICE_SETTLE_SECS),
+                        settled: false,
+                    };
+                    self.store.put_runtime(
+                        account,
+                        &streaming_key,
+                        &serde_json::to_vec(&pending)?,
+                    )?;
+                    defer_commit = true;
+                }
+            }
+        } else if message.message_type == 34 {
+            self.store.clear_runtime(account, &streaming_key)?;
         }
         if download_media
             && !defer_commit
-            && !voice_incomplete
+            && !voice_cancelled
             && !already_finalized_voice
             && matches!(message.message_type, 3 | 34 | 43 | 47 | 49)
             && origin != "profile_import"
@@ -1304,6 +1339,89 @@ impl Core {
         self.store.put_runtime(account, receipt, b"1")?;
         Ok(())
     }
+
+    /// Whether a streaming type-34 voice message (`endflag="0"`) is still inside its
+    /// bounded deferral window waiting for a finalized `endflag="1"` update.
+    pub(crate) fn streaming_voice_active(&self, account: &str, message_id: &str) -> Result<bool> {
+        let Some(raw) = self
+            .store
+            .runtime(account, &streaming_voice_key(message_id))?
+        else {
+            return Ok(false);
+        };
+        let Ok(pending) = serde_json::from_slice::<PendingStreamingVoice>(&raw) else {
+            return Ok(false);
+        };
+        Ok(!pending.settled && chrono::Utc::now().timestamp() < pending.settle_after)
+    }
+
+    /// Commit and clear any streaming voice stubs whose bounded wait window expired
+    /// without a finalized `endflag="1"` or `cancelflag="1"` update.
+    pub(crate) fn settle_stale_streaming_voices(&self, account: &str, now: i64) -> Result<usize> {
+        let entries = self
+            .store
+            .runtime_prefix(account, STREAMING_VOICE_PREFIX, 100)?;
+        let mut settled = 0usize;
+        for (key, raw) in entries {
+            let Ok(mut pending) = serde_json::from_slice::<PendingStreamingVoice>(&raw) else {
+                self.store.clear_runtime(account, &key)?;
+                continue;
+            };
+            if now < pending.settle_after {
+                continue;
+            }
+            let still_voice = crate::source_message_id(&pending.message_id)
+                .ok()
+                .and_then(|source| {
+                    let reader = self.profile_reader(account).ok()?;
+                    let own = self.profile_username(account).ok().flatten();
+                    reader.message(&source, own.as_deref()).ok()
+                })
+                .is_some_and(|msg| msg.message_type == 34);
+            if still_voice {
+                if !pending.settled {
+                    pending.settled = true;
+                    self.store
+                        .put_runtime(account, &key, &serde_json::to_vec(&pending)?)?;
+                }
+                let _ = self.queue_received_media(account, &pending.message_id);
+                self.store.append_event_once(
+                    account,
+                    &format!("message:{}", pending.message_id),
+                    "message.committed",
+                    &json!({
+                        "messageId": pending.message_id,
+                        "threadId": pending.thread_id,
+                        "origin": pending.origin,
+                        "direction": pending.direction,
+                    }),
+                )?;
+                settled += 1;
+            }
+            self.store.clear_runtime(account, &key)?;
+        }
+        Ok(settled)
+    }
+}
+
+/// Bounded grace window (seconds) to wait for a streaming voice message (`endflag="0"`)
+/// to settle with `endflag="1"` or `cancelflag="1"` before announcing it anyway.
+const STREAMING_VOICE_SETTLE_SECS: i64 = 90;
+const STREAMING_VOICE_PREFIX: &str = "streaming-voice:";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PendingStreamingVoice {
+    message_id: String,
+    thread_id: String,
+    origin: String,
+    direction: String,
+    settle_after: i64,
+    #[serde(default)]
+    settled: bool,
+}
+
+fn streaming_voice_key(message_id: &str) -> String {
+    format!("{STREAMING_VOICE_PREFIX}{message_id}")
 }
 #[cfg(test)]
 mod tests {
@@ -4210,5 +4328,118 @@ mod automatic_voice_tests {
             .as_deref()
             .unwrap()
             .contains("length='18432'"));
+    }
+
+    #[test]
+    fn stale_streaming_voice_settles_after_bounded_delay_and_old_catchup_commits_immediately() {
+        let (_temporary, store, core) = fixture();
+        // Live streaming voice whose final endflag="1" never arrives.
+        let stalled = add(
+            34,
+            "peer",
+            "synthetic_self",
+            b"<msg><voicemsg voiceformat='4' length='4096' voicelength='1500' endflag='0'/></msg>",
+            260,
+            100,
+        );
+        core.apply_received_sync_command("one", &stalled, "voice-stalled-0", "live")
+            .unwrap();
+        let now = chrono::Utc::now().timestamp();
+        assert_eq!(core.settle_stale_streaming_voices("one", now).unwrap(), 0);
+        assert!(!store
+            .events("one", 0, 200)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "message.committed"));
+
+        // Once the bounded 90-second window passes, settlement emits `message.committed`,
+        // queues auto-download, exposes pending assets, and removes the marker.
+        assert_eq!(
+            core.settle_stale_streaming_voices("one", now + STREAMING_VOICE_SETTLE_SECS + 1)
+                .unwrap(),
+            1
+        );
+        assert!(store
+            .events("one", 0, 200)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "message.committed"));
+        let queued = store.runtime_prefix("one", "received-voice:", 100).unwrap();
+        assert_eq!(queued.len(), 1);
+        let msg_id = core.messages("one", "peer", Some(10), None).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["serverId"].as_str() == Some("260"))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let assets = core.media_assets("one", &msg_id).unwrap();
+        assert_eq!(assets.len(), 2);
+        assert!(assets.iter().all(|a| a.state == "pending"));
+        assert!(store
+            .runtime_prefix("one", STREAMING_VOICE_PREFIX, 100)
+            .unwrap()
+            .is_empty());
+
+        // A zero-length stalled streaming voice settles cleanly with message.committed and no assets.
+        let zero_stalled = add(
+            34,
+            "peer",
+            "synthetic_self",
+            b"<msg><voicemsg voiceformat='4' length='0' voicelength='0' endflag='0'/></msg>",
+            261,
+            101,
+        );
+        core.apply_received_sync_command("one", &zero_stalled, "voice-stalled-zero", "live")
+            .unwrap();
+        assert_eq!(
+            core.settle_stale_streaming_voices("one", now + STREAMING_VOICE_SETTLE_SECS + 1)
+                .unwrap(),
+            1
+        );
+        let zero_msg_id = core.messages("one", "peer", Some(10), None).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["serverId"].as_str() == Some("261"))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(core.media_assets("one", &zero_msg_id).unwrap().is_empty());
+
+        // An already-old endflag="0" message arriving on catchup commits immediately without waiting.
+        let old_catchup = add(
+            34,
+            "peer",
+            "synthetic_self",
+            b"<msg><voicemsg voiceformat='4' length='2048' voicelength='900' endflag='0'/></msg>",
+            262,
+            102,
+        );
+        core.apply_received_sync_command("one", &old_catchup, "voice-old-catchup", "catchup")
+            .unwrap();
+        assert!(store
+            .runtime_prefix("one", STREAMING_VOICE_PREFIX, 100)
+            .unwrap()
+            .is_empty());
+        let catchup_msg_id = core.messages("one", "peer", Some(10), None).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["serverId"].as_str() == Some("262"))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(store
+            .events("one", 0, 200)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "message.committed"
+                && e.data["messageId"].as_str() == Some(catchup_msg_id.as_str())));
+        assert_eq!(core.media_assets("one", &catchup_msg_id).unwrap().len(), 2);
     }
 }

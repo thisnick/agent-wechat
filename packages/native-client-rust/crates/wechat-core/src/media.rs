@@ -1071,6 +1071,10 @@ impl Core {
             // Embedded subtype belongs to the quote, not the outer reply.
             quoted.local_type = kind.to_string();
             discover(&quoted, content)?
+        } else if msg.message_type == 34 && self.streaming_voice_active(account, message_id)? {
+            // In-progress streaming voice note (endflag="0") within its bounded settle
+            // window: wait for endflag="1" (or fallback settlement) before creating assets.
+            vec![]
         } else {
             discover(&msg, content)?
         };
@@ -1777,8 +1781,15 @@ impl Core {
     }
     fn progress_media(&self, account: &str, id: &str, done: u64, total: Option<u64>) -> Result<()> {
         let mut row = self.active_media_job(account, id)?;
-        row.data["completedBytes"] = done.into();
-        row.data["totalBytes"] = total.into();
+        let completed = serde_json::Value::from(done);
+        let total_value = serde_json::Value::from(total);
+        if row.data.get("completedBytes") == Some(&completed)
+            && row.data.get("totalBytes") == Some(&total_value)
+        {
+            return Ok(());
+        }
+        row.data["completedBytes"] = completed;
+        row.data["totalBytes"] = total_value;
         self.store.save_media_job(account, &row)?;
         Ok(())
     }
@@ -2475,6 +2486,25 @@ impl Core {
                     voice::normalize_encoded_voice(bytes, voice_format)
                 };
                 let detected = voice::detect_voice_format(&bytes, voice_format);
+                // Validate known container framing and reject early-EOF unknown payloads
+                // before decoding or persisting into write-once `VoiceInfo` on both the
+                // Normal (WAV) and Encoded paths.
+                voice::validate_encoded_voice(&bytes, voice_format, early_eof, from_profile)
+                    .map_err(|error| {
+                        let reason = classify_error(&error);
+                        error.context(voice::VoiceDownloadFailure {
+                            stage: "validate",
+                            transport,
+                            cdn_fallback,
+                            advertised_bytes: length,
+                            received_bytes: bytes.len(),
+                            chunk_count,
+                            offset_mismatch,
+                            voice_format,
+                            detected_format: detected.as_str(),
+                            reason,
+                        })
+                    })?;
                 if as_wav {
                     let wav = voice::decode_voice_to_wav(&bytes, voice_format, || {
                         self.active_media_job(account, id)?;
@@ -2515,25 +2545,7 @@ impl Core {
                     )
                 } else {
                     // Match official clients: store raw encoded voice bytes without
-                    // requiring SILK decoding on `--quality encoded`, while checking
-                    // known container framing and rejecting early-EOF unknown payloads
-                    // before persisting into write-once `VoiceInfo`.
-                    voice::validate_encoded_voice(&bytes, voice_format, early_eof, from_profile)
-                        .map_err(|error| {
-                            let reason = classify_error(&error);
-                            error.context(voice::VoiceDownloadFailure {
-                                stage: "validate",
-                                transport,
-                                cdn_fallback,
-                                advertised_bytes: length,
-                                received_bytes: bytes.len(),
-                                chunk_count,
-                                offset_mismatch,
-                                voice_format,
-                                detected_format: detected.as_str(),
-                                reason,
-                            })
-                        })?;
+                    // requiring SILK decoding on `--quality encoded`.
                     official_writeback =
                         Some(self.project_received_voice(account, id, &asset, &bytes));
                     (
@@ -2975,7 +2987,7 @@ pub(crate) fn classify_error(error: &anyhow::Error) -> String {
         if is_media_auth_rejected(error) {
             return "auth_required".into();
         }
-        if stage == "http" && (500..600).contains(&code) {
+        if stage == "http" && matches!(code, 408 | 429 | 500..=599) {
             return "transport_unavailable".into();
         }
         if stage.starts_with("channels") {
@@ -3618,12 +3630,14 @@ fn discover(msg: &wechat_profile::Message, content: &str) -> Result<Vec<Discover
         }
         34 => {
             let n = element("voicemsg")?;
-            if number(n.attribute("cancelflag")) == Some(1)
-                || number(n.attribute("endflag")) == Some(0)
+            if number(n.attribute("cancelflag")) == Some(1) {
+                // Cancelled recordings have no downloadable audio.
+                return Ok(vec![]);
+            }
+            if number(n.attribute("endflag")) == Some(0)
+                && number(n.attribute("length")).unwrap_or(0) == 0
             {
-                // Cancelled recordings have no downloadable audio, and in-progress
-                // streaming voice uploads (endflag="0") are not downloadable until
-                // finalized with endflag="1".
+                // A zero-length streaming stub has no downloadable bytes yet.
                 return Ok(vec![]);
             }
             let length = u32::try_from(
@@ -6456,6 +6470,39 @@ mod tests {
         }
     }
     #[test]
+    fn progress_media_skips_redundant_writes_while_enforcing_fences() {
+        let (_dir, core) = test_core();
+        let mut plan = file_plan();
+        initialize_file_upload_ids(&mut plan, MAX_SOURCE_BYTES).unwrap();
+        let id = "progress-dedupe";
+        plan_job(&core, id, &plan);
+
+        core.progress_media("one", id, 65_536, Some(131_072))
+            .unwrap();
+        let first = core.store.media_job("one", id).unwrap();
+        assert_eq!(first.data["completedBytes"], 65_536);
+        assert_eq!(first.data["totalBytes"], 131_072);
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        core.progress_media("one", id, 65_536, Some(131_072))
+            .unwrap();
+        let unchanged = core.store.media_job("one", id).unwrap();
+        assert_eq!(unchanged.updated_at, first.updated_at);
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        core.progress_media("one", id, 131_072, Some(131_072))
+            .unwrap();
+        let advanced = core.store.media_job("one", id).unwrap();
+        assert_eq!(advanced.data["completedBytes"], 131_072);
+        assert_ne!(advanced.updated_at, first.updated_at);
+
+        core.store.cancel_media_job("one", id).unwrap();
+        let err = core
+            .progress_media("one", id, 131_072, Some(131_072))
+            .unwrap_err();
+        assert!(err.to_string().contains("media_cancelled"), "{err:#}");
+    }
+    #[test]
     fn logout_during_reservation_retains_receipt_and_blocks_transfer() {
         let (_dir, core) = test_core();
         let mut plan = file_plan();
@@ -7619,10 +7666,12 @@ mod tests {
         assert_eq!(classify_error(&expired_auth), "auth_required");
         let denied = anyhow::anyhow!("CDN HTTP status 403");
         assert_eq!(classify_error(&denied), "media_service_rejected");
-        assert_eq!(
-            classify_error(&anyhow::anyhow!("CDN HTTP status 503")),
-            "transport_unavailable"
-        );
+        for status in [408, 429, 503] {
+            assert_eq!(
+                classify_error(&anyhow::anyhow!("CDN HTTP status {status}")),
+                "transport_unavailable"
+            );
+        }
         // Message text alone is not a service diagnostic.
         assert!(service_diagnostic(&anyhow::anyhow!("CDN bootstrap returned -13")).is_none());
         assert!(service_diagnostic(&anyhow::anyhow!(

@@ -936,4 +936,77 @@ mod tests {
         let job_a = core_a.store.media_job("one", "job-cdn-auth").unwrap();
         assert_eq!(job_a.error_code.as_deref(), Some("auth_required"));
     }
+
+    #[test]
+    fn truncated_opus_on_normal_variant_fails_validation_without_poisoning_voice_info() {
+        let opus = sample_opus_raw_v1();
+        let truncated = opus[..opus.len() - 3].to_vec();
+        let advertised = opus.len() as u32;
+        let xml = format!(
+            "<msg><voicemsg voiceformat='7' length='{advertised}' voicelength='100' endflag='1'/></msg>"
+        );
+        // First attempt returns truncated Opus followed by 3 empty chunks (early EOF).
+        // Second attempt returns the complete Opus stream.
+        let empty = || {
+            Ok(wechat_protocol::wire::VoiceChunk {
+                offset: truncated.len() as u32,
+                next_offset: truncated.len() as u32,
+                total_length: advertised,
+                complete: false,
+                bytes: vec![],
+                echoed_server_id: None,
+                offset_matches: true,
+            })
+        };
+        let upstream = Arc::new(VoiceTestUpstream::new(vec![
+            Ok(wechat_protocol::wire::VoiceChunk {
+                offset: 0,
+                next_offset: truncated.len() as u32,
+                total_length: advertised,
+                complete: false,
+                bytes: truncated.clone(),
+                echoed_server_id: None,
+                offset_matches: true,
+            }),
+            empty(),
+            empty(),
+            empty(),
+            Ok(wechat_protocol::wire::VoiceChunk {
+                offset: 0,
+                next_offset: opus.len() as u32,
+                total_length: advertised,
+                complete: true,
+                bytes: opus.clone(),
+                echoed_server_id: None,
+                offset_matches: true,
+            }),
+        ]));
+        let (_dir, core, _msg_id, assets) = voice_fixture(upstream, &xml, "9001008");
+        let normal = assets
+            .iter()
+            .find(|a| a.variant == MediaVariant::Normal)
+            .unwrap();
+        let encoded = assets
+            .iter()
+            .find(|a| a.variant == MediaVariant::Encoded)
+            .unwrap();
+
+        assert!(run_download(&core, &normal.id, "job-trunc-normal").is_err());
+        let failed = core.store.media_job("one", "job-trunc-normal").unwrap();
+        assert_eq!(failed.error_code.as_deref(), Some("media_integrity_failed"));
+        assert_eq!(
+            failed.data["result"]["voiceDownloadFailure"]["stage"],
+            "validate"
+        );
+        // Write-once VoiceInfo must remain empty after the truncated attempt.
+        assert!(core.profile_voice_for("one", normal).is_none());
+
+        // A retry with complete bytes now succeeds on Normal and populates VoiceInfo
+        // cleanly for Encoded readback as well.
+        run_download(&core, &normal.id, "job-complete-normal").unwrap();
+        let wav = core.media_content("one", &normal.id).unwrap();
+        assert_eq!(&wav.bytes[..4], b"RIFF");
+        run_download(&core, &encoded.id, "job-complete-encoded").unwrap();
+        assert_eq!(core.media_content("one", &encoded.id).unwrap().bytes, opus);
+    }
 }
