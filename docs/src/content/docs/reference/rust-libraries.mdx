@@ -167,6 +167,7 @@ The high-level `client.calls()` facade is unfinished. Use the
 
 - Use `NativeClient::with_transport` for async login (`start_qr_login_async`, `poll_login_async`, `complete_login_async`).
 - Use `NativeClient::from_account_with_transport` for async account RPCs and `open_push_connection` (`AsyncPushConnection`).
+- Use `media::CdnClient` async methods (`download_async`, `download_to_with_progress_async`, `download_voice_with_progress_async`, `upload_async`, `upload_source_with_progress_async`, `upload_image_async`, `upload_video_async`, `upload_large_file_with_progress_async`, `upload_large_file_from_source_with_progress_async`), streaming `AsyncDownloadSink` / `AsyncUploadSource` (`PreparedAsyncUpload`), and async standalone downloaders (`download_advertised_avatar_async`, `fetch_sticker_async`, `fetch_link_thumbnail_async`, `fetch_tp_media_async`, `fetch_tp_media_to_async`, `fetch_channels_video_async`) over any `HttpTransport` and `Clock`.
 - On `wasm32-unknown-unknown`, `wechat-media` and `wechat-protocol` (`default-features = false, features = ["pure-rust-crypto"]`) omit OS sockets, `reqwest`, and native media tools automatically. In the application crate, configure a `getrandom` 0.4 backend (for browsers, add `getrandom = { version = "0.4", features = ["wasm_js"] }` and build with `RUSTFLAGS='--cfg getrandom_backend="wasm_js"'`).
 
 ## Profile writes

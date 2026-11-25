@@ -6,24 +6,18 @@
 //! message's 16-byte `aeskey` (or `tpthumbaeskey`). The server caps single responses at 512 KiB
 //! and returns `206 Partial Content`, so transfers loop over contiguous byte ranges and decrypt
 //! directly into a streaming sink.
-use super::MediaQuality;
-#[cfg(not(target_arch = "wasm32"))]
 use super::{
-    DownloadReceipt, DownloadedMedia, MAX_CDN_TRANSFER_BYTES, MAX_LARGE_FILE_BYTES,
-    MAX_VIDEO_DOWNLOAD_BYTES,
+    AsyncDownloadSink, DownloadReceipt, DownloadedMedia, MediaQuality, MAX_CDN_TRANSFER_BYTES,
+    MAX_LARGE_FILE_BYTES, MAX_VIDEO_DOWNLOAD_BYTES,
 };
-#[cfg(not(target_arch = "wasm32"))]
 use crate::crypto::{Aes128EcbDecryptor, Md5Hasher, Sha256Hasher};
-#[cfg(not(target_arch = "wasm32"))]
-use anyhow::bail;
-use anyhow::{ensure, Result};
+use crate::transport::{Clock, HttpMethod, HttpRequest, HttpTransport};
+use anyhow::{bail, ensure, Result};
 use serde::{Deserialize, Serialize};
 use std::{fmt, time::Duration};
 #[cfg(not(target_arch = "wasm32"))]
 use std::{io::Read, net::SocketAddr};
-use zeroize::Zeroize;
-#[cfg(not(target_arch = "wasm32"))]
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Approved Enterprise WeChat (WeCom) media download hosts.
 pub const TP_MEDIA_HOSTS: &[&str] = &["wwfile.work.weixin.qq.com"];
@@ -135,7 +129,271 @@ pub fn fetch_tp_media_to(
     fetch_tp_media_at(url, address, descriptor, progress, sink)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+/// Asynchronously download and decrypt an Enterprise WeChat media object into
+/// memory using a pluggable [`HttpTransport`] and [`Clock`].
+///
+/// The caller's [`HttpTransport`] must not follow HTTP redirects and is
+/// responsible for network/SSRF boundaries.
+pub async fn fetch_tp_media_async(
+    descriptor: &TpMediaDescriptor,
+    http: &dyn HttpTransport,
+    clock: &dyn Clock,
+    progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+) -> Result<DownloadedMedia> {
+    let mut bytes = Vec::new();
+    let receipt = fetch_tp_media_to_async(descriptor, http, clock, progress, &mut bytes).await?;
+    Ok(DownloadedMedia::from_receipt(receipt, bytes))
+}
+
+/// Asynchronously download and decrypt an Enterprise WeChat media object
+/// directly into `sink`, verifying range framing, PKCS#7 padding, size limits,
+/// and any advertised length or MD5 digest. Until this returns `Ok`, bytes
+/// written to `sink` are unverified and must be discarded on error.
+///
+/// The caller's [`HttpTransport`] must not follow HTTP redirects and is
+/// responsible for network/SSRF boundaries.
+pub async fn fetch_tp_media_to_async(
+    descriptor: &TpMediaDescriptor,
+    http: &dyn HttpTransport,
+    clock: &dyn Clock,
+    mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+    sink: &mut (impl AsyncDownloadSink + ?Sized),
+) -> Result<DownloadReceipt> {
+    let url = validate_tp_media_url(&descriptor.url)?;
+    validate_tp_auth_key(&descriptor.auth_key)?;
+    ensure!(descriptor.aes_key.len() == 16, "media_metadata_invalid");
+    if let Some(expected) = descriptor.expected_md5.as_deref() {
+        ensure!(
+            expected.len() == 32 && expected.bytes().all(|b| b.is_ascii_hexdigit()),
+            "media_metadata_invalid"
+        );
+    }
+    if let Some(expiry) = descriptor.expires_at {
+        ensure!(expiry > u64::from(clock.unix_time_secs()?), "media_expired");
+    }
+    let limit = plaintext_limit(descriptor.quality);
+    let max_ciphertext_limit = (limit / 16 + 1) * 16;
+    let expected_ciphertext = if let Some(expected) = descriptor.expected_bytes {
+        ensure!(expected <= limit as u64, "tp_media_size_limit");
+        if descriptor.strict_size {
+            ensure!(expected > 0, "media_metadata_invalid");
+            let expected_usize =
+                usize::try_from(expected).map_err(|_| anyhow::anyhow!("tp_media_size_limit"))?;
+            Some((expected_usize / 16 + 1) * 16)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let ciphertext_limit = expected_ciphertext.unwrap_or(max_ciphertext_limit);
+    let check_total = |size: usize| -> Result<()> {
+        ensure!(
+            size > 0 && size.is_multiple_of(16),
+            "media_integrity_failed"
+        );
+        ensure!(size <= max_ciphertext_limit, "tp_media_size_limit");
+        if let Some(expected) = expected_ciphertext {
+            ensure!(size == expected, "Advertised media size mismatch");
+        }
+        Ok(())
+    };
+
+    let mut decryptor = Aes128EcbDecryptor::new(&descriptor.aes_key)?;
+    let mut plain = Zeroizing::new(vec![0u8; TP_READ_STEP + 16]);
+    let mut plaintext_bytes = 0usize;
+    let mut plaintext_md5 = Md5Hasher::new()?;
+    let mut plaintext_sha256 = Sha256Hasher::new()?;
+
+    let mut position = 0usize;
+    let mut total = 0usize;
+    let max_chunks = ciphertext_limit
+        .div_ceil(TP_MIN_CHUNK_BYTES)
+        .clamp(16, TP_MAX_CHUNKS);
+
+    for _ in 0..max_chunks {
+        progress(
+            position as u64,
+            if total == 0 { None } else { Some(total as u64) },
+        )?;
+        let requested_end = if total == 0 {
+            TP_CHUNK_BYTES - 1
+        } else {
+            (total - 1).min(position + TP_CHUNK_BYTES - 1)
+        };
+        let max_response_bytes = if position == 0 {
+            ciphertext_limit.max(TP_CHUNK_BYTES)
+        } else {
+            TP_CHUNK_BYTES
+        };
+        let response = http
+            .send(HttpRequest {
+                method: HttpMethod::Get,
+                url: url.clone(),
+                headers: vec![
+                    ("Accept-Encoding".into(), "identity".into()),
+                    ("User-Agent".into(), TP_USER_AGENT.into()),
+                    ("authkey".into(), descriptor.auth_key.clone()),
+                    ("Range".into(), format!("bytes={position}-{requested_end}")),
+                ],
+                body: Vec::new(),
+                timeout: TP_CHUNK_TIMEOUT,
+                max_response_bytes,
+            })
+            .await
+            .map_err(|error| {
+                if crate::transport::find_transport_error(&error)
+                    == Some(crate::transport::TransportError::ResponseTooLarge)
+                {
+                    anyhow::anyhow!("tp_media_size_limit")
+                } else {
+                    anyhow::anyhow!("tp_media_fetch_failed")
+                }
+            })?;
+
+        let status = response.status;
+        if status != 200 && status != 206 {
+            bail!("CDN HTTP status {status}");
+        }
+        for errno in response.header_values("x-errno") {
+            ensure!(errno.trim() == "0", "tp_media_fetch_failed");
+        }
+        for encoding in response.header_values("content-encoding") {
+            ensure!(
+                encoding.trim().eq_ignore_ascii_case("identity"),
+                "tp_media_encoding_refused"
+            );
+        }
+
+        let mut content_range = None;
+        for raw in response.header_values("content-range") {
+            ensure!(content_range.is_none(), "media_integrity_failed");
+            content_range = Some(parse_content_range(raw)?);
+        }
+        let content_length = response
+            .content_length()
+            .map_err(|_| anyhow::anyhow!("media_integrity_failed"))?;
+
+        let (expected_chunk_len, whole_body) = if status == 206 {
+            let (start, end, size) =
+                content_range.ok_or_else(|| anyhow::anyhow!("media_integrity_failed"))?;
+            check_total(size)?;
+            ensure!(
+                start == position && end <= requested_end && (total == 0 || total == size),
+                "media_integrity_failed"
+            );
+            let chunk_len = end - start + 1;
+            if let Some(cl) = content_length {
+                ensure!(cl == chunk_len as u64, "media_integrity_failed");
+            }
+            total = size;
+            (Some(chunk_len), false)
+        } else {
+            ensure!(position == 0, "media_integrity_failed");
+            if let Some((start, end, size)) = content_range {
+                check_total(size)?;
+                ensure!(start == 0 && end + 1 == size, "media_integrity_failed");
+                if let Some(cl) = content_length {
+                    ensure!(cl == size as u64, "media_integrity_failed");
+                }
+                total = size;
+                (Some(size), true)
+            } else if let Some(cl) = content_length {
+                let cl_usize =
+                    usize::try_from(cl).map_err(|_| anyhow::anyhow!("tp_media_size_limit"))?;
+                check_total(cl_usize)?;
+                total = cl_usize;
+                (Some(cl_usize), true)
+            } else {
+                (None, true)
+            }
+        };
+
+        let chunk_received = response.body.len();
+        ensure!(chunk_received > 0, "media_integrity_failed");
+        if let Some(expected) = expected_chunk_len {
+            ensure!(chunk_received == expected, "media_integrity_failed");
+        }
+        let next_pos = position
+            .checked_add(chunk_received)
+            .ok_or_else(|| anyhow::anyhow!("tp_media_size_limit"))?;
+        ensure!(next_pos <= max_ciphertext_limit, "tp_media_size_limit");
+        if let Some(expected) = expected_ciphertext {
+            ensure!(next_pos <= expected, "Advertised media size mismatch");
+        }
+        let mut cursor = position;
+        for slice in response.body.chunks(TP_READ_STEP) {
+            let count = decryptor
+                .update(slice, &mut plain)
+                .map_err(|_| anyhow::anyhow!("media_integrity_failed"))?;
+            plaintext_bytes += count;
+            ensure!(plaintext_bytes <= limit, "tp_media_size_limit");
+            plaintext_md5.update(&plain[..count])?;
+            plaintext_sha256.update(&plain[..count])?;
+            if count > 0 {
+                sink.write_all(&plain[..count]).await?;
+            }
+            cursor += slice.len();
+            progress(
+                cursor as u64,
+                if total == 0 { None } else { Some(total as u64) },
+            )?;
+        }
+
+        position = next_pos;
+        if whole_body {
+            total = position;
+            break;
+        }
+        if position == total {
+            break;
+        }
+        ensure!(chunk_received >= 16, "media_integrity_failed");
+    }
+
+    ensure!(
+        total > 0 && position == total && total.is_multiple_of(16) && total <= ciphertext_limit,
+        "media_integrity_failed"
+    );
+    let count = decryptor
+        .finalize(&mut plain)
+        .map_err(|_| anyhow::anyhow!("media_integrity_failed"))?;
+    plaintext_bytes += count;
+    ensure!(plaintext_bytes > 0, "media_integrity_failed");
+    ensure!(plaintext_bytes <= limit, "tp_media_size_limit");
+    plaintext_md5.update(&plain[..count])?;
+    plaintext_sha256.update(&plain[..count])?;
+    if count > 0 {
+        sink.write_all(&plain[..count]).await?;
+    }
+    sink.flush().await?;
+
+    let size_matches = descriptor
+        .expected_bytes
+        .map(|expected| expected == plaintext_bytes as u64);
+    ensure!(
+        !(descriptor.strict_size && size_matches == Some(false)),
+        "Advertised media size mismatch"
+    );
+    let md5_hex = hex::encode(plaintext_md5.finish()?);
+    if let Some(expected) = descriptor.expected_md5.as_deref() {
+        ensure!(
+            md5_hex.eq_ignore_ascii_case(expected),
+            "Advertised media checksum mismatch"
+        );
+    }
+    let sha256_hex = hex::encode(plaintext_sha256.finish()?);
+    Ok(DownloadReceipt {
+        byte_length: plaintext_bytes as u64,
+        requested_quality: descriptor.quality,
+        substituted_filetype: None,
+        picture_format: None,
+        md5: md5_hex,
+        sha256: sha256_hex,
+        advertised_size_matches: size_matches,
+    })
+}
+
 fn plaintext_limit(quality: MediaQuality) -> usize {
     match quality {
         MediaQuality::LargeFile => MAX_LARGE_FILE_BYTES,
@@ -147,7 +405,6 @@ fn plaintext_limit(quality: MediaQuality) -> usize {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn parse_content_range(value: &str) -> Result<(usize, usize, usize)> {
     let trimmed = value.trim();
     let rest = trimmed
@@ -1131,6 +1388,234 @@ mod tests {
             .unwrap_err()
             .to_string(),
             "media_cancelled"
+        );
+    }
+
+    #[tokio::test]
+    async fn async_tp_media_downloads_ranged_chunks_and_enforces_expiry_and_integrity() {
+        let key = [0x44u8; 16];
+        let plain: Vec<u8> = (0..(TP_CHUNK_BYTES + 1234))
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let ciphertext = encrypt_ecb(&plain, &key);
+        let total = ciphertext.len();
+
+        struct FixedClock(u64);
+        impl Clock for FixedClock {
+            fn monotonic_ms(&self) -> u64 {
+                0
+            }
+            fn unix_time_ms(&self) -> Result<u64> {
+                Ok(self.0 * 1000)
+            }
+        }
+        struct RangedHttp {
+            body: Vec<u8>,
+            ranges_seen: std::sync::Mutex<Vec<String>>,
+        }
+        impl HttpTransport for RangedHttp {
+            fn send<'a>(
+                &'a self,
+                req: HttpRequest,
+            ) -> crate::transport::TransportFuture<'a, Result<crate::transport::HttpResponse>>
+            {
+                let range = req
+                    .headers
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("range"))
+                    .unwrap()
+                    .1
+                    .clone();
+                let auth = req
+                    .headers
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("authkey"))
+                    .unwrap()
+                    .1
+                    .clone();
+                assert_eq!(auth, "0123456789abcdef");
+                self.ranges_seen.lock().unwrap().push(range.clone());
+                let (start, end) = range
+                    .strip_prefix("bytes=")
+                    .unwrap()
+                    .split_once('-')
+                    .unwrap();
+                let start: usize = start.parse().unwrap();
+                let end: usize = end.parse::<usize>().unwrap().min(self.body.len() - 1);
+                let slice = self.body[start..=end].to_vec();
+                let resp = crate::transport::HttpResponse {
+                    status: 206,
+                    headers: vec![
+                        ("X-ErrNo".into(), "0".into()),
+                        (
+                            "Content-Range".into(),
+                            format!("bytes {start}-{end}/{}", self.body.len()),
+                        ),
+                        ("Content-Length".into(), slice.len().to_string()),
+                    ],
+                    body: slice,
+                };
+                Box::pin(async move { Ok(resp) })
+            }
+        }
+
+        let mut desc = synthetic_descriptor(
+            "https://wwfile.work.weixin.qq.com/cgi-bin/download?f=synthetic",
+            &key,
+            MediaQuality::File,
+            Some(plain.len() as u64),
+            Some(hex::encode(crate::crypto::md5(&plain))),
+            true,
+        );
+        desc.expires_at = Some(2_000_000_000);
+        let http = RangedHttp {
+            body: ciphertext,
+            ranges_seen: std::sync::Mutex::new(Vec::new()),
+        };
+        let downloaded =
+            fetch_tp_media_async(&desc, &http, &FixedClock(1_700_000_000), |_, _| Ok(()))
+                .await
+                .unwrap();
+        assert_eq!(downloaded.bytes, plain);
+        assert_eq!(downloaded.md5, hex::encode(crate::crypto::md5(&plain)));
+        assert_eq!(
+            http.ranges_seen.lock().unwrap().len(),
+            total.div_ceil(TP_CHUNK_BYTES)
+        );
+
+        let expired = fetch_tp_media_async(&desc, &http, &FixedClock(2_000_000_000), |_, _| Ok(()))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(expired.to_string(), "media_expired");
+
+        // Custom AsyncDownloadSink receives non-empty decrypted chunks and flush().
+        struct RecordingSink {
+            bytes: Vec<u8>,
+            writes: usize,
+            flushed: bool,
+        }
+        impl AsyncDownloadSink for RecordingSink {
+            fn write_all<'a>(
+                &'a mut self,
+                buf: &'a [u8],
+            ) -> crate::transport::TransportFuture<'a, Result<()>> {
+                assert!(!buf.is_empty(), "sink must not receive empty writes");
+                self.bytes.extend_from_slice(buf);
+                self.writes += 1;
+                Box::pin(std::future::ready(Ok(())))
+            }
+            fn flush<'a>(&'a mut self) -> crate::transport::TransportFuture<'a, Result<()>> {
+                self.flushed = true;
+                Box::pin(std::future::ready(Ok(())))
+            }
+        }
+        let mut sink = RecordingSink {
+            bytes: Vec::new(),
+            writes: 0,
+            flushed: false,
+        };
+        let receipt = fetch_tp_media_to_async(
+            &desc,
+            &http,
+            &FixedClock(1_700_000_000),
+            |_, _| Ok(()),
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        assert_eq!(sink.bytes, plain);
+        assert!(sink.writes > 0 && sink.flushed);
+        assert_eq!(receipt.byte_length, plain.len() as u64);
+
+        // Small strict-size descriptor still gives chunk 0 >= TP_CHUNK_BYTES budget so
+        // 4xx error pages and small strict-size mismatches preserve exact error codes.
+        let small_plain = b"hello world".to_vec();
+        let small_desc = synthetic_descriptor(
+            "https://wwfile.work.weixin.qq.com/cgi-bin/download?f=small",
+            &key,
+            MediaQuality::File,
+            Some(small_plain.len() as u64),
+            Some(hex::encode(crate::crypto::md5(&small_plain))),
+            true,
+        );
+        struct EnforcingHttp(crate::transport::HttpResponse);
+        impl HttpTransport for EnforcingHttp {
+            fn send<'a>(
+                &'a self,
+                req: HttpRequest,
+            ) -> crate::transport::TransportFuture<'a, Result<crate::transport::HttpResponse>>
+            {
+                assert!(req.max_response_bytes >= TP_CHUNK_BYTES);
+                if self.0.body.len() > req.max_response_bytes {
+                    return Box::pin(async {
+                        Err(crate::transport::TransportError::ResponseTooLarge.into())
+                    });
+                }
+                let resp = self.0.clone();
+                Box::pin(async move { Ok(resp) })
+            }
+        }
+        let http_403 = EnforcingHttp(crate::transport::HttpResponse {
+            status: 403,
+            headers: vec![],
+            body: vec![b'x'; 256],
+        });
+        assert_eq!(
+            fetch_tp_media_async(
+                &small_desc,
+                &http_403,
+                &FixedClock(1_700_000_000),
+                |_, _| Ok(())
+            )
+            .await
+            .err()
+            .unwrap()
+            .to_string(),
+            "CDN HTTP status 403"
+        );
+        let mismatch_ct = encrypt_ecb(&[0u8; 64], &key);
+        let http_mismatch = EnforcingHttp(crate::transport::HttpResponse {
+            status: 200,
+            headers: vec![("Content-Length".into(), mismatch_ct.len().to_string())],
+            body: mismatch_ct,
+        });
+        assert_eq!(
+            fetch_tp_media_async(
+                &small_desc,
+                &http_mismatch,
+                &FixedClock(1_700_000_000),
+                |_, _| Ok(())
+            )
+            .await
+            .err()
+            .unwrap()
+            .to_string(),
+            "Advertised media size mismatch"
+        );
+
+        struct TooLargeHttp;
+        impl HttpTransport for TooLargeHttp {
+            fn send<'a>(
+                &'a self,
+                _req: HttpRequest,
+            ) -> crate::transport::TransportFuture<'a, Result<crate::transport::HttpResponse>>
+            {
+                Box::pin(async { Err(crate::transport::TransportError::ResponseTooLarge.into()) })
+            }
+        }
+        assert_eq!(
+            fetch_tp_media_async(
+                &small_desc,
+                &TooLargeHttp,
+                &FixedClock(1_700_000_000),
+                |_, _| Ok(())
+            )
+            .await
+            .err()
+            .unwrap()
+            .to_string(),
+            "tp_media_size_limit"
         );
     }
 }

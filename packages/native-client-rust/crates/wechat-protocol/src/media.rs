@@ -1,7 +1,9 @@
 //! Bounded native CDN transport. This uses the observed HTTP carrier on port 443,
 //! not HTTPS. Media encryption and advertised size/digests are checked separately.
-#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 use crate::errors::{Service, ServiceRejected};
+use crate::transport::{
+    find_transport_error, Clock, HttpMethod, HttpRequest, HttpTransport, TransportError,
+};
 use crate::{
     crypto::{
         aes_128_cbc_encrypt, aes_128_ecb_decrypt, aes_128_ecb_encrypt, md5, random, sha256,
@@ -12,10 +14,14 @@ use crate::{
 use anyhow::{bail, ensure, Result};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap, fmt, io::Read, net::Ipv4Addr, sync::atomic::AtomicUsize, time::Duration,
+    collections::BTreeMap,
+    fmt,
+    net::Ipv4Addr,
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
 };
 #[cfg(not(target_arch = "wasm32"))]
-use std::{net::SocketAddr, sync::atomic::Ordering, time::Instant};
+use std::{io::Read, net::SocketAddr, time::Instant};
 use zeroize::Zeroize;
 pub type CdnFields = BTreeMap<String, Vec<u8>>;
 const MAX_CDN_BODY: usize = 2 * 1024 * 1024;
@@ -53,8 +59,10 @@ mod tp_media;
 pub use tp_media::*;
 #[path = "upload_source.rs"]
 mod upload_source;
-pub use upload_source::PreparedFileUpload;
 use upload_source::UploadRef;
+pub use upload_source::{
+    AsyncDownloadSink, AsyncUploadSource, PreparedAsyncUpload, PreparedFileUpload,
+};
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct CdnLocation {
@@ -549,7 +557,9 @@ pub struct UploadedMedia {
     pub width: Option<u32>,
     pub height: Option<u32>,
 }
+#[cfg(not(target_arch = "wasm32"))]
 const CDN_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(not(target_arch = "wasm32"))]
 const CDN_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 const CDN_RETRY_SLEEP_SLICE: Duration = Duration::from_millis(100);
 const CDN_RETRY_BACKOFFS: [Duration; 4] = [
@@ -757,6 +767,178 @@ impl<'a> CdnSession<'a> {
     }
 }
 
+async fn sleep_with_fence_async(
+    clock: &dyn Clock,
+    delay: Duration,
+    slice: Duration,
+    check_fence: &mut impl FnMut() -> Result<()>,
+) -> Result<()> {
+    if delay.is_zero() {
+        return check_fence();
+    }
+    let slice = slice.max(Duration::from_millis(1));
+    let mut remaining = delay;
+    while !remaining.is_zero() {
+        check_fence()?;
+        let step = remaining.min(slice);
+        let before_ms = clock.monotonic_ms();
+        clock.sleep(step).await;
+        let elapsed = Duration::from_millis(clock.monotonic_ms().saturating_sub(before_ms));
+        remaining = remaining.saturating_sub(step.max(elapsed));
+    }
+    check_fence()
+}
+
+pub(crate) struct AsyncCdnSession<'a> {
+    client: &'a CdnClient,
+    endpoints: Vec<Ipv4Addr>,
+    policy: RetryPolicy,
+    http: &'a dyn HttpTransport,
+    clock: &'a dyn Clock,
+    current_ip: usize,
+    had_success_on_current_ip: bool,
+}
+
+impl<'a> AsyncCdnSession<'a> {
+    fn new(
+        client: &'a CdnClient,
+        endpoints: Vec<Ipv4Addr>,
+        policy: RetryPolicy,
+        http: &'a dyn HttpTransport,
+        clock: &'a dyn Clock,
+    ) -> Self {
+        let current_ip = if endpoints.is_empty() {
+            0
+        } else {
+            client.preferred_ip.load(Ordering::Relaxed) % endpoints.len()
+        };
+        Self {
+            client,
+            endpoints,
+            policy,
+            http,
+            clock,
+            current_ip,
+            had_success_on_current_ip: false,
+        }
+    }
+
+    async fn post_once(
+        &self,
+        ip: Ipv4Addr,
+        path: &str,
+        sequence: u32,
+        body: &[u8],
+    ) -> std::result::Result<CdnFields, PostAttemptError> {
+        let url = url::Url::parse(&format!("http://{ip}:443{path}"))
+            .map_err(|error| PostAttemptError::Fatal(anyhow::Error::new(error)))?;
+        let request = HttpRequest {
+            method: HttpMethod::Post,
+            url,
+            headers: vec![
+                ("Accept".into(), "*/*".into()),
+                ("Content-Type".into(), "application/octet-stream".into()),
+                ("User-Agent".into(), "MicroMessenger Client".into()),
+                ("C-Seq".into(), sequence.to_string()),
+            ],
+            body: body.to_vec(),
+            timeout: self.client.timeout,
+            max_response_bytes: MAX_CDN_BODY,
+        };
+        let response =
+            self.http
+                .send(request)
+                .await
+                .map_err(|error| match find_transport_error(&error) {
+                    Some(TransportError::Disconnected) => PostAttemptError::Retryable {
+                        error,
+                        prefer_failover: true,
+                    },
+                    Some(TransportError::Timeout) => PostAttemptError::Retryable {
+                        error,
+                        prefer_failover: false,
+                    },
+                    Some(TransportError::ResponseTooLarge) | None => PostAttemptError::Fatal(error),
+                })?;
+        let status = response.status;
+        if status != 200 {
+            let error = anyhow::anyhow!("CDN HTTP status {status}");
+            return if is_retryable_http_status(status) {
+                Err(PostAttemptError::Retryable {
+                    error,
+                    prefer_failover: true,
+                })
+            } else {
+                Err(PostAttemptError::Fatal(error))
+            };
+        }
+        if response.body.len() > MAX_CDN_BODY {
+            return Err(PostAttemptError::Fatal(anyhow::anyhow!(
+                "CDN reply exceeds limit"
+            )));
+        }
+        unpack_cdn(&response.body).map_err(PostAttemptError::Fatal)
+    }
+
+    pub(crate) async fn post(
+        &mut self,
+        path: &str,
+        fields: &CdnFields,
+        mut check_fence: impl FnMut() -> Result<()>,
+    ) -> Result<CdnFields> {
+        let sequence = u32::try_from(integer(fields, "seq")?)?;
+        ensure!(sequence != 0, "Invalid CDN sequence");
+        ensure!(
+            ["/download", "/downloadbig", "/downloadstorage", "/uploadv3"].contains(&path)
+                || large_file_path(path, self.client.config.uin, sequence),
+            "Invalid CDN path"
+        );
+        ensure!(!self.endpoints.is_empty(), "Invalid CDN config");
+        let body = pack_cdn(fields)?;
+        let mut ip_index = self.current_ip % self.endpoints.len();
+        let mut retried_same_ip = false;
+        let max_attempts = self.policy.backoffs.len() + 1;
+        for attempt in 0..max_attempts {
+            let ip = self.endpoints[ip_index];
+            match self.post_once(ip, path, sequence, &body).await {
+                Ok(reply) => {
+                    self.current_ip = ip_index;
+                    self.had_success_on_current_ip = true;
+                    self.client.preferred_ip.store(ip_index, Ordering::Relaxed);
+                    return Ok(reply);
+                }
+                Err(PostAttemptError::Fatal(error)) => return Err(error),
+                Err(PostAttemptError::Retryable {
+                    error,
+                    prefer_failover,
+                }) => {
+                    let Some(&delay) = self.policy.backoffs.get(attempt) else {
+                        return Err(error);
+                    };
+                    let retry_same_ip =
+                        !prefer_failover && self.had_success_on_current_ip && !retried_same_ip;
+                    if retry_same_ip {
+                        retried_same_ip = true;
+                    } else if self.endpoints.len() > 1 {
+                        ip_index = (ip_index + 1) % self.endpoints.len();
+                        self.current_ip = ip_index;
+                        self.had_success_on_current_ip = false;
+                        retried_same_ip = false;
+                    }
+                    sleep_with_fence_async(
+                        self.clock,
+                        delay,
+                        self.policy.sleep_slice,
+                        &mut check_fence,
+                    )
+                    .await?;
+                }
+            }
+        }
+        unreachable!("max_attempts is always at least 1")
+    }
+}
+
 pub struct CdnClient {
     config: CdnConfig,
     timeout: Duration,
@@ -797,10 +979,34 @@ impl CdnClient {
         }
         CdnSession::new(self, endpoints, RetryPolicy::DEFAULT)
     }
+    pub(crate) fn async_session<'a>(
+        &'a self,
+        http: &'a dyn HttpTransport,
+        clock: &'a dyn Clock,
+    ) -> AsyncCdnSession<'a> {
+        let mut endpoints = Vec::with_capacity(self.config.server_ips.len());
+        for ip in &self.config.server_ips {
+            if !endpoints.contains(ip) {
+                endpoints.push(*ip);
+            }
+        }
+        AsyncCdnSession::new(self, endpoints, RetryPolicy::DEFAULT, http, clock)
+    }
     /// Download and decrypt one bounded CDN media object into memory.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn download(&self, descriptor: &MediaDescriptor) -> Result<DownloadedMedia> {
         self.download_with_progress(descriptor, |_, _| Ok(()))
+    }
+    /// Asynchronously download and decrypt one bounded CDN media object into
+    /// memory using a pluggable [`HttpTransport`] and [`Clock`].
+    pub async fn download_async(
+        &self,
+        descriptor: &MediaDescriptor,
+        http: &dyn HttpTransport,
+        clock: &dyn Clock,
+    ) -> Result<DownloadedMedia> {
+        self.download_with_progress_async(descriptor, http, clock, |_, _| Ok(()))
+            .await
     }
     /// Download and decrypt one bounded CDN media object into memory while
     /// reporting cumulative ciphertext progress before each chunk.
@@ -819,6 +1025,29 @@ impl CdnClient {
             |path, fields, fence| session.post(path, fields, fence),
             &mut bytes,
         )?;
+        Ok(DownloadedMedia::from_receipt(receipt, bytes))
+    }
+    /// Asynchronously download and decrypt one bounded CDN media object into
+    /// memory while reporting cumulative ciphertext progress before each chunk.
+    pub async fn download_with_progress_async(
+        &self,
+        descriptor: &MediaDescriptor,
+        http: &dyn HttpTransport,
+        clock: &dyn Clock,
+        progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+    ) -> Result<DownloadedMedia> {
+        let mut session = self.async_session(http, clock);
+        let mut bytes = vec![];
+        let receipt = self
+            .download_on_route_async(
+                descriptor,
+                DownloadRoute::Standard,
+                clock,
+                progress,
+                &mut session,
+                &mut bytes,
+            )
+            .await?;
         Ok(DownloadedMedia::from_receipt(receipt, bytes))
     }
     /// Download into `sink`, decrypting each piece as it arrives, so the object
@@ -840,6 +1069,28 @@ impl CdnClient {
             |path, fields, fence| session.post(path, fields, fence),
             sink,
         )
+    }
+    /// Asynchronously download into `sink`, decrypting each piece as it arrives
+    /// without buffering the whole object in memory. Until this returns `Ok`,
+    /// bytes written to `sink` are unverified and must be discarded on error.
+    pub async fn download_to_with_progress_async(
+        &self,
+        descriptor: &MediaDescriptor,
+        http: &dyn HttpTransport,
+        clock: &dyn Clock,
+        progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+        sink: &mut (impl AsyncDownloadSink + ?Sized),
+    ) -> Result<DownloadReceipt> {
+        let mut session = self.async_session(http, clock);
+        self.download_on_route_async(
+            descriptor,
+            DownloadRoute::Standard,
+            clock,
+            progress,
+            &mut session,
+            sink,
+        )
+        .await
     }
     /// Download a storage object, as the official client does for sticker pack
     /// archives: `POST /downloadstorage` with the storage request fields
@@ -864,6 +1115,30 @@ impl CdnClient {
             |path, fields, fence| session.post(path, fields, fence),
             &mut bytes,
         )?;
+        Ok(DownloadedMedia::from_receipt(receipt, bytes))
+    }
+    /// Asynchronously download a CDN storage object (`POST /downloadstorage`)
+    /// using a pluggable [`HttpTransport`] and [`Clock`].
+    pub async fn download_storage_with_progress_async(
+        &self,
+        descriptor: &MediaDescriptor,
+        file_key: &str,
+        http: &dyn HttpTransport,
+        clock: &dyn Clock,
+        progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+    ) -> Result<DownloadedMedia> {
+        let mut session = self.async_session(http, clock);
+        let mut bytes = vec![];
+        let receipt = self
+            .download_on_route_async(
+                descriptor,
+                DownloadRoute::Storage(file_key),
+                clock,
+                progress,
+                &mut session,
+                &mut bytes,
+            )
+            .await?;
         Ok(DownloadedMedia::from_receipt(receipt, bytes))
     }
     /// Download an incoming voice note over CDN (`POST /download` with `filetype = 15`),
@@ -895,7 +1170,39 @@ impl CdnClient {
         )?;
         Ok(bytes)
     }
-    #[cfg(test)]
+    /// Asynchronously download an incoming voice note over CDN (`POST /download`
+    /// with `filetype = 15`), bounded to [`MAX_VOICE_CDN_BYTES`] (16 MiB) and
+    /// tolerating transcoded length differences from `expected_bytes`.
+    pub async fn download_voice_with_progress_async(
+        &self,
+        descriptor: &VoiceCdnDescriptor,
+        http: &dyn HttpTransport,
+        clock: &dyn Clock,
+        progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+    ) -> Result<Vec<u8>> {
+        let mut session = self.async_session(http, clock);
+        let internal = MediaDescriptor {
+            file_id: descriptor.file_id.clone(),
+            aes_key: descriptor.aes_key.clone(),
+            quality: MediaQuality::File,
+            expected_bytes: descriptor.expected_bytes,
+            expected_md5: None,
+            strict_size: false,
+            expires_at: None,
+        };
+        let mut bytes = vec![];
+        self.download_on_route_async(
+            &internal,
+            DownloadRoute::Voice,
+            clock,
+            progress,
+            &mut session,
+            &mut bytes,
+        )
+        .await?;
+        Ok(bytes)
+    }
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     fn download_voice_with_transport(
         &self,
         descriptor: &VoiceCdnDescriptor,
@@ -921,7 +1228,7 @@ impl CdnClient {
         )?;
         Ok(bytes)
     }
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     fn download_with_transport(
         &self,
         descriptor: &MediaDescriptor,
@@ -938,6 +1245,7 @@ impl CdnClient {
         )?;
         Ok(DownloadedMedia::from_receipt(receipt, bytes))
     }
+    #[cfg(not(target_arch = "wasm32"))]
     fn download_on_route(
         &self,
         descriptor: &MediaDescriptor,
@@ -946,6 +1254,249 @@ impl CdnClient {
         mut post: impl FnMut(&str, &CdnFields, &mut dyn FnMut() -> Result<()>) -> Result<CdnFields>,
         sink: &mut dyn std::io::Write,
     ) -> Result<DownloadReceipt> {
+        let now_unix_secs = if descriptor.expires_at.is_some() {
+            Some(crate::wire::unix_time()? as u64)
+        } else {
+            None
+        };
+        let mut state = DownloadState::new(descriptor, route, now_unix_secs)?;
+        for sequence in 1..=state.max_sequences {
+            let (position, total) = state.progress_snapshot();
+            progress(position, total)?;
+            let (path, fields) = state.build_request(&self.config, sequence);
+            let reply = post(path, &fields, &mut || progress(position, total))?;
+            let (count, done) = state.accept_reply_plaintext(sequence, &reply)?;
+            if count > 0 {
+                sink.write_all(&state.plain[..count])?;
+            }
+            let (next_position, next_total) = state.progress_snapshot();
+            progress(next_position, next_total)?;
+            if done {
+                break;
+            }
+        }
+        let count = state.finalize_plaintext()?;
+        if count > 0 {
+            sink.write_all(&state.plain[..count])?;
+        }
+        sink.flush()?;
+        state.into_receipt()
+    }
+    async fn download_on_route_async(
+        &self,
+        descriptor: &MediaDescriptor,
+        route: DownloadRoute<'_>,
+        clock: &dyn Clock,
+        mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+        session: &mut AsyncCdnSession<'_>,
+        sink: &mut (impl AsyncDownloadSink + ?Sized),
+    ) -> Result<DownloadReceipt> {
+        let now_unix_secs = if descriptor.expires_at.is_some() {
+            Some(u64::from(clock.unix_time_secs()?))
+        } else {
+            None
+        };
+        let mut state = DownloadState::new(descriptor, route, now_unix_secs)?;
+        for sequence in 1..=state.max_sequences {
+            let (position, total) = state.progress_snapshot();
+            progress(position, total)?;
+            let (path, fields) = state.build_request(&self.config, sequence);
+            let reply = session
+                .post(path, &fields, || progress(position, total))
+                .await?;
+            let (count, done) = state.accept_reply_plaintext(sequence, &reply)?;
+            if count > 0 {
+                sink.write_all(&state.plain[..count]).await?;
+            }
+            let (next_position, next_total) = state.progress_snapshot();
+            progress(next_position, next_total)?;
+            if done {
+                break;
+            }
+        }
+        let count = state.finalize_plaintext()?;
+        if count > 0 {
+            sink.write_all(&state.plain[..count]).await?;
+        }
+        sink.flush().await?;
+        state.into_receipt()
+    }
+    /// Upload one prepared in-memory media object to WeChat CDN.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn upload(&self, prepared: &PreparedUpload) -> Result<UploadedMedia> {
+        self.upload_with_progress(prepared, |_, _| Ok(()))
+    }
+    /// Asynchronously upload one prepared in-memory media object to WeChat CDN
+    /// using a pluggable [`HttpTransport`] and [`Clock`].
+    pub async fn upload_async(
+        &self,
+        prepared: &PreparedUpload,
+        http: &dyn HttpTransport,
+        clock: &dyn Clock,
+    ) -> Result<UploadedMedia> {
+        self.upload_with_progress_async(prepared, http, clock, |_, _| Ok(()))
+            .await
+    }
+    /// Upload one prepared in-memory media object to WeChat CDN while reporting
+    /// cumulative encrypted bytes sent before each chunk.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn upload_with_progress(
+        &self,
+        prepared: &PreparedUpload,
+        progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+    ) -> Result<UploadedMedia> {
+        let mut session = self.session();
+        self.upload_with_transport(
+            UploadRef::Memory(prepared),
+            progress,
+            |path, fields, fence| session.post(path, fields, fence),
+        )
+    }
+    /// Asynchronously upload one prepared in-memory media object while
+    /// reporting cumulative encrypted bytes sent before each chunk.
+    pub async fn upload_with_progress_async(
+        &self,
+        prepared: &PreparedUpload,
+        http: &dyn HttpTransport,
+        clock: &dyn Clock,
+        progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+    ) -> Result<UploadedMedia> {
+        let mut session = self.async_session(http, clock);
+        self.upload_with_transport_async(UploadRef::Memory(prepared), progress, &mut session)
+            .await
+    }
+    /// [`Self::upload_with_progress`] for an upload read from a file in steps.
+    /// The requests are the same as for the equivalent in-memory upload.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn upload_file_with_progress(
+        &self,
+        prepared: &PreparedFileUpload,
+        progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+    ) -> Result<UploadedMedia> {
+        let mut session = self.session();
+        self.upload_with_transport(
+            UploadRef::File(prepared),
+            progress,
+            |path, fields, fence| session.post(path, fields, fence),
+        )
+    }
+    /// Asynchronously upload an object streamed from a [`PreparedAsyncUpload`]
+    /// in steps without buffering the full ciphertext in memory.
+    pub async fn upload_source_with_progress_async(
+        &self,
+        prepared: &PreparedAsyncUpload,
+        http: &dyn HttpTransport,
+        clock: &dyn Clock,
+        progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+    ) -> Result<UploadedMedia> {
+        let mut session = self.async_session(http, clock);
+        self.upload_with_transport_async(UploadRef::Async(prepared), progress, &mut session)
+            .await
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    fn upload_with_transport(
+        &self,
+        prepared: UploadRef<'_>,
+        mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+        mut post: impl FnMut(&str, &CdnFields, &mut dyn FnMut() -> Result<()>) -> Result<CdnFields>,
+    ) -> Result<UploadedMedia> {
+        prepared.validate()?;
+        let total = prepared.encrypted_len();
+        let path = legacy_upload_path(prepared.kind(), prepared.plaintext_bytes() as usize, total)?;
+        let mut file_id = None;
+        let mut chunks = prepared.chunks();
+        let mut sequence = 0u32;
+        while chunks.position() < total {
+            let start = chunks.position();
+            sequence += 1;
+            progress(start as u64, Some(total as u64))?;
+            let chunk = chunks.next(UPLOAD_CHUNK)?;
+            let end = start + chunk.len() - 1;
+            let mut fields = upload_fields(&self.config, prepared, sequence, start, &chunk)?;
+            fields.insert("filedata".into(), chunk.to_vec());
+            let reply = post(path, &fields, &mut || {
+                progress(start as u64, Some(total as u64))
+            })?;
+            validate_upload_reply(&reply, sequence, start, end, &mut file_id)?;
+            // The final correlated acknowledgement must reach the caller so it
+            // can save completion before applying cancellation/logout fences.
+            if end + 1 < total {
+                progress((end + 1) as u64, Some(total as u64))?;
+            }
+        }
+        let file_id =
+            file_id.ok_or_else(|| anyhow::anyhow!("CDN upload returned no file identifier"))?;
+        Ok(prepared.uploaded(file_id, None, None))
+    }
+    async fn upload_with_transport_async(
+        &self,
+        prepared: UploadRef<'_>,
+        mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+        session: &mut AsyncCdnSession<'_>,
+    ) -> Result<UploadedMedia> {
+        prepared.validate()?;
+        let total = prepared.encrypted_len();
+        let path = legacy_upload_path(prepared.kind(), prepared.plaintext_bytes() as usize, total)?;
+        let mut file_id = None;
+        let mut chunks = prepared.chunks();
+        let mut sequence = 0u32;
+        while chunks.position() < total {
+            let start = chunks.position();
+            sequence += 1;
+            progress(start as u64, Some(total as u64))?;
+            let chunk = chunks.next_async(UPLOAD_CHUNK).await?;
+            let end = start + chunk.len() - 1;
+            let mut fields = upload_fields(&self.config, prepared, sequence, start, &chunk)?;
+            fields.insert("filedata".into(), chunk.to_vec());
+            let reply = session
+                .post(path, &fields, || progress(start as u64, Some(total as u64)))
+                .await?;
+            validate_upload_reply(&reply, sequence, start, end, &mut file_id)?;
+            if end + 1 < total {
+                progress((end + 1) as u64, Some(total as u64))?;
+            }
+        }
+        let file_id =
+            file_id.ok_or_else(|| anyhow::anyhow!("CDN upload returned no file identifier"))?;
+        Ok(prepared.uploaded(file_id, None, None))
+    }
+}
+
+struct DownloadState<'a> {
+    descriptor: &'a MediaDescriptor,
+    storage_key: Option<&'a str>,
+    voice: bool,
+    large: bool,
+    large_video: bool,
+    strict_transfer: bool,
+    plaintext_limit: usize,
+    chunk_bytes: usize,
+    ciphertext_limit: usize,
+    expected_ciphertext: Option<usize>,
+    max_sequences: u32,
+    position: usize,
+    total: usize,
+    decryptor: Aes128EcbDecryptor,
+    plain: zeroize::Zeroizing<Vec<u8>>,
+    plaintext_bytes: usize,
+    plaintext_md5: Md5Hasher,
+    plaintext_sha256: Sha256Hasher,
+    substituted_filetype: Option<u32>,
+    picture_format: Option<u32>,
+    server_md5: Option<String>,
+    observe_video: bool,
+    video_reply: VideoReplyMetadata,
+    video_selected_response: Option<bool>,
+    video_response_md5: Option<String>,
+    video_response_bytes: Option<u64>,
+}
+
+impl<'a> DownloadState<'a> {
+    fn new(
+        descriptor: &'a MediaDescriptor,
+        route: DownloadRoute<'a>,
+        now_unix_secs: Option<u64>,
+    ) -> Result<Self> {
         let storage_key = match route {
             DownloadRoute::Storage(key) => Some(key),
             _ => None,
@@ -968,7 +1519,8 @@ impl CdnClient {
             "Invalid download descriptor"
         );
         if let Some(expiry) = descriptor.expires_at {
-            ensure!(expiry > crate::wire::unix_time()? as u64, "media_expired");
+            let now = now_unix_secs.ok_or_else(|| anyhow::anyhow!("Missing clock timestamp"))?;
+            ensure!(expiry > now, "media_expired");
         }
         let large = !voice && descriptor.quality == MediaQuality::LargeFile;
         let large_video = !voice
@@ -1016,265 +1568,301 @@ impl CdnClient {
                 "Large video source checksum is required"
             );
         }
-        let mut position = 0usize;
-        let mut total = 0usize;
-        // Pieces are decrypted as they arrive. The decryptor keeps the last
-        // block back until the padding is known.
-        let mut decryptor = Aes128EcbDecryptor::new(&descriptor.aes_key)?;
-        let mut plain = zeroize::Zeroizing::new(vec![]);
-        let mut plaintext_bytes = 0usize;
-        let mut plaintext_md5 = Md5Hasher::new()?;
-        let mut plaintext_sha256 = Sha256Hasher::new()?;
-        let mut substituted_filetype = None;
-        let mut picture_format = None;
-        let mut server_md5 = None;
-        let observe_video = descriptor.quality == MediaQuality::Video && !strict_transfer;
-        let mut video_reply = VideoReplyMetadata::default();
-        let mut video_selected_response: Option<bool> = None;
-        let mut video_response_md5: Option<String> = None;
-        let mut video_response_bytes: Option<u64> = None;
-        for sequence in 1..=u32::try_from(ciphertext_limit.div_ceil(chunk_bytes))? {
-            progress(
-                position as u64,
-                if total == 0 { None } else { Some(total as u64) },
-            )?;
-            let filetype = if voice {
-                15
+        let max_sequences = u32::try_from(ciphertext_limit.div_ceil(chunk_bytes))?;
+        Ok(Self {
+            descriptor,
+            storage_key,
+            voice,
+            large,
+            large_video,
+            strict_transfer,
+            plaintext_limit,
+            chunk_bytes,
+            ciphertext_limit,
+            expected_ciphertext,
+            max_sequences,
+            position: 0,
+            total: 0,
+            decryptor: Aes128EcbDecryptor::new(&descriptor.aes_key)?,
+            plain: zeroize::Zeroizing::new(vec![]),
+            plaintext_bytes: 0,
+            plaintext_md5: Md5Hasher::new()?,
+            plaintext_sha256: Sha256Hasher::new()?,
+            substituted_filetype: None,
+            picture_format: None,
+            server_md5: None,
+            observe_video: descriptor.quality == MediaQuality::Video && !strict_transfer,
+            video_reply: VideoReplyMetadata::default(),
+            video_selected_response: None,
+            video_response_md5: None,
+            video_response_bytes: None,
+        })
+    }
+
+    fn progress_snapshot(&self) -> (u64, Option<u64>) {
+        (
+            self.position as u64,
+            if self.total == 0 {
+                None
             } else {
-                descriptor.quality.filetype()
-            };
-            let mut fields = shared(&self.config, sequence, filetype);
-            let requested_end = if total == 0 {
-                chunk_bytes - 1
-            } else {
-                (total - 1).min(position + chunk_bytes - 1)
-            };
+                Some(self.total as u64)
+            },
+        )
+    }
+
+    fn requested_end(&self) -> usize {
+        if self.total == 0 {
+            self.chunk_bytes - 1
+        } else {
+            (self.total - 1).min(self.position + self.chunk_bytes - 1)
+        }
+    }
+
+    fn build_request(&self, config: &CdnConfig, sequence: u32) -> (&'static str, CdnFields) {
+        let filetype = if self.voice {
+            15
+        } else {
+            self.descriptor.quality.filetype()
+        };
+        let mut fields = shared(config, sequence, filetype);
+        let requested_end = self.requested_end();
+        for (k, v) in [
+            ("wxautostart", 0),
+            ("downpicformat", 1),
+            ("rangestart", self.position as u64),
+            ("rangeend", requested_end as u64),
+        ] {
+            put(&mut fields, k, v);
+        }
+        fields.insert("wxmsgflag".into(), vec![]);
+        fields.insert("fileid".into(), self.descriptor.file_id.as_bytes().to_vec());
+        if let Some(key) = self.storage_key {
+            // The descriptor always carries its AES key, so the official
+            // client's conditional `nocheckaeskey` is always 1 here.
             for (k, v) in [
-                ("wxautostart", 0),
-                ("downpicformat", 1),
-                ("rangestart", position as u64),
-                ("rangeend", requested_end as u64),
+                ("apptype", 10),
+                ("isstorevideo", 0),
+                ("nocheckaeskey", 1),
+                ("enablehit", 1),
+                ("existancecheck", 0),
             ] {
                 put(&mut fields, k, v);
             }
-            fields.insert("wxmsgflag".into(), vec![]);
-            fields.insert("fileid".into(), descriptor.file_id.as_bytes().to_vec());
-            if let Some(key) = storage_key {
-                // The descriptor always carries its AES key, so the official
-                // client's conditional `nocheckaeskey` is always 1 here.
-                for (k, v) in [
-                    ("apptype", 10),
-                    ("isstorevideo", 0),
-                    ("nocheckaeskey", 1),
-                    ("enablehit", 1),
-                    ("existancecheck", 0),
-                ] {
-                    put(&mut fields, k, v);
-                }
-                fields.insert("filekey".into(), key.as_bytes().to_vec());
-            }
-            let path = if storage_key.is_some() {
-                "/downloadstorage"
-            } else if large {
-                "/downloadbig"
-            } else {
-                "/download"
-            };
-            let reply = post(path, &fields, &mut || {
-                progress(
-                    position as u64,
-                    if total == 0 { None } else { Some(total as u64) },
-                )
-            })?;
-            let code = integer(&reply, "retcode")?;
-            ServiceRejected::check_wide(Service::CdnDownload, code)?;
-            let response_digest = reply
-                .get("rawfilemd5")
-                .and_then(|v| std::str::from_utf8(v).ok())
-                .filter(|v| v.len() == 32 && v.bytes().all(|b| b.is_ascii_hexdigit()))
-                .map(|v| v.to_ascii_lowercase());
-            let server_selected = descriptor.quality == MediaQuality::Video
-                && !descriptor.strict_size
-                && matches!(integer(&reply, "istrans").ok(), Some(13 | 999))
-                && integer(&reply, "videoformat").ok() == Some(1)
-                && integer(&reply, "ver").ok() == Some(0);
-            if server_selected {
-                ensure!(response_digest.is_some(), "media_integrity_failed");
-                validate_large_video_reply_fields(&reply)?;
-                if reply.contains_key("rawfilesize") {
-                    let size = u64::try_from(integer(&reply, "rawfilesize")?)?;
-                    ensure!(
-                        size > 0
-                            && size <= plaintext_limit as u64
-                            && video_response_bytes.is_none_or(|previous| previous == size),
-                        "Invalid video response size"
-                    );
-                    video_response_bytes = Some(size);
-                }
-                for key in [
-                    "retrysec",
-                    "isretry",
-                    "isoverload",
-                    "isgetcdn",
-                    "backsrcnum",
-                    "rsppicformat",
-                ] {
-                    ensure!(
-                        !reply.contains_key(key)
-                            || (integer(&reply, key)? == 0
-                                || (key == "backsrcnum" && matches!(integer(&reply, key)?, 0..=2))),
-                        "Unsupported server_selected-video control: {key}"
-                    );
-                }
+            fields.insert("filekey".into(), key.as_bytes().to_vec());
+        }
+        let path = if self.storage_key.is_some() {
+            "/downloadstorage"
+        } else if self.large {
+            "/downloadbig"
+        } else {
+            "/download"
+        };
+        (path, fields)
+    }
+
+    fn accept_reply_plaintext(
+        &mut self,
+        sequence: u32,
+        reply: &CdnFields,
+    ) -> Result<(usize, bool)> {
+        let requested_end = self.requested_end();
+        let code = integer(reply, "retcode")?;
+        ServiceRejected::check_wide(Service::CdnDownload, code)?;
+        let response_digest = reply
+            .get("rawfilemd5")
+            .and_then(|v| std::str::from_utf8(v).ok())
+            .filter(|v| v.len() == 32 && v.bytes().all(|b| b.is_ascii_hexdigit()))
+            .map(|v| v.to_ascii_lowercase());
+        let server_selected = self.descriptor.quality == MediaQuality::Video
+            && !self.descriptor.strict_size
+            && matches!(integer(reply, "istrans").ok(), Some(13 | 999))
+            && integer(reply, "videoformat").ok() == Some(1)
+            && integer(reply, "ver").ok() == Some(0);
+        if server_selected {
+            ensure!(response_digest.is_some(), "media_integrity_failed");
+            validate_large_video_reply_fields(reply)?;
+            if reply.contains_key("rawfilesize") {
+                let size = u64::try_from(integer(reply, "rawfilesize")?)?;
                 ensure!(
-                    !reply.contains_key("substituteftype")
-                        || matches!(integer(&reply, "substituteftype")?, 0 | 4 | 9),
-                    "Unsupported server_selected-video representation"
+                    size > 0
+                        && size <= self.plaintext_limit as u64
+                        && self
+                            .video_response_bytes
+                            .is_none_or(|previous| previous == size),
+                    "Invalid video response size"
+                );
+                self.video_response_bytes = Some(size);
+            }
+            for key in [
+                "retrysec",
+                "isretry",
+                "isoverload",
+                "isgetcdn",
+                "backsrcnum",
+                "rsppicformat",
+            ] {
+                ensure!(
+                    !reply.contains_key(key)
+                        || (integer(reply, key)? == 0
+                            || (key == "backsrcnum" && matches!(integer(reply, key)?, 0..=2))),
+                    "Unsupported server_selected-video control: {key}"
                 );
             }
-            if descriptor.quality == MediaQuality::Video {
+            ensure!(
+                !reply.contains_key("substituteftype")
+                    || matches!(integer(reply, "substituteftype")?, 0 | 4 | 9),
+                "Unsupported server_selected-video representation"
+            );
+        }
+        if self.descriptor.quality == MediaQuality::Video {
+            ensure!(
+                self.video_selected_response
+                    .is_none_or(|v| v == server_selected),
+                "CDN representation changed during transfer"
+            );
+            self.video_selected_response = Some(server_selected);
+            if let Some(value) = response_digest {
                 ensure!(
-                    video_selected_response.is_none_or(|v| v == server_selected),
+                    self.video_response_md5.as_ref().is_none_or(|v| v == &value),
                     "CDN representation changed during transfer"
                 );
-                video_selected_response = Some(server_selected);
-                if let Some(value) = response_digest {
-                    ensure!(
-                        video_response_md5.as_ref().is_none_or(|v| v == &value),
-                        "CDN representation changed during transfer"
-                    );
-                    video_response_md5 = Some(value);
-                } else if server_selected {
-                    anyhow::bail!("media_integrity_failed");
-                }
-            }
-            if strict_transfer || reply.contains_key("seq") {
-                ensure!(
-                    integer(&reply, "seq")? == i64::from(sequence),
-                    "CDN download reply sequence mismatch"
-                );
-            }
-            if large {
-                validate_large_download_reply(&reply, descriptor, &mut server_md5)?;
-            } else if large_video && !server_selected {
-                validate_large_video_download_reply(&reply, descriptor, &mut server_md5)?;
-            }
-            let start = usize::try_from(integer(&reply, "rangestart")?)?;
-            let end = usize::try_from(integer(&reply, "rangeend")?)?;
-            let size = usize::try_from(integer(&reply, "totalsize")?)?;
-            let data = reply
-                .get("filedata")
-                .ok_or_else(|| anyhow::anyhow!("Missing CDN payload"))?;
-            ensure!(
-                start == position
-                    && !data.is_empty()
-                    && size > 0
-                    && size <= ciphertext_limit
-                    && (server_selected
-                        || expected_ciphertext.is_none_or(|expected| expected == size))
-                    && size >= position
-                    && data.len() <= size - position
-                    && end <= requested_end
-                    && (!strict_transfer
-                        || server_selected
-                        || data.len() == (size - position).min(chunk_bytes))
-                    && (total == 0 || total == size)
-                    && end == start + data.len() - 1,
-                "Inconsistent CDN range response"
-            );
-            total = size;
-            position += data.len();
-            plain.resize(data.len() + 16, 0);
-            let count = decryptor.update(data, &mut plain)?;
-            plaintext_bytes += count;
-            ensure!(
-                plaintext_bytes <= plaintext_limit,
-                "Decoded CDN body too large"
-            );
-            plaintext_md5.update(&plain[..count])?;
-            plaintext_sha256.update(&plain[..count])?;
-            sink.write_all(&plain[..count])?;
-            if !large {
-                for (key, target) in [
-                    ("substituteftype", &mut substituted_filetype),
-                    ("rsppicformat", &mut picture_format),
-                ] {
-                    if reply.contains_key(key) {
-                        let value = u32::try_from(integer(&reply, key)?)?;
-                        ensure!(
-                            target.is_none_or(|previous| previous == value),
-                            "CDN representation changed during transfer"
-                        );
-                        *target = Some(value);
-                    }
-                }
-            }
-            if observe_video {
-                video_reply.observe(&reply);
-            }
-            progress(position as u64, Some(total as u64))?;
-            if position == total {
-                break;
+                self.video_response_md5 = Some(value);
+            } else if server_selected {
+                anyhow::bail!("media_integrity_failed");
             }
         }
+        if self.strict_transfer || reply.contains_key("seq") {
+            ensure!(
+                integer(reply, "seq")? == i64::from(sequence),
+                "CDN download reply sequence mismatch"
+            );
+        }
+        if self.large {
+            validate_large_download_reply(reply, self.descriptor, &mut self.server_md5)?;
+        } else if self.large_video && !server_selected {
+            validate_large_video_download_reply(reply, self.descriptor, &mut self.server_md5)?;
+        }
+        let start = usize::try_from(integer(reply, "rangestart")?)?;
+        let end = usize::try_from(integer(reply, "rangeend")?)?;
+        let size = usize::try_from(integer(reply, "totalsize")?)?;
+        let data = reply
+            .get("filedata")
+            .ok_or_else(|| anyhow::anyhow!("Missing CDN payload"))?;
         ensure!(
-            total > 0 && position == total,
+            start == self.position
+                && !data.is_empty()
+                && size > 0
+                && size <= self.ciphertext_limit
+                && (server_selected
+                    || self
+                        .expected_ciphertext
+                        .is_none_or(|expected| expected == size))
+                && size >= self.position
+                && data.len() <= size - self.position
+                && end <= requested_end
+                && (!self.strict_transfer
+                    || server_selected
+                    || data.len() == (size - self.position).min(self.chunk_bytes))
+                && (self.total == 0 || self.total == size)
+                && end == start + data.len() - 1,
+            "Inconsistent CDN range response"
+        );
+        self.total = size;
+        self.position += data.len();
+        self.plain.resize(data.len() + 16, 0);
+        let count = self.decryptor.update(data, &mut self.plain)?;
+        self.plaintext_bytes += count;
+        ensure!(
+            self.plaintext_bytes <= self.plaintext_limit,
+            "Decoded CDN body too large"
+        );
+        self.plaintext_md5.update(&self.plain[..count])?;
+        self.plaintext_sha256.update(&self.plain[..count])?;
+        if !self.large {
+            for (key, target) in [
+                ("substituteftype", &mut self.substituted_filetype),
+                ("rsppicformat", &mut self.picture_format),
+            ] {
+                if reply.contains_key(key) {
+                    let value = u32::try_from(integer(reply, key)?)?;
+                    ensure!(
+                        target.is_none_or(|previous| previous == value),
+                        "CDN representation changed during transfer"
+                    );
+                    *target = Some(value);
+                }
+            }
+        }
+        if self.observe_video {
+            self.video_reply.observe(reply);
+        }
+        Ok((count, self.position == self.total))
+    }
+
+    fn finalize_plaintext(&mut self) -> Result<usize> {
+        ensure!(
+            self.total > 0 && self.position == self.total,
             "CDN transfer did not finish within bound"
         );
         ensure!(
-            total.is_multiple_of(16) && total <= MAX_LARGE_FILE_BYTES + 16,
+            self.total.is_multiple_of(16) && self.total <= MAX_LARGE_FILE_BYTES + 16,
             "Invalid CDN ciphertext"
         );
-        plain.resize(32, 0);
-        let count = decryptor.finalize(&mut plain)?;
-        plaintext_bytes += count;
+        self.plain.resize(32, 0);
+        let count = self.decryptor.finalize(&mut self.plain)?;
+        self.plaintext_bytes += count;
         ensure!(
-            plaintext_bytes <= plaintext_limit,
+            self.plaintext_bytes <= self.plaintext_limit,
             "Decoded CDN body too large"
         );
-        plaintext_md5.update(&plain[..count])?;
-        plaintext_sha256.update(&plain[..count])?;
-        sink.write_all(&plain[..count])?;
-        sink.flush()?;
-        let size_matches = descriptor
+        self.plaintext_md5.update(&self.plain[..count])?;
+        self.plaintext_sha256.update(&self.plain[..count])?;
+        Ok(count)
+    }
+
+    fn into_receipt(mut self) -> Result<DownloadReceipt> {
+        let size_matches = self
+            .descriptor
             .expected_bytes
-            .map(|n| n == plaintext_bytes as u64);
+            .map(|n| n == self.plaintext_bytes as u64);
         // Normal-video plans are no longer strict so that a selected copy can be accepted, but
         // a video reply the CDN did not mark as selected must still match the advertised size.
-        let size_rejected = video_selected_response != Some(true)
-            && (strict_transfer
-                || descriptor.strict_size
-                || descriptor.quality == MediaQuality::Video)
+        let size_rejected = self.video_selected_response != Some(true)
+            && (self.strict_transfer
+                || self.descriptor.strict_size
+                || self.descriptor.quality == MediaQuality::Video)
             && size_matches == Some(false);
-        let digest = hex::encode(plaintext_md5.finish()?);
-        let digest_matches = descriptor.expected_md5.as_ref().map(|expected| {
+        let digest = hex::encode(self.plaintext_md5.finish()?);
+        let digest_matches = self.descriptor.expected_md5.as_ref().map(|expected| {
             expected.len() == 32
                 && expected.bytes().all(|b| b.is_ascii_hexdigit())
                 && digest.eq_ignore_ascii_case(expected)
         });
-        if observe_video
-            && video_selected_response != Some(true)
+        if self.observe_video
+            && self.video_selected_response != Some(true)
             && (size_rejected || digest_matches == Some(false))
         {
             // Reject exactly as before, but keep comparison facts so a different
             // server-selected representation can be told apart from corruption.
-            return Err(video_reply
+            return Err(self
+                .video_reply
                 .mismatch(
-                    descriptor,
-                    plaintext_bytes,
+                    self.descriptor,
+                    self.plaintext_bytes,
                     &digest,
                     digest_matches,
-                    substituted_filetype,
+                    self.substituted_filetype,
                 )
                 .into());
         }
-        if video_selected_response == Some(true) {
+        if self.video_selected_response == Some(true) {
             ensure!(
-                video_response_bytes.is_none_or(|size| size == plaintext_bytes as u64),
+                self.video_response_bytes
+                    .is_none_or(|size| size == self.plaintext_bytes as u64),
                 "CDN video response size mismatch"
             );
             ensure!(
-                video_response_md5.as_deref() == Some(digest.as_str()),
+                self.video_response_md5.as_deref() == Some(digest.as_str()),
                 "CDN video response checksum mismatch"
             );
         } else {
@@ -1284,90 +1872,21 @@ impl CdnClient {
                 "Advertised media checksum mismatch"
             );
         }
-        if let Some(expected) = server_md5 {
+        if let Some(expected) = self.server_md5 {
             ensure!(
                 digest.eq_ignore_ascii_case(&expected),
                 "CDN source checksum mismatch"
             );
         }
         Ok(DownloadReceipt {
-            byte_length: plaintext_bytes as u64,
-            sha256: hex::encode(plaintext_sha256.finish()?),
-            requested_quality: descriptor.quality,
-            substituted_filetype,
-            picture_format,
+            byte_length: self.plaintext_bytes as u64,
+            sha256: hex::encode(self.plaintext_sha256.finish()?),
+            requested_quality: self.descriptor.quality,
+            substituted_filetype: self.substituted_filetype,
+            picture_format: self.picture_format,
             md5: digest,
             advertised_size_matches: size_matches,
         })
-    }
-    /// Upload one prepared in-memory media object to WeChat CDN.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn upload(&self, prepared: &PreparedUpload) -> Result<UploadedMedia> {
-        self.upload_with_progress(prepared, |_, _| Ok(()))
-    }
-    /// Upload one prepared in-memory media object to WeChat CDN while reporting
-    /// cumulative encrypted bytes sent before each chunk.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn upload_with_progress(
-        &self,
-        prepared: &PreparedUpload,
-        progress: impl FnMut(u64, Option<u64>) -> Result<()>,
-    ) -> Result<UploadedMedia> {
-        let mut session = self.session();
-        self.upload_with_transport(
-            UploadRef::Memory(prepared),
-            progress,
-            |path, fields, fence| session.post(path, fields, fence),
-        )
-    }
-    /// [`Self::upload_with_progress`] for an upload read from a file in steps.
-    /// The requests are the same as for the equivalent in-memory upload.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn upload_file_with_progress(
-        &self,
-        prepared: &PreparedFileUpload,
-        progress: impl FnMut(u64, Option<u64>) -> Result<()>,
-    ) -> Result<UploadedMedia> {
-        let mut session = self.session();
-        self.upload_with_transport(
-            UploadRef::File(prepared),
-            progress,
-            |path, fields, fence| session.post(path, fields, fence),
-        )
-    }
-    fn upload_with_transport(
-        &self,
-        prepared: UploadRef<'_>,
-        mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
-        mut post: impl FnMut(&str, &CdnFields, &mut dyn FnMut() -> Result<()>) -> Result<CdnFields>,
-    ) -> Result<UploadedMedia> {
-        prepared.validate()?;
-        let total = prepared.encrypted_len();
-        let path = legacy_upload_path(prepared.kind(), prepared.plaintext_bytes() as usize, total)?;
-        let mut file_id = None;
-        let mut chunks = prepared.chunks();
-        let mut sequence = 0u32;
-        while chunks.position() < total {
-            let start = chunks.position();
-            sequence += 1;
-            progress(start as u64, Some(total as u64))?;
-            let chunk = chunks.next(UPLOAD_CHUNK)?;
-            let end = start + chunk.len() - 1;
-            let mut fields = upload_fields(&self.config, prepared, sequence, start, &chunk)?;
-            fields.insert("filedata".into(), chunk.to_vec());
-            let reply = post(path, &fields, &mut || {
-                progress(start as u64, Some(total as u64))
-            })?;
-            validate_upload_reply(&reply, sequence, start, end, &mut file_id)?;
-            // The final correlated acknowledgement must reach the caller so it
-            // can save completion before applying cancellation/logout fences.
-            if end + 1 < total {
-                progress((end + 1) as u64, Some(total as u64))?;
-            }
-        }
-        let file_id =
-            file_id.ok_or_else(|| anyhow::anyhow!("CDN upload returned no file identifier"))?;
-        Ok(prepared.uploaded(file_id, None, None))
     }
 }
 /// Only these fixed, nonsecret numeric controls can enter a stored diagnostic.
@@ -2133,6 +2652,17 @@ impl CdnClient {
     pub fn upload_image(&self, p: &PreparedImageUpload) -> Result<UploadedImage> {
         self.upload_image_with_progress(p, |_, _| Ok(()))
     }
+    /// Asynchronously upload an image's prepared copies (original, standard,
+    /// and thumbnail) using a pluggable [`HttpTransport`] and [`Clock`].
+    pub async fn upload_image_async(
+        &self,
+        p: &PreparedImageUpload,
+        http: &dyn HttpTransport,
+        clock: &dyn Clock,
+    ) -> Result<UploadedImage> {
+        self.upload_image_with_progress_async(p, http, clock, |_, _| Ok(()))
+            .await
+    }
     /// Upload an image's original, standard and thumbnail copies, reporting the encrypted bytes
     /// of the original sent so far and their total before each request.
     #[cfg(not(target_arch = "wasm32"))]
@@ -2146,7 +2676,53 @@ impl CdnClient {
             session.post(path, fields, fence)
         })
     }
-    #[cfg(test)]
+    /// Asynchronously upload an image's original, standard, and thumbnail
+    /// copies while reporting cumulative encrypted original bytes sent.
+    pub async fn upload_image_with_progress_async(
+        &self,
+        p: &PreparedImageUpload,
+        http: &dyn HttpTransport,
+        clock: &dyn Clock,
+        mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+    ) -> Result<UploadedImage> {
+        p.validate()?;
+        let original = UploadRef::Memory(&p.original);
+        let total = original.encrypted_len();
+        let mut session = self.async_session(http, clock);
+        let mut file_id = None;
+        let mut chunks = original.chunks();
+        let mut sequence = 0u32;
+        while chunks.position() < total {
+            let start = chunks.position();
+            sequence += 1;
+            progress(start as u64, Some(total as u64))?;
+            let chunk = chunks.next_async(UPLOAD_CHUNK).await?;
+            let end = start + chunk.len() - 1;
+            let f = image_upload_chunk_fields(&self.config, p, original, sequence, start, &chunk)?;
+            let reply = session
+                .post("/uploadv3", &f, || {
+                    progress(start as u64, Some(total as u64))
+                })
+                .await?;
+            validate_upload_reply(&reply, sequence, start, end, &mut file_id)?;
+            if end + 1 < total {
+                progress((end + 1) as u64, Some(total as u64))?;
+            }
+        }
+        let id =
+            file_id.ok_or_else(|| anyhow::anyhow!("Image upload returned no file identifier"))?;
+        Ok(UploadedImage {
+            original: Some(uploaded_primary(
+                &p.original,
+                &id,
+                Some(p.width),
+                Some(p.height),
+            )),
+            standard: uploaded_variant(&p.original, &p.standard, &id, MediaQuality::Standard),
+            thumbnail: uploaded_variant(&p.original, &p.thumbnail, &id, MediaQuality::Thumbnail),
+        })
+    }
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     fn upload_image_with_transport(
         &self,
         p: &PreparedImageUpload,
@@ -2158,6 +2734,7 @@ impl CdnClient {
     /// Upload the original in 64 KiB ranges like a video. The first request
     /// also carries the standard and thumbnail copies and the image metadata,
     /// so an original that fits one range is still a single request.
+    #[cfg(not(target_arch = "wasm32"))]
     fn upload_image_with_checked_transport(
         &self,
         p: &PreparedImageUpload,
@@ -2176,24 +2753,7 @@ impl CdnClient {
             progress(start as u64, Some(total as u64))?;
             let chunk = chunks.next(UPLOAD_CHUNK)?;
             let end = start + chunk.len() - 1;
-            let mut f = upload_fields(&self.config, original, sequence, start, &chunk)?;
-            f.insert("filedata".into(), chunk.to_vec());
-            if start == 0 {
-                add_thumbnail(&mut f, &p.thumbnail);
-                for (k, v) in [
-                    ("imgheight", p.height as u64),
-                    ("imgwidth", p.width as u64),
-                    ("midimgrawsize", p.standard.plaintext_bytes as u64),
-                    ("midimgtotalsize", p.standard.encrypted.len() as u64),
-                    ("midimgchecksum", p.standard.encrypted_checksum as u64),
-                    ("file_format", 0),
-                    ("mid_format", 0),
-                ] {
-                    put(&mut f, k, v);
-                }
-                f.insert("midimgmd5".into(), p.standard.md5.as_bytes().to_vec());
-                f.insert("midimgdata".into(), p.standard.encrypted.clone());
-            }
+            let f = image_upload_chunk_fields(&self.config, p, original, sequence, start, &chunk)?;
             let reply = post("/uploadv3", &f, &mut || {
                 progress(start as u64, Some(total as u64))
             })?;
@@ -2220,6 +2780,17 @@ impl CdnClient {
     pub fn upload_video(&self, p: &PreparedVideoUpload) -> Result<UploadedVideo> {
         self.upload_video_with_progress(p, |_, _| Ok(()))
     }
+    /// Asynchronously upload a video's prepared playback and thumbnail copies
+    /// using a pluggable [`HttpTransport`] and [`Clock`].
+    pub async fn upload_video_async(
+        &self,
+        p: &PreparedVideoUpload,
+        http: &dyn HttpTransport,
+        clock: &dyn Clock,
+    ) -> Result<UploadedVideo> {
+        self.upload_video_with_progress_async(p, http, clock, |_, _| Ok(()))
+            .await
+    }
     /// Upload a video's prepared copies while reporting cumulative encrypted bytes sent.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn upload_video_with_progress(
@@ -2232,23 +2803,56 @@ impl CdnClient {
             session.post(path, fields, fence)
         })
     }
+    /// Asynchronously upload a video's prepared copies while reporting
+    /// cumulative encrypted bytes sent.
+    pub async fn upload_video_with_progress_async(
+        &self,
+        p: &PreparedVideoUpload,
+        http: &dyn HttpTransport,
+        clock: &dyn Clock,
+        mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+    ) -> Result<UploadedVideo> {
+        validate_normal_video_upload(p)?;
+        let mut session = self.async_session(http, clock);
+        let mut file_id = None;
+        let video = UploadRef::Memory(&p.video);
+        let total = video.encrypted_len();
+        let mut chunks = video.chunks();
+        let mut sequence = 0u32;
+        while chunks.position() < total {
+            let start = chunks.position();
+            sequence += 1;
+            progress(start as u64, Some(total as u64))?;
+            let chunk = chunks.next_async(UPLOAD_CHUNK).await?;
+            let end = start + chunk.len() - 1;
+            let fields =
+                video_upload_chunk_fields(&self.config, p, video, sequence, start, &chunk)?;
+            let reply = session
+                .post("/uploadv3", &fields, || {
+                    progress(start as u64, Some(total as u64))
+                })
+                .await?;
+            validate_upload_reply(&reply, sequence, start, end, &mut file_id)?;
+            if end + 1 < total {
+                progress((end + 1) as u64, Some(total as u64))?;
+            }
+        }
+        let id =
+            file_id.ok_or_else(|| anyhow::anyhow!("Video upload returned no file identifier"))?;
+        Ok(UploadedVideo {
+            video: uploaded_primary(&p.video, &id, None, None),
+            thumbnail: uploaded_variant(&p.video, &p.thumbnail, &id, MediaQuality::Thumbnail),
+            original: None,
+        })
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     fn upload_video_with_transport(
         &self,
         p: &PreparedVideoUpload,
         mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
         mut post: impl FnMut(&str, &CdnFields, &mut dyn FnMut() -> Result<()>) -> Result<CdnFields>,
     ) -> Result<UploadedVideo> {
-        p.video.validate()?;
-        ensure!(
-            p.video.kind == MediaQuality::Video
-                && p.video.plaintext_bytes as usize <= MAX_NATIVE_UPLOAD_BYTES,
-            "Invalid normal video upload profile"
-        );
-        p.thumbnail.validate(&p.video.aes_key)?;
-        ensure!(
-            p.thumbnail.width <= 320 && p.thumbnail.height <= 320,
-            "Video thumbnail outside limit"
-        );
+        validate_normal_video_upload(p)?;
         let mut file_id = None;
         let video = UploadRef::Memory(&p.video);
         let total = video.encrypted_len();
@@ -2260,12 +2864,8 @@ impl CdnClient {
             progress(start as u64, Some(total as u64))?;
             let chunk = chunks.next(UPLOAD_CHUNK)?;
             let end = start + chunk.len() - 1;
-            let mut fields = upload_fields(&self.config, video, sequence, start, &chunk)?;
-            fields.insert("filedata".into(), chunk.to_vec());
-            if start == 0 {
-                add_thumbnail(&mut fields, &p.thumbnail);
-            }
-            put(&mut fields, "smallvideoflag", 0);
+            let fields =
+                video_upload_chunk_fields(&self.config, p, video, sequence, start, &chunk)?;
             let reply = post("/uploadv3", &fields, &mut || {
                 progress(start as u64, Some(total as u64))
             })?;
@@ -2282,6 +2882,67 @@ impl CdnClient {
             original: None,
         })
     }
+}
+
+fn image_upload_chunk_fields(
+    config: &CdnConfig,
+    p: &PreparedImageUpload,
+    original: UploadRef<'_>,
+    sequence: u32,
+    start: usize,
+    chunk: &[u8],
+) -> Result<CdnFields> {
+    let mut f = upload_fields(config, original, sequence, start, chunk)?;
+    f.insert("filedata".into(), chunk.to_vec());
+    if start == 0 {
+        add_thumbnail(&mut f, &p.thumbnail);
+        for (k, v) in [
+            ("imgheight", p.height as u64),
+            ("imgwidth", p.width as u64),
+            ("midimgrawsize", p.standard.plaintext_bytes as u64),
+            ("midimgtotalsize", p.standard.encrypted.len() as u64),
+            ("midimgchecksum", p.standard.encrypted_checksum as u64),
+            ("file_format", 0),
+            ("mid_format", 0),
+        ] {
+            put(&mut f, k, v);
+        }
+        f.insert("midimgmd5".into(), p.standard.md5.as_bytes().to_vec());
+        f.insert("midimgdata".into(), p.standard.encrypted.clone());
+    }
+    Ok(f)
+}
+
+fn validate_normal_video_upload(p: &PreparedVideoUpload) -> Result<()> {
+    p.video.validate()?;
+    ensure!(
+        p.video.kind == MediaQuality::Video
+            && p.video.plaintext_bytes as usize <= MAX_NATIVE_UPLOAD_BYTES,
+        "Invalid normal video upload profile"
+    );
+    p.thumbnail.validate(&p.video.aes_key)?;
+    ensure!(
+        p.thumbnail.width <= 320 && p.thumbnail.height <= 320,
+        "Video thumbnail outside limit"
+    );
+    Ok(())
+}
+
+fn video_upload_chunk_fields(
+    config: &CdnConfig,
+    p: &PreparedVideoUpload,
+    video: UploadRef<'_>,
+    sequence: u32,
+    start: usize,
+    chunk: &[u8],
+) -> Result<CdnFields> {
+    let mut fields = upload_fields(config, video, sequence, start, chunk)?;
+    fields.insert("filedata".into(), chunk.to_vec());
+    if start == 0 {
+        add_thumbnail(&mut fields, &p.thumbnail);
+    }
+    put(&mut fields, "smallvideoflag", 0);
+    Ok(fields)
 }
 
 #[cfg(test)]
@@ -4633,5 +5294,545 @@ mod tests {
                 SocketAddr::from((ip_c, 443)),
             ]
         );
+    }
+
+    struct RecordingClock {
+        unix_ms: std::sync::atomic::AtomicU64,
+        sleeps: std::sync::Mutex<Vec<Duration>>,
+    }
+    impl RecordingClock {
+        fn new(unix_secs: u64) -> Self {
+            Self {
+                unix_ms: std::sync::atomic::AtomicU64::new(unix_secs * 1000),
+                sleeps: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+    impl Clock for RecordingClock {
+        fn monotonic_ms(&self) -> u64 {
+            1000
+        }
+        fn unix_time_ms(&self) -> Result<u64> {
+            Ok(self.unix_ms.load(Ordering::Acquire))
+        }
+        fn sleep<'a>(&'a self, duration: Duration) -> crate::transport::TransportFuture<'a, ()> {
+            self.sleeps.lock().unwrap().push(duration);
+            Box::pin(std::future::ready(()))
+        }
+    }
+
+    struct FnHttp<F>(F);
+    impl<F> HttpTransport for FnHttp<F>
+    where
+        F: Fn(HttpRequest) -> Result<crate::transport::HttpResponse> + Send + Sync,
+    {
+        fn send<'a>(
+            &'a self,
+            request: HttpRequest,
+        ) -> crate::transport::TransportFuture<'a, Result<crate::transport::HttpResponse>> {
+            let outcome = (self.0)(request);
+            Box::pin(async move { outcome })
+        }
+    }
+
+    struct MemoryAsyncSource(std::sync::Mutex<Vec<u8>>);
+    impl AsyncUploadSource for MemoryAsyncSource {
+        fn read_at<'a>(
+            &'a self,
+            offset: u64,
+            buf: &'a mut [u8],
+        ) -> crate::transport::TransportFuture<'a, Result<()>> {
+            let result = (|| {
+                let data = self.0.lock().unwrap();
+                let start = usize::try_from(offset)?;
+                let end = start
+                    .checked_add(buf.len())
+                    .ok_or_else(|| anyhow::anyhow!("Upload source range overflow"))?;
+                ensure!(end <= data.len(), "Upload source changed");
+                buf.copy_from_slice(&data[start..end]);
+                Ok(())
+            })();
+            Box::pin(async move { result })
+        }
+    }
+
+    fn tiny_jpeg() -> Vec<u8> {
+        let mut out = Vec::new();
+        let img = image::RgbImage::from_pixel(4, 4, image::Rgb([0x22, 0x44, 0x66]));
+        img.write_to(
+            &mut std::io::Cursor::new(&mut out),
+            image::ImageFormat::Jpeg,
+        )
+        .unwrap();
+        out
+    }
+
+    #[tokio::test]
+    async fn async_cdn_download_failover_storage_sink_and_expiry() {
+        let ip_a = Ipv4Addr::new(1, 1, 1, 1);
+        let ip_b = Ipv4Addr::new(8, 8, 8, 8);
+        let cdn = CdnClient::new(
+            CdnConfig {
+                version: 1,
+                uin: 12345,
+                client_version: 456,
+                client_os_type: "synthetic-client".into(),
+                auth_key: b"synthetic-auth".to_vec(),
+                server_ips: vec![ip_a, ip_b],
+                front_id: 0,
+                location: None,
+            },
+            Duration::from_secs(25),
+        )
+        .unwrap();
+        let (mut descriptor, raw, ciphertext) =
+            download_fixture(UPLOAD_CHUNK + 200, MediaQuality::File);
+        descriptor.expires_at = Some(2_000_000_000);
+
+        let clock = RecordingClock::new(1_700_000_000);
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        let seen_hosts = std::sync::Mutex::new(Vec::new());
+        let desc_for_http = descriptor.clone();
+        let ct_for_http = ciphertext.clone();
+        let http = FnHttp(|req: HttpRequest| {
+            assert_eq!(req.method, HttpMethod::Post);
+            assert_eq!(req.url.scheme(), "http");
+            assert_eq!(req.url.port(), Some(443));
+            seen_hosts
+                .lock()
+                .unwrap()
+                .push(req.url.host_str().unwrap().to_owned());
+            let n = attempts.fetch_add(1, Ordering::AcqRel);
+            if n == 0 {
+                return Err(TransportError::Disconnected.into());
+            }
+            if n == 2 {
+                return Ok(crate::transport::HttpResponse {
+                    status: 503,
+                    headers: vec![],
+                    body: vec![],
+                });
+            }
+            let fields = unpack_cdn(&req.body)?;
+            let reply = download_reply(&fields, &desc_for_http, &ct_for_http);
+            Ok(crate::transport::HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: pack_cdn(&reply)?,
+            })
+        });
+
+        // 1. Download into memory with failover across both IPs + 503 retry + backoff sleep.
+        let downloaded = cdn
+            .download_async(&descriptor, &http, &clock)
+            .await
+            .unwrap();
+        assert_eq!(downloaded.bytes, raw);
+        assert_eq!(downloaded.md5, descriptor.expected_md5.as_deref().unwrap());
+        assert_eq!(downloaded.sha256, hex::encode(sha256(&raw)));
+        assert_eq!(
+            *seen_hosts.lock().unwrap(),
+            vec!["1.1.1.1", "8.8.8.8", "8.8.8.8", "1.1.1.1"]
+        );
+        assert!(
+            !clock.sleeps.lock().unwrap().is_empty(),
+            "retry backoff must invoke Clock::sleep"
+        );
+
+        // 2. Download directly to a sink + storage download route.
+        let desc_for_sink = descriptor.clone();
+        let ct_for_sink = ciphertext.clone();
+        let storage_http = FnHttp(|req: HttpRequest| {
+            let fields = unpack_cdn(&req.body)?;
+            let reply = download_reply(&fields, &desc_for_sink, &ct_for_sink);
+            Ok(crate::transport::HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: pack_cdn(&reply)?,
+            })
+        });
+        let mut sink = Vec::new();
+        let receipt = cdn
+            .download_to_with_progress_async(
+                &descriptor,
+                &storage_http,
+                &clock,
+                |_, _| Ok(()),
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        assert_eq!(sink, raw);
+        assert_eq!(receipt.byte_length, raw.len() as u64);
+
+        let storage_dl = cdn
+            .download_storage_with_progress_async(
+                &descriptor,
+                "pack-task-1",
+                &storage_http,
+                &clock,
+                |_, _| Ok(()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(storage_dl.bytes, raw);
+
+        // 2b. Voice CDN download over async transport uses filetype=15 and tolerates length drift.
+        let voice_desc = VoiceCdnDescriptor {
+            file_id: descriptor.file_id.clone(),
+            aes_key: descriptor.aes_key.clone(),
+            expected_bytes: Some((raw.len() + 32) as u64),
+        };
+        let saw_voice_filetype = std::sync::Mutex::new(None);
+        let desc_for_voice = descriptor.clone();
+        let ct_for_voice = ciphertext.clone();
+        let voice_http = FnHttp(|req: HttpRequest| {
+            assert_eq!(req.url.path(), "/download");
+            let fields = unpack_cdn(&req.body)?;
+            *saw_voice_filetype.lock().unwrap() = Some(integer(&fields, "filetype")?);
+            let reply = download_reply(&fields, &desc_for_voice, &ct_for_voice);
+            Ok(crate::transport::HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: pack_cdn(&reply)?,
+            })
+        });
+        let voice_bytes = cdn
+            .download_voice_with_progress_async(&voice_desc, &voice_http, &clock, |_, _| Ok(()))
+            .await
+            .unwrap();
+        assert_eq!(voice_bytes, raw);
+        assert_eq!(*saw_voice_filetype.lock().unwrap(), Some(15));
+
+        // 3. Expiry enforced via Clock without reaching HttpTransport.
+        let expired_clock = RecordingClock::new(2_000_000_000);
+        let never_called = FnHttp(|_| bail!("must not call transport on expired media"));
+        let err = cdn
+            .download_async(&descriptor, &never_called, &expired_clock)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.to_string(), "media_expired");
+
+        // 4. Non-retryable 403 fails immediately without sleeping or retrying.
+        let status_clock = RecordingClock::new(1_700_000_000);
+        let calls_403 = std::sync::atomic::AtomicUsize::new(0);
+        let http_403 = FnHttp(|_| {
+            calls_403.fetch_add(1, Ordering::AcqRel);
+            Ok(crate::transport::HttpResponse {
+                status: 403,
+                headers: vec![],
+                body: vec![],
+            })
+        });
+        let err = cdn
+            .download_async(&descriptor, &http_403, &status_clock)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.to_string(), "CDN HTTP status 403");
+        assert_eq!(calls_403.load(Ordering::Acquire), 1);
+        assert!(status_clock.sleeps.lock().unwrap().is_empty());
+
+        // 5. Fence abort stops retry during backoff sleep without another request.
+        let fence_calls = std::sync::atomic::AtomicUsize::new(0);
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let fence_http = FnHttp(|_| {
+            fence_calls.fetch_add(1, Ordering::AcqRel);
+            cancelled.store(true, Ordering::Release);
+            Err(TransportError::Timeout.into())
+        });
+        let err = cdn
+            .download_with_progress_async(&descriptor, &fence_http, &status_clock, |_, _| {
+                ensure!(!cancelled.load(Ordering::Acquire), "media_cancelled");
+                Ok(())
+            })
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.to_string(), "media_cancelled");
+        assert_eq!(fence_calls.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn async_cdn_upload_memory_source_image_and_video() {
+        let cdn = client();
+        let clock = RecordingClock::new(1_700_000_000);
+        let (prepared, raw) = multi_chunk_file_fixture(2);
+        let total = prepared.encrypted.len();
+
+        // 1. In-memory upload_async.
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let store = received.clone();
+        let http = FnHttp(move |req: HttpRequest| {
+            assert_eq!(req.url.path(), "/uploadv3");
+            let fields = unpack_cdn(&req.body)?;
+            record_chunk(&store, total, &fields);
+            Ok(crate::transport::HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: pack_cdn(&upload_ok_reply(&fields, "async-file-id"))?,
+            })
+        });
+        let uploaded = cdn.upload_async(&prepared, &http, &clock).await.unwrap();
+        assert_eq!(uploaded.descriptor.file_id, "async-file-id");
+        assert_eq!(
+            decrypt_cdn(&received.lock().unwrap(), &prepared.aes_key).unwrap(),
+            raw
+        );
+
+        // 2. Streaming PreparedAsyncUpload produces byte-identical ciphertext and detects tampering.
+        let source = std::sync::Arc::new(MemoryAsyncSource(std::sync::Mutex::new(raw.clone())));
+        let async_prepared = PreparedAsyncUpload::new(
+            source.clone(),
+            raw.len() as u64,
+            &prepared.md5,
+            &prepared.sha256,
+            MediaQuality::File,
+            &prepared.file_name,
+            &prepared.destination,
+            &prepared.aes_key,
+            &prepared.file_key,
+        )
+        .unwrap();
+        assert_eq!(
+            async_prepared.to_memory().await.unwrap().encrypted,
+            prepared.encrypted
+        );
+        let received_stream = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let store2 = received_stream.clone();
+        let http_stream = FnHttp(move |req: HttpRequest| {
+            let fields = unpack_cdn(&req.body)?;
+            record_chunk(&store2, total, &fields);
+            Ok(crate::transport::HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: pack_cdn(&upload_ok_reply(&fields, "async-source-id"))?,
+            })
+        });
+        let uploaded_stream = cdn
+            .upload_source_with_progress_async(&async_prepared, &http_stream, &clock, |_, _| Ok(()))
+            .await
+            .unwrap();
+        assert_eq!(uploaded_stream.descriptor.file_id, "async-source-id");
+        assert_eq!(*received_stream.lock().unwrap(), prepared.encrypted);
+
+        // Tampering with source bytes rejects before sending final block.
+        source.0.lock().unwrap()[0] ^= 0xff;
+        let sent_last = std::sync::atomic::AtomicBool::new(false);
+        let http_tamper = FnHttp(|req: HttpRequest| {
+            let fields = unpack_cdn(&req.body)?;
+            if integer(&fields, "rangeend")? as usize + 1 == total {
+                sent_last.store(true, Ordering::Release);
+            }
+            Ok(crate::transport::HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: pack_cdn(&upload_ok_reply(&fields, "must-not-finish"))?,
+            })
+        });
+        assert!(cdn
+            .upload_source_with_progress_async(&async_prepared, &http_tamper, &clock, |_, _| {
+                Ok(())
+            })
+            .await
+            .is_err());
+        assert!(!sent_last.load(Ordering::Acquire));
+
+        // 3. upload_image_async + upload_video_async.
+        let jpeg = tiny_jpeg();
+        let prepared_img =
+            PreparedImageUpload::prepare(&jpeg, &jpeg, &jpeg, "photo.jpg", "filehelper").unwrap();
+        let http_img = FnHttp(|req: HttpRequest| {
+            let fields = unpack_cdn(&req.body)?;
+            assert!(fields.contains_key("midimgdata"));
+            assert!(fields.contains_key("thumbdata"));
+            Ok(crate::transport::HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: pack_cdn(&upload_ok_reply(&fields, "async-img-id"))?,
+            })
+        });
+        let uploaded_img = cdn
+            .upload_image_async(&prepared_img, &http_img, &clock)
+            .await
+            .unwrap();
+        assert_eq!(uploaded_img.standard.descriptor.file_id, "async-img-id");
+        assert_eq!(
+            uploaded_img.original.as_ref().unwrap().descriptor.file_id,
+            "async-img-id"
+        );
+
+        let mut mp4 = b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isommp41".to_vec();
+        mp4.resize(128, 0xaa);
+        let prepared_vid =
+            PreparedVideoUpload::prepare(&mp4, &jpeg, "clip.mp4", "filehelper").unwrap();
+        let http_vid = FnHttp(|req: HttpRequest| {
+            let fields = unpack_cdn(&req.body)?;
+            assert_eq!(integer(&fields, "smallvideoflag")?, 0);
+            assert!(fields.contains_key("thumbdata"));
+            Ok(crate::transport::HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: pack_cdn(&upload_ok_reply(&fields, "async-vid-id"))?,
+            })
+        });
+        let uploaded_vid = cdn
+            .upload_video_async(&prepared_vid, &http_vid, &clock)
+            .await
+            .unwrap();
+        assert_eq!(uploaded_vid.video.descriptor.file_id, "async-vid-id");
+        assert_eq!(uploaded_vid.thumbnail.descriptor.file_id, "async-vid-id");
+    }
+
+    #[tokio::test]
+    async fn async_backoff_respects_monotonic_elapsed_time_under_throttled_timers() {
+        struct ThrottledClock {
+            now_ms: std::sync::atomic::AtomicU64,
+            calls: std::sync::atomic::AtomicUsize,
+        }
+        impl Clock for ThrottledClock {
+            fn monotonic_ms(&self) -> u64 {
+                self.now_ms.load(Ordering::Acquire)
+            }
+            fn unix_time_ms(&self) -> Result<u64> {
+                Ok(1_700_000_000_000)
+            }
+            fn sleep<'a>(
+                &'a self,
+                _duration: Duration,
+            ) -> crate::transport::TransportFuture<'a, ()> {
+                self.calls.fetch_add(1, Ordering::AcqRel);
+                // Simulate a background browser tab clamping setTimeout to 1000ms.
+                self.now_ms.fetch_add(1000, Ordering::AcqRel);
+                Box::pin(std::future::ready(()))
+            }
+        }
+        let clock = ThrottledClock {
+            now_ms: std::sync::atomic::AtomicU64::new(0),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        sleep_with_fence_async(
+            &clock,
+            Duration::from_millis(2000),
+            Duration::from_millis(100),
+            &mut || Ok(()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            clock.calls.load(Ordering::Acquire),
+            2,
+            "2000ms backoff under 1000ms clamped timers must finish in 2 sleeps, not 20"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn async_media_futures_are_send_on_native() {
+        fn assert_send<F: std::future::Future + Send>(_: &F) {}
+        #[allow(dead_code, clippy::too_many_arguments)]
+        fn check_all(
+            cdn: &CdnClient,
+            desc: &MediaDescriptor,
+            voice: &VoiceCdnDescriptor,
+            upload: &PreparedUpload,
+            async_upload: &PreparedAsyncUpload,
+            img: &PreparedImageUpload,
+            vid: &PreparedVideoUpload,
+            sticker: &StickerDescriptor,
+            tp: &TpMediaDescriptor,
+            channels: &crate::ChannelsMedia,
+            http: &dyn HttpTransport,
+            clock: &dyn Clock,
+            sink: &mut Vec<u8>,
+        ) {
+            assert_send(&cdn.download_async(desc, http, clock));
+            assert_send(&cdn.download_with_progress_async(desc, http, clock, |_, _| Ok(())));
+            assert_send(&cdn.download_to_with_progress_async(
+                desc,
+                http,
+                clock,
+                |_, _| Ok(()),
+                sink,
+            ));
+            assert_send(&cdn.download_storage_with_progress_async(
+                desc,
+                "k",
+                http,
+                clock,
+                |_, _| Ok(()),
+            ));
+            assert_send(&cdn.download_voice_with_progress_async(voice, http, clock, |_, _| Ok(())));
+            assert_send(&cdn.upload_async(upload, http, clock));
+            assert_send(&cdn.upload_with_progress_async(upload, http, clock, |_, _| Ok(())));
+            assert_send(&cdn.upload_source_with_progress_async(
+                async_upload,
+                http,
+                clock,
+                |_, _| Ok(()),
+            ));
+            assert_send(&cdn.upload_image_async(img, http, clock));
+            assert_send(&cdn.upload_image_with_progress_async(img, http, clock, |_, _| Ok(())));
+            assert_send(&cdn.upload_video_async(vid, http, clock));
+            assert_send(&cdn.upload_video_with_progress_async(vid, http, clock, |_, _| Ok(())));
+            assert_send(&cdn.upload_large_file_with_progress_async(
+                upload,
+                1,
+                http,
+                clock,
+                |_, _| Ok(()),
+            ));
+            assert_send(&cdn.upload_large_file_from_source_with_progress_async(
+                async_upload,
+                1,
+                http,
+                clock,
+                |_, _| Ok(()),
+            ));
+            assert_send(&cdn.upload_video_original_with_progress_async(
+                upload,
+                1,
+                http,
+                clock,
+                |_, _| Ok(()),
+            ));
+            assert_send(&cdn.upload_video_original_from_source_with_progress_async(
+                async_upload,
+                1,
+                http,
+                clock,
+                |_, _| Ok(()),
+            ));
+            assert_send(&async_upload.to_memory());
+            assert_send(&download_advertised_avatar_async(
+                "https://wx.qlogo.cn/a",
+                http,
+            ));
+            assert_send(&fetch_sticker_async(sticker, http, clock, |_, _| Ok(())));
+            assert_send(&fetch_sticker_original_async(
+                "http://vweixinf.tc.qq.com/x",
+                "0123456789abcdef0123456789abcdef",
+                http,
+                |_, _| Ok(()),
+            ));
+            assert_send(&fetch_link_thumbnail_async(
+                "https://example.invalid/a.png",
+                http,
+                |_, _| Ok(()),
+            ));
+            assert_send(&fetch_tp_media_async(tp, http, clock, |_, _| Ok(())));
+            assert_send(&fetch_tp_media_to_async(
+                tp,
+                http,
+                clock,
+                |_, _| Ok(()),
+                sink,
+            ));
+            assert_send(&fetch_channels_video_async(channels, 1024, http, |_, _| {
+                Ok(())
+            }));
+        }
+        let _ = check_all;
     }
 }

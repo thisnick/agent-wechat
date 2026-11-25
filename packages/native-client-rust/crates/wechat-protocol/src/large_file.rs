@@ -102,6 +102,101 @@ impl CdnClient {
     }
 }
 
+impl CdnClient {
+    /// Asynchronously upload one large ordinary file using previously persisted
+    /// source/key material and a pluggable [`HttpTransport`] and [`Clock`].
+    pub async fn upload_large_file_with_progress_async(
+        &self,
+        prepared: &PreparedUpload,
+        task_id: u64,
+        http: &dyn HttpTransport,
+        clock: &dyn Clock,
+        progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+    ) -> Result<UploadedMedia> {
+        ensure!(
+            matches!(prepared.kind, MediaQuality::File | MediaQuality::LargeFile),
+            "Expected an ordinary file upload"
+        );
+        let mut session = self.async_session(http, clock);
+        upload_large_file_async(
+            &self.config,
+            UploadRef::Memory(prepared),
+            task_id,
+            &mut session,
+            progress,
+        )
+        .await
+    }
+
+    /// Asynchronously upload one large ordinary file streamed from a
+    /// [`PreparedAsyncUpload`] without buffering the full ciphertext in memory.
+    pub async fn upload_large_file_from_source_with_progress_async(
+        &self,
+        prepared: &PreparedAsyncUpload,
+        task_id: u64,
+        http: &dyn HttpTransport,
+        clock: &dyn Clock,
+        progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+    ) -> Result<UploadedMedia> {
+        ensure!(
+            matches!(prepared.kind, MediaQuality::File | MediaQuality::LargeFile),
+            "Expected an ordinary file upload"
+        );
+        let mut session = self.async_session(http, clock);
+        upload_large_file_async(
+            &self.config,
+            UploadRef::Async(prepared),
+            task_id,
+            &mut session,
+            progress,
+        )
+        .await
+    }
+
+    /// Asynchronously upload an unmodified original video as a separate type-4
+    /// object using a pluggable [`HttpTransport`] and [`Clock`].
+    pub async fn upload_video_original_with_progress_async(
+        &self,
+        prepared: &PreparedUpload,
+        task_id: u64,
+        http: &dyn HttpTransport,
+        clock: &dyn Clock,
+        progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+    ) -> Result<UploadedMedia> {
+        let mut session = self.async_session(http, clock);
+        upload_video_original_async(
+            self,
+            UploadRef::Memory(prepared),
+            task_id,
+            &mut session,
+            progress,
+        )
+        .await
+    }
+
+    /// Asynchronously upload an unmodified original video streamed from a
+    /// [`PreparedAsyncUpload`].
+    pub async fn upload_video_original_from_source_with_progress_async(
+        &self,
+        prepared: &PreparedAsyncUpload,
+        task_id: u64,
+        http: &dyn HttpTransport,
+        clock: &dyn Clock,
+        progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+    ) -> Result<UploadedMedia> {
+        let mut session = self.async_session(http, clock);
+        upload_video_original_async(
+            self,
+            UploadRef::Async(prepared),
+            task_id,
+            &mut session,
+            progress,
+        )
+        .await
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn upload_video_original(
     client: &CdnClient,
     prepared: UploadRef<'_>,
@@ -118,6 +213,27 @@ fn upload_video_original(
         client.upload_with_transport(prepared, progress, post)
     } else {
         upload_large_file(&client.config, prepared, task_id, post, progress)
+    }
+}
+
+async fn upload_video_original_async(
+    client: &CdnClient,
+    prepared: UploadRef<'_>,
+    task_id: u64,
+    session: &mut AsyncCdnSession<'_>,
+    progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+) -> Result<UploadedMedia> {
+    ensure!(
+        prepared.kind() == MediaQuality::Video && task_id != 0,
+        "Expected an original video upload and task ID"
+    );
+    prepared.validate()?;
+    if prepared.encrypted_len() < MAX_CDN_TRANSFER_BYTES {
+        client
+            .upload_with_transport_async(prepared, progress, session)
+            .await
+    } else {
+        upload_large_file_async(&client.config, prepared, task_id, session, progress).await
     }
 }
 
@@ -201,13 +317,11 @@ fn opaque_field(reply: &CdnFields, key: &str, max_bytes: usize) -> Result<Vec<u8
     Ok(value.clone())
 }
 
-fn upload_large_file(
+fn validate_large_file_inputs(
     conf: &CdnConfig,
     prepared: UploadRef<'_>,
     task_id: u64,
-    mut post: impl FnMut(&str, &CdnFields, &mut dyn FnMut() -> Result<()>) -> Result<CdnFields>,
-    mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
-) -> Result<UploadedMedia> {
+) -> Result<u64> {
     ensure!(
         ((prepared.kind() == MediaQuality::File
             && prepared.plaintext_bytes() as usize > MAX_NATIVE_UPLOAD_BYTES
@@ -228,31 +342,10 @@ fn upload_large_file(
         "Missing authenticated CDN location"
     );
     prepared.validate()?;
-    let total = prepared.encrypted_len() as u64;
-    let mut sequence = 0u32;
-    // Protocol rejections and unexpected controls are never retried; transient
-    // HTTP/TCP transport failures are handled inside the session layer while
-    // leaving the caller's persisted source/key material intact and never
-    // submitting a business message.
-    let mut exchange =
-        |phase: &str,
-         extra: CdnFields,
-         acknowledged: u64,
-         progress: &mut dyn FnMut(u64, Option<u64>) -> Result<()>| {
-            progress(acknowledged, Some(total))?;
-            sequence += 1;
-            let mut fields = common_fields(conf, prepared, task_id, sequence);
-            fields.extend(extra);
-            let path = format!(
-                "/cdn/{}/{sequence}/{}/{phase}",
-                conf.uin,
-                prepared.kind().filetype()
-            );
-            let reply = post(&path, &fields, &mut || progress(acknowledged, Some(total)))?;
-            validate_reply(&reply, sequence, conf.version)?;
-            Ok::<_, anyhow::Error>(reply)
-        };
+    Ok(prepared.encrypted_len() as u64)
+}
 
+fn apply_fields(prepared: UploadRef<'_>, total: u64) -> Result<CdnFields> {
     let mut apply = CdnFields::new();
     for (key, value) in [
         ("apptype", 1),
@@ -279,25 +372,113 @@ fn upload_large_file(
             apply.insert("ext_0".into(), extension.as_bytes().to_vec());
         }
     }
-    let reply = exchange("apply", apply, 0, &mut progress)?;
+    Ok(apply)
+}
+
+fn parse_apply_reply(reply: &CdnFields, prepared: UploadRef<'_>) -> Result<(usize, Vec<u8>)> {
     ensure!(
-        integer(&reply, "hit")? == 0,
+        integer(reply, "hit")? == 0,
         "Large-file cache hits require unsupported key recovery"
     );
     ensure!(
-        integer(&reply, "type")? == i64::from(prepared.kind().filetype())
-            && integer(&reply, "num")? == 1
-            && integer(&reply, "type_0")? == i64::from(prepared.kind().filetype())
-            && integer(&reply, "fin_0")? == 0,
+        integer(reply, "type")? == i64::from(prepared.kind().filetype())
+            && integer(reply, "num")? == 1
+            && integer(reply, "type_0")? == i64::from(prepared.kind().filetype())
+            && integer(reply, "fin_0")? == 0,
         "Unsupported large-file apply result"
     );
-    let block_size = usize::try_from(integer(&reply, "blocksize_0")?)?;
+    let block_size = usize::try_from(integer(reply, "blocksize_0")?)?;
     ensure!(
         [512 * 1024, 1024 * 1024].contains(&block_size)
             && prepared.encrypted_len().div_ceil(block_size) <= MAX_BLOCKS,
         "Unsupported large-file block size"
     );
-    let upinfo = opaque_field(&reply, "upinfo_0", MAX_UPLOAD_TOKEN_BYTES)?;
+    let upinfo = opaque_field(reply, "upinfo_0", MAX_UPLOAD_TOKEN_BYTES)?;
+    Ok((block_size, upinfo))
+}
+
+fn upload_block_fields(acknowledged: u64, index: usize, upinfo: &[u8], chunk: &[u8]) -> CdnFields {
+    let mut fields = CdnFields::new();
+    put(&mut fields, "alreadyupsize", acknowledged);
+    fields.insert("alreadyupbit".into(), acknowledged_bitmap(index));
+    fields.insert("upinfo".into(), upinfo.to_vec());
+    put(&mut fields, "offset", acknowledged);
+    fields.insert("blockmd5".into(), hex::encode(md5(chunk)).into_bytes());
+    fields.insert("blockdata".into(), chunk.to_vec());
+    fields
+}
+
+fn parse_block_reply(reply: &CdnFields, acknowledged: u64) -> Result<Vec<u8>> {
+    ensure!(
+        u64::try_from(integer(reply, "offset")?)? == acknowledged && integer(reply, "fin")? == 0,
+        "Large-file block acknowledgement mismatch"
+    );
+    opaque_field(reply, "etag", 8192)
+}
+
+fn finish_fields(upinfo: Vec<u8>, etags: Vec<Vec<u8>>) -> CdnFields {
+    let mut finish = CdnFields::new();
+    finish.insert("upinfo".into(), upinfo);
+    put(&mut finish, "blocksum", etags.len());
+    for (index, etag) in etags.into_iter().enumerate() {
+        finish.insert(format!("etag_{index}"), etag);
+    }
+    finish
+}
+
+fn complete_fields(prepared: UploadRef<'_>, finished_upinfo: Vec<u8>) -> CdnFields {
+    let mut complete = CdnFields::new();
+    put(&mut complete, "type", prepared.kind().filetype());
+    put(&mut complete, "num", 1);
+    complete.insert("upinfo_0".into(), finished_upinfo);
+    complete
+}
+
+fn parse_complete_reply(reply: &CdnFields) -> Result<String> {
+    let file_id = String::from_utf8(opaque_field(reply, "fileid", 8192)?)?;
+    ensure!(
+        !file_id.chars().any(|c| c.is_control()),
+        "Invalid large-file identifier"
+    );
+    Ok(file_id)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn upload_large_file(
+    conf: &CdnConfig,
+    prepared: UploadRef<'_>,
+    task_id: u64,
+    mut post: impl FnMut(&str, &CdnFields, &mut dyn FnMut() -> Result<()>) -> Result<CdnFields>,
+    mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+) -> Result<UploadedMedia> {
+    let total = validate_large_file_inputs(conf, prepared, task_id)?;
+    let mut sequence = 0u32;
+    // Protocol rejections and unexpected controls are never retried; transient
+    // HTTP/TCP transport failures are handled inside the session layer while
+    // leaving the caller's persisted source/key material intact and never
+    // submitting a business message.
+    let mut exchange =
+        |phase: &str,
+         extra: CdnFields,
+         acknowledged: u64,
+         progress: &mut dyn FnMut(u64, Option<u64>) -> Result<()>| {
+            progress(acknowledged, Some(total))?;
+            sequence += 1;
+            let mut fields = common_fields(conf, prepared, task_id, sequence);
+            fields.extend(extra);
+            let path = format!(
+                "/cdn/{}/{sequence}/{}/{phase}",
+                conf.uin,
+                prepared.kind().filetype()
+            );
+            let reply = post(&path, &fields, &mut || progress(acknowledged, Some(total)))?;
+            validate_reply(&reply, sequence, conf.version)?;
+            Ok::<_, anyhow::Error>(reply)
+        };
+
+    let apply = apply_fields(prepared, total)?;
+    let reply = exchange("apply", apply, 0, &mut progress)?;
+    let (block_size, upinfo) = parse_apply_reply(&reply, prepared)?;
     progress(0, Some(total))?;
 
     let mut acknowledged = 0u64;
@@ -309,47 +490,130 @@ fn upload_large_file(
     let mut index = 0usize;
     while (chunks.position() as u64) < total {
         let chunk = chunks.next(block_size)?;
-        let mut fields = CdnFields::new();
-        put(&mut fields, "alreadyupsize", acknowledged);
-        fields.insert("alreadyupbit".into(), acknowledged_bitmap(index));
-        fields.insert("upinfo".into(), upinfo.clone());
-        put(&mut fields, "offset", acknowledged);
-        fields.insert("blockmd5".into(), hex::encode(md5(&chunk)).into_bytes());
-        fields.insert("blockdata".into(), chunk.to_vec());
+        let fields = upload_block_fields(acknowledged, index, &upinfo, &chunk);
         let reply = exchange("uploadblock", fields, acknowledged, &mut progress)?;
-        ensure!(
-            u64::try_from(integer(&reply, "offset")?)? == acknowledged
-                && integer(&reply, "fin")? == 0,
-            "Large-file block acknowledgement mismatch"
-        );
-        etags.push(opaque_field(&reply, "etag", 8192)?);
+        etags.push(parse_block_reply(&reply, acknowledged)?);
         acknowledged += chunk.len() as u64;
         index += 1;
         progress(acknowledged, Some(total))?;
     }
     ensure!(acknowledged == total, "Incomplete large-file upload");
 
-    let mut finish = CdnFields::new();
-    finish.insert("upinfo".into(), upinfo);
-    put(&mut finish, "blocksum", etags.len());
-    for (index, etag) in etags.into_iter().enumerate() {
-        finish.insert(format!("etag_{index}"), etag);
-    }
-    let reply = exchange("fin", finish, acknowledged, &mut progress)?;
+    let reply = exchange(
+        "fin",
+        finish_fields(upinfo, etags),
+        acknowledged,
+        &mut progress,
+    )?;
     let finished_upinfo = opaque_field(&reply, "upinfo", MAX_UPLOAD_TOKEN_BYTES)?;
     progress(acknowledged, Some(total))?;
-    let mut complete = CdnFields::new();
-    put(&mut complete, "type", prepared.kind().filetype());
-    put(&mut complete, "num", 1);
-    complete.insert("upinfo_0".into(), finished_upinfo);
-    let reply = exchange("complete", complete, acknowledged, &mut progress)?;
-    let file_id = String::from_utf8(opaque_field(&reply, "fileid", 8192)?)?;
-    ensure!(
-        !file_id.chars().any(|c| c.is_control()),
-        "Invalid large-file identifier"
-    );
+    let reply = exchange(
+        "complete",
+        complete_fields(prepared, finished_upinfo),
+        acknowledged,
+        &mut progress,
+    )?;
+    let file_id = parse_complete_reply(&reply)?;
     // Return the correlated completion even if cancellation arrived while this
     // request was in flight. The caller persists it before checking its fence.
+    Ok(prepared.uploaded(file_id, None, None))
+}
+
+struct LargeFileExchange<'a, 's, 't> {
+    conf: &'a CdnConfig,
+    prepared: UploadRef<'a>,
+    task_id: u64,
+    total: u64,
+    sequence: u32,
+    session: &'s mut AsyncCdnSession<'t>,
+}
+
+impl LargeFileExchange<'_, '_, '_> {
+    async fn send(
+        &mut self,
+        phase: &str,
+        extra: CdnFields,
+        acknowledged: u64,
+        progress: &mut impl FnMut(u64, Option<u64>) -> Result<()>,
+    ) -> Result<CdnFields> {
+        progress(acknowledged, Some(self.total))?;
+        self.sequence += 1;
+        let seq = self.sequence;
+        let mut fields = common_fields(self.conf, self.prepared, self.task_id, seq);
+        fields.extend(extra);
+        let path = format!(
+            "/cdn/{}/{seq}/{}/{phase}",
+            self.conf.uin,
+            self.prepared.kind().filetype()
+        );
+        let total = self.total;
+        let reply = self
+            .session
+            .post(&path, &fields, || progress(acknowledged, Some(total)))
+            .await?;
+        validate_reply(&reply, seq, self.conf.version)?;
+        Ok(reply)
+    }
+}
+
+async fn upload_large_file_async(
+    conf: &CdnConfig,
+    prepared: UploadRef<'_>,
+    task_id: u64,
+    session: &mut AsyncCdnSession<'_>,
+    mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
+) -> Result<UploadedMedia> {
+    let total = validate_large_file_inputs(conf, prepared, task_id)?;
+    let mut exchange = LargeFileExchange {
+        conf,
+        prepared,
+        task_id,
+        total,
+        sequence: 0,
+        session,
+    };
+
+    let apply = apply_fields(prepared, total)?;
+    let reply = exchange.send("apply", apply, 0, &mut progress).await?;
+    let (block_size, upinfo) = parse_apply_reply(&reply, prepared)?;
+    progress(0, Some(total))?;
+
+    let mut acknowledged = 0u64;
+    let mut etags = Vec::new();
+    let mut chunks = prepared.chunks();
+    let mut index = 0usize;
+    while (chunks.position() as u64) < total {
+        let chunk = chunks.next_async(block_size).await?;
+        let fields = upload_block_fields(acknowledged, index, &upinfo, &chunk);
+        let reply = exchange
+            .send("uploadblock", fields, acknowledged, &mut progress)
+            .await?;
+        etags.push(parse_block_reply(&reply, acknowledged)?);
+        acknowledged += chunk.len() as u64;
+        index += 1;
+        progress(acknowledged, Some(total))?;
+    }
+    ensure!(acknowledged == total, "Incomplete large-file upload");
+
+    let reply = exchange
+        .send(
+            "fin",
+            finish_fields(upinfo, etags),
+            acknowledged,
+            &mut progress,
+        )
+        .await?;
+    let finished_upinfo = opaque_field(&reply, "upinfo", MAX_UPLOAD_TOKEN_BYTES)?;
+    progress(acknowledged, Some(total))?;
+    let reply = exchange
+        .send(
+            "complete",
+            complete_fields(prepared, finished_upinfo),
+            acknowledged,
+            &mut progress,
+        )
+        .await?;
+    let file_id = parse_complete_reply(&reply)?;
     Ok(prepared.uploaded(file_id, None, None))
 }
 
@@ -1202,5 +1466,106 @@ mod tests {
             2,
             "initial keep-alive connection + 1 fresh socket after drop"
         );
+    }
+
+    #[tokio::test]
+    async fn async_large_file_upload_supports_memory_and_streaming_source() {
+        use std::sync::{Arc, Mutex};
+
+        struct InstantClock;
+        impl Clock for InstantClock {
+            fn monotonic_ms(&self) -> u64 {
+                1000
+            }
+            fn unix_time_ms(&self) -> Result<u64> {
+                Ok(1_700_000_000_000)
+            }
+        }
+
+        struct PeerHttp(Mutex<Peer<'static>>);
+        impl HttpTransport for PeerHttp {
+            fn send<'a>(
+                &'a self,
+                request: HttpRequest,
+            ) -> crate::transport::TransportFuture<'a, Result<crate::transport::HttpResponse>>
+            {
+                let outcome = (|| {
+                    let fields = unpack_cdn(&request.body)?;
+                    let reply = self
+                        .0
+                        .lock()
+                        .unwrap()
+                        .respond(request.url.path(), &fields)?;
+                    Ok(crate::transport::HttpResponse {
+                        status: 200,
+                        headers: vec![],
+                        body: pack_cdn(&reply)?,
+                    })
+                })();
+                Box::pin(async move { outcome })
+            }
+        }
+
+        struct VecSource(Arc<Vec<u8>>);
+        impl AsyncUploadSource for VecSource {
+            fn read_at<'a>(
+                &'a self,
+                offset: u64,
+                buf: &'a mut [u8],
+            ) -> crate::transport::TransportFuture<'a, Result<()>> {
+                let outcome = (|| {
+                    let start = usize::try_from(offset)?;
+                    let end = start + buf.len();
+                    ensure!(end <= self.0.len(), "Upload source changed");
+                    buf.copy_from_slice(&self.0[start..end]);
+                    Ok(())
+                })();
+                Box::pin(async move { outcome })
+            }
+        }
+
+        let memory = prepared();
+        let cdn = CdnClient::new(config(), Duration::from_secs(5)).unwrap();
+
+        let http_mem = PeerHttp(Mutex::new(Peer::new(memory, 1024 * 1024)));
+        let uploaded_mem = cdn
+            .upload_large_file_with_progress_async(
+                memory,
+                987654321,
+                &http_mem,
+                &InstantClock,
+                |_, _| Ok(()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(uploaded_mem.descriptor.file_id, "completed-object");
+        assert_eq!(uploaded_mem.sha256, memory.sha256);
+
+        let raw = Arc::new(vec![0x5a; MAX_CDN_TRANSFER_BYTES + 17]);
+        let async_source = PreparedAsyncUpload::new(
+            Arc::new(VecSource(raw)),
+            (MAX_CDN_TRANSFER_BYTES + 17) as u64,
+            &memory.md5,
+            &memory.sha256,
+            memory.kind,
+            &memory.file_name,
+            &memory.destination,
+            &memory.aes_key,
+            &memory.file_key,
+        )
+        .unwrap();
+        let http_src = PeerHttp(Mutex::new(Peer::new(memory, 1024 * 1024)));
+        let uploaded_src = cdn
+            .upload_large_file_from_source_with_progress_async(
+                &async_source,
+                987654321,
+                &http_src,
+                &InstantClock,
+                |_, _| Ok(()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(uploaded_src.descriptor.file_id, "completed-object");
+        assert_eq!(uploaded_src.sha256, memory.sha256);
     }
 }
