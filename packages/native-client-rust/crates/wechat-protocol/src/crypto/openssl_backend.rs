@@ -255,8 +255,7 @@ pub(crate) struct Ecdh {
 }
 
 impl Ecdh {
-    pub(crate) fn generate(curve: Curve) -> Result<Self> {
-        let nid = curve_nid(curve);
+    pub(crate) fn generate_nid(nid: Nid) -> Result<Self> {
         let group = EcGroup::from_curve_name(nid)?;
         Ok(Self {
             key: PKey::from_ec_key(EcKey::generate(&group)?)?,
@@ -264,16 +263,7 @@ impl Ecdh {
         })
     }
 
-    pub(crate) fn from_private(curve: Curve, private: &[u8]) -> Result<Self> {
-        let max_len = match curve {
-            Curve::P224 => 28,
-            Curve::P256 => 32,
-        };
-        ensure!(
-            !private.is_empty() && private.len() <= max_len,
-            "Invalid ECDH scalar"
-        );
-        let nid = curve_nid(curve);
+    pub(crate) fn from_private_nid(nid: Nid, private: &[u8]) -> Result<Self> {
         let group = EcGroup::from_curve_name(nid)?;
         let scalar = BigNum::from_slice(private)?;
         let mut ctx = BigNumContext::new()?;
@@ -285,6 +275,22 @@ impl Ecdh {
             key: PKey::from_ec_key(key)?,
             nid,
         })
+    }
+
+    pub(crate) fn generate(curve: Curve) -> Result<Self> {
+        Self::generate_nid(curve_nid(curve))
+    }
+
+    pub(crate) fn from_private(curve: Curve, private: &[u8]) -> Result<Self> {
+        let max_len = match curve {
+            Curve::P224 => 28,
+            Curve::P256 => 32,
+        };
+        ensure!(
+            !private.is_empty() && private.len() <= max_len,
+            "Invalid ECDH scalar"
+        );
+        Self::from_private_nid(curve_nid(curve), private)
     }
 
     pub(crate) fn public(&self) -> Result<Vec<u8>> {

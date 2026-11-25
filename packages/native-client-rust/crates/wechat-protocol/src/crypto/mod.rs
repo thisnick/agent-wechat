@@ -63,15 +63,6 @@ pub enum Curve {
     P256,
 }
 
-#[cfg(feature = "openssl-crypto")]
-fn curve_from_nid(nid: openssl::nid::Nid) -> Result<Curve> {
-    match nid {
-        openssl::nid::Nid::SECP224R1 => Ok(Curve::P224),
-        openssl::nid::Nid::X9_62_PRIME256V1 => Ok(Curve::P256),
-        _ => anyhow::bail!("Unsupported elliptic curve"),
-    }
-}
-
 /// Generate `N` cryptographically secure random bytes.
 pub fn random<const N: usize>() -> Result<[u8; N]> {
     active::random()
@@ -353,7 +344,9 @@ impl Ecdh {
     /// [`Self::generate_for`].
     #[cfg(feature = "openssl-crypto")]
     pub fn generate(nid: openssl::nid::Nid) -> Result<Self> {
-        Self::generate_for(curve_from_nid(nid)?)
+        Ok(Self {
+            inner: openssl_backend::Ecdh::generate_nid(nid)?,
+        })
     }
 
     /// Construct an ECDH key pair from a big-endian private scalar using an
@@ -361,7 +354,9 @@ impl Ecdh {
     /// callers can use [`Self::from_private_for`].
     #[cfg(feature = "openssl-crypto")]
     pub fn from_private(nid: openssl::nid::Nid, private: &[u8]) -> Result<Self> {
-        Self::from_private_for(curve_from_nid(nid)?, private)
+        Ok(Self {
+            inner: openssl_backend::Ecdh::from_private_nid(nid, private)?,
+        })
     }
 
     /// Return the uncompressed SEC1 public point (`0x04 || x || y`).
@@ -423,6 +418,23 @@ mod tests {
                 b.derive(&a.public().unwrap()).unwrap()
             );
         }
+    }
+
+    #[cfg(feature = "openssl-crypto")]
+    #[test]
+    fn openssl_ecdh_wrappers_keep_arbitrary_nid_and_leading_zero_scalar_compat() {
+        use openssl::nid::Nid;
+        let a = Ecdh::generate(Nid::SECP384R1).unwrap();
+        let b = Ecdh::generate(Nid::SECP384R1).unwrap();
+        assert_eq!(
+            a.derive(&b.public().unwrap()).unwrap(),
+            b.derive(&a.public().unwrap()).unwrap()
+        );
+        let mut padded_33 = [0u8; 33];
+        padded_33[32] = 1;
+        let wide = Ecdh::from_private(Nid::X9_62_PRIME256V1, &padded_33).unwrap();
+        let narrow = Ecdh::from_private_for(Curve::P256, &[1]).unwrap();
+        assert_eq!(wide.public().unwrap(), narrow.public().unwrap());
     }
 
     #[test]
