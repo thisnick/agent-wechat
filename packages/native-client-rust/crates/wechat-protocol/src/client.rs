@@ -630,10 +630,43 @@ impl NativeClient {
     where
         F: FnOnce() -> Result<()>,
     {
+        Self::prelogin_rpc_async_options(
+            &self.options,
+            transport,
+            long_host,
+            short_host,
+            cgi,
+            path,
+            plain,
+            cookie,
+            auth_key,
+            fixed_version,
+            before_submit,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn prelogin_rpc_async_options<F>(
+        options: &NativeOptions,
+        transport: &crate::transport::ProtocolTransport,
+        long_host: &str,
+        short_host: &str,
+        cgi: u16,
+        path: &str,
+        plain: &[u8],
+        cookie: &[u8],
+        auth_key: &[u8],
+        fixed_version: Option<u16>,
+        before_submit: F,
+    ) -> Result<(Vec<u8>, Vec<u8>, u16)>
+    where
+        F: FnOnce() -> Result<()>,
+    {
         let session = mmtls::AsyncSession::connect(
             long_host,
-            self.options.timeout,
-            self.options.receive_budget,
+            options.timeout,
+            options.receive_budget,
             &*transport.streams,
             transport.clock.clone(),
         )
@@ -654,7 +687,7 @@ impl NativeClient {
             short_host,
             path,
             &packet,
-            self.options.timeout,
+            options.timeout,
             &*transport.http,
             &*transport.clock,
         )

@@ -673,26 +673,31 @@ impl NativeClient {
         encoded: &[u8],
     ) -> Result<crate::media_send::MediaSendResult> {
         if let Some(transport) = self.transport.clone() {
-            let owner = self.owned_account()?;
+            let owner = self.owned_account()?.clone();
             let (exchange, mut state) = owner
                 .begin()
                 .map_err(|error| error.context(NativeRequestNotSubmitted))?;
-            let mut prior_admission = false;
-            let result = async {
-                let mut upload = crate::media_send::VoiceUpload::new(
-                    destination,
-                    client_id,
-                    created_at,
-                    duration_ms,
-                    encoded,
-                )?;
-                loop {
-                    let request = upload.request(&state)?;
-                    let reply = self
-                        .async_authenticated_rpc_step(
+            let options = self.options.clone();
+            let (destination, client_id) = (destination.to_owned(), client_id.to_owned());
+            let encoded = encoded.to_vec();
+            return run_detached_exchange(&transport.clone(), move |cancellation| async move {
+                let mut prior_admission = false;
+                let result = async {
+                    let mut upload = crate::media_send::VoiceUpload::new(
+                        &destination,
+                        &client_id,
+                        created_at,
+                        duration_ms,
+                        &encoded,
+                    )?;
+                    loop {
+                        let request = Zeroizing::new(upload.request(&state)?);
+                        let reply = Self::async_authenticated_rpc_step(
+                            &options,
                             &transport,
                             &owner.short_link,
                             &exchange,
+                            &cancellation,
                             &mut state,
                             &mut prior_admission,
                             127,
@@ -701,13 +706,15 @@ impl NativeClient {
                             || Ok(()),
                         )
                         .await?;
-                    if let Some(done) = upload.accept_reply(&reply)? {
-                        return Ok(done);
+                        if let Some(done) = upload.accept_reply(&reply)? {
+                            return Ok(done);
+                        }
                     }
                 }
-            }
+                .await;
+                finish_account_exchange(exchange, &state, result)
+            })
             .await;
-            return finish_account_exchange(exchange, &state, result);
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -738,15 +745,22 @@ impl NativeClient {
     pub async fn renew_session(&self, computer_name: &str) -> Result<()> {
         let (exchange, state) = self.owned_account()?.begin()?;
         if let Some(transport) = self.transport.clone() {
-            state.validate()?;
-            let inner = crate::crypto::Ecdh::generate_for(crate::crypto::Curve::P224)?;
-            let request = crate::wire::auto_auth(&state, &inner.public()?, computer_name)?;
-            let mut long = state.long_host.clone();
-            let mut short = state.short_host.clone();
-            let mut cookie = state.cookie.clone();
-            for redirected in 0..=1 {
-                let (reply, next_cookie, _) = self
-                    .prelogin_rpc_async_with_guard(
+            let options = self.options.clone();
+            let computer_name = computer_name.to_owned();
+            return run_detached_exchange(&transport.clone(), move |cancellation| async move {
+                state.validate()?;
+                let inner = crate::crypto::Ecdh::generate_for(crate::crypto::Curve::P224)?;
+                let request = Zeroizing::new(crate::wire::auto_auth(
+                    &state,
+                    &inner.public()?,
+                    &computer_name,
+                )?);
+                let mut long = state.long_host.clone();
+                let mut short = state.short_host.clone();
+                let mut cookie = state.cookie.clone();
+                for redirected in 0..=1 {
+                    let (reply, next_cookie, _) = Self::prelogin_rpc_async_options(
+                        &options,
                         &transport,
                         &long,
                         &short,
@@ -756,33 +770,48 @@ impl NativeClient {
                         &cookie,
                         &state.auto_auth_key,
                         None,
-                        || exchange.check(),
+                        || {
+                            let check = (|| {
+                                ensure!(
+                                    !cancellation.load(Ordering::Acquire),
+                                    "Account authentication cancelled before submission"
+                                );
+                                exchange.check()
+                            })();
+                            if redirected == 0 {
+                                check.map_err(|error| error.context(NativeRequestNotSubmitted))
+                            } else {
+                                check
+                            }
+                        },
                     )
                     .await?;
-                let fields = crate::protobuf::decode(&reply)?;
-                let code = crate::protobuf::base_code(&fields)?;
-                if code == -301 && redirected == 0 {
-                    (long, short) = super::super::redirect(&fields)?;
-                    cookie = next_cookie;
-                    continue;
+                    let fields = crate::protobuf::decode(&reply)?;
+                    let code = crate::protobuf::base_code(&fields)?;
+                    if code == -301 && redirected == 0 {
+                        (long, short) = super::super::redirect(&fields)?;
+                        cookie = next_cookie;
+                        continue;
+                    }
+                    crate::errors::ServiceRejected::check(
+                        crate::errors::Service::AutomaticAuthentication,
+                        code,
+                    )?;
+                    let mut next = super::super::reduce_auth(
+                        &reply,
+                        Some(&state),
+                        &inner,
+                        &state.device,
+                        &next_cookie,
+                    )?;
+                    next.long_host = long;
+                    next.short_host = short;
+                    next.validate()?;
+                    return exchange.accept_credentials(next);
                 }
-                crate::errors::ServiceRejected::check(
-                    crate::errors::Service::AutomaticAuthentication,
-                    code,
-                )?;
-                let mut next = super::super::reduce_auth(
-                    &reply,
-                    Some(&state),
-                    &inner,
-                    &state.device,
-                    &next_cookie,
-                )?;
-                next.long_host = long;
-                next.short_host = short;
-                next.validate()?;
-                return exchange.accept_credentials(next);
-            }
-            anyhow::bail!("AutoAuth redirect limit reached");
+                anyhow::bail!("AutoAuth redirect limit reached");
+            })
+            .await;
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -998,9 +1027,9 @@ impl NativeClient {
         if let Some(transport) = self.transport.clone() {
             return self
                 .call_rpc_async(
-                    &transport,
+                    transport,
                     route,
-                    &request,
+                    request,
                     self.options.timeout,
                     before_submit,
                     retain_reply,
@@ -1183,9 +1212,9 @@ impl NativeClient {
         if let Some(transport) = self.transport.clone() {
             return self
                 .call_rpc_async(
-                    &transport,
+                    transport,
                     crate::calls::host_policy::CallHostRoute::LiveSync,
-                    &request,
+                    request,
                     wait_timeout,
                     before_submit,
                     retain_reply,
@@ -1229,18 +1258,18 @@ impl NativeClient {
     #[allow(clippy::too_many_arguments)]
     async fn call_rpc_async<F, O, C>(
         &self,
-        transport: &crate::transport::ProtocolTransport,
+        transport: crate::transport::ProtocolTransport,
         route: crate::calls::host_policy::CallHostRoute,
-        request: &[u8],
+        request: Vec<u8>,
         exchange_timeout: Duration,
         before_submit: F,
         retain_reply: O,
         cancellation: Option<C>,
     ) -> Result<Vec<u8>>
     where
-        F: FnOnce() -> Result<()>,
-        O: Fn(&[u8]) -> Result<()>,
-        C: Future<Output = ()>,
+        F: FnOnce() -> Result<()> + MaybeSend + 'static,
+        O: Fn(&[u8]) -> Result<()> + MaybeSend + MaybeSync + 'static,
+        C: Future<Output = ()> + MaybeSend + 'static,
     {
         use crate::calls::{
             host_policy::{selected_policy, CallHostPolicy},
@@ -1250,69 +1279,84 @@ impl NativeClient {
         let (exchange, mut state) = owner
             .begin()
             .map_err(|error| error.context(NativeRequestNotSubmitted))?;
-        let result = async {
-            crate::mmtls::validate_short_route(route.path())
-                .map_err(|error| CallHostRpcError::from_cause(CallHostStage::Route, &error))?;
-            let policy = selected_policy(&state.auth_snapshot, route.command())
-                .map_err(|_| CallHostRpcError::new(CallHostStage::Route, "policy", None))?;
-            if policy != CallHostPolicy::Ordinary {
-                return Err(
-                    CallHostRpcError::new(CallHostStage::Route, "ax_unsupported", None).into(),
-                );
-            }
-            let session = crate::mmtls::AsyncSession::connect(
-                &state.long_host,
-                self.options.timeout,
-                self.options.receive_budget,
-                &*transport.streams,
-                transport.clock.clone(),
-            )
-            .await
-            .map_err(|error| CallHostRpcError::from_cause(CallHostStage::Handshake, &error))?;
-            let short = session.short.clone();
-            let _ = session.close().await;
-            let packet =
-                crate::business::AuthenticatedPacket::prepare(&state, route.command(), request)
-                    .map_err(|error| {
-                        CallHostRpcError::from_cause(CallHostStage::Prepare, &error)
-                    })?;
-            exchange
-                .check()
-                .map_err(|error| error.context(NativeRequestNotSubmitted))?;
-            before_submit()?;
-            let exchange_future = crate::mmtls::short_exchange_async(
-                &short,
-                &state.short_host,
-                route.path(),
-                &packet.packet,
-                exchange_timeout,
-                &*transport.http,
-                &*transport.clock,
-            );
-            let reply = match cancellation {
-                Some(cancel) => wait_for_poll(exchange_future, cancel, owner.stopped()).await,
-                None => exchange_future.await,
-            }
-            .map_err(|error| {
-                if error.is::<crate::calls::host_transport::CallLiveSyncInterrupted>() {
-                    error
-                } else {
-                    CallHostRpcError::from_cause(CallHostStage::Exchange, &error).into()
+        let options = self.options.clone();
+        run_detached_exchange(&transport.clone(), move |task_cancellation| async move {
+            let request = Zeroizing::new(request);
+            let result = async {
+                crate::mmtls::validate_short_route(route.path())
+                    .map_err(|error| CallHostRpcError::from_cause(CallHostStage::Route, &error))?;
+                let policy = selected_policy(&state.auth_snapshot, route.command())
+                    .map_err(|_| CallHostRpcError::new(CallHostStage::Route, "policy", None))?;
+                if policy != CallHostPolicy::Ordinary {
+                    return Err(CallHostRpcError::new(
+                        CallHostStage::Route,
+                        "ax_unsupported",
+                        None,
+                    )
+                    .into());
                 }
-            })?;
-            let (plain, cookie) = crate::calls::host_transport::decode_verified_reply(
-                &state,
-                route.command(),
-                &reply,
-            )?;
-            retain_reply(&plain)?;
-            if !cookie.is_empty() {
-                state.cookie = cookie;
+                let session = crate::mmtls::AsyncSession::connect(
+                    &state.long_host,
+                    options.timeout,
+                    options.receive_budget,
+                    &*transport.streams,
+                    transport.clock.clone(),
+                )
+                .await
+                .map_err(|error| CallHostRpcError::from_cause(CallHostStage::Handshake, &error))?;
+                let short = session.short.clone();
+                let _ = session.close().await;
+                let packet = crate::business::AuthenticatedPacket::prepare(
+                    &state,
+                    route.command(),
+                    &request,
+                )
+                .map_err(|error| CallHostRpcError::from_cause(CallHostStage::Prepare, &error))?;
+                if task_cancellation.load(Ordering::Acquire) {
+                    return Err(
+                        anyhow::anyhow!("Account request cancelled before submission")
+                            .context(NativeRequestNotSubmitted),
+                    );
+                }
+                exchange
+                    .check()
+                    .map_err(|error| error.context(NativeRequestNotSubmitted))?;
+                before_submit()?;
+                let exchange_future = crate::mmtls::short_exchange_async(
+                    &short,
+                    &state.short_host,
+                    route.path(),
+                    &packet.packet,
+                    exchange_timeout,
+                    &*transport.http,
+                    &*transport.clock,
+                );
+                let reply = match cancellation {
+                    Some(cancel) => wait_for_poll(exchange_future, cancel, owner.stopped()).await,
+                    None => exchange_future.await,
+                }
+                .map_err(|error| {
+                    if error.is::<crate::calls::host_transport::CallLiveSyncInterrupted>() {
+                        error
+                    } else {
+                        CallHostRpcError::from_cause(CallHostStage::Exchange, &error).into()
+                    }
+                })?;
+                let (plain, cookie) = crate::calls::host_transport::decode_verified_reply(
+                    &state,
+                    route.command(),
+                    &reply,
+                )?;
+                retain_reply(&plain)?;
+                if !cookie.is_empty() {
+                    state.cookie = cookie;
+                }
+                Ok(plain)
             }
-            Ok(plain)
-        }
-        .await;
-        finish_account_exchange(exchange, &state, result)
+            .await;
+            finish_account_exchange(exchange, &state, result)
+        })
+        .await
     }
 }
 

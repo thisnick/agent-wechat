@@ -163,7 +163,7 @@ The high-level `client.calls()` facade is unfinished. Use the
 
 ## Pluggable async transport and WebAssembly
 
-`wechat-protocol` supports custom async transports through `wechat_protocol::transport` (`StreamTransport`, `HttpTransport`, `HttpOverStream`, `Clock`, and `ProtocolTransport`). Hosts with only raw TCP streams—such as a browser Isolated Web App using Direct Sockets—can wrap a `StreamTransport` with `ProtocolTransport::from_streams(streams, clock)`.
+`wechat-protocol` supports custom async transports through `wechat_protocol::transport` (`StreamTransport`, `HttpTransport`, `HttpOverStream`, `Clock`, `TaskSpawner`, and `ProtocolTransport`). Hosts with only raw TCP streams—such as a browser Isolated Web App using Direct Sockets—can wrap a `StreamTransport` with `ProtocolTransport::from_streams(streams, clock)`. On `wasm32` or non-Tokio executors, attach a task spawner with `ProtocolTransport::with_spawner` (for example `wasm_bindgen_futures::spawn_local`) so cancelling an in-flight account request still waits for the exchange and adopts verified replies.
 
 - Use `NativeClient::with_transport` for async login (`start_qr_login_async`, `poll_login_async`, `complete_login_async`).
 - Use `NativeClient::from_account_with_transport` for async account RPCs and `open_push_connection` (`AsyncPushConnection`).

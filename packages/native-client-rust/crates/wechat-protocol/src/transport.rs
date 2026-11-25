@@ -154,7 +154,12 @@ pub trait AsyncByteStream: MaybeSend {
         timeout: Duration,
     ) -> TransportFuture<'a, Result<()>>;
 
-    /// Best-effort graceful close of the underlying stream.
+    /// Best-effort prompt teardown of the underlying stream.
+    ///
+    /// Implementations must return promptly and must not block indefinitely
+    /// waiting for peer shutdown acknowledgement; callers such as
+    /// [`HttpOverStream`] and [`crate::mmtls::AsyncSession`] await `close`
+    /// without an additional timeout.
     fn close<'a>(&'a mut self) -> TransportFuture<'a, Result<()>>;
 }
 
@@ -260,8 +265,37 @@ impl<T: HttpTransport + ?Sized> HttpTransport for Arc<T> {
     }
 }
 
+/// Background task spawner used by [`ProtocolTransport`] so submitted account
+/// exchanges continue holding the account handoff barrier and adopt verified
+/// cookies and renewed credentials even if the caller drops the outer future.
+///
+/// On native targets running inside a Tokio runtime, [`ProtocolTransport`]
+/// detaches exchanges onto the current Tokio runtime automatically when no
+/// custom spawner is configured. On `wasm32` (for example via
+/// `wasm_bindgen_futures::spawn_local`) or non-Tokio executors, configure a
+/// spawner with [`ProtocolTransport::with_spawner`] whenever callers may cancel
+/// or time out account RPC futures.
+pub trait TaskSpawner: MaybeSend + MaybeSync {
+    /// Spawn `task` to run to completion independently of the caller's future.
+    fn spawn(&self, task: TransportFuture<'static, ()>);
+}
+
+impl<T: TaskSpawner + ?Sized> TaskSpawner for Arc<T> {
+    fn spawn(&self, task: TransportFuture<'static, ()>) {
+        (**self).spawn(task)
+    }
+}
+
 /// Pluggable async transport bundle for [`crate::NativeClient`] and async login
 /// operations.
+///
+/// When a [`TaskSpawner`] is attached via [`Self::with_spawner`] (or when
+/// executing inside a native Tokio runtime), account-owned RPCs, renewals, and
+/// logout submissions detach from the caller's future so dropping the future
+/// after submission still holds the account barrier and adopts verified replies.
+/// On non-Tokio executors without a configured [`TaskSpawner`] (including
+/// `wasm32` without `with_spawner`), exchanges run inline and callers must not
+/// cancel account RPC futures after submission.
 #[derive(Clone)]
 pub struct ProtocolTransport {
     /// Raw byte-stream transport for MMTLS long-link handshakes and persistent
@@ -271,6 +305,7 @@ pub struct ProtocolTransport {
     pub http: Arc<dyn HttpTransport>,
     /// Monotonic and wall-clock time source.
     pub clock: Arc<dyn Clock>,
+    spawner: Option<Arc<dyn TaskSpawner>>,
 }
 
 impl ProtocolTransport {
@@ -285,6 +320,7 @@ impl ProtocolTransport {
             streams,
             http,
             clock,
+            spawner: None,
         }
     }
 
@@ -298,7 +334,21 @@ impl ProtocolTransport {
             streams,
             http,
             clock,
+            spawner: None,
         }
+    }
+
+    /// Attach a [`TaskSpawner`] so submitted account exchanges detach from the
+    /// caller's future, preserving handoff barriers and reply adoption across
+    /// caller cancellation on non-Tokio and `wasm32` executors.
+    pub fn with_spawner(mut self, spawner: Arc<dyn TaskSpawner>) -> Self {
+        self.spawner = Some(spawner);
+        self
+    }
+
+    /// Return the configured [`TaskSpawner`], if any.
+    pub fn spawner(&self) -> Option<&Arc<dyn TaskSpawner>> {
+        self.spawner.as_ref()
     }
 }
 

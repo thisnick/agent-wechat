@@ -37,12 +37,17 @@ updates through its encrypted persistence callback.
 ### Pluggable async transport and WebAssembly
 
 Use the `transport` module (`StreamTransport`, `AsyncByteStream`,
-`HttpTransport`, `HttpOverStream`, `Clock`, and `ProtocolTransport`) to supply
-your own async sockets, HTTP client and clock instead of OS sockets and
-`reqwest`. Hosts with only raw TCP streams (such as a browser Isolated Web App
-using Direct Sockets) can build a bundle with
+`HttpTransport`, `HttpOverStream`, `Clock`, `TaskSpawner`, and
+`ProtocolTransport`) to supply your own async sockets, HTTP client and clock
+instead of OS sockets and `reqwest`. Hosts with only raw TCP streams (such as a
+browser Isolated Web App using Direct Sockets) can build a bundle with
 `ProtocolTransport::from_streams(streams, clock)`, which layers strict plaintext
 HTTP/1.1 (`HttpOverStream`) over the byte stream for MMTLS short-link exchanges.
+On native Tokio runtimes, submitted account exchanges detach automatically so
+dropping an outer future still holds the shutdown barrier and adopts verified
+replies; on `wasm32` or non-Tokio executors, attach a host spawner with
+`ProtocolTransport::with_spawner` (for example `wasm_bindgen_futures::spawn_local`)
+if callers may cancel in-flight account RPC futures.
 
 Bind the transport with `NativeClient::with_transport` for async login bootstrap
 (`start_qr_login_async`, `start_saved_device_login_async`, `poll_login_async`,

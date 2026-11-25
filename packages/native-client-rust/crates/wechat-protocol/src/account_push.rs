@@ -21,6 +21,9 @@ pub struct AccountPushConnection {
 /// Requests and notification waits enforce the same account admission,
 /// credential-generation, and handoff barriers as [`AccountPushConnection`].
 /// Reconnect after a credential renewal supersedes the connection's generation.
+/// Methods take `&mut self` and run inline on the connection stream; do not
+/// cancel an in-flight `heartbeat`, `sync`, or `send_sticker_chunk_raw` call
+/// after submission (close and reconnect if dropped).
 pub struct AsyncPushConnection {
     client: NativeClient,
     connection: push::AsyncConnection,
@@ -33,10 +36,12 @@ impl NativeClient {
     /// worker. Creating the transport does not start a hidden executor or loop.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open_push_connection_blocking(&self) -> Result<AccountPushConnection> {
-        ensure!(
-            self.transport.is_none(),
-            "Blocking push connection cannot bypass a configured async transport"
-        );
+        if self.transport.is_some() {
+            return Err(anyhow::anyhow!(
+                "Blocking push connection cannot bypass a configured async transport"
+            )
+            .context(NativeRequestNotSubmitted));
+        }
         let owner = self.owned_account()?;
         let (exchange, state) = owner
             .begin()

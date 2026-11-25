@@ -348,10 +348,12 @@ impl NativeClient {
     /// Explicit authentication renewal on an existing blocking worker. This
     /// never retries the operation whose rejection prompted the caller to renew.
     pub fn renew_session_blocking(&self, computer_name: &str) -> Result<()> {
-        ensure!(
-            self.transport.is_none(),
-            "Blocking renewal cannot bypass a configured async transport"
-        );
+        if self.transport.is_some() {
+            return Err(anyhow::anyhow!(
+                "Blocking renewal cannot bypass a configured async transport"
+            )
+            .context(NativeRequestNotSubmitted));
+        }
         let (exchange, state) = self
             .owned_account()?
             .begin()
@@ -372,10 +374,12 @@ impl NativeClient {
     /// is needed. Logout is submitted at most once and the owner stays stopped
     /// after rejection or uncertainty.
     pub fn logout_blocking(&self) -> Result<crate::LogoutReply> {
-        ensure!(
-            self.transport.is_none(),
-            "Blocking logout cannot bypass a configured async transport"
-        );
+        if self.transport.is_some() {
+            return Err(anyhow::anyhow!(
+                "Blocking logout cannot bypass a configured async transport"
+            )
+            .context(NativeRequestNotSubmitted));
+        }
         self.prepare_logout()?.submit_blocking()
     }
 

@@ -169,52 +169,65 @@ impl PendingLogout {
 
     async fn submit_async<F>(self, before_submit: F) -> Result<super::LogoutReply>
     where
-        F: FnOnce() -> Result<()>,
+        F: FnOnce() -> Result<()> + crate::transport::MaybeSend + 'static,
     {
         let Self {
             exchange,
-            mut state,
+            state,
             options,
             transport,
         } = self;
         let transport = transport.context("Native client has no async transport configured")?;
-        let request = super::logout::request(&state)?;
-        let session = crate::mmtls::AsyncSession::connect(
-            &state.long_host,
-            options.timeout,
-            options.receive_budget,
-            &*transport.streams,
-            transport.clock.clone(),
-        )
-        .await?;
-        let short = session.short.clone();
-        let _ = session.close().await;
-        let packet =
-            crate::business::AuthenticatedPacket::prepare(&state, super::logout::CGI, &request)?;
-        exchange
-            .check_logout()
-            .map_err(|error| error.context(NativeRequestNotSubmitted))?;
-        before_submit().map_err(|error| error.context(NativeRequestNotSubmitted))?;
-        let reply = crate::mmtls::short_exchange_async(
-            &short,
-            &state.short_host,
-            super::logout::PATH,
-            &packet.packet,
-            options.timeout,
-            &*transport.http,
-            &*transport.clock,
-        )
-        .await?;
-        let (plain, cookie) = packet.decode_verified_transport_reply(&reply)?;
-        if !cookie.is_empty() {
-            state.cookie = cookie;
-        }
-        super::logout::response(&plain)
+        run_detached_exchange(&transport.clone(), move |cancellation| async move {
+            let request = super::logout::request(&state)?;
+            let session = crate::mmtls::AsyncSession::connect(
+                &state.long_host,
+                options.timeout,
+                options.receive_budget,
+                &*transport.streams,
+                transport.clock.clone(),
+            )
+            .await?;
+            let short = session.short.clone();
+            let _ = session.close().await;
+            let packet = crate::business::AuthenticatedPacket::prepare(
+                &state,
+                super::logout::CGI,
+                &request,
+            )?;
+            if cancellation.load(Ordering::Acquire) {
+                return Err(
+                    anyhow::anyhow!("Account logout cancelled before submission")
+                        .context(NativeRequestNotSubmitted),
+                );
+            }
+            exchange
+                .check_logout()
+                .map_err(|error| error.context(NativeRequestNotSubmitted))?;
+            before_submit().map_err(|error| error.context(NativeRequestNotSubmitted))?;
+            let reply = crate::mmtls::short_exchange_async(
+                &short,
+                &state.short_host,
+                super::logout::PATH,
+                &packet.packet,
+                options.timeout,
+                &*transport.http,
+                &*transport.clock,
+            )
+            .await?;
+            let (plain, _cookie) = packet.decode_verified_transport_reply(&reply)?;
+            super::logout::response(&plain)
+        })
+        .await
     }
 
     /// As [`Self::submit`], on the caller's blocking worker. No Tokio runtime is
     /// needed. Do not call it on an async executor thread or from inside an
     /// account request: it waits for every earlier request to finish.
+    ///
+    /// Clients built with a [`crate::transport::ProtocolTransport`] must use
+    /// [`Self::submit`] instead; calling this method refuses with
+    /// [`NativeRequestNotSubmitted`].
     #[cfg(not(target_arch = "wasm32"))]
     pub fn submit_blocking(self) -> Result<super::LogoutReply> {
         self.submit_guarded_blocking(|| Ok(()))
@@ -223,15 +236,21 @@ impl PendingLogout {
     /// As [`Self::submit_guarded`], on the caller's blocking worker. The token
     /// is consumed even on failure, and an uncertain response never permits
     /// automatic resubmission.
+    ///
+    /// Clients built with a [`crate::transport::ProtocolTransport`] must use
+    /// [`Self::submit_guarded`] instead; calling this method refuses with
+    /// [`NativeRequestNotSubmitted`].
     #[cfg(not(target_arch = "wasm32"))]
     pub fn submit_guarded_blocking<F>(self, before_submit: F) -> Result<super::LogoutReply>
     where
         F: FnOnce() -> Result<()> + Send + 'static,
     {
-        ensure!(
-            self.transport.is_none(),
-            "Blocking logout cannot bypass a configured async transport"
-        );
+        if self.transport.is_some() {
+            return Err(anyhow::anyhow!(
+                "Blocking logout cannot bypass a configured async transport"
+            )
+            .context(NativeRequestNotSubmitted));
+        }
         self.exchange.account.drain_to_blocking(1)?;
         self.submit_on_worker(Arc::new(AtomicBool::new(false)), before_submit)
     }
@@ -338,14 +357,45 @@ struct Exchange {
     non_cookie: [u8; 32],
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 struct CancelOnDrop(Arc<AtomicBool>);
 
-#[cfg(not(target_arch = "wasm32"))]
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
         self.0.store(true, Ordering::Release);
     }
+}
+
+async fn run_detached_exchange<T, F>(
+    transport: &crate::transport::ProtocolTransport,
+    build_future: impl FnOnce(Arc<AtomicBool>) -> F,
+) -> Result<T>
+where
+    T: crate::transport::MaybeSend + 'static,
+    F: Future<Output = Result<T>> + crate::transport::MaybeSend + 'static,
+{
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let _cancel_on_drop = CancelOnDrop(cancellation.clone());
+    let fut = build_future(cancellation);
+    if let Some(spawner) = transport.spawner() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        spawner.spawn(Box::pin(async move {
+            let _ = tx.send(fut.await);
+        }));
+        return rx
+            .await
+            .context("Account request task terminated without returning a result")?;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle.spawn(async move {
+            let _ = tx.send(fut.await);
+        });
+        return rx
+            .await
+            .context("Account request task terminated without returning a result")?;
+    }
+    fut.await
 }
 
 impl OwnedAccount {
@@ -802,7 +852,7 @@ impl NativeClient {
     }
 
     async fn async_short_session(
-        &self,
+        options: &NativeOptions,
         transport: &crate::transport::ProtocolTransport,
         short_link: &crate::mmtls::ShortLinkCache,
         host: &str,
@@ -813,8 +863,8 @@ impl NativeClient {
         }
         let session = crate::mmtls::AsyncSession::connect(
             host,
-            self.options.timeout,
-            self.options.receive_budget,
+            options.timeout,
+            options.receive_budget,
             &*transport.streams,
             transport.clock.clone(),
         )
@@ -828,10 +878,11 @@ impl NativeClient {
 
     #[allow(clippy::too_many_arguments)]
     async fn async_authenticated_rpc_step<F>(
-        &self,
+        options: &NativeOptions,
         transport: &crate::transport::ProtocolTransport,
         short_link: &crate::mmtls::ShortLinkCache,
         exchange: &Exchange,
+        cancellation: &AtomicBool,
         state: &mut AccountState,
         prior_admission: &mut bool,
         cgi: u16,
@@ -842,11 +893,17 @@ impl NativeClient {
     where
         F: FnOnce() -> Result<()>,
     {
-        let short = self
-            .async_short_session(transport, short_link, &state.long_host)
-            .await?;
+        let short =
+            Self::async_short_session(options, transport, short_link, &state.long_host).await?;
         let packet = crate::business::AuthenticatedPacket::prepare(state, cgi, request)?;
-        match exchange.check() {
+        let check = (|| {
+            ensure!(
+                !cancellation.load(Ordering::Acquire),
+                "Account request cancelled before submission"
+            );
+            exchange.check()
+        })();
+        match check {
             Ok(()) => {}
             Err(error) if !*prior_admission => {
                 return Err(error.context(NativeRequestNotSubmitted));
@@ -860,7 +917,7 @@ impl NativeClient {
             &state.short_host,
             path,
             &packet.packet,
-            self.options.timeout,
+            options.timeout,
             &*transport.http,
             &*transport.clock,
         )
@@ -904,19 +961,22 @@ impl NativeClient {
         Guard: FnOnce() -> Result<()> + crate::transport::MaybeSend + 'static,
     {
         if let Some(transport) = self.transport.clone() {
-            let owner = self.owned_account()?;
+            let owner = self.owned_account()?.clone();
             let (exchange, mut state) = owner
                 .begin()
                 .map_err(|error| error.context(NativeRequestNotSubmitted))?;
-            let mut prior_admission = false;
-            let result = async {
-                let (cgi, path, request) = build(&state)?;
-                let request = Zeroizing::new(request);
-                let reply = self
-                    .async_authenticated_rpc_step(
+            let options = self.options.clone();
+            return run_detached_exchange(&transport.clone(), move |cancellation| async move {
+                let mut prior_admission = false;
+                let result = async {
+                    let (cgi, path, request) = build(&state)?;
+                    let request = Zeroizing::new(request);
+                    let reply = Self::async_authenticated_rpc_step(
+                        &options,
                         &transport,
                         &owner.short_link,
                         &exchange,
+                        &cancellation,
                         &mut state,
                         &mut prior_admission,
                         cgi,
@@ -925,10 +985,12 @@ impl NativeClient {
                         before_submit,
                     )
                     .await?;
-                decode(&state, reply)
-            }
+                    decode(&state, reply)
+                }
+                .await;
+                finish_account_exchange(exchange, &state, result)
+            })
             .await;
-            return finish_account_exchange(exchange, &state, result);
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -988,10 +1050,12 @@ impl NativeClient {
     where
         F: FnOnce(&NativeClient, &mut AccountState, &dyn Fn() -> Result<()>) -> Result<T>,
     {
-        ensure!(
-            self.transport.is_none(),
-            "Blocking account operations cannot bypass a configured async transport"
-        );
+        if self.transport.is_some() {
+            return Err(anyhow::anyhow!(
+                "Blocking account operations cannot bypass a configured async transport"
+            )
+            .context(NativeRequestNotSubmitted));
+        }
         let owner = self.owned_account()?;
         let (exchange, state) = owner
             .begin()
