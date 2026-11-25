@@ -691,8 +691,14 @@ input:focus-visible {
   width: 144px;
   height: 144px;
 }
+/* WebKit lays out its native audio controls for its own system font; the
+   page font inherited into their shadow tree makes the time labels overflow
+   and overlap the scrubber in Safari/WKWebView. */
 .media-audio {
   width: min(300px, 100%);
+  font: initial;
+  letter-spacing: normal;
+  line-height: normal;
 }
 .account-settings {
   display: grid;
