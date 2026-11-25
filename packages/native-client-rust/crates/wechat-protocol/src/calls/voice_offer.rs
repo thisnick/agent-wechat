@@ -97,9 +97,9 @@ impl VoiceOffer {
                     (4, Some(v)) => u64::from(v.video_flags),
                     (5, _) => 0x40000,
                     (6, _) => 0x100,
-                    // Advertise the modern transport version bit (`1 << 17`) on video offers so
-                    // peers keep video ARQ/NACK and updated P2S feedback active during negotiation.
-                    (7, Some(_)) => 0x20000,
+                    // Field 7 (`u32AExtcap`, audio extended capabilities) stays 0, as on voice
+                    // offers. Advertising only bit 17 on video offers stopped Android peers from
+                    // sending or playing call audio while video still flowed.
                     (8, Some(_)) => 4,
                     (9, Some(_)) => 30,
                     (10, Some(_)) => 0x41,
@@ -199,7 +199,8 @@ mod tests {
         assert_eq!(p::scalar(&fields, 3).unwrap(), 0x3f);
         assert_eq!(p::scalar(&fields, 4).unwrap(), 178);
         assert_eq!(p::scalar(&fields, 5).unwrap(), 0x40000);
-        assert_eq!(p::scalar(&fields, 7).unwrap(), 0x20000);
+        // u32AExtcap stays 0 on video offers, matching voice offers.
+        assert_eq!(p::scalar(&fields, 7).unwrap(), 0);
         assert_eq!(p::scalar(&fields, 11).unwrap(), 0);
         assert_eq!(p::scalar(&fields, 12).unwrap(), 0);
         assert_eq!(p::scalar(&fields, 13).unwrap(), 6);

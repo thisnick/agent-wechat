@@ -5,6 +5,7 @@ mod conference;
 mod conference_sources;
 mod direct;
 mod relay;
+mod rx_trace;
 mod submission;
 pub use conference_sources::{reconcile_roster, BoundConferenceReceiver};
 pub use direct::{

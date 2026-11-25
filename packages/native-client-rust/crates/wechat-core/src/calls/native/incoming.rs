@@ -1073,6 +1073,18 @@ impl Actor {
                     .map(|&(c, u, _)| (c, u))
             })
             .unwrap_or_else(|| super::media::select_relay_indices(&candidates));
+        if std::env::var("WX_CALL_VIDEO_TRACE").as_deref() == Ok("1") {
+            let listed: Vec<String> = candidates
+                .iter()
+                .map(|(c, u, ep)| format!("{c}/{u}={ep}"))
+                .collect();
+            eprintln!(
+                "[wechat-call-video] join relay candidates={} selected={connection_index}/{udp_index} preconnected={} list=[{}]",
+                candidates.len(),
+                preconnected.is_some(),
+                listed.join(",")
+            );
+        }
         let session = self.session.as_mut().context("Missing incoming session")?;
         let media = session.take_media(&self.state, self.authority, connection_index, udp_index)?;
         if let Some(muted) = session.peer_microphone_muted() {

@@ -498,6 +498,10 @@ field wechat_protocol::calls::relay::SelectedRelay::merge_mode | bool | MISSING 
 field wechat_protocol::calls::relay::SelectedRelay::own_member | u16 | MISSING DOC
 field wechat_protocol::calls::relay::SelectedRelay::room_id | u64 | MISSING DOC
 field wechat_protocol::calls::relay::SelectedRelay::room_key | u64 | MISSING DOC
+field wechat_protocol::calls::rudp::RudpData::cmd_type | core::option::Option<u64> | `RudpCmd` field 1 when the payload parses as one.
+field wechat_protocol::calls::rudp::RudpData::payload_len | usize | Length of the `RudpRawPkt` payload in bytes.
+field wechat_protocol::calls::rudp::RudpData::pkt_num | u64 | `RudpRawPkt` field 2; numbering starts at 1 on each stream.
+field wechat_protocol::calls::rudp::RudpData::stream_id | u32 | `RudpRawPkt` field 1.
 field wechat_protocol::calls::signaling::CloudRequest::body | core::option::Option<alloc::vec::Vec<u8>> | MISSING DOC
 field wechat_protocol::calls::signaling::CloudRequest::command_id | core::option::Option<u32> | MISSING DOC
 field wechat_protocol::calls::signaling::CloudRequest::longpolling | core::option::Option<bool> | MISSING DOC
@@ -1126,6 +1130,7 @@ fn wechat_protocol::calls::audio_packet::Live96::reply_to_probe | fn(&mut self, 
 fn wechat_protocol::calls::audio_packet::Live96::seal_audio | fn(&mut self, current: wechat_protocol::calls::audio_packet::MediaEpoch, now_ms: u64, conf_payload: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
 fn wechat_protocol::calls::audio_packet::Live96::seal_probe_init | fn(&mut self, current: wechat_protocol::calls::audio_packet::MediaEpoch, now_ms: u64) -> anyhow::Result<alloc::vec::Vec<u8>> | Send the initial `0x70` faking_type1 probe (`[8, 1, 18, 2, 8, 1]`) after relay check-in completes, matching official clients.
 fn wechat_protocol::calls::audio_packet::Live96::seal_qos_p2s | fn(&mut self, current: wechat_protocol::calls::audio_packet::MediaEpoch, now_ms: u64, payload: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Seal one MP QoS P2S telemetry packet (`packed_kind = 0x30`).
+fn wechat_protocol::calls::audio_packet::Live96::seal_rudp | fn(&mut self, current: wechat_protocol::calls::audio_packet::MediaEpoch, now_ms: u64, payload: &[u8]) -> anyhow::Result<core::option::Option<alloc::vec::Vec<u8>>> | Seal one in-band RUDP packet (`packed_kind = 0x50`, relay command `0xd9`), such as a feedback acknowledgement. Sequence numbers the peer already used for `0x50` are skipped so no nonce is reused; returns `Ok(None)`, sending nothing, if a short run of following sequence numbers is also taken.
 fn wechat_protocol::calls::audio_packet::Live96::seal_video | fn(&mut self, current: wechat_protocol::calls::audio_packet::MediaEpoch, now_ms: u64, stream_id: u8, is_data: bool, payload: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Seal one MP/iLink video payload (`packed_kind = 0x20 | stream_id`, `ext_byte = is_data`).
 fn wechat_protocol::calls::audio_packet::Live96::seal_video_nack | fn(&mut self, current: wechat_protocol::calls::audio_packet::MediaEpoch, now_ms: u64, stream_id: u8, payload: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Seal one peer-to-peer `0x06` video ARQ/NACK packet on `packed_kind = 0x60 | stream_id`. Uses the active session envelope (`Live96` with `ext_byte = 0`, or `Live98` with `ext_byte = 2` when `prefer_live98_tx` is enabled) and advances the shared video sequence counter to preserve nonce uniqueness.
 fn wechat_protocol::calls::audio_packet::Live96::seal_video_rtcp | fn(&mut self, current: wechat_protocol::calls::audio_packet::MediaEpoch, now_ms: u64, stream_id: u8, payload: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Seal one peer-to-peer video RTCP packet (`0x66` `IRequest`). Wire byte 14 carries `0x60 | stream_id`, while the AEAD nonce uses `kind & 0x2f` and shares the video sequence counter (`GetSeqIndex` slot 12).
@@ -1216,6 +1221,9 @@ fn wechat_protocol::calls::relay::decrypt_checkin | fn(cipher: &[u8], key: &[u8;
 fn wechat_protocol::calls::relay::encrypt_checkin | fn(plain: &[u8], key: &[u8; 16], random: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | Selector0 TEA chaining with its structural trailer. This is not an AEAD.
 fn wechat_protocol::calls::relay::frame_outer | fn(body: &[u8]) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
 fn wechat_protocol::calls::relay::unframe_outer | fn(packet: &[u8]) -> anyhow::Result<&[u8]> | MISSING DOC
+fn wechat_protocol::calls::rudp::RudpAckTracker::record | fn(&mut self, stream_id: u32, pkt_num: u64) -> core::option::Option<u64> | Record one data packet and return the packet number to acknowledge on its stream (the highest seen so far), or `None` when a new stream exceeds the stream limit.
+fn wechat_protocol::calls::rudp::encode_rudp_feedback | fn(timestamp_ms: u32, stream_id: u32, max_pkt_num: u64, receiver_member: u16) -> anyhow::Result<alloc::vec::Vec<u8>> | Build a feedback packet acknowledging every packet up to `max_pkt_num` on `stream_id`.
+fn wechat_protocol::calls::rudp::parse_rudp_data | fn(payload: &[u8]) -> anyhow::Result<core::option::Option<wechat_protocol::calls::rudp::RudpData>> | Parse an authenticated `0x50` payload. Returns `Ok(None)` for feedback packets and any other head sign, which need no acknowledgement.
 fn wechat_protocol::calls::signaling::CallOperation::command_id | const fn(self) -> u32 | MISSING DOC
 fn wechat_protocol::calls::signaling::CallOperation::from_parts | fn(command_id: u32, path: &str) -> anyhow::Result<Self> | MISSING DOC
 fn wechat_protocol::calls::signaling::CallOperation::path | const fn(self) -> &'static str | MISSING DOC
@@ -1582,6 +1590,7 @@ impl core::clone::Clone for wechat_protocol::calls::relay::RelayEpoch | impl | -
 impl core::clone::Clone for wechat_protocol::calls::relay::RelayProgress | impl | -
 impl core::clone::Clone for wechat_protocol::calls::relay::RelayTarget | impl | -
 impl core::clone::Clone for wechat_protocol::calls::relay::RoomInputs | impl | -
+impl core::clone::Clone for wechat_protocol::calls::rudp::RudpData | impl | -
 impl core::clone::Clone for wechat_protocol::calls::signaling::CallOperation | impl | -
 impl core::clone::Clone for wechat_protocol::calls::video_packet::ParsedS2p | impl | -
 impl core::clone::Clone for wechat_protocol::calls::video_packet::ReassembledVideoFrame | impl | -
@@ -1694,6 +1703,7 @@ impl core::cmp::Eq for wechat_protocol::calls::personal::VoiceRoom | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::relay::RelayEpoch | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::relay::RelayProgress | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::relay::RelayTarget | impl | -
+impl core::cmp::Eq for wechat_protocol::calls::rudp::RudpData | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::signaling::CallOperation | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::video_packet::ParsedS2p | impl | -
 impl core::cmp::Eq for wechat_protocol::calls::video_packet::ReassembledVideoFrame | impl | -
@@ -1766,6 +1776,7 @@ impl core::cmp::PartialEq for wechat_protocol::calls::personal::VoiceRoom | impl
 impl core::cmp::PartialEq for wechat_protocol::calls::relay::RelayEpoch | impl | -
 impl core::cmp::PartialEq for wechat_protocol::calls::relay::RelayProgress | impl | -
 impl core::cmp::PartialEq for wechat_protocol::calls::relay::RelayTarget | impl | -
+impl core::cmp::PartialEq for wechat_protocol::calls::rudp::RudpData | impl | -
 impl core::cmp::PartialEq for wechat_protocol::calls::signaling::CallOperation | impl | -
 impl core::cmp::PartialEq for wechat_protocol::calls::video_packet::ParsedS2p | impl | -
 impl core::cmp::PartialEq for wechat_protocol::calls::video_packet::ReassembledVideoFrame | impl | -
@@ -1810,6 +1821,7 @@ impl core::convert::TryFrom<alloc::string::String> for wechat_protocol::StickerP
 impl core::default::Default for wechat_protocol::AuthSnapshot | impl | -
 impl core::default::Default for wechat_protocol::ContactPrivacySettings | impl | -
 impl core::default::Default for wechat_protocol::NativeOptions | impl | -
+impl core::default::Default for wechat_protocol::calls::rudp::RudpAckTracker | impl | -
 impl core::default::Default for wechat_protocol::calls::signaling::CloudRequest | impl | -
 impl core::default::Default for wechat_protocol::calls::signaling::CommonRequest | impl | -
 impl core::default::Default for wechat_protocol::calls::signaling::CommonResponse | impl | -
@@ -1881,6 +1893,8 @@ impl core::fmt::Debug for wechat_protocol::calls::personal::HostOperation | impl
 impl core::fmt::Debug for wechat_protocol::calls::personal::RemoteExitReason | impl | -
 impl core::fmt::Debug for wechat_protocol::calls::relay::RelayEpoch | impl | -
 impl core::fmt::Debug for wechat_protocol::calls::relay::RelayProgress | impl | -
+impl core::fmt::Debug for wechat_protocol::calls::rudp::RudpAckTracker | impl | -
+impl core::fmt::Debug for wechat_protocol::calls::rudp::RudpData | impl | -
 impl core::fmt::Debug for wechat_protocol::calls::signaling::CallOperation | impl | -
 impl core::fmt::Debug for wechat_protocol::calls::video_packet::ParsedS2p | impl | -
 impl core::fmt::Debug for wechat_protocol::calls::video_packet::ReassembledVideoFrame | impl | -
@@ -2020,6 +2034,7 @@ impl core::marker::StructuralPartialEq for wechat_protocol::calls::personal::Voi
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::relay::RelayEpoch | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::relay::RelayProgress | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::relay::RelayTarget | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::calls::rudp::RudpData | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::signaling::CallOperation | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::video_packet::ParsedS2p | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::calls::video_packet::ReassembledVideoFrame | impl | -
@@ -2252,6 +2267,7 @@ mod wechat_protocol::calls::host_transport | - | Call-specific ordinary reply po
 mod wechat_protocol::calls::incoming | - | Offline incoming call carriers and conference notification envelopes.
 mod wechat_protocol::calls::personal | - | Personal-call request codecs. Preparation performs no transport or account I/O.
 mod wechat_protocol::calls::relay | - | Selected IPv4/IPv6 relay setup: initial check-in, at most one learned continuation (or direct 1-RTT merged check-in) and explicit Ready. CRC/TEA structural checks are not media AEAD. The host owns sockets, current account/key generations, time and randomness.
+mod wechat_protocol::calls::rudp | - | In-band reliable `0x50` messages and their acknowledgements. In-band reliable messages on Live96 packed kind `0x50` (relay command `0xd9`).
 mod wechat_protocol::calls::signaling | - | Experimental offline call-signaling codecs.
 mod wechat_protocol::calls::video_packet | - | Video packetization, reassembly and video RTCP/QoS codecs. MP/iLink (`workMode = 3`) video packetization, Annex-B framing and video RTCP/QoS codecs.
 mod wechat_protocol::calls::video_qos | - | Deterministic video ARQ/NACK, P2S QoS telemetry and keyframe-recovery state machines.
@@ -2368,6 +2384,8 @@ struct wechat_protocol::calls::relay::RelayTarget | struct { public fields } | R
 struct wechat_protocol::calls::relay::RoomInputs | struct { public fields } | Selected initial/reset room values. Constructors are deliberately scoped to this personal profile; they do not describe every supported server transport.
 struct wechat_protocol::calls::relay::SelectedRelay | struct { public fields } | An endpoint selected from an admitted Strategy. No DNS or fallback is used. Room key and media material intentionally have no Debug representation.
 struct wechat_protocol::calls::relay::TwoRttRelay | struct { private fields } | No retries or network I/O. Every preparation is spent before randomness or encryption; failure closes this attempt instead of making it reusable.
+struct wechat_protocol::calls::rudp::RudpAckTracker | struct { private fields } | Per-call record of the highest RUDP packet number received on each stream.
+struct wechat_protocol::calls::rudp::RudpData | struct { public fields } | One inbound RUDP data packet.
 struct wechat_protocol::calls::signaling::CloudRequest | struct { public fields } | Conference-to-host callback envelope. Bodies can contain private data, so this and the network envelopes intentionally do not implement `Debug`.
 struct wechat_protocol::calls::signaling::CommonRequest | struct { public fields } | Standard base request plus an opaque inner operation body. The existing [`crate::wire::base_request`] prepares the standard base message. Validation checks wire kinds and widths, not credential or account suitability.
 struct wechat_protocol::calls::signaling::CommonResponse | struct { public fields } | Standard base response plus an opaque inner response. Decoding does not establish success: inspect the return code before admitting an inner reply.

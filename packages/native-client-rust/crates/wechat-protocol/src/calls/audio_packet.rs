@@ -23,6 +23,8 @@ const VIDEO_WINDOW: u32 = 256;
 const MAX_NONCE_VARIANTS: usize = 8;
 // Leave 60,000 sequences for the current 20-minute limit at 50 audio packets/sec.
 const MAX_LEGACY_AUDIO_START: u16 = u16::MAX - 59_999;
+/// Peer-used `0x50` sequence numbers skipped before an RUDP send is abandoned.
+const MAX_RUDP_SEQUENCE_SKIP: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MediaEpoch {
@@ -139,10 +141,12 @@ pub struct Live96 {
     first_tx_audio: u16,
     first_tx_video: u16,
     first_tx_control: u16,
+    first_tx_rudp: u16,
     next_audio: u32,
     next_video: u32,
     next_qos: u32,
     next_control: u32,
+    next_rudp: u32,
     clear_sequence: u32,
     rx_highest: BTreeMap<u8, u32>,
     rx_seen: BTreeMap<u8, Box<[u64; 1024]>>,
@@ -244,10 +248,12 @@ impl Live96 {
             first_tx_audio: 0,
             first_tx_video: 0,
             first_tx_control: 0,
+            first_tx_rudp: 0,
             next_audio: 0,
             next_video: 0,
             next_qos: 0,
             next_control: 0,
+            next_rudp: 0,
             clear_sequence: 0,
             rx_highest: BTreeMap::new(),
             rx_seen: BTreeMap::new(),
@@ -294,8 +300,12 @@ impl Live96 {
             self.next_audio = u32::from(self.first_tx_audio);
             self.first_tx_video = self.legacy_start(b"agent-wechat/live96/video-start/v1")?;
             self.next_video = u32::from(self.first_tx_video);
-            self.first_tx_control = self.legacy_control_start()?;
+            self.first_tx_control =
+                self.legacy_reserved_start(b"agent-wechat/live96/control-start/v1")?;
             self.next_control = u32::from(self.first_tx_control);
+            self.first_tx_rudp =
+                self.legacy_reserved_start(b"agent-wechat/live96/rudp-start/v1")?;
+            self.next_rudp = u32::from(self.first_tx_rudp);
             self.legacy_receive_nonce_reuse = true;
         }
         self.tx_scope = Some(scope);
@@ -312,17 +322,18 @@ impl Live96 {
         let prefix = u32::from_le_bytes(digest[..4].try_into()?);
         Ok((prefix % u32::from(MAX_LEGACY_AUDIO_START) + 1) as u16)
     }
-    fn legacy_control_start(&self) -> Result<u16> {
+    /// Derive a sender start sequence for a low-rate kind (`0x70` control, `0x50` RUDP).
+    fn legacy_reserved_start(&self, domain: &[u8]) -> Result<u16> {
         let key = PKey::hmac(&self.key[..])?;
         let mut mac = Signer::new(MessageDigest::sha256(), &key)?;
-        mac.update(b"agent-wechat/live96/control-start/v1")?;
+        mac.update(domain)?;
         mac.update(&self.context.room_id.to_le_bytes())?;
         mac.update(&self.base.to_le_bytes())?;
         mac.update(&self.context.own_member.to_le_bytes())?;
         let digest = Zeroizing::new(mac.sign_to_vec()?);
         let prefix = u32::from_le_bytes(digest[..4].try_into()?);
-        // Reserve 0..1024 for peers that start 0x70 control probes at 0 while
-        // keeping >31,000 sequences available below u16::MAX.
+        // Reserve 0..1024 for peers that start these kinds at 0 while keeping
+        // >31,000 sequences available below u16::MAX.
         Ok((1024 + (prefix % 32_768)) as u16)
     }
     fn tx_check(&mut self, current: MediaEpoch, now_ms: u64) -> Result<()> {
@@ -461,6 +472,26 @@ impl Live96 {
         self.seal_inner(current, now_ms, 0x30, 0, self.prefer_live98_tx, payload)
     }
 
+    /// Seal one in-band RUDP packet (`packed_kind = 0x50`, relay command `0xd9`), such as
+    /// a feedback acknowledgement. Sequence numbers the peer already used for `0x50` are
+    /// skipped so no nonce is reused; returns `Ok(None)`, sending nothing, if a short run
+    /// of following sequence numbers is also taken.
+    pub fn seal_rudp(
+        &mut self,
+        current: MediaEpoch,
+        now_ms: u64,
+        payload: &[u8],
+    ) -> Result<Option<Vec<u8>>> {
+        self.check(current)?;
+        for _ in 0..MAX_RUDP_SEQUENCE_SKIP {
+            if !self.rx_seen_contains(0x50, self.next_rudp) {
+                return Ok(Some(self.seal(current, now_ms, 0x50, payload)?));
+            }
+            self.next_rudp = self.next_rudp.saturating_add(1);
+        }
+        Ok(None)
+    }
+
     fn seal(
         &mut self,
         current: MediaEpoch,
@@ -500,6 +531,7 @@ impl Live96 {
             0x10 if wire_kind == 0x10 => &mut self.next_audio,
             0x20 | 0x60 => &mut self.next_video,
             0x30 if wire_kind == 0x30 => &mut self.next_qos,
+            0x50 if wire_kind == 0x50 => &mut self.next_rudp,
             0x70 if wire_kind == 0x70 => &mut self.next_control,
             _ => bail!("Unsupported media sender family"),
         };
@@ -511,10 +543,7 @@ impl Live96 {
         *next += 1;
         let nonce = self.nonce32(nonce_kind, sequence);
         let seen_overlap = if sequence <= u32::from(u16::MAX) {
-            self.rx_seen.get(&nonce_kind).is_some_and(|seen| {
-                let s = sequence as usize;
-                seen[s / 64] & (1u64 << (s % 64)) != 0
-            })
+            self.rx_seen_contains(nonce_kind, sequence)
         } else {
             self.rx_high_overflow
                 .get(&nonce_kind)
@@ -613,10 +642,15 @@ impl Live96 {
             0x10 => (self.next_audio, u32::from(self.first_tx_audio)),
             0x20 => (self.next_video, u32::from(self.first_tx_video)),
             0x30 => (self.next_qos, 0),
+            0x50 => (self.next_rudp, u32::from(self.first_tx_rudp)),
             0x70 => (self.next_control, u32::from(self.first_tx_control)),
             _ => (0, 0),
         };
-        if sequence32 < own_next && sequence32 >= first_tx {
+        // A sequence the peer already used before this packet was either skipped by our
+        // sender (`seal_rudp`) or caught when we sealed (`seal_inner`), so a later peer
+        // packet at that sequence is not a new cross-direction reuse.
+        let peer_used_first = self.rx_seen_contains(nonce_kind, sequence32);
+        if !peer_used_first && sequence32 < own_next && sequence32 >= first_tx {
             self.diagnostic_overlap(nonce_kind)?;
         }
         // Retire every authenticated, sender-bound nonce before payload classification.
@@ -702,12 +736,7 @@ impl Live96 {
             [8, 1, 18, 2, 8, 1] => {
                 // Leave the probe unanswered if a reply would consume an
                 // inbound nonce. The sender's reuse fence stays unchanged.
-                if self.next_control <= u32::from(u16::MAX)
-                    && self.rx_seen.get(&0x70).is_some_and(|seen| {
-                        let sequence = self.next_control as usize;
-                        seen[sequence / 64] & (1u64 << (sequence % 64)) != 0
-                    })
-                {
+                if self.rx_seen_contains(0x70, self.next_control) {
                     return Ok(None);
                 }
                 Ok(Some(self.seal(
@@ -722,6 +751,14 @@ impl Live96 {
             // Ignore them without inventing a response or stopping audio.
             _ => Ok(None),
         }
+    }
+    /// True when the peer already used `sequence` for `nonce_kind` (16-bit ledger only).
+    fn rx_seen_contains(&self, nonce_kind: u8, sequence: u32) -> bool {
+        sequence <= u32::from(u16::MAX)
+            && self.rx_seen.get(&nonce_kind).is_some_and(|seen| {
+                let s = sequence as usize;
+                seen[s / 64] & (1u64 << (s % 64)) != 0
+            })
     }
     pub fn close(&mut self) {
         self.key = Zeroizing::new([0; 32]);
@@ -1123,6 +1160,37 @@ mod tests {
         assert!(receive.open(epoch(), &first).unwrap().is_none());
         let next = sending.seal(epoch(), 0, 0x70, &[8, 3]).unwrap();
         assert!(receive.open(epoch(), &next).unwrap().is_some());
+    }
+
+    #[test]
+    fn rudp_sealing_skips_peer_sequences_and_detects_cross_direction_reuse() {
+        let mut local = receiver();
+        local
+            .authorize_transmit(
+                epoch(),
+                TransmitScope::LegacyRelayAudio { key_generation: 1 },
+            )
+            .unwrap();
+        let mut remote = peer();
+        assert!(local.first_tx_rudp >= 1024);
+        let start = local.first_tx_rudp;
+
+        // A peer 0x50 packet at our next sequence makes the ack skip that nonce.
+        remote.next_rudp = u32::from(start);
+        let peer_data = remote.seal(epoch(), 0, 0x50, &[8, 1]).unwrap();
+        assert!(local.open(epoch(), &peer_data).unwrap().is_some());
+        let ack = local.seal_rudp(epoch(), 0, &[8, 2]).unwrap().unwrap();
+        assert_eq!(u16::from_le_bytes([ack[15], ack[16]]), start + 1);
+
+        // Another peer packet at the sequence we skipped is not mistaken for reuse of ours.
+        remote.next_rudp = u32::from(start);
+        let late_variant = remote.seal(epoch(), 0, 0x50, &[8, 4]).unwrap();
+        assert!(local.open(epoch(), &late_variant).unwrap().is_some());
+
+        // A later peer 0x50 packet reusing the sequence we sent on is rejected.
+        remote.next_rudp = u32::from(start) + 1;
+        let reused = remote.seal(epoch(), 0, 0x50, &[8, 3]).unwrap();
+        assert!(local.open(epoch(), &reused).is_err());
     }
 
     #[test]

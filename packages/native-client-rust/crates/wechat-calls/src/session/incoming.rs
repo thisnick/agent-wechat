@@ -370,6 +370,18 @@ impl NativeIncomingSession {
             "Incomplete incoming ACK control context"
         );
         let strategy = p::optional_data(&ack, 7)?.unwrap_or_default();
+        if std::env::var("WX_CALL_VIDEO_TRACE").as_deref() == Ok("1") {
+            // Field numbers only: shows whether the ringing ACK carries relay endpoints
+            // (strategy field 1) or connections (field 15) for an early relay check-in.
+            let ack_tags: Vec<u32> = ack.iter().map(|f| f.number).collect();
+            let strategy_tags: Vec<u32> = fields(strategy)
+                .map(|parsed| parsed.iter().map(|f| f.number).collect())
+                .unwrap_or_default();
+            eprintln!(
+                "[wechat-call-video] incoming ack fields={ack_tags:?} strategy_len={} strategy_fields={strategy_tags:?}",
+                strategy.len()
+            );
+        }
         ensure!(
             number(&fields(strategy)?, 14, Some(0))? & (1 << 36) == 0,
             "Alternate incoming sync unsupported"
