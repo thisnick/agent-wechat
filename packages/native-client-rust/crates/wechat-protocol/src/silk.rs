@@ -1,6 +1,12 @@
 //! Bounded independent SILK SDK wrapper. Public source/license pins are under
 //! vendor/silk; no WeChat codec library is linked or loaded.
+//!
+//! Framing constants, [`validate_framing`], and [`wav`] are always available.
+//! PCM encoding and decoding (`encode` and `decode`) require the default-enabled
+//! `voice-silk` Cargo feature.
 use anyhow::{ensure, Result};
+
+#[cfg(feature = "voice-silk")]
 unsafe extern "C" {
     fn aw_silk_encode(
         pcm: *const i16,
@@ -38,6 +44,10 @@ pub const MAX_STREAM_BYTES: usize = 512 * 1024;
 pub const MAX_NOTE_BYTES: usize = 10
     + (MAX_NOTE_MS / FRAME_MS) as usize * (2 + (BIT_RATE / 8 * FRAME_MS / 1000) as usize * 3 / 2);
 const _: () = assert!(MAX_NOTE_BYTES <= MAX_STREAM_BYTES);
+
+/// Encode mono 16 kHz signed 16-bit PCM into a framed `#!SILK_V3` voice note
+/// using the bundled SILK C encoder. Requires the `voice-silk` feature.
+#[cfg(feature = "voice-silk")]
 pub fn encode(pcm: &[i16]) -> Result<Vec<u8>> {
     ensure!(
         !pcm.is_empty() && pcm.len() <= MAX_SAMPLES,
@@ -64,6 +74,9 @@ pub fn encode(pcm: &[i16]) -> Result<Vec<u8>> {
     validate_framing(&out)?;
     Ok(out)
 }
+
+/// Validate a WeChat-prefixed `#!SILK_V3` stream's header, packet lengths and
+/// duration bounds, returning the total duration in milliseconds.
 pub fn validate_framing(input: &[u8]) -> Result<u32> {
     ensure!(
         input.len() >= 12
@@ -89,6 +102,10 @@ pub fn validate_framing(input: &[u8]) -> Result<u32> {
     ensure!(packets > 0, "empty_silk_stream");
     Ok(packets * FRAME_MS)
 }
+
+/// Decode a validated `#!SILK_V3` voice note into mono 16 kHz signed 16-bit PCM
+/// using the bundled SILK C decoder. Requires the `voice-silk` feature.
+#[cfg(feature = "voice-silk")]
 pub fn decode(input: &[u8]) -> Result<Vec<i16>> {
     validate_framing(input)?;
     let mut pcm = vec![0i16; MAX_SAMPLES];
@@ -111,6 +128,9 @@ pub fn decode(input: &[u8]) -> Result<Vec<i16>> {
     pcm.truncate(samples as usize);
     Ok(pcm)
 }
+
+/// Wrap mono 16 kHz signed 16-bit PCM samples in an uncompressed RIFF/WAVE
+/// container.
 pub fn wav(pcm: &[i16]) -> Result<Vec<u8>> {
     ensure!(pcm.len() <= MAX_SAMPLES, "voice_duration_limit");
     let n = u32::try_from(pcm.len() * 2)?;
@@ -135,6 +155,52 @@ pub fn wav(pcm: &[i16]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn framing_validation_and_wav_work_without_c_codec() {
+        let mut valid = vec![2];
+        valid.extend_from_slice(b"#!SILK_V3");
+        valid.extend_from_slice(&4i16.to_le_bytes());
+        valid.extend_from_slice(&[1, 2, 3, 4]);
+        assert_eq!(validate_framing(&valid).unwrap(), FRAME_MS);
+
+        valid.extend_from_slice(&2i16.to_le_bytes());
+        valid.extend_from_slice(&[5, 6]);
+        assert_eq!(validate_framing(&valid).unwrap(), FRAME_MS * 2);
+
+        let mut too_many_packets = vec![2];
+        too_many_packets.extend_from_slice(b"#!SILK_V3");
+        for _ in 0..=(MAX_NOTE_MS / FRAME_MS) {
+            too_many_packets.extend_from_slice(&1i16.to_le_bytes());
+            too_many_packets.push(0);
+        }
+        assert!(validate_framing(&too_many_packets).is_err());
+
+        for bad in [
+            vec![],
+            [vec![4], b"#!SILK_V3".to_vec(), vec![1, 0, 0]].concat(),
+            [vec![2], b"#!SILK_V3".to_vec()].concat(),
+            [vec![2], b"#!SILK_V3".to_vec(), vec![0, 0]].concat(),
+            [vec![2], b"#!SILK_V3".to_vec(), vec![255, 255]].concat(),
+            [vec![2], b"#!SILK_V3".to_vec(), vec![5, 0, 1, 2]].concat(),
+            [
+                vec![2],
+                b"#!SILK_V3".to_vec(),
+                5121i16.to_le_bytes().to_vec(),
+            ]
+            .concat(),
+        ] {
+            assert!(validate_framing(&bad).is_err());
+        }
+
+        let wav_bytes = wav(&[0, 1000, -1000, i16::MAX]).unwrap();
+        assert_eq!(&wav_bytes[..4], b"RIFF");
+        assert_eq!(&wav_bytes[8..12], b"WAVE");
+        assert_eq!(wav_bytes.len(), 44 + 8);
+        assert!(wav(&vec![0i16; MAX_SAMPLES + 1]).is_err());
+    }
+
+    #[cfg(feature = "voice-silk")]
     #[test]
     fn independent_fresh_tones_encode_decode() {
         let pcm = (0..16000)
@@ -147,6 +213,8 @@ mod tests {
         assert!(decoded.iter().any(|s| s.abs() > 1000));
         assert_eq!(&wav(&decoded).unwrap()[..4], b"RIFF");
     }
+
+    #[cfg(feature = "voice-silk")]
     #[test]
     fn maximum_note_stays_within_derived_byte_bound() {
         assert_eq!(MAX_SAMPLES, 960_000);
@@ -180,6 +248,8 @@ mod tests {
         let too_long = vec![0i16; MAX_SAMPLES + 1];
         assert!(encode(&too_long).is_err());
     }
+
+    #[cfg(feature = "voice-silk")]
     #[test]
     fn malformed_packet_refused_before_ffi() {
         for input in [

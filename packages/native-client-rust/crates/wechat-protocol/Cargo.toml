@@ -14,8 +14,10 @@ categories = ["network-programming"]
 include = ["src/**", "tests/**", "examples/**", "README.md", "LICENSE", "NOTICE", "build.rs", "fixtures/**", "vendor/silk/**"]
 
 [features]
-# Compatibility aliases; these features no longer select different builds.
-default = []
+default = ["voice-silk"]
+# Compile the bundled C SILK voice codec (`silk::encode` and `silk::decode`).
+voice-silk = ["dep:cc"]
+# Compatibility alias; this feature no longer selects a different build.
 experimental-calls = []
 
 [dependencies]
@@ -35,4 +37,4 @@ zeroize = { version = "1", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 
 [build-dependencies]
-cc = "1"
+cc = { version = "1", optional = true }

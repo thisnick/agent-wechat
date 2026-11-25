@@ -28,6 +28,9 @@ connecting to a running daemon can use the [HTTP API](/use/api/).
 
 2. Build with Rust 1.93.1+, a C compiler, Make and Perl. Cargo resolves supporting
    crates automatically. Native Opus also needs CMake and a C++ compiler.
+   To skip compiling the bundled C SILK voice encoder/decoder (`voice-silk`) in
+   `wechat-protocol`, disable default features (`default-features = false`);
+   framing validation, WAV packaging, and all protocol codecs stay available.
 
 From the release after 2.3.2, the Rust libraries have the same version number as
 the CLI, daemon and OpenClaw plugin, and every release publishes all five. Earlier
