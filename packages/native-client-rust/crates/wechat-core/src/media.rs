@@ -1759,7 +1759,13 @@ impl Core {
         let cdn = cdn_download_failure(error);
         let channels = channels_download_failure(error);
         let voice = voice::voice_download_failure(error);
-        if service.is_none() && cdn.is_none() && channels.is_none() && voice.is_none() {
+        let upload = cdn_upload_failure(error);
+        if service.is_none()
+            && cdn.is_none()
+            && channels.is_none()
+            && voice.is_none()
+            && upload.is_none()
+        {
             return Ok(());
         }
         let mut row = self.store.media_job(account, id)?;
@@ -1775,6 +1781,9 @@ impl Core {
         }
         if let Some(detail) = voice {
             row.data["result"]["voiceDownloadFailure"] = detail;
+        }
+        if let Some(detail) = upload {
+            row.data["result"]["cdnUploadFailure"] = detail;
         }
         self.store.save_media_job(account, &row)?;
         Ok(())
@@ -2928,6 +2937,18 @@ fn cdn_download_failure(error: &anyhow::Error) -> Option<serde_json::Value> {
         }
     })
 }
+/// Where a large-file CDN upload stopped: request, block, attempts, server
+/// retries and a fixed cause. No server text, addresses, keys or file data.
+fn cdn_upload_failure(error: &anyhow::Error) -> Option<serde_json::Value> {
+    let failure = wechat_protocol::media::LargeFileUploadFailure::find(error)?;
+    Some(json!({
+        "phase": failure.phase,
+        "block": failure.block,
+        "attempts": failure.attempts,
+        "serverRetries": failure.server_retries,
+        "cause": failure.cause.as_str(),
+    }))
+}
 fn video_representation_mismatch(
     error: &anyhow::Error,
 ) -> Option<&wechat_protocol::media::VideoRepresentationMismatch> {
@@ -2940,6 +2961,7 @@ fn service_diagnostic(error: &anyhow::Error) -> Option<(&'static str, i32)> {
             Service::CdnBootstrap => Some("bootstrap"),
             Service::CdnDownload => Some("download"),
             Service::CdnUpload => Some("upload"),
+            Service::LargeFileUpload => Some("large_file_upload"),
             Service::AccountAuthentication | Service::AutomaticAuthentication => {
                 Some("authentication")
             }
@@ -7683,6 +7705,51 @@ mod tests {
             None,
             "boundaries outside media have no media stage"
         );
+        // A large-file CDN rejection names its stage and code instead of falling
+        // through to media_processing_failed (#706).
+        let large_file =
+            anyhow::Error::new(ServiceRejected::new(Service::LargeFileUpload, -5103015))
+                .context("uploading");
+        assert_eq!(
+            service_diagnostic(&large_file),
+            Some(("large_file_upload", -5103015))
+        );
+        assert_eq!(classify_error(&large_file), "media_service_rejected");
+        let stopped = anyhow::Error::new(ServiceRejected::new(Service::LargeFileUpload, -5103015))
+            .context(wechat_protocol::media::LargeFileUploadFailure {
+                phase: "uploadblock",
+                block: Some(2),
+                attempts: 1,
+                server_retries: 3,
+                cause: wechat_protocol::media::LargeFileUploadCause::ServiceRejected,
+            });
+        assert_eq!(
+            service_diagnostic(&stopped),
+            Some(("large_file_upload", -5103015))
+        );
+        assert_eq!(classify_error(&stopped), "media_service_rejected");
+        assert_eq!(
+            cdn_upload_failure(&stopped),
+            Some(json!({
+                "phase": "uploadblock",
+                "block": 2,
+                "attempts": 1,
+                "serverRetries": 3,
+                "cause": "service_rejected",
+            }))
+        );
+        // A tag on a transport failure keeps its retryable classification.
+        let dropped = anyhow::anyhow!("connection closed before message completed").context(
+            wechat_protocol::media::LargeFileUploadFailure {
+                phase: "uploadblock",
+                block: Some(7),
+                attempts: 5,
+                server_retries: 0,
+                cause: wechat_protocol::media::LargeFileUploadCause::Transport,
+            },
+        );
+        assert_eq!(classify_error(&dropped), "transport_unavailable");
+        assert!(cdn_upload_failure(&anyhow::anyhow!("other")).is_none());
         let nested = anyhow::anyhow!("connection closed before message completed")
             .context("opaque request wrapper");
         assert_eq!(classify_error(&nested), "transport_unavailable");

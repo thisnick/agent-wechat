@@ -213,7 +213,9 @@ impl std::fmt::Display for AccountInterrupted {
 
 impl std::error::Error for AccountInterrupted {}
 
-fn find<T: std::error::Error + Send + Sync + 'static>(error: &anyhow::Error) -> Option<&T> {
+pub(crate) fn find<T: std::error::Error + Send + Sync + 'static>(
+    error: &anyhow::Error,
+) -> Option<&T> {
     error
         .downcast_ref::<T>()
         .or_else(|| error.chain().find_map(|cause| cause.downcast_ref::<T>()))
