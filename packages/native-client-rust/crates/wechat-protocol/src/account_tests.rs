@@ -1384,6 +1384,38 @@ async fn async_transport_cancelled_multichunk_voice_adopts_chunk1_cookie_and_sto
     assert_eq!(client.export_account_state().unwrap().cookie, b"v-chunk1");
 }
 
+/// Short-link HTTP that signals once the request is handed off and replies
+/// only when released.
+struct GatedHttp {
+    session: crate::mmtls::ShortSession,
+    reply: Mutex<Option<Vec<u8>>>,
+    submitted: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+}
+impl crate::transport::HttpTransport for GatedHttp {
+    fn send<'a>(
+        &'a self,
+        request: crate::transport::HttpRequest,
+    ) -> crate::transport::TransportFuture<'a, Result<crate::transport::HttpResponse>> {
+        let reply = self.reply.lock().unwrap().take().unwrap();
+        let (_, _, _, wire) =
+            crate::mmtls::tests::handle_mock_short_exchange(&self.session, &request.body, &reply)
+                .unwrap();
+        if let Some(tx) = self.submitted.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+        let release = self.release.lock().unwrap().take().unwrap();
+        Box::pin(async move {
+            let _ = release.await;
+            Ok(crate::transport::HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: wire,
+            })
+        })
+    }
+}
+
 /// A scripted transport client whose persistence can be made to fail.
 fn scoped_fixture(
     replies: Vec<Result<Vec<u8>>>,
@@ -1567,39 +1599,6 @@ async fn a_scoped_operation_that_failed_before_submission_does_not_use_up_the_re
 
 #[tokio::test]
 async fn a_scoped_operation_dropped_after_submission_still_completes_and_commits() {
-    struct GatedHttp {
-        session: crate::mmtls::ShortSession,
-        reply: Mutex<Option<Vec<u8>>>,
-        submitted: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-        release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
-    }
-    impl crate::transport::HttpTransport for GatedHttp {
-        fn send<'a>(
-            &'a self,
-            request: crate::transport::HttpRequest,
-        ) -> crate::transport::TransportFuture<'a, Result<crate::transport::HttpResponse>> {
-            let reply = self.reply.lock().unwrap().take().unwrap();
-            let (_, _, _, wire) = crate::mmtls::tests::handle_mock_short_exchange(
-                &self.session,
-                &request.body,
-                &reply,
-            )
-            .unwrap();
-            if let Some(tx) = self.submitted.lock().unwrap().take() {
-                let _ = tx.send(());
-            }
-            let release = self.release.lock().unwrap().take().unwrap();
-            Box::pin(async move {
-                let _ = release.await;
-                Ok(crate::transport::HttpResponse {
-                    status: 200,
-                    headers: vec![],
-                    body: wire,
-                })
-            })
-        }
-    }
-
     let initial = client().export_account_state().unwrap();
     let short_session = synthetic_short_session();
     let (submitted_tx, mut submitted_rx) = tokio::sync::oneshot::channel();
@@ -1644,5 +1643,86 @@ async fn a_scoped_operation_dropped_after_submission_still_completes_and_commits
     releaser.await.unwrap();
     // The detached operation finished and the request committed its cookie.
     assert_eq!(client.export_account_state().unwrap().cookie, b"c-late");
+    assert_eq!(client.account_status().unwrap().in_flight, 0);
+}
+
+/// A client whose single heartbeat reply (cookie `cookie`) is gated, plus the
+/// handoff signal and the release switch.
+fn gated_client(
+    cookie: &[u8],
+) -> (
+    NativeClient,
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let initial = client().export_account_state().unwrap();
+    let short_session = synthetic_short_session();
+    let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let http = Arc::new(GatedHttp {
+        session: short_session.clone(),
+        reply: Mutex::new(Some(heartbeat_reply(&initial, cookie))),
+        submitted: Mutex::new(Some(submitted_tx)),
+        release: Mutex::new(Some(release_rx)),
+    });
+    let transport = crate::transport::ProtocolTransport::new(
+        Arc::new(UnusedStreamTransport),
+        http,
+        Arc::new(MockClock(AtomicU64::new(100))),
+    );
+    let client =
+        NativeClient::from_account_with_transport(initial, NativeOptions::default(), transport)
+            .unwrap();
+    client
+        .owned_account()
+        .unwrap()
+        .short_link
+        .put_at_ms("long.weixin.qq.com", short_session, 100);
+    (client, submitted_rx, release_tx)
+}
+
+#[tokio::test]
+async fn an_abandoned_scoped_request_still_commits_its_in_flight_operation() {
+    let (client, submitted_rx, release_tx) = gated_client(b"c-abandoned");
+    let worker = client.clone();
+    let request = tokio::spawn(async move {
+        worker
+            .request(async |request| request.heartbeat(&[]).await.map(|_| ()))
+            .await
+    });
+    submitted_rx.await.unwrap();
+    // Drop the whole request future after handoff, as an outer timeout would.
+    request.abort();
+    let _ = request.await;
+    release_tx.send(()).unwrap();
+    while client.account_status().unwrap().in_flight != 0 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        client.export_account_state().unwrap().cookie,
+        b"c-abandoned"
+    );
+}
+
+#[tokio::test]
+async fn an_abandoned_scoped_request_commits_a_finished_operation() {
+    let (client, _submitted_rx, release_tx) = gated_client(b"c-finished");
+    release_tx.send(()).unwrap();
+    let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+    let worker = client.clone();
+    let request = tokio::spawn(async move {
+        worker
+            .request(async |request| {
+                request.heartbeat(&[]).await?;
+                finished_tx.send(()).unwrap();
+                // The closure is still running when its future is dropped.
+                std::future::pending::<Result<()>>().await
+            })
+            .await
+    });
+    finished_rx.await.unwrap();
+    request.abort();
+    let _ = request.await;
+    assert_eq!(client.export_account_state().unwrap().cookie, b"c-finished");
     assert_eq!(client.account_status().unwrap().in_flight, 0);
 }

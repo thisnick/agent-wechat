@@ -34,6 +34,9 @@ struct ScopeInner {
     /// An operation currently holds the exchange.
     busy: bool,
     closed: bool,
+    /// The request's future was dropped: whoever holds the exchange commits
+    /// it instead of handing it back.
+    abandoned: bool,
 }
 
 impl RequestScope {
@@ -44,6 +47,7 @@ impl RequestScope {
                 spent: false,
                 busy: false,
                 closed: false,
+                abandoned: false,
             }),
             returned: Notify::new(),
         }
@@ -73,17 +77,41 @@ impl RequestScope {
     }
 
     /// Take the exchange back from an operation, or record that it was lost.
+    /// After the request was abandoned, commit the exchange here instead so a
+    /// verified cookie from the finished operation is still adopted.
     fn give_back(&self, parts: Option<ExchangeParts>) {
+        let mut orphaned = None;
         if let Ok(mut inner) = self.lock() {
             inner.busy = false;
             if let Some(parts) = parts {
                 inner.spent |= parts.prior_admission;
-                if !inner.closed {
+                if inner.abandoned {
+                    orphaned = Some(parts);
+                } else if !inner.closed {
                     inner.parts = Some(parts);
                 }
             }
         }
         self.returned.notify_one();
+        if let Some(parts) = orphaned {
+            commit_abandoned(parts);
+        }
+    }
+
+    /// The request's future was dropped before it committed. Commit an idle
+    /// exchange now; an operation still running commits when it gives back.
+    fn abandon(&self) {
+        let parts = match self.lock() {
+            Ok(mut inner) => {
+                inner.abandoned = true;
+                inner.closed = true;
+                inner.parts.take()
+            }
+            Err(_) => None,
+        };
+        if let Some(parts) = parts {
+            commit_abandoned(parts);
+        }
     }
 
     /// Close the scope once no operation holds the exchange, returning it
@@ -107,6 +135,25 @@ impl RequestScope {
             .as_ref()
             .map(|parts| parts.state.clone())
             .context("Account request context is in use or has ended")
+    }
+}
+
+/// Adopt whatever verified cookie an abandoned request's operations left in
+/// its state, as an ordinary detached RPC would. There is no caller left to
+/// report a commit failure to.
+fn commit_abandoned(parts: ExchangeParts) {
+    let _ = finish_account_exchange(parts.exchange, &parts.state, Ok(()));
+}
+
+/// Commits the request's exchange if its future is dropped before it
+/// finishes.
+struct AbandonOnDrop(Option<Arc<RequestScope>>);
+
+impl Drop for AbandonOnDrop {
+    fn drop(&mut self) {
+        if let Some(scope) = self.0.take() {
+            scope.abandon();
+        }
     }
 }
 
@@ -206,8 +253,10 @@ impl NativeClient {
     /// The operation runs detached like the ordinary async methods: if its
     /// future is dropped after submission (for example by a timeout inside the
     /// closure), it still completes on Tokio or the configured spawner, and
-    /// this method waits for it before committing. Without either, it runs
-    /// inline and must not be dropped after submission.
+    /// this method waits for it before committing. If this method's own future
+    /// is dropped, the finished operation's verified cookie is still committed.
+    /// Without Tokio or a spawner, the operation runs inline and must not be
+    /// dropped after submission.
     ///
     /// The request holds the account's handoff barrier until the closure
     /// returns: calling `shutdown`, `quiesce_and_export` or `logout` on this
@@ -229,13 +278,15 @@ impl NativeClient {
         // that would begin another exchange fails closed.
         let mut client = Self::from_validated_options(self.options.clone(), Some(transport))?;
         client.scope = Some(scope.clone());
+        let mut abandon = AbandonOnDrop(Some(scope.clone()));
         let mut request = AsyncAccountRequest { client };
         let result = operation(&mut request).await;
         drop(request);
-        let parts = scope
-            .close_when_idle()
-            .await?
-            .context("Account request operation ended without returning its context")?;
+        let parts = scope.close_when_idle().await;
+        // From here on the request commits (or reports a lost context) itself.
+        abandon.0 = None;
+        let parts =
+            parts?.context("Account request operation ended without returning its context")?;
         finish_account_exchange(parts.exchange, &parts.state, result)
     }
 }
