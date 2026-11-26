@@ -698,10 +698,11 @@ field wechat_protocol::media::DownloadedMedia::sha256 | alloc::string::String | 
 field wechat_protocol::media::DownloadedMedia::substituted_filetype | core::option::Option<u32> | MISSING DOC
 field wechat_protocol::media::LargeFileDownloadError::FixedControlMismatch::actual | i64 | MISSING DOC
 field wechat_protocol::media::LargeFileDownloadError::FixedControlMismatch::control | wechat_protocol::media::LargeFileDownloadControl | MISSING DOC
-field wechat_protocol::media::LargeFileUploadFailure::attempts | u32 | HTTP attempts made for the request that failed, including retries. Zero when the upload stopped outside a request.
+field wechat_protocol::media::LargeFileUploadFailure::attempts | u32 | HTTP attempts made for the request that failed, including the session's resends of that request. Zero when the upload stopped outside a request.
 field wechat_protocol::media::LargeFileUploadFailure::block | core::option::Option<u32> | Zero-based index of the block, for `uploadblock`.
 field wechat_protocol::media::LargeFileUploadFailure::cause | wechat_protocol::media::LargeFileUploadCause | Why the upload stopped.
 field wechat_protocol::media::LargeFileUploadFailure::phase | &'static str | The request that failed: `apply`, `uploadblock`, `fin` or `complete`.
+field wechat_protocol::media::LargeFileUploadFailure::server_retries | u32 | CDN errors retried with a new request during the upload before it stopped.
 field wechat_protocol::media::MediaDescriptor::aes_key | alloc::vec::Vec<u8> | MISSING DOC
 field wechat_protocol::media::MediaDescriptor::expected_bytes | core::option::Option<u64> | MISSING DOC
 field wechat_protocol::media::MediaDescriptor::expected_md5 | core::option::Option<alloc::string::String> | MISSING DOC
