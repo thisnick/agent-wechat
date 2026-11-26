@@ -394,6 +394,47 @@ function VideoPoster({
   );
 }
 
+/**
+ * WebKit (Safari and the macOS app's web view) lays out its native audio
+ * controls in script. It enables the overflow (>>) button once the media has
+ * loaded, but does not always lay the controls out again, and it skips layout
+ * entirely while the page is hidden. The button's container then stays at
+ * x = 0 and is drawn over the play button. Any size change makes WebKit lay the
+ * controls out again, so after metadata loads, and whenever the page becomes
+ * visible again, narrow the player by a pixel for a few frames. Video is left
+ * alone: its height follows its width, so the nudge would reflow the message
+ * list.
+ */
+function relayoutNativeControls(media: HTMLAudioElement | null) {
+  if (!media) return;
+  let frame = 0;
+  const after = (frames: number, run: () => void) => {
+    frame = requestAnimationFrame(() =>
+      frames > 1 ? after(frames - 1, run) : run(),
+    );
+  };
+  const nudge = () => {
+    // A hidden page runs no frames; the visibility listener nudges later.
+    if (document.hidden) return;
+    cancelAnimationFrame(frame);
+    media.style.width = "";
+    after(2, () => {
+      media.style.width = `${media.getBoundingClientRect().width - 1}px`;
+      after(2, () => {
+        media.style.width = "";
+      });
+    });
+  };
+  media.addEventListener("loadedmetadata", nudge);
+  document.addEventListener("visibilitychange", nudge);
+  return () => {
+    media.removeEventListener("loadedmetadata", nudge);
+    document.removeEventListener("visibilitychange", nudge);
+    cancelAnimationFrame(frame);
+    media.style.width = "";
+  };
+}
+
 export function AssetContent({
   asset,
   connection,
@@ -527,6 +568,7 @@ export function AssetContent({
           />
         ) : (
           <audio
+            ref={relayoutNativeControls}
             className="media-audio"
             src={url}
             controls
