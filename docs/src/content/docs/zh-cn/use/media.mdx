@@ -1,7 +1,7 @@
 ---
 title: 发送与下载附件
 description: 文件、图片、视频与语音的大小限制、较长的发送时间，以及 CLI、API 和 SDK 接口。
-sourceHash: "685429610874"
+sourceHash: "ec8b3e2e1290"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -129,5 +129,6 @@ wx messages media filehelper MESSAGE_ID --quality normal --output ./post.mp4 --w
 - 网关和代理的超时同样适用。若响应丢失，请使用相同的幂等键进行查询；详见[发送与恢复](/how-it-works/sends/)。
 - 普通视频的已校验字节若与消息元数据不一致，仍可通过 Daemon 下载，但其 `officialWriteback` 会保持 `blocked` 状态。官方 Profile 缓存仍会执行原有的身份校验。
 - 无法识别的视频响应若与消息中声明的大小或 MD5 不一致，下载将停止。任务可能包含 `result.cdnDownloadFailure`，其中列出声明的大小、实际交付的大小以及哪些校验项匹配。这些诊断信息不包含文件内容或哈希值。
+- 超过 25 MiB 的文件和原始画质视频会按分块上传，分块大小由微信设定，通常为 1 MiB。连接中断、无法解析的响应以及微信标记为可重试的服务端错误会自动重试，每次上传最多自动重试 8 次服务端错误。若上传在传输过程中中止，任务的 `result.cdnUploadFailure` 会指明出错的请求（`apply`、`uploadblock`、`fin` 或 `complete`）、分块编号、该请求的尝试次数、已重试的服务端错误次数（`serverRetries`），以及 `cause` 原因，例如 `service_rejected` 或 `transport`。若由服务端拒绝，还会设置 `serviceStage: "large_file_upload"` 及其 `serviceCode`。
 - 沙箱中的 OpenClaw 智能体（例如通过 SSH 运行 shell 的智能体）无法打开媒体工具下载的文件。工具结果会通过 `reachableFromSandbox: false` 说明这一点，而不是给出路径。收到的附件仍会随消息送达沙箱。
 </Aside>
