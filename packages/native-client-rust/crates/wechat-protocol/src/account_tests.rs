@@ -1535,3 +1535,114 @@ async fn a_scoped_async_request_refuses_before_submission_when_it_cannot_run() {
     assert!(http.seen_paths.lock().unwrap().is_empty());
     assert_eq!(client.account_status().unwrap().in_flight, 0);
 }
+
+#[tokio::test]
+async fn a_scoped_operation_that_failed_before_submission_does_not_use_up_the_request() {
+    let initial = client().export_account_state().unwrap();
+    let (client, http, _, _) = scoped_fixture(vec![Ok(heartbeat_reply(&initial, b"c1"))], false);
+    client
+        .request(async |request| {
+            let refused = request
+                .send_text_guarded(
+                    "peer_user",
+                    "never sent",
+                    TextSendOptions {
+                        created_at: 1_700_000_010,
+                        client_message_id: 777,
+                        source: None,
+                    },
+                    || anyhow::bail!("guard refused"),
+                )
+                .await
+                .unwrap_err();
+            assert!(refused.to_string().contains("guard refused"));
+            request.heartbeat(&[]).await?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(http.seen_paths.lock().unwrap().len(), 1);
+    assert_eq!(client.export_account_state().unwrap().cookie, b"c1");
+}
+
+#[tokio::test]
+async fn a_scoped_operation_dropped_after_submission_still_completes_and_commits() {
+    struct GatedHttp {
+        session: crate::mmtls::ShortSession,
+        reply: Mutex<Option<Vec<u8>>>,
+        submitted: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    }
+    impl crate::transport::HttpTransport for GatedHttp {
+        fn send<'a>(
+            &'a self,
+            request: crate::transport::HttpRequest,
+        ) -> crate::transport::TransportFuture<'a, Result<crate::transport::HttpResponse>> {
+            let reply = self.reply.lock().unwrap().take().unwrap();
+            let (_, _, _, wire) = crate::mmtls::tests::handle_mock_short_exchange(
+                &self.session,
+                &request.body,
+                &reply,
+            )
+            .unwrap();
+            if let Some(tx) = self.submitted.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            let release = self.release.lock().unwrap().take().unwrap();
+            Box::pin(async move {
+                let _ = release.await;
+                Ok(crate::transport::HttpResponse {
+                    status: 200,
+                    headers: vec![],
+                    body: wire,
+                })
+            })
+        }
+    }
+
+    let initial = client().export_account_state().unwrap();
+    let short_session = synthetic_short_session();
+    let (submitted_tx, mut submitted_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let http = Arc::new(GatedHttp {
+        session: short_session.clone(),
+        reply: Mutex::new(Some(heartbeat_reply(&initial, b"c-late"))),
+        submitted: Mutex::new(Some(submitted_tx)),
+        release: Mutex::new(Some(release_rx)),
+    });
+    let transport = crate::transport::ProtocolTransport::new(
+        Arc::new(UnusedStreamTransport),
+        http,
+        Arc::new(MockClock(AtomicU64::new(100))),
+    );
+    let client =
+        NativeClient::from_account_with_transport(initial, NativeOptions::default(), transport)
+            .unwrap();
+    client
+        .owned_account()
+        .unwrap()
+        .short_link
+        .put_at_ms("long.weixin.qq.com", short_session, 100);
+    let releaser = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        release_tx.send(()).unwrap();
+    });
+    client
+        .request(async |request| {
+            // Give up on the operation once it is submitted, as a timeout would.
+            let operation = request.heartbeat(&[]);
+            tokio::pin!(operation);
+            tokio::select! {
+                biased;
+                _ = &mut submitted_rx => {}
+                _ = &mut operation => panic!("the reply was gated"),
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    releaser.await.unwrap();
+    // The detached operation finished and the request committed its cookie.
+    assert_eq!(client.export_account_state().unwrap().cookie, b"c-late");
+    assert_eq!(client.account_status().unwrap().in_flight, 0);
+}

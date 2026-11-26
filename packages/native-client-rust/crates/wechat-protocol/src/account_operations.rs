@@ -893,7 +893,7 @@ impl NativeClient {
             .await
     }
 
-    async fn send_text_guarded_impl<F>(
+    pub(super) async fn send_text_guarded_impl<F>(
         &self,
         destination: &str,
         content: &str,
@@ -1317,6 +1317,7 @@ impl NativeClient {
                     .check()
                     .map_err(|error| error.context(NativeRequestNotSubmitted))?;
                 before_submit()?;
+                parts.prior_admission = true;
                 let exchange_future = crate::mmtls::short_exchange_async(
                     &short,
                     &state.short_host,

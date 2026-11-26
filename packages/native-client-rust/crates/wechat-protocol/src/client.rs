@@ -916,16 +916,10 @@ impl NativeClient {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let response = match self.poll_login_notification_async(attempt).await? {
-                Ok(response) => response,
-                Err(status) => return Ok(status),
-            };
-            if response.lan_challenge && matches!(response.status, Some(0..=2)) {
-                refuse_lan_challenge(attempt);
-                return Err(crate::lan_login::failure("unsupported_transport"));
+            match self.poll_login_notification_async(attempt).await? {
+                Ok(response) => apply_login_notification_without_lan(attempt, response),
+                Err(status) => Ok(status),
             }
-            apply_ordinary_login_notification(attempt, response);
-            Ok(attempt.status)
         }
     }
 
@@ -946,12 +940,7 @@ impl NativeClient {
             Err(status) => return Ok(status),
         };
         if !transport.lan_login() {
-            if response.lan_challenge && matches!(response.status, Some(0..=2)) {
-                refuse_lan_challenge(attempt);
-                return Err(crate::lan_login::failure("unsupported_transport"));
-            }
-            apply_ordinary_login_notification(attempt, response);
-            return Ok(attempt.status);
+            return apply_login_notification_without_lan(attempt, response);
         }
         match login_notification_step(attempt, response)? {
             LoginStep::Status(status) => Ok(status),
@@ -1033,35 +1022,33 @@ impl NativeClient {
     ) -> Result<std::sync::Arc<crate::lan_login::Challenge>> {
         use crate::lan_login as lan;
         let challenge = std::sync::Arc::new(lan::Challenge::bind(scope)?);
-        let random = zeroize::Zeroizing::new(crate::crypto::random::<16>()?);
-        let request = zeroize::Zeroizing::new(challenge.request(
-            &attempt.device,
-            &attempt.identifier,
-            &random,
-        )?);
-        let (reply, cookie, _) = self
-            .prelogin_rpc_async_with_guard(
-                transport,
-                &attempt.long_host,
-                &attempt.short_host,
-                lan::CGI,
-                lan::PATH,
-                &request,
-                &attempt.cookie,
-                &[],
-                Some(attempt.key_version),
-                || Ok(()),
-            )
-            .await
-            .map_err(|_| lan::failure("upload_failed"))?;
-        let reply = zeroize::Zeroizing::new(reply);
-        let token =
-            lan::response(&reply).map_err(|_| lan::failure("upload_rejected_or_invalid"))?;
-        challenge.arm(&token)?;
-        if !cookie.is_empty() {
-            attempt.cookie = cookie;
+        let uploaded = async {
+            let request = lan_upload_request(&challenge, attempt)?;
+            let (reply, cookie, _) = self
+                .prelogin_rpc_async_with_guard(
+                    transport,
+                    &attempt.long_host,
+                    &attempt.short_host,
+                    lan::CGI,
+                    lan::PATH,
+                    &request,
+                    &attempt.cookie,
+                    &[],
+                    Some(attempt.key_version),
+                    || Ok(()),
+                )
+                .await
+                .map_err(|_| lan::failure("upload_failed"))?;
+            accept_lan_upload(&challenge, attempt, reply, cookie)
         }
-        Ok(challenge)
+        .await;
+        match uploaded {
+            Ok(()) => Ok(challenge),
+            Err(error) => {
+                release_lan_challenge(challenge);
+                Err(error)
+            }
+        }
     }
 
     /// Asynchronously exchange an approved challenge for secret account
@@ -1424,12 +1411,7 @@ impl NativeClient {
     ) -> Result<std::sync::Arc<crate::lan_login::Challenge>> {
         use crate::lan_login as lan;
         let challenge = std::sync::Arc::new(lan::Challenge::bind(scope)?);
-        let random = zeroize::Zeroizing::new(crate::crypto::random::<16>()?);
-        let request = zeroize::Zeroizing::new(challenge.request(
-            &attempt.device,
-            &attempt.identifier,
-            &random,
-        )?);
+        let request = lan_upload_request(&challenge, attempt)?;
         let (reply, cookie, _) = self
             .prelogin_rpc(
                 &attempt.long_host,
@@ -1442,13 +1424,7 @@ impl NativeClient {
                 Some(attempt.key_version),
             )
             .map_err(|_| lan::failure("upload_failed"))?;
-        let reply = zeroize::Zeroizing::new(reply);
-        let token =
-            lan::response(&reply).map_err(|_| lan::failure("upload_rejected_or_invalid"))?;
-        challenge.arm(&token)?;
-        if !cookie.is_empty() {
-            attempt.cookie = cookie;
-        }
+        accept_lan_upload(&challenge, attempt, reply, cookie)?;
         Ok(challenge)
     }
     /// Exchange an approved challenge for secret account credentials once.
@@ -2216,6 +2192,66 @@ fn refuse_lan_challenge(attempt: &mut LoginAttempt) {
     attempt.credential3 = None;
     attempt.credential4 = None;
     attempt.status = LoginStatus::Scanned;
+}
+
+/// Apply a poll notification on a transport that cannot open a local
+/// listener: a LAN risk challenge fails closed.
+fn apply_login_notification_without_lan(
+    attempt: &mut LoginAttempt,
+    response: wire::PollResponse,
+) -> Result<LoginStatus> {
+    if response.lan_challenge && matches!(response.status, Some(0..=2)) {
+        refuse_lan_challenge(attempt);
+        return Err(crate::lan_login::failure("unsupported_transport"));
+    }
+    apply_ordinary_login_notification(attempt, response);
+    Ok(attempt.status)
+}
+
+/// The LAN upload request advertising `challenge`'s addresses for `attempt`.
+#[cfg(not(target_arch = "wasm32"))]
+fn lan_upload_request(
+    challenge: &crate::lan_login::Challenge,
+    attempt: &LoginAttempt,
+) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+    let random = zeroize::Zeroizing::new(crate::crypto::random::<16>()?);
+    Ok(zeroize::Zeroizing::new(challenge.request(
+        &attempt.device,
+        &attempt.identifier,
+        &random,
+    )?))
+}
+
+/// Arm `challenge` with the token from a verified LAN upload reply and adopt
+/// the reply's cookie.
+#[cfg(not(target_arch = "wasm32"))]
+fn accept_lan_upload(
+    challenge: &crate::lan_login::Challenge,
+    attempt: &mut LoginAttempt,
+    reply: Vec<u8>,
+    cookie: Vec<u8>,
+) -> Result<()> {
+    use crate::lan_login as lan;
+    let reply = zeroize::Zeroizing::new(reply);
+    let token = lan::response(&reply).map_err(|_| lan::failure("upload_rejected_or_invalid"))?;
+    challenge.arm(&token)?;
+    if !cookie.is_empty() {
+        attempt.cookie = cookie;
+    }
+    Ok(())
+}
+
+/// Stop and drop a LAN challenge without blocking an async executor: dropping
+/// the last handle joins its listener thread.
+#[cfg(not(target_arch = "wasm32"))]
+fn release_lan_challenge(challenge: std::sync::Arc<crate::lan_login::Challenge>) {
+    challenge.stop();
+    match tokio::runtime::Handle::try_current() {
+        Ok(runtime) => {
+            runtime.spawn_blocking(move || drop(challenge));
+        }
+        Err(_) => drop(challenge),
+    }
 }
 
 /// What a QR poll notification asks the caller to do next.

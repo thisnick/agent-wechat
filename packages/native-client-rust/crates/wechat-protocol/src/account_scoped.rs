@@ -20,14 +20,19 @@ pub(crate) struct ExchangeParts {
     pub(super) prior_admission: bool,
 }
 
-/// The exchange an [`AsyncAccountRequest`] lends to its single operation.
+/// The exchange an [`AsyncAccountRequest`] lends to its operation.
 pub(crate) struct RequestScope {
     inner: Mutex<ScopeInner>,
+    /// Signalled whenever a lent exchange comes back (or is lost).
+    returned: Notify,
 }
 
 struct ScopeInner {
     parts: Option<ExchangeParts>,
+    /// An operation handed bytes to transport; no other may follow it.
     spent: bool,
+    /// An operation currently holds the exchange.
+    busy: bool,
     closed: bool,
 }
 
@@ -37,8 +42,10 @@ impl RequestScope {
             inner: Mutex::new(ScopeInner {
                 parts: Some(parts),
                 spent: false,
+                busy: false,
                 closed: false,
             }),
+            returned: Notify::new(),
         }
     }
 
@@ -48,31 +55,50 @@ impl RequestScope {
             .map_err(|_| anyhow::anyhow!("Account request context unavailable"))
     }
 
-    /// Lend the exchange to one operation. A second operation is refused
-    /// without the not-submitted marker: it must not relabel the first,
-    /// possibly accepted, operation.
+    /// Lend the exchange to one operation. Once an operation has handed bytes
+    /// to transport, another is refused without the not-submitted marker: it
+    /// must not relabel the first, possibly accepted, operation.
     fn acquire(&self) -> Result<ExchangeParts> {
         let mut inner = self.lock()?;
-        ensure!(!inner.spent, "Account request context already consumed");
-        inner.spent = true;
-        inner
+        ensure!(
+            !inner.spent && !inner.busy,
+            "Account request context already consumed"
+        );
+        let parts = inner
             .parts
             .take()
-            .context("Account request context has ended")
+            .context("Account request context has ended")?;
+        inner.busy = true;
+        Ok(parts)
     }
 
-    fn release(&self, parts: ExchangeParts) {
+    /// Take the exchange back from an operation, or record that it was lost.
+    fn give_back(&self, parts: Option<ExchangeParts>) {
         if let Ok(mut inner) = self.lock() {
-            if !inner.closed {
-                inner.parts = Some(parts);
+            inner.busy = false;
+            if let Some(parts) = parts {
+                inner.spent |= parts.prior_admission;
+                if !inner.closed {
+                    inner.parts = Some(parts);
+                }
             }
         }
+        self.returned.notify_one();
     }
 
-    fn close(&self) -> Option<ExchangeParts> {
-        let mut inner = self.lock().ok()?;
-        inner.closed = true;
-        inner.parts.take()
+    /// Close the scope once no operation holds the exchange, returning it
+    /// unless an operation lost it.
+    async fn close_when_idle(&self) -> Result<Option<ExchangeParts>> {
+        loop {
+            {
+                let mut inner = self.lock()?;
+                if !inner.busy {
+                    inner.closed = true;
+                    return Ok(inner.parts.take());
+                }
+            }
+            self.returned.notified().await;
+        }
     }
 
     fn account(&self) -> Result<AccountState> {
@@ -84,11 +110,49 @@ impl RequestScope {
     }
 }
 
+/// An exchange lent to one scoped operation. Dropping it without returning
+/// the exchange (a panic, or an inline operation that was cancelled) still
+/// releases the scope so the request can finish.
+struct ScopeLoan {
+    scope: Arc<RequestScope>,
+    returned: bool,
+}
+
+impl ScopeLoan {
+    fn give_back(mut self, parts: ExchangeParts) {
+        self.returned = true;
+        self.scope.give_back(Some(parts));
+    }
+}
+
+impl Drop for ScopeLoan {
+    fn drop(&mut self) {
+        if !self.returned {
+            self.scope.give_back(None);
+        }
+    }
+}
+
 impl NativeClient {
-    /// Run one account exchange on `transport`: inside a scoped request it
-    /// borrows that request's exchange; otherwise it begins a new exchange,
-    /// detaches it from the caller's future, and commits the update after
-    /// `body` returns.
+    /// Admit one exchange on this client's account owner.
+    fn begin_parts(&self, cancellation: Arc<AtomicBool>) -> Result<ExchangeParts> {
+        let owner = self.owned_account()?.clone();
+        let (exchange, state) = owner
+            .begin()
+            .map_err(|error| error.context(NativeRequestNotSubmitted))?;
+        Ok(ExchangeParts {
+            owner,
+            exchange,
+            state,
+            cancellation,
+            prior_admission: false,
+        })
+    }
+
+    /// Run one account exchange on `transport`, detached from the caller's
+    /// future. Inside a scoped request it borrows that request's exchange and
+    /// returns it; otherwise it begins a new exchange and commits the update
+    /// after `body` returns.
     pub(super) async fn run_account_exchange<T, F, Fut>(
         &self,
         transport: &crate::transport::ProtocolTransport,
@@ -100,23 +164,25 @@ impl NativeClient {
         Fut: Future<Output = (ExchangeParts, Result<T>)> + MaybeSend + 'static,
     {
         if let Some(scope) = &self.scope {
-            let parts = scope.acquire()?;
-            let (parts, result) = body(parts).await;
-            scope.release(parts);
-            return result;
-        }
-        let owner = self.owned_account()?.clone();
-        let (exchange, state) = owner
-            .begin()
-            .map_err(|error| error.context(NativeRequestNotSubmitted))?;
-        run_detached_exchange(transport, move |cancellation| async move {
-            let parts = ExchangeParts {
-                owner,
-                exchange,
-                state,
-                cancellation,
-                prior_admission: false,
+            let mut parts = scope.acquire()?;
+            let loan = ScopeLoan {
+                scope: scope.clone(),
+                returned: false,
             };
+            return run_detached_exchange(transport, move |cancellation| async move {
+                // Cancelling this operation (or the whole request) stops it
+                // before submission; afterwards it runs to completion.
+                let request_cancellation = std::mem::replace(&mut parts.cancellation, cancellation);
+                let (mut parts, result) = body(parts).await;
+                parts.cancellation = request_cancellation;
+                loan.give_back(parts);
+                result
+            })
+            .await;
+        }
+        let mut parts = self.begin_parts(Arc::new(AtomicBool::new(false)))?;
+        run_detached_exchange(transport, move |cancellation| async move {
+            parts.cancellation = cancellation;
             let (parts, result) = body(parts).await;
             finish_account_exchange(parts.exchange, &parts.state, result)
         })
@@ -129,17 +195,24 @@ impl NativeClient {
     /// storage and handoff barriers.
     ///
     /// `operation` is an async closure that receives an [`AsyncAccountRequest`]
-    /// admitting a single operation, for example
-    /// `client.request(async |request| request.sync(&cursor).await)`. Whatever that operation returned is visible inside the
-    /// closure before the account update is committed, so a caller can keep a
-    /// verified reply even when this method then fails to commit (for example
-    /// with [`AccountPersistenceFailed`] or after a logout fence). Such a
-    /// failure never authorizes resubmission.
+    /// for one operation, for example
+    /// `client.request(async |request| request.sync(&cursor).await)`. Whatever
+    /// that operation returned is visible inside the closure before the
+    /// account update is committed, so a caller can keep a verified reply even
+    /// when this method then fails to commit (for example with
+    /// [`AccountPersistenceFailed`] or after a logout fence). Such a failure
+    /// never authorizes resubmission.
     ///
-    /// The exchange runs on the caller's task. Do not drop the returned future
-    /// after the operation may have been submitted; use the ordinary async
-    /// methods when the caller may cancel. Clients without a configured
-    /// transport fail with [`NativeRequestNotSubmitted`].
+    /// The operation runs detached like the ordinary async methods: if its
+    /// future is dropped after submission (for example by a timeout inside the
+    /// closure), it still completes on Tokio or the configured spawner, and
+    /// this method waits for it before committing. Without either, it runs
+    /// inline and must not be dropped after submission.
+    ///
+    /// The request holds the account's handoff barrier until the closure
+    /// returns: calling `shutdown`, `quiesce_and_export` or `logout` on this
+    /// account from inside the closure waits forever. Clients without a
+    /// configured transport fail with [`NativeRequestNotSubmitted`].
     #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
     pub async fn request<T, F>(&self, operation: F) -> Result<T>
     where
@@ -149,19 +222,9 @@ impl NativeClient {
             anyhow::anyhow!("Scoped async requests need a configured transport")
                 .context(NativeRequestNotSubmitted)
         })?;
-        let owner = self.owned_account()?.clone();
-        let (exchange, state) = owner
-            .begin()
-            .map_err(|error| error.context(NativeRequestNotSubmitted))?;
         let cancellation = Arc::new(AtomicBool::new(false));
         let _cancel_on_drop = CancelOnDrop(cancellation.clone());
-        let scope = Arc::new(RequestScope::new(ExchangeParts {
-            owner,
-            exchange,
-            state,
-            cancellation,
-            prior_admission: false,
-        }));
+        let scope = Arc::new(RequestScope::new(self.begin_parts(cancellation)?));
         // The scoped handle has no account of its own, so every entry point
         // that would begin another exchange fails closed.
         let mut client = Self::from_validated_options(self.options.clone(), Some(transport))?;
@@ -170,15 +233,17 @@ impl NativeClient {
         let result = operation(&mut request).await;
         drop(request);
         let parts = scope
-            .close()
-            .context("Account request context was still in use")?;
+            .close_when_idle()
+            .await?
+            .context("Account request operation ended without returning its context")?;
         finish_account_exchange(parts.exchange, &parts.state, result)
     }
 }
 
 /// A single logical operation inside [`NativeClient::request`]. It borrows the
-/// request's temporary account state; it is not an account owner, and only
-/// one operation may run through it.
+/// request's temporary account state and is not an account owner. Only one
+/// operation may hand bytes to transport through it; an operation that failed
+/// before submission does not use it up.
 pub struct AsyncAccountRequest {
     client: NativeClient,
 }
@@ -356,7 +421,6 @@ impl AsyncAccountRequest {
         send_sticker_chunk_raw(chunk: &crate::sticker_send::StickerSendChunk<'_>) -> Vec<u8>);
 
     /// Submit one text message with a final check right before transport handoff.
-    #[cfg(not(target_arch = "wasm32"))]
     pub async fn send_text_guarded<F>(
         &mut self,
         destination: &str,
@@ -365,27 +429,10 @@ impl AsyncAccountRequest {
         before_submit: F,
     ) -> Result<crate::TextSendResult>
     where
-        F: FnOnce() -> Result<()> + Send + 'static,
+        F: FnOnce() -> Result<()> + MaybeSend + 'static,
     {
         self.client
-            .send_text_guarded(destination, content, options, before_submit)
-            .await
-    }
-
-    /// Submit one text message with a final check right before transport handoff.
-    #[cfg(target_arch = "wasm32")]
-    pub async fn send_text_guarded<F>(
-        &mut self,
-        destination: &str,
-        content: &str,
-        options: TextSendOptions,
-        before_submit: F,
-    ) -> Result<crate::TextSendResult>
-    where
-        F: FnOnce() -> Result<()> + 'static,
-    {
-        self.client
-            .send_text_guarded(destination, content, options, before_submit)
+            .send_text_guarded_impl(destination, content, options, before_submit)
             .await
     }
 
