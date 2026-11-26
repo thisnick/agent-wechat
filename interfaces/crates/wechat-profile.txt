@@ -241,10 +241,18 @@ field wechat_profile::NativeMemberPatch::display | core::option::Option<alloc::s
 field wechat_profile::NativeMemberPatch::flags | core::option::Option<u32> | MISSING DOC
 field wechat_profile::NativeMemberPatch::opaque | core::option::Option<alloc::vec::Vec<u8>> | MISSING DOC
 field wechat_profile::NativeMemberPatch::username | alloc::string::String | MISSING DOC
+field wechat_profile::NativeRosterMember::display | core::option::Option<alloc::string::String> | Per-room display name (`ext_buffer` nested member field 2); `None` omits the field.
+field wechat_profile::NativeRosterMember::flags | core::option::Option<u32> | Member flag bitmask (`ext_buffer` nested member field 3); `None` omits the field.
+field wechat_profile::NativeRosterMember::opaque | core::option::Option<alloc::vec::Vec<u8>> | Opaque member field (`ext_buffer` nested member field 4); `None` omits the field.
+field wechat_profile::NativeRosterMember::username | alloc::string::String | Member WeChat username (`ext_buffer` nested member field 1).
 field wechat_profile::NativeRosterPatch::administrator_ids | core::option::Option<alloc::vec::Vec<alloc::string::String>> | None preserves the saved list. Some replaces it, including an empty list.
 field wechat_profile::NativeRosterPatch::complete_roster | bool | MISSING DOC
 field wechat_profile::NativeRosterPatch::members | alloc::vec::Vec<wechat_profile::projection::NativeMemberPatch> | MISSING DOC
 field wechat_profile::NativeRosterPatch::username | alloc::string::String | MISSING DOC
+field wechat_profile::NativeRosterUpdate::administrator_ids | core::option::Option<alloc::vec::Vec<alloc::string::String>> | Saved administrator list update; `None` preserves the saved list, `Some` replaces it.
+field wechat_profile::NativeRosterUpdate::full_member_ids | core::option::Option<alloc::vec::Vec<alloc::string::String>> | Complete member username list when supplied by the reply; `None` for delta-only updates.
+field wechat_profile::NativeRosterUpdate::updated_members | alloc::vec::Vec<wechat_profile::projection::NativeRosterMember> | Returned member rows whose known fields replace saved values.
+field wechat_profile::NativeRosterUpdate::username | alloc::string::String | Group `@chatroom` username.
 field wechat_profile::OfficialHomeBootstrap::device_id | alloc::vec::Vec<u8> | MISSING DOC
 field wechat_profile::OfficialHomeBootstrap::global_values | alloc::vec::Vec<(alloc::string::String, core::option::Option<alloc::vec::Vec<u8>>)> | Additional already encoded values, e.g. verified saved-login records. Unknown defaults are not fabricated. Identity keys are reserved and cannot override.
 field wechat_profile::OfficialHomeBootstrap::uin | u32 | MISSING DOC
@@ -501,6 +509,7 @@ fn wechat_profile::apply_message_session_projection | fn(location: &wechat_profi
 fn wechat_profile::apply_message_sticker_cache | fn(location: &wechat_profile::snapshot::ProfileLocation, uin: u32, username: &str, month: &str, id: &str, bytes: &[u8], options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<bool> | Publish one verified outgoing GIF in the native message asset cache. The caller records the local calendar month before submission; no Saved or pack membership/metadata is created. Conflicting existing bytes are preserved.
 fn wechat_profile::apply_native_group_edit | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, room: &str, edit: wechat_profile::projection::NativeGroupEdit<'_>, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<()> | MISSING DOC
 fn wechat_profile::apply_native_roster_patch | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, input: &wechat_profile::projection::NativeRosterPatch, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<()> | Translate only the proved network member identity/display semantics into the local repeated-field1 representation. Caller proves roster completeness (for example, a separate complete member identity list in the server reply). Unknown root/member protobuf chunks, existing owner and unrelated contact fields are retained byte-for-byte. No network version is guessed into opaque fields.
+fn wechat_profile::apply_native_roster_update | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, input: &wechat_profile::projection::NativeRosterUpdate, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<()> | Project a native roster reply into `chat_room.ext_buffer` and `chatroom_member`, separating returned member rows from unchanged complete-roster identities.
 fn wechat_profile::apply_recall_projection | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, peer: &str, server_id: &str, recalled_at: core::option::Option<i64>, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<core::option::Option<wechat_profile::model::SourceMessageId>> | Replace the live row while preserving its source/server identity and ordering. Media cache files and unknown official files have independent lifetimes.
 fn wechat_profile::apply_recall_projection_with_notice | fn(location: &wechat_profile::snapshot::ProfileLocation, keys: &wechat_profile::keys::KeyFile, peer: &str, server_id: &str, recalled_at: core::option::Option<i64>, replacement_text: core::option::Option<&str>, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<core::option::Option<wechat_profile::model::SourceMessageId>> | Preserve the server's replacement text as XML text, never as markup.
 fn wechat_profile::apply_remove_sticker_pack_cache | fn(location: &wechat_profile::snapshot::ProfileLocation, pack: &str, options: &wechat_profile::writer::WriteOptions) -> wechat_profile::Result<()> | Remove only one pack's three known persisted caches, after membership SQL removal. Other files and every custom Saved cache are preserved. Files are unlinked separately in icon/thumbnail/original order; a partial error is reported for local replay, which never contacts the server. Missing files are satisfied no-ops; links and special files are refused.
@@ -620,7 +629,9 @@ impl core::clone::Clone for wechat_profile::MessageReference | impl | -
 impl core::clone::Clone for wechat_profile::MessageSessionProjection | impl | -
 impl core::clone::Clone for wechat_profile::MmkvPublication | impl | -
 impl core::clone::Clone for wechat_profile::NativeMemberPatch | impl | -
+impl core::clone::Clone for wechat_profile::NativeRosterMember | impl | -
 impl core::clone::Clone for wechat_profile::NativeRosterPatch | impl | -
+impl core::clone::Clone for wechat_profile::NativeRosterUpdate | impl | -
 impl core::clone::Clone for wechat_profile::OfficialHomeReport | impl | -
 impl core::clone::Clone for wechat_profile::Page | impl<T: core::clone::Clone> | -
 impl core::clone::Clone for wechat_profile::PeerBusinessMetadata | impl | -
@@ -751,7 +762,9 @@ impl core::fmt::Debug for wechat_profile::MessageReference | impl | -
 impl core::fmt::Debug for wechat_profile::MessageSessionProjection | impl | -
 impl core::fmt::Debug for wechat_profile::MmkvPublication | impl | -
 impl core::fmt::Debug for wechat_profile::NativeMemberPatch | impl | -
+impl core::fmt::Debug for wechat_profile::NativeRosterMember | impl | -
 impl core::fmt::Debug for wechat_profile::NativeRosterPatch | impl | -
+impl core::fmt::Debug for wechat_profile::NativeRosterUpdate | impl | -
 impl core::fmt::Debug for wechat_profile::OfficialHomeReport | impl | -
 impl core::fmt::Debug for wechat_profile::Page | impl<T: core::fmt::Debug> | -
 impl core::fmt::Debug for wechat_profile::PeerBusinessMetadata | impl | -
@@ -827,7 +840,9 @@ impl serde_core::de::Deserialize<'de> for wechat_profile::MediaResourceProjectio
 impl serde_core::de::Deserialize<'de> for wechat_profile::MessageProjection | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_profile::MessageSessionProjection | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_profile::NativeMemberPatch | impl<'de> | -
+impl serde_core::de::Deserialize<'de> for wechat_profile::NativeRosterMember | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_profile::NativeRosterPatch | impl<'de> | -
+impl serde_core::de::Deserialize<'de> for wechat_profile::NativeRosterUpdate | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_profile::SavedKeyInfoPlan | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_profile::SavedSticker | impl<'de> | -
 impl serde_core::de::Deserialize<'de> for wechat_profile::SavedStickerProjection | impl<'de> | -
@@ -882,7 +897,9 @@ impl serde_core::ser::Serialize for wechat_profile::MessageProjection | impl | -
 impl serde_core::ser::Serialize for wechat_profile::MessageSessionProjection | impl | -
 impl serde_core::ser::Serialize for wechat_profile::MmkvPublication | impl | -
 impl serde_core::ser::Serialize for wechat_profile::NativeMemberPatch | impl | -
+impl serde_core::ser::Serialize for wechat_profile::NativeRosterMember | impl | -
 impl serde_core::ser::Serialize for wechat_profile::NativeRosterPatch | impl | -
+impl serde_core::ser::Serialize for wechat_profile::NativeRosterUpdate | impl | -
 impl serde_core::ser::Serialize for wechat_profile::OfficialHomeReport | impl | -
 impl serde_core::ser::Serialize for wechat_profile::Page | impl<T> where T: serde_core::ser::Serialize | -
 impl serde_core::ser::Serialize for wechat_profile::PeerBusinessMetadata | impl | -
@@ -959,7 +976,9 @@ struct wechat_profile::MessageSessionProjection | struct { public fields } | MIS
 struct wechat_profile::MmkvPublication | struct { public fields } | MISSING DOC
 struct wechat_profile::MmkvRecords | struct { private fields } | Decoded v4 records are secrets; Debug and serde intentionally unavailable.
 struct wechat_profile::NativeMemberPatch | struct { public fields } | MISSING DOC
+struct wechat_profile::NativeRosterMember | struct { public fields } | Authoritative member row from a native roster reply (such as CGI 551 `ChatRoomMemberData`). Known fields (`display`, `flags`, `opaque`) replace saved values for this member; `None` omits that field in `chat_room.ext_buffer`, clearing any previously saved value while preserving unknown member chunks.
 struct wechat_profile::NativeRosterPatch | struct { public fields } | MISSING DOC
+struct wechat_profile::NativeRosterUpdate | struct { public fields } | Complete or delta roster update from a verified native roster reply.
 struct wechat_profile::OfficialHomeBootstrap | struct { public fields } | Credentials and additional raw MMKV values are caller supplied; this type has no Debug/Serialize so a bootstrap request cannot enter ordinary logs.
 struct wechat_profile::OfficialHomeReport | struct { public fields } | MISSING DOC
 struct wechat_profile::OwnedReaderCache | struct { private fields } | MISSING DOC

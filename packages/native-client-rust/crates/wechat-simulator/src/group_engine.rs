@@ -367,22 +367,15 @@ pub(super) fn roster(db: &Connection, session: &Session, room: &str) -> Result<V
         p::uint(6, members.len() as u64),
     ];
     for member in members {
-        data.push(p::bytes(
-            2,
-            &p::message(&[
-                p::bytes(1, member.as_bytes()),
-                p::bytes(2, label(&member).as_bytes()),
-                p::bytes(
-                    3,
-                    if member == own(&session.account) {
-                        my_name.as_bytes()
-                    } else {
-                        b""
-                    },
-                ),
-                p::uint(6, 0),
-            ])?,
-        ));
+        let mut member_fields = vec![
+            p::bytes(1, member.as_bytes()),
+            p::bytes(2, label(&member).as_bytes()),
+        ];
+        if member == own(&session.account) && !my_name.is_empty() {
+            member_fields.push(p::bytes(3, my_name.as_bytes()));
+        }
+        member_fields.push(p::uint(6, 0));
+        data.push(p::bytes(2, &p::message(&member_fields)?));
         fields.push(p::bytes(7, &p::bytes(1, member.as_bytes())));
     }
     fields.push(p::bytes(4, &p::message(&data)?));

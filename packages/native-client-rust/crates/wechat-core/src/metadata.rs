@@ -1258,19 +1258,20 @@ impl Core {
                 options,
             )?;
         }
-        // f4 contains changed member rows. A separate, count-checked f6/f7
-        // list establishes the whole roster, even when f4 is a delta.
-        let mut members = value
+        // f4 contains changed member rows whose known fields replace saved
+        // values. A separate, count-checked f6/f7 list establishes the whole
+        // roster while preserving saved entries for members omitted from f4.
+        let mut updated_members = value
             .members
             .iter()
-            .map(|m| wechat_profile::NativeMemberPatch {
-                flags: Some(m.flags),
-                opaque: m.opaque.clone(),
+            .map(|m| wechat_profile::NativeRosterMember {
                 username: m.username.clone(),
                 display: m.room_display_name.clone(),
+                flags: Some(m.flags),
+                opaque: m.opaque.clone(),
             })
             .collect::<Vec<_>>();
-        let complete = if let Some(ids) = &value.full_member_ids {
+        let full_member_ids = if let Some(ids) = &value.full_member_ids {
             let reader = wechat_profile::ProfileReader::open(
                 location.clone(),
                 keys.clone(),
@@ -1303,35 +1304,22 @@ impl Core {
             }
             ensure!(
                 ids.iter()
-                    .all(|id| old.contains(id) || members.iter().any(|m| &m.username == id)),
+                    .all(|id| old.contains(id) || updated_members.iter().any(|m| &m.username == id)),
                 "group_roster_base_incomplete"
             );
-            members = ids
-                .iter()
-                .map(|id| {
-                    members
-                        .iter()
-                        .find(|m| &m.username == id)
-                        .cloned()
-                        .unwrap_or(wechat_profile::NativeMemberPatch {
-                            flags: None,
-                            opaque: None,
-                            username: id.clone(),
-                            display: None,
-                        })
-                })
-                .collect();
-            true
+            let id_set: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+            updated_members.retain(|m| id_set.contains(m.username.as_str()));
+            Some(ids.clone())
         } else {
-            false
+            None
         };
-        let patch = wechat_profile::NativeRosterPatch {
+        let update = wechat_profile::NativeRosterUpdate {
             username: value.room_id.clone(),
-            members,
-            complete_roster: complete,
+            updated_members,
+            full_member_ids,
             administrator_ids: value.administrator_ids.clone(),
         };
-        wechat_profile::apply_native_roster_patch(location, keys, &patch, options)?;
+        wechat_profile::apply_native_roster_update(location, keys, &update, options)?;
         if let Some(owner) = &value.owner {
             let mut fields = RawFields::new();
             fields.insert("owner".into(), SqlValue::Text(owner.clone()));

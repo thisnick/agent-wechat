@@ -698,6 +698,172 @@ mod tests {
             .unwrap();
         assert_eq!(core.refresh_incoming_groups("one", false).unwrap(), 0);
     }
+
+    #[test]
+    fn incoming_group_refresh_clears_display_name_for_changed_members_and_keeps_unchanged_delta_members(
+    ) {
+        let (_temp, core) = super::super::groups::tests::fixture();
+        super::super::groups::tests::make_group(&core);
+        let (location, keys) = core.profile_location_keys("one").unwrap();
+        let options = core.write_options("one", "roster-clear-test").unwrap();
+
+        let initial_raw = p::message(&[
+            p::bytes(1, &p::uint(1, 0)),
+            p::uint(3, 7),
+            p::bytes(
+                4,
+                &p::message(&[
+                    p::uint(1, 2),
+                    p::bytes(
+                        2,
+                        &p::message(&[
+                            p::bytes(1, b"synthetic_self"),
+                            p::bytes(2, b"Self Nick"),
+                            p::bytes(3, b"Self Room Name"),
+                            p::uint(6, 1),
+                            p::bytes(7, b"inviter-self"),
+                        ])
+                        .unwrap(),
+                    ),
+                    p::bytes(
+                        2,
+                        &p::message(&[
+                            p::bytes(1, b"peer"),
+                            p::bytes(2, b"Peer Nick"),
+                            p::bytes(3, b"Peer Room Name"),
+                            p::uint(6, 2),
+                            p::bytes(7, b"inviter-peer"),
+                        ])
+                        .unwrap(),
+                    ),
+                ])
+                .unwrap(),
+            ),
+            p::bytes(5, b"peer"),
+            p::uint(6, 2),
+            p::bytes(7, &p::bytes(1, b"synthetic_self")),
+            p::bytes(7, &p::bytes(1, b"peer")),
+        ])
+        .unwrap();
+        let initial_reply = MetadataReply {
+            value: wechat_protocol::wire::decode_room(&initial_raw, ROOM).unwrap(),
+            raw: initial_raw,
+        };
+        core.project_metadata_roster(&location, &keys, &initial_reply, &options, true)
+            .unwrap();
+        assert_eq!(
+            core.group_member("one", ROOM, "synthetic_self").unwrap()["member"]["roomDisplayName"],
+            "Self Room Name"
+        );
+        assert_eq!(
+            core.group_member("one", ROOM, "peer").unwrap()["member"]["roomDisplayName"],
+            "Peer Room Name"
+        );
+
+        // Delta CGI 551 reply: only `peer` changed and cleared its display name (field 3 omitted)
+        // and opaque inviter (field 7 omitted). `synthetic_self` is omitted from f4 and kept via f7.
+        // Also include an extra removed member in f4 absent from f7 to match official f7 filtering.
+        let delta_clear_raw = p::message(&[
+            p::bytes(1, &p::uint(1, 0)),
+            p::uint(3, 8),
+            p::bytes(
+                4,
+                &p::message(&[
+                    p::uint(1, 2),
+                    p::bytes(
+                        2,
+                        &p::message(&[
+                            p::bytes(1, b"peer"),
+                            p::bytes(2, b"Peer Nick"),
+                            p::uint(6, 0),
+                        ])
+                        .unwrap(),
+                    ),
+                    p::bytes(
+                        2,
+                        &p::message(&[
+                            p::bytes(1, b"removed_member"),
+                            p::bytes(2, b"Removed"),
+                            p::uint(6, 0),
+                        ])
+                        .unwrap(),
+                    ),
+                ])
+                .unwrap(),
+            ),
+            p::bytes(5, b"peer"),
+            p::uint(6, 2),
+            p::bytes(7, &p::bytes(1, b"synthetic_self")),
+            p::bytes(7, &p::bytes(1, b"peer")),
+        ])
+        .unwrap();
+        let delta_reply = MetadataReply {
+            value: wechat_protocol::wire::decode_room(&delta_clear_raw, ROOM).unwrap(),
+            raw: delta_clear_raw,
+        };
+        core.project_metadata_roster(&location, &keys, &delta_reply, &options, true)
+            .unwrap();
+        let peer_member = core.group_member("one", ROOM, "peer").unwrap();
+        assert_eq!(peer_member["member"]["roomDisplayName"], Value::Null);
+        assert_eq!(peer_member["member"]["displayName"], "Peer Nick");
+        assert_eq!(peer_member["member"]["mentionName"], "Peer Nick");
+        assert_eq!(
+            core.group_member("one", ROOM, "synthetic_self").unwrap()["member"]["roomDisplayName"],
+            "Self Room Name"
+        );
+        assert_eq!(
+            core.group_member("one", ROOM, "removed_member").unwrap()["state"],
+            "unconfirmed"
+        );
+
+        // Full incoming sync refresh clears `synthetic_self` too when wire field 3 is omitted.
+        let (key, mut job) = staged(&core);
+        job.roster_raw = Some(
+            p::message(&[
+                p::bytes(1, &p::uint(1, 0)),
+                p::uint(3, 9),
+                p::bytes(
+                    4,
+                    &p::message(&[
+                        p::uint(1, 2),
+                        p::bytes(
+                            2,
+                            &p::message(&[
+                                p::bytes(1, b"synthetic_self"),
+                                p::bytes(2, b"Self Nick"),
+                                p::uint(6, 0),
+                            ])
+                            .unwrap(),
+                        ),
+                        p::bytes(
+                            2,
+                            &p::message(&[
+                                p::bytes(1, b"peer"),
+                                p::bytes(2, b"Peer Nick"),
+                                p::uint(6, 0),
+                            ])
+                            .unwrap(),
+                        ),
+                    ])
+                    .unwrap(),
+                ),
+                p::bytes(5, b"peer"),
+                p::uint(6, 2),
+                p::bytes(7, &p::bytes(1, b"synthetic_self")),
+                p::bytes(7, &p::bytes(1, b"peer")),
+            ])
+            .unwrap(),
+        );
+        core.save_incoming_group("one", &key, &job).unwrap();
+        assert_eq!(core.refresh_incoming_groups("one", false).unwrap(), 1);
+        assert_eq!(
+            core.group_info("one", ROOM).unwrap()["myDisplayName"],
+            Value::Null
+        );
+        let self_member = core.group_member("one", ROOM, "synthetic_self").unwrap();
+        assert_eq!(self_member["member"]["roomDisplayName"], Value::Null);
+        assert_eq!(self_member["member"]["displayName"], "Self Nick");
+    }
 }
 
 #[cfg(test)]
