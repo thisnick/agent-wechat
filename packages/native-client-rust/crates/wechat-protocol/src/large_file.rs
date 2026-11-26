@@ -2052,6 +2052,56 @@ mod tests {
     }
 
     #[test]
+    fn an_http_error_status_on_a_block_is_reported_as_http_status() {
+        // 403 is fatal at once; 503 is retried until the session gives up. Both are
+        // HttpStatus, which `CdnPostFailure::attempt` picks from the status message.
+        use super::super::tests::{MockCdnAction, MockCdnServer, FAST_RETRY_POLICY, ZERO_BACKOFFS};
+        use std::sync::{Arc, Mutex};
+        for (status, attempts) in [(403, 1), (503, ZERO_BACKOFFS.len() as u32 + 1)] {
+            let memory = prepared();
+            let peer = Arc::new(Mutex::new(Peer::new(memory, 1024 * 1024)));
+            let peer_ref = peer.clone();
+            let server = MockCdnServer::start(move |_req, path, fields| {
+                if path.ends_with("/uploadblock") && integer(fields, "offset").unwrap() == 0x10_0000
+                {
+                    return MockCdnAction::Status(status);
+                }
+                MockCdnAction::Ok {
+                    reply: peer_ref.lock().unwrap().respond(path, fields).unwrap(),
+                    close: false,
+                }
+            });
+            let conf = config();
+            let cdn = CdnClient::new(conf.clone(), Duration::from_secs(5)).unwrap();
+            let mut session = CdnSession::new(&cdn, vec![server.addr], FAST_RETRY_POLICY);
+            let error = super::upload_large_file(
+                &conf,
+                UploadRef::Memory(memory),
+                987654321,
+                |path, fields, fence, switch| session.post_large(path, fields, fence, switch),
+                |_, _| Ok(()),
+            )
+            .err()
+            .unwrap();
+            assert_eq!(
+                error.root_cause().to_string(),
+                format!("CDN HTTP status {status}")
+            );
+            assert_eq!(
+                LargeFileUploadFailure::find(&error),
+                Some(&LargeFileUploadFailure {
+                    phase: "uploadblock",
+                    block: Some(1),
+                    attempts,
+                    server_retries: 0,
+                    cause: LargeFileUploadCause::HttpStatus,
+                }),
+                "{status}"
+            );
+        }
+    }
+
+    #[test]
     fn a_block_whose_replies_stay_unreadable_says_where_the_upload_stopped() {
         use super::super::tests::{MockCdnAction, MockCdnServer, FAST_RETRY_POLICY, ZERO_BACKOFFS};
         use std::sync::{Arc, Mutex};

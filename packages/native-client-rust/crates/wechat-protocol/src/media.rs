@@ -723,6 +723,7 @@ impl CdnPostFailure {
             LargeFileUploadCause::ReplyUnreadable
         } else if error
             .chain()
+            // The message built for a non-200 status; wechat-core reads it the same way.
             .any(|cause| cause.to_string().starts_with("CDN HTTP status "))
         {
             LargeFileUploadCause::HttpStatus
