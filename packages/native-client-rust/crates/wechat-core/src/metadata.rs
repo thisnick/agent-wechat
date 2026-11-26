@@ -1258,19 +1258,11 @@ impl Core {
                 options,
             )?;
         }
-        // f4 contains changed member rows. A separate, count-checked f6/f7
-        // list establishes the whole roster, even when f4 is a delta.
-        let mut members = value
-            .members
-            .iter()
-            .map(|m| wechat_profile::NativeMemberPatch {
-                flags: Some(m.flags),
-                opaque: m.opaque.clone(),
-                username: m.username.clone(),
-                display: m.room_display_name.clone(),
-            })
-            .collect::<Vec<_>>();
-        let complete = if let Some(ids) = &value.full_member_ids {
+        // f4 contains changed member rows whose known fields replace saved
+        // values (omitted wire fields clear saved values). A separate,
+        // count-checked f6/f7 list establishes the whole roster while
+        // preserving saved entries for members omitted from f4.
+        let members = if let Some(ids) = &value.full_member_ids {
             let reader = wechat_profile::ProfileReader::open(
                 location.clone(),
                 keys.clone(),
@@ -1301,34 +1293,65 @@ impl Core {
                     break;
                 }
             }
+            let id_set: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+            let mut by_name = std::collections::HashMap::new();
+            for member in &value.members {
+                if id_set.contains(member.username.as_str()) {
+                    ensure!(
+                        by_name.insert(member.username.as_str(), member).is_none(),
+                        "duplicate_group_roster_member"
+                    );
+                }
+            }
             ensure!(
                 ids.iter()
-                    .all(|id| old.contains(id) || members.iter().any(|m| &m.username == id)),
+                    .all(|id| old.contains(id) || by_name.contains_key(id.as_str())),
                 "group_roster_base_incomplete"
             );
-            members = ids
-                .iter()
-                .map(|id| {
-                    members
-                        .iter()
-                        .find(|m| &m.username == id)
-                        .cloned()
-                        .unwrap_or(wechat_profile::NativeMemberPatch {
-                            flags: None,
-                            opaque: None,
-                            username: id.clone(),
-                            display: None,
-                        })
+            ids.iter()
+                .map(|id| match by_name.get(id.as_str()) {
+                    Some(m) => wechat_profile::NativeMemberPatch {
+                        username: id.clone(),
+                        display: m.room_display_name.clone().map_or(
+                            wechat_profile::NativeFieldPatch::Clear,
+                            wechat_profile::NativeFieldPatch::Set,
+                        ),
+                        flags: wechat_profile::NativeFieldPatch::Set(m.flags),
+                        opaque: m.opaque.clone().map_or(
+                            wechat_profile::NativeFieldPatch::Clear,
+                            wechat_profile::NativeFieldPatch::Set,
+                        ),
+                    },
+                    None => wechat_profile::NativeMemberPatch {
+                        username: id.clone(),
+                        display: wechat_profile::NativeFieldPatch::Keep,
+                        flags: wechat_profile::NativeFieldPatch::Keep,
+                        opaque: wechat_profile::NativeFieldPatch::Keep,
+                    },
                 })
-                .collect();
-            true
+                .collect()
         } else {
-            false
+            value
+                .members
+                .iter()
+                .map(|m| wechat_profile::NativeMemberPatch {
+                    username: m.username.clone(),
+                    display: m.room_display_name.clone().map_or(
+                        wechat_profile::NativeFieldPatch::Clear,
+                        wechat_profile::NativeFieldPatch::Set,
+                    ),
+                    flags: wechat_profile::NativeFieldPatch::Set(m.flags),
+                    opaque: m.opaque.clone().map_or(
+                        wechat_profile::NativeFieldPatch::Clear,
+                        wechat_profile::NativeFieldPatch::Set,
+                    ),
+                })
+                .collect()
         };
         let patch = wechat_profile::NativeRosterPatch {
             username: value.room_id.clone(),
             members,
-            complete_roster: complete,
+            complete_roster: value.full_member_ids.is_some(),
             administrator_ids: value.administrator_ids.clone(),
         };
         wechat_profile::apply_native_roster_patch(location, keys, &patch, options)?;

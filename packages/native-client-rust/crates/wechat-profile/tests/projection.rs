@@ -100,9 +100,9 @@ fn group_all_mentions_derive_roles_and_follow_official_admin_replacement() {
     patch.administrator_ids = Some(vec![]);
     patch.members = vec![NativeMemberPatch {
         username: "member".into(),
-        display: None,
-        flags: Some(u32::MAX),
-        opaque: None,
+        display: NativeFieldPatch::Keep,
+        flags: NativeFieldPatch::Set(u32::MAX),
+        opaque: NativeFieldPatch::Keep,
     }];
     apply_native_roster_patch(&loc, &keys, &patch, &o).unwrap();
     assert_eq!(read(Some("member")).can_mention_all, Some(false));
@@ -259,10 +259,10 @@ fn group_control_edits_preserve_unknown_chunks_other_members_and_history() {
             members: ["self", "peer", "other"]
                 .iter()
                 .map(|name| NativeMemberPatch {
-                    flags: None,
-                    opaque: None,
+                    flags: NativeFieldPatch::Keep,
+                    opaque: NativeFieldPatch::Keep,
                     username: (*name).into(),
-                    display: None,
+                    display: NativeFieldPatch::Keep,
                 })
                 .collect(),
             complete_roster: true,
@@ -966,10 +966,10 @@ fn sparse_contact_and_native_roster_updates_preserve_opaque_fields_and_only_remo
     let initial = NativeRosterPatch {
         username: "room@chatroom".into(),
         members: vec![NativeMemberPatch {
-            flags: None,
-            opaque: None,
+            flags: NativeFieldPatch::Keep,
+            opaque: NativeFieldPatch::Keep,
             username: "peer".into(),
-            display: Some("Per-room label".into()),
+            display: NativeFieldPatch::Set("Per-room label".into()),
         }],
         complete_roster: true,
         administrator_ids: None,
@@ -993,10 +993,10 @@ fn sparse_contact_and_native_roster_updates_preserve_opaque_fields_and_only_remo
     let partial = NativeRosterPatch {
         username: "room@chatroom".into(),
         members: vec![NativeMemberPatch {
-            flags: None,
-            opaque: None,
+            flags: NativeFieldPatch::Keep,
+            opaque: NativeFieldPatch::Keep,
             username: "other".into(),
-            display: Some("Other room label".into()),
+            display: NativeFieldPatch::Set("Other room label".into()),
         }],
         complete_roster: false,
         administrator_ids: None,
@@ -1017,10 +1017,10 @@ fn sparse_contact_and_native_roster_updates_preserve_opaque_fields_and_only_remo
     let complete = NativeRosterPatch {
         username: "room@chatroom".into(),
         members: vec![NativeMemberPatch {
-            flags: None,
-            opaque: None,
+            flags: NativeFieldPatch::Keep,
+            opaque: NativeFieldPatch::Keep,
             username: "peer".into(),
-            display: None,
+            display: NativeFieldPatch::Keep,
         }],
         complete_roster: true,
         administrator_ids: None,
@@ -1074,10 +1074,10 @@ fn sparse_contact_and_native_roster_updates_preserve_opaque_fields_and_only_remo
         username: "room@chatroom".into(),
         members: vec![
             NativeMemberPatch {
-                flags: None,
-                opaque: None,
+                flags: NativeFieldPatch::Keep,
+                opaque: NativeFieldPatch::Keep,
                 username: "peer".into(),
-                display: None
+                display: NativeFieldPatch::Keep
             };
             2
         ],
@@ -1085,4 +1085,429 @@ fn sparse_contact_and_native_roster_updates_preserve_opaque_fields_and_only_remo
         administrator_ids: None,
     };
     assert!(apply_native_roster_patch(&loc, &keys, &duplicate, &o).is_err());
+}
+
+#[test]
+fn roster_patch_clears_omitted_fields_while_preserving_unchanged_delta_members_and_extensions() {
+    let d = fixture();
+    let loc = ProfileLocation::new(d.path().join("account")).unwrap();
+    let keys = KeyFile::empty("account");
+    let o = options();
+    for name in ["peer", "other", "room@chatroom"] {
+        let mut fields = RawFields::new();
+        fields.insert(
+            "nick_name".into(),
+            SqlValue::Text(format!("Synthetic {name}")),
+        );
+        apply_contact_patch(
+            &loc,
+            &keys,
+            &ContactProjection {
+                username: name.into(),
+                fields,
+            },
+            &o,
+        )
+        .unwrap();
+    }
+    apply_native_roster_patch(
+        &loc,
+        &keys,
+        &NativeRosterPatch {
+            username: "room@chatroom".into(),
+            members: vec![
+                NativeMemberPatch {
+                    username: "peer".into(),
+                    display: NativeFieldPatch::Set("Peer room label".into()),
+                    flags: NativeFieldPatch::Set(9),
+                    opaque: NativeFieldPatch::Set(b"inviter-a".to_vec()),
+                },
+                NativeMemberPatch {
+                    username: "other".into(),
+                    display: NativeFieldPatch::Set("Other room label".into()),
+                    flags: NativeFieldPatch::Set(3),
+                    opaque: NativeFieldPatch::Set(b"inviter-b".to_vec()),
+                },
+            ],
+            complete_roster: true,
+            administrator_ids: None,
+        },
+        &o,
+    )
+    .unwrap();
+    // Inject an unknown member field (field 5) on peer and an unknown root chunk.
+    let c = Connection::open(loc.root().join("db_storage/contact/contact.db")).unwrap();
+    let peer_ext = [0x2a, 3, 0xaa, 0xbb, 0xcc];
+    let root_unknown = [0x18, 0x4d, 0x32, 2, 0x01, 0x02];
+    let mut seeded = vec![];
+    let peer_member = [
+        &[
+            0x0a, 4, b'p', b'e', b'e', b'r', 0x12, 15, b'P', b'e', b'e', b'r', b' ', b'r', b'o',
+            b'o', b'm', b' ', b'l', b'a', b'b', b'e', b'l', 0x18, 9, 0x22, 9, b'i', b'n', b'v',
+            b'i', b't', b'e', b'r', b'-', b'a',
+        ][..],
+        &peer_ext[..],
+    ]
+    .concat();
+    let other_member = [
+        0x0a, 5, b'o', b't', b'h', b'e', b'r', 0x12, 16, b'O', b't', b'h', b'e', b'r', b' ', b'r',
+        b'o', b'o', b'm', b' ', b'l', b'a', b'b', b'e', b'l', 0x18, 3, 0x22, 9, b'i', b'n', b'v',
+        b'i', b't', b'e', b'r', b'-', b'b',
+    ];
+    seeded.push(0x0a);
+    seeded.push(peer_member.len() as u8);
+    seeded.extend_from_slice(&peer_member);
+    seeded.push(0x0a);
+    seeded.push(other_member.len() as u8);
+    seeded.extend_from_slice(&other_member);
+    seeded.extend_from_slice(&root_unknown);
+    c.execute("UPDATE chat_room SET ext_buffer=?1", [&seeded])
+        .unwrap();
+
+    // Delta-shaped complete reply: peer clears display and opaque and sets flags=0;
+    // other uses Keep for every field and stays verbatim.
+    apply_native_roster_patch(
+        &loc,
+        &keys,
+        &NativeRosterPatch {
+            username: "room@chatroom".into(),
+            members: vec![
+                NativeMemberPatch {
+                    username: "peer".into(),
+                    display: NativeFieldPatch::Clear,
+                    flags: NativeFieldPatch::Set(0),
+                    opaque: NativeFieldPatch::Clear,
+                },
+                NativeMemberPatch {
+                    username: "other".into(),
+                    display: NativeFieldPatch::Keep,
+                    flags: NativeFieldPatch::Keep,
+                    opaque: NativeFieldPatch::Keep,
+                },
+            ],
+            complete_roster: true,
+            administrator_ids: None,
+        },
+        &o,
+    )
+    .unwrap();
+    let packed: Vec<u8> = c
+        .query_row("SELECT ext_buffer FROM chat_room", [], |r| r.get(0))
+        .unwrap();
+    let expected_peer = [
+        &[0x0a, 4, b'p', b'e', b'e', b'r', 0x18, 0][..],
+        &peer_ext[..],
+    ]
+    .concat();
+    let mut expected = vec![0x0a, expected_peer.len() as u8];
+    expected.extend_from_slice(&expected_peer);
+    expected.push(0x0a);
+    expected.push(other_member.len() as u8);
+    expected.extend_from_slice(&other_member);
+    expected.extend_from_slice(&root_unknown);
+    assert_eq!(packed, expected);
+
+    let read_members = || {
+        ProfileReader::open(
+            loc.clone(),
+            keys.clone(),
+            ReadOptions {
+                stopped_or_consistent_snapshot: true,
+                allow_plaintext: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .group_members("room@chatroom", &ListQuery::default())
+        .unwrap()
+        .items
+    };
+    let members = read_members();
+    let by_name: BTreeMap<_, _> = members
+        .into_iter()
+        .map(|m| (m.username.clone(), m))
+        .collect();
+    assert_eq!(by_name["peer"].room_display_name, None);
+    assert_eq!(by_name["peer"].label, "Synthetic peer");
+    assert_eq!(
+        by_name["other"].room_display_name.as_deref(),
+        Some("Other room label")
+    );
+
+    // Explicit empty wire strings (Set("")) encode empty length-delimited fields,
+    // matching official proto2 presence, while delta-only patches preserve absent members.
+    apply_native_roster_patch(
+        &loc,
+        &keys,
+        &NativeRosterPatch {
+            username: "room@chatroom".into(),
+            members: vec![NativeMemberPatch {
+                username: "other".into(),
+                display: NativeFieldPatch::Set(String::new()),
+                flags: NativeFieldPatch::Set(0),
+                opaque: NativeFieldPatch::Set(vec![]),
+            }],
+            complete_roster: false,
+            administrator_ids: None,
+        },
+        &o,
+    )
+    .unwrap();
+    let packed: Vec<u8> = c
+        .query_row("SELECT ext_buffer FROM chat_room", [], |r| r.get(0))
+        .unwrap();
+    let expected_other_empty = [
+        0x0a, 5, b'o', b't', b'h', b'e', b'r', 0x12, 0, 0x18, 0, 0x22, 0,
+    ];
+    assert!(packed
+        .windows(expected_other_empty.len())
+        .any(|w| w == expected_other_empty));
+    let by_name: BTreeMap<_, _> = read_members()
+        .into_iter()
+        .map(|m| (m.username.clone(), m))
+        .collect();
+    assert_eq!(by_name["other"].room_display_name.as_deref(), Some(""));
+    assert_eq!(by_name["other"].label, "Synthetic other");
+    assert_eq!(by_name["peer"].room_display_name, None);
+
+    // A delta-only clear omits field 2 and field 4 without dropping other members.
+    apply_native_roster_patch(
+        &loc,
+        &keys,
+        &NativeRosterPatch {
+            username: "room@chatroom".into(),
+            members: vec![NativeMemberPatch {
+                username: "other".into(),
+                display: NativeFieldPatch::Clear,
+                flags: NativeFieldPatch::Set(0),
+                opaque: NativeFieldPatch::Clear,
+            }],
+            complete_roster: false,
+            administrator_ids: None,
+        },
+        &o,
+    )
+    .unwrap();
+    let by_name: BTreeMap<_, _> = read_members()
+        .into_iter()
+        .map(|m| (m.username.clone(), m))
+        .collect();
+    assert_eq!(by_name.len(), 2);
+    assert_eq!(by_name["other"].room_display_name, None);
+
+    // Clearing flags (Clear) omits field 3, and removing a member absent from
+    // a complete roster deletes it from both ext_buffer and chatroom_member.
+    apply_native_roster_patch(
+        &loc,
+        &keys,
+        &NativeRosterPatch {
+            username: "room@chatroom".into(),
+            members: vec![NativeMemberPatch {
+                username: "peer".into(),
+                display: NativeFieldPatch::Clear,
+                flags: NativeFieldPatch::Clear,
+                opaque: NativeFieldPatch::Clear,
+            }],
+            complete_roster: true,
+            administrator_ids: None,
+        },
+        &o,
+    )
+    .unwrap();
+    let packed: Vec<u8> = c
+        .query_row("SELECT ext_buffer FROM chat_room", [], |r| r.get(0))
+        .unwrap();
+    let expected_peer_no_flags = [&[0x0a, 4, b'p', b'e', b'e', b'r'][..], &peer_ext[..]].concat();
+    let mut expected_single = vec![0x0a, expected_peer_no_flags.len() as u8];
+    expected_single.extend_from_slice(&expected_peer_no_flags);
+    expected_single.extend_from_slice(&root_unknown);
+    assert_eq!(packed, expected_single);
+    let sql_members: Vec<String> = c
+        .prepare("SELECT c.username FROM chatroom_member m JOIN contact c ON c.id=m.member_id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(sql_members, vec!["peer"]);
+
+    // Malformed wire types or duplicate field 3/4 in existing ext_buffer fail closed when cleared.
+    for bad_member in [
+        // field 3 with wire type 2 (bytes instead of varint)
+        vec![0x0a, 4, b'p', b'e', b'e', b'r', 0x1a, 1, 0x00],
+        // duplicate field 3
+        vec![0x0a, 4, b'p', b'e', b'e', b'r', 0x18, 1, 0x18, 2],
+        // field 4 with wire type 0 (varint instead of bytes)
+        vec![0x0a, 4, b'p', b'e', b'e', b'r', 0x20, 1],
+        // duplicate field 4
+        vec![
+            0x0a, 4, b'p', b'e', b'e', b'r', 0x22, 1, b'a', 0x22, 1, b'b',
+        ],
+    ] {
+        let mut bad = vec![0x0a, bad_member.len() as u8];
+        bad.extend_from_slice(&bad_member);
+        c.execute("UPDATE chat_room SET ext_buffer=?1", [&bad])
+            .unwrap();
+        assert!(apply_native_roster_patch(
+            &loc,
+            &keys,
+            &NativeRosterPatch {
+                username: "room@chatroom".into(),
+                members: vec![NativeMemberPatch {
+                    username: "peer".into(),
+                    display: NativeFieldPatch::Clear,
+                    flags: NativeFieldPatch::Clear,
+                    opaque: NativeFieldPatch::Clear,
+                }],
+                complete_roster: true,
+                administrator_ids: None,
+            },
+            &o,
+        )
+        .is_err());
+    }
+
+    // Empty delta-only patch preserves NULL ext_buffer (and unknown administrator_ids).
+    c.execute("DELETE FROM chatroom_member", []).unwrap();
+    c.execute("UPDATE chat_room SET ext_buffer=NULL", [])
+        .unwrap();
+    apply_native_roster_patch(
+        &loc,
+        &keys,
+        &NativeRosterPatch {
+            username: "room@chatroom".into(),
+            members: vec![],
+            complete_roster: false,
+            administrator_ids: None,
+        },
+        &o,
+    )
+    .unwrap();
+    let stored: Option<Vec<u8>> = c
+        .query_row("SELECT ext_buffer FROM chat_room", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(stored, None);
+    let perms = ProfileReader::open(
+        loc,
+        keys,
+        ReadOptions {
+            stopped_or_consistent_snapshot: true,
+            allow_plaintext: true,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .group_mention_permissions("room@chatroom", None)
+    .unwrap();
+    assert_eq!(perms.administrator_ids, None);
+}
+
+#[test]
+fn group_my_name_clear_omits_display_field_and_preserves_other_member_fields() {
+    let d = fixture();
+    let loc = ProfileLocation::new(d.path().join("account")).unwrap();
+    let keys = KeyFile::empty("account");
+    let o = options();
+    for name in ["self", "room@chatroom"] {
+        apply_contact_patch(&loc, &keys, &contact(d.path(), name, name), &o).unwrap();
+    }
+    apply_native_roster_patch(
+        &loc,
+        &keys,
+        &NativeRosterPatch {
+            username: "room@chatroom".into(),
+            members: vec![NativeMemberPatch {
+                username: "self".into(),
+                display: NativeFieldPatch::Set("My alias".into()),
+                flags: NativeFieldPatch::Set(1),
+                opaque: NativeFieldPatch::Set(b"inv".to_vec()),
+            }],
+            complete_roster: true,
+            administrator_ids: None,
+        },
+        &o,
+    )
+    .unwrap();
+    let c = Connection::open(loc.root().join("db_storage/contact/contact.db")).unwrap();
+    let unknown_member = [0x2a, 2, 0xaa, 0xbb];
+    let seeded_member = [
+        &[
+            0x0a, 4, b's', b'e', b'l', b'f', 0x12, 8, b'M', b'y', b' ', b'a', b'l', b'i', b'a',
+            b's', 0x18, 1, 0x22, 3, b'i', b'n', b'v',
+        ][..],
+        &unknown_member[..],
+    ]
+    .concat();
+    let mut seeded = vec![0x0a, seeded_member.len() as u8];
+    seeded.extend_from_slice(&seeded_member);
+    c.execute("UPDATE chat_room SET ext_buffer=?1", [&seeded])
+        .unwrap();
+
+    for _ in 0..2 {
+        apply_native_group_edit(
+            &loc,
+            &keys,
+            "room@chatroom",
+            NativeGroupEdit::MyName {
+                own: "self",
+                display: "",
+            },
+            &o,
+        )
+        .unwrap();
+    }
+    let cleared: Vec<u8> = c
+        .query_row("SELECT ext_buffer FROM chat_room", [], |r| r.get(0))
+        .unwrap();
+    let expected_member = [
+        &[
+            0x0a, 4, b's', b'e', b'l', b'f', 0x18, 1, 0x22, 3, b'i', b'n', b'v',
+        ][..],
+        &unknown_member[..],
+    ]
+    .concat();
+    let mut expected = vec![0x0a, expected_member.len() as u8];
+    expected.extend_from_slice(&expected_member);
+    assert_eq!(cleared, expected);
+    let members = ProfileReader::open(
+        loc.clone(),
+        keys.clone(),
+        ReadOptions {
+            stopped_or_consistent_snapshot: true,
+            allow_plaintext: true,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .group_members("room@chatroom", &ListQuery::default())
+    .unwrap()
+    .items;
+    assert_eq!(members[0].room_display_name, None);
+    assert_eq!(members[0].label, "self");
+
+    apply_native_group_edit(
+        &loc,
+        &keys,
+        "room@chatroom",
+        NativeGroupEdit::MyName {
+            own: "self",
+            display: "Restored",
+        },
+        &o,
+    )
+    .unwrap();
+    let members = ProfileReader::open(
+        loc,
+        keys,
+        ReadOptions {
+            stopped_or_consistent_snapshot: true,
+            allow_plaintext: true,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .group_members("room@chatroom", &ListQuery::default())
+    .unwrap()
+    .items;
+    assert_eq!(members[0].room_display_name.as_deref(), Some("Restored"));
 }

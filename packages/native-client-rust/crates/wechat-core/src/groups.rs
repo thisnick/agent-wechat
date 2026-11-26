@@ -3,8 +3,8 @@
 use super::*;
 use anyhow::ensure;
 use wechat_profile::{
-    ContactProjection, GroupProjection, NativeGroupEdit, NativeMemberPatch, NativeRosterPatch,
-    RawFields, SqlValue,
+    ContactProjection, GroupProjection, NativeFieldPatch, NativeGroupEdit, NativeMemberPatch,
+    NativeRosterPatch, RawFields, SqlValue,
 };
 use wechat_protocol::protobuf as p;
 use wechat_protocol::{
@@ -804,10 +804,10 @@ impl Core {
                         &options,
                     )?;
                     members.push(NativeMemberPatch {
-                        flags: None,
-                        opaque: None,
+                        flags: NativeFieldPatch::Keep,
+                        opaque: NativeFieldPatch::Keep,
                         username: attempt.own.clone(),
-                        display: None,
+                        display: NativeFieldPatch::Keep,
                     });
                 }
                 for member in &accepted {
@@ -825,10 +825,10 @@ impl Core {
                         &options,
                     )?;
                     members.push(NativeMemberPatch {
-                        flags: None,
-                        opaque: None,
+                        flags: NativeFieldPatch::Keep,
+                        opaque: NativeFieldPatch::Keep,
                         username: member.username.clone(),
-                        display: None,
+                        display: NativeFieldPatch::Keep,
                     });
                 }
                 wechat_profile::apply_native_roster_patch(

@@ -1773,4 +1773,79 @@ mod tests {
         );
         assert!(group_like.map_or(true, |rpc| mutate(&rpc).is_err()));
     }
+
+    #[test]
+    fn group_roster_omits_display_name_when_empty_and_includes_it_when_set() {
+        let scratch = wechat_platform::private_tempdir("simulator-group-roster-").unwrap();
+        let engine = Engine::open(&scratch.path().join("remote.sqlite")).unwrap();
+        let session = login(&engine, "personal");
+        let state = authorization("personal", session.generation, device()).unwrap();
+        let run_group = |action: &wechat_protocol::GroupMutation| -> Vec<u8> {
+            let rpcs = wechat_protocol::group_mutation_requests(&state, action, false).unwrap();
+            let mut last = vec![];
+            for rpc in rpcs {
+                let raw = engine
+                    .request(Request::GroupMutation {
+                        session: session.clone(),
+                        request: rpc,
+                    })
+                    .unwrap();
+                last = serde_json::from_value(raw).unwrap();
+            }
+            last
+        };
+        let create_reply = run_group(&wechat_protocol::GroupMutation::Create {
+            members: vec!["sim_mei".into(), "sim_daniel".into()],
+            name: Some("Roster test".into()),
+        });
+        let room = wechat_protocol::observed_created_group(&create_reply).unwrap();
+        let fetch_roster = || {
+            let raw: Vec<u8> = serde_json::from_value(
+                engine
+                    .request(Request::Room {
+                        session: session.clone(),
+                        room: room.clone(),
+                    })
+                    .unwrap(),
+            )
+            .unwrap();
+            wechat_protocol::wire::decode_room(&raw, &room).unwrap()
+        };
+
+        // Initially no member has a group display name, so wire field 3 is omitted for all.
+        let initial = fetch_roster();
+        assert!(initial
+            .members
+            .iter()
+            .all(|member| member.room_display_name.is_none()));
+
+        // Setting own display name includes wire field 3 for self only.
+        run_group(&wechat_protocol::GroupMutation::MyName {
+            group_id: room.clone(),
+            display_name: "Team lead".into(),
+        });
+        let named = fetch_roster();
+        let self_member = named
+            .members
+            .iter()
+            .find(|member| member.username == "sim_personal")
+            .unwrap();
+        assert_eq!(self_member.room_display_name.as_deref(), Some("Team lead"));
+        assert!(named
+            .members
+            .iter()
+            .filter(|member| member.username != "sim_personal")
+            .all(|member| member.room_display_name.is_none()));
+
+        // Clearing own display name omits wire field 3 again.
+        run_group(&wechat_protocol::GroupMutation::MyName {
+            group_id: room.clone(),
+            display_name: String::new(),
+        });
+        let cleared = fetch_roster();
+        assert!(cleared
+            .members
+            .iter()
+            .all(|member| member.room_display_name.is_none()));
+    }
 }
