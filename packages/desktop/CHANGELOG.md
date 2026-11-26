@@ -1,5 +1,13 @@
 # @agent-wechat/desktop
 
+## 3.2.0
+
+### Patch Changes
+
+- [#714](https://github.com/thisnick/agent-wechat/pull/714) [`bf35510`](https://github.com/thisnick/agent-wechat/commit/bf35510da240d02b7ea7d2e5c3740b24bb18b162) Thanks [@thisnick](https://github.com/thisnick)! - The daemon's account requests, QR and saved-device login (including LAN risk challenges), session renewal, logout, long-link notifications and call signaling now use the native async transport (Tokio sockets and a pooled HTTP/1.1 client) instead of blocking sockets. Request, receipt and retry behaviour is unchanged.
+
+- [#714](https://github.com/thisnick/agent-wechat/pull/714) [`91f8056`](https://github.com/thisnick/agent-wechat/commit/91f8056a72a2b3a9858354663c9b73745918b5a0) Thanks [@thisnick](https://github.com/thisnick)! - The daemon's CDN uploads and downloads, file-backed uploads, and avatar, sticker, link-thumbnail, Enterprise WeChat and Channels video downloads now use the native async transport; message media URLs go through `NativeHttpTransport` with `DestinationPolicy::PublicOnly`. `wechat-protocol` adds `HttpTransport::send_streaming` (with `HttpBodySink` and `HttpResponseHead`) so long downloads report progress and stop per piece, streams Channels videos through it, and adds `TransportError::Interrupted` so CDN transfers retry the same address after a connection drops mid-request, as the blocking session does.
+
 ## 3.1.1
 
 ### Patch Changes
