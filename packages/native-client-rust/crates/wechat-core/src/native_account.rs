@@ -100,7 +100,7 @@ impl Core {
         let transport = self
             .upstream
             .protocol_transport()
-            .context("unsupported_simulator_operation")?;
+            .context("Native account owners need the upstream's protocol transport")?;
         let client = NativeClient::from_account_with_transport_and_persistence(
             state,
             NativeOptions::default(),

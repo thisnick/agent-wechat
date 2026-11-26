@@ -502,9 +502,14 @@ pub(crate) struct NativeUpstream {
 }
 impl NativeUpstream {
     pub(crate) fn new() -> Result<Self> {
-        Ok(Self {
-            transport: ProtocolTransport::native()?,
-        })
+        let mut transport = ProtocolTransport::native()?;
+        // Detached account exchanges always run on the runtime that owns the
+        // shared connection pool, even when a synchronous caller (a call
+        // worker thread, a test) waits on a temporary runtime.
+        if let Ok(spawner) = wechat_protocol::transport::TokioSpawner::current() {
+            transport = transport.with_spawner(std::sync::Arc::new(spawner));
+        }
+        Ok(Self { transport })
     }
 }
 impl Upstream for NativeUpstream {

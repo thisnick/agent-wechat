@@ -857,37 +857,13 @@ impl FencedTransport {
     }
     /// Resolves when a joined conference should stop its live-sync poll.
     fn conference_interrupt(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
-        let worker = self.worker.clone();
-        async move {
-            let mut stop_check = tokio::time::interval(Duration::from_millis(20));
-            loop {
-                stop_check.tick().await;
-                if !worker.current()
-                    || worker.stop.load(Ordering::Acquire)
-                    || (worker.joined_commands_ready.load(Ordering::Acquire)
-                        && worker.has_commands())
-                {
-                    return;
-                }
-            }
-        }
+        live_sync_interrupt(self.worker.clone(), |worker| worker.has_commands())
     }
     /// Resolves when a direct video call should stop its live-sync poll.
     fn direct_interrupt(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
-        let worker = self.worker.clone();
-        async move {
-            let mut stop_check = tokio::time::interval(Duration::from_millis(20));
-            loop {
-                stop_check.tick().await;
-                if !worker.current()
-                    || worker.stop.load(Ordering::Acquire)
-                    || (worker.joined_commands_ready.load(Ordering::Acquire)
-                        && (worker.has_direct_commands() || worker.initial_camera_off_due()))
-                {
-                    return;
-                }
-            }
-        }
+        live_sync_interrupt(self.worker.clone(), |worker| {
+            worker.has_direct_commands() || worker.initial_camera_off_due()
+        })
     }
     /// Resolves when an answer is queued for a ringing incoming call.
     fn incoming_interrupt(&self) -> Result<impl std::future::Future<Output = ()> + Send + 'static> {
@@ -896,7 +872,11 @@ impl FencedTransport {
             .incoming
             .clone()
             .context("Incoming mailbox missing")?;
-        Ok(async move { mailbox.answer_queued.notified().await })
+        Ok(async move {
+            mailbox.answer_queued.notified().await;
+            // Let a reply that is already ready win, as it did before.
+            tokio::task::yield_now().await;
+        })
     }
     #[cfg(test)]
     fn wait_for_interrupt<T>(
@@ -935,6 +915,23 @@ impl FencedTransport {
     }
     fn admits(&self, teardown: bool, rejecting: bool) -> bool {
         admission_open(&self.worker, &self.admission, teardown, rejecting)
+    }
+}
+
+/// Resolves when the worker stops, loses authority, or (once joined) has
+/// `pending` commands to send, checked every 20 ms. It yields once before
+/// resolving so a live-sync reply that is already ready still wins.
+async fn live_sync_interrupt(worker: Arc<Worker>, pending: fn(&Worker) -> bool) {
+    let mut stop_check = tokio::time::interval(Duration::from_millis(20));
+    loop {
+        stop_check.tick().await;
+        if !worker.current()
+            || worker.stop.load(Ordering::Acquire)
+            || (worker.joined_commands_ready.load(Ordering::Acquire) && pending(&worker))
+        {
+            tokio::task::yield_now().await;
+            return;
+        }
     }
 }
 
@@ -1075,6 +1072,14 @@ impl PersonalTransport for FencedTransport {
         if !self.admits(teardown, rejecting) {
             return Err(CallRpcNotSubmitted.into());
         }
+        // A pre-answer poll needs the incoming mailbox; check before spending
+        // a call action so a missing one leaves nothing half recorded.
+        #[cfg(not(test))]
+        let incoming = if self.pre_answer_poll(route) {
+            Some(self.incoming_interrupt()?)
+        } else {
+            None
+        };
         let ordinal = self.ordinal.fetch_add(1, Ordering::AcqRel);
         ensure!(ordinal < 4096, "Call action budget exhausted");
         let action = ordinal.to_string();
@@ -1109,25 +1114,27 @@ impl PersonalTransport for FencedTransport {
                 handed_off.clone(),
             );
             move || {
-                if !worker.authorized() || core.stopping.load(Ordering::Acquire) {
-                    return Err(CallRpcNotSubmitted.into());
-                }
-                if !admission_open(&worker, &admission, teardown, rejecting) {
-                    return Err(CallRpcNotSubmitted.into());
-                }
-                if route == CallHostRoute::ConferenceJoin
-                    && !worker
-                        .conference
-                        .as_ref()
-                        .is_some_and(|pending| pending.current())
-                {
-                    return Err(CallRpcNotSubmitted.into());
-                }
-                handed_off.store(true, Ordering::Release);
-                if !matches!(route, CallHostRoute::AppAuth | CallHostRoute::LiveSync) {
-                    worker.mutations_submitted.store(true, Ordering::Release);
-                }
-                Ok(())
+                crate::async_bridge::blocking_section(|| {
+                    if !worker.authorized() || core.stopping.load(Ordering::Acquire) {
+                        return Err(CallRpcNotSubmitted.into());
+                    }
+                    if !admission_open(&worker, &admission, teardown, rejecting) {
+                        return Err(CallRpcNotSubmitted.into());
+                    }
+                    if route == CallHostRoute::ConferenceJoin
+                        && !worker
+                            .conference
+                            .as_ref()
+                            .is_some_and(|pending| pending.current())
+                    {
+                        return Err(CallRpcNotSubmitted.into());
+                    }
+                    handed_off.store(true, Ordering::Release);
+                    if !matches!(route, CallHostRoute::AppAuth | CallHostRoute::LiveSync) {
+                        worker.mutations_submitted.store(true, Ordering::Release);
+                    }
+                    Ok(())
+                })
             }
         };
         // A unit-test build can never fall through into network transport.
@@ -1159,57 +1166,56 @@ impl PersonalTransport for FencedTransport {
                     reply_retained.clone(),
                 );
                 move |reply: &[u8]| {
-                    Self::retain_host_result(
-                        &account,
-                        &call_id,
-                        &core,
-                        &action,
-                        route,
-                        &Ok(reply.to_vec()),
-                        true,
-                    )?;
+                    crate::async_bridge::blocking_section(|| {
+                        Self::retain_host_result(
+                            &account,
+                            &call_id,
+                            &core,
+                            &action,
+                            route,
+                            &Ok(reply.to_vec()),
+                            true,
+                        )
+                    })?;
                     retained.store(true, Ordering::Release);
                     Ok(())
                 }
             };
             let request = request.to_vec();
-            let pre_answer = self.pre_answer_poll(route);
-            let incoming = if pre_answer {
-                Some(self.incoming_interrupt()?)
-            } else {
-                None
-            };
-            crate::async_bridge::block_on(native.request(async |operation| {
-                if let Some(incoming) = incoming {
-                    operation
-                        .call_live_sync(request, self.timeout, handoff, incoming, retain)
-                        .await
-                } else if route == CallHostRoute::LiveSync && self.worker.is_conference() {
-                    operation
-                        .call_live_sync(
-                            request,
-                            Duration::from_secs(60),
-                            handoff,
-                            self.conference_interrupt(),
-                            retain,
-                        )
-                        .await
-                } else if route == CallHostRoute::LiveSync
-                    && self.worker.call_type == CallType::Video
-                {
-                    operation
-                        .call_live_sync(
-                            request,
-                            self.timeout,
-                            handoff,
-                            self.direct_interrupt(),
-                            retain,
-                        )
-                        .await
-                } else {
-                    operation.call_rpc(route, request, handoff, retain).await
-                }
-            }))
+            crate::async_bridge::block_on_with(
+                &self.runtime,
+                native.request(async |operation| {
+                    if let Some(incoming) = incoming {
+                        operation
+                            .call_live_sync(request, self.timeout, handoff, incoming, retain)
+                            .await
+                    } else if route == CallHostRoute::LiveSync && self.worker.is_conference() {
+                        operation
+                            .call_live_sync(
+                                request,
+                                Duration::from_secs(60),
+                                handoff,
+                                self.conference_interrupt(),
+                                retain,
+                            )
+                            .await
+                    } else if route == CallHostRoute::LiveSync
+                        && self.worker.call_type == CallType::Video
+                    {
+                        operation
+                            .call_live_sync(
+                                request,
+                                self.timeout,
+                                handoff,
+                                self.direct_interrupt(),
+                                retain,
+                            )
+                            .await
+                    } else {
+                        operation.call_rpc(route, request, handoff, retain).await
+                    }
+                }),
+            )
         };
         #[cfg(not(test))]
         if let Ok(accepted) = native.export_account_state() {

@@ -20,3 +20,27 @@ pub(crate) fn block_on<F: Future>(future: F) -> F::Output {
             .block_on(future),
     }
 }
+
+/// [`block_on`] on a specific runtime, for synchronous threads that hold a
+/// runtime handle but were not started by that runtime (call workers).
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn block_on_with<F: Future>(runtime: &tokio::runtime::Handle, future: F) -> F::Output {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        tokio::task::block_in_place(|| runtime.block_on(future))
+    } else {
+        runtime.block_on(future)
+    }
+}
+
+/// Run synchronous store or vault work from inside an async protocol hook
+/// (a pre-submission guard or reply retention) without stalling a Tokio
+/// worker: on a multi-threaded runtime the worker hands its other tasks off
+/// first. Elsewhere it runs inline.
+pub(crate) fn blocking_section<T>(work: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(runtime) if runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(work)
+        }
+        _ => work(),
+    }
+}

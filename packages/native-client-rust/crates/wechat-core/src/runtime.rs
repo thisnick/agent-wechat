@@ -1838,7 +1838,7 @@ impl Core {
                         Box::new(move || {
                             let (core, account, fence) =
                                 (&guard_core, &guard_account, &guard_fence);
-                            let check = (|| -> Result<()> {
+                            let check = crate::async_bridge::blocking_section(|| -> Result<()> {
                                 let current = core
                                     .store
                                     .runtime(account, "account-state")?
@@ -1856,7 +1856,7 @@ impl Core {
                                     "text_send_admission_revoked",
                                 );
                                 Ok(())
-                            })();
+                            });
                             revoked.store(check.is_err(), Ordering::Release);
                             check
                         }),
