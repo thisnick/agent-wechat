@@ -4529,9 +4529,9 @@ pub(crate) mod tests {
                 username: "room@chatroom".into(),
                 members: vec![wechat_profile::NativeMemberPatch {
                     username: "synthetic_self".into(),
-                    display: None,
-                    flags: None,
-                    opaque: None,
+                    display: wechat_profile::NativeFieldPatch::Keep,
+                    flags: wechat_profile::NativeFieldPatch::Keep,
+                    opaque: wechat_profile::NativeFieldPatch::Keep,
                 }],
                 complete_roster: true,
                 administrator_ids: None,

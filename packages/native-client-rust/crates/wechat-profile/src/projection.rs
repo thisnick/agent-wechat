@@ -973,63 +973,45 @@ pub fn apply_group_patch(
     apply_group_projection(location, keys, &input, options)
 }
 
+/// Update rule for an optional member field in `chat_room.ext_buffer`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NativeFieldPatch<T> {
+    /// Preserve any previously saved protobuf field bytes.
+    #[default]
+    Keep,
+    /// Omit the protobuf field, clearing any previously saved value.
+    Clear,
+    /// Write the protobuf field with the supplied value.
+    Set(T),
+}
+/// Member-level patch for `chat_room.ext_buffer` and `chatroom_member`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeMemberPatch {
+    /// Member WeChat username (`ext_buffer` nested member field 1).
     pub username: String,
-    pub display: Option<String>,
+    /// Per-room display name (`ext_buffer` nested member field 2).
     #[serde(default)]
-    pub flags: Option<u32>,
+    pub display: NativeFieldPatch<String>,
+    /// Member flag bitmask (`ext_buffer` nested member field 3).
     #[serde(default)]
-    pub opaque: Option<Vec<u8>>,
+    pub flags: NativeFieldPatch<u32>,
+    /// Opaque member field (`ext_buffer` nested member field 4).
+    #[serde(default)]
+    pub opaque: NativeFieldPatch<Vec<u8>>,
 }
+/// Complete or delta roster patch for `chat_room.ext_buffer` and `chatroom_member`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeRosterPatch {
-    pub username: String,
-    pub members: Vec<NativeMemberPatch>,
-    pub complete_roster: bool,
-    /// None preserves the saved list. Some replaces it, including an empty list.
-    #[serde(default)]
-    pub administrator_ids: Option<Vec<String>>,
-}
-/// Authoritative member row from a native roster reply (such as CGI 551
-/// `ChatRoomMemberData`). Known fields (`display`, `flags`, `opaque`) replace
-/// saved values for this member; `None` omits that field in `chat_room.ext_buffer`,
-/// clearing any previously saved value while preserving unknown member chunks.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct NativeRosterMember {
-    /// Member WeChat username (`ext_buffer` nested member field 1).
-    pub username: String,
-    /// Per-room display name (`ext_buffer` nested member field 2); `None` omits the field.
-    pub display: Option<String>,
-    /// Member flag bitmask (`ext_buffer` nested member field 3); `None` omits the field.
-    #[serde(default)]
-    pub flags: Option<u32>,
-    /// Opaque member field (`ext_buffer` nested member field 4); `None` omits the field.
-    #[serde(default)]
-    pub opaque: Option<Vec<u8>>,
-}
-/// Complete or delta roster update from a verified native roster reply.
-///
-/// Entries in `updated_members` replace that member's known fields (`display`,
-/// `flags`, `opaque`) in `chat_room.ext_buffer`, omitting any `None` field while
-/// preserving unknown member chunks. When `full_member_ids` is `Some`, it proves
-/// the complete roster: members listed only there keep their saved `ext_buffer`
-/// entry byte-for-byte, and absent members are removed. When `full_member_ids`
-/// is `None`, existing members not in `updated_members` are preserved.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct NativeRosterUpdate {
     /// Group `@chatroom` username.
     pub username: String,
-    /// Returned member rows whose known fields replace saved values.
-    pub updated_members: Vec<NativeRosterMember>,
-    /// Complete member username list when supplied by the reply; `None` for delta-only updates.
-    #[serde(default)]
-    pub full_member_ids: Option<Vec<String>>,
-    /// Saved administrator list update; `None` preserves the saved list, `Some` replaces it.
+    /// Member patches to apply; when `complete_roster` is true, also defines the complete membership list.
+    pub members: Vec<NativeMemberPatch>,
+    /// When true, `members` proves the complete roster and absent members are removed.
+    pub complete_roster: bool,
+    /// None preserves the saved list. Some replaces it, including an empty list.
     #[serde(default)]
     pub administrator_ids: Option<Vec<String>>,
 }
@@ -1131,12 +1113,12 @@ pub fn apply_native_group_edit(
                     &MemberWrite {
                         username: &name,
                         display: if display.is_empty() {
-                            FieldPatch::Clear
+                            NativeFieldPatch::Clear
                         } else {
-                            FieldPatch::Set(display)
+                            NativeFieldPatch::Set(display)
                         },
-                        flags: FieldPatch::Keep,
-                        opaque: FieldPatch::Keep,
+                        flags: NativeFieldPatch::Keep,
+                        opaque: NativeFieldPatch::Keep,
                     },
                 )?)
             }
@@ -1281,26 +1263,32 @@ fn member_name(data: &[u8]) -> Result<String> {
     }
     name.ok_or(ProfileError::InvalidMetadata)
 }
-#[derive(Clone, Copy)]
-enum FieldPatch<T> {
-    Keep,
-    Clear,
-    Set(T),
-}
 struct MemberWrite<'a> {
     username: &'a str,
-    display: FieldPatch<&'a str>,
-    flags: FieldPatch<u32>,
-    opaque: FieldPatch<&'a [u8]>,
+    display: NativeFieldPatch<&'a str>,
+    flags: NativeFieldPatch<u32>,
+    opaque: NativeFieldPatch<&'a [u8]>,
+}
+impl MemberWrite<'_> {
+    fn is_all_keep(&self) -> bool {
+        matches!(
+            (self.display, self.flags, self.opaque),
+            (
+                NativeFieldPatch::Keep,
+                NativeFieldPatch::Keep,
+                NativeFieldPatch::Keep
+            )
+        )
+    }
 }
 fn patch_member(old: Option<&[u8]>, patch: &MemberWrite<'_>) -> Result<Vec<u8>> {
     identity(patch.username)?;
-    if let FieldPatch::Set(opaque) = patch.opaque {
+    if let NativeFieldPatch::Set(opaque) = patch.opaque {
         if opaque.len() > 65536 {
             return Err(ProfileError::ResourceLimit);
         }
     }
-    if let FieldPatch::Set(display) = patch.display {
+    if let NativeFieldPatch::Set(display) = patch.display {
         if display.len() > 65536 || display.contains('\0') {
             return Err(ProfileError::InvalidMetadata);
         }
@@ -1316,29 +1304,29 @@ fn patch_member(old: Option<&[u8]>, patch: &MemberWrite<'_>) -> Result<Vec<u8>> 
         for chunk in proto_chunks(old)? {
             if chunk.field == 2 {
                 match patch.display {
-                    FieldPatch::Set(display) => {
+                    NativeFieldPatch::Set(display) => {
                         proto_bytes(2, display.as_bytes(), &mut out);
                         wrote_display = true;
                     }
-                    FieldPatch::Clear => {
+                    NativeFieldPatch::Clear => {
                         wrote_display = true;
                     }
-                    FieldPatch::Keep => out.extend_from_slice(chunk.raw),
+                    NativeFieldPatch::Keep => out.extend_from_slice(chunk.raw),
                 }
-            } else if chunk.field == 3 && !matches!(patch.flags, FieldPatch::Keep) {
+            } else if chunk.field == 3 && !matches!(patch.flags, NativeFieldPatch::Keep) {
                 if chunk.wire != 0 || wrote_flags {
                     return Err(ProfileError::InvalidMetadata);
                 }
-                if let FieldPatch::Set(flags) = patch.flags {
+                if let NativeFieldPatch::Set(flags) = patch.flags {
                     var_out(3 << 3, &mut out);
                     var_out(u64::from(flags), &mut out);
                 }
                 wrote_flags = true;
-            } else if chunk.field == 4 && !matches!(patch.opaque, FieldPatch::Keep) {
+            } else if chunk.field == 4 && !matches!(patch.opaque, NativeFieldPatch::Keep) {
                 if chunk.wire != 2 || wrote_opaque {
                     return Err(ProfileError::InvalidMetadata);
                 }
-                if let FieldPatch::Set(opaque) = patch.opaque {
+                if let NativeFieldPatch::Set(opaque) = patch.opaque {
                     proto_bytes(4, opaque, &mut out);
                 }
                 wrote_opaque = true;
@@ -1350,38 +1338,54 @@ fn patch_member(old: Option<&[u8]>, patch: &MemberWrite<'_>) -> Result<Vec<u8>> 
         proto_bytes(1, patch.username.as_bytes(), &mut out);
     }
     if !wrote_display {
-        if let FieldPatch::Set(display) = patch.display {
+        if let NativeFieldPatch::Set(display) = patch.display {
             proto_bytes(2, display.as_bytes(), &mut out);
         }
     }
     if !wrote_flags {
-        if let FieldPatch::Set(flags) = patch.flags {
+        if let NativeFieldPatch::Set(flags) = patch.flags {
             var_out(3 << 3, &mut out);
             var_out(u64::from(flags), &mut out);
         }
     }
     if !wrote_opaque {
-        if let FieldPatch::Set(opaque) = patch.opaque {
+        if let NativeFieldPatch::Set(opaque) = patch.opaque {
             proto_bytes(4, opaque, &mut out);
         }
     }
     Ok(out)
 }
-fn apply_roster_writes(
+/// Project a native roster patch into `chat_room.ext_buffer` and `chatroom_member`.
+///
+/// For each entry in `input.members`, each known member field (`display`, `flags`,
+/// `opaque`) follows its [`NativeFieldPatch`] rule: `Keep` preserves saved protobuf
+/// field bytes, `Clear` omits the field (clearing any previously saved value), and
+/// `Set` writes the supplied value (including explicit empty strings or bytes).
+/// Unknown root/member protobuf chunks, existing owner, and unrelated contact
+/// fields are retained byte-for-byte. No network version is guessed into opaque
+/// fields.
+///
+/// Writes only `contact/contact.db` (`name2id`, `chat_room`, and
+/// `chatroom_member`, initializing omitted columns on a new `chat_room` row to
+/// SQL `NULL`) in one SQLite transaction after reading any existing `ext_buffer`
+/// and `chatroom_member` rows. Replaying the same [`NativeRosterPatch`] is
+/// idempotent and performs no network I/O. The caller must hold exclusive profile
+/// ownership with a durable intent in `options`, fence stale replies, ensure
+/// `contact` rows already exist for `input.username` and every resulting member,
+/// and prove roster completeness when `input.complete_roster` is `true` (for
+/// example, from a separate complete member identity list in the server reply).
+pub fn apply_native_roster_patch(
     location: &ProfileLocation,
     keys: &KeyFile,
-    username: &str,
-    writes: &std::collections::BTreeMap<String, MemberWrite<'_>>,
-    full_member_ids: Option<&[String]>,
-    administrator_ids: Option<&[String]>,
+    input: &NativeRosterPatch,
     options: &WriteOptions,
 ) -> Result<()> {
     ownership(location, keys, options)?;
-    identity(username)?;
-    if !username.ends_with("@chatroom") || writes.len() > 10000 {
+    identity(&input.username)?;
+    if !input.username.ends_with("@chatroom") || input.members.len() > 10000 {
         return Err(ProfileError::InvalidMetadata);
     }
-    if let Some(ids) = administrator_ids {
+    if let Some(ids) = &input.administrator_ids {
         let mut seen = std::collections::BTreeSet::new();
         for id in ids {
             identity(id)?;
@@ -1390,24 +1394,29 @@ fn apply_roster_writes(
             }
         }
     }
-    let full_set = if let Some(ids) = full_member_ids {
-        if ids.len() > 10000 {
+    let mut writes = std::collections::BTreeMap::new();
+    let mut member_ids = std::collections::BTreeSet::new();
+    for member in &input.members {
+        identity(&member.username)?;
+        let write = MemberWrite {
+            username: &member.username,
+            display: match &member.display {
+                NativeFieldPatch::Keep => NativeFieldPatch::Keep,
+                NativeFieldPatch::Clear => NativeFieldPatch::Clear,
+                NativeFieldPatch::Set(v) => NativeFieldPatch::Set(v.as_str()),
+            },
+            flags: member.flags,
+            opaque: match &member.opaque {
+                NativeFieldPatch::Keep => NativeFieldPatch::Keep,
+                NativeFieldPatch::Clear => NativeFieldPatch::Clear,
+                NativeFieldPatch::Set(v) => NativeFieldPatch::Set(v.as_slice()),
+            },
+        };
+        if writes.insert(member.username.clone(), write).is_some() {
             return Err(ProfileError::InvalidMetadata);
         }
-        let mut set = std::collections::BTreeSet::new();
-        for id in ids {
-            identity(id)?;
-            if !set.insert(id.clone()) {
-                return Err(ProfileError::InvalidMetadata);
-            }
-        }
-        if writes.keys().any(|name| !set.contains(name)) {
-            return Err(ProfileError::InvalidMetadata);
-        }
-        Some(set)
-    } else {
-        None
-    };
+        member_ids.insert(member.username.clone());
+    }
     let db = find_database(location, "contact.db")?;
     let c = open_write(location, &db, keys, options.allow_plaintext)?;
     check_known_table(&c, "chat_room")?;
@@ -1415,7 +1424,7 @@ fn apply_roster_writes(
     let room = c
         .query_row(
             "SELECT id,ext_buffer FROM chat_room WHERE username=?1",
-            [username],
+            [&input.username],
             |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<Vec<u8>>>(1)?)),
         )
         .optional()?;
@@ -1436,9 +1445,8 @@ fn apply_roster_writes(
             }
         }
     }
-    let complete_roster = full_set.is_some();
-    let mut result_members = if let Some(set) = full_set {
-        set
+    let mut result_members = if input.complete_roster {
+        member_ids
     } else {
         let mut set: std::collections::BTreeSet<String> = old_members.keys().cloned().collect();
         if let Some((id, _)) = &room {
@@ -1448,13 +1456,13 @@ fn apply_roster_writes(
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             set.extend(names);
         }
-        set.extend(writes.keys().cloned());
+        set.extend(member_ids);
         set
     };
     let mut packed = vec![];
     let mut written = std::collections::BTreeSet::new();
     for chunk in chunks {
-        if chunk.field == 5 && administrator_ids.is_some() {
+        if chunk.field == 5 && input.administrator_ids.is_some() {
             if chunk.wire != 2 {
                 return Err(ProfileError::InvalidMetadata);
             }
@@ -1469,9 +1477,13 @@ fn apply_roster_writes(
             continue;
         }
         if let Some(patch) = writes.get(&name) {
-            proto_bytes(1, &patch_member(Some(chunk.value), patch)?, &mut packed)
+            if patch.is_all_keep() {
+                packed.extend_from_slice(chunk.raw);
+            } else {
+                proto_bytes(1, &patch_member(Some(chunk.value), patch)?, &mut packed);
+            }
         } else {
-            packed.extend_from_slice(chunk.raw)
+            packed.extend_from_slice(chunk.raw);
         }
         written.insert(name);
     }
@@ -1480,21 +1492,21 @@ fn apply_roster_writes(
     for name in result_members.difference(&written) {
         let empty = MemberWrite {
             username: name,
-            display: FieldPatch::Keep,
-            flags: FieldPatch::Keep,
-            opaque: FieldPatch::Keep,
+            display: NativeFieldPatch::Keep,
+            flags: NativeFieldPatch::Keep,
+            opaque: NativeFieldPatch::Keep,
         };
         let patch = writes.get(name).unwrap_or(&empty);
         proto_bytes(1, &patch_member(None, patch)?, &mut packed);
     }
     let mut fields = RawFields::new();
-    if let Some(ids) = administrator_ids {
+    if let Some(ids) = &input.administrator_ids {
         for id in ids {
             proto_bytes(5, id.as_bytes(), &mut packed);
         }
     }
-    if complete_roster
-        || administrator_ids.is_some()
+    if input.complete_roster
+        || input.administrator_ids.is_some()
         || !packed.is_empty()
         || room.as_ref().is_some_and(|(_, bytes)| bytes.is_some())
     {
@@ -1505,115 +1517,12 @@ fn apply_roster_writes(
         location,
         keys,
         &GroupProjection {
-            username: username.to_owned(),
+            username: input.username.clone(),
             fields,
             detail_fields: None,
             members: std::mem::take(&mut result_members).into_iter().collect(),
-            complete_roster,
+            complete_roster: input.complete_roster,
         },
-        options,
-    )
-}
-/// Translate only the proved network member identity/display semantics into the
-/// local repeated-field1 representation. Caller proves roster completeness (for
-/// example, a separate complete member identity list in the server reply). Unknown
-/// root/member protobuf chunks, existing owner and unrelated contact fields are
-/// retained byte-for-byte. No network version is guessed into opaque fields.
-pub fn apply_native_roster_patch(
-    location: &ProfileLocation,
-    keys: &KeyFile,
-    input: &NativeRosterPatch,
-    options: &WriteOptions,
-) -> Result<()> {
-    if input.members.len() > 10000 {
-        return Err(ProfileError::InvalidMetadata);
-    }
-    let mut writes = std::collections::BTreeMap::new();
-    let mut member_ids = Vec::with_capacity(input.members.len());
-    for member in &input.members {
-        identity(&member.username)?;
-        let write = MemberWrite {
-            username: &member.username,
-            display: member
-                .display
-                .as_deref()
-                .map_or(FieldPatch::Keep, FieldPatch::Set),
-            flags: member.flags.map_or(FieldPatch::Keep, FieldPatch::Set),
-            opaque: member
-                .opaque
-                .as_deref()
-                .map_or(FieldPatch::Keep, FieldPatch::Set),
-        };
-        if writes.insert(member.username.clone(), write).is_some() {
-            return Err(ProfileError::InvalidMetadata);
-        }
-        member_ids.push(member.username.clone());
-    }
-    apply_roster_writes(
-        location,
-        keys,
-        &input.username,
-        &writes,
-        input.complete_roster.then_some(member_ids.as_slice()),
-        input.administrator_ids.as_deref(),
-        options,
-    )
-}
-/// Project a native roster reply into `chat_room.ext_buffer` and `chatroom_member`,
-/// separating returned member rows from unchanged complete-roster identities.
-///
-/// For each member in `input.updated_members`, known member fields (`display`,
-/// `flags`, `opaque`) replace saved values and `None` omits the corresponding
-/// protobuf field (matching the official Linux client's proto2 presence rules),
-/// while unknown member chunks remain byte-for-byte intact. Unchanged members
-/// listed only in `input.full_member_ids` keep their saved `ext_buffer` chunks
-/// untouched. Unknown root chunks, existing owner, and unrelated contact fields
-/// are preserved.
-///
-/// Writes only `contact/contact.db` (`name2id`, `chat_room`, and
-/// `chatroom_member`, initializing omitted columns on a new `chat_room` row to
-/// SQL `NULL`) in one SQLite transaction after reading any existing `ext_buffer`
-/// and `chatroom_member` rows. Replaying the same `NativeRosterUpdate` is
-/// idempotent and performs no network I/O. The caller must hold exclusive
-/// profile ownership with a durable intent in `options`, fence stale replies,
-/// ensure `contact` rows already exist for `input.username` and every resulting
-/// member, and prove roster completeness with every `updated_members` entry
-/// present in `full_member_ids` when `full_member_ids` is `Some`.
-pub fn apply_native_roster_update(
-    location: &ProfileLocation,
-    keys: &KeyFile,
-    input: &NativeRosterUpdate,
-    options: &WriteOptions,
-) -> Result<()> {
-    if input.updated_members.len() > 10000 {
-        return Err(ProfileError::InvalidMetadata);
-    }
-    let mut writes = std::collections::BTreeMap::new();
-    for member in &input.updated_members {
-        identity(&member.username)?;
-        let write = MemberWrite {
-            username: &member.username,
-            display: member
-                .display
-                .as_deref()
-                .map_or(FieldPatch::Clear, FieldPatch::Set),
-            flags: member.flags.map_or(FieldPatch::Clear, FieldPatch::Set),
-            opaque: member
-                .opaque
-                .as_deref()
-                .map_or(FieldPatch::Clear, FieldPatch::Set),
-        };
-        if writes.insert(member.username.clone(), write).is_some() {
-            return Err(ProfileError::InvalidMetadata);
-        }
-    }
-    apply_roster_writes(
-        location,
-        keys,
-        &input.username,
-        &writes,
-        input.full_member_ids.as_deref(),
-        input.administrator_ids.as_deref(),
         options,
     )
 }

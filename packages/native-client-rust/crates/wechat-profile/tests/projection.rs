@@ -100,9 +100,9 @@ fn group_all_mentions_derive_roles_and_follow_official_admin_replacement() {
     patch.administrator_ids = Some(vec![]);
     patch.members = vec![NativeMemberPatch {
         username: "member".into(),
-        display: None,
-        flags: Some(u32::MAX),
-        opaque: None,
+        display: NativeFieldPatch::Keep,
+        flags: NativeFieldPatch::Set(u32::MAX),
+        opaque: NativeFieldPatch::Keep,
     }];
     apply_native_roster_patch(&loc, &keys, &patch, &o).unwrap();
     assert_eq!(read(Some("member")).can_mention_all, Some(false));
@@ -259,10 +259,10 @@ fn group_control_edits_preserve_unknown_chunks_other_members_and_history() {
             members: ["self", "peer", "other"]
                 .iter()
                 .map(|name| NativeMemberPatch {
-                    flags: None,
-                    opaque: None,
+                    flags: NativeFieldPatch::Keep,
+                    opaque: NativeFieldPatch::Keep,
                     username: (*name).into(),
-                    display: None,
+                    display: NativeFieldPatch::Keep,
                 })
                 .collect(),
             complete_roster: true,
@@ -966,10 +966,10 @@ fn sparse_contact_and_native_roster_updates_preserve_opaque_fields_and_only_remo
     let initial = NativeRosterPatch {
         username: "room@chatroom".into(),
         members: vec![NativeMemberPatch {
-            flags: None,
-            opaque: None,
+            flags: NativeFieldPatch::Keep,
+            opaque: NativeFieldPatch::Keep,
             username: "peer".into(),
-            display: Some("Per-room label".into()),
+            display: NativeFieldPatch::Set("Per-room label".into()),
         }],
         complete_roster: true,
         administrator_ids: None,
@@ -993,10 +993,10 @@ fn sparse_contact_and_native_roster_updates_preserve_opaque_fields_and_only_remo
     let partial = NativeRosterPatch {
         username: "room@chatroom".into(),
         members: vec![NativeMemberPatch {
-            flags: None,
-            opaque: None,
+            flags: NativeFieldPatch::Keep,
+            opaque: NativeFieldPatch::Keep,
             username: "other".into(),
-            display: Some("Other room label".into()),
+            display: NativeFieldPatch::Set("Other room label".into()),
         }],
         complete_roster: false,
         administrator_ids: None,
@@ -1017,10 +1017,10 @@ fn sparse_contact_and_native_roster_updates_preserve_opaque_fields_and_only_remo
     let complete = NativeRosterPatch {
         username: "room@chatroom".into(),
         members: vec![NativeMemberPatch {
-            flags: None,
-            opaque: None,
+            flags: NativeFieldPatch::Keep,
+            opaque: NativeFieldPatch::Keep,
             username: "peer".into(),
-            display: None,
+            display: NativeFieldPatch::Keep,
         }],
         complete_roster: true,
         administrator_ids: None,
@@ -1074,10 +1074,10 @@ fn sparse_contact_and_native_roster_updates_preserve_opaque_fields_and_only_remo
         username: "room@chatroom".into(),
         members: vec![
             NativeMemberPatch {
-                flags: None,
-                opaque: None,
+                flags: NativeFieldPatch::Keep,
+                opaque: NativeFieldPatch::Keep,
                 username: "peer".into(),
-                display: None
+                display: NativeFieldPatch::Keep
             };
             2
         ],
@@ -1088,7 +1088,7 @@ fn sparse_contact_and_native_roster_updates_preserve_opaque_fields_and_only_remo
 }
 
 #[test]
-fn roster_update_clears_omitted_fields_while_preserving_unchanged_delta_members_and_extensions() {
+fn roster_patch_clears_omitted_fields_while_preserving_unchanged_delta_members_and_extensions() {
     let d = fixture();
     let loc = ProfileLocation::new(d.path().join("account")).unwrap();
     let keys = KeyFile::empty("account");
@@ -1110,26 +1110,26 @@ fn roster_update_clears_omitted_fields_while_preserving_unchanged_delta_members_
         )
         .unwrap();
     }
-    apply_native_roster_update(
+    apply_native_roster_patch(
         &loc,
         &keys,
-        &NativeRosterUpdate {
+        &NativeRosterPatch {
             username: "room@chatroom".into(),
-            updated_members: vec![
-                NativeRosterMember {
+            members: vec![
+                NativeMemberPatch {
                     username: "peer".into(),
-                    display: Some("Peer room label".into()),
-                    flags: Some(9),
-                    opaque: Some(b"inviter-a".to_vec()),
+                    display: NativeFieldPatch::Set("Peer room label".into()),
+                    flags: NativeFieldPatch::Set(9),
+                    opaque: NativeFieldPatch::Set(b"inviter-a".to_vec()),
                 },
-                NativeRosterMember {
+                NativeMemberPatch {
                     username: "other".into(),
-                    display: Some("Other room label".into()),
-                    flags: Some(3),
-                    opaque: Some(b"inviter-b".to_vec()),
+                    display: NativeFieldPatch::Set("Other room label".into()),
+                    flags: NativeFieldPatch::Set(3),
+                    opaque: NativeFieldPatch::Set(b"inviter-b".to_vec()),
                 },
             ],
-            full_member_ids: Some(vec!["peer".into(), "other".into()]),
+            complete_roster: true,
             administrator_ids: None,
         },
         &o,
@@ -1164,20 +1164,28 @@ fn roster_update_clears_omitted_fields_while_preserving_unchanged_delta_members_
     c.execute("UPDATE chat_room SET ext_buffer=?1", [&seeded])
         .unwrap();
 
-    // Delta-shaped complete reply: peer is in updated_members with display and opaque
-    // omitted (cleared) and flags=0; other is only in full_member_ids and stays verbatim.
-    apply_native_roster_update(
+    // Delta-shaped complete reply: peer clears display and opaque and sets flags=0;
+    // other uses Keep for every field and stays verbatim.
+    apply_native_roster_patch(
         &loc,
         &keys,
-        &NativeRosterUpdate {
+        &NativeRosterPatch {
             username: "room@chatroom".into(),
-            updated_members: vec![NativeRosterMember {
-                username: "peer".into(),
-                display: None,
-                flags: Some(0),
-                opaque: None,
-            }],
-            full_member_ids: Some(vec!["peer".into(), "other".into()]),
+            members: vec![
+                NativeMemberPatch {
+                    username: "peer".into(),
+                    display: NativeFieldPatch::Clear,
+                    flags: NativeFieldPatch::Set(0),
+                    opaque: NativeFieldPatch::Clear,
+                },
+                NativeMemberPatch {
+                    username: "other".into(),
+                    display: NativeFieldPatch::Keep,
+                    flags: NativeFieldPatch::Keep,
+                    opaque: NativeFieldPatch::Keep,
+                },
+            ],
+            complete_roster: true,
             administrator_ids: None,
         },
         &o,
@@ -1226,20 +1234,20 @@ fn roster_update_clears_omitted_fields_while_preserving_unchanged_delta_members_
         Some("Other room label")
     );
 
-    // Explicit empty wire strings (Some("")) encode empty length-delimited fields,
-    // matching official proto2 presence, while delta-only updates preserve absent members.
-    apply_native_roster_update(
+    // Explicit empty wire strings (Set("")) encode empty length-delimited fields,
+    // matching official proto2 presence, while delta-only patches preserve absent members.
+    apply_native_roster_patch(
         &loc,
         &keys,
-        &NativeRosterUpdate {
+        &NativeRosterPatch {
             username: "room@chatroom".into(),
-            updated_members: vec![NativeRosterMember {
+            members: vec![NativeMemberPatch {
                 username: "other".into(),
-                display: Some(String::new()),
-                flags: Some(0),
-                opaque: Some(vec![]),
+                display: NativeFieldPatch::Set(String::new()),
+                flags: NativeFieldPatch::Set(0),
+                opaque: NativeFieldPatch::Set(vec![]),
             }],
-            full_member_ids: None,
+            complete_roster: false,
             administrator_ids: None,
         },
         &o,
@@ -1263,18 +1271,18 @@ fn roster_update_clears_omitted_fields_while_preserving_unchanged_delta_members_
     assert_eq!(by_name["peer"].room_display_name, None);
 
     // A delta-only clear omits field 2 and field 4 without dropping other members.
-    apply_native_roster_update(
+    apply_native_roster_patch(
         &loc,
         &keys,
-        &NativeRosterUpdate {
+        &NativeRosterPatch {
             username: "room@chatroom".into(),
-            updated_members: vec![NativeRosterMember {
+            members: vec![NativeMemberPatch {
                 username: "other".into(),
-                display: None,
-                flags: Some(0),
-                opaque: None,
+                display: NativeFieldPatch::Clear,
+                flags: NativeFieldPatch::Set(0),
+                opaque: NativeFieldPatch::Clear,
             }],
-            full_member_ids: None,
+            complete_roster: false,
             administrator_ids: None,
         },
         &o,
@@ -1287,51 +1295,20 @@ fn roster_update_clears_omitted_fields_while_preserving_unchanged_delta_members_
     assert_eq!(by_name.len(), 2);
     assert_eq!(by_name["other"].room_display_name, None);
 
-    // Reject inconsistent updated_members absent from full_member_ids and duplicates.
-    assert!(apply_native_roster_update(
+    // Clearing flags (Clear) omits field 3, and removing a member absent from
+    // a complete roster deletes it from both ext_buffer and chatroom_member.
+    apply_native_roster_patch(
         &loc,
         &keys,
-        &NativeRosterUpdate {
+        &NativeRosterPatch {
             username: "room@chatroom".into(),
-            updated_members: vec![NativeRosterMember {
-                username: "other".into(),
-                display: None,
-                flags: Some(0),
-                opaque: None,
-            }],
-            full_member_ids: Some(vec!["peer".into()]),
-            administrator_ids: None,
-        },
-        &o,
-    )
-    .is_err());
-    assert!(apply_native_roster_update(
-        &loc,
-        &keys,
-        &NativeRosterUpdate {
-            username: "room@chatroom".into(),
-            updated_members: vec![],
-            full_member_ids: Some(vec!["peer".into(), "peer".into()]),
-            administrator_ids: None,
-        },
-        &o,
-    )
-    .is_err());
-
-    // Clearing flags (flags: None) omits field 3, and removing a member absent from
-    // full_member_ids deletes it from both ext_buffer and chatroom_member.
-    apply_native_roster_update(
-        &loc,
-        &keys,
-        &NativeRosterUpdate {
-            username: "room@chatroom".into(),
-            updated_members: vec![NativeRosterMember {
+            members: vec![NativeMemberPatch {
                 username: "peer".into(),
-                display: None,
-                flags: None,
-                opaque: None,
+                display: NativeFieldPatch::Clear,
+                flags: NativeFieldPatch::Clear,
+                opaque: NativeFieldPatch::Clear,
             }],
-            full_member_ids: Some(vec!["peer".into()]),
+            complete_roster: true,
             administrator_ids: None,
         },
         &o,
@@ -1371,18 +1348,18 @@ fn roster_update_clears_omitted_fields_while_preserving_unchanged_delta_members_
         bad.extend_from_slice(&bad_member);
         c.execute("UPDATE chat_room SET ext_buffer=?1", [&bad])
             .unwrap();
-        assert!(apply_native_roster_update(
+        assert!(apply_native_roster_patch(
             &loc,
             &keys,
-            &NativeRosterUpdate {
+            &NativeRosterPatch {
                 username: "room@chatroom".into(),
-                updated_members: vec![NativeRosterMember {
+                members: vec![NativeMemberPatch {
                     username: "peer".into(),
-                    display: None,
-                    flags: None,
-                    opaque: None,
+                    display: NativeFieldPatch::Clear,
+                    flags: NativeFieldPatch::Clear,
+                    opaque: NativeFieldPatch::Clear,
                 }],
-                full_member_ids: Some(vec!["peer".into()]),
+                complete_roster: true,
                 administrator_ids: None,
             },
             &o,
@@ -1390,17 +1367,17 @@ fn roster_update_clears_omitted_fields_while_preserving_unchanged_delta_members_
         .is_err());
     }
 
-    // Empty delta-only update preserves NULL ext_buffer (and unknown administrator_ids).
+    // Empty delta-only patch preserves NULL ext_buffer (and unknown administrator_ids).
     c.execute("DELETE FROM chatroom_member", []).unwrap();
     c.execute("UPDATE chat_room SET ext_buffer=NULL", [])
         .unwrap();
-    apply_native_roster_update(
+    apply_native_roster_patch(
         &loc,
         &keys,
-        &NativeRosterUpdate {
+        &NativeRosterPatch {
             username: "room@chatroom".into(),
-            updated_members: vec![],
-            full_member_ids: None,
+            members: vec![],
+            complete_roster: false,
             administrator_ids: None,
         },
         &o,
@@ -1434,18 +1411,18 @@ fn group_my_name_clear_omits_display_field_and_preserves_other_member_fields() {
     for name in ["self", "room@chatroom"] {
         apply_contact_patch(&loc, &keys, &contact(d.path(), name, name), &o).unwrap();
     }
-    apply_native_roster_update(
+    apply_native_roster_patch(
         &loc,
         &keys,
-        &NativeRosterUpdate {
+        &NativeRosterPatch {
             username: "room@chatroom".into(),
-            updated_members: vec![NativeRosterMember {
+            members: vec![NativeMemberPatch {
                 username: "self".into(),
-                display: Some("My alias".into()),
-                flags: Some(1),
-                opaque: Some(b"inv".to_vec()),
+                display: NativeFieldPatch::Set("My alias".into()),
+                flags: NativeFieldPatch::Set(1),
+                opaque: NativeFieldPatch::Set(b"inv".to_vec()),
             }],
-            full_member_ids: Some(vec!["self".into()]),
+            complete_roster: true,
             administrator_ids: None,
         },
         &o,
