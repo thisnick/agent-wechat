@@ -61,6 +61,8 @@ pub fn fetch_link_thumbnail(
 ///
 /// The caller's [`HttpTransport`] must not follow HTTP redirects and is
 /// responsible for DNS/SSRF validation before connecting to non-literal hostnames.
+/// On native targets, `transport::NativeHttpTransport` built with
+/// `DestinationPolicy::PublicOnly` provides that boundary.
 pub async fn fetch_link_thumbnail_async(
     value: &str,
     http: &dyn HttpTransport,

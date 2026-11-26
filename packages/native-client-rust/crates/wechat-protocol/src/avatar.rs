@@ -91,6 +91,8 @@ pub fn download_advertised_avatar(value: &str) -> Result<Vec<u8>> {
 /// The URL is validated against the WeChat avatar host allowlist before sending.
 /// The caller's [`HttpTransport`] must not follow HTTP redirects and is
 /// responsible for network/SSRF boundaries.
+/// On native targets, `transport::NativeHttpTransport` built with
+/// `DestinationPolicy::PublicOnly` provides that boundary.
 pub async fn download_advertised_avatar_async(
     value: &str,
     http: &dyn HttpTransport,

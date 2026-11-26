@@ -136,6 +136,8 @@ pub fn fetch_tp_media_to(
 ///
 /// The caller's [`HttpTransport`] must not follow HTTP redirects and is
 /// responsible for network/SSRF boundaries.
+/// On native targets, `transport::NativeHttpTransport` built with
+/// `DestinationPolicy::PublicOnly` provides that boundary.
 pub async fn fetch_tp_media_async(
     descriptor: &TpMediaDescriptor,
     http: &dyn HttpTransport,
@@ -153,7 +155,9 @@ pub async fn fetch_tp_media_async(
 /// written to `sink` are unverified and must be discarded on error.
 ///
 /// The caller's [`HttpTransport`] must not follow HTTP redirects and is
-/// responsible for network/SSRF boundaries. Because [`HttpTransport::send`]
+/// responsible for network/SSRF boundaries (on native targets,
+/// `transport::NativeHttpTransport` built with
+/// `DestinationPolicy::PublicOnly`). Because [`HttpTransport::send`]
 /// buffers each response up to `max_response_bytes` before status and headers
 /// are inspected, chunk 0 sets `max_response_bytes` to the larger of 512 KiB
 /// and the object's ciphertext limit (so a server that ignores `Range` with a

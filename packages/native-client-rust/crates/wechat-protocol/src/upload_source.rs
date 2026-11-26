@@ -228,16 +228,16 @@ impl FileUploadSource {
     }
 }
 
+/// Fill `buffer` from `file` at `offset`, failing if the file is shorter.
 #[cfg(not(target_arch = "wasm32"))]
-fn read_file_at(file: &std::fs::File, offset: u64, length: usize) -> Result<Zeroizing<Vec<u8>>> {
-    let mut buffer = Zeroizing::new(vec![0u8; length]);
+fn read_file_at(file: &std::fs::File, offset: u64, buffer: &mut [u8]) -> Result<()> {
     #[cfg(unix)]
     let read = {
         use std::os::unix::fs::FileExt;
-        file.read_exact_at(&mut buffer, offset)
+        file.read_exact_at(buffer, offset)
     };
     #[cfg(windows)]
-    let read = (|| {
+    let read = (|| -> std::io::Result<()> {
         use std::os::windows::fs::FileExt;
         let mut filled = 0;
         while filled < buffer.len() {
@@ -248,8 +248,7 @@ fn read_file_at(file: &std::fs::File, offset: u64, length: usize) -> Result<Zero
         }
         Ok(())
     })();
-    read.map_err(|_| anyhow::anyhow!("Upload source changed"))?;
-    Ok(buffer)
+    read.map_err(|_| anyhow::anyhow!("Upload source changed"))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -262,15 +261,18 @@ impl AsyncUploadSource for FileUploadSource {
                     .is_some_and(|end| end <= self.length),
                 "Upload source changed"
             );
-            let bytes = if tokio::runtime::Handle::try_current().is_ok() {
-                let file = self.file.clone();
-                let length = buf.len();
-                tokio::task::spawn_blocking(move || read_file_at(&file, offset, length))
-                    .await
-                    .map_err(|_| anyhow::anyhow!("Upload source unavailable"))??
-            } else {
-                read_file_at(&self.file, offset, buf.len())?
-            };
+            if tokio::runtime::Handle::try_current().is_err() {
+                return read_file_at(&self.file, offset, buf);
+            }
+            // The blocking pool needs an owned buffer.
+            let file = self.file.clone();
+            let length = buf.len();
+            let bytes = tokio::task::spawn_blocking(move || {
+                let mut bytes = Zeroizing::new(vec![0u8; length]);
+                read_file_at(&file, offset, &mut bytes).map(|()| bytes)
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("Upload source unavailable"))??;
             buf.copy_from_slice(&bytes);
             Ok(())
         })

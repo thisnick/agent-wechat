@@ -118,6 +118,8 @@ pub fn fetch_sticker_original(
 ///
 /// The caller's [`HttpTransport`] must not follow HTTP redirects and is
 /// responsible for network/SSRF boundaries.
+/// On native targets, `transport::NativeHttpTransport` built with
+/// `DestinationPolicy::PublicOnly` provides that boundary.
 pub async fn fetch_sticker_async(
     descriptor: &StickerDescriptor,
     http: &dyn HttpTransport,
@@ -146,6 +148,8 @@ pub async fn fetch_sticker_async(
 ///
 /// The caller's [`HttpTransport`] must not follow HTTP redirects and is
 /// responsible for network/SSRF boundaries.
+/// On native targets, `transport::NativeHttpTransport` built with
+/// `DestinationPolicy::PublicOnly` provides that boundary.
 pub async fn fetch_sticker_original_async(
     url: &str,
     expected_md5: &str,

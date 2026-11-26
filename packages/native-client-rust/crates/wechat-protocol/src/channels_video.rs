@@ -160,6 +160,8 @@ fn split_http_list_unquoted(value: &str) -> Vec<&str> {
 /// `max_bytes` caps the transfer below [`MAX_CHANNELS_VIDEO_BYTES`]. The
 /// caller's [`HttpTransport`] must not follow HTTP redirects and is responsible
 /// for network/SSRF boundaries.
+/// On native targets, `transport::NativeHttpTransport` built with
+/// `DestinationPolicy::PublicOnly` provides that boundary.
 pub async fn fetch_channels_video_async(
     media: &crate::ChannelsMedia,
     max_bytes: usize,

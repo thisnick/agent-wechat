@@ -202,9 +202,14 @@ pub enum DestinationPolicy {
 /// [`HttpTransport`] backed by an asynchronous `reqwest` client.
 ///
 /// One instance keeps a pool of HTTP/1.1 keep-alive connections, so share it
-/// (for example in an [`Arc`]) across requests to the same hosts. Requests
+/// (for example in an [`Arc`]) across requests to the same hosts. Pooled
+/// connections belong to the Tokio runtime that opened them, so use one
+/// instance from a single runtime. Requests
 /// never use a proxy and never follow redirects; a redirect response is
-/// returned to the caller unchanged. `HttpRequest::timeout` bounds the whole
+/// returned to the caller unchanged. Request headers follow the same rules as
+/// [`super::HttpOverStream`]: no `Host`, `Content-Length` or
+/// `Transfer-Encoding`, and `Connection` only as `close`. Responses are never
+/// decompressed. `HttpRequest::timeout` bounds the whole
 /// exchange, including the body, and the body is read in pieces so a
 /// response larger than `HttpRequest::max_response_bytes` fails with
 /// [`TransportError::ResponseTooLarge`] without being held in memory.
@@ -239,12 +244,21 @@ impl NativeHttpTransport {
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .referer(false)
+            // Bodies and their framing headers reach the protocol checks unchanged,
+            // even when another crate enables reqwest's decompression features.
+            .no_gzip()
+            .no_brotli()
+            .no_deflate()
+            .no_zstd()
             .connect_timeout(HTTP_CONNECT_TIMEOUT)
             .pool_idle_timeout(HTTP_POOL_IDLE_TIMEOUT)
             .pool_max_idle_per_host(HTTP_POOL_IDLE_PER_HOST);
-        if policy == DestinationPolicy::PublicOnly {
-            builder = builder.dns_resolver(Arc::new(CheckedResolver { allowed }));
-        }
+        builder = match policy {
+            DestinationPolicy::System => builder,
+            DestinationPolicy::PublicOnly => {
+                builder.dns_resolver(Arc::new(CheckedResolver { allowed }))
+            }
+        };
         Ok(Self {
             client: builder.build().context("HTTP client setup failed")?,
             policy,
@@ -258,7 +272,11 @@ impl NativeHttpTransport {
             "Unsupported HTTP URL scheme"
         );
         ensure!(!request.timeout.is_zero(), "Invalid HTTP timeout");
-        if self.policy == DestinationPolicy::PublicOnly {
+        let check_literal = match self.policy {
+            DestinationPolicy::System => false,
+            DestinationPolicy::PublicOnly => true,
+        };
+        if check_literal {
             let literal = match request.url.host() {
                 Some(url::Host::Ipv4(ip)) => Some(IpAddr::V4(ip)),
                 Some(url::Host::Ipv6(ip)) => Some(IpAddr::V6(ip)),
@@ -280,6 +298,7 @@ impl NativeHttpTransport {
             .request(method, request.url)
             .timeout(request.timeout);
         for (name, value) in &request.headers {
+            super::check_request_header(name, value)?;
             let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
                 .context("Invalid HTTP request header name")?;
             let value = reqwest::header::HeaderValue::from_str(value)
@@ -551,6 +570,31 @@ mod tests {
         assert_eq!(second.body, b"hello");
         assert_eq!(requests.load(Ordering::SeqCst), 2);
         assert_eq!(accepted.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn applies_the_shared_request_header_rules() {
+        let (address, accepted, requests) = serve(|head| {
+            assert!(head.to_ascii_lowercase().contains("connection: close"));
+            Some(ok("closed"))
+        })
+        .await;
+        let http = NativeHttpTransport::new(DestinationPolicy::System).unwrap();
+        for (name, value) in [
+            ("Host", "other.example"),
+            ("Content-Length", "1"),
+            ("Transfer-Encoding", "chunked"),
+            ("Connection", "keep-alive"),
+        ] {
+            let mut request = get(&format!("http://{address}/a"), 1024, Duration::from_secs(5));
+            request.headers.push((name.into(), value.into()));
+            assert!(http.send(request).await.is_err(), "{name}");
+        }
+        assert_eq!(accepted.load(Ordering::SeqCst), 0);
+        let mut request = get(&format!("http://{address}/a"), 1024, Duration::from_secs(5));
+        request.headers.push(("Connection".into(), "close".into()));
+        assert_eq!(http.send(request).await.unwrap().body, b"closed");
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

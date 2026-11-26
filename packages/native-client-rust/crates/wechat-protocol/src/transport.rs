@@ -562,19 +562,8 @@ fn format_http_request(request: &HttpRequest) -> Result<(String, u16, Vec<u8>)> 
         wire.extend_from_slice(format!("Content-Length: {}\r\n", request.body.len()).as_bytes());
     }
     for (name, value) in &request.headers {
-        ensure!(valid_header_name(name), "Invalid HTTP header name");
-        ensure!(valid_header_value(value), "Invalid HTTP header value");
-        if name.eq_ignore_ascii_case("host")
-            || name.eq_ignore_ascii_case("content-length")
-            || name.eq_ignore_ascii_case("transfer-encoding")
-        {
-            bail!("Restricted HTTP request header");
-        }
+        check_request_header(name, value)?;
         if name.eq_ignore_ascii_case("connection") {
-            ensure!(
-                value.eq_ignore_ascii_case("close"),
-                "Only Connection: close is supported"
-            );
             continue;
         }
         wire.extend_from_slice(name.as_bytes());
@@ -585,6 +574,27 @@ fn format_http_request(request: &HttpRequest) -> Result<(String, u16, Vec<u8>)> 
     wire.extend_from_slice(b"Connection: close\r\n\r\n");
     wire.extend_from_slice(&request.body);
     Ok((connect_host, port, wire))
+}
+
+/// Rules every transport applies to a caller-supplied request header: a valid
+/// name and value, no `Host`, `Content-Length` or `Transfer-Encoding` (the
+/// transport derives those), and `Connection` only as `close`.
+pub(crate) fn check_request_header(name: &str, value: &str) -> Result<()> {
+    ensure!(valid_header_name(name), "Invalid HTTP header name");
+    ensure!(valid_header_value(value), "Invalid HTTP header value");
+    if name.eq_ignore_ascii_case("host")
+        || name.eq_ignore_ascii_case("content-length")
+        || name.eq_ignore_ascii_case("transfer-encoding")
+    {
+        bail!("Restricted HTTP request header");
+    }
+    if name.eq_ignore_ascii_case("connection") {
+        ensure!(
+            value.eq_ignore_ascii_case("close"),
+            "Only Connection: close is supported"
+        );
+    }
+    Ok(())
 }
 
 fn remaining_deadline(clock: &dyn Clock, deadline_ms: u64) -> Result<Duration> {

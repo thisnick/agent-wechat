@@ -59,7 +59,8 @@ destination class. Give the standalone media downloaders
 `NativeHttpTransport::new(DestinationPolicy::PublicOnly)`: it connects only to
 checked public addresses (every resolved address, and any literal IP in the
 URL) and otherwise fails with `TransportError::DestinationNotAllowed`, which
-the downloaders report as their `*_dns_not_public` codes. Use
+the downloaders report as their existing codes (`*_dns_not_public`, or
+`channels_download_failed` for Channels videos). Use
 `media::FileUploadSource` (or `PreparedAsyncUpload::from_file`) to stream an
 upload from a file, and a `tokio::fs::File` as an `AsyncDownloadSink`.
 
