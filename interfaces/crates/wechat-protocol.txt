@@ -67,6 +67,7 @@ enum wechat_protocol::custom_stickers::CustomStickerMutation | enum | One member
 enum wechat_protocol::media::LargeCdnRoute | enum | MISSING DOC
 enum wechat_protocol::media::LargeFileDownloadControl | enum | Only these fixed, nonsecret numeric controls can enter a stored diagnostic.
 enum wechat_protocol::media::LargeFileDownloadError | enum | Strict rejection details. Unknown keys and response bytes are never retained.
+enum wechat_protocol::media::LargeFileUploadCause | enum | Why a large-file CDN upload stopped.
 enum wechat_protocol::media::MediaQuality | enum | MISSING DOC
 enum wechat_protocol::media_send::SendStatus | enum | MISSING DOC
 enum wechat_protocol::protobuf::Value | enum | MISSING DOC
@@ -697,6 +698,10 @@ field wechat_protocol::media::DownloadedMedia::sha256 | alloc::string::String | 
 field wechat_protocol::media::DownloadedMedia::substituted_filetype | core::option::Option<u32> | MISSING DOC
 field wechat_protocol::media::LargeFileDownloadError::FixedControlMismatch::actual | i64 | MISSING DOC
 field wechat_protocol::media::LargeFileDownloadError::FixedControlMismatch::control | wechat_protocol::media::LargeFileDownloadControl | MISSING DOC
+field wechat_protocol::media::LargeFileUploadFailure::attempts | u32 | HTTP attempts made for the request that failed, including retries. Zero when the upload stopped outside a request.
+field wechat_protocol::media::LargeFileUploadFailure::block | core::option::Option<u32> | Zero-based index of the block, for `uploadblock`.
+field wechat_protocol::media::LargeFileUploadFailure::cause | wechat_protocol::media::LargeFileUploadCause | Why the upload stopped.
+field wechat_protocol::media::LargeFileUploadFailure::phase | &'static str | The request that failed: `apply`, `uploadblock`, `fin` or `complete`.
 field wechat_protocol::media::MediaDescriptor::aes_key | alloc::vec::Vec<u8> | MISSING DOC
 field wechat_protocol::media::MediaDescriptor::expected_bytes | core::option::Option<u64> | MISSING DOC
 field wechat_protocol::media::MediaDescriptor::expected_md5 | core::option::Option<alloc::string::String> | MISSING DOC
@@ -1461,6 +1466,8 @@ fn wechat_protocol::media::CdnClient::upload_with_progress_async | async fn(&sel
 fn wechat_protocol::media::CdnConfig::validate | fn(&self) -> anyhow::Result<()> | MISSING DOC
 fn wechat_protocol::media::DownloadedMedia::into_parts | fn(self) -> (alloc::vec::Vec<u8>, wechat_protocol::media::DownloadReceipt) | The bytes and the receipt describing them.
 fn wechat_protocol::media::LargeFileDownloadControl::field_name | const fn(self) -> &'static str | MISSING DOC
+fn wechat_protocol::media::LargeFileUploadCause::as_str | fn(self) -> &'static str | Fixed snake_case name, as shown in job diagnostics.
+fn wechat_protocol::media::LargeFileUploadFailure::find | fn(error: &anyhow::Error) -> core::option::Option<&Self> | Find this failure anywhere in an error and its causes.
 fn wechat_protocol::media::MediaQuality::filetype | fn(self) -> u32 | MISSING DOC
 fn wechat_protocol::media::PreparedAsyncUpload::encrypted_len | fn(&self) -> usize | Length of the encrypted object, including its PKCS#7 padding block.
 fn wechat_protocol::media::PreparedAsyncUpload::new | fn(source: alloc::sync::Arc<dyn wechat_protocol::media::upload_source::AsyncUploadSource>, length: u64, md5: &str, sha256: &str, kind: wechat_protocol::media::MediaQuality, file_name: &str, destination: &str, key: &[u8], file_key: &str) -> anyhow::Result<Self> | Prepare an upload backed by `source`. `length`, `md5`, and `sha256` describe the immutable plaintext; changed bytes are rejected before the final block is emitted.
@@ -1748,6 +1755,8 @@ impl core::clone::Clone for wechat_protocol::media::DownloadReceipt | impl | -
 impl core::clone::Clone for wechat_protocol::media::LargeCdnRoute | impl | -
 impl core::clone::Clone for wechat_protocol::media::LargeFileDownloadControl | impl | -
 impl core::clone::Clone for wechat_protocol::media::LargeFileDownloadError | impl | -
+impl core::clone::Clone for wechat_protocol::media::LargeFileUploadCause | impl | -
+impl core::clone::Clone for wechat_protocol::media::LargeFileUploadFailure | impl | -
 impl core::clone::Clone for wechat_protocol::media::MediaDescriptor | impl | -
 impl core::clone::Clone for wechat_protocol::media::MediaQuality | impl | -
 impl core::clone::Clone for wechat_protocol::media::PreparedAsyncUpload | impl | -
@@ -1865,6 +1874,8 @@ impl core::cmp::Eq for wechat_protocol::media::ChannelsDownloadFacts | impl | -
 impl core::cmp::Eq for wechat_protocol::media::LargeCdnRoute | impl | -
 impl core::cmp::Eq for wechat_protocol::media::LargeFileDownloadControl | impl | -
 impl core::cmp::Eq for wechat_protocol::media::LargeFileDownloadError | impl | -
+impl core::cmp::Eq for wechat_protocol::media::LargeFileUploadCause | impl | -
+impl core::cmp::Eq for wechat_protocol::media::LargeFileUploadFailure | impl | -
 impl core::cmp::Eq for wechat_protocol::media::MediaQuality | impl | -
 impl core::cmp::Eq for wechat_protocol::media::SourceEvidence | impl | -
 impl core::cmp::Eq for wechat_protocol::media::VideoRepresentationMismatch | impl | -
@@ -1943,6 +1954,8 @@ impl core::cmp::PartialEq for wechat_protocol::media::ChannelsDownloadFacts | im
 impl core::cmp::PartialEq for wechat_protocol::media::LargeCdnRoute | impl | -
 impl core::cmp::PartialEq for wechat_protocol::media::LargeFileDownloadControl | impl | -
 impl core::cmp::PartialEq for wechat_protocol::media::LargeFileDownloadError | impl | -
+impl core::cmp::PartialEq for wechat_protocol::media::LargeFileUploadCause | impl | -
+impl core::cmp::PartialEq for wechat_protocol::media::LargeFileUploadFailure | impl | -
 impl core::cmp::PartialEq for wechat_protocol::media::MediaQuality | impl | -
 impl core::cmp::PartialEq for wechat_protocol::media::SourceEvidence | impl | -
 impl core::cmp::PartialEq for wechat_protocol::media::VideoRepresentationMismatch | impl | -
@@ -1994,6 +2007,7 @@ impl core::error::Error for wechat_protocol::calls::host_transport::CallHostRpcE
 impl core::error::Error for wechat_protocol::calls::host_transport::CallLiveSyncInterrupted | impl | -
 impl core::error::Error for wechat_protocol::media::ChannelsDownloadFailure | impl | -
 impl core::error::Error for wechat_protocol::media::LargeFileDownloadError | impl | -
+impl core::error::Error for wechat_protocol::media::LargeFileUploadFailure | impl | -
 impl core::error::Error for wechat_protocol::media::VideoRepresentationMismatch | impl | -
 impl core::error::Error for wechat_protocol::openim::OpenImServiceError | impl | -
 impl core::error::Error for wechat_protocol::transport::TransportError | impl | -
@@ -2075,6 +2089,8 @@ impl core::fmt::Debug for wechat_protocol::media::DownloadReceipt | impl | -
 impl core::fmt::Debug for wechat_protocol::media::LargeCdnRoute | impl | -
 impl core::fmt::Debug for wechat_protocol::media::LargeFileDownloadControl | impl | -
 impl core::fmt::Debug for wechat_protocol::media::LargeFileDownloadError | impl | -
+impl core::fmt::Debug for wechat_protocol::media::LargeFileUploadCause | impl | -
+impl core::fmt::Debug for wechat_protocol::media::LargeFileUploadFailure | impl | -
 impl core::fmt::Debug for wechat_protocol::media::MediaDescriptor | impl | -
 impl core::fmt::Debug for wechat_protocol::media::MediaQuality | impl | -
 impl core::fmt::Debug for wechat_protocol::media::PreparedAsyncUpload | impl | -
@@ -2113,6 +2129,7 @@ impl core::fmt::Display for wechat_protocol::calls::host_transport::CallHostRpcE
 impl core::fmt::Display for wechat_protocol::calls::host_transport::CallLiveSyncInterrupted | impl | -
 impl core::fmt::Display for wechat_protocol::media::ChannelsDownloadFailure | impl | -
 impl core::fmt::Display for wechat_protocol::media::LargeFileDownloadError | impl | -
+impl core::fmt::Display for wechat_protocol::media::LargeFileUploadFailure | impl | -
 impl core::fmt::Display for wechat_protocol::media::VideoRepresentationMismatch | impl | -
 impl core::fmt::Display for wechat_protocol::openim::OpenImServiceError | impl | -
 impl core::fmt::Display for wechat_protocol::transport::TransportError | impl | -
@@ -2155,6 +2172,8 @@ impl core::marker::Copy for wechat_protocol::media::CdnLocation | impl | -
 impl core::marker::Copy for wechat_protocol::media::LargeCdnRoute | impl | -
 impl core::marker::Copy for wechat_protocol::media::LargeFileDownloadControl | impl | -
 impl core::marker::Copy for wechat_protocol::media::LargeFileDownloadError | impl | -
+impl core::marker::Copy for wechat_protocol::media::LargeFileUploadCause | impl | -
+impl core::marker::Copy for wechat_protocol::media::LargeFileUploadFailure | impl | -
 impl core::marker::Copy for wechat_protocol::media::MediaQuality | impl | -
 impl core::marker::Copy for wechat_protocol::media::SourceEvidence | impl | -
 impl core::marker::Copy for wechat_protocol::media::VideoRepresentationMismatch | impl | -
@@ -2225,6 +2244,8 @@ impl core::marker::StructuralPartialEq for wechat_protocol::media::ChannelsDownl
 impl core::marker::StructuralPartialEq for wechat_protocol::media::LargeCdnRoute | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::media::LargeFileDownloadControl | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::media::LargeFileDownloadError | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::media::LargeFileUploadCause | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::media::LargeFileUploadFailure | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::media::MediaQuality | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::media::SourceEvidence | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::media::VideoRepresentationMismatch | impl | -
@@ -2603,6 +2624,7 @@ struct wechat_protocol::media::ChannelsDownloadFailure | struct { public fields 
 struct wechat_protocol::media::ChannelsVideo | struct { public fields } | A downloaded Channels video: the decoded bytes and what the CDN delivered.
 struct wechat_protocol::media::DownloadReceipt | struct { public fields } | What a download into a writer verified: everything [`DownloadedMedia`] reports except the bytes, which went to the writer.
 struct wechat_protocol::media::DownloadedMedia | struct { public fields } | MISSING DOC
+struct wechat_protocol::media::LargeFileUploadFailure | struct { public fields } | Where a large-file CDN upload stopped and why. It is attached to the upload's error and holds only fixed values: no server text, addresses, keys or file data.
 struct wechat_protocol::media::MediaDescriptor | struct { public fields } | MISSING DOC
 struct wechat_protocol::media::PreparedAsyncUpload | struct { private fields } | One object ready to upload from an [`AsyncUploadSource`]. Plaintext is read in steps as each ciphertext chunk is sent; its length, MD5, and SHA-256 are verified incrementally, and the final block is emitted only when every byte matched the expected digests. Persist the key and file key before the first upload request, as for [`PreparedUpload`].
 struct wechat_protocol::media::PreparedFileUpload | struct { private fields } | One object ready to upload from a private file. The file is read in steps while the object is sent; its length, MD5 and SHA-256 are checked again on the way, and the request that ends the object is only made once every byte read matched. Persist the key and file key before the first request, as for [`PreparedUpload`].
@@ -2802,6 +2824,12 @@ variant wechat_protocol::media::LargeFileDownloadControl::Version | - | MISSING 
 variant wechat_protocol::media::LargeFileDownloadControl::VideoFormat | - | MISSING DOC
 variant wechat_protocol::media::LargeFileDownloadError::FixedControlMismatch | { public fields } | MISSING DOC
 variant wechat_protocol::media::LargeFileDownloadError::UnknownField | - | MISSING DOC
+variant wechat_protocol::media::LargeFileUploadCause::HttpStatus | - | The CDN answered with an HTTP error status.
+variant wechat_protocol::media::LargeFileUploadCause::Local | - | The upload stopped locally: cancellation, logout, a changed source or a local error.
+variant wechat_protocol::media::LargeFileUploadCause::ReplyInvalid | - | A reply parsed but did not match its request: sequence, version, offset or a missing field.
+variant wechat_protocol::media::LargeFileUploadCause::ReplyUnreadable | - | Replies stayed empty or unparseable after the session's retries.
+variant wechat_protocol::media::LargeFileUploadCause::ServiceRejected | - | The CDN answered with a nonzero `retcode` that is not retried, or kept answering with one after the retries the official client allows.
+variant wechat_protocol::media::LargeFileUploadCause::Transport | - | The connection failed or timed out after the session's retries.
 variant wechat_protocol::media::MediaQuality::File | - | MISSING DOC
 variant wechat_protocol::media::MediaQuality::LargeFile | - | MISSING DOC
 variant wechat_protocol::media::MediaQuality::Original | - | MISSING DOC
