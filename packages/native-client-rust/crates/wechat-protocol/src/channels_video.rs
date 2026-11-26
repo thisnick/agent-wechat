@@ -189,13 +189,12 @@ pub async fn fetch_channels_video_async(
         })
         .await
         .map_err(|error| {
-            if crate::transport::find_transport_error(&error)
-                == Some(crate::transport::TransportError::ResponseTooLarge)
-            {
-                anyhow::anyhow!("channels_media_too_large")
-            } else {
-                anyhow::anyhow!("channels_download_failed")
-            }
+            super::download_failure(
+                &error,
+                "channels_media_too_large",
+                "channels_download_failed",
+                "channels_download_failed",
+            )
         })?;
     if response.status != 200 {
         anyhow::bail!("CDN HTTP status {}", response.status);

@@ -107,13 +107,12 @@ pub async fn download_advertised_avatar_async(
         })
         .await
         .map_err(|error| {
-            if crate::transport::find_transport_error(&error)
-                == Some(crate::transport::TransportError::ResponseTooLarge)
-            {
-                anyhow::anyhow!("avatar_size_limit")
-            } else {
-                anyhow::anyhow!("avatar_fetch_failed")
-            }
+            super::download_failure(
+                &error,
+                "avatar_size_limit",
+                "avatar_dns_not_public",
+                "avatar_fetch_failed",
+            )
         })?;
     ensure!(response.status == 200, "avatar_fetch_failed");
     let content_length = response

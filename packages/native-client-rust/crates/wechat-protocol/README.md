@@ -49,6 +49,20 @@ replies; on `wasm32` or non-Tokio executors, attach a host spawner with
 `ProtocolTransport::with_spawner` (for example `wasm_bindgen_futures::spawn_local`)
 if callers may cancel in-flight account RPC futures.
 
+On native targets, `ProtocolTransport::native()` is the default bundle:
+`TokioStreamTransport` for MMTLS long links, `NativeHttpTransport` with
+`DestinationPolicy::System` for short links, and `SystemClock`. Call it from a
+Tokio runtime. `NativeHttpTransport` pools HTTP/1.1 keep-alive connections,
+never uses a proxy or follows redirects, and enforces each request's deadline
+and receive budget while the body streams in, so share one instance per
+destination class. Give the standalone media downloaders
+`NativeHttpTransport::new(DestinationPolicy::PublicOnly)`: it connects only to
+checked public addresses (every resolved address, and any literal IP in the
+URL) and otherwise fails with `TransportError::DestinationNotAllowed`, which
+the downloaders report as their `*_dns_not_public` codes. Use
+`media::FileUploadSource` (or `PreparedAsyncUpload::from_file`) to stream an
+upload from a file, and a `tokio::fs::File` as an `AsyncDownloadSink`.
+
 Bind the transport with `NativeClient::with_transport` for async login bootstrap
 (`start_qr_login_async`, `start_saved_device_login_async`, `poll_login_async`,
 `complete_login_async`, `refresh_qr_login_async`) and

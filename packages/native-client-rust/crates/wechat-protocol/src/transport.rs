@@ -52,6 +52,10 @@ pub enum TransportError {
     Disconnected,
     /// The HTTP response body exceeded `HttpRequest::max_response_bytes`.
     ResponseTooLarge,
+    /// The destination is, or resolves to, an address the transport's policy
+    /// refuses, such as `DestinationPolicy::PublicOnly` on native targets. No
+    /// connection was made.
+    DestinationNotAllowed,
 }
 
 impl fmt::Display for TransportError {
@@ -60,6 +64,7 @@ impl fmt::Display for TransportError {
             Self::Timeout => f.write_str("Transport operation timed out"),
             Self::Disconnected => f.write_str("Transport disconnected"),
             Self::ResponseTooLarge => f.write_str("HTTP response body exceeds receive budget"),
+            Self::DestinationNotAllowed => f.write_str("Transport destination not allowed"),
         }
     }
 }
@@ -445,6 +450,12 @@ impl ProtocolTransport {
         self.spawner.as_ref()
     }
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "native_transport.rs"]
+mod native;
+#[cfg(not(target_arch = "wasm32"))]
+pub use native::{DestinationPolicy, NativeHttpTransport, TokioSpawner, TokioStreamTransport};
 
 const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
 const MAX_HTTP_HEADERS: usize = 128;

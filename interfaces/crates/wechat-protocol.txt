@@ -72,6 +72,7 @@ enum wechat_protocol::media::MediaQuality | enum | MISSING DOC
 enum wechat_protocol::media_send::SendStatus | enum | MISSING DOC
 enum wechat_protocol::protobuf::Value | enum | MISSING DOC
 enum wechat_protocol::sticker_packs::StickerPackFeed | enum | Feed selected by the supported Linux pack-list producer.
+enum wechat_protocol::transport::DestinationPolicy | #[non_exhaustive] enum | Which network addresses a [`NativeHttpTransport`] may connect to.
 enum wechat_protocol::transport::HttpMethod | enum | HTTP request method supported by protocol and media exchanges.
 enum wechat_protocol::transport::ReadOutcome | enum | Result of a bounded [`AsyncByteStream::read`] call.
 enum wechat_protocol::transport::TransportError | #[non_exhaustive] enum | Typed transport failure categories shared across native and custom transports for retryable login-poll, call-RPC, CDN failover, and media receive-budget classification.
@@ -1466,11 +1467,13 @@ fn wechat_protocol::media::CdnClient::upload_with_progress | #[cfg(not(target_ar
 fn wechat_protocol::media::CdnClient::upload_with_progress_async | async fn(&self, prepared: &wechat_protocol::media::PreparedUpload, http: &dyn wechat_protocol::transport::HttpTransport, clock: &dyn wechat_protocol::transport::Clock, progress: impl core::ops::function::FnMut(u64, core::option::Option<u64>) -> anyhow::Result<()>) -> anyhow::Result<wechat_protocol::media::UploadedMedia> | Asynchronously upload one prepared in-memory media object while reporting cumulative encrypted bytes sent before each chunk.
 fn wechat_protocol::media::CdnConfig::validate | fn(&self) -> anyhow::Result<()> | MISSING DOC
 fn wechat_protocol::media::DownloadedMedia::into_parts | fn(self) -> (alloc::vec::Vec<u8>, wechat_protocol::media::DownloadReceipt) | The bytes and the receipt describing them.
+fn wechat_protocol::media::FileUploadSource::new | fn(file: std::fs::File, length: u64) -> anyhow::Result<Self> | Read from `file`, which must currently be `length` bytes long. A read past `length`, or one that finds the file shorter, fails with `Upload source changed`.
 fn wechat_protocol::media::LargeFileDownloadControl::field_name | const fn(self) -> &'static str | MISSING DOC
 fn wechat_protocol::media::LargeFileUploadCause::as_str | fn(self) -> &'static str | Fixed snake_case name, as shown in job diagnostics.
 fn wechat_protocol::media::LargeFileUploadFailure::find | fn(error: &anyhow::Error) -> core::option::Option<&Self> | Find this failure anywhere in an error and its causes.
 fn wechat_protocol::media::MediaQuality::filetype | fn(self) -> u32 | MISSING DOC
 fn wechat_protocol::media::PreparedAsyncUpload::encrypted_len | fn(&self) -> usize | Length of the encrypted object, including its PKCS#7 padding block.
+fn wechat_protocol::media::PreparedAsyncUpload::from_file | #[cfg(not(target_arch = \"wasm32\"))] fn(file: std::fs::File, length: u64, md5: &str, sha256: &str, kind: wechat_protocol::media::MediaQuality, file_name: &str, destination: &str, key: &[u8], file_key: &str) -> anyhow::Result<Self> | Prepare an upload read from a private `file` through [`FileUploadSource`], with the same arguments and checks as [`PreparedFileUpload::new`]: a file of another length is refused now, and changed bytes before the final block is sent.
 fn wechat_protocol::media::PreparedAsyncUpload::new | fn(source: alloc::sync::Arc<dyn wechat_protocol::media::upload_source::AsyncUploadSource>, length: u64, md5: &str, sha256: &str, kind: wechat_protocol::media::MediaQuality, file_name: &str, destination: &str, key: &[u8], file_key: &str) -> anyhow::Result<Self> | Prepare an upload backed by `source`. `length`, `md5`, and `sha256` describe the immutable plaintext; changed bytes are rejected before the final block is emitted.
 fn wechat_protocol::media::PreparedAsyncUpload::to_memory | async fn(&self) -> anyhow::Result<wechat_protocol::media::PreparedUpload> | Materialize the whole upload into memory while checking its digests.
 fn wechat_protocol::media::PreparedFileUpload::encrypted_len | fn(&self) -> usize | Length of the encrypted object, including its padding block.
@@ -1610,13 +1613,19 @@ fn wechat_protocol::transport::HttpOverStream::new | fn(streams: S, clock: alloc
 fn wechat_protocol::transport::HttpResponse::header | fn(&self, name: &str) -> core::option::Option<&str> | Return the first header value matching `name` (ASCII case-insensitive).
 fn wechat_protocol::transport::HttpResponse::header_values | fn(&self, name: &str) -> alloc::vec::Vec<&str> | Return all header values matching `name` (ASCII case-insensitive), in wire order.
 fn wechat_protocol::transport::HttpTransport::send | required fn<'a>(&'a self, request: wechat_protocol::transport::HttpRequest) -> wechat_protocol::transport::TransportFuture<'a, anyhow::Result<wechat_protocol::transport::HttpResponse>> | Execute a single bounded HTTP request without automatic redirects.
+fn wechat_protocol::transport::NativeHttpTransport::new | fn(policy: wechat_protocol::transport::native::DestinationPolicy) -> anyhow::Result<Self> | Construct a transport that connects according to `policy`.
+fn wechat_protocol::transport::NativeHttpTransport::policy | fn(&self) -> wechat_protocol::transport::native::DestinationPolicy | The destination policy this transport enforces.
 fn wechat_protocol::transport::ProtocolTransport::from_streams | fn(streams: alloc::sync::Arc<dyn wechat_protocol::transport::StreamTransport>, clock: alloc::sync::Arc<dyn wechat_protocol::transport::Clock>) -> Self | Construct a transport bundle backed solely by a [`StreamTransport`] and [`Clock`], routing short-link HTTP exchanges through [`HttpOverStream`].
+fn wechat_protocol::transport::ProtocolTransport::native | fn() -> anyhow::Result<Self> | Default native transport bundle: [`TokioStreamTransport`] for MMTLS long links, [`NativeHttpTransport`] with [`DestinationPolicy::System`] for MMTLS short links, and [`SystemClock`].
 fn wechat_protocol::transport::ProtocolTransport::new | fn(streams: alloc::sync::Arc<dyn wechat_protocol::transport::StreamTransport>, http: alloc::sync::Arc<dyn wechat_protocol::transport::HttpTransport>, clock: alloc::sync::Arc<dyn wechat_protocol::transport::Clock>) -> Self | Construct a transport bundle with explicit stream, HTTP, and clock implementations.
 fn wechat_protocol::transport::ProtocolTransport::spawner | fn(&self) -> core::option::Option<&alloc::sync::Arc<dyn wechat_protocol::transport::TaskSpawner>> | Return the configured [`TaskSpawner`], if any.
 fn wechat_protocol::transport::ProtocolTransport::with_spawner | fn(self, spawner: alloc::sync::Arc<dyn wechat_protocol::transport::TaskSpawner>) -> Self | Attach a [`TaskSpawner`] so submitted account exchanges detach from the caller's future, preserving handoff barriers and reply adoption across caller cancellation on non-Tokio and `wasm32` executors.
 fn wechat_protocol::transport::StreamTransport::connect | required fn<'a>(&'a self, host: &'a str, port: u16, timeout: core::time::Duration) -> wechat_protocol::transport::TransportFuture<'a, anyhow::Result<alloc::boxed::Box<dyn wechat_protocol::transport::AsyncByteStream>>> | Open a raw byte stream to `host:port` within `timeout`.
 fn wechat_protocol::transport::SystemClock::new | fn() -> Self | Construct a clock anchored at the current monotonic instant.
 fn wechat_protocol::transport::TaskSpawner::spawn | required fn(&self, task: wechat_protocol::transport::TransportFuture<'static, ()>) | Spawn `task` to run to completion independently of the caller's future.
+fn wechat_protocol::transport::TokioSpawner::current | fn() -> anyhow::Result<Self> | Spawn onto the Tokio runtime the caller is running in. Fails outside a runtime.
+fn wechat_protocol::transport::TokioSpawner::new | fn(handle: tokio::runtime::handle::Handle) -> Self | Spawn onto the runtime that `handle` refers to.
+fn wechat_protocol::transport::TokioStreamTransport::new | fn() -> Self | Construct a TCP stream transport.
 fn wechat_protocol::wire::app_attach_request | fn(state: &wechat_protocol::client::AccountState, request: &wechat_protocol::wire::AppAttachRequest) -> anyhow::Result<alloc::vec::Vec<u8>> | Encode a `DownloadAppAttachRequest` protobuf for CGI `221`.
 fn wechat_protocol::wire::apply_cursor | fn(prior: &[u8], incoming: &[u8], code: i32) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
 fn wechat_protocol::wire::auto_auth | fn(state: &wechat_protocol::client::AccountState, point: &[u8], computer_name: &str) -> anyhow::Result<alloc::vec::Vec<u8>> | MISSING DOC
@@ -1753,6 +1762,7 @@ impl core::clone::Clone for wechat_protocol::media::CdnLocation | impl | -
 impl core::clone::Clone for wechat_protocol::media::ChannelsDownloadFacts | impl | -
 impl core::clone::Clone for wechat_protocol::media::ChannelsDownloadFailure | impl | -
 impl core::clone::Clone for wechat_protocol::media::DownloadReceipt | impl | -
+impl core::clone::Clone for wechat_protocol::media::FileUploadSource | impl | -
 impl core::clone::Clone for wechat_protocol::media::LargeCdnRoute | impl | -
 impl core::clone::Clone for wechat_protocol::media::LargeFileDownloadControl | impl | -
 impl core::clone::Clone for wechat_protocol::media::LargeFileDownloadError | impl | -
@@ -1793,12 +1803,15 @@ impl core::clone::Clone for wechat_protocol::sticker_packs::StickerPackItem | im
 impl core::clone::Clone for wechat_protocol::sticker_packs::StickerPackPage | impl | -
 impl core::clone::Clone for wechat_protocol::sticker_packs::StickerPackSummary | impl | -
 impl core::clone::Clone for wechat_protocol::sticker_upload::StickerUploadAcknowledgement | impl | -
+impl core::clone::Clone for wechat_protocol::transport::DestinationPolicy | impl | -
 impl core::clone::Clone for wechat_protocol::transport::HttpMethod | impl | -
 impl core::clone::Clone for wechat_protocol::transport::HttpRequest | impl | -
 impl core::clone::Clone for wechat_protocol::transport::HttpResponse | impl | -
 impl core::clone::Clone for wechat_protocol::transport::ProtocolTransport | impl | -
 impl core::clone::Clone for wechat_protocol::transport::ReadOutcome | impl | -
 impl core::clone::Clone for wechat_protocol::transport::SystemClock | impl | -
+impl core::clone::Clone for wechat_protocol::transport::TokioSpawner | impl | -
+impl core::clone::Clone for wechat_protocol::transport::TokioStreamTransport | impl | -
 impl core::clone::Clone for wechat_protocol::transport::TransportError | impl | -
 impl core::clone::Clone for wechat_protocol::wire::AddMessage | impl | -
 impl core::clone::Clone for wechat_protocol::wire::AppAttachChunk | impl | -
@@ -1887,6 +1900,7 @@ impl core::cmp::Eq for wechat_protocol::protobuf::Field | impl | -
 impl core::cmp::Eq for wechat_protocol::protobuf::Value | impl | -
 impl core::cmp::Eq for wechat_protocol::push::Notification | impl | -
 impl core::cmp::Eq for wechat_protocol::quote_send::QuoteReference | impl | -
+impl core::cmp::Eq for wechat_protocol::transport::DestinationPolicy | impl | -
 impl core::cmp::Eq for wechat_protocol::transport::HttpMethod | impl | -
 impl core::cmp::Eq for wechat_protocol::transport::ReadOutcome | impl | -
 impl core::cmp::Eq for wechat_protocol::transport::TransportError | impl | -
@@ -1967,6 +1981,7 @@ impl core::cmp::PartialEq for wechat_protocol::protobuf::Field | impl | -
 impl core::cmp::PartialEq for wechat_protocol::protobuf::Value | impl | -
 impl core::cmp::PartialEq for wechat_protocol::push::Notification | impl | -
 impl core::cmp::PartialEq for wechat_protocol::quote_send::QuoteReference | impl | -
+impl core::cmp::PartialEq for wechat_protocol::transport::DestinationPolicy | impl | -
 impl core::cmp::PartialEq for wechat_protocol::transport::HttpMethod | impl | -
 impl core::cmp::PartialEq for wechat_protocol::transport::ReadOutcome | impl | -
 impl core::cmp::PartialEq for wechat_protocol::transport::TransportError | impl | -
@@ -1999,6 +2014,7 @@ impl core::default::Default for wechat_protocol::calls::video_qos::VideoNackTrac
 impl core::default::Default for wechat_protocol::calls::voice_offer::VideoOfferOptions | impl | -
 impl core::default::Default for wechat_protocol::media::ChannelsDownloadFacts | impl | -
 impl core::default::Default for wechat_protocol::transport::SystemClock | impl | -
+impl core::default::Default for wechat_protocol::transport::TokioStreamTransport | impl | -
 impl core::error::Error for wechat_protocol::AccountInterrupted | impl | -
 impl core::error::Error for wechat_protocol::AccountPersistenceFailed | impl | -
 impl core::error::Error for wechat_protocol::NativeRequestNotSubmitted | impl | -
@@ -2087,6 +2103,7 @@ impl core::fmt::Debug for wechat_protocol::media::ChannelsDownloadFacts | impl |
 impl core::fmt::Debug for wechat_protocol::media::ChannelsDownloadFailure | impl | -
 impl core::fmt::Debug for wechat_protocol::media::ChannelsVideo | impl | -
 impl core::fmt::Debug for wechat_protocol::media::DownloadReceipt | impl | -
+impl core::fmt::Debug for wechat_protocol::media::FileUploadSource | impl | -
 impl core::fmt::Debug for wechat_protocol::media::LargeCdnRoute | impl | -
 impl core::fmt::Debug for wechat_protocol::media::LargeFileDownloadControl | impl | -
 impl core::fmt::Debug for wechat_protocol::media::LargeFileDownloadError | impl | -
@@ -2109,11 +2126,15 @@ impl core::fmt::Debug for wechat_protocol::push::Notification | impl | -
 impl core::fmt::Debug for wechat_protocol::quote_send::QuoteReference | impl | -
 impl core::fmt::Debug for wechat_protocol::sticker_packs::StickerPackFeed | impl | -
 impl core::fmt::Debug for wechat_protocol::sticker_upload::StickerUploadAcknowledgement | impl | -
+impl core::fmt::Debug for wechat_protocol::transport::DestinationPolicy | impl | -
 impl core::fmt::Debug for wechat_protocol::transport::HttpMethod | impl | -
 impl core::fmt::Debug for wechat_protocol::transport::HttpRequest | impl | -
 impl core::fmt::Debug for wechat_protocol::transport::HttpResponse | impl | -
+impl core::fmt::Debug for wechat_protocol::transport::NativeHttpTransport | impl | -
 impl core::fmt::Debug for wechat_protocol::transport::ReadOutcome | impl | -
 impl core::fmt::Debug for wechat_protocol::transport::SystemClock | impl | -
+impl core::fmt::Debug for wechat_protocol::transport::TokioSpawner | impl | -
+impl core::fmt::Debug for wechat_protocol::transport::TokioStreamTransport | impl | -
 impl core::fmt::Debug for wechat_protocol::transport::TransportError | impl | -
 impl core::fmt::Debug for wechat_protocol::wire::AppAttachChunk | impl | -
 impl core::fmt::Debug for wechat_protocol::wire::AppAttachRequest | impl | -
@@ -2181,6 +2202,7 @@ impl core::marker::Copy for wechat_protocol::media::VideoRepresentationMismatch 
 impl core::marker::Copy for wechat_protocol::openim::OpenImServiceError | impl | -
 impl core::marker::Copy for wechat_protocol::push::Notification | impl | -
 impl core::marker::Copy for wechat_protocol::sticker_packs::StickerPackFeed | impl | -
+impl core::marker::Copy for wechat_protocol::transport::DestinationPolicy | impl | -
 impl core::marker::Copy for wechat_protocol::transport::HttpMethod | impl | -
 impl core::marker::Copy for wechat_protocol::transport::ReadOutcome | impl | -
 impl core::marker::Copy for wechat_protocol::transport::TransportError | impl | -
@@ -2257,6 +2279,7 @@ impl core::marker::StructuralPartialEq for wechat_protocol::protobuf::Field | im
 impl core::marker::StructuralPartialEq for wechat_protocol::protobuf::Value | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::push::Notification | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::quote_send::QuoteReference | impl | -
+impl core::marker::StructuralPartialEq for wechat_protocol::transport::DestinationPolicy | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::transport::HttpMethod | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::transport::ReadOutcome | impl | -
 impl core::marker::StructuralPartialEq for wechat_protocol::transport::TransportError | impl | -
@@ -2455,8 +2478,12 @@ impl serde_core::ser::Serialize for wechat_protocol::wire::SyncBatch | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::wire::SyncCommand | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::wire::TextSendResult | impl | -
 impl serde_core::ser::Serialize for wechat_protocol::wire::VoiceChunk | impl | -
+impl wechat_protocol::media::upload_source::AsyncUploadSource for wechat_protocol::media::FileUploadSource | impl | -
 impl wechat_protocol::transport::Clock for wechat_protocol::transport::SystemClock | impl | -
 impl wechat_protocol::transport::HttpTransport for wechat_protocol::transport::HttpOverStream | impl<S: wechat_protocol::transport::StreamTransport> | -
+impl wechat_protocol::transport::HttpTransport for wechat_protocol::transport::NativeHttpTransport | impl | -
+impl wechat_protocol::transport::StreamTransport for wechat_protocol::transport::TokioStreamTransport | impl | -
+impl wechat_protocol::transport::TaskSpawner for wechat_protocol::transport::TokioSpawner | impl | -
 mod wechat_protocol | - | Connect to WeChat, authenticate, synchronize and submit messages with [`NativeClient`].
 mod wechat_protocol::business | - | Business encryption is separate from authenticated MMTLS records.
 mod wechat_protocol::calls | - | Call signaling codecs, authenticated host routes and media packet transforms.
@@ -2625,6 +2652,7 @@ struct wechat_protocol::media::ChannelsDownloadFailure | struct { public fields 
 struct wechat_protocol::media::ChannelsVideo | struct { public fields } | A downloaded Channels video: the decoded bytes and what the CDN delivered.
 struct wechat_protocol::media::DownloadReceipt | struct { public fields } | What a download into a writer verified: everything [`DownloadedMedia`] reports except the bytes, which went to the writer.
 struct wechat_protocol::media::DownloadedMedia | struct { public fields } | MISSING DOC
+struct wechat_protocol::media::FileUploadSource | #[cfg(not(target_arch = \"wasm32\"))] struct { private fields } | [`AsyncUploadSource`] reading a private file by position, for [`PreparedAsyncUpload`] on native targets.
 struct wechat_protocol::media::LargeFileUploadFailure | struct { public fields } | Where a large-file CDN upload stopped and why. It is attached to the upload's error and holds only fixed values: no server text, addresses, keys or file data.
 struct wechat_protocol::media::MediaDescriptor | struct { public fields } | MISSING DOC
 struct wechat_protocol::media::PreparedAsyncUpload | struct { private fields } | One object ready to upload from an [`AsyncUploadSource`]. Plaintext is read in steps as each ciphertext chunk is sent; its length, MD5, and SHA-256 are verified incrementally, and the final block is emitted only when every byte matched the expected digests. Persist the key and file key before the first upload request, as for [`PreparedUpload`].
@@ -2667,8 +2695,11 @@ struct wechat_protocol::sticker_upload::StickerUploadAcknowledgement | struct { 
 struct wechat_protocol::transport::HttpOverStream | struct<S> { private fields } | Strict plaintext HTTP/1.1 client layered on top of a [`StreamTransport`].
 struct wechat_protocol::transport::HttpRequest | struct { public fields } | Bounded HTTP request prepared by `wechat-protocol` after host, route, and payload validation.
 struct wechat_protocol::transport::HttpResponse | struct { public fields } | Bounded HTTP response returned by an [`HttpTransport`].
+struct wechat_protocol::transport::NativeHttpTransport | struct { private fields } | [`HttpTransport`] backed by an asynchronous `reqwest` client.
 struct wechat_protocol::transport::ProtocolTransport | struct { private fields } | Pluggable async transport bundle for [`crate::NativeClient`] and async login operations.
 struct wechat_protocol::transport::SystemClock | #[cfg(not(target_arch = \"wasm32\"))] struct { private fields } | System-backed [`Clock`] using `std::time::Instant` and `std::time::SystemTime`.
+struct wechat_protocol::transport::TokioSpawner | struct { private fields } | [`TaskSpawner`] that runs detached account exchanges on a Tokio runtime.
+struct wechat_protocol::transport::TokioStreamTransport | struct { private fields } | [`StreamTransport`] that opens Tokio TCP connections.
 struct wechat_protocol::wire::AddMessage | struct { public fields } | MISSING DOC
 struct wechat_protocol::wire::AppAttachChunk | struct { public fields } | One verified chunk returned by `/cgi-bin/micromsg-bin/downloadappattach`.
 struct wechat_protocol::wire::AppAttachRequest | struct { public fields } | Parameters for one `/cgi-bin/micromsg-bin/downloadappattach` chunk request.
@@ -2846,11 +2877,14 @@ variant wechat_protocol::protobuf::Value::Fixed64 | ([u8; 8]) | MISSING DOC
 variant wechat_protocol::protobuf::Value::Varint | (u64) | MISSING DOC
 variant wechat_protocol::sticker_packs::StickerPackFeed::Added | - | Complete account membership, including packs absent from the public feed.
 variant wechat_protocol::sticker_packs::StickerPackFeed::Catalog | - | Available public feed; reaching its end does not imply a global inventory.
+variant wechat_protocol::transport::DestinationPolicy::PublicOnly | - | Require every address a host resolves to, and any IP address written in the URL, to be a public unicast address, and connect only to those checked addresses. A refused destination fails with [`TransportError::DestinationNotAllowed`] before any connection is made. Use this for media URLs carried in messages: avatars, stickers, link thumbnails, Enterprise WeChat media and Channels videos.
+variant wechat_protocol::transport::DestinationPolicy::System | - | Connect to whatever the system resolver returns. Use this for WeChat service endpoints that `wechat-protocol` validates itself: MMTLS short links on allowlisted hosts and CDN addresses from a server-signed configuration.
 variant wechat_protocol::transport::HttpMethod::Get | - | HTTP `GET`.
 variant wechat_protocol::transport::HttpMethod::Post | - | HTTP `POST`.
 variant wechat_protocol::transport::ReadOutcome::Bytes | (usize) | `1..=buf.len()` bytes were written into the caller's buffer.
 variant wechat_protocol::transport::ReadOutcome::Eof | - | The peer closed the stream cleanly before sending more bytes.
 variant wechat_protocol::transport::ReadOutcome::TimedOut | - | The per-call timeout elapsed without new bytes arriving.
+variant wechat_protocol::transport::TransportError::DestinationNotAllowed | - | The destination is, or resolves to, an address the transport's policy refuses, such as `DestinationPolicy::PublicOnly` on native targets. No connection was made.
 variant wechat_protocol::transport::TransportError::Disconnected | - | Connection attempt failed or the peer closed the connection unexpectedly.
 variant wechat_protocol::transport::TransportError::ResponseTooLarge | - | The HTTP response body exceeded `HttpRequest::max_response_bytes`.
 variant wechat_protocol::transport::TransportError::Timeout | - | Connection, read, or write deadline elapsed.

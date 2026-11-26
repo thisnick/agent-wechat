@@ -255,13 +255,12 @@ pub async fn fetch_tp_media_to_async(
             })
             .await
             .map_err(|error| {
-                if crate::transport::find_transport_error(&error)
-                    == Some(crate::transport::TransportError::ResponseTooLarge)
-                {
-                    anyhow::anyhow!("tp_media_size_limit")
-                } else {
-                    anyhow::anyhow!("tp_media_fetch_failed")
-                }
+                super::download_failure(
+                    &error,
+                    "tp_media_size_limit",
+                    "tp_media_dns_not_public",
+                    "tp_media_fetch_failed",
+                )
             })?;
 
         let status = response.status;

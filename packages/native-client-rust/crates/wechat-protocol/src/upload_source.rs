@@ -193,6 +193,109 @@ impl<T: AsyncDownloadSink + ?Sized> AsyncDownloadSink for Box<T> {
     }
 }
 
+/// [`AsyncUploadSource`] reading a private file by position, for
+/// [`PreparedAsyncUpload`] on native targets.
+///
+/// Reads run on Tokio's blocking thread pool when called inside a Tokio
+/// runtime, and on the calling thread otherwise.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+pub struct FileUploadSource {
+    file: Arc<std::fs::File>,
+    length: u64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl fmt::Debug for FileUploadSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FileUploadSource")
+            .field("length", &self.length)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl FileUploadSource {
+    /// Read from `file`, which must currently be `length` bytes long. A read
+    /// past `length`, or one that finds the file shorter, fails with
+    /// `Upload source changed`.
+    pub fn new(file: std::fs::File, length: u64) -> Result<Self> {
+        ensure!(file.metadata()?.len() == length, "Upload source changed");
+        Ok(Self {
+            file: Arc::new(file),
+            length,
+        })
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_file_at(file: &std::fs::File, offset: u64, length: usize) -> Result<Zeroizing<Vec<u8>>> {
+    let mut buffer = Zeroizing::new(vec![0u8; length]);
+    #[cfg(unix)]
+    let read = {
+        use std::os::unix::fs::FileExt;
+        file.read_exact_at(&mut buffer, offset)
+    };
+    #[cfg(windows)]
+    let read = (|| {
+        use std::os::windows::fs::FileExt;
+        let mut filled = 0;
+        while filled < buffer.len() {
+            match file.seek_read(&mut buffer[filled..], offset + filled as u64)? {
+                0 => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+                read => filled += read,
+            }
+        }
+        Ok(())
+    })();
+    read.map_err(|_| anyhow::anyhow!("Upload source changed"))?;
+    Ok(buffer)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl AsyncUploadSource for FileUploadSource {
+    fn read_at<'a>(&'a self, offset: u64, buf: &'a mut [u8]) -> TransportFuture<'a, Result<()>> {
+        Box::pin(async move {
+            ensure!(
+                offset
+                    .checked_add(buf.len() as u64)
+                    .is_some_and(|end| end <= self.length),
+                "Upload source changed"
+            );
+            let bytes = if tokio::runtime::Handle::try_current().is_ok() {
+                let file = self.file.clone();
+                let length = buf.len();
+                tokio::task::spawn_blocking(move || read_file_at(&file, offset, length))
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Upload source unavailable"))??
+            } else {
+                read_file_at(&self.file, offset, buf.len())?
+            };
+            buf.copy_from_slice(&bytes);
+            Ok(())
+        })
+    }
+}
+
+/// Streams decrypted downloads into a Tokio file. Flushing writes buffered
+/// bytes to the operating system; it does not sync them to disk.
+#[cfg(not(target_arch = "wasm32"))]
+impl AsyncDownloadSink for tokio::fs::File {
+    fn write_all<'a>(&'a mut self, buf: &'a [u8]) -> TransportFuture<'a, Result<()>> {
+        Box::pin(async move {
+            tokio::io::AsyncWriteExt::write_all(self, buf).await?;
+            Ok(())
+        })
+    }
+
+    fn flush<'a>(&'a mut self) -> TransportFuture<'a, Result<()>> {
+        Box::pin(async move {
+            tokio::io::AsyncWriteExt::flush(self).await?;
+            Ok(())
+        })
+    }
+}
+
 /// One object ready to upload from an [`AsyncUploadSource`]. Plaintext is read
 /// in steps as each ciphertext chunk is sent; its length, MD5, and SHA-256 are
 /// verified incrementally, and the final block is emitted only when every byte
@@ -272,6 +375,36 @@ impl PreparedAsyncUpload {
             destination: destination.into(),
             source,
         })
+    }
+
+    /// Prepare an upload read from a private `file` through
+    /// [`FileUploadSource`], with the same arguments and checks as
+    /// [`PreparedFileUpload::new`]: a file of another length is refused now,
+    /// and changed bytes before the final block is sent.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_file(
+        file: std::fs::File,
+        length: u64,
+        md5: &str,
+        sha256: &str,
+        kind: MediaQuality,
+        file_name: &str,
+        destination: &str,
+        key: &[u8],
+        file_key: &str,
+    ) -> Result<Self> {
+        Self::new(
+            Arc::new(FileUploadSource::new(file, length)?),
+            length,
+            md5,
+            sha256,
+            kind,
+            file_name,
+            destination,
+            key,
+            file_key,
+        )
     }
 
     /// Length of the encrypted object, including its PKCS#7 padding block.
@@ -829,5 +962,108 @@ pub(super) mod tests {
                 assert_eq!(out, memory.encrypted, "async {length}/{chunk_size}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_file_backed_async_upload_matches_the_file_upload_and_refuses_changes() {
+        let raw: Vec<u8> = (0..70_000).map(|i| (i * 7 % 256) as u8).collect();
+        let (file, prepared) = file_upload(&raw);
+        let (key, file_key) = material();
+        let from_file = || {
+            PreparedAsyncUpload::from_file(
+                std::fs::File::open(&file.path).unwrap(),
+                raw.len() as u64,
+                &hex::encode(md5(&raw)),
+                &hex::encode(sha256(&raw)),
+                MediaQuality::File,
+                "a.bin",
+                "wxid_peer",
+                &key,
+                &file_key,
+            )
+        };
+        let async_prepared = from_file().unwrap();
+        let mut chunks = UploadRef::Async(&async_prepared).chunks();
+        let mut out = Vec::new();
+        while chunks.position() < async_prepared.encrypted_len() {
+            out.extend_from_slice(&chunks.next_async(UPLOAD_CHUNK).await.unwrap());
+        }
+        assert_eq!(out, whole(UploadRef::File(&prepared), UPLOAD_CHUNK));
+        assert_eq!(
+            async_prepared.to_memory().await.unwrap().encrypted,
+            prepared.to_memory().unwrap().encrypted
+        );
+
+        // Changed after preparation: the final chunk is refused.
+        let mut changed = raw.clone();
+        changed[69_999] ^= 1;
+        std::fs::write(&file.path, &changed).unwrap();
+        let mut chunks = UploadRef::Async(&async_prepared).chunks();
+        chunks.next_async(UPLOAD_CHUNK).await.unwrap();
+        let error = chunks.next_async(UPLOAD_CHUNK).await.unwrap_err();
+        assert_eq!(error.to_string(), "Prepared upload digest mismatch");
+        // Truncated: the read itself fails, inside or outside a runtime.
+        std::fs::write(&file.path, &raw[..66_000]).unwrap();
+        let mut chunks = UploadRef::Async(&async_prepared).chunks();
+        chunks.next_async(UPLOAD_CHUNK).await.unwrap();
+        let error = chunks.next_async(UPLOAD_CHUNK).await.unwrap_err();
+        assert_eq!(error.to_string(), "Upload source changed");
+        let source =
+            FileUploadSource::new(std::fs::File::open(&file.path).unwrap(), 66_000).unwrap();
+        let path = file.path.clone();
+        let expected = raw[65_984..66_000].to_vec();
+        std::thread::spawn(move || {
+            // No Tokio runtime on this thread: reads run inline.
+            let mut buf = [0u8; 16];
+            block_on_plain_thread(source.read_at(65_984, &mut buf)).unwrap();
+            assert_eq!(buf.to_vec(), expected);
+            let past = block_on_plain_thread(source.read_at(65_999, &mut [0u8; 2]));
+            assert_eq!(past.unwrap_err().to_string(), "Upload source changed");
+            std::fs::write(&path, [0u8; 65_000]).unwrap();
+            let short = block_on_plain_thread(source.read_at(65_500, &mut buf));
+            assert_eq!(short.unwrap_err().to_string(), "Upload source changed");
+        })
+        .join()
+        .unwrap();
+        std::fs::write(&file.path, &raw[..66_000]).unwrap();
+        // A file whose length differs is refused when prepared.
+        assert_eq!(
+            from_file().err().unwrap().to_string(),
+            "Upload source changed"
+        );
+    }
+
+    /// Poll `future` to completion on the current thread without a Tokio runtime.
+    fn block_on_plain_thread<T>(future: impl std::future::Future<Output = T>) -> T {
+        use std::task::{Context, Poll, Wake, Waker};
+        struct Noop;
+        impl Wake for Noop {
+            fn wake(self: Arc<Self>) {}
+        }
+        let waker = Waker::from(Arc::new(Noop));
+        let mut context = Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        loop {
+            if let Poll::Ready(value) = future.as_mut().poll(&mut context) {
+                return value;
+            }
+            std::thread::yield_now();
+        }
+    }
+
+    #[tokio::test]
+    async fn tokio_file_download_sink_writes_and_flushes() {
+        let directory = wechat_platform::private_tempdir("wechat-download-sink-test-").unwrap();
+        let path = directory.path().join("sink");
+        let mut sink = tokio::fs::File::create(&path).await.unwrap();
+        AsyncDownloadSink::write_all(&mut sink, b"abc")
+            .await
+            .unwrap();
+        AsyncDownloadSink::write_all(&mut sink, b"def")
+            .await
+            .unwrap();
+        AsyncDownloadSink::flush(&mut sink).await.unwrap();
+        drop(sink);
+        assert_eq!(std::fs::read(&path).unwrap(), b"abcdef");
     }
 }

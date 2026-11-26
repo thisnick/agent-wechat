@@ -79,13 +79,12 @@ pub async fn fetch_link_thumbnail_async(
         })
         .await
         .map_err(|error| {
-            if crate::transport::find_transport_error(&error)
-                == Some(crate::transport::TransportError::ResponseTooLarge)
-            {
-                anyhow::anyhow!("link_thumbnail_size_limit")
-            } else {
-                anyhow::anyhow!("link_thumbnail_fetch_failed")
-            }
+            super::download_failure(
+                &error,
+                "link_thumbnail_size_limit",
+                "link_thumbnail_dns_not_public",
+                "link_thumbnail_fetch_failed",
+            )
         })?;
     ensure!(response.status == 200, "link_thumbnail_fetch_failed");
     ensure!(
@@ -382,5 +381,39 @@ mod tests {
             .to_string(),
             "link_thumbnail_size_limit"
         );
+    }
+
+    #[tokio::test]
+    async fn native_public_only_transport_reports_private_hosts_as_not_public() {
+        // `localhost` passes URL validation but resolves to loopback, so the
+        // transport refuses it before connecting and the downloader keeps its
+        // `dns_not_public` code. The other downloaders share this mapping.
+        let http = crate::transport::NativeHttpTransport::new(
+            crate::transport::DestinationPolicy::PublicOnly,
+        )
+        .unwrap();
+        let error = fetch_link_thumbnail_async("http://localhost/a.png", &http, |_, _| Ok(()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "link_thumbnail_dns_not_public");
+        for (category, code) in [
+            (
+                crate::transport::TransportError::DestinationNotAllowed,
+                "not_public",
+            ),
+            (
+                crate::transport::TransportError::ResponseTooLarge,
+                "too_large",
+            ),
+            (crate::transport::TransportError::Timeout, "failed"),
+            (crate::transport::TransportError::Disconnected, "failed"),
+        ] {
+            let error = anyhow::Error::new(category).context("detail");
+            assert_eq!(
+                super::super::download_failure(&error, "too_large", "not_public", "failed")
+                    .to_string(),
+                code
+            );
+        }
     }
 }

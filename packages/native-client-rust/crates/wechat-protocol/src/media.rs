@@ -53,16 +53,35 @@ mod channels_video;
 pub use channels_video::*;
 #[path = "sticker.rs"]
 mod sticker;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use sticker::public_ip;
 pub use sticker::*;
 #[path = "tp_media.rs"]
 mod tp_media;
 pub use tp_media::*;
 #[path = "upload_source.rs"]
 mod upload_source;
+#[cfg(not(target_arch = "wasm32"))]
+pub use upload_source::FileUploadSource;
 use upload_source::UploadRef;
 pub use upload_source::{
     AsyncDownloadSink, AsyncUploadSource, PreparedAsyncUpload, PreparedFileUpload,
 };
+
+/// Name a standalone download's transport failure with that downloader's own
+/// error codes: an oversized body, a refused destination, or anything else.
+pub(crate) fn download_failure(
+    error: &anyhow::Error,
+    too_large: &'static str,
+    not_public: &'static str,
+    failed: &'static str,
+) -> anyhow::Error {
+    match find_transport_error(error) {
+        Some(TransportError::ResponseTooLarge) => anyhow::anyhow!(too_large),
+        Some(TransportError::DestinationNotAllowed) => anyhow::anyhow!(not_public),
+        _ => anyhow::anyhow!(failed),
+    }
+}
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct CdnLocation {
@@ -1064,7 +1083,10 @@ impl<'a> AsyncCdnSession<'a> {
                         error,
                         prefer_failover: false,
                     },
-                    Some(TransportError::ResponseTooLarge) | None => PostAttemptError::Fatal(error),
+                    Some(
+                        TransportError::ResponseTooLarge | TransportError::DestinationNotAllowed,
+                    )
+                    | None => PostAttemptError::Fatal(error),
                 })?;
         let status = response.status;
         if status != 200 {
