@@ -590,6 +590,151 @@ enum PostAttemptError {
     Fatal(anyhow::Error),
 }
 
+/// A CDN reply that arrived with HTTP 200 but was empty or could not be parsed.
+/// The session retries it like a dropped connection: the CDN answers a repeated
+/// request, including an already accepted large-file block, with the same reply.
+#[derive(Clone, Copy, Debug)]
+struct UnreadableCdnReply {
+    empty: bool,
+}
+
+impl fmt::Display for UnreadableCdnReply {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(if self.empty {
+            "Empty CDN reply"
+        } else {
+            "Unreadable CDN reply"
+        })
+    }
+}
+
+impl std::error::Error for UnreadableCdnReply {}
+
+/// Decode a CDN reply body that arrived with HTTP 200.
+fn decode_cdn_reply(raw: &[u8]) -> std::result::Result<CdnFields, PostAttemptError> {
+    if raw.len() > MAX_CDN_BODY {
+        return Err(PostAttemptError::Fatal(anyhow::anyhow!(
+            "CDN reply exceeds limit"
+        )));
+    }
+    if raw.is_empty() {
+        return Err(PostAttemptError::Retryable {
+            error: anyhow::Error::new(UnreadableCdnReply { empty: true }),
+            prefer_failover: false,
+        });
+    }
+    unpack_cdn(raw).map_err(|error| PostAttemptError::Retryable {
+        error: error.context(UnreadableCdnReply { empty: false }),
+        prefer_failover: false,
+    })
+}
+
+/// Where a large-file CDN upload stopped and why. It is attached to the upload's
+/// error and holds only fixed values: no server text, addresses, keys or file data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LargeFileUploadFailure {
+    /// The request that failed: `apply`, `uploadblock`, `fin` or `complete`.
+    pub phase: &'static str,
+    /// Zero-based index of the block, for `uploadblock`.
+    pub block: Option<u32>,
+    /// HTTP attempts made for the request that failed, including retries. Zero
+    /// when the upload stopped outside a request.
+    pub attempts: u32,
+    /// Why the upload stopped.
+    pub cause: LargeFileUploadCause,
+}
+
+impl fmt::Display for LargeFileUploadFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Large-file upload stopped at {}", self.phase)?;
+        if let Some(block) = self.block {
+            write!(f, " block {block}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for LargeFileUploadFailure {}
+
+impl LargeFileUploadFailure {
+    /// Find this failure anywhere in an error and its causes.
+    pub fn find(error: &anyhow::Error) -> Option<&Self> {
+        crate::errors::find(error)
+    }
+}
+
+/// Why a large-file CDN upload stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LargeFileUploadCause {
+    /// The CDN answered with a nonzero `retcode`.
+    ServiceRejected,
+    /// The CDN asked for a retry, back-off or new route, which this client does not follow.
+    RoutingControl,
+    /// A reply parsed but did not match its request: sequence, version, offset or a missing field.
+    ReplyInvalid,
+    /// Replies stayed empty or unparseable after the session's retries.
+    ReplyUnreadable,
+    /// The CDN answered with an HTTP error status.
+    HttpStatus,
+    /// The connection failed or timed out after the session's retries.
+    Transport,
+    /// The upload stopped locally: cancellation, logout, a changed source or a local error.
+    Local,
+}
+
+impl LargeFileUploadCause {
+    /// Fixed snake_case name, as shown in job diagnostics.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ServiceRejected => "service_rejected",
+            Self::RoutingControl => "routing_control",
+            Self::ReplyInvalid => "reply_invalid",
+            Self::ReplyUnreadable => "reply_unreadable",
+            Self::HttpStatus => "http_status",
+            Self::Transport => "transport",
+            Self::Local => "local",
+        }
+    }
+}
+
+/// A CDN request the session gave up on, with the attempts it made. Used by the
+/// large-file upload to say where and why it stopped.
+pub(crate) struct CdnPostFailure {
+    pub(crate) error: anyhow::Error,
+    pub(crate) attempts: u32,
+    pub(crate) cause: LargeFileUploadCause,
+}
+
+impl CdnPostFailure {
+    /// A failure before any request was sent, or while waiting between attempts.
+    fn local(error: anyhow::Error, attempts: u32) -> Self {
+        Self {
+            error,
+            attempts,
+            cause: LargeFileUploadCause::Local,
+        }
+    }
+
+    /// A failure returned by an HTTP attempt.
+    fn attempt(error: anyhow::Error, attempts: u32) -> Self {
+        let cause = if crate::errors::find::<UnreadableCdnReply>(&error).is_some() {
+            LargeFileUploadCause::ReplyUnreadable
+        } else if error
+            .chain()
+            .any(|cause| cause.to_string().starts_with("CDN HTTP status "))
+        {
+            LargeFileUploadCause::HttpStatus
+        } else {
+            LargeFileUploadCause::Transport
+        };
+        Self {
+            error,
+            attempts,
+            cause,
+        }
+    }
+}
+
 fn is_retryable_http_status(status: u16) -> bool {
     matches!(status, 408 | 429 | 500..=599)
 }
@@ -711,7 +856,7 @@ impl<'a> CdnSession<'a> {
                 error: anyhow::Error::new(error).context("CDN connection read failed"),
                 prefer_failover: false,
             })?;
-        unpack_cdn(&raw).map_err(PostAttemptError::Fatal)
+        decode_cdn_reply(&raw)
     }
 
     pub(crate) fn post(
@@ -720,28 +865,38 @@ impl<'a> CdnSession<'a> {
         fields: &CdnFields,
         check_fence: &mut dyn FnMut() -> Result<()>,
     ) -> Result<CdnFields> {
-        let sequence = u32::try_from(integer(fields, "seq")?)?;
-        ensure!(sequence != 0, "Invalid CDN sequence");
-        ensure!(
-            ["/download", "/downloadbig", "/downloadstorage", "/uploadv3"].contains(&path)
-                || large_file_path(path, self.client.config.uin, sequence),
-            "Invalid CDN path"
-        );
-        ensure!(!self.endpoints.is_empty(), "Invalid CDN config");
-        let body = pack_cdn(fields)?;
+        self.post_counted(path, fields, check_fence)
+            .map(|(reply, _)| reply)
+            .map_err(|failure| failure.error)
+    }
+
+    /// [`Self::post`], also returning how many HTTP attempts the request took and,
+    /// on failure, why the session gave up.
+    pub(crate) fn post_counted(
+        &mut self,
+        path: &str,
+        fields: &CdnFields,
+        check_fence: &mut dyn FnMut() -> Result<()>,
+    ) -> std::result::Result<(CdnFields, u32), CdnPostFailure> {
+        let (sequence, body) = self
+            .request_body(path, fields)
+            .map_err(|error| CdnPostFailure::local(error, 0))?;
         let mut ip_index = self.current_ip % self.endpoints.len();
         let mut retried_same_ip = false;
         let max_attempts = self.policy.backoffs.len() + 1;
         for attempt in 0..max_attempts {
+            let attempts = attempt as u32 + 1;
             let endpoint = self.endpoints[ip_index];
             match self.post_once(endpoint, path, sequence, &body) {
                 Ok(reply) => {
                     self.current_ip = ip_index;
                     self.had_success_on_current_ip = true;
                     self.client.preferred_ip.store(ip_index, Ordering::Relaxed);
-                    return Ok(reply);
+                    return Ok((reply, attempts));
                 }
-                Err(PostAttemptError::Fatal(error)) => return Err(error),
+                Err(PostAttemptError::Fatal(error)) => {
+                    return Err(CdnPostFailure::attempt(error, attempts))
+                }
                 Err(PostAttemptError::Retryable {
                     error,
                     prefer_failover,
@@ -750,7 +905,7 @@ impl<'a> CdnSession<'a> {
                     // keep-alive connection is never reused.
                     self.http = None;
                     let Some(&delay) = self.policy.backoffs.get(attempt) else {
-                        return Err(error);
+                        return Err(CdnPostFailure::attempt(error, attempts));
                     };
                     let retry_same_ip =
                         !prefer_failover && self.had_success_on_current_ip && !retried_same_ip;
@@ -762,11 +917,26 @@ impl<'a> CdnSession<'a> {
                         self.had_success_on_current_ip = false;
                         retried_same_ip = false;
                     }
-                    sleep_with_fence(delay, self.policy.sleep_slice, check_fence)?;
+                    sleep_with_fence(delay, self.policy.sleep_slice, check_fence)
+                        .map_err(|error| CdnPostFailure::local(error, attempts))?;
                 }
             }
         }
         unreachable!("max_attempts is always at least 1")
+    }
+
+    /// Check a request's sequence and path and encode its body. The same bytes are
+    /// sent on every attempt: the CDN accepts a repeated request only unchanged.
+    fn request_body(&self, path: &str, fields: &CdnFields) -> Result<(u32, Vec<u8>)> {
+        let sequence = u32::try_from(integer(fields, "seq")?)?;
+        ensure!(sequence != 0, "Invalid CDN sequence");
+        ensure!(
+            ["/download", "/downloadbig", "/downloadstorage", "/uploadv3"].contains(&path)
+                || large_file_path(path, self.client.config.uin, sequence),
+            "Invalid CDN path"
+        );
+        ensure!(!self.endpoints.is_empty(), "Invalid CDN config");
+        Ok((sequence, pack_cdn(fields)?))
     }
 }
 
@@ -875,48 +1045,54 @@ impl<'a> AsyncCdnSession<'a> {
                 Err(PostAttemptError::Fatal(error))
             };
         }
-        if response.body.len() > MAX_CDN_BODY {
-            return Err(PostAttemptError::Fatal(anyhow::anyhow!(
-                "CDN reply exceeds limit"
-            )));
-        }
-        unpack_cdn(&response.body).map_err(PostAttemptError::Fatal)
+        decode_cdn_reply(&response.body)
     }
 
     pub(crate) async fn post(
         &mut self,
         path: &str,
         fields: &CdnFields,
-        mut check_fence: impl FnMut() -> Result<()>,
+        check_fence: impl FnMut() -> Result<()>,
     ) -> Result<CdnFields> {
-        let sequence = u32::try_from(integer(fields, "seq")?)?;
-        ensure!(sequence != 0, "Invalid CDN sequence");
-        ensure!(
-            ["/download", "/downloadbig", "/downloadstorage", "/uploadv3"].contains(&path)
-                || large_file_path(path, self.client.config.uin, sequence),
-            "Invalid CDN path"
-        );
-        ensure!(!self.endpoints.is_empty(), "Invalid CDN config");
-        let body = pack_cdn(fields)?;
+        self.post_counted(path, fields, check_fence)
+            .await
+            .map(|(reply, _)| reply)
+            .map_err(|failure| failure.error)
+    }
+
+    /// [`Self::post`], also returning how many HTTP attempts the request took and,
+    /// on failure, why the session gave up.
+    pub(crate) async fn post_counted(
+        &mut self,
+        path: &str,
+        fields: &CdnFields,
+        mut check_fence: impl FnMut() -> Result<()>,
+    ) -> std::result::Result<(CdnFields, u32), CdnPostFailure> {
+        let (sequence, body) = self
+            .request_body(path, fields)
+            .map_err(|error| CdnPostFailure::local(error, 0))?;
         let mut ip_index = self.current_ip % self.endpoints.len();
         let mut retried_same_ip = false;
         let max_attempts = self.policy.backoffs.len() + 1;
         for attempt in 0..max_attempts {
+            let attempts = attempt as u32 + 1;
             let ip = self.endpoints[ip_index];
             match self.post_once(ip, path, sequence, &body).await {
                 Ok(reply) => {
                     self.current_ip = ip_index;
                     self.had_success_on_current_ip = true;
                     self.client.preferred_ip.store(ip_index, Ordering::Relaxed);
-                    return Ok(reply);
+                    return Ok((reply, attempts));
                 }
-                Err(PostAttemptError::Fatal(error)) => return Err(error),
+                Err(PostAttemptError::Fatal(error)) => {
+                    return Err(CdnPostFailure::attempt(error, attempts))
+                }
                 Err(PostAttemptError::Retryable {
                     error,
                     prefer_failover,
                 }) => {
                     let Some(&delay) = self.policy.backoffs.get(attempt) else {
-                        return Err(error);
+                        return Err(CdnPostFailure::attempt(error, attempts));
                     };
                     let retry_same_ip =
                         !prefer_failover && self.had_success_on_current_ip && !retried_same_ip;
@@ -934,11 +1110,26 @@ impl<'a> AsyncCdnSession<'a> {
                         self.policy.sleep_slice,
                         &mut check_fence,
                     )
-                    .await?;
+                    .await
+                    .map_err(|error| CdnPostFailure::local(error, attempts))?;
                 }
             }
         }
         unreachable!("max_attempts is always at least 1")
+    }
+
+    /// Check a request's sequence and path and encode its body. The same bytes are
+    /// sent on every attempt: the CDN accepts a repeated request only unchanged.
+    fn request_body(&self, path: &str, fields: &CdnFields) -> Result<(u32, Vec<u8>)> {
+        let sequence = u32::try_from(integer(fields, "seq")?)?;
+        ensure!(sequence != 0, "Invalid CDN sequence");
+        ensure!(
+            ["/download", "/downloadbig", "/downloadstorage", "/uploadv3"].contains(&path)
+                || large_file_path(path, self.client.config.uin, sequence),
+            "Invalid CDN path"
+        );
+        ensure!(!self.endpoints.is_empty(), "Invalid CDN config");
+        Ok((sequence, pack_cdn(fields)?))
     }
 }
 
@@ -4614,10 +4805,15 @@ mod tests {
     };
 
     pub(super) enum MockCdnAction {
-        Ok { reply: CdnFields, close: bool },
+        Ok {
+            reply: CdnFields,
+            close: bool,
+        },
         Status(u16),
         DropBeforeResponse,
         TruncateMidBody,
+        /// HTTP 200 with this exact body, keeping the connection open.
+        Raw(Vec<u8>),
     }
 
     pub(super) struct MockCdnServer {
@@ -4739,6 +4935,18 @@ mod tests {
                                 MockCdnAction::DropBeforeResponse => {
                                     let _ = writer.shutdown(std::net::Shutdown::Both);
                                     break;
+                                }
+                                MockCdnAction::Raw(payload) => {
+                                    let header = format!(
+                                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+                                        payload.len()
+                                    );
+                                    if writer.write_all(header.as_bytes()).is_err()
+                                        || writer.write_all(&payload).is_err()
+                                        || writer.flush().is_err()
+                                    {
+                                        break;
+                                    }
                                 }
                                 MockCdnAction::TruncateMidBody => {
                                     let header =
