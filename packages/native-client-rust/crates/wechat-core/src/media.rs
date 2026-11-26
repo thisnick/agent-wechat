@@ -2937,14 +2937,15 @@ fn cdn_download_failure(error: &anyhow::Error) -> Option<serde_json::Value> {
         }
     })
 }
-/// Where a large-file CDN upload stopped: request, block, attempts and a fixed
-/// cause. No server text, addresses, keys or file data.
+/// Where a large-file CDN upload stopped: request, block, attempts, server
+/// retries and a fixed cause. No server text, addresses, keys or file data.
 fn cdn_upload_failure(error: &anyhow::Error) -> Option<serde_json::Value> {
     let failure = wechat_protocol::media::LargeFileUploadFailure::find(error)?;
     Some(json!({
         "phase": failure.phase,
         "block": failure.block,
         "attempts": failure.attempts,
+        "serverRetries": failure.server_retries,
         "cause": failure.cause.as_str(),
     }))
 }
@@ -7719,6 +7720,7 @@ mod tests {
                 phase: "uploadblock",
                 block: Some(2),
                 attempts: 1,
+                server_retries: 3,
                 cause: wechat_protocol::media::LargeFileUploadCause::ServiceRejected,
             });
         assert_eq!(
@@ -7732,6 +7734,7 @@ mod tests {
                 "phase": "uploadblock",
                 "block": 2,
                 "attempts": 1,
+                "serverRetries": 3,
                 "cause": "service_rejected",
             }))
         );
@@ -7741,6 +7744,7 @@ mod tests {
                 phase: "uploadblock",
                 block: Some(7),
                 attempts: 5,
+                server_retries: 0,
                 cause: wechat_protocol::media::LargeFileUploadCause::Transport,
             },
         );

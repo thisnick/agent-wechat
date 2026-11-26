@@ -591,8 +591,10 @@ enum PostAttemptError {
 }
 
 /// A CDN reply that arrived with HTTP 200 but was empty or could not be parsed.
-/// The session retries it like a dropped connection: the CDN answers a repeated
-/// request, including an already accepted large-file block, with the same reply.
+/// Every CDN session retries it like a dropped connection. A download range is a
+/// read, `/uploadv3` chunks are already resent after a drop, and the CDN answers a
+/// repeated large-file request, even an already accepted block, with the same
+/// reply; the official client also retries such replies.
 #[derive(Clone, Copy, Debug)]
 struct UnreadableCdnReply {
     empty: bool,
@@ -637,9 +639,11 @@ pub struct LargeFileUploadFailure {
     pub phase: &'static str,
     /// Zero-based index of the block, for `uploadblock`.
     pub block: Option<u32>,
-    /// HTTP attempts made for the request that failed, including retries. Zero
-    /// when the upload stopped outside a request.
+    /// HTTP attempts made for the request that failed, including the session's
+    /// resends of that request. Zero when the upload stopped outside a request.
     pub attempts: u32,
+    /// CDN errors retried with a new request during the upload before it stopped.
+    pub server_retries: u32,
     /// Why the upload stopped.
     pub cause: LargeFileUploadCause,
 }
@@ -731,6 +735,26 @@ impl CdnPostFailure {
             cause,
         }
     }
+}
+
+/// Check a request's sequence and path and encode its body. A session sends the
+/// same bytes on every attempt: the CDN answers a repeated request only when it
+/// is unchanged.
+fn cdn_request_body<E>(
+    path: &str,
+    fields: &CdnFields,
+    uin: u64,
+    endpoints: &[E],
+) -> Result<(u32, Vec<u8>)> {
+    let sequence = u32::try_from(integer(fields, "seq")?)?;
+    ensure!(sequence != 0, "Invalid CDN sequence");
+    ensure!(
+        ["/download", "/downloadbig", "/downloadstorage", "/uploadv3"].contains(&path)
+            || large_file_path(path, uin, sequence),
+        "Invalid CDN path"
+    );
+    ensure!(!endpoints.is_empty(), "Invalid CDN config");
+    Ok((sequence, pack_cdn(fields)?))
 }
 
 fn is_retryable_http_status(status: u16) -> bool {
@@ -876,9 +900,9 @@ impl<'a> CdnSession<'a> {
         fields: &CdnFields,
         check_fence: &mut dyn FnMut() -> Result<()>,
     ) -> std::result::Result<(CdnFields, u32), CdnPostFailure> {
-        let (sequence, body) = self
-            .request_body(path, fields)
-            .map_err(|error| CdnPostFailure::local(error, 0))?;
+        let (sequence, body) =
+            cdn_request_body(path, fields, self.client.config.uin, &self.endpoints)
+                .map_err(|error| CdnPostFailure::local(error, 0))?;
         let mut ip_index = self.current_ip % self.endpoints.len();
         let mut retried_same_ip = false;
         let max_attempts = self.policy.backoffs.len() + 1;
@@ -921,20 +945,6 @@ impl<'a> CdnSession<'a> {
             }
         }
         unreachable!("max_attempts is always at least 1")
-    }
-
-    /// Check a request's sequence and path and encode its body. The same bytes are
-    /// sent on every attempt: the CDN accepts a repeated request only unchanged.
-    fn request_body(&self, path: &str, fields: &CdnFields) -> Result<(u32, Vec<u8>)> {
-        let sequence = u32::try_from(integer(fields, "seq")?)?;
-        ensure!(sequence != 0, "Invalid CDN sequence");
-        ensure!(
-            ["/download", "/downloadbig", "/downloadstorage", "/uploadv3"].contains(&path)
-                || large_file_path(path, self.client.config.uin, sequence),
-            "Invalid CDN path"
-        );
-        ensure!(!self.endpoints.is_empty(), "Invalid CDN config");
-        Ok((sequence, pack_cdn(fields)?))
     }
 
     /// Move to the next CDN address on a new connection, as the official client
@@ -1090,9 +1100,9 @@ impl<'a> AsyncCdnSession<'a> {
         fields: &CdnFields,
         mut check_fence: impl FnMut() -> Result<()>,
     ) -> std::result::Result<(CdnFields, u32), CdnPostFailure> {
-        let (sequence, body) = self
-            .request_body(path, fields)
-            .map_err(|error| CdnPostFailure::local(error, 0))?;
+        let (sequence, body) =
+            cdn_request_body(path, fields, self.client.config.uin, &self.endpoints)
+                .map_err(|error| CdnPostFailure::local(error, 0))?;
         let mut ip_index = self.current_ip % self.endpoints.len();
         let mut retried_same_ip = false;
         let max_attempts = self.policy.backoffs.len() + 1;
@@ -1138,20 +1148,6 @@ impl<'a> AsyncCdnSession<'a> {
             }
         }
         unreachable!("max_attempts is always at least 1")
-    }
-
-    /// Check a request's sequence and path and encode its body. The same bytes are
-    /// sent on every attempt: the CDN accepts a repeated request only unchanged.
-    fn request_body(&self, path: &str, fields: &CdnFields) -> Result<(u32, Vec<u8>)> {
-        let sequence = u32::try_from(integer(fields, "seq")?)?;
-        ensure!(sequence != 0, "Invalid CDN sequence");
-        ensure!(
-            ["/download", "/downloadbig", "/downloadstorage", "/uploadv3"].contains(&path)
-                || large_file_path(path, self.client.config.uin, sequence),
-            "Invalid CDN path"
-        );
-        ensure!(!self.endpoints.is_empty(), "Invalid CDN config");
-        Ok((sequence, pack_cdn(fields)?))
     }
 
     /// Move to the next CDN address, as the official client does after a server

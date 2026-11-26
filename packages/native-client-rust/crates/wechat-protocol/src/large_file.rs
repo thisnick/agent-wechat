@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::atomic::{AtomicU32, AtomicU64};
 
 const MAX_UPLOAD_TOKEN_BYTES: usize = 65536;
 const BLOCKS_PER_GROUP: usize = 128;
@@ -304,22 +305,29 @@ const RETRYABLE_SERVER_CODES: [i32; 8] = [
     -5_103_217, // ResumeTooOldData
     -5_202_163,
 ];
+/// Of those, the codes the official client retries at once.
+const FAST_RETRY_CODES: [i32; 7] = [
+    -5_103_179, -5_103_202, -5_103_205, -5_103_211, -5_103_215, -5_103_216, -5_103_217,
+];
 /// Server errors retried during one upload, as in the official client.
 const MAX_SERVER_RETRIES: u32 = 8;
-/// Wait before retrying a server error the official client does not retry at
-/// once, when the reply gives no `retrysec`.
-const SERVER_RETRY_DELAY: Duration = Duration::from_secs(1);
+/// Waits, in seconds, before retry 1 to 8 of other codes when the reply gives no
+/// usable `retrysec`: the start of the official client's backoff table.
+const SERVER_RETRY_BACKOFF_SECS: [u64; MAX_SERVER_RETRIES as usize] = [0, 1, 1, 1, 3, 3, 3, 6];
+/// Most time one upload waits between server retries in total: the official
+/// client's limit for a whole large-file transfer.
+const MAX_SERVER_RETRY_WAIT: Duration = Duration::from_secs(900);
 
 /// Whether and when to retry a large-file request the CDN rejected, following
-/// the official client: `isretry` decides when present, otherwise the code does,
-/// and a `retrysec` below 900 sets the wait. The retry uses a new sequence number
-/// on the next CDN address and is otherwise unchanged.
-fn server_retry_delay(reply: &CdnFields, code: i32) -> Option<Duration> {
-    let retry = match reply.get("isretry") {
+/// the official client: `isretry` decides when present, otherwise the code does.
+/// A `retrysec` below 900 sets the wait; otherwise some codes are retried at once
+/// and the rest back off. `retry` counts the server retries already made.
+fn server_retry_delay(reply: &CdnFields, code: i32, retry: u32) -> Option<Duration> {
+    let retryable = match reply.get("isretry") {
         Some(_) => integer(reply, "isretry").ok()? != 0,
         None => RETRYABLE_SERVER_CODES.contains(&code),
     };
-    if !retry {
+    if !retryable {
         return None;
     }
     if let Ok(seconds) = integer(reply, "retrysec") {
@@ -327,11 +335,41 @@ fn server_retry_delay(reply: &CdnFields, code: i32) -> Option<Duration> {
             return Some(Duration::from_secs(seconds as u64));
         }
     }
-    Some(if code == -5_202_163 {
-        SERVER_RETRY_DELAY
-    } else {
-        Duration::ZERO
-    })
+    if FAST_RETRY_CODES.contains(&code) {
+        return Some(Duration::ZERO);
+    }
+    let index = (retry as usize).min(SERVER_RETRY_BACKOFF_SECS.len() - 1);
+    Some(Duration::from_secs(SERVER_RETRY_BACKOFF_SECS[index]))
+}
+
+/// The server-error retries of one upload, bounded like the official client's.
+/// A retry resends the rejected request with a new sequence number on the next
+/// CDN address and is otherwise unchanged.
+#[derive(Default)]
+struct ServerRetries {
+    count: AtomicU32,
+    waited_ms: AtomicU64,
+}
+
+impl ServerRetries {
+    /// The wait before retrying a request the CDN rejected, or `None` to stop.
+    fn next(&self, reply: &CdnFields, error: &anyhow::Error) -> Option<Duration> {
+        let code = ServiceRejected::find(error)?.code;
+        let count = self.count();
+        let delay = server_retry_delay(reply, code, count)?;
+        let waited_ms = self.waited_ms.load(Ordering::Relaxed) + delay.as_millis() as u64;
+        if count >= MAX_SERVER_RETRIES || waited_ms > MAX_SERVER_RETRY_WAIT.as_millis() as u64 {
+            return None;
+        }
+        self.count.store(count + 1, Ordering::Relaxed);
+        self.waited_ms.store(waited_ms, Ordering::Relaxed);
+        Some(delay)
+    }
+
+    /// Server errors retried so far.
+    fn count(&self) -> u32 {
+        self.count.load(Ordering::Relaxed)
+    }
 }
 
 /// A large-file request's reply and the HTTP attempts it took, or why it failed.
@@ -340,14 +378,19 @@ type CountedPost = std::result::Result<(CdnFields, u32), CdnPostFailure>;
 
 /// One request of a large-file upload, used to say where the upload stopped.
 #[derive(Clone, Copy)]
-struct Step {
+struct Step<'r> {
     phase: &'static str,
     block: Option<usize>,
+    retries: &'r ServerRetries,
 }
 
-impl Step {
-    fn new(phase: &'static str, block: Option<usize>) -> Self {
-        Self { phase, block }
+impl<'r> Step<'r> {
+    fn new(phase: &'static str, block: Option<usize>, retries: &'r ServerRetries) -> Self {
+        Self {
+            phase,
+            block,
+            retries,
+        }
     }
 
     /// Attach where and why the upload stopped. An error that already says where
@@ -370,6 +413,7 @@ impl Step {
             phase: self.phase,
             block: self.block.and_then(|block| u32::try_from(block).ok()),
             attempts,
+            server_retries: self.retries.count(),
             cause,
         })
     }
@@ -553,13 +597,13 @@ fn upload_large_file(
 ) -> Result<UploadedMedia> {
     let total = validate_large_file_inputs(conf, prepared, task_id)?;
     let mut sequence = 0u32;
-    let mut server_retries = 0u32;
-    // Protocol rejections and unexpected controls are never retried. The session
-    // retries transient HTTP/TCP failures and unreadable replies by resending the
-    // same bytes, which the CDN answers with the same reply, even for a block it
-    // already accepted. Changing `retrycnt` on a resend is rejected (-5103015).
-    // A failed upload leaves the caller's persisted source/key material intact
-    // and never submits a business message.
+    let retries = ServerRetries::default();
+    // The session retries transient HTTP/TCP failures and unreadable replies by
+    // resending the same bytes, which the CDN answers with the same reply, even
+    // for a block it already accepted; changing `retrycnt` on such a resend is
+    // rejected (-5103015). A rejected reply is retried only as `ServerRetries`
+    // allows. A failed upload leaves the caller's persisted source/key material
+    // intact and never submits a business message.
     let mut exchange =
         |step: Step,
          extra: CdnFields,
@@ -584,21 +628,16 @@ fn upload_large_file(
                 let Err(error) = validate_reply(&reply, sequence, conf.version) else {
                     return Ok::<_, anyhow::Error>((reply, attempts));
                 };
-                let delay = ServiceRejected::find(&error)
-                    .and_then(|rejected| server_retry_delay(&reply, rejected.code));
-                match delay {
-                    Some(delay) if server_retries < MAX_SERVER_RETRIES => {
-                        server_retries += 1;
-                        sleep_with_fence(delay, CDN_RETRY_SLEEP_SLICE, &mut fence)
-                            .map_err(|error| step.local(error))?;
-                        switch_endpoint = true;
-                    }
-                    _ => return Err(step.reply(error, attempts)),
-                }
+                let Some(delay) = retries.next(&reply, &error) else {
+                    return Err(step.reply(error, attempts));
+                };
+                sleep_with_fence(delay, CDN_RETRY_SLEEP_SLICE, &mut fence)
+                    .map_err(|error| step.local(error))?;
+                switch_endpoint = true;
             }
         };
 
-    let step = Step::new("apply", None);
+    let step = Step::new("apply", None, &retries);
     let apply = apply_fields(prepared, total)?;
     let (reply, attempts) = exchange(step, apply, 0, &mut progress)?;
     let (block_size, upinfo) =
@@ -613,7 +652,7 @@ fn upload_large_file(
     let mut chunks = prepared.chunks();
     let mut index = 0usize;
     while (chunks.position() as u64) < total {
-        let step = Step::new("uploadblock", Some(index));
+        let step = Step::new("uploadblock", Some(index), &retries);
         let chunk = chunks.next(block_size).map_err(|error| step.local(error))?;
         let fields = upload_block_fields(acknowledged, index, &upinfo, &chunk);
         let (reply, attempts) = exchange(step, fields, acknowledged, &mut progress)?;
@@ -624,9 +663,12 @@ fn upload_large_file(
         index += 1;
         progress(acknowledged, Some(total)).map_err(|error| step.local(error))?;
     }
-    ensure!(acknowledged == total, "Incomplete large-file upload");
+    if acknowledged != total {
+        let step = Step::new("uploadblock", Some(index), &retries);
+        return Err(step.local(anyhow::anyhow!("Incomplete large-file upload")));
+    }
 
-    let step = Step::new("fin", None);
+    let step = Step::new("fin", None, &retries);
     let (reply, attempts) = exchange(
         step,
         finish_fields(upinfo, etags),
@@ -636,7 +678,7 @@ fn upload_large_file(
     let finished_upinfo = opaque_field(&reply, "upinfo", MAX_UPLOAD_TOKEN_BYTES)
         .map_err(|error| step.reply(error, attempts))?;
     progress(acknowledged, Some(total)).map_err(|error| step.local(error))?;
-    let step = Step::new("complete", None);
+    let step = Step::new("complete", None, &retries);
     let (reply, attempts) = exchange(
         step,
         complete_fields(prepared, finished_upinfo),
@@ -655,14 +697,14 @@ struct LargeFileExchange<'a, 's, 't> {
     task_id: u64,
     total: u64,
     sequence: u32,
-    server_retries: u32,
+    retries: &'a ServerRetries,
     session: &'s mut AsyncCdnSession<'t>,
 }
 
 impl LargeFileExchange<'_, '_, '_> {
     async fn send(
         &mut self,
-        step: Step,
+        step: Step<'_>,
         extra: CdnFields,
         acknowledged: u64,
         progress: &mut impl FnMut(u64, Option<u64>) -> Result<()>,
@@ -689,19 +731,14 @@ impl LargeFileExchange<'_, '_, '_> {
             let Err(error) = validate_reply(&reply, seq, self.conf.version) else {
                 return Ok((reply, attempts));
             };
-            let delay = ServiceRejected::find(&error)
-                .and_then(|rejected| server_retry_delay(&reply, rejected.code));
-            match delay {
-                Some(delay) if self.server_retries < MAX_SERVER_RETRIES => {
-                    self.server_retries += 1;
-                    self.session
-                        .wait(delay, &mut || progress(acknowledged, Some(total)))
-                        .await
-                        .map_err(|error| step.local(error))?;
-                    self.session.switch_endpoint();
-                }
-                _ => return Err(step.reply(error, attempts)),
-            }
+            let Some(delay) = self.retries.next(&reply, &error) else {
+                return Err(step.reply(error, attempts));
+            };
+            self.session
+                .wait(delay, &mut || progress(acknowledged, Some(total)))
+                .await
+                .map_err(|error| step.local(error))?;
+            self.session.switch_endpoint();
         }
     }
 }
@@ -714,17 +751,18 @@ async fn upload_large_file_async(
     mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
 ) -> Result<UploadedMedia> {
     let total = validate_large_file_inputs(conf, prepared, task_id)?;
+    let retries = ServerRetries::default();
     let mut exchange = LargeFileExchange {
         conf,
         prepared,
         task_id,
         total,
         sequence: 0,
-        server_retries: 0,
+        retries: &retries,
         session,
     };
 
-    let step = Step::new("apply", None);
+    let step = Step::new("apply", None, &retries);
     let apply = apply_fields(prepared, total)?;
     let (reply, attempts) = exchange.send(step, apply, 0, &mut progress).await?;
     let (block_size, upinfo) =
@@ -736,7 +774,7 @@ async fn upload_large_file_async(
     let mut chunks = prepared.chunks();
     let mut index = 0usize;
     while (chunks.position() as u64) < total {
-        let step = Step::new("uploadblock", Some(index));
+        let step = Step::new("uploadblock", Some(index), &retries);
         let chunk = chunks
             .next_async(block_size)
             .await
@@ -752,9 +790,12 @@ async fn upload_large_file_async(
         index += 1;
         progress(acknowledged, Some(total)).map_err(|error| step.local(error))?;
     }
-    ensure!(acknowledged == total, "Incomplete large-file upload");
+    if acknowledged != total {
+        let step = Step::new("uploadblock", Some(index), &retries);
+        return Err(step.local(anyhow::anyhow!("Incomplete large-file upload")));
+    }
 
-    let step = Step::new("fin", None);
+    let step = Step::new("fin", None, &retries);
     let (reply, attempts) = exchange
         .send(
             step,
@@ -766,7 +807,7 @@ async fn upload_large_file_async(
     let finished_upinfo = opaque_field(&reply, "upinfo", MAX_UPLOAD_TOKEN_BYTES)
         .map_err(|error| step.reply(error, attempts))?;
     progress(acknowledged, Some(total)).map_err(|error| step.local(error))?;
-    let step = Step::new("complete", None);
+    let step = Step::new("complete", None, &retries);
     let (reply, attempts) = exchange
         .send(
             step,
@@ -1589,6 +1630,7 @@ mod tests {
                 phase: "uploadblock",
                 block: Some(0),
                 attempts: 1,
+                server_retries: MAX_SERVER_RETRIES,
                 cause: LargeFileUploadCause::ServiceRejected,
             })
         );
@@ -1601,17 +1643,45 @@ mod tests {
         put(&mut reply, "isretry", 1);
         put(&mut reply, "retrysec", 7);
         assert_eq!(
-            server_retry_delay(&reply, -5103015),
+            server_retry_delay(&reply, -5103015, 0),
             Some(Duration::from_secs(7))
         );
+        // Without a usable retrysec: fast codes at once, others back off.
         put(&mut reply, "retrysec", 900);
-        assert_eq!(server_retry_delay(&reply, -5103202), Some(Duration::ZERO));
         assert_eq!(
-            server_retry_delay(&reply, -5202163),
-            Some(SERVER_RETRY_DELAY)
+            server_retry_delay(&reply, -5103202, 3),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            server_retry_delay(&reply, -5202163, 0),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            server_retry_delay(&reply, -5202163, 4),
+            Some(Duration::from_secs(3))
+        );
+        assert_eq!(
+            server_retry_delay(&reply, -5103015, 20),
+            Some(Duration::from_secs(6))
         );
         put(&mut reply, "isretry", 0);
-        assert_eq!(server_retry_delay(&reply, -5103202), None);
+        assert_eq!(server_retry_delay(&reply, -5103202, 0), None);
+
+        // The waits of one upload stay within the official transfer limit.
+        let rejected = anyhow::Error::new(ServiceRejected::new(Service::LargeFileUpload, -5103202));
+        put(&mut reply, "isretry", 1);
+        put(&mut reply, "retrysec", 600);
+        let retries = ServerRetries::default();
+        assert_eq!(
+            retries.next(&reply, &rejected),
+            Some(Duration::from_secs(600))
+        );
+        assert_eq!(
+            retries.next(&reply, &rejected),
+            None,
+            "1200 s would exceed 900 s"
+        );
+        assert_eq!(retries.count(), 1);
 
         // A cancellation during the wait stops at once, without another request.
         let mut peer = Peer::new(memory, 1024 * 1024);
@@ -1696,6 +1766,7 @@ mod tests {
                     phase: "uploadblock",
                     block: Some(0),
                     attempts: 1,
+                    server_retries: 0,
                     cause: LargeFileUploadCause::ReplyInvalid,
                 }),
                 "{bad}"
@@ -1729,6 +1800,7 @@ mod tests {
                 phase: "uploadblock",
                 block: Some(2),
                 attempts: 1,
+                server_retries: 0,
                 cause: LargeFileUploadCause::ServiceRejected,
             })
         );
@@ -2014,6 +2086,7 @@ mod tests {
                 phase: "uploadblock",
                 block: Some(1),
                 attempts: ZERO_BACKOFFS.len() as u32 + 1,
+                server_retries: 0,
                 cause: LargeFileUploadCause::ReplyUnreadable,
             })
         );
