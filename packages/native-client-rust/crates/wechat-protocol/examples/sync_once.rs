@@ -7,7 +7,7 @@ async fn main() -> anyhow::Result<()> {
         println!("sync_once: approve a test-account QR login and summarize one initial sync page.");
         return Ok(());
     }
-    let client = tokio::task::spawn_blocking(support::login).await??;
+    let client = support::login().await?;
     let identity = client.account_identity()?;
     let batch = client.sync(&[]).await?;
     let mut messages = 0;

@@ -15,7 +15,7 @@ The crate-level Functions list mainly contains helper functions.
 
 | Task | API |
 | --- | --- |
-| Login | `start_qr_login`, `poll_login`, `complete_login` (or `*_async` with `with_transport`) |
+| Login | `start_qr_login_async`, `poll_login_async` / `poll_login_guarded_async`, `complete_login_async` with `with_transport(options, ProtocolTransport::native()?)` (blocking `start_qr_login`, `poll_login`, `complete_login` remain for 3.x) |
 | Receive | `sync`, `sync_scene`, `heartbeat`, `open_push_connection` / `open_push_connection_blocking` |
 | Send | `send_text`, `send_share`, `send_quote`, `send_file`, `send_image`, `send_video`, `send_voice` |
 | Contacts | `lookup_contacts`, `lookup_openim_contact`, `lookup_room`, `init_contacts` |
@@ -92,6 +92,12 @@ targets, add `getrandom = { version = "0.4", features = ["wasm_js"] }` and
 `RUSTFLAGS='--cfg getrandom_backend="wasm_js"'`; for custom runtimes, use
 `RUSTFLAGS='--cfg getrandom_backend="custom"'`).
 
+`request(async |request| ...)` runs one scoped operation (an
+`AsyncAccountRequest`) on the configured transport. Whatever the operation
+returned is visible inside the closure before the account update commits, so a
+verified reply survives a later commit failure such as `AccountPersistenceFailed`
+or a logout fence. It runs on the caller's task: don't drop it after submission.
+
 Embedders that already use blocking workers can use `request_blocking` for one
 scoped operation, or `open_push_connection_blocking` for persistent notifications.
 Both share the same credentials, shutdown and response-ordering checks as async
@@ -143,7 +149,7 @@ cargo run --manifest-path packages/native-client-rust/Cargo.toml -p wechat-proto
 cargo run --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol --example sync_once
 ```
 
-Each requests a fresh QR login for a test account, prints a private temporary
+Each uses `ProtocolTransport::native()`, requests a fresh QR login for a test account, prints a private temporary
 PNG path to open and waits for phone approval. The QR is removed after login;
 credentials stay in memory. `send_text` submits once and prints the receipt;
 `sync_once` summarizes one page without saving history or a cursor. These are

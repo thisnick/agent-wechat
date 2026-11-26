@@ -405,6 +405,10 @@ pub struct ProtocolTransport {
     /// Monotonic and wall-clock time source.
     pub clock: Arc<dyn Clock>,
     spawner: Option<Arc<dyn TaskSpawner>>,
+    /// Whether async login may open a local TCP listener for a LAN risk
+    /// challenge.
+    #[cfg(not(target_arch = "wasm32"))]
+    lan_login: bool,
 }
 
 impl ProtocolTransport {
@@ -420,6 +424,8 @@ impl ProtocolTransport {
             http,
             clock,
             spawner: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            lan_login: false,
         }
     }
 
@@ -434,6 +440,8 @@ impl ProtocolTransport {
             http,
             clock,
             spawner: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            lan_login: false,
         }
     }
 
@@ -448,6 +456,22 @@ impl ProtocolTransport {
     /// Return the configured [`TaskSpawner`], if any.
     pub fn spawner(&self) -> Option<&Arc<dyn TaskSpawner>> {
         self.spawner.as_ref()
+    }
+
+    /// Let async QR login answer a LAN risk challenge by opening a temporary
+    /// local TCP listener (ports 8050–8100 on this host's IPv4 addresses), as
+    /// the blocking login does. [`Self::native`] enables this; enable it on
+    /// another bundle only when the host may accept connections from the
+    /// phone on the local network.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_lan_login(mut self) -> Self {
+        self.lan_login = true;
+        self
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn lan_login(&self) -> bool {
+        self.lan_login
     }
 }
 

@@ -961,36 +961,33 @@ impl NativeClient {
         Guard: FnOnce() -> Result<()> + crate::transport::MaybeSend + 'static,
     {
         if let Some(transport) = self.transport.clone() {
-            let owner = self.owned_account()?.clone();
-            let (exchange, mut state) = owner
-                .begin()
-                .map_err(|error| error.context(NativeRequestNotSubmitted))?;
             let options = self.options.clone();
-            return run_detached_exchange(&transport.clone(), move |cancellation| async move {
-                let mut prior_admission = false;
-                let result = async {
-                    let (cgi, path, request) = build(&state)?;
-                    let request = Zeroizing::new(request);
-                    let reply = Self::async_authenticated_rpc_step(
-                        &options,
-                        &transport,
-                        &owner.short_link,
-                        &exchange,
-                        &cancellation,
-                        &mut state,
-                        &mut prior_admission,
-                        cgi,
-                        path.as_ref(),
-                        &request,
-                        before_submit,
-                    )
-                    .await?;
-                    decode(&state, reply)
-                }
+            let runner = transport.clone();
+            return self
+                .run_account_exchange(&runner, move |mut parts| async move {
+                    let result = async {
+                        let (cgi, path, request) = build(&parts.state)?;
+                        let request = Zeroizing::new(request);
+                        let reply = Self::async_authenticated_rpc_step(
+                            &options,
+                            &transport,
+                            &parts.owner.short_link,
+                            &parts.exchange,
+                            &parts.cancellation,
+                            &mut parts.state,
+                            &mut parts.prior_admission,
+                            cgi,
+                            path.as_ref(),
+                            &request,
+                            before_submit,
+                        )
+                        .await?;
+                        decode(&parts.state, reply)
+                    }
+                    .await;
+                    (parts, result)
+                })
                 .await;
-                finish_account_exchange(exchange, &state, result)
-            })
-            .await;
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1145,6 +1142,11 @@ fn finish_account_exchange<T>(
         },
     }
 }
+
+#[path = "account_scoped.rs"]
+mod scoped;
+pub use scoped::AsyncAccountRequest;
+pub(crate) use scoped::RequestScope;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "account_request.rs"]

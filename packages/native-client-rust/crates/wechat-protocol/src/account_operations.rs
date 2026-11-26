@@ -673,48 +673,45 @@ impl NativeClient {
         encoded: &[u8],
     ) -> Result<crate::media_send::MediaSendResult> {
         if let Some(transport) = self.transport.clone() {
-            let owner = self.owned_account()?.clone();
-            let (exchange, mut state) = owner
-                .begin()
-                .map_err(|error| error.context(NativeRequestNotSubmitted))?;
             let options = self.options.clone();
             let (destination, client_id) = (destination.to_owned(), client_id.to_owned());
             let encoded = encoded.to_vec();
-            return run_detached_exchange(&transport.clone(), move |cancellation| async move {
-                let mut prior_admission = false;
-                let result = async {
-                    let mut upload = crate::media_send::VoiceUpload::new(
-                        &destination,
-                        &client_id,
-                        created_at,
-                        duration_ms,
-                        &encoded,
-                    )?;
-                    loop {
-                        let request = Zeroizing::new(upload.request(&state)?);
-                        let reply = Self::async_authenticated_rpc_step(
-                            &options,
-                            &transport,
-                            &owner.short_link,
-                            &exchange,
-                            &cancellation,
-                            &mut state,
-                            &mut prior_admission,
-                            127,
-                            "/cgi-bin/micromsg-bin/uploadvoice",
-                            &request,
-                            || Ok(()),
-                        )
-                        .await?;
-                        if let Some(done) = upload.accept_reply(&reply)? {
-                            return Ok(done);
+            let runner = transport.clone();
+            return self
+                .run_account_exchange(&runner, move |mut parts| async move {
+                    let result = async {
+                        let mut upload = crate::media_send::VoiceUpload::new(
+                            &destination,
+                            &client_id,
+                            created_at,
+                            duration_ms,
+                            &encoded,
+                        )?;
+                        loop {
+                            let request = Zeroizing::new(upload.request(&parts.state)?);
+                            let reply = Self::async_authenticated_rpc_step(
+                                &options,
+                                &transport,
+                                &parts.owner.short_link,
+                                &parts.exchange,
+                                &parts.cancellation,
+                                &mut parts.state,
+                                &mut parts.prior_admission,
+                                127,
+                                "/cgi-bin/micromsg-bin/uploadvoice",
+                                &request,
+                                || Ok(()),
+                            )
+                            .await?;
+                            if let Some(done) = upload.accept_reply(&reply)? {
+                                return Ok(done);
+                            }
                         }
                     }
-                }
+                    .await;
+                    (parts, result)
+                })
                 .await;
-                finish_account_exchange(exchange, &state, result)
-            })
-            .await;
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1013,7 +1010,7 @@ impl NativeClient {
             .await
     }
 
-    async fn call_rpc_observed_impl<F, O>(
+    pub(super) async fn call_rpc_observed_impl<F, O>(
         &self,
         route: crate::calls::host_policy::CallHostRoute,
         request: Vec<u8>,
@@ -1192,7 +1189,7 @@ impl NativeClient {
         .await
     }
 
-    async fn call_live_sync_observed_impl<F, C, O>(
+    pub(super) async fn call_live_sync_observed_impl<F, C, O>(
         &self,
         request: Vec<u8>,
         wait_timeout: Duration,
@@ -1275,14 +1272,12 @@ impl NativeClient {
             host_policy::{selected_policy, CallHostPolicy},
             host_transport::{CallHostRpcError, CallHostStage},
         };
-        let owner = self.owned_account()?.clone();
-        let (exchange, mut state) = owner
-            .begin()
-            .map_err(|error| error.context(NativeRequestNotSubmitted))?;
         let options = self.options.clone();
-        run_detached_exchange(&transport.clone(), move |task_cancellation| async move {
+        let runner = transport.clone();
+        self.run_account_exchange(&runner, move |mut parts| async move {
             let request = Zeroizing::new(request);
             let result = async {
+                let state = &mut parts.state;
                 crate::mmtls::validate_short_route(route.path())
                     .map_err(|error| CallHostRpcError::from_cause(CallHostStage::Route, &error))?;
                 let policy = selected_policy(&state.auth_snapshot, route.command())
@@ -1306,19 +1301,19 @@ impl NativeClient {
                 .map_err(|error| CallHostRpcError::from_cause(CallHostStage::Handshake, &error))?;
                 let short = session.short.clone();
                 let _ = session.close().await;
-                let packet = crate::business::AuthenticatedPacket::prepare(
-                    &state,
-                    route.command(),
-                    &request,
-                )
-                .map_err(|error| CallHostRpcError::from_cause(CallHostStage::Prepare, &error))?;
-                if task_cancellation.load(Ordering::Acquire) {
+                let packet =
+                    crate::business::AuthenticatedPacket::prepare(state, route.command(), &request)
+                        .map_err(|error| {
+                            CallHostRpcError::from_cause(CallHostStage::Prepare, &error)
+                        })?;
+                if parts.cancellation.load(Ordering::Acquire) {
                     return Err(
                         anyhow::anyhow!("Account request cancelled before submission")
                             .context(NativeRequestNotSubmitted),
                     );
                 }
-                exchange
+                parts
+                    .exchange
                     .check()
                     .map_err(|error| error.context(NativeRequestNotSubmitted))?;
                 before_submit()?;
@@ -1332,7 +1327,9 @@ impl NativeClient {
                     &*transport.clock,
                 );
                 let reply = match cancellation {
-                    Some(cancel) => wait_for_poll(exchange_future, cancel, owner.stopped()).await,
+                    Some(cancel) => {
+                        wait_for_poll(exchange_future, cancel, parts.owner.stopped()).await
+                    }
                     None => exchange_future.await,
                 }
                 .map_err(|error| {
@@ -1343,7 +1340,7 @@ impl NativeClient {
                     }
                 })?;
                 let (plain, cookie) = crate::calls::host_transport::decode_verified_reply(
-                    &state,
+                    state,
                     route.command(),
                     &reply,
                 )?;
@@ -1354,7 +1351,7 @@ impl NativeClient {
                 Ok(plain)
             }
             .await;
-            finish_account_exchange(exchange, &state, result)
+            (parts, result)
         })
         .await
     }
@@ -1444,6 +1441,130 @@ impl NativeClient {
                     Cow::Borrowed("/cgi-bin/micromsg-bin/mmbackupemojioperate"),
                     request,
                 ))
+            },
+            |_, raw| Ok(raw),
+        )
+        .await
+    }
+}
+
+impl NativeClient {
+    /// Submit one direct custom-sticker upload chunk and return its raw
+    /// acknowledgement for retention before validation. Journal each attempted
+    /// offset; an error after submission has an uncertain outcome.
+    pub async fn upload_sticker_chunk_raw(&self, source: &[u8], offset: u32) -> Result<Vec<u8>> {
+        let request = crate::sticker_upload::sticker_upload_request(source, offset)?;
+        self.account_single_rpc(
+            move |_| {
+                Ok((
+                    703,
+                    Cow::Borrowed("/cgi-bin/micromsg-bin/mmemojiupload"),
+                    request,
+                ))
+            },
+            |_, raw| Ok(raw),
+        )
+        .await
+    }
+    /// Return one custom-list or metadata reply for caller-owned receipt
+    /// retention. The request must come from the bounded custom-sticker builders.
+    pub async fn custom_stickers_raw(&self, request: &[u8]) -> Result<Vec<u8>> {
+        ensure!(request.len() <= 65536, "sticker_request_limit");
+        let request = request.to_vec();
+        self.account_single_rpc(
+            move |_| {
+                Ok((
+                    697,
+                    Cow::Borrowed("/cgi-bin/micromsg-bin/mmbatchemojidownload"),
+                    request,
+                ))
+            },
+            |_, raw| Ok(raw),
+        )
+        .await
+    }
+    /// Submit one journaled probe or byte continuation for a single sticker
+    /// send on the short link. Retain the raw reply before validating it.
+    pub async fn send_sticker_chunk_raw(
+        &self,
+        chunk: &crate::sticker_send::StickerSendChunk<'_>,
+    ) -> Result<Vec<u8>> {
+        let (id, recipient, client_id) = (
+            chunk.id.to_owned(),
+            chunk.recipient.to_owned(),
+            chunk.client_id.to_owned(),
+        );
+        let source = Zeroizing::new(chunk.source.to_vec());
+        let (offset, probe) = (chunk.offset, chunk.probe);
+        self.account_single_rpc(
+            move |state| {
+                let chunk = crate::sticker_send::StickerSendChunk {
+                    id: &id,
+                    recipient: &recipient,
+                    client_id: &client_id,
+                    source: &source,
+                    offset,
+                    probe,
+                };
+                Ok((
+                    175,
+                    Cow::Borrowed("/cgi-bin/micromsg-bin/sendemoji"),
+                    crate::sticker_send::sticker_send_request(state, &chunk)?,
+                ))
+            },
+            |_, raw| Ok(raw),
+        )
+        .await
+    }
+    /// Read a native pack-list page and return the raw reply for durable
+    /// caller-owned receipt storage.
+    pub async fn sticker_pack_page_raw(
+        &self,
+        feed: crate::sticker_packs::StickerPackFeed,
+        cursor: &[u8],
+    ) -> Result<Vec<u8>> {
+        let cursor = cursor.to_vec();
+        self.sticker_pack_raw(411, move |state| {
+            crate::sticker_packs::sticker_pack_list_request(state, feed, &cursor)
+        })
+        .await
+    }
+    /// Read full metadata and content references for one product without
+    /// acquiring media, as raw reply bytes.
+    pub async fn sticker_pack_detail_raw(&self, id: &str) -> Result<Vec<u8>> {
+        let id = id.to_owned();
+        self.sticker_pack_raw(412, move |state| {
+            crate::sticker_packs::sticker_pack_detail_request(state, &id)
+        })
+        .await
+    }
+    /// Read localized caption rows for one product, retaining the complete
+    /// reply.
+    pub async fn sticker_pack_captions_raw(&self, id: &str) -> Result<Vec<u8>> {
+        let id = id.to_owned();
+        self.sticker_pack_raw(521, move |state| {
+            crate::sticker_packs::sticker_pack_captions_request(state, &id)
+        })
+        .await
+    }
+    /// Acquire one archive locator without changing pack membership. Journal
+    /// the attempt before calling and retain the raw reply before decoding it.
+    pub async fn sticker_pack_acquisition_raw(&self, id: &str) -> Result<Vec<u8>> {
+        let id = id.to_owned();
+        self.sticker_pack_raw(423, move |state| {
+            crate::sticker_packs::sticker_pack_acquisition_request(state, &id)
+        })
+        .await
+    }
+    async fn sticker_pack_raw(
+        &self,
+        cgi: u16,
+        build: impl FnOnce(&AccountState) -> Result<Vec<u8>> + MaybeSend + 'static,
+    ) -> Result<Vec<u8>> {
+        self.account_single_rpc(
+            move |state| {
+                let path = crate::sticker_packs::sticker_pack_rpc_path(cgi)?;
+                Ok((cgi, Cow::Borrowed(path), build(state)?))
             },
             |_, raw| Ok(raw),
         )

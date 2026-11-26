@@ -1383,3 +1383,155 @@ async fn async_transport_cancelled_multichunk_voice_adopts_chunk1_cookie_and_sto
     assert_eq!(http.calls.load(Ordering::Acquire), 1);
     assert_eq!(client.export_account_state().unwrap().cookie, b"v-chunk1");
 }
+
+/// A scripted transport client whose persistence can be made to fail.
+fn scoped_fixture(
+    replies: Vec<Result<Vec<u8>>>,
+    fail_storage: bool,
+) -> (
+    NativeClient,
+    Arc<ScriptedShortHttp>,
+    Arc<RecordingPersistence>,
+    AccountState,
+) {
+    let initial = client().export_account_state().unwrap();
+    let short_session = synthetic_short_session();
+    let http = Arc::new(ScriptedShortHttp {
+        session: short_session.clone(),
+        responses: Mutex::new(replies.into_iter().collect()),
+        seen_paths: Mutex::new(Vec::new()),
+        seen_packets: Mutex::new(Vec::new()),
+    });
+    let transport = crate::transport::ProtocolTransport::new(
+        Arc::new(UnusedStreamTransport),
+        http.clone(),
+        Arc::new(MockClock(AtomicU64::new(100))),
+    );
+    let storage = Arc::new(RecordingPersistence {
+        fail: AtomicBool::new(fail_storage),
+        cookies: Mutex::new(vec![]),
+    });
+    let client = NativeClient::from_account_with_transport_and_persistence(
+        initial.clone(),
+        NativeOptions::default(),
+        transport,
+        storage.clone(),
+    )
+    .unwrap();
+    client
+        .owned_account()
+        .unwrap()
+        .short_link
+        .put_at_ms("long.weixin.qq.com", short_session, 100);
+    (client, http, storage, initial)
+}
+
+fn heartbeat_reply(state: &AccountState, cookie: &[u8]) -> Vec<u8> {
+    use crate::protobuf as p;
+    let plain = p::message(&[p::bytes(1, &p::uint(1, 0)), p::uint(2, 90), p::uint(3, 0)]).unwrap();
+    synthetic_business_reply(state, 518, cookie, &plain)
+}
+
+#[tokio::test]
+async fn a_scoped_async_request_keeps_its_verified_reply_when_the_commit_fails() {
+    let initial = client().export_account_state().unwrap();
+    let (client, http, storage, _) =
+        scoped_fixture(vec![Ok(heartbeat_reply(&initial, b"c1"))], true);
+    let mut reply = None;
+    let committed = client
+        .request(async |request| {
+            assert_eq!(request.account().unwrap().uin, 1);
+            reply = Some(request.heartbeat(&[]).await);
+            Ok(())
+        })
+        .await;
+    // The verified reply survives; the failed commit is reported separately and
+    // neither adopts the cookie nor counts as "not submitted".
+    assert_eq!(reply.unwrap().unwrap().next_interval, 90);
+    let error = committed.unwrap_err();
+    assert!(error.is::<AccountPersistenceFailed>(), "{error:#}");
+    assert!(!error.is::<NativeRequestNotSubmitted>());
+    assert!(client.export_account_state().unwrap().cookie.is_empty());
+    assert!(storage.cookies.lock().unwrap().is_empty());
+    assert_eq!(http.seen_paths.lock().unwrap().len(), 1);
+    assert_eq!(client.account_status().unwrap().in_flight, 0);
+}
+
+#[tokio::test]
+async fn a_scoped_async_request_admits_one_operation_and_commits_its_cookie() {
+    let initial = client().export_account_state().unwrap();
+    let (client, http, storage, _) =
+        scoped_fixture(vec![Ok(heartbeat_reply(&initial, b"c1"))], false);
+    let mut second = None;
+    let interval = client
+        .request(async |request| {
+            let first = request.heartbeat(&[]).await?;
+            // A second operation must not relabel the first as unsent, and the
+            // request's state is only readable between operations.
+            second = Some(request.heartbeat(&[]).await);
+            assert_eq!(request.account().unwrap().cookie, b"c1");
+            Ok(first.next_interval)
+        })
+        .await
+        .unwrap();
+    assert_eq!(interval, 90);
+    let second = second.unwrap().unwrap_err();
+    assert_eq!(
+        second.to_string(),
+        "Account request context already consumed"
+    );
+    assert!(!second.is::<NativeRequestNotSubmitted>());
+    assert_eq!(http.seen_paths.lock().unwrap().len(), 1);
+    assert_eq!(client.export_account_state().unwrap().cookie, b"c1");
+    assert_eq!(
+        *storage.cookies.lock().unwrap(),
+        vec![(vec![], b"c1".to_vec())]
+    );
+    assert_eq!(client.account_status().unwrap().in_flight, 0);
+}
+
+#[tokio::test]
+async fn a_scoped_async_request_refuses_before_submission_when_it_cannot_run() {
+    // No transport: refused before entering the closure.
+    let blocking = client();
+    let mut entered = false;
+    let error = blocking
+        .request(async |_| {
+            entered = true;
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+    assert!(error.is::<NativeRequestNotSubmitted>());
+    assert!(!entered);
+
+    // A stopped owner: refused before entering the closure and without HTTP.
+    let (client, http, _, _) = scoped_fixture(vec![], false);
+    client.stop().unwrap();
+    let error = client
+        .request(async |request| request.heartbeat(&[]).await.map(|_| ()))
+        .await
+        .unwrap_err();
+    assert!(error.is::<NativeRequestNotSubmitted>());
+    assert!(http.seen_paths.lock().unwrap().is_empty());
+
+    // A fence that lands after admission but before handoff is reported as not
+    // submitted by the operation itself.
+    let (client, http, _, _) = scoped_fixture(vec![], false);
+    let stopper = client.clone();
+    let mut outcome = None;
+    let committed = client
+        .request(async |request| {
+            stopper.stop().unwrap();
+            outcome = Some(request.heartbeat(&[]).await);
+            Ok(())
+        })
+        .await;
+    assert!(outcome
+        .unwrap()
+        .unwrap_err()
+        .is::<NativeRequestNotSubmitted>());
+    assert!(committed.is_err());
+    assert!(http.seen_paths.lock().unwrap().is_empty());
+    assert_eq!(client.account_status().unwrap().in_flight, 0);
+}

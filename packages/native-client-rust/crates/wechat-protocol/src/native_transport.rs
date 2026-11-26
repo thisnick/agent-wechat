@@ -37,7 +37,9 @@ const CLOSE_TIMEOUT: Duration = Duration::from_millis(250);
 impl ProtocolTransport {
     /// Default native transport bundle: [`TokioStreamTransport`] for MMTLS
     /// long links, [`NativeHttpTransport`] with [`DestinationPolicy::System`]
-    /// for MMTLS short links, and [`SystemClock`].
+    /// for MMTLS short links, and [`SystemClock`]. Async QR login may answer a
+    /// LAN risk challenge with a temporary local listener
+    /// ([`Self::with_lan_login`]).
     ///
     /// Requests run on the caller's Tokio runtime, which needs its I/O and
     /// time drivers enabled. Submitted account exchanges detach onto the
@@ -49,7 +51,8 @@ impl ProtocolTransport {
             Arc::new(TokioStreamTransport::new()),
             Arc::new(NativeHttpTransport::new(DestinationPolicy::System)?),
             Arc::new(SystemClock::new()),
-        ))
+        )
+        .with_lan_login())
     }
 }
 
@@ -839,5 +842,13 @@ mod tests {
             .unwrap());
         let native = ProtocolTransport::native().unwrap();
         assert!(native.spawner().is_none());
+        assert!(native.lan_login());
+        let custom = ProtocolTransport::new(
+            Arc::new(TokioStreamTransport::new()),
+            Arc::new(NativeHttpTransport::new(DestinationPolicy::System).unwrap()),
+            Arc::new(SystemClock::new()),
+        );
+        assert!(!custom.lan_login());
+        assert!(custom.with_lan_login().lan_login());
     }
 }
