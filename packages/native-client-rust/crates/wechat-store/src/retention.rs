@@ -601,6 +601,18 @@ pub enum RuntimeRetention {
     Retire(&'static str, i64),
 }
 
+/// A group refresh job and its held marker use the bare `<hash>` key. Earlier
+/// releases also saved superseded copies under these names with a suffix
+/// (`incoming-group-pending:<hash>:superseded:<n>…`, and the same under
+/// `incoming-group-held:` once one failed). They are copies of response bodies:
+/// the refresh queue skips any suffixed key and nothing reads them (#722).
+fn legacy_group_refresh_copy(key: &str) -> bool {
+    ["incoming-group-pending:", "incoming-group-held:"]
+        .iter()
+        .filter_map(|prefix| key.strip_prefix(prefix))
+        .any(|rest| rest.contains(':'))
+}
+
 /// Retention for one runtime key. Duplicate guards cover one batch, command,
 /// message, operation or minute and are consulted only while that work runs
 /// or shortly after. A key naming an unfinished sync batch is always kept.
@@ -657,10 +669,11 @@ pub fn aged_runtime(key: &str) -> RuntimeRetention {
     ];
     // Raw replies kept for investigation and call diagnostics. No code reads
     // them back.
-    const RAW: [&str; 10] = [
+    const RAW: [&str; 11] = [
         "metadata-wire:",
         "metadata-unavailable:",
         "incoming-group-receipt:",
+        "incoming-group-superseded:",
         "call-host-diagnostic:",
         "call-media-error:",
         "call-media-diagnostic:",
@@ -678,7 +691,7 @@ pub fn aged_runtime(key: &str) -> RuntimeRetention {
     }
     if COMMAND.iter().any(|p| key.starts_with(p)) {
         RuntimeRetention::Remove(RECEIPT_DAYS)
-    } else if RAW.iter().any(|p| key.starts_with(p)) {
+    } else if RAW.iter().any(|p| key.starts_with(p)) || legacy_group_refresh_copy(key) {
         RuntimeRetention::Remove(RAW_DAYS)
     } else if key.starts_with("metadata-receipt:") {
         RuntimeRetention::RemoveFinishedMetadata
@@ -2593,6 +2606,15 @@ mod tests {
             ("metadata-receipt:u", RemoveFinishedMetadata),
             ("metadata-wire:u", Remove(RAW_DAYS)),
             ("incoming-group-held:x", Keep),
+            ("incoming-group-pending:x", Keep),
+            ("incoming-group-superseded:x:1", Remove(RAW_DAYS)),
+            (
+                "incoming-group-pending:x:superseded:1:superseded:2",
+                Remove(RAW_DAYS),
+            ),
+            ("incoming-group-held:x:superseded:255", Remove(RAW_DAYS)),
+            // Not a job: the refresh queue skips any suffixed key.
+            ("incoming-group-pending:x:other", Remove(RAW_DAYS)),
             (
                 "thread-read-notification:h",
                 Retire(READ_NOTIFICATION, RECEIPT_DAYS),

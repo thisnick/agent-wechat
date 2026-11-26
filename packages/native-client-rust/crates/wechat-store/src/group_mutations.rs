@@ -52,9 +52,13 @@ fn key_hash(key: &str) -> Result<String> {
     Ok(format!("{:x}", Sha256::digest(key.as_bytes())))
 }
 impl Store {
+    /// Queued group refresh jobs, oldest first. A job key is the prefix and one
+    /// hash. Earlier releases also saved superseded copies under this prefix
+    /// with a `:superseded:` suffix; those are not jobs, and retention removes
+    /// them (#722).
     pub fn incoming_group_refreshes(&self, account: &str) -> Result<Vec<(String, Vec<u8>)>> {
         self.control(account,|db| {
-            let mut q=db.prepare("SELECT key,value FROM runtime WHERE key GLOB 'incoming-group-pending:*' ORDER BY rowid LIMIT 4")?;
+            let mut q=db.prepare("SELECT key,value FROM runtime WHERE key GLOB 'incoming-group-pending:*' AND key NOT GLOB 'incoming-group-pending:*:*' ORDER BY rowid LIMIT 4")?;
             let rows=q.query_map([],|r|Ok((r.get(0)?,r.get(1)?)))?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
