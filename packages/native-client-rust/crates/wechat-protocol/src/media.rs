@@ -1079,10 +1079,12 @@ impl<'a> AsyncCdnSession<'a> {
                         error,
                         prefer_failover: true,
                     },
-                    Some(TransportError::Timeout) => PostAttemptError::Retryable {
-                        error,
-                        prefer_failover: false,
-                    },
+                    Some(TransportError::Timeout | TransportError::Interrupted) => {
+                        PostAttemptError::Retryable {
+                            error,
+                            prefer_failover: false,
+                        }
+                    }
                     Some(
                         TransportError::ResponseTooLarge | TransportError::DestinationNotAllowed,
                     )
@@ -5822,6 +5824,65 @@ mod tests {
             .unwrap();
         assert_eq!(err.to_string(), "media_cancelled");
         assert_eq!(fence_calls.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn async_cdn_retries_the_same_address_after_an_interrupted_reply() {
+        let cdn = CdnClient::new(
+            CdnConfig {
+                version: 1,
+                uin: 12345,
+                client_version: 456,
+                client_os_type: "synthetic-client".into(),
+                auth_key: b"synthetic-auth".to_vec(),
+                server_ips: vec![Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(8, 8, 8, 8)],
+                front_id: 0,
+                location: None,
+            },
+            Duration::from_secs(25),
+        )
+        .unwrap();
+        let (descriptor, raw, ciphertext) =
+            download_fixture(UPLOAD_CHUNK + 200, MediaQuality::File);
+        let clock = RecordingClock::new(1_700_000_000);
+        for (failure, expected) in [
+            // A connection dropped after an earlier success: retry this address once.
+            (
+                TransportError::Interrupted,
+                ["1.1.1.1", "1.1.1.1", "1.1.1.1"],
+            ),
+            // No connection at all: move to the next address.
+            (
+                TransportError::Disconnected,
+                ["1.1.1.1", "1.1.1.1", "8.8.8.8"],
+            ),
+        ] {
+            let attempts = std::sync::atomic::AtomicUsize::new(0);
+            let seen_hosts = std::sync::Mutex::new(Vec::new());
+            let http = FnHttp(|req: HttpRequest| {
+                seen_hosts
+                    .lock()
+                    .unwrap()
+                    .push(req.url.host_str().unwrap().to_owned());
+                if attempts.fetch_add(1, Ordering::AcqRel) == 1 {
+                    return Err(failure.into());
+                }
+                let fields = unpack_cdn(&req.body)?;
+                let reply = download_reply(&fields, &descriptor, &ciphertext);
+                Ok(crate::transport::HttpResponse {
+                    status: 200,
+                    headers: vec![],
+                    body: pack_cdn(&reply)?,
+                })
+            });
+            let fresh = CdnClient::new(cdn.config.clone(), Duration::from_secs(25)).unwrap();
+            let downloaded = fresh
+                .download_async(&descriptor, &http, &clock)
+                .await
+                .unwrap();
+            assert_eq!(downloaded.bytes, raw);
+            assert_eq!(*seen_hosts.lock().unwrap(), expected, "{failure:?}");
+        }
     }
 
     #[tokio::test]

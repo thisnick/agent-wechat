@@ -532,6 +532,7 @@ pub fn is_retryable_login_poll_error(error: &anyhow::Error) -> bool {
                 transport,
                 crate::transport::TransportError::Timeout
                     | crate::transport::TransportError::Disconnected
+                    | crate::transport::TransportError::Interrupted
             );
         }
         if let Some(io) = cause.downcast_ref::<std::io::Error>() {

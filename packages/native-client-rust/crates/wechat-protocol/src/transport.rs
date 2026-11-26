@@ -50,6 +50,10 @@ pub enum TransportError {
     Timeout,
     /// Connection attempt failed or the peer closed the connection unexpectedly.
     Disconnected,
+    /// The connection was established but failed or closed before the
+    /// response completed. CDN transfers retry the same address once for
+    /// this, as for a dropped keep-alive connection, rather than failing over.
+    Interrupted,
     /// The HTTP response body exceeded `HttpRequest::max_response_bytes`.
     ResponseTooLarge,
     /// The destination is, or resolves to, an address the transport's policy
@@ -63,6 +67,7 @@ impl fmt::Display for TransportError {
         match self {
             Self::Timeout => f.write_str("Transport operation timed out"),
             Self::Disconnected => f.write_str("Transport disconnected"),
+            Self::Interrupted => f.write_str("Transport connection interrupted"),
             Self::ResponseTooLarge => f.write_str("HTTP response body exceeds receive budget"),
             Self::DestinationNotAllowed => f.write_str("Transport destination not allowed"),
         }
@@ -342,6 +347,59 @@ impl HttpResponse {
     }
 }
 
+/// Status and headers of an HTTP response whose body is delivered separately
+/// to an [`HttpBodySink`].
+#[derive(Clone, Debug)]
+pub struct HttpResponseHead {
+    /// Numeric HTTP status code (`100..=599`).
+    pub status: u16,
+    /// Response headers as `(name, value)` pairs.
+    pub headers: Vec<(String, String)>,
+}
+
+impl HttpResponseHead {
+    /// Return the first header value matching `name` (ASCII case-insensitive).
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// Return all header values matching `name` (ASCII case-insensitive), in
+    /// wire order.
+    pub fn header_values(&self, name: &str) -> Vec<&str> {
+        self.headers
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+            .collect()
+    }
+
+    /// Parse and validate `Content-Length` if present, rejecting malformed
+    /// values and conflicting duplicates.
+    pub(crate) fn content_length(&self) -> Result<Option<u64>> {
+        HttpResponse {
+            status: self.status,
+            headers: self.headers.clone(),
+            body: Vec::new(),
+        }
+        .content_length()
+    }
+}
+
+/// Receives an HTTP response streamed by [`HttpTransport::send_streaming`].
+pub trait HttpBodySink: MaybeSend {
+    /// Inspect the status and headers before any body bytes arrive. An error
+    /// stops the transfer and is returned to the caller unchanged.
+    fn head(&mut self, head: &HttpResponseHead) -> Result<()>;
+
+    /// Accept the next piece of the body, in order. Never called with an
+    /// empty slice. An error stops the transfer and is returned to the caller
+    /// unchanged.
+    fn chunk(&mut self, bytes: &[u8]) -> Result<()>;
+}
+
 /// Asynchronous HTTP request/response transport.
 ///
 /// Implementations must disable automatic redirects and honor
@@ -356,11 +414,46 @@ impl HttpResponse {
 pub trait HttpTransport: MaybeSend + MaybeSync {
     /// Execute a single bounded HTTP request without automatic redirects.
     fn send<'a>(&'a self, request: HttpRequest) -> TransportFuture<'a, Result<HttpResponse>>;
+
+    /// Execute a request like [`Self::send`], delivering the head and then
+    /// the body in pieces to `sink` as they arrive, so a caller can report
+    /// progress or stop a long download early. The whole body is still
+    /// bounded by `request.max_response_bytes` and `request.timeout`.
+    ///
+    /// The default implementation buffers the response with [`Self::send`]
+    /// and delivers the body in one piece; transports that can stream should
+    /// override it.
+    fn send_streaming<'a>(
+        &'a self,
+        request: HttpRequest,
+        sink: &'a mut dyn HttpBodySink,
+    ) -> TransportFuture<'a, Result<HttpResponseHead>> {
+        Box::pin(async move {
+            let response = self.send(request).await?;
+            let head = HttpResponseHead {
+                status: response.status,
+                headers: response.headers,
+            };
+            sink.head(&head)?;
+            if !response.body.is_empty() {
+                sink.chunk(&response.body)?;
+            }
+            Ok(head)
+        })
+    }
 }
 
 impl<T: HttpTransport + ?Sized> HttpTransport for Arc<T> {
     fn send<'a>(&'a self, request: HttpRequest) -> TransportFuture<'a, Result<HttpResponse>> {
         (**self).send(request)
+    }
+
+    fn send_streaming<'a>(
+        &'a self,
+        request: HttpRequest,
+        sink: &'a mut dyn HttpBodySink,
+    ) -> TransportFuture<'a, Result<HttpResponseHead>> {
+        (**self).send_streaming(request, sink)
     }
 }
 

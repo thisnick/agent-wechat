@@ -5,8 +5,9 @@
 //! Media URLs taken from messages need [`NativeHttpTransport`] built with
 //! [`DestinationPolicy::PublicOnly`].
 use super::{
-    AsyncByteStream, HttpMethod, HttpRequest, HttpResponse, HttpTransport, ProtocolTransport,
-    ReadOutcome, StreamTransport, SystemClock, TaskSpawner, TransportError, TransportFuture,
+    AsyncByteStream, HttpBodySink, HttpMethod, HttpRequest, HttpResponse, HttpResponseHead,
+    HttpTransport, ProtocolTransport, ReadOutcome, StreamTransport, SystemClock, TaskSpawner,
+    TransportError, TransportFuture,
 };
 use anyhow::{ensure, Context, Result};
 use std::{
@@ -273,7 +274,13 @@ impl NativeHttpTransport {
         })
     }
 
-    async fn exchange(&self, request: HttpRequest) -> Result<HttpResponse> {
+    /// Send `request` and stream the response into `sink`, enforcing the
+    /// destination policy, the deadline and the receive budget.
+    async fn exchange(
+        &self,
+        request: HttpRequest,
+        sink: &mut dyn HttpBodySink,
+    ) -> Result<HttpResponseHead> {
         ensure!(
             matches!(request.url.scheme(), "http" | "https"),
             "Unsupported HTTP URL scheme"
@@ -319,17 +326,19 @@ impl NativeHttpTransport {
             .await
             .map_err(|_| timed_out())?
             .map_err(classify)?;
-        let status = response.status().as_u16();
-        let headers = response
-            .headers()
-            .iter()
-            .map(|(name, value)| {
-                (
-                    name.as_str().to_owned(),
-                    String::from_utf8_lossy(value.as_bytes()).into_owned(),
-                )
-            })
-            .collect();
+        let head = HttpResponseHead {
+            status: response.status().as_u16(),
+            headers: response
+                .headers()
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        name.as_str().to_owned(),
+                        String::from_utf8_lossy(value.as_bytes()).into_owned(),
+                    )
+                })
+                .collect(),
+        };
         let limit = request.max_response_bytes;
         if response
             .content_length()
@@ -337,34 +346,61 @@ impl NativeHttpTransport {
         {
             return Err(too_large());
         }
-        let mut body = Vec::with_capacity(
-            response
-                .content_length()
-                .map_or(0, |length| length as usize)
-                .min(limit)
-                .min(1024 * 1024),
-        );
+        sink.head(&head)?;
+        let mut received = 0usize;
         while let Some(chunk) = tokio::time::timeout_at(deadline, response.chunk())
             .await
             .map_err(|_| timed_out())?
             .map_err(classify)?
         {
-            if chunk.len() > limit - body.len() {
+            if chunk.len() > limit - received {
                 return Err(too_large());
             }
-            body.extend_from_slice(&chunk);
+            received += chunk.len();
+            if !chunk.is_empty() {
+                sink.chunk(&chunk)?;
+            }
         }
-        Ok(HttpResponse {
-            status,
-            headers,
-            body,
-        })
+        Ok(head)
+    }
+}
+
+/// Collects a whole response for [`HttpTransport::send`].
+#[derive(Default)]
+struct BufferSink {
+    body: Vec<u8>,
+}
+
+impl HttpBodySink for BufferSink {
+    fn head(&mut self, _head: &HttpResponseHead) -> Result<()> {
+        Ok(())
+    }
+
+    fn chunk(&mut self, bytes: &[u8]) -> Result<()> {
+        self.body.extend_from_slice(bytes);
+        Ok(())
     }
 }
 
 impl HttpTransport for NativeHttpTransport {
     fn send<'a>(&'a self, request: HttpRequest) -> TransportFuture<'a, Result<HttpResponse>> {
-        Box::pin(self.exchange(request))
+        Box::pin(async move {
+            let mut sink = BufferSink::default();
+            let head = self.exchange(request, &mut sink).await?;
+            Ok(HttpResponse {
+                status: head.status,
+                headers: head.headers,
+                body: sink.body,
+            })
+        })
+    }
+
+    fn send_streaming<'a>(
+        &'a self,
+        request: HttpRequest,
+        sink: &'a mut dyn HttpBodySink,
+    ) -> TransportFuture<'a, Result<HttpResponseHead>> {
+        Box::pin(self.exchange(request, sink))
     }
 }
 
@@ -397,8 +433,12 @@ fn classify(error: reqwest::Error) -> anyhow::Error {
         TransportError::Timeout
     } else if error.is_builder() {
         return anyhow::Error::new(error).context("Invalid HTTP request");
-    } else {
+    } else if error.is_connect() {
         TransportError::Disconnected
+    } else {
+        // The connection was made, then failed while sending the request or
+        // reading the response.
+        TransportError::Interrupted
     };
     anyhow::Error::new(category).context(message)
 }
@@ -602,6 +642,110 @@ mod tests {
         request.headers.push(("Connection".into(), "close".into()));
         assert_eq!(http.send(request).await.unwrap().body, b"closed");
         assert_eq!(requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn streams_bodies_to_a_sink_and_stops_when_it_refuses() {
+        let (address, _, _) = serve(|_| {
+            Some(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n3\r\ndef\r\n3\r\nghi\r\n0\r\n\r\n"
+                    .to_vec(),
+            )
+        })
+        .await;
+        struct Recorder {
+            status: Option<u16>,
+            pieces: Vec<Vec<u8>>,
+            refuse_after: usize,
+        }
+        impl HttpBodySink for Recorder {
+            fn head(&mut self, head: &HttpResponseHead) -> Result<()> {
+                self.status = Some(head.status);
+                Ok(())
+            }
+            fn chunk(&mut self, bytes: &[u8]) -> Result<()> {
+                self.pieces.push(bytes.to_vec());
+                anyhow::ensure!(self.pieces.len() < self.refuse_after, "sink refused");
+                Ok(())
+            }
+        }
+        let http = NativeHttpTransport::new(DestinationPolicy::System).unwrap();
+        let mut all = Recorder {
+            status: None,
+            pieces: Vec::new(),
+            refuse_after: usize::MAX,
+        };
+        let head = http
+            .send_streaming(
+                get(&format!("http://{address}/a"), 1024, Duration::from_secs(5)),
+                &mut all,
+            )
+            .await
+            .unwrap();
+        assert_eq!(head.status, 200);
+        assert_eq!(all.status, Some(200));
+        assert_eq!(all.pieces.concat(), b"abcdefghi");
+
+        let mut refusing = Recorder {
+            status: None,
+            pieces: Vec::new(),
+            refuse_after: 1,
+        };
+        let error = http
+            .send_streaming(
+                get(&format!("http://{address}/a"), 1024, Duration::from_secs(5)),
+                &mut refusing,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "sink refused");
+        assert_eq!(refusing.pieces.len(), 1);
+
+        let error = http
+            .send_streaming(
+                get(&format!("http://{address}/a"), 4, Duration::from_secs(5)),
+                &mut Recorder {
+                    status: None,
+                    pieces: Vec::new(),
+                    refuse_after: usize::MAX,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            find_transport_error(&error),
+            Some(TransportError::ResponseTooLarge)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_connection_lost_mid_body_is_interrupted_not_disconnected() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+            // Promise ten bytes, send three, then drop the connection.
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc")
+                .await
+                .unwrap();
+        });
+        let http = NativeHttpTransport::new(DestinationPolicy::System).unwrap();
+        let error = http
+            .send(get(
+                &format!("http://{address}/a"),
+                1024,
+                Duration::from_secs(5),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            find_transport_error(&error),
+            Some(TransportError::Interrupted),
+            "{error:#}"
+        );
     }
 
     #[tokio::test]
