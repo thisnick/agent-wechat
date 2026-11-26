@@ -24,7 +24,7 @@ impl Core {
         account: &str,
         key: &str,
         permit: Option<&mut MediaAccountPermit>,
-        fetch: impl FnOnce(&mut wechat_protocol::AccountRequest<'_>) -> Result<Vec<u8>>,
+        fetch: impl AsyncFnOnce(&mut wechat_protocol::AsyncAccountRequest) -> Result<Vec<u8>>,
     ) -> Result<Vec<u8>> {
         let fence = self.session_fence(account)?;
         let epoch = self
@@ -146,9 +146,10 @@ impl Core {
             }
         };
         let cache_key = format!("catalog:{:x}", Sha256::digest(&continuation.cursor));
-        let raw = self.cached_sticker_metadata(account, &cache_key, permit, |ctx| {
-            let raw =
-                ctx.sticker_pack_page_raw(wire::StickerPackFeed::Catalog, &continuation.cursor)?;
+        let raw = self.cached_sticker_metadata(account, &cache_key, permit, async |ctx| {
+            let raw = ctx
+                .sticker_pack_page_raw(wire::StickerPackFeed::Catalog, &continuation.cursor)
+                .await?;
             let page = wire::decode_sticker_pack_page(&raw)?;
             ensure!(!page.restart, "pagination_cursor_expired");
             Ok(raw)
@@ -220,12 +221,16 @@ impl Core {
         pack: &str,
         permit: Option<&mut MediaAccountPermit>,
     ) -> Result<StickerPack> {
-        let raw =
-            self.cached_sticker_metadata(account, &format!("detail:{pack}"), permit, |ctx| {
-                let raw = ctx.sticker_pack_detail_raw(pack)?;
+        let raw = self.cached_sticker_metadata(
+            account,
+            &format!("detail:{pack}"),
+            permit,
+            async |ctx| {
+                let raw = ctx.sticker_pack_detail_raw(pack).await?;
                 wire::decode_sticker_pack_detail(&raw, pack)?;
                 Ok(raw)
-            })?;
+            },
+        )?;
         let detail = wire::decode_sticker_pack_detail(&raw, pack)?;
         let mut item = public_sticker_pack(
             &detail.summary,
@@ -269,19 +274,23 @@ impl Core {
             account,
             &format!("detail:{pack}"),
             permit.as_deref_mut(),
-            |ctx| {
-                let raw = ctx.sticker_pack_detail_raw(pack)?;
+            async |ctx| {
+                let raw = ctx.sticker_pack_detail_raw(pack).await?;
                 wire::decode_sticker_pack_detail(&raw, pack)?;
                 Ok(raw)
             },
         )?;
         let detail = wire::decode_sticker_pack_detail(&raw, pack)?;
-        let raw =
-            self.cached_sticker_metadata(account, &format!("captions:{pack}"), permit, |ctx| {
-                let raw = ctx.sticker_pack_captions_raw(pack)?;
+        let raw = self.cached_sticker_metadata(
+            account,
+            &format!("captions:{pack}"),
+            permit,
+            async |ctx| {
+                let raw = ctx.sticker_pack_captions_raw(pack).await?;
                 wire::decode_sticker_pack_captions(&raw)?;
                 Ok(raw)
-            })?;
+            },
+        )?;
         let captions = wire::decode_sticker_pack_captions(&raw)?;
         let items = detail
             .items

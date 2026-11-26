@@ -96,8 +96,8 @@ impl Core {
                         };
                         worker.execute_recall(&account, &operation_id, |state, request| {
                             permit.transfer(&worker, &account, || {
-                                worker.native_request(&account, state, |operation| {
-                                    operation.recall_message(request)
+                                worker.native_request(&account, state, async |operation| {
+                                    operation.recall_message(request).await
                                 })
                             })
                         })

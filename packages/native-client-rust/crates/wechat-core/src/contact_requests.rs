@@ -594,7 +594,7 @@ impl Core {
         self.session_request(account,"contact_search",|fence|async move{
             let guard=self.lock_account(account).await?;let core=self.clone();let account=account.to_owned();blocking(move||{
                 let mut permit=crate::account_network::AccountNetworkPermit {guard:Some(guard),runtime:tokio::runtime::Handle::current()};let mut state=core.session_state(&account,&fence)?;let expected=core.store.runtime(&account,"account-state")?.context("auth_required")?;let desired=core.store.runtime(&account,"desired")?;
-                let rpc=wechat_protocol::contact_search_request(&state,&query)?;let raw=permit.transfer(&core,&account,||core.native_request(&account,&mut state,|r|r.contact_rpc_raw(&rpc)))?;
+                let rpc=wechat_protocol::contact_search_request(&state,&query)?;let raw=permit.transfer(&core,&account,||core.native_request(&account,&mut state,async |r| r.contact_rpc_raw(&rpc).await))?;
                 core.store.put_runtime(&account,"contact-search-receipt",&core.vault.seal(&account,"contact-search-receipt",&raw)?)?;
                 core.save_network_state(&account,&state,&expected,&fence,desired.as_deref())?;
                 let found=wechat_protocol::decode_contact_search(&raw,&query).map_err(|error| {

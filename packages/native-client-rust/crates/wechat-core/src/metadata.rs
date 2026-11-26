@@ -1089,8 +1089,10 @@ impl Core {
                 pending
             } else {
                 let mut state = self.account_state(account)?;
-                let reply = self.native_request(account, &mut state, |request| {
-                    request.init_contacts_receipt(sequences.0, sequences.1)
+                let reply = self.native_request(account, &mut state, async |request| {
+                    request
+                        .init_contacts_receipt(sequences.0, sequences.1)
+                        .await
                 })?;
                 self.save_state(account, &state)?;
                 let id =
@@ -1186,8 +1188,8 @@ impl Core {
             }
             self.metadata_check(account, operation, deadline)?;
             let mut state = self.account_state(account)?;
-            let page = self.native_request(account, &mut state, |request| {
-                request.group_inventory(&cursor)
+            let page = self.native_request(account, &mut state, async |request| {
+                request.group_inventory(&cursor).await
             })?;
             self.save_state(account, &state)?;
             let more = page.more;

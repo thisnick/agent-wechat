@@ -1,5 +1,6 @@
 //! Account coordination, durable intents and profile application barriers.
 mod account_network;
+mod async_bridge;
 mod business_contacts;
 pub mod call_types;
 

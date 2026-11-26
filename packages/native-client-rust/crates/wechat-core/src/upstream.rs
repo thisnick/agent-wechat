@@ -1,5 +1,6 @@
 //! Simulation and bootstrap dispatch. NativeClient owns live account state;
 //! Core retains daemon permissions, journals and official-profile integration.
+use crate::async_bridge::block_on;
 use anyhow::{bail, ensure, Result};
 use std::{
     path::Path,
@@ -8,6 +9,7 @@ use std::{
 use wechat_protocol::{
     media_send::MediaSendResult,
     push::Notification,
+    transport::ProtocolTransport,
     wire::{Heartbeat, SyncBatch, TextSendResult},
     AccountState, DeviceProfile, LoginAttempt, LoginStatus, NativeClient, NativeOptions,
 };
@@ -39,6 +41,10 @@ pub trait LoginChallenge: Send {
     fn complete(&mut self) -> Result<AccountState>;
     fn refresh(&self) -> Result<Box<dyn LoginChallenge>>;
 }
+
+/// Final admission check run once, immediately before a text send is handed to
+/// transport. It may run on another thread than the caller's.
+pub type TextSendGuard = Box<dyn FnOnce() -> Result<()> + Send + 'static>;
 
 /// Notifications remain hints; Core performs and commits the corresponding sync.
 pub trait PushConnection: Send {
@@ -147,6 +153,11 @@ pub trait Upstream: Send + Sync {
     fn native(&self, _options: NativeOptions) -> Result<NativeClient> {
         bail!("unsupported_simulator_operation")
     }
+    /// The async transport native account owners and login clients use.
+    /// Simulators have none.
+    fn protocol_transport(&self) -> Option<ProtocolTransport> {
+        None
+    }
     fn start_qr_login(
         &self,
         _account: &str,
@@ -156,7 +167,8 @@ pub trait Upstream: Send + Sync {
         key_info: &[u8],
     ) -> Result<Box<dyn LoginChallenge>> {
         let client = self.native(options)?;
-        let attempt = client.start_profile_qr_login(device, computer_name, key_info)?;
+        let attempt =
+            block_on(client.start_profile_qr_login_async(device, computer_name, key_info))?;
         Ok(Box::new(NativeChallenge { client, attempt }))
     }
     fn start_saved_device_login(
@@ -166,7 +178,7 @@ pub trait Upstream: Send + Sync {
         computer_name: &str,
     ) -> Result<Box<dyn LoginChallenge>> {
         let client = self.native(NativeOptions::default())?;
-        let attempt = client.start_saved_device_login(state, computer_name)?;
+        let attempt = block_on(client.start_saved_device_login_async(state, computer_name))?;
         Ok(Box::new(NativeChallenge { client, attempt }))
     }
     #[allow(clippy::too_many_arguments)]
@@ -181,14 +193,14 @@ pub trait Upstream: Send + Sync {
         computer_name: &str,
     ) -> Result<Box<dyn LoginChallenge>> {
         let client = self.native(options)?;
-        let attempt = client.start_profile_saved_device_login(
+        let attempt = block_on(client.start_profile_saved_device_login_async(
             device,
             username,
             auto_auth_key,
             cookie,
             key_info,
             computer_name,
-        )?;
+        ))?;
         Ok(Box::new(NativeChallenge { client, attempt }))
     }
     fn renew_session(&self, _state: &AccountState, _computer_name: &str) -> Result<AccountState> {
@@ -289,7 +301,7 @@ pub trait Upstream: Send + Sync {
         content: &str,
         created_at: u32,
         client_message_id: u32,
-        before_submit: &mut dyn FnMut() -> Result<()>,
+        before_submit: TextSendGuard,
     ) -> Result<TextSendResult> {
         before_submit()?;
         self.send_text(state, destination, content, created_at, client_message_id)
@@ -483,7 +495,18 @@ pub trait Upstream: Send + Sync {
     }
 }
 
-pub(crate) struct NativeUpstream;
+/// The network: login clients and account owners share one native async
+/// transport (Tokio streams and a pooled HTTP/1.1 client).
+pub(crate) struct NativeUpstream {
+    transport: ProtocolTransport,
+}
+impl NativeUpstream {
+    pub(crate) fn new() -> Result<Self> {
+        Ok(Self {
+            transport: ProtocolTransport::native()?,
+        })
+    }
+}
 impl Upstream for NativeUpstream {
     fn uses_account_owner(&self) -> bool {
         true
@@ -492,7 +515,10 @@ impl Upstream for NativeUpstream {
         UpstreamKind::Native
     }
     fn native(&self, options: NativeOptions) -> Result<NativeClient> {
-        NativeClient::new(options)
+        NativeClient::with_transport(options, self.transport.clone())
+    }
+    fn protocol_transport(&self) -> Option<ProtocolTransport> {
+        Some(self.transport.clone())
     }
 }
 
@@ -515,15 +541,18 @@ impl LoginChallenge for NativeChallenge {
         deadline: Instant,
         cancelled: Box<dyn Fn() -> bool + Send + Sync>,
     ) -> Result<LoginStatus> {
-        self.client
-            .poll_login_guarded(&mut self.attempt, deadline, cancelled)
+        block_on(
+            self.client
+                .poll_login_guarded_async(&mut self.attempt, deadline, cancelled),
+        )
     }
     fn complete(&mut self) -> Result<AccountState> {
-        self.client.complete_login(&mut self.attempt)
+        block_on(self.client.complete_login_async(&mut self.attempt))
     }
     fn refresh(&self) -> Result<Box<dyn LoginChallenge>> {
-        let client = NativeClient::new(NativeOptions::default())?;
-        let attempt = client.refresh_qr_login(&self.attempt)?;
+        // The attempt carries its own hosts; the transport is the shared one.
+        let client = self.client.clone();
+        let attempt = block_on(client.refresh_qr_login_async(&self.attempt))?;
         Ok(Box::new(Self { client, attempt }))
     }
 }

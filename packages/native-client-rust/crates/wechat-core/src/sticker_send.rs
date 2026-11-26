@@ -310,7 +310,9 @@ impl Core {
                 return result;
             }
         }
-        self.native_request(account, state, |ctx| ctx.send_sticker_chunk_raw(chunk))
+        self.native_request(account, state, async |ctx| {
+            ctx.send_sticker_chunk_raw(chunk).await
+        })
     }
     fn finish_sticker_send(&self, account: &str, id: &str, plan: &StickerSendPlan) -> Result<()> {
         self.write_sticker_message_cache(account, id, plan)?;

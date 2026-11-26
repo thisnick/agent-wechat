@@ -3925,11 +3925,13 @@ impl Core {
                 (&source, &source_md5),
                 |uploaded, state| {
                     let conf = if uploaded.descriptor.quality == MediaQuality::LargeFile {
-                        self.native_request(account, state, |request| {
-                            request.large_cdn_config(LargeCdnRoute::Download)
+                        self.native_request(account, state, async |request| {
+                            request.large_cdn_config(LargeCdnRoute::Download).await
                         })?
                     } else {
-                        self.native_request(account, state, |request| request.cdn_config())?
+                        self.native_request(account, state, async |request| {
+                            request.cdn_config().await
+                        })?
                     };
                     self.save_state(account, state)?;
                     let cdn = CdnClient::new(conf, Duration::from_secs(25))?;
@@ -3946,14 +3948,16 @@ impl Core {
                     Ok(downloaded.sha256)
                 },
                 |plan, state| {
-                    self.native_request(account, state, |request| {
-                        request.send_file(
-                            &plan.request.thread_id,
-                            &plan.client_id,
-                            plan.created_at,
-                            plan.uploaded_file.as_ref().unwrap(),
-                            plan.reservation.as_ref(),
-                        )
+                    self.native_request(account, state, async |request| {
+                        request
+                            .send_file(
+                                &plan.request.thread_id,
+                                &plan.client_id,
+                                plan.created_at,
+                                plan.uploaded_file.as_ref().unwrap(),
+                                plan.reservation.as_ref(),
+                            )
+                            .await
                     })
                 },
             );
@@ -4096,16 +4100,18 @@ impl Core {
         let destination = plan.request.thread_id.clone();
         let progress_id = plan.file_upload_progress_id.clone();
         if self.reserve_media_file_upload(account, id, &mut plan, source_len, || {
-            self.native_request(account, &mut state, |request| {
-                request.reserve_file_upload(
-                    &destination,
-                    progress_id
-                        .as_deref()
-                        .context("file_reservation_needs_review")?,
-                    &source.name,
-                    source_len,
-                    &source_file.md5,
-                )
+            self.native_request(account, &mut state, async |request| {
+                request
+                    .reserve_file_upload(
+                        &destination,
+                        progress_id
+                            .as_deref()
+                            .context("file_reservation_needs_review")?,
+                        &source.name,
+                        source_len,
+                        &source_file.md5,
+                    )
+                    .await
             })
         })? {
             self.save_state(account, &state)?;

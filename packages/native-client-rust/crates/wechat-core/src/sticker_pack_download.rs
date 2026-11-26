@@ -156,8 +156,8 @@ impl Core {
             if plan.locator.is_none() {
                 let mut state = self.resume_media_state(account, id, &plan.fence)?;
                 let raw = permit.transfer(self, account, || {
-                    self.native_request(account, &mut state, |ctx| {
-                        ctx.sticker_pack_detail_raw(&plan.pack)
+                    self.native_request(account, &mut state, async |ctx| {
+                        ctx.sticker_pack_detail_raw(&plan.pack).await
                     })
                 })?;
                 let detail = wire::decode_sticker_pack_detail(&raw, &plan.pack)?;
@@ -175,8 +175,8 @@ impl Core {
                 );
                 let mut state = self.resume_media_state(account, id, &plan.fence)?;
                 let captions = permit.transfer(self, account, || {
-                    self.native_request(account, &mut state, |ctx| {
-                        ctx.sticker_pack_captions_raw(&plan.pack)
+                    self.native_request(account, &mut state, async |ctx| {
+                        ctx.sticker_pack_captions_raw(&plan.pack).await
                     })
                 })?;
                 plan.contents = Some(PackContents {
@@ -188,8 +188,8 @@ impl Core {
                 self.save_acquisition(account, id, &plan)?;
                 let mut state = self.resume_media_state(account, id, &plan.fence)?;
                 let raw = permit.transfer(self, account, || {
-                    self.native_request(account, &mut state, |ctx| {
-                        ctx.sticker_pack_acquisition_raw(&plan.pack)
+                    self.native_request(account, &mut state, async |ctx| {
+                        ctx.sticker_pack_acquisition_raw(&plan.pack).await
                     })
                 })?;
                 plan.reply = Some(raw.clone());
@@ -206,7 +206,7 @@ impl Core {
             self.phase_media(account, id, "downloading")?;
             let mut state = self.resume_media_state(account, id, &plan.fence)?;
             let config = permit.transfer(self, account, || {
-                self.native_request(account, &mut state, |ctx| ctx.cdn_config())
+                self.native_request(account, &mut state, async |ctx| ctx.cdn_config().await)
             })?;
             let cdn = CdnClient::new(config, Duration::from_secs(25))?;
             // The official client downloads pack archives as storage objects.
