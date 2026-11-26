@@ -22,12 +22,16 @@ struct Refresh {
     #[serde(default)]
     contact_revision: Option<Vec<u8>>,
 }
-const PENDING: &str = "incoming-group-pending:";
-/// Response bodies a refresh replaced after the group changed again. Raw
-/// replies for investigation; nothing reads them back.
-const SUPERSEDED: &str = "incoming-group-superseded:";
 fn key(receipt: &str) -> String {
-    format!("{PENDING}{:x}", Sha256::digest(receipt.as_bytes()))
+    format!(
+        "incoming-group-pending:{:x}",
+        Sha256::digest(receipt.as_bytes())
+    )
+}
+/// Response bodies a refresh replaced after the group changed again, one copy
+/// per replacement. Raw replies for investigation; nothing reads them back.
+fn superseded(key: &str, attempts: u8) -> String {
+    format!("{}:{attempts}", key.replace("pending:", "superseded:"))
 }
 fn done(receipt: &str) -> String {
     format!(
@@ -162,8 +166,7 @@ impl Core {
                         // the refresh queue: a key under `incoming-group-pending:`
                         // would be picked up as a new job that is always
                         // superseded again, refetching on every tick (#722).
-                        let prior =
-                            format!("{}:{}", key.replacen(PENDING, SUPERSEDED, 1), job.attempts);
+                        let prior = superseded(&key, job.attempts);
                         self.store.put_runtime(
                             account,
                             &prior,
@@ -172,6 +175,8 @@ impl Core {
                         job.contact_raw = None;
                         job.roster_raw = None;
                         job.detail_raw = None;
+                        // A failed refetch must not save the same bodies again.
+                        self.save_incoming_group(account, &key, &job)?;
                     }
                 }
                 if job.contact_raw.is_none() {
@@ -612,7 +617,10 @@ mod tests {
                 crate::upstream::UpstreamKind::Native
             }
             fn lookup_contacts_raw(&self, _: &mut AccountState, _: &[String]) -> Result<Vec<u8>> {
-                self.calls.fetch_add(1, Ordering::SeqCst);
+                // The first refetch fails.
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    bail!("synthetic_network_error");
+                }
                 Ok(self.contact.clone())
             }
             fn lookup_room_raw(&self, _: &mut AccountState, _: &str, _: u32) -> Result<Vec<u8>> {
@@ -645,8 +653,12 @@ mod tests {
         let legacy = format!("{key}:superseded:1");
         core.store.put_runtime("one", &legacy, b"legacy").unwrap();
 
+        // The superseded bodies are saved once; the refetch fails.
+        assert_eq!(core.refresh_incoming_groups("one", true).unwrap(), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // The retry refetches without saving the same bodies again, then applies.
         assert_eq!(core.refresh_incoming_groups("one", true).unwrap(), 1);
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
         assert_eq!(
             core.group_info("one", ROOM).unwrap()["name"],
             "Fresh phone title"
@@ -655,18 +667,18 @@ mod tests {
         for _ in 0..3 {
             assert_eq!(core.refresh_incoming_groups("one", true).unwrap(), 0);
         }
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
         assert!(core
             .store
             .incoming_group_refreshes("one")
             .unwrap()
             .is_empty());
-        let saved = core.store.runtime_prefix("one", SUPERSEDED, 10).unwrap();
-        assert_eq!(saved.len(), 1);
-        assert_eq!(
-            saved[0].0,
-            format!("{}:1", key.replacen(PENDING, SUPERSEDED, 1))
-        );
+        let saved = core
+            .store
+            .runtime_prefix("one", "incoming-group-superseded:", 10)
+            .unwrap();
+        let keys: Vec<_> = saved.into_iter().map(|(key, _)| key).collect();
+        assert_eq!(keys, [superseded(&key, 1)]);
     }
     #[test]
     fn local_repair_never_fetches_missing_data_or_overwrites_a_newer_change() {

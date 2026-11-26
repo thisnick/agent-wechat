@@ -601,16 +601,16 @@ pub enum RuntimeRetention {
     Retire(&'static str, i64),
 }
 
-/// Earlier releases saved a superseded group refresh under the queue's names
-/// (`incoming-group-pending:<hash>:superseded:<n>…`), and moved failed copies to
-/// `incoming-group-held:<hash>:superseded:<n>…`. They are copies of response
-/// bodies, not jobs: the job and its held marker use the bare `<hash>` key,
-/// and nothing reads these (#722).
+/// A group refresh job and its held marker use the bare `<hash>` key. Earlier
+/// releases also saved superseded copies under these names with a suffix
+/// (`incoming-group-pending:<hash>:superseded:<n>…`, and the same under
+/// `incoming-group-held:` once one failed). They are copies of response bodies:
+/// the refresh queue skips any suffixed key and nothing reads them (#722).
 fn legacy_group_refresh_copy(key: &str) -> bool {
     ["incoming-group-pending:", "incoming-group-held:"]
         .iter()
         .filter_map(|prefix| key.strip_prefix(prefix))
-        .any(|rest| rest.contains(":superseded:"))
+        .any(|rest| rest.contains(':'))
 }
 
 /// Retention for one runtime key. Duplicate guards cover one batch, command,
@@ -2613,6 +2613,8 @@ mod tests {
                 Remove(RAW_DAYS),
             ),
             ("incoming-group-held:x:superseded:255", Remove(RAW_DAYS)),
+            // Not a job: the refresh queue skips any suffixed key.
+            ("incoming-group-pending:x:other", Remove(RAW_DAYS)),
             (
                 "thread-read-notification:h",
                 Retire(READ_NOTIFICATION, RECEIPT_DAYS),

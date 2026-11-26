@@ -7,12 +7,13 @@
 //! for corruption before use.
 //!
 //! The scratch copies are removed when admission returns. A process that is
-//! stopped part-way leaves them behind. They are only copies: a pre-open family
-//! worth keeping is published as `.sqlite-recovery-*` before SQLite opens the
-//! original, or its scratch directory is marked as retained. So an admission
-//! that is about to copy a database first removes unmarked leftovers beside it,
-//! and a successful admission removes them too. Otherwise starts that keep
-//! failing for lack of space would never free the space they need.
+//! stopped part-way leaves them behind. Until an admission starts opening the
+//! original they are only copies of an unchanged family, so the next admission
+//! that copies the database removes them first. Otherwise starts that keep
+//! failing for lack of space would never free the space they need. A directory
+//! whose admission went on to open the original is marked: its copy may be the
+//! only pre-open state, so only a successful admission removes it. One kept on
+//! purpose after a failed open is marked as retained and never removed.
 use anyhow::{ensure, Context, Result};
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
@@ -28,6 +29,8 @@ const SUFFIXES: [&str; 4] = ["", "-wal", "-shm", "-journal"];
 const SCRATCH: &str = ".sqlite-admission-";
 /// Marks a scratch directory that was kept on purpose as the only pre-open copy.
 const RETAINED: &str = "retained";
+/// Marks a scratch directory whose admission went on to open the original.
+const OPENING: &str = "opening";
 #[path = "admission_wal.rs"]
 mod wal;
 pub(crate) type AdmissionCache = BTreeMap<PathBuf, Family>;
@@ -199,8 +202,9 @@ impl Family {
     }
 }
 /// Remove scratch directories that an interrupted admission left beside this
-/// database. One kept on purpose carries a marker and is left alone.
-fn sweep_scratch(parent: &Path) {
+/// database. One kept on purpose carries a marker and is left alone. Before a
+/// new copy, one whose admission had started opening the original stays too.
+fn sweep_scratch(parent: &Path, before_copy: bool) {
     let Ok(entries) = fs::read_dir(parent) else {
         return;
     };
@@ -214,6 +218,7 @@ fn sweep_scratch(parent: &Path) {
             && fs::symlink_metadata(&path)
                 .is_ok_and(|m| m.is_dir() && !wechat_platform::is_link(&m))
             && !path.join(RETAINED).exists()
+            && !(before_copy && path.join(OPENING).exists())
         {
             let _ = fs::remove_dir_all(&path);
         }
@@ -283,42 +288,39 @@ pub(crate) fn open_prepared<T>(
             )
         })?;
         let value = prepare(&mut db)?;
-        sweep_scratch(parent);
+        sweep_scratch(parent, false);
         return Ok((db, value));
     }
     // Free what interrupted admissions left before making new copies.
-    sweep_scratch(parent);
+    sweep_scratch(parent, true);
     let needed = family
         .0
         .values()
         .map(|member| member.length)
         .sum::<u64>()
         .saturating_mul(2);
-    let staging = |error: anyhow::Error| {
-        anyhow::anyhow!(
-            "cannot copy {} for validation: {error:#}. The check needs about {} MiB free beside it; existing database and companions preserved",
-            path.display(),
-            needed.div_ceil(1 << 20)
-        )
-    };
-    let scratch = wechat_platform::private_tempdir_in(parent, SCRATCH)?;
-    let original = scratch.path().join("original");
-    let validation = scratch.path().join("validation");
-    wechat_platform::private_dir(&original)?;
-    wechat_platform::private_dir(&validation)?;
-    let saved = original.join("database.sqlite");
-    family.copy_to(path, &saved).map_err(staging)?;
-    let copied = Family::read(&saved)?;
-    let retain_unverified = wal::validate(&copied).map_err(|error| {
-        anyhow::anyhow!(
-            "cannot open {}: {error}. Stop the daemon and back up this file with its -wal and -shm files before changing them; see https://thisnick.github.io/agent-wechat/reference/troubleshooting/#starting-the-daemon",
-            path.display()
-        )
-    })?;
-    let probe = validation.join("database.sqlite");
-    copied.copy_to(&saved, &probe).map_err(staging)?;
-    wechat_platform::sync_dir(scratch.path())?;
-    wechat_platform::sync_dir(parent)?;
+    let (scratch, original, probe, retain_unverified) = (|| -> Result<_> {
+        let scratch = wechat_platform::private_tempdir_in(parent, SCRATCH)?;
+        let original = scratch.path().join("original");
+        let validation = scratch.path().join("validation");
+        wechat_platform::private_dir(&original)?;
+        wechat_platform::private_dir(&validation)?;
+        let saved = original.join("database.sqlite");
+        family.copy_to(path, &saved)?;
+        let copied = Family::read(&saved)?;
+        let retain_unverified = wal::validate(&copied).map_err(|error| {
+            anyhow::anyhow!(
+                "cannot open {}: {error}. Stop the daemon and back up this file with its -wal and -shm files before changing them; see https://thisnick.github.io/agent-wechat/reference/troubleshooting/#starting-the-daemon",
+                path.display()
+            )
+        })?;
+        let probe = validation.join("database.sqlite");
+        copied.copy_to(&saved, &probe)?;
+        wechat_platform::sync_dir(scratch.path())?;
+        wechat_platform::sync_dir(parent)?;
+        Ok((scratch, original, probe, retain_unverified))
+    })()
+    .map_err(space_hint(path, needed))?;
     let validate = || -> Result<()> {
         let mut db = connect(&probe)?;
         check(&db)?;
@@ -349,6 +351,10 @@ pub(crate) fn open_prepared<T>(
         family.unchanged(path)?,
         "database family changed before admission; existing files preserved"
     );
+    // From here the original can change. If this process stops, the copy above
+    // is kept until an admission of this database succeeds.
+    File::create(scratch.path().join(OPENING))?;
+    wechat_platform::sync_dir(scratch.path())?;
     let opened = (|| -> Result<(Connection, T)> {
         let mut db = connect(path)?;
         let value = prepare(&mut db)?;
@@ -357,7 +363,7 @@ pub(crate) fn open_prepared<T>(
     match opened {
         Ok(result) => {
             drop(scratch);
-            sweep_scratch(parent);
+            sweep_scratch(parent, false);
             Ok(result)
         }
         Err(error) => {
@@ -368,8 +374,8 @@ pub(crate) fn open_prepared<T>(
                 None => match retain_recovery(&original, parent) {
                     Ok(path) => path,
                     Err(_) => {
-                        // Best effort: without the marker a later successful
-                        // admission treats this directory as a leftover.
+                        // Best effort: without this marker, the opening marker
+                        // still keeps the directory until an admission succeeds.
                         let _ = File::create(scratch.path().join(RETAINED));
                         let recovery = scratch.keep();
                         return Err(error.context(format!("database admission failed; unpublished pre-open recovery family retained at {}",recovery.join("original").display())));
@@ -381,6 +387,30 @@ pub(crate) fn open_prepared<T>(
                 recovery.display()
             )))
         }
+    }
+}
+
+/// Name the space the copies need when the disk or quota ran out. The original
+/// error stays the source, so callers still classify it as an I/O failure.
+fn space_hint(path: &Path, needed: u64) -> impl Fn(anyhow::Error) -> anyhow::Error + '_ {
+    move |error| {
+        let full = error
+            .chain()
+            .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+            .any(|cause| {
+                matches!(
+                    cause.kind(),
+                    std::io::ErrorKind::StorageFull | std::io::ErrorKind::QuotaExceeded
+                )
+            });
+        if !full {
+            return error;
+        }
+        error.context(format!(
+            "cannot copy {} for validation: the copies need about {} MiB free beside it; existing database and companions preserved",
+            path.display(),
+            needed.div_ceil(1 << 20).max(1)
+        ))
     }
 }
 
@@ -504,9 +534,15 @@ mod tests {
     fn copying_again_first_removes_leftovers_even_when_admission_then_fails() {
         let temp = tempfile::tempdir().unwrap();
         let path = database(temp.path(), 4);
+        // Stopped before opening the original: only copies of an unchanged family.
         let stale = temp.path().join(format!("{SCRATCH}interrupted"));
         fs::create_dir_all(stale.join("validation")).unwrap();
         fs::write(stale.join("validation/database.sqlite"), b"partial copy").unwrap();
+        // Stopped while opening the original: its copy may be the only pre-open state.
+        let opening = temp.path().join(format!("{SCRATCH}opening"));
+        fs::create_dir_all(opening.join("original")).unwrap();
+        fs::write(opening.join("original/database.sqlite"), b"pre-open copy").unwrap();
+        fs::write(opening.join(OPENING), b"").unwrap();
         let kept = temp.path().join(format!("{SCRATCH}kept"));
         fs::create_dir_all(&kept).unwrap();
         fs::write(kept.join(RETAINED), b"").unwrap();
@@ -516,10 +552,56 @@ mod tests {
         private(&wal, b"pending");
         let error = open(&path, 4).unwrap_err().to_string();
         assert!(error.contains("unrecognized database WAL"), "{error}");
-        // A start that keeps failing, such as on a full disk, still frees
-        // earlier copies. The marked copy and the original files stay.
-        assert_eq!(scratch(temp.path()), [format!("{SCRATCH}kept")]);
+        // A start that keeps failing, such as on a full disk, still frees plain
+        // copies. The marked copies and the original files stay.
+        assert_eq!(
+            scratch(temp.path()),
+            [format!("{SCRATCH}kept"), format!("{SCRATCH}opening")]
+        );
         assert_eq!(fs::read(&wal).unwrap(), b"pending");
+
+        // The opening marker is written before the original is opened.
+        fs::remove_file(&wal).unwrap();
+        let runs = Cell::new(0);
+        open_prepared(&path, None, 5, |db| {
+            runs.set(runs.get() + 1);
+            let marked = scratch(temp.path())
+                .iter()
+                .filter(|name| temp.path().join(name).join(OPENING).exists())
+                .count();
+            // The leftover above, plus this admission's own while it opens the original.
+            assert_eq!(marked, runs.get());
+            db.pragma_update(None, "user_version", 5)?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(runs.get(), 2);
+        // Only a successful admission removes a copy left while opening.
+        assert_eq!(scratch(temp.path()), [format!("{SCRATCH}kept")]);
+    }
+
+    #[test]
+    fn a_full_disk_names_the_space_the_copies_need_and_keeps_the_cause() {
+        use std::io::{Error, ErrorKind};
+        let path = Path::new("/data/control.sqlite");
+        let hint = space_hint(path, 3 << 20);
+        let full = hint(Error::from(ErrorKind::StorageFull).into());
+        assert!(full.to_string().contains("about 3 MiB free"), "{full}");
+        assert_eq!(
+            full.downcast_ref::<Error>().map(Error::kind),
+            Some(ErrorKind::StorageFull)
+        );
+        // A small database still names a nonzero amount.
+        let quota = space_hint(path, 10)(Error::from(ErrorKind::QuotaExceeded).into());
+        assert!(quota.to_string().contains("about 1 MiB free"), "{quota}");
+        // Other failures pass through unchanged.
+        let other = hint(anyhow::anyhow!("database family changed during validation"));
+        assert_eq!(
+            other.to_string(),
+            "database family changed during validation"
+        );
+        let denied = hint(Error::from(ErrorKind::PermissionDenied).into());
+        assert_eq!(denied.chain().count(), 1);
     }
 
     #[test]
