@@ -7,8 +7,12 @@
 //! for corruption before use.
 //!
 //! The scratch copies are removed when admission returns. A process that is
-//! stopped part-way leaves them behind, so the next successful admission of a
-//! database removes leftover scratch directories beside it.
+//! stopped part-way leaves them behind. They are only copies: a pre-open family
+//! worth keeping is published as `.sqlite-recovery-*` before SQLite opens the
+//! original, or its scratch directory is marked as retained. So an admission
+//! that is about to copy a database first removes unmarked leftovers beside it,
+//! and a successful admission removes them too. Otherwise starts that keep
+//! failing for lack of space would never free the space they need.
 use anyhow::{ensure, Context, Result};
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
@@ -282,13 +286,28 @@ pub(crate) fn open_prepared<T>(
         sweep_scratch(parent);
         return Ok((db, value));
     }
+    // Free what interrupted admissions left before making new copies.
+    sweep_scratch(parent);
+    let needed = family
+        .0
+        .values()
+        .map(|member| member.length)
+        .sum::<u64>()
+        .saturating_mul(2);
+    let staging = |error: anyhow::Error| {
+        anyhow::anyhow!(
+            "cannot copy {} for validation: {error:#}. The check needs about {} MiB free beside it; existing database and companions preserved",
+            path.display(),
+            needed.div_ceil(1 << 20)
+        )
+    };
     let scratch = wechat_platform::private_tempdir_in(parent, SCRATCH)?;
     let original = scratch.path().join("original");
     let validation = scratch.path().join("validation");
     wechat_platform::private_dir(&original)?;
     wechat_platform::private_dir(&validation)?;
     let saved = original.join("database.sqlite");
-    family.copy_to(path, &saved)?;
+    family.copy_to(path, &saved).map_err(staging)?;
     let copied = Family::read(&saved)?;
     let retain_unverified = wal::validate(&copied).map_err(|error| {
         anyhow::anyhow!(
@@ -297,7 +316,7 @@ pub(crate) fn open_prepared<T>(
         )
     })?;
     let probe = validation.join("database.sqlite");
-    copied.copy_to(&saved, &probe)?;
+    copied.copy_to(&saved, &probe).map_err(staging)?;
     wechat_platform::sync_dir(scratch.path())?;
     wechat_platform::sync_dir(parent)?;
     let validate = || -> Result<()> {
@@ -482,6 +501,28 @@ mod tests {
     }
 
     #[test]
+    fn copying_again_first_removes_leftovers_even_when_admission_then_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = database(temp.path(), 4);
+        let stale = temp.path().join(format!("{SCRATCH}interrupted"));
+        fs::create_dir_all(stale.join("validation")).unwrap();
+        fs::write(stale.join("validation/database.sqlite"), b"partial copy").unwrap();
+        let kept = temp.path().join(format!("{SCRATCH}kept"));
+        fs::create_dir_all(&kept).unwrap();
+        fs::write(kept.join(RETAINED), b"").unwrap();
+        // A log that needs replaying sends the open through the copy path,
+        // which then refuses this unrecognized one.
+        let wal = member_path(&path, "-wal").unwrap();
+        private(&wal, b"pending");
+        let error = open(&path, 4).unwrap_err().to_string();
+        assert!(error.contains("unrecognized database WAL"), "{error}");
+        // A start that keeps failing, such as on a full disk, still frees
+        // earlier copies. The marked copy and the original files stay.
+        assert_eq!(scratch(temp.path()), [format!("{SCRATCH}kept")]);
+        assert_eq!(fs::read(&wal).unwrap(), b"pending");
+    }
+
+    #[test]
     fn leftovers_of_an_interrupted_admission_are_removed_and_a_kept_copy_stays() {
         let temp = tempfile::tempdir().unwrap();
         let path = database(temp.path(), 4);
@@ -498,7 +539,7 @@ mod tests {
         // A file with the scratch prefix is not a scratch directory.
         fs::write(temp.path().join(format!("{SCRATCH}file")), b"").unwrap();
 
-        // A refused open removes nothing.
+        // A refused open in place removes nothing.
         assert!(open_prepared(&path, None, 4, |_| -> Result<()> {
             anyhow::bail!("refused")
         })

@@ -22,11 +22,12 @@ struct Refresh {
     #[serde(default)]
     contact_revision: Option<Vec<u8>>,
 }
+const PENDING: &str = "incoming-group-pending:";
+/// Response bodies a refresh replaced after the group changed again. Raw
+/// replies for investigation; nothing reads them back.
+const SUPERSEDED: &str = "incoming-group-superseded:";
 fn key(receipt: &str) -> String {
-    format!(
-        "incoming-group-pending:{:x}",
-        Sha256::digest(receipt.as_bytes())
-    )
+    format!("{PENDING}{:x}", Sha256::digest(receipt.as_bytes()))
 }
 fn done(receipt: &str) -> String {
     format!(
@@ -157,7 +158,12 @@ impl Core {
                         && current != job.contact_revision
                         && current.as_deref() != Some(key.as_bytes())
                     {
-                        let prior = format!("{}:superseded:{}", key, job.attempts);
+                        // Keep the replaced bodies for investigation, outside
+                        // the refresh queue: a key under `incoming-group-pending:`
+                        // would be picked up as a new job that is always
+                        // superseded again, refetching on every tick (#722).
+                        let prior =
+                            format!("{}:{}", key.replacen(PENDING, SUPERSEDED, 1), job.attempts);
                         self.store.put_runtime(
                             account,
                             &prior,
@@ -591,6 +597,76 @@ mod tests {
             "Later phone edit"
         );
         assert_eq!(core.refresh_incoming_groups("one", false).unwrap(), 0);
+    }
+    #[test]
+    fn a_refresh_superseded_once_refetches_once_and_leaves_the_queue() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Server {
+            contact: Vec<u8>,
+            roster: Vec<u8>,
+            detail: Vec<u8>,
+            calls: Arc<AtomicUsize>,
+        }
+        impl crate::upstream::Upstream for Server {
+            fn kind(&self) -> crate::upstream::UpstreamKind {
+                crate::upstream::UpstreamKind::Native
+            }
+            fn lookup_contacts_raw(&self, _: &mut AccountState, _: &[String]) -> Result<Vec<u8>> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(self.contact.clone())
+            }
+            fn lookup_room_raw(&self, _: &mut AccountState, _: &str, _: u32) -> Result<Vec<u8>> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(self.roster.clone())
+            }
+            fn group_detail_raw(&self, _: &mut AccountState, _: &str) -> Result<Vec<u8>> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(self.detail.clone())
+            }
+        }
+        let (_temp, mut core) = super::super::groups::tests::fixture();
+        super::super::groups::tests::make_group(&core);
+        let (key, job) = staged(&core);
+        let calls = Arc::new(AtomicUsize::new(0));
+        Arc::get_mut(&mut Arc::get_mut(&mut core).unwrap().shared)
+            .unwrap()
+            .upstream = Arc::new(Server {
+            contact: job.contact_raw.clone().unwrap(),
+            roster: job.roster_raw.clone().unwrap(),
+            detail: job.detail_raw.clone().unwrap(),
+            calls: calls.clone(),
+        });
+        // The job already holds fetched bodies when another update to the same
+        // group lands once, before the job applies them.
+        core.save_incoming_group("one", &key, &job).unwrap();
+        core.mark_group_revision("one", ROOM, "concurrent-update")
+            .unwrap();
+        // A copy an earlier release saved under the queue's names is not a job.
+        let legacy = format!("{key}:superseded:1");
+        core.store.put_runtime("one", &legacy, b"legacy").unwrap();
+
+        assert_eq!(core.refresh_incoming_groups("one", true).unwrap(), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            core.group_info("one", ROOM).unwrap()["name"],
+            "Fresh phone title"
+        );
+        // Later ticks find nothing to do and never ask the server again.
+        for _ in 0..3 {
+            assert_eq!(core.refresh_incoming_groups("one", true).unwrap(), 0);
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert!(core
+            .store
+            .incoming_group_refreshes("one")
+            .unwrap()
+            .is_empty());
+        let saved = core.store.runtime_prefix("one", SUPERSEDED, 10).unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(
+            saved[0].0,
+            format!("{}:1", key.replacen(PENDING, SUPERSEDED, 1))
+        );
     }
     #[test]
     fn local_repair_never_fetches_missing_data_or_overwrites_a_newer_change() {
