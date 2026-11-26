@@ -1,7 +1,7 @@
 ---
 title: Rust 开发库
 description: 在 Rust 中使用原生微信协议、Profile 与语音媒体库。
-sourceHash: "feebac213596"
+sourceHash: "b67321be4933"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -56,7 +56,7 @@ fn contacts(profile: &str, keys_path: &str) -> wechat_profile::Result<()> {
 
 操作均为 `NativeClient` 上的方法。应用程序负责凭据存储、恢复与 Profile 回写。
 
-1. 调用 `start_qr_login`，轮询直至 `LoginStatus::Approved`，然后调用 `complete_login`。将返回的 `AccountState` 传入 `NativeClient::from_account(state, options)`。克隆出的句柄共享同一个账号所有者。操作不再接受单独的可变账号状态。
+1. 使用 `NativeClient::with_transport(options, ProtocolTransport::native()?)` 创建客户端。调用 `start_qr_login_async`，使用 `poll_login_async` 轮询直至 `LoginStatus::Approved`，然后调用 `complete_login_async`。将返回的 `AccountState` 移入 `NativeClient::from_account_with_transport(state, options, transport)`。克隆出的句柄共享同一个账号所有者。
 2. 提交前，先记录操作、唯一任务 ID 与 Unix 秒级时间戳。收件人请使用其确切的微信用户名（username）：
 
    ```rust
@@ -119,8 +119,11 @@ cargo run --manifest-path packages/native-client-rust/Cargo.toml -p wechat-proto
 
 `wechat-protocol` 通过 `wechat_protocol::transport` 支持自定义异步传输（`StreamTransport`、`HttpTransport`、`HttpOverStream`、`Clock`、`TaskSpawner` 与 `ProtocolTransport`）。仅提供原始 TCP 流的宿主（例如使用 Direct Sockets 的浏览器 Isolated Web App）可以通过 `ProtocolTransport::from_streams(streams, clock)` 包装 `StreamTransport`。在 `wasm32` 或非 Tokio 执行器上，请使用 `ProtocolTransport::with_spawner` 挂载任务派生器（例如 `wasm_bindgen_futures::spawn_local`），这样即使取消进行中的账号请求，仍会等待该次交换完成，并采纳经过校验的回复。
 
+在原生目标上，`ProtocolTransport::native()` 会构建默认的组合：Tokio TCP 流、池化的 HTTP/1.1 客户端以及系统时钟。请在 Tokio 运行时内调用它。对于消息中出现的媒体 URL（头像、表情、链接缩略图、企业微信媒体以及视频号视频），请传入下载器 `NativeHttpTransport::new(DestinationPolicy::PublicOnly)`：仅当主机解析到的每个地址都是公网地址时才会连接，否则以 `TransportError::DestinationNotAllowed` 失败。`media::FileUploadSource` 与 `PreparedAsyncUpload::from_file` 可从文件流式上传，`tokio::fs::File` 可作为 `AsyncDownloadSink` 使用。
+
 - 异步登录请使用 `NativeClient::with_transport`（`start_qr_login_async`、`poll_login_async`、`complete_login_async`）。
-- 异步账号 RPC 与 `open_push_connection`（`AsyncPushConnection`）请使用 `NativeClient::from_account_with_transport`。
+- 异步账号 RPC 与 `open_push_connection`（`AsyncPushConnection`）请使用 `NativeClient::from_account_with_transport`。`client.request(async |request| ...)` 可运行一次有范围限定的操作；即使之后保存账号更新失败，也能保留其已验证的回复，与 `request_blocking` 相同。
+- 使用 `ProtocolTransport::native()` 时，`poll_login_async` 与 `poll_login_guarded_async` 会通过临时本地监听器应答局域网风险验证，与阻塞式登录的做法相同。
 - 使用 `media::CdnClient` 的异步方法（`download_async`、`download_to_with_progress_async`、`download_voice_with_progress_async`、`upload_async`、`upload_source_with_progress_async`、`upload_image_async`、`upload_video_async`、`upload_large_file_with_progress_async`、`upload_large_file_from_source_with_progress_async`），流式的 `AsyncDownloadSink` / `AsyncUploadSource`（`PreparedAsyncUpload`），以及异步独立下载器（`download_advertised_avatar_async`、`fetch_sticker_async`、`fetch_link_thumbnail_async`、`fetch_tp_media_async`、`fetch_tp_media_to_async`、`fetch_channels_video_async`），它们可基于任意 `HttpTransport` 与 `Clock` 运行。
 - 在 `wasm32-unknown-unknown` 上，`wechat-media` 与 `wechat-protocol`（`default-features = false, features = ["pure-rust-crypto"]`）会自动省略操作系统套接字、`reqwest` 与原生媒体工具。在应用 crate 中，请配置 `getrandom` 0.4 的后端（浏览器中需添加 `getrandom = { version = "0.4", features = ["wasm_js"] }`，并使用 `RUSTFLAGS='--cfg getrandom_backend="wasm_js"'` 构建）。
 
@@ -129,5 +132,5 @@ cargo run --manifest-path packages/native-client-rust/Cargo.toml -p wechat-proto
 `stage_*` 准备字节数据，`apply_*` 应用逻辑更新，`publish_*` 将字节安装到 Profile 中的路径。这些是 API 名称，并非官方客户端的名称；`apply_*` 与 `publish_*` 的职责有部分重叠，且不保证整个操作是原子的。MMKV 暂存会生成加密数据以及匹配的 `.crc` 元数据。发布时会使用临时文件。`WriteOptions::durable_intent_id` 指向你事先保存的恢复记录；该库无法验证此记录是否存在。
 
 <Aside title="使用提示">
-账号所有的异步方法使用传输 Worker。在异步应用中，阻塞式引导方法需要阻塞 Worker。新的测试登录可能会使已有的桌面端会话下线；示例仅在内存中保存凭据。保存凭据时请加密，并在重试前先核查状态不确定的发送。Profile 写入器需要独占所有权、匹配的密钥以及受支持的架构。Linux 上的 Profile 支持并不代表兼容 Windows 或 macOS。部分媒体功能需要 FFmpeg。请固定依赖版本，并在升级前检查 API 变更。
+已弃用的阻塞式登录、请求、推送、CDN 与下载方法将在 4.0 中移除；每条弃用说明都会注明其异步替代方法。新的测试登录可能会替换已有的桌面端会话；示例仅在内存中保留凭据。请加密保存凭据，并在重试前核查状态不确定的发送。Profile 写入器需要独占所有权、匹配的密钥以及受支持的架构。Linux 上的 Profile 支持并不代表兼容 Windows 或 macOS。部分媒体路径需要 FFmpeg。请固定版本号，并检查 API 变更。
 </Aside>
