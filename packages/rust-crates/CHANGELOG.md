@@ -1,5 +1,17 @@
 # @agent-wechat/rust-crates
 
+## 3.2.0
+
+### Minor Changes
+
+- [#714](https://github.com/thisnick/agent-wechat/pull/714) [`388f275`](https://github.com/thisnick/agent-wechat/commit/388f27568eea6a15b616358513813ed0460f9ebb) Thanks [@thisnick](https://github.com/thisnick)! - Add async parity for the remaining blocking-only `wechat-protocol` paths: `NativeClient::request` with `AsyncAccountRequest` (the async counterpart of `request_blocking`, keeping a verified reply when the account commit fails), async `upload_sticker_chunk_raw`, `custom_stickers_raw`, `send_sticker_chunk_raw`, `sticker_pack_page_raw`, `sticker_pack_detail_raw`, `sticker_pack_captions_raw` and `sticker_pack_acquisition_raw`, and LAN risk-challenge support in async QR login (`poll_login_guarded_async`, `ProtocolTransport::with_lan_login`, enabled by `ProtocolTransport::native()`). The protocol examples now use the native async transport.
+
+- [#714](https://github.com/thisnick/agent-wechat/pull/714) [`91f8056`](https://github.com/thisnick/agent-wechat/commit/91f8056a72a2b3a9858354663c9b73745918b5a0) Thanks [@thisnick](https://github.com/thisnick)! - The daemon's CDN uploads and downloads, file-backed uploads, and avatar, sticker, link-thumbnail, Enterprise WeChat and Channels video downloads now use the native async transport; message media URLs go through `NativeHttpTransport` with `DestinationPolicy::PublicOnly`. `wechat-protocol` adds `HttpTransport::send_streaming` (with `HttpBodySink` and `HttpResponseHead`) so long downloads report progress and stop per piece, streams Channels videos through it, and adds `TransportError::Interrupted` so CDN transfers retry the same address after a connection drops mid-request, as the blocking session does.
+
+- [#714](https://github.com/thisnick/agent-wechat/pull/714) [`ce03c0c`](https://github.com/thisnick/agent-wechat/commit/ce03c0cd8b7a705033afa206ae9e0aa90a929486) Thanks [@thisnick](https://github.com/thisnick)! - Deprecate `wechat-protocol`'s blocking APIs ahead of their removal in 4.0: `mmtls::Session` and `short_exchange`, `AccountPushConnection` and `open_push_connection_blocking`, `AccountRequest` and `request_blocking`, `renew_session_blocking`, `logout_blocking`, `shutdown_blocking`, `PendingLogout::submit_blocking` / `submit_guarded_blocking`, the blocking QR and saved-device login methods, the blocking `CdnClient` transfer methods, `PreparedFileUpload`, and the blocking avatar, sticker, link-thumbnail, Enterprise WeChat and Channels downloaders. Each deprecation note names its async replacement.
+
+- [#714](https://github.com/thisnick/agent-wechat/pull/714) [`3630475`](https://github.com/thisnick/agent-wechat/commit/3630475469f9778073a19bf6a6f9ba74de595142) Thanks [@thisnick](https://github.com/thisnick)! - Add default native async transports to `wechat-protocol`: `ProtocolTransport::native()`, `TokioStreamTransport`, `TokioSpawner` and `NativeHttpTransport` (pooled HTTP/1.1, no proxy or redirects, streamed receive budgets) with `DestinationPolicy::PublicOnly` for message-supplied media URLs. Add `TransportError::DestinationNotAllowed`, which the async standalone downloaders report with the codes their blocking versions use (`*_dns_not_public`, or `channels_download_failed` for Channels videos), plus `media::FileUploadSource`, `PreparedAsyncUpload::from_file` and an `AsyncDownloadSink` implementation for `tokio::fs::File`.
+
 ## 3.1.1
 
 ### Patch Changes
