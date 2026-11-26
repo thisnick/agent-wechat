@@ -1,4 +1,7 @@
 //! Account-owned asynchronous protocol operations.
+// This module defines or still uses the blocking APIs deprecated in 3.2;
+// 4.0 removes them (#701).
+#![allow(deprecated)]
 use super::*;
 use crate::transport::{MaybeSend, MaybeSync};
 

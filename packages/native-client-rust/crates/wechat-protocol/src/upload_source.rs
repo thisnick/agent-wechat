@@ -7,6 +7,9 @@
 //! ciphertext. A [`PreparedFileUpload`] is therefore read from disk as it is
 //! sent instead of being encrypted into memory first, and every request is the
 //! same as for the equivalent in-memory [`PreparedUpload`].
+// This module defines or still uses the blocking APIs deprecated in 3.2;
+// 4.0 removes them (#701).
+#![allow(deprecated)]
 use super::*;
 use crate::transport::{MaybeSend, MaybeSync, TransportFuture};
 use std::{

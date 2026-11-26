@@ -27,10 +27,13 @@ surfaces are scheduled for retirement in `#701`.
 
 ## Legacy APIs to avoid in new code
 
-The blocking APIs below are `#[deprecated]` since 3.2 and are removed in
-4.0 (#701). No workspace crate outside `wechat-protocol` uses them; CI's
-warning-denying Clippy keeps it that way. Inside `wechat-protocol` the
-deprecated items may still use each other until they are deleted.
+The public blocking APIs below, and `NativeClient::new` / `from_account*`
+without a transport, are `#[deprecated]` since 3.2 and are removed in 4.0
+(#701); the internal `CdnSession`, `push::Connection` and `spawn_blocking`
+fallbacks are reachable only through them. No workspace crate outside
+`wechat-protocol` uses them, and CI's warning-denying Clippy keeps it that
+way. Inside `wechat-protocol`, only the modules that define or still use the
+deprecated items allow the lint, until 4.0 deletes them.
 
 | Legacy (avoid in new code; tracked in `#701`) | Preferred replacement |
 | --- | --- |

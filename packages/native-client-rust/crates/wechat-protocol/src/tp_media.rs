@@ -6,6 +6,9 @@
 //! message's 16-byte `aeskey` (or `tpthumbaeskey`). The server caps single responses at 512 KiB
 //! and returns `206 Partial Content`, so transfers loop over contiguous byte ranges and decrypt
 //! directly into a streaming sink.
+// This module defines or still uses the blocking APIs deprecated in 3.2;
+// 4.0 removes them (#701).
+#![allow(deprecated)]
 use super::{
     AsyncDownloadSink, DownloadReceipt, DownloadedMedia, MediaQuality, MAX_CDN_TRANSFER_BYTES,
     MAX_LARGE_FILE_BYTES, MAX_VIDEO_DOWNLOAD_BYTES,

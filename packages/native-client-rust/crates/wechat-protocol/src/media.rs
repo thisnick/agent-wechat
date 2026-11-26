@@ -1,5 +1,8 @@
 //! Bounded native CDN transport. This uses the observed HTTP carrier on port 443,
 //! not HTTPS. Media encryption and advertised size/digests are checked separately.
+// This module defines or still uses the blocking APIs deprecated in 3.2;
+// 4.0 removes them (#701).
+#![allow(deprecated)]
 use crate::errors::{Service, ServiceRejected};
 use crate::transport::{
     find_transport_error, Clock, HttpMethod, HttpRequest, HttpTransport, TransportError,

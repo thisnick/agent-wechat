@@ -1,3 +1,6 @@
+// This module defines or still uses the blocking APIs deprecated in 3.2;
+// 4.0 removes them (#701).
+#![allow(deprecated)]
 #[path = "contact_requests.rs"]
 mod contact_requests;
 pub use contact_requests::*;
@@ -598,6 +601,10 @@ impl NativeClient {
     }
 
     /// Validate transport options. Construction itself makes no network request.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `NativeClient::with_transport` with `ProtocolTransport::native()`; a client without a transport runs on the blocking backend; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn new(options: NativeOptions) -> Result<Self> {
         Self::from_validated_options(options, None)

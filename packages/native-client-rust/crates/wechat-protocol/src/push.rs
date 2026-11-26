@@ -1,5 +1,8 @@
 //! Persistent authenticated incoming notifications. The outer longlink command
 //! is distinct from the encrypted business CGI: heartbeat 238/518, sync 121/138.
+// This module defines or still uses the blocking APIs deprecated in 3.2;
+// 4.0 removes them (#701).
+#![allow(deprecated)]
 #[cfg(not(target_arch = "wasm32"))]
 use crate::mmtls::Session;
 use crate::{

@@ -3,9 +3,10 @@
 Native protocol library for the Linux 4.1.13.26 profile. This is Rust
 protocol code using vendored OpenSSL primitives by default (`openssl-crypto`)
 or an opt-in pure-Rust backend (`pure-rust-crypto`); it does not execute Node or load an
-official WeChat executable/library. Account-owned requests use async methods
-backed by blocking transport workers. Login bootstrap
-and remaining low-level operations require a blocking worker in async applications.
+official WeChat executable/library. On native targets,
+`ProtocolTransport::native()` runs login and every account request
+asynchronously on Tokio. The blocking APIs are deprecated since 3.2 and are
+removed in 4.0.
 
 ## Start with NativeClient
 
@@ -22,9 +23,8 @@ The crate-level Functions list mainly contains helper functions.
 | Lower-level operations | `transport`, `wire`, `media`, group request builders and response decoders |
 
 After login, move the accepted `AccountState` into
-`NativeClient::from_account(state, options)` (or
-`NativeClient::from_account_with_transport(state, options, transport)` for a
-custom async transport). Cloned handles share that account
+`NativeClient::from_account_with_transport(state, options, transport)`, with
+`ProtocolTransport::native()?` or your own transport. Cloned handles share that account
 owner. Async sync, text and call requests take temporary request snapshots and
 adopt accepted cookie updates without holding a state lock over network waits.
 Explicit renewal fences older credential generations. `shutdown().await` stops
@@ -101,24 +101,20 @@ targets, add `getrandom = { version = "0.4", features = ["wasm_js"] }` and
 `AsyncAccountRequest`) on the configured transport. Whatever the operation
 returned is visible inside the closure before the account update commits, so a
 verified reply survives a later commit failure such as `AccountPersistenceFailed`
-or a logout fence. It runs on the caller's task: don't drop it after submission.
+or a logout fence. If the request's future is dropped, a submitted operation
+still completes and its verified cookie is committed.
 
 The blocking APIs (`request_blocking`, `open_push_connection_blocking`, the
-blocking login methods, the blocking `CdnClient` methods, `PreparedFileUpload`
-and the blocking downloaders) are deprecated since 3.2 and are removed in 4.0.
-Each deprecation note names its async replacement.
+`*_blocking` logout and shutdown forms, the blocking login methods, the
+blocking `CdnClient` methods, `PreparedFileUpload`, the blocking downloaders,
+and `NativeClient::new` / `from_account` without a transport) are deprecated
+since 3.2 and are removed in 4.0. Each deprecation note names its async
+replacement.
 
-Embedders that already use blocking workers can use `request_blocking` for one
-scoped operation, or `open_push_connection_blocking` for persistent notifications.
-Both share the same credentials, shutdown and response-ordering checks as async
-methods. `account_lease()` supplies a credential-free generation check for media
-workers; it does not replace a request's final submission guard.
-
-`logout_blocking`, `shutdown_blocking`, `PendingLogout::submit_blocking` and
-`PendingLogout::submit_guarded_blocking` do the same work as their async
-counterparts on the caller's worker, without a Tokio runtime. Logout is still
-submitted at most once. Do not call them from inside an account request: they
-wait for every earlier request to finish.
+`account_lease()` supplies a credential-free generation check for media
+workers; it does not replace a request's final submission guard. Logout is
+submitted at most once. Don't call `logout` or `shutdown` from inside an
+account request: they wait for every earlier request to finish.
 
 ### Typed errors
 

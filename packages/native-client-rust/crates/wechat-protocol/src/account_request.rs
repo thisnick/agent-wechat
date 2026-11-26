@@ -1,4 +1,7 @@
 //! Scoped operations for embedders that already execute on blocking workers.
+// This module defines or still uses the blocking APIs deprecated in 3.2;
+// 4.0 removes them (#701).
+#![allow(deprecated)]
 use super::*;
 
 /// A single logical operation borrowing this client's temporary request state.

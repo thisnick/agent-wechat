@@ -2,7 +2,7 @@
 //!
 //! Most server operations are **methods on [`NativeClient`]**, rather than free
 //! functions in this crate's Functions list. [`AccountState`] holds accepted
-//! credentials; transfer it once into [`NativeClient::from_account`]. Account
+//! credentials; transfer it once into [`NativeClient::from_account_with_transport`]. Account
 //! operations then share that owner. It is secret data, not an API access token.
 //! On native targets, bind clients to [`transport::ProtocolTransport::native`]
 //! with [`NativeClient::with_transport`] or
@@ -86,10 +86,6 @@
 //! [`NativeClient::open_push_connection`], [`NativeClient::renew_session`],
 //! [`NativeClient::logout`], [`PendingLogout::submit`] and
 //! [`NativeClient::shutdown`] instead.
-
-// The deprecated blocking APIs still call each other and share internals until
-// 4.0 removes them (#701). Callers outside this crate get the warnings.
-#![allow(deprecated)]
 
 pub mod business;
 

@@ -1,4 +1,7 @@
 //! Persistent notifications share the account owner, not a saved credential copy.
+// This module defines or still uses the blocking APIs deprecated in 3.2;
+// 4.0 removes them (#701).
+#![allow(deprecated)]
 use super::*;
 use crate::{errors::AccountInterrupted, push, wire};
 #[cfg(not(target_arch = "wasm32"))]
