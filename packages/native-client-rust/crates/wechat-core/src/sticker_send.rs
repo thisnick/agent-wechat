@@ -212,8 +212,14 @@ impl Core {
                 .as_deref()
                 .context("sticker_source_unavailable")?;
             crate::upstream::require_native(self.upstream.kind())?;
+            let http = crate::upstream::public_media_http(&*self.upstream)?;
             let (bytes, _) = permit.transfer(self, account, || {
-                wechat_protocol::media::fetch_sticker_original(url, &plan.content_id, |_, _| Ok(()))
+                crate::async_bridge::block_on(wechat_protocol::media::fetch_sticker_original_async(
+                    url,
+                    &plan.content_id,
+                    &*http,
+                    |_, _| Ok(()),
+                ))
             })?;
             self.resume_media_state(account, id, &plan.fence)?;
             self.validate_sticker_send_membership(account, &plan.request.source)?;
@@ -310,7 +316,9 @@ impl Core {
                 return result;
             }
         }
-        self.native_request(account, state, |ctx| ctx.send_sticker_chunk_raw(chunk))
+        self.native_request(account, state, async |ctx| {
+            ctx.send_sticker_chunk_raw(chunk).await
+        })
     }
     fn finish_sticker_send(&self, account: &str, id: &str, plan: &StickerSendPlan) -> Result<()> {
         self.write_sticker_message_cache(account, id, plan)?;

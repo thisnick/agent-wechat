@@ -1,4 +1,7 @@
 //! Persistent notifications share the account owner, not a saved credential copy.
+// This module defines or still uses the blocking APIs deprecated in 3.2;
+// 4.0 removes them (#701).
+#![allow(deprecated)]
 use super::*;
 use crate::{errors::AccountInterrupted, push, wire};
 #[cfg(not(target_arch = "wasm32"))]
@@ -10,6 +13,10 @@ use std::time::Instant;
 /// Requests and notification waits use the same account admission and handoff
 /// barriers as ordinary operations. Reconnect after a credential generation
 /// changes; an old authenticated socket cannot adopt newer credentials.
+#[deprecated(
+    since = "3.2.0",
+    note = "use `AsyncPushConnection` from `NativeClient::open_push_connection`; blocking APIs are removed in 4.0 (#701)"
+)]
 #[cfg(not(target_arch = "wasm32"))]
 pub struct AccountPushConnection {
     client: NativeClient,
@@ -36,6 +43,10 @@ pub struct AsyncPushConnection {
 impl NativeClient {
     /// Open an authenticated notification transport on the caller's blocking
     /// worker. Creating the transport does not start a hidden executor or loop.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `NativeClient::open_push_connection`; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open_push_connection_blocking(&self) -> Result<AccountPushConnection> {
         if self.transport.is_some() {

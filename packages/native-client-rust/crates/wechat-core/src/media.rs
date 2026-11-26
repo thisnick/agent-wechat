@@ -13,9 +13,9 @@ use std::{
 use wechat_protocol::{
     file_upload::FileUploadReservation,
     media::{
-        CdnClient, LargeCdnRoute, MediaDescriptor, MediaQuality, PreparedFileUpload,
-        PreparedImageUpload, PreparedVideoUpload, StickerDescriptor, TpMediaDescriptor,
-        UploadedImage, UploadedMedia, UploadedVideo,
+        LargeCdnRoute, MediaDescriptor, MediaQuality, PreparedAsyncUpload, PreparedImageUpload,
+        PreparedVideoUpload, StickerDescriptor, TpMediaDescriptor, UploadedImage, UploadedMedia,
+        UploadedVideo,
     },
 };
 use wechat_store::{MediaAssetRecord, MediaJobRecord, OwnedMediaSource};
@@ -2171,8 +2171,11 @@ impl Core {
                     .as_ref()
                     .map(|_| self.media_authorization_fence(account))
                     .transpose()?;
+                let http = crate::upstream::public_media_http(&*self.upstream)?;
                 let bytes = cdn_transfer(permit.as_deref_mut(), self, account, || {
-                    wechat_protocol::media::fetch_link_thumbnail(&url, progress)
+                    crate::async_bridge::block_on(
+                        wechat_protocol::media::fetch_link_thumbnail_async(&url, &*http, progress),
+                    )
                 })?;
                 if let Some(fence) = fence {
                     self.resume_media_state(account, id, &fence)?;
@@ -2258,9 +2261,14 @@ impl Core {
             }
             DownloadPlan::SavedSticker { id: sticker, url } => {
                 let fence = self.media_authorization_fence(account)?;
+                let http = crate::upstream::public_media_http(&*self.upstream)?;
                 let (bytes, inspection) =
                     cdn_transfer(permit.as_deref_mut(), self, account, || {
-                        wechat_protocol::media::fetch_sticker_original(&url, &sticker, &progress)
+                        crate::async_bridge::block_on(
+                            wechat_protocol::media::fetch_sticker_original_async(
+                                &url, &sticker, &*http, &progress,
+                            ),
+                        )
                     })?;
                 self.resume_media_state(account, id, &fence)?;
                 self.write_saved_cache(account, id, &sticker, &bytes)?;
@@ -3925,20 +3933,23 @@ impl Core {
                 (&source, &source_md5),
                 |uploaded, state| {
                     let conf = if uploaded.descriptor.quality == MediaQuality::LargeFile {
-                        self.native_request(account, state, |request| {
-                            request.large_cdn_config(LargeCdnRoute::Download)
+                        self.native_request(account, state, async |request| {
+                            request.large_cdn_config(LargeCdnRoute::Download).await
                         })?
                     } else {
-                        self.native_request(account, state, |request| request.cdn_config())?
+                        self.native_request(account, state, async |request| {
+                            request.cdn_config().await
+                        })?
                     };
                     self.save_state(account, state)?;
-                    let cdn = CdnClient::new(conf, Duration::from_secs(25))?;
+                    let cdn = self.native_media_transport(conf)?;
                     let fence = self.media_authorization_fence(account)?;
                     // Readback only needs the digest, so nothing is kept.
                     let downloaded = cdn_transfer(permit, self, account, || {
-                        cdn.download_to_with_progress(
+                        crate::upstream::media::MediaTransport::download_to(
+                            &cdn,
                             &uploaded.descriptor,
-                            |n, t| self.progress_media(account, id, n, t),
+                            &|n, t| self.progress_media(account, id, n, t),
                             &mut std::io::sink(),
                         )
                     })?;
@@ -3946,14 +3957,16 @@ impl Core {
                     Ok(downloaded.sha256)
                 },
                 |plan, state| {
-                    self.native_request(account, state, |request| {
-                        request.send_file(
-                            &plan.request.thread_id,
-                            &plan.client_id,
-                            plan.created_at,
-                            plan.uploaded_file.as_ref().unwrap(),
-                            plan.reservation.as_ref(),
-                        )
+                    self.native_request(account, state, async |request| {
+                        request
+                            .send_file(
+                                &plan.request.thread_id,
+                                &plan.client_id,
+                                plan.created_at,
+                                plan.uploaded_file.as_ref().unwrap(),
+                                plan.reservation.as_ref(),
+                            )
+                            .await
                     })
                 },
             );
@@ -4096,16 +4109,18 @@ impl Core {
         let destination = plan.request.thread_id.clone();
         let progress_id = plan.file_upload_progress_id.clone();
         if self.reserve_media_file_upload(account, id, &mut plan, source_len, || {
-            self.native_request(account, &mut state, |request| {
-                request.reserve_file_upload(
-                    &destination,
-                    progress_id
-                        .as_deref()
-                        .context("file_reservation_needs_review")?,
-                    &source.name,
-                    source_len,
-                    &source_file.md5,
-                )
+            self.native_request(account, &mut state, async |request| {
+                request
+                    .reserve_file_upload(
+                        &destination,
+                        progress_id
+                            .as_deref()
+                            .context("file_reservation_needs_review")?,
+                        &source.name,
+                        source_len,
+                        &source_file.md5,
+                    )
+                    .await
             })
         })? {
             self.save_state(account, &state)?;
@@ -4115,7 +4130,7 @@ impl Core {
         match plan.request.kind {
             MediaKind::File => {
                 if plan.uploaded_file.is_none() {
-                    let prepared = PreparedFileUpload::new(
+                    let prepared = PreparedAsyncUpload::from_file(
                         source_file.open()?,
                         source_file.byte_length,
                         &source_file.md5,
@@ -4133,11 +4148,7 @@ impl Core {
                         .transpose()?;
                     let uploaded = cdn_transfer(permit.as_deref_mut(), self, account, || {
                         if modern_file {
-                            cdn.native()?.upload_large_file_from_file_with_progress(
-                                &prepared,
-                                material.task_id,
-                                callback,
-                            )
+                            cdn.upload_large_file(&prepared, material.task_id, &callback)
                         } else {
                             cdn.upload_file(&prepared, &callback)
                         }
@@ -4277,7 +4288,7 @@ impl Core {
                         .original_video_material
                         .as_ref()
                         .context("video_preparation_missing")?;
-                    let prepared = PreparedFileUpload::new(
+                    let prepared = PreparedAsyncUpload::from_file(
                         source_file.open()?,
                         source_file.byte_length,
                         &source_file.md5,
@@ -8045,7 +8056,7 @@ mod tests {
                 &self,
                 descriptor: &TpMediaDescriptor,
                 progress: crate::upstream::media::Progress<'_>,
-                sink: &mut dyn std::io::Write,
+                sink: &mut (dyn std::io::Write + Send),
             ) -> Result<wechat_protocol::media::DownloadReceipt> {
                 let (bytes, receipt) = self.download_tp_media(descriptor, progress)?.into_parts();
                 sink.write_all(&bytes)?;

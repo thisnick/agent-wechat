@@ -1,3 +1,6 @@
+// This module defines or still uses the blocking APIs deprecated in 3.2;
+// 4.0 removes them (#701).
+#![allow(deprecated)]
 #[path = "contact_requests.rs"]
 mod contact_requests;
 pub use contact_requests::*;
@@ -40,7 +43,8 @@ use crate::{
 };
 pub use account::{
     AccountIdentity, AccountLease, AccountLifecycle, AccountPersistence, AccountPersistenceFailed,
-    AccountStatus, AsyncPushConnection, NativeRequestNotSubmitted, PendingLogout, TextSendOptions,
+    AccountStatus, AsyncAccountRequest, AsyncPushConnection, NativeRequestNotSubmitted,
+    PendingLogout, TextSendOptions,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use account::{AccountPushConnection, AccountRequest};
@@ -513,6 +517,9 @@ pub struct NativeClient {
     /// The account owner's reusable short-link ticket, set on request transports.
     #[cfg(not(target_arch = "wasm32"))]
     short_link: Option<std::sync::Arc<mmtls::ShortLinkCache>>,
+    /// Set on the handle inside [`NativeClient::request`]: account operations
+    /// borrow that request's exchange instead of beginning their own.
+    scope: Option<std::sync::Arc<account::RequestScope>>,
 }
 #[cfg(not(target_arch = "wasm32"))]
 type CallReplyObserver = dyn Fn(&[u8]) -> Result<()> + Send + Sync;
@@ -528,6 +535,7 @@ pub fn is_retryable_login_poll_error(error: &anyhow::Error) -> bool {
                 transport,
                 crate::transport::TransportError::Timeout
                     | crate::transport::TransportError::Disconnected
+                    | crate::transport::TransportError::Interrupted
             );
         }
         if let Some(io) = cause.downcast_ref::<std::io::Error>() {
@@ -588,10 +596,15 @@ impl NativeClient {
             call_reply_observer: None,
             #[cfg(not(target_arch = "wasm32"))]
             short_link: None,
+            scope: None,
         })
     }
 
     /// Validate transport options. Construction itself makes no network request.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `NativeClient::with_transport` with `ProtocolTransport::native()`; a client without a transport runs on the blocking backend; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn new(options: NativeOptions) -> Result<Self> {
         Self::from_validated_options(options, None)
@@ -891,10 +904,77 @@ impl NativeClient {
     /// Asynchronously poll an issued login challenge using this client's
     /// [`crate::transport::ProtocolTransport`].
     ///
-    /// Pluggable async transports cannot open a local LAN TCP listener; if the
-    /// server requests a LAN risk challenge, this fails closed with a
-    /// non-retryable LAN login error (see [`crate::login_lan_error_reason`]).
+    /// On native targets with a transport that allows LAN login (as
+    /// [`crate::transport::ProtocolTransport::native`] does), a server LAN
+    /// risk challenge opens the same temporary local listener as the blocking
+    /// poll, bounded by the attempt's 15-minute lifetime; use
+    /// [`Self::poll_login_guarded_async`] to bound or cancel it sooner. Other
+    /// transports cannot open a local listener: a LAN risk challenge then
+    /// fails closed with a non-retryable LAN login error (see
+    /// [`crate::login_lan_error_reason`]).
     pub async fn poll_login_async(&self, attempt: &mut LoginAttempt) -> Result<LoginStatus> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.poll_login_guarded_async(
+                attempt,
+                std::time::Instant::now() + Duration::from_secs(900),
+                || false,
+            )
+            .await
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            match self.poll_login_notification_async(attempt).await? {
+                Ok(response) => apply_login_notification_without_lan(attempt, response),
+                Err(status) => Ok(status),
+            }
+        }
+    }
+
+    /// As [`Self::poll_login_async`], with a bound on any LAN risk-challenge
+    /// listener: it closes at `deadline` (or the attempt's 15-minute limit,
+    /// whichever is first) or as soon as `cancelled` returns true. The guard is
+    /// polled while the listener runs; it must not block.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn poll_login_guarded_async(
+        &self,
+        attempt: &mut LoginAttempt,
+        deadline: std::time::Instant,
+        cancelled: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> Result<LoginStatus> {
+        let transport = self.require_transport()?;
+        let response = match self.poll_login_notification_async(attempt).await? {
+            Ok(response) => response,
+            Err(status) => return Ok(status),
+        };
+        if !transport.lan_login() {
+            return apply_login_notification_without_lan(attempt, response);
+        }
+        match login_notification_step(attempt, response)? {
+            LoginStep::Status(status) => Ok(status),
+            LoginStep::StartLan => {
+                let remaining = attempt
+                    .created_at
+                    .saturating_add(900)
+                    .saturating_sub(transport.clock.unix_time_secs()?);
+                let deadline = deadline
+                    .min(std::time::Instant::now() + Duration::from_secs(u64::from(remaining)));
+                let scope = crate::lan_login::Scope::new(deadline, cancelled);
+                let challenge = self
+                    .start_lan_login_async(transport, attempt, scope)
+                    .await?;
+                attempt.lan_challenge = Some(challenge);
+                Ok(attempt.status)
+            }
+        }
+    }
+
+    /// Submit one QR poll. Returns the decoded notification, or the attempt's
+    /// final status when it expired locally without a request.
+    async fn poll_login_notification_async(
+        &self,
+        attempt: &mut LoginAttempt,
+    ) -> Result<std::result::Result<wire::PollResponse, LoginStatus>> {
         ensure!(
             self.account.is_none(),
             "Explicit-state transport cannot use a bound account client"
@@ -906,7 +986,7 @@ impl NativeClient {
         if attempt.locally_expired(now) {
             attempt.stop_lan_login();
             attempt.status = LoginStatus::Expired;
-            return Ok(attempt.status);
+            return Ok(Err(attempt.status));
         }
         attempt.validate_at(now)?;
         ensure!(
@@ -935,16 +1015,48 @@ impl NativeClient {
         if !cookie.is_empty() {
             attempt.cookie = cookie;
         }
-        if response.lan_challenge && matches!(response.status, Some(0..=2)) {
-            attempt.credential3.zeroize();
-            attempt.credential4.zeroize();
-            attempt.credential3 = None;
-            attempt.credential4 = None;
-            attempt.status = LoginStatus::Scanned;
-            return Err(crate::lan_login::failure("unsupported_transport"));
+        Ok(Ok(response))
+    }
+
+    /// Open the LAN risk-challenge listener and upload its addresses once on
+    /// this client's transport, as [`Self::start_lan_login`] does on the
+    /// blocking path.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn start_lan_login_async(
+        &self,
+        transport: &crate::transport::ProtocolTransport,
+        attempt: &mut LoginAttempt,
+        scope: crate::lan_login::Scope,
+    ) -> Result<std::sync::Arc<crate::lan_login::Challenge>> {
+        use crate::lan_login as lan;
+        let challenge = std::sync::Arc::new(lan::Challenge::bind(scope)?);
+        let uploaded = async {
+            let request = lan_upload_request(&challenge, attempt)?;
+            let (reply, cookie, _) = self
+                .prelogin_rpc_async_with_guard(
+                    transport,
+                    &attempt.long_host,
+                    &attempt.short_host,
+                    lan::CGI,
+                    lan::PATH,
+                    &request,
+                    &attempt.cookie,
+                    &[],
+                    Some(attempt.key_version),
+                    || Ok(()),
+                )
+                .await
+                .map_err(|_| lan::failure("upload_failed"))?;
+            accept_lan_upload(&challenge, attempt, reply, cookie)
         }
-        apply_ordinary_login_notification(attempt, response);
-        Ok(attempt.status)
+        .await;
+        match uploaded {
+            Ok(()) => Ok(challenge),
+            Err(error) => {
+                release_lan_challenge(challenge);
+                Err(error)
+            }
+        }
     }
 
     /// Asynchronously exchange an approved challenge for secret account
@@ -1090,6 +1202,10 @@ impl NativeClient {
     /// Request one QR challenge for the supplied device. Display
     /// [`LoginAttempt::qr_png`] privately, poll for phone approval, then call
     /// [`Self::complete_login`]. This does not grant authorization by itself.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `start_qr_login_async` on a client from `NativeClient::with_transport`; blocking APIs are removed in 4.0 (#701)"
+    )]
     pub fn start_qr_login(
         &self,
         device: DeviceProfile,
@@ -1099,6 +1215,10 @@ impl NativeClient {
     }
     /// QR approval for an existing installation retains its selected key-info.
     /// This neither bypasses phone approval nor imports active authorization.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `start_profile_qr_login_async` on a client from `NativeClient::with_transport`; blocking APIs are removed in 4.0 (#701)"
+    )]
     pub fn start_profile_qr_login(
         &self,
         device: DeviceProfile,
@@ -1145,6 +1265,10 @@ impl NativeClient {
     }
     /// Initiates phone approval for an existing remembered device without a QR.
     /// The caller chooses this fallback explicitly; no automatic auth retries occur.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `start_saved_device_login_async` on a client from `NativeClient::with_transport`; blocking APIs are removed in 4.0 (#701)"
+    )]
     pub fn start_saved_device_login(
         &self,
         state: &AccountState,
@@ -1163,6 +1287,10 @@ impl NativeClient {
         )
     }
     /// Use remembered official-profile trust without inventing active session keys.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `start_profile_saved_device_login_async` on a client from `NativeClient::with_transport`; blocking APIs are removed in 4.0 (#701)"
+    )]
     pub fn start_profile_saved_device_login(
         &self,
         device: &DeviceProfile,
@@ -1245,6 +1373,10 @@ impl NativeClient {
     }
     /// Poll an existing challenge. Only [`LoginStatus::Approved`] permits
     /// [`Self::complete_login`]; expired/rejected/cancelled attempts must stop.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `poll_login_async` on a client from `NativeClient::with_transport`; blocking APIs are removed in 4.0 (#701)"
+    )]
     pub fn poll_login(&self, attempt: &mut LoginAttempt) -> Result<LoginStatus> {
         self.poll_login_guarded(
             attempt,
@@ -1254,6 +1386,10 @@ impl NativeClient {
     }
     /// The guard bounds the temporary LAN listener even while a blocking poll
     /// or upload is in flight. It must not perform blocking work itself.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `poll_login_guarded_async` on a client from `NativeClient::with_transport`; blocking APIs are removed in 4.0 (#701)"
+    )]
     pub fn poll_login_guarded(
         &self,
         attempt: &mut LoginAttempt,
@@ -1307,12 +1443,7 @@ impl NativeClient {
     ) -> Result<std::sync::Arc<crate::lan_login::Challenge>> {
         use crate::lan_login as lan;
         let challenge = std::sync::Arc::new(lan::Challenge::bind(scope)?);
-        let random = zeroize::Zeroizing::new(crate::crypto::random::<16>()?);
-        let request = zeroize::Zeroizing::new(challenge.request(
-            &attempt.device,
-            &attempt.identifier,
-            &random,
-        )?);
+        let request = lan_upload_request(&challenge, attempt)?;
         let (reply, cookie, _) = self
             .prelogin_rpc(
                 &attempt.long_host,
@@ -1325,17 +1456,15 @@ impl NativeClient {
                 Some(attempt.key_version),
             )
             .map_err(|_| lan::failure("upload_failed"))?;
-        let reply = zeroize::Zeroizing::new(reply);
-        let token =
-            lan::response(&reply).map_err(|_| lan::failure("upload_rejected_or_invalid"))?;
-        challenge.arm(&token)?;
-        if !cookie.is_empty() {
-            attempt.cookie = cookie;
-        }
+        accept_lan_upload(&challenge, attempt, reply, cookie)?;
         Ok(challenge)
     }
     /// Exchange an approved challenge for secret account credentials once.
     /// Keep the returned state in memory or an encrypted application vault.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `complete_login_async` on a client from `NativeClient::with_transport`; blocking APIs are removed in 4.0 (#701)"
+    )]
     pub fn complete_login(&self, attempt: &mut LoginAttempt) -> Result<AccountState> {
         attempt.stop_lan_login();
         attempt.validate()?;
@@ -1379,6 +1508,10 @@ impl NativeClient {
         bail!("Native authentication redirect limit reached")
     }
     /// Replace an expired, unscanned QR while preserving installation key-info.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `refresh_qr_login_async` on a client from `NativeClient::with_transport`; blocking APIs are removed in 4.0 (#701)"
+    )]
     pub fn refresh_qr_login(&self, attempt: &LoginAttempt) -> Result<LoginAttempt> {
         self.check_snapshot_transport()?;
         ensure!(
@@ -2091,23 +2224,98 @@ fn apply_ordinary_login_notification(attempt: &mut LoginAttempt, response: wire:
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn apply_login_notification(
+/// A LAN risk challenge is not approval: drop any credentials it carried and
+/// keep the attempt at `Scanned`.
+fn refuse_lan_challenge(attempt: &mut LoginAttempt) {
+    attempt.credential3.zeroize();
+    attempt.credential4.zeroize();
+    attempt.credential3 = None;
+    attempt.credential4 = None;
+    attempt.status = LoginStatus::Scanned;
+}
+
+/// Apply a poll notification on a transport that cannot open a local
+/// listener: a LAN risk challenge fails closed.
+fn apply_login_notification_without_lan(
     attempt: &mut LoginAttempt,
     response: wire::PollResponse,
-    start_lan: impl FnOnce(&mut LoginAttempt) -> Result<std::sync::Arc<crate::lan_login::Challenge>>,
 ) -> Result<LoginStatus> {
+    if response.lan_challenge && matches!(response.status, Some(0..=2)) {
+        refuse_lan_challenge(attempt);
+        return Err(crate::lan_login::failure("unsupported_transport"));
+    }
+    apply_ordinary_login_notification(attempt, response);
+    Ok(attempt.status)
+}
+
+/// The LAN upload request advertising `challenge`'s addresses for `attempt`.
+#[cfg(not(target_arch = "wasm32"))]
+fn lan_upload_request(
+    challenge: &crate::lan_login::Challenge,
+    attempt: &LoginAttempt,
+) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+    let random = zeroize::Zeroizing::new(crate::crypto::random::<16>()?);
+    Ok(zeroize::Zeroizing::new(challenge.request(
+        &attempt.device,
+        &attempt.identifier,
+        &random,
+    )?))
+}
+
+/// Arm `challenge` with the token from a verified LAN upload reply and adopt
+/// the reply's cookie.
+#[cfg(not(target_arch = "wasm32"))]
+fn accept_lan_upload(
+    challenge: &crate::lan_login::Challenge,
+    attempt: &mut LoginAttempt,
+    reply: Vec<u8>,
+    cookie: Vec<u8>,
+) -> Result<()> {
+    use crate::lan_login as lan;
+    let reply = zeroize::Zeroizing::new(reply);
+    let token = lan::response(&reply).map_err(|_| lan::failure("upload_rejected_or_invalid"))?;
+    challenge.arm(&token)?;
+    if !cookie.is_empty() {
+        attempt.cookie = cookie;
+    }
+    Ok(())
+}
+
+/// Stop and drop a LAN challenge without blocking an async executor: dropping
+/// the last handle joins its listener thread.
+#[cfg(not(target_arch = "wasm32"))]
+fn release_lan_challenge(challenge: std::sync::Arc<crate::lan_login::Challenge>) {
+    challenge.stop();
+    match tokio::runtime::Handle::try_current() {
+        Ok(runtime) => {
+            runtime.spawn_blocking(move || drop(challenge));
+        }
+        Err(_) => drop(challenge),
+    }
+}
+
+/// What a QR poll notification asks the caller to do next.
+#[cfg(not(target_arch = "wasm32"))]
+enum LoginStep {
+    /// The attempt is at this status; nothing else to start.
+    Status(LoginStatus),
+    /// Open the LAN risk-challenge listener and upload its addresses. The
+    /// upload is already recorded as attempted.
+    StartLan,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn login_notification_step(
+    attempt: &mut LoginAttempt,
+    response: wire::PollResponse,
+) -> Result<LoginStep> {
     if response.lan_challenge && matches!(response.status, Some(0..=2)) {
         // A risk challenge is not approval, including a notification carrying
         // the ordinary approval status without the final credentials yet.
-        attempt.credential3.zeroize();
-        attempt.credential4.zeroize();
-        attempt.credential3 = None;
-        attempt.credential4 = None;
-        attempt.status = LoginStatus::Scanned;
+        refuse_lan_challenge(attempt);
         if let Some(challenge) = &attempt.lan_challenge {
             if challenge.active() {
-                return Ok(attempt.status);
+                return Ok(LoginStep::Status(attempt.status));
             }
             attempt.stop_lan_login();
             return Err(crate::lan_login::failure("listener_stopped"));
@@ -2118,8 +2326,7 @@ fn apply_login_notification(
         // Record before submission. A lost upload response must not produce an
         // automatic new nonce/token exchange on the next repeatable QR poll.
         attempt.lan_upload_attempted = true;
-        attempt.lan_challenge = Some(start_lan(attempt)?);
-        return Ok(attempt.status);
+        return Ok(LoginStep::StartLan);
     }
     apply_ordinary_login_notification(attempt, response);
     if attempt
@@ -2130,7 +2337,22 @@ fn apply_login_notification(
         attempt.stop_lan_login();
         return Err(crate::lan_login::failure("listener_stopped"));
     }
-    Ok(attempt.status)
+    Ok(LoginStep::Status(attempt.status))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_login_notification(
+    attempt: &mut LoginAttempt,
+    response: wire::PollResponse,
+    start_lan: impl FnOnce(&mut LoginAttempt) -> Result<std::sync::Arc<crate::lan_login::Challenge>>,
+) -> Result<LoginStatus> {
+    match login_notification_step(attempt, response)? {
+        LoginStep::Status(status) => Ok(status),
+        LoginStep::StartLan => {
+            attempt.lan_challenge = Some(start_lan(attempt)?);
+            Ok(attempt.status)
+        }
+    }
 }
 
 #[cfg(test)]

@@ -27,11 +27,19 @@ surfaces are scheduled for retirement in `#701`.
 
 ## Legacy APIs to avoid in new code
 
+The public blocking APIs below, and `NativeClient::new` / `from_account*`
+without a transport, are `#[deprecated]` since 3.2 and are removed in 4.0
+(#701); the internal `CdnSession`, `push::Connection` and `spawn_blocking`
+fallbacks are reachable only through them. No workspace crate outside
+`wechat-protocol` uses them, and CI's warning-denying Clippy keeps it that
+way. Inside `wechat-protocol`, only the modules that define or still use the
+deprecated items allow the lint, until 4.0 deletes them.
+
 | Legacy (avoid in new code; tracked in `#701`) | Preferred replacement |
 | --- | --- |
 | `openssl-crypto` feature, `crypto::openssl_backend`, `crypto::Ecdh::generate`, `crypto::Ecdh::from_private`, `crypto::cbc` | `pure-rust-crypto` feature, `crypto::Curve`, `Ecdh::generate_for`, `Ecdh::from_private_for`, `crypto::cbc_encrypt`, `crypto::cbc_decrypt` |
 | `mmtls::Session`, `mmtls::short_exchange` | `mmtls::AsyncSession`, `mmtls::short_exchange_async` |
 | `push::Connection`, `AccountPushConnection`, `NativeClient::open_push_connection_blocking` | `push::AsyncConnection`, `AsyncPushConnection`, `NativeClient::open_push_connection` |
-| Blocking `NativeClient` login and escape hatches (`start_*_login`, `poll_login`, `complete_login`, `refresh_qr_login`, `*_blocking`, `spawn_blocking` fallbacks) | `NativeClient::with_transport`, `from_account_with_transport*`, `*_login_async`, and `NativeClient` async RPCs |
-| Blocking `CdnSession`, `CdnClient::{download*, upload*}`, `PreparedFileUpload` | `CdnClient::*_async`, `PreparedAsyncUpload` (`AsyncUploadSource`), `AsyncDownloadSink` |
-| Blocking `download_advertised_avatar`, `fetch_sticker*`, `fetch_link_thumbnail`, `fetch_tp_media*`, `fetch_channels_video` | `download_advertised_avatar_async`, `fetch_sticker*_async`, `fetch_link_thumbnail_async`, `fetch_tp_media*_async`, `fetch_channels_video_async` |
+| Blocking `NativeClient` login and escape hatches (`start_*_login`, `poll_login`, `complete_login`, `refresh_qr_login`, `*_blocking`, `spawn_blocking` fallbacks) | `NativeClient::with_transport`, `from_account_with_transport*` with `ProtocolTransport::native()` on native targets, `*_login_async`, and `NativeClient` async RPCs |
+| Blocking `CdnSession`, `CdnClient::{download*, upload*}`, `PreparedFileUpload` | `CdnClient::*_async` over `NativeHttpTransport` (`DestinationPolicy::System`), `PreparedAsyncUpload::from_file` / `FileUploadSource`, `AsyncDownloadSink` |
+| Blocking `download_advertised_avatar`, `fetch_sticker*`, `fetch_link_thumbnail`, `fetch_tp_media*`, `fetch_channels_video` | `download_advertised_avatar_async`, `fetch_sticker*_async`, `fetch_link_thumbnail_async`, `fetch_tp_media*_async`, `fetch_channels_video_async` over `NativeHttpTransport` (`DestinationPolicy::PublicOnly`) |

@@ -1,9 +1,12 @@
 //! Core keeps persistence and policy; NativeClient is the sole live account owner.
 use super::*;
-use wechat_protocol::{AccountPersistence, AccountRequest, NativeClient};
+use crate::async_bridge::block_on;
+use wechat_protocol::{AccountPersistence, AsyncAccountRequest, NativeClient};
 
 pub(super) struct BoundUpstream {
     client: NativeClient,
+    transport: wechat_protocol::transport::ProtocolTransport,
+    public_http: Arc<dyn wechat_protocol::transport::HttpTransport>,
 }
 
 struct PersistAccount {
@@ -96,9 +99,14 @@ impl Core {
             epoch: self.store.runtime(account, "logout-epoch")?,
             desired: self.store.runtime(account, "desired")?,
         });
-        let client = NativeClient::from_account_with_persistence(
+        let transport = self
+            .upstream
+            .protocol_transport()
+            .context("Native account owners need the upstream's protocol transport")?;
+        let client = NativeClient::from_account_with_transport_and_persistence(
             state,
             NativeOptions::default(),
+            transport,
             persistence,
         )?;
         owners.insert(account.into(), Some(client.clone()));
@@ -114,6 +122,11 @@ impl Core {
         }
         Ok(Arc::new(BoundUpstream {
             client: self.native_account(account, NativeOptions::default())?,
+            transport: self
+                .upstream
+                .protocol_transport()
+                .context("Native account owners need the upstream's protocol transport")?,
+            public_http: crate::upstream::public_media_http(&*self.upstream)?,
         }))
     }
 
@@ -226,11 +239,23 @@ impl Core {
         Ok(Some(current))
     }
 
+    /// The account's CDN with `config` on the daemon's native async transport.
+    pub(crate) fn native_media_transport(
+        &self,
+        config: wechat_protocol::media::CdnConfig,
+    ) -> Result<crate::upstream::media::NativeMediaTransport> {
+        let transport = self
+            .upstream
+            .protocol_transport()
+            .context("unsupported_simulator_operation")?;
+        crate::upstream::media::NativeMediaTransport::new(config, &transport)
+    }
+
     pub(crate) fn native_request<T>(
         &self,
         account: &str,
         snapshot: &mut AccountState,
-        operation: impl FnOnce(&mut AccountRequest<'_>) -> Result<T>,
+        operation: impl AsyncFnOnce(&mut AsyncAccountRequest) -> Result<T>,
     ) -> Result<T> {
         mirror(
             &self.native_account(account, NativeOptions::default())?,
@@ -243,16 +268,16 @@ impl Core {
 fn mirror<T>(
     client: &NativeClient,
     snapshot: &mut AccountState,
-    operation: impl FnOnce(&mut AccountRequest<'_>) -> Result<T>,
+    operation: impl AsyncFnOnce(&mut AsyncAccountRequest) -> Result<T>,
 ) -> Result<T> {
     // Preserve verified operation receipts independently from credential
     // installation. A local fence cannot turn an accepted send into an unknown
     // send. Core still checks its own fence before journal/profile completion.
     let mut response = None;
-    let committed = client.request_blocking(|request| {
-        response = Some(operation(request));
+    let committed = block_on(client.request(async |request| {
+        response = Some(operation(request).await);
         Ok(())
-    });
+    }));
     if committed
         .as_ref()
         .is_err_and(|error| error.is::<wechat_protocol::AccountPersistenceFailed>())
@@ -285,7 +310,7 @@ fn channels_stage(error: anyhow::Error, stage: &'static str) -> anyhow::Error {
 macro_rules! forward {
     ($name:ident($($arg:ident: $ty:ty),*) -> $result:ty => $method:ident) => {
         fn $name(&self, state: &mut AccountState, $($arg: $ty),*) -> Result<$result> {
-            mirror(&self.client, state, |request| request.$method($($arg),*))
+            mirror(&self.client, state, async |request| request.$method($($arg),*).await)
         }
     };
 }
@@ -296,6 +321,12 @@ impl crate::upstream::Upstream for BoundUpstream {
     }
     fn native(&self, options: NativeOptions) -> Result<NativeClient> {
         self.client.with_request_options(options)
+    }
+    fn protocol_transport(&self) -> Option<wechat_protocol::transport::ProtocolTransport> {
+        Some(self.transport.clone())
+    }
+    fn public_media_http(&self) -> Option<Arc<dyn wechat_protocol::transport::HttpTransport>> {
+        Some(self.public_http.clone())
     }
     forward!(sync(cursor: &[u8]) -> wechat_protocol::SyncBatch => sync);
     forward!(heartbeat(cursor: &[u8]) -> wechat_protocol::Heartbeat => heartbeat);
@@ -327,7 +358,7 @@ impl crate::upstream::Upstream for BoundUpstream {
             content,
             created_at,
             client_message_id,
-            &mut || Ok(()),
+            Box::new(|| Ok(())),
         )
     }
     fn send_text_with_source(
@@ -339,16 +370,18 @@ impl crate::upstream::Upstream for BoundUpstream {
         client_message_id: u32,
         source: &str,
     ) -> Result<wechat_protocol::TextSendResult> {
-        mirror(&self.client, state, |request| {
-            request.send_text(
-                destination,
-                content,
-                &wechat_protocol::TextSendOptions {
-                    created_at,
-                    client_message_id,
-                    source: Some(source.into()),
-                },
-            )
+        mirror(&self.client, state, async |request| {
+            request
+                .send_text(
+                    destination,
+                    content,
+                    wechat_protocol::TextSendOptions {
+                        created_at,
+                        client_message_id,
+                        source: Some(source.into()),
+                    },
+                )
+                .await
         })
     }
     fn send_text_guarded(
@@ -358,23 +391,25 @@ impl crate::upstream::Upstream for BoundUpstream {
         content: &str,
         created_at: u32,
         client_message_id: u32,
-        before_submit: &mut dyn FnMut() -> Result<()>,
+        before_submit: crate::upstream::TextSendGuard,
     ) -> Result<wechat_protocol::TextSendResult> {
-        mirror(&self.client, state, |request| {
-            request.send_text_guarded(
-                destination,
-                content,
-                &wechat_protocol::TextSendOptions {
-                    created_at,
-                    client_message_id,
-                    source: None,
-                },
-                before_submit,
-            )
+        mirror(&self.client, state, async |request| {
+            request
+                .send_text_guarded(
+                    destination,
+                    content,
+                    wechat_protocol::TextSendOptions {
+                        created_at,
+                        client_message_id,
+                        source: None,
+                    },
+                    before_submit,
+                )
+                .await
         })
     }
     fn renew_session(&self, _state: &AccountState, computer_name: &str) -> Result<AccountState> {
-        if let Err(error) = self.client.renew_session_blocking(computer_name) {
+        if let Err(error) = block_on(self.client.renew_session(computer_name)) {
             if error.is::<wechat_protocol::AccountPersistenceFailed>() {
                 self.client.stop()?;
             }
@@ -388,9 +423,9 @@ impl crate::upstream::Upstream for BoundUpstream {
         route: Option<wechat_protocol::media::LargeCdnRoute>,
     ) -> Result<Box<dyn crate::upstream::media::MediaTransport>> {
         let load = |state: &mut AccountState| {
-            mirror(&self.client, state, |request| match route {
-                Some(route) => request.large_cdn_config(route),
-                None => request.cdn_config(),
+            mirror(&self.client, state, async |request| match route {
+                Some(route) => request.large_cdn_config(route).await,
+                None => request.cdn_config().await,
             })
         };
         let mut configuration = match load(state) {
@@ -401,8 +436,10 @@ impl crate::upstream::Upstream for BoundUpstream {
             }
             Err(error) => return Err(error),
         };
-        let transport =
-            wechat_protocol::media::CdnClient::new(configuration.clone(), Duration::from_secs(25))?;
+        let transport = crate::upstream::media::NativeMediaTransport::new(
+            configuration.clone(),
+            &self.transport,
+        )?;
         configuration.auth_key.fill(0);
         Ok(Box::new(transport))
     }
@@ -419,7 +456,9 @@ impl crate::upstream::Upstream for BoundUpstream {
         // the ticket after it, as in the accepted native sequence.
         let mut renewed = false;
         let page = loop {
-            match mirror(&self.client, state, |request| request.channels_page(post)) {
+            match mirror(&self.client, state, async |request| {
+                request.channels_page(post).await
+            }) {
                 Ok(page) => break page,
                 Err(error) if !renewed && crate::media::is_media_auth_rejected(&error) => {
                     *state = self.renew_session(state, "agent-wechat media")?;
@@ -430,7 +469,9 @@ impl crate::upstream::Upstream for BoundUpstream {
         };
         checkpoint()?;
         let ticket = loop {
-            match mirror(&self.client, state, |request| request.channels_ticket()) {
+            match mirror(&self.client, state, async |request| {
+                request.channels_ticket().await
+            }) {
                 Ok(ticket) => break ticket,
                 Err(error) if !renewed && crate::media::is_media_auth_rejected(&error) => {
                     *state = self.renew_session(state, "agent-wechat media")?;
@@ -440,13 +481,18 @@ impl crate::upstream::Upstream for BoundUpstream {
             }
         };
         checkpoint()?;
-        let media = mirror(&self.client, state, |request| {
-            request.channels_media(post, &ticket, &page)
+        let media = mirror(&self.client, state, async |request| {
+            request.channels_media(post, &ticket, &page).await
         })
         .map_err(|error| channels_stage(error, "channels_detail_failed"))?;
         drop((ticket, page));
         checkpoint()?;
-        wechat_protocol::media::fetch_channels_video(&media, max_bytes, progress)
+        block_on(wechat_protocol::media::fetch_channels_video_async(
+            &media,
+            max_bytes,
+            &*self.public_http,
+            progress,
+        ))
     }
     fn submit_media(
         &self,
@@ -454,33 +500,45 @@ impl crate::upstream::Upstream for BoundUpstream {
         input: crate::upstream::media::MediaSubmission<'_>,
     ) -> Result<wechat_protocol::media_send::MediaSendResult> {
         use crate::upstream::media::MediaBody;
-        mirror(&self.client, state, |request| match input.body {
+        mirror(&self.client, state, async |request| match input.body {
             MediaBody::File {
                 upload,
                 reservation,
-            } => request.send_file(
-                input.destination,
-                input.client_id,
-                input.created_at,
-                upload,
-                reservation,
-            ),
+            } => {
+                request
+                    .send_file(
+                        input.destination,
+                        input.client_id,
+                        input.created_at,
+                        upload,
+                        reservation,
+                    )
+                    .await
+            }
             MediaBody::Image(upload) => {
-                request.send_image(input.destination, input.client_id, upload)
+                request
+                    .send_image(input.destination, input.client_id, upload)
+                    .await
             }
             MediaBody::Video { upload, seconds } => {
-                request.send_video(input.destination, input.client_id, upload, seconds)
+                request
+                    .send_video(input.destination, input.client_id, upload, seconds)
+                    .await
             }
             MediaBody::Voice {
                 encoded,
                 duration_ms,
-            } => request.send_voice(
-                input.destination,
-                input.client_id,
-                input.created_at,
-                duration_ms,
-                encoded,
-            ),
+            } => {
+                request
+                    .send_voice(
+                        input.destination,
+                        input.client_id,
+                        input.created_at,
+                        duration_ms,
+                        encoded,
+                    )
+                    .await
+            }
         })
     }
     fn push_connection(
@@ -489,14 +547,14 @@ impl crate::upstream::Upstream for BoundUpstream {
     ) -> Result<Box<dyn crate::upstream::PushConnection>> {
         Ok(Box::new(BoundPush {
             client: self.client.clone(),
-            connection: self.client.open_push_connection_blocking()?,
+            connection: block_on(self.client.open_push_connection())?,
         }))
     }
 }
 
 struct BoundPush {
     client: NativeClient,
-    connection: wechat_protocol::AccountPushConnection,
+    connection: wechat_protocol::AsyncPushConnection,
 }
 impl crate::upstream::PushConnection for BoundPush {
     fn heartbeat(
@@ -504,7 +562,7 @@ impl crate::upstream::PushConnection for BoundPush {
         state: &mut AccountState,
         cursor: &[u8],
     ) -> Result<wechat_protocol::Heartbeat> {
-        let reply = self.connection.heartbeat(cursor);
+        let reply = block_on(self.connection.heartbeat(cursor));
         if reply
             .as_ref()
             .is_err_and(|error| error.is::<wechat_protocol::AccountPersistenceFailed>())
@@ -520,7 +578,7 @@ impl crate::upstream::PushConnection for BoundPush {
         cursor: &[u8],
         scene: u32,
     ) -> Result<wechat_protocol::SyncBatch> {
-        let reply = self.connection.sync(cursor, scene);
+        let reply = block_on(self.connection.sync(cursor, scene));
         if reply
             .as_ref()
             .is_err_and(|error| error.is::<wechat_protocol::AccountPersistenceFailed>())
@@ -531,7 +589,7 @@ impl crate::upstream::PushConnection for BoundPush {
         reply
     }
     fn poll(&mut self, timeout: Duration) -> Result<Option<wechat_protocol::push::Notification>> {
-        self.connection.poll(timeout)
+        block_on(self.connection.poll(timeout))
     }
     fn sends_sticker_chunks(&self) -> bool {
         true
@@ -540,7 +598,7 @@ impl crate::upstream::PushConnection for BoundPush {
         &mut self,
         chunk: &wechat_protocol::sticker_send::StickerSendChunk<'_>,
     ) -> Result<Vec<u8>> {
-        let reply = self.connection.send_sticker_chunk_raw(chunk);
+        let reply = block_on(self.connection.send_sticker_chunk_raw(chunk));
         if reply
             .as_ref()
             .is_err_and(|error| error.is::<wechat_protocol::AccountPersistenceFailed>())
@@ -720,7 +778,7 @@ mod tests {
             .unwrap();
         let mut snapshot = client.export_account_state().unwrap();
         let stop = client.clone();
-        let receipt = mirror(&client, &mut snapshot, |_| {
+        let receipt = mirror(&client, &mut snapshot, async |_| {
             // The operation has decoded a verified reply; inhibition wins the
             // later account update without erasing this independent receipt.
             stop.stop()?;

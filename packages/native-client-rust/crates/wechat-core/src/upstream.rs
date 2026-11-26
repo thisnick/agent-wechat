@@ -1,13 +1,18 @@
 //! Simulation and bootstrap dispatch. NativeClient owns live account state;
 //! Core retains daemon permissions, journals and official-profile integration.
-use anyhow::{bail, ensure, Result};
+use crate::async_bridge::block_on;
+use anyhow::{bail, ensure, Context, Result};
 use std::{
     path::Path,
+    sync::Arc,
     time::{Duration, Instant},
 };
 use wechat_protocol::{
     media_send::MediaSendResult,
     push::Notification,
+    transport::{
+        DestinationPolicy, HttpTransport, NativeHttpTransport, ProtocolTransport, SystemClock,
+    },
     wire::{Heartbeat, SyncBatch, TextSendResult},
     AccountState, DeviceProfile, LoginAttempt, LoginStatus, NativeClient, NativeOptions,
 };
@@ -39,6 +44,10 @@ pub trait LoginChallenge: Send {
     fn complete(&mut self) -> Result<AccountState>;
     fn refresh(&self) -> Result<Box<dyn LoginChallenge>>;
 }
+
+/// Final admission check run once, immediately before a text send is handed to
+/// transport. It may run on another thread than the caller's.
+pub type TextSendGuard = Box<dyn FnOnce() -> Result<()> + Send + 'static>;
 
 /// Notifications remain hints; Core performs and commits the corresponding sync.
 pub trait PushConnection: Send {
@@ -147,6 +156,17 @@ pub trait Upstream: Send + Sync {
     fn native(&self, _options: NativeOptions) -> Result<NativeClient> {
         bail!("unsupported_simulator_operation")
     }
+    /// The async transport native account owners and login clients use.
+    /// Simulators have none.
+    fn protocol_transport(&self) -> Option<ProtocolTransport> {
+        None
+    }
+    /// HTTP transport for media URLs carried in messages (avatars, stickers,
+    /// link thumbnails, Enterprise WeChat media, Channels videos): it connects
+    /// only to checked public addresses. Simulators have none.
+    fn public_media_http(&self) -> Option<Arc<dyn HttpTransport>> {
+        None
+    }
     fn start_qr_login(
         &self,
         _account: &str,
@@ -156,7 +176,8 @@ pub trait Upstream: Send + Sync {
         key_info: &[u8],
     ) -> Result<Box<dyn LoginChallenge>> {
         let client = self.native(options)?;
-        let attempt = client.start_profile_qr_login(device, computer_name, key_info)?;
+        let attempt =
+            block_on(client.start_profile_qr_login_async(device, computer_name, key_info))?;
         Ok(Box::new(NativeChallenge { client, attempt }))
     }
     fn start_saved_device_login(
@@ -166,7 +187,7 @@ pub trait Upstream: Send + Sync {
         computer_name: &str,
     ) -> Result<Box<dyn LoginChallenge>> {
         let client = self.native(NativeOptions::default())?;
-        let attempt = client.start_saved_device_login(state, computer_name)?;
+        let attempt = block_on(client.start_saved_device_login_async(state, computer_name))?;
         Ok(Box::new(NativeChallenge { client, attempt }))
     }
     #[allow(clippy::too_many_arguments)]
@@ -181,14 +202,14 @@ pub trait Upstream: Send + Sync {
         computer_name: &str,
     ) -> Result<Box<dyn LoginChallenge>> {
         let client = self.native(options)?;
-        let attempt = client.start_profile_saved_device_login(
+        let attempt = block_on(client.start_profile_saved_device_login_async(
             device,
             username,
             auto_auth_key,
             cookie,
             key_info,
             computer_name,
-        )?;
+        ))?;
         Ok(Box::new(NativeChallenge { client, attempt }))
     }
     fn renew_session(&self, _state: &AccountState, _computer_name: &str) -> Result<AccountState> {
@@ -289,7 +310,7 @@ pub trait Upstream: Send + Sync {
         content: &str,
         created_at: u32,
         client_message_id: u32,
-        before_submit: &mut dyn FnMut() -> Result<()>,
+        before_submit: TextSendGuard,
     ) -> Result<TextSendResult> {
         before_submit()?;
         self.send_text(state, destination, content, created_at, client_message_id)
@@ -423,7 +444,10 @@ pub trait Upstream: Send + Sync {
     }
     fn download_avatar(&self, _state: &mut AccountState, source: &str) -> Result<Vec<u8>> {
         require_native(self.kind())?;
-        wechat_protocol::media::download_advertised_avatar(source)
+        let http = public_media_http(self)?;
+        block_on(wechat_protocol::media::download_advertised_avatar_async(
+            source, &*http,
+        ))
     }
     fn download_sticker(
         &self,
@@ -432,7 +456,13 @@ pub trait Upstream: Send + Sync {
         progress: media::Progress<'_>,
     ) -> Result<(Vec<u8>, wechat_protocol::media::ImageInspection)> {
         require_native(self.kind())?;
-        wechat_protocol::media::fetch_sticker(descriptor, progress)
+        let http = public_media_http(self)?;
+        block_on(wechat_protocol::media::fetch_sticker_async(
+            descriptor,
+            &*http,
+            &*media_clock(self),
+            progress,
+        ))
     }
     fn download_tp_media(
         &self,
@@ -440,16 +470,29 @@ pub trait Upstream: Send + Sync {
         progress: media::Progress<'_>,
     ) -> Result<wechat_protocol::media::DownloadedMedia> {
         require_native(self.kind())?;
-        wechat_protocol::media::fetch_tp_media(descriptor, progress)
+        let http = public_media_http(self)?;
+        block_on(wechat_protocol::media::fetch_tp_media_async(
+            descriptor,
+            &*http,
+            &*media_clock(self),
+            progress,
+        ))
     }
     fn download_tp_media_to(
         &self,
         descriptor: &wechat_protocol::media::TpMediaDescriptor,
         progress: media::Progress<'_>,
-        sink: &mut dyn std::io::Write,
+        sink: &mut (dyn std::io::Write + Send),
     ) -> Result<wechat_protocol::media::DownloadReceipt> {
         require_native(self.kind())?;
-        wechat_protocol::media::fetch_tp_media_to(descriptor, progress, sink)
+        let http = public_media_http(self)?;
+        block_on(wechat_protocol::media::fetch_tp_media_to_async(
+            descriptor,
+            &*http,
+            &*media_clock(self),
+            progress,
+            &mut media::WriteSink(sink),
+        ))
     }
     /// Resolve a Channels post's playback material and download its decoded video. Each
     /// authenticated step is submitted once; `checkpoint` runs between steps and stops the
@@ -483,7 +526,28 @@ pub trait Upstream: Send + Sync {
     }
 }
 
-pub(crate) struct NativeUpstream;
+/// The network: login clients, account owners and CDN transfers share one
+/// native async transport (Tokio streams and a pooled HTTP/1.1 client);
+/// message media URLs use a separate public-address-only HTTP client.
+pub(crate) struct NativeUpstream {
+    transport: ProtocolTransport,
+    public_http: Arc<dyn HttpTransport>,
+}
+impl NativeUpstream {
+    pub(crate) fn new() -> Result<Self> {
+        let mut transport = ProtocolTransport::native()?;
+        // Detached account exchanges always run on the runtime that owns the
+        // shared connection pool, even when a synchronous caller (a call
+        // worker thread, a test) waits on a temporary runtime.
+        if let Ok(spawner) = wechat_protocol::transport::TokioSpawner::current() {
+            transport = transport.with_spawner(std::sync::Arc::new(spawner));
+        }
+        Ok(Self {
+            transport,
+            public_http: Arc::new(NativeHttpTransport::new(DestinationPolicy::PublicOnly)?),
+        })
+    }
+}
 impl Upstream for NativeUpstream {
     fn uses_account_owner(&self) -> bool {
         true
@@ -492,8 +556,34 @@ impl Upstream for NativeUpstream {
         UpstreamKind::Native
     }
     fn native(&self, options: NativeOptions) -> Result<NativeClient> {
-        NativeClient::new(options)
+        NativeClient::with_transport(options, self.transport.clone())
     }
+    fn protocol_transport(&self) -> Option<ProtocolTransport> {
+        Some(self.transport.clone())
+    }
+    fn public_media_http(&self) -> Option<Arc<dyn HttpTransport>> {
+        Some(self.public_http.clone())
+    }
+}
+
+/// The clock media downloads check expiry against: the protocol transport's,
+/// or the system clock for upstreams without one.
+pub(crate) fn media_clock<U: Upstream + ?Sized>(
+    upstream: &U,
+) -> Arc<dyn wechat_protocol::transport::Clock> {
+    match upstream.protocol_transport() {
+        Some(transport) => transport.clock,
+        None => Arc::new(SystemClock::new()),
+    }
+}
+
+/// The upstream's public-address-only media HTTP transport.
+pub(crate) fn public_media_http<U: Upstream + ?Sized>(
+    upstream: &U,
+) -> Result<Arc<dyn HttpTransport>> {
+    upstream
+        .public_media_http()
+        .context("Native media downloads need the upstream's public HTTP transport")
 }
 
 struct NativeChallenge {
@@ -515,15 +605,18 @@ impl LoginChallenge for NativeChallenge {
         deadline: Instant,
         cancelled: Box<dyn Fn() -> bool + Send + Sync>,
     ) -> Result<LoginStatus> {
-        self.client
-            .poll_login_guarded(&mut self.attempt, deadline, cancelled)
+        block_on(
+            self.client
+                .poll_login_guarded_async(&mut self.attempt, deadline, cancelled),
+        )
     }
     fn complete(&mut self) -> Result<AccountState> {
-        self.client.complete_login(&mut self.attempt)
+        block_on(self.client.complete_login_async(&mut self.attempt))
     }
     fn refresh(&self) -> Result<Box<dyn LoginChallenge>> {
-        let client = NativeClient::new(NativeOptions::default())?;
-        let attempt = client.refresh_qr_login(&self.attempt)?;
+        // The attempt carries its own hosts; the transport is the shared one.
+        let client = self.client.clone();
+        let attempt = block_on(client.refresh_qr_login_async(&self.attempt))?;
         Ok(Box::new(Self { client, attempt }))
     }
 }

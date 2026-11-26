@@ -156,8 +156,8 @@ impl Core {
             if plan.locator.is_none() {
                 let mut state = self.resume_media_state(account, id, &plan.fence)?;
                 let raw = permit.transfer(self, account, || {
-                    self.native_request(account, &mut state, |ctx| {
-                        ctx.sticker_pack_detail_raw(&plan.pack)
+                    self.native_request(account, &mut state, async |ctx| {
+                        ctx.sticker_pack_detail_raw(&plan.pack).await
                     })
                 })?;
                 let detail = wire::decode_sticker_pack_detail(&raw, &plan.pack)?;
@@ -175,8 +175,8 @@ impl Core {
                 );
                 let mut state = self.resume_media_state(account, id, &plan.fence)?;
                 let captions = permit.transfer(self, account, || {
-                    self.native_request(account, &mut state, |ctx| {
-                        ctx.sticker_pack_captions_raw(&plan.pack)
+                    self.native_request(account, &mut state, async |ctx| {
+                        ctx.sticker_pack_captions_raw(&plan.pack).await
                     })
                 })?;
                 plan.contents = Some(PackContents {
@@ -188,8 +188,8 @@ impl Core {
                 self.save_acquisition(account, id, &plan)?;
                 let mut state = self.resume_media_state(account, id, &plan.fence)?;
                 let raw = permit.transfer(self, account, || {
-                    self.native_request(account, &mut state, |ctx| {
-                        ctx.sticker_pack_acquisition_raw(&plan.pack)
+                    self.native_request(account, &mut state, async |ctx| {
+                        ctx.sticker_pack_acquisition_raw(&plan.pack).await
                     })
                 })?;
                 plan.reply = Some(raw.clone());
@@ -206,17 +206,17 @@ impl Core {
             self.phase_media(account, id, "downloading")?;
             let mut state = self.resume_media_state(account, id, &plan.fence)?;
             let config = permit.transfer(self, account, || {
-                self.native_request(account, &mut state, |ctx| ctx.cdn_config())
+                self.native_request(account, &mut state, async |ctx| ctx.cdn_config().await)
             })?;
-            let cdn = CdnClient::new(config, Duration::from_secs(25))?;
+            let cdn = self.native_media_transport(config)?;
             // The official client downloads pack archives as storage objects.
             // Its task ID is the archive task kind (2), an underscore and the
             // product ID; some archives are only served on this route.
             let downloaded = permit.transfer(self, account, || {
-                cdn.download_storage_with_progress(
+                cdn.download_storage(
                     plan.locator.as_ref().unwrap(),
                     &format!("2_{}", plan.pack),
-                    |n, t| self.progress_media(account, id, n, t),
+                    &|n, t| self.progress_media(account, id, n, t),
                 )
             })?;
             self.resume_media_state(account, id, &plan.fence)?;

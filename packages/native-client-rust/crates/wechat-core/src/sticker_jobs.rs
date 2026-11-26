@@ -395,8 +395,9 @@ impl Core {
                                 self.save_saved_job(account, id, &job)?;
                                 let mut state = self.resume_media_state(account, id, &job.fence)?;
                                 let raw = permit.transfer(self, account, || {
-                                    self.native_request(account, &mut state, |ctx| {
+                                    self.native_request(account, &mut state, async |ctx| {
                                         ctx.upload_sticker_chunk_raw(&bytes, job.upload_offset)
+                                            .await
                                     })
                                 })?;
                                 job.replies.push(raw.clone());
@@ -424,8 +425,8 @@ impl Core {
                 self.save_saved_job(account, id, &job)?;
                 let mut state = self.resume_media_state(account, id, &job.fence)?;
                 let raw = permit.transfer(self, account, || {
-                    self.native_request(account, &mut state, |ctx| {
-                        ctx.mutate_custom_sticker(&identity, &action)
+                    self.native_request(account, &mut state, async |ctx| {
+                        ctx.mutate_custom_sticker(&identity, &action).await
                     })
                 })?;
                 job.replies.push(raw.clone());

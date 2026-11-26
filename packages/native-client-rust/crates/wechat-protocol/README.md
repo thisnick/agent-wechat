@@ -3,9 +3,10 @@
 Native protocol library for the Linux 4.1.13.26 profile. This is Rust
 protocol code using vendored OpenSSL primitives by default (`openssl-crypto`)
 or an opt-in pure-Rust backend (`pure-rust-crypto`); it does not execute Node or load an
-official WeChat executable/library. Account-owned requests use async methods
-backed by blocking transport workers. Login bootstrap
-and remaining low-level operations require a blocking worker in async applications.
+official WeChat executable/library. On native targets,
+`ProtocolTransport::native()` runs login and every account request
+asynchronously on Tokio. The blocking APIs are deprecated since 3.2 and are
+removed in 4.0.
 
 ## Start with NativeClient
 
@@ -15,16 +16,15 @@ The crate-level Functions list mainly contains helper functions.
 
 | Task | API |
 | --- | --- |
-| Login | `start_qr_login`, `poll_login`, `complete_login` (or `*_async` with `with_transport`) |
-| Receive | `sync`, `sync_scene`, `heartbeat`, `open_push_connection` / `open_push_connection_blocking` |
+| Login | `start_qr_login_async`, `poll_login_async` / `poll_login_guarded_async`, `complete_login_async` with `with_transport(options, ProtocolTransport::native()?)` |
+| Receive | `sync`, `sync_scene`, `heartbeat`, `open_push_connection` |
 | Send | `send_text`, `send_share`, `send_quote`, `send_file`, `send_image`, `send_video`, `send_voice` |
 | Contacts | `lookup_contacts`, `lookup_openim_contact`, `lookup_room`, `init_contacts` |
 | Lower-level operations | `transport`, `wire`, `media`, group request builders and response decoders |
 
 After login, move the accepted `AccountState` into
-`NativeClient::from_account(state, options)` (or
-`NativeClient::from_account_with_transport(state, options, transport)` for a
-custom async transport). Cloned handles share that account
+`NativeClient::from_account_with_transport(state, options, transport)`, with
+`ProtocolTransport::native()?` or your own transport. Cloned handles share that account
 owner. Async sync, text and call requests take temporary request snapshots and
 adopt accepted cookie updates without holding a state lock over network waits.
 Explicit renewal fences older credential generations. `shutdown().await` stops
@@ -48,6 +48,26 @@ dropping an outer future still holds the shutdown barrier and adopts verified
 replies; on `wasm32` or non-Tokio executors, attach a host spawner with
 `ProtocolTransport::with_spawner` (for example `wasm_bindgen_futures::spawn_local`)
 if callers may cancel in-flight account RPC futures.
+
+On native targets, `ProtocolTransport::native()` is the default bundle:
+`TokioStreamTransport` for MMTLS long links, `NativeHttpTransport` with
+`DestinationPolicy::System` for short links, and `SystemClock`. Call it from a
+Tokio runtime. `NativeHttpTransport` pools HTTP/1.1 keep-alive connections,
+never uses a proxy or follows redirects, and enforces each request's deadline
+and receive budget while the body streams in, so share one instance per
+destination class. Give the standalone media downloaders
+`NativeHttpTransport::new(DestinationPolicy::PublicOnly)`: it connects only to
+checked public addresses (every resolved address, and any literal IP in the
+URL) and otherwise fails with `TransportError::DestinationNotAllowed`, which
+the downloaders report as their existing codes (`*_dns_not_public`, or
+`channels_download_failed` for Channels videos). `HttpTransport::send_streaming`
+delivers a body in pieces to an `HttpBodySink` (the default buffers through
+`send`); `NativeHttpTransport` streams, so long Channels downloads report
+progress and can stop early. A connection that fails after it was made is
+`TransportError::Interrupted`, which CDN transfers retry on the same address.
+Use
+`media::FileUploadSource` (or `PreparedAsyncUpload::from_file`) to stream an
+upload from a file, and a `tokio::fs::File` as an `AsyncDownloadSink`.
 
 Bind the transport with `NativeClient::with_transport` for async login bootstrap
 (`start_qr_login_async`, `start_saved_device_login_async`, `poll_login_async`,
@@ -77,17 +97,26 @@ targets, add `getrandom = { version = "0.4", features = ["wasm_js"] }` and
 `RUSTFLAGS='--cfg getrandom_backend="wasm_js"'`; for custom runtimes, use
 `RUSTFLAGS='--cfg getrandom_backend="custom"'`).
 
-Embedders that already use blocking workers can use `request_blocking` for one
-scoped operation, or `open_push_connection_blocking` for persistent notifications.
-Both share the same credentials, shutdown and response-ordering checks as async
-methods. `account_lease()` supplies a credential-free generation check for media
-workers; it does not replace a request's final submission guard.
+`request(async |request| ...)` runs one scoped operation (an
+`AsyncAccountRequest`) on the configured transport. Whatever the operation
+returned is visible inside the closure before the account update commits, so a
+verified reply survives a later commit failure such as `AccountPersistenceFailed`
+or a logout fence. With Tokio or a configured spawner, a submitted operation
+still completes after its future is dropped, and its verified cookie is
+committed. Without one (for example on wasm32 or a custom transport with no
+spawner), the operation runs inline: don't drop it after submission.
 
-`logout_blocking`, `shutdown_blocking`, `PendingLogout::submit_blocking` and
-`PendingLogout::submit_guarded_blocking` do the same work as their async
-counterparts on the caller's worker, without a Tokio runtime. Logout is still
-submitted at most once. Do not call them from inside an account request: they
-wait for every earlier request to finish.
+The blocking APIs (`request_blocking`, `open_push_connection_blocking`, the
+`*_blocking` logout and shutdown forms, the blocking login methods, the
+blocking `CdnClient` methods, `PreparedFileUpload`, the blocking downloaders,
+and `NativeClient::new` / `from_account` without a transport) are deprecated
+since 3.2 and are removed in 4.0. Each deprecation note names its async
+replacement.
+
+`account_lease()` supplies a credential-free generation check for media
+workers; it does not replace a request's final submission guard. Logout is
+submitted at most once. Don't call `logout` or `shutdown` from inside an
+account request: they wait for every earlier request to finish.
 
 ### Typed errors
 
@@ -128,7 +157,7 @@ cargo run --manifest-path packages/native-client-rust/Cargo.toml -p wechat-proto
 cargo run --manifest-path packages/native-client-rust/Cargo.toml -p wechat-protocol --example sync_once
 ```
 
-Each requests a fresh QR login for a test account, prints a private temporary
+Each uses `ProtocolTransport::native()`, requests a fresh QR login for a test account, prints a private temporary
 PNG path to open and waits for phone approval. The QR is removed after login;
 credentials stay in memory. `send_text` submits once and prints the receipt;
 `sync_once` summarizes one page without saving history or a cursor. These are

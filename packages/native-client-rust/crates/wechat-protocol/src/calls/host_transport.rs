@@ -98,7 +98,11 @@ impl CallHostRpcError {
             result.code = match transport {
                 crate::transport::TransportError::Timeout => "timeout",
                 crate::transport::TransportError::Disconnected => "connection_closed",
+                crate::transport::TransportError::Interrupted => "connection_interrupted",
                 crate::transport::TransportError::ResponseTooLarge => "response_too_large",
+                crate::transport::TransportError::DestinationNotAllowed => {
+                    "destination_not_allowed"
+                }
             };
         } else if let Some((code, value)) = classify_reqwest_error(cause) {
             result.code = code;

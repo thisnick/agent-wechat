@@ -18,7 +18,7 @@ async fn main() -> anyhow::Result<()> {
     // Validate arguments before requesting any login. A real application records
     // this operation and timestamp before submitting it, and retains its result.
     wire::text_send_request(recipient, text, wire::unix_time()?, client_id)?;
-    let client = tokio::task::spawn_blocking(support::login).await??;
+    let client = support::login().await?;
     let created_at = wire::unix_time()?;
     let receipt = client
         .send_text(

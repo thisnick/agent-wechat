@@ -13,7 +13,8 @@ pub struct StickerDescriptor {
     pub expected_md5: String,
     pub expires_at: Option<u64>,
 }
-pub(super) fn public_ip(ip: IpAddr) -> bool {
+/// Whether `ip` is a public unicast address that media downloads may reach.
+pub(crate) fn public_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v) => {
             let [a, b, c, _] = v.octets();
@@ -81,6 +82,10 @@ pub fn validate_sticker_url(value: &str) -> Result<url::Url> {
 // Legacy blocking sticker downloaders kept for 3.x native compatibility (#701).
 // Prefer `fetch_sticker_async` and `fetch_sticker_original_async` for new code.
 /// Download and verify one sticker image from a validated sticker CDN host.
+#[deprecated(
+    since = "3.2.0",
+    note = "use `fetch_sticker_async` with `NativeHttpTransport::new(DestinationPolicy::PublicOnly)`; blocking APIs are removed in 4.0 (#701)"
+)]
 #[cfg(not(target_arch = "wasm32"))]
 pub fn fetch_sticker(
     descriptor: &StickerDescriptor,
@@ -103,6 +108,10 @@ pub fn fetch_sticker(
 
 /// Fetch an original whose metadata has no advertised length. Enforces the same
 /// host, DNS, stream-size, MD5 and image checks without inventing a source length.
+#[deprecated(
+    since = "3.2.0",
+    note = "use `fetch_sticker_original_async` with `NativeHttpTransport::new(DestinationPolicy::PublicOnly)`; blocking APIs are removed in 4.0 (#701)"
+)]
 #[cfg(not(target_arch = "wasm32"))]
 pub fn fetch_sticker_original(
     url: &str,
@@ -117,6 +126,8 @@ pub fn fetch_sticker_original(
 ///
 /// The caller's [`HttpTransport`] must not follow HTTP redirects and is
 /// responsible for network/SSRF boundaries.
+/// On native targets, `transport::NativeHttpTransport` built with
+/// `DestinationPolicy::PublicOnly` provides that boundary.
 pub async fn fetch_sticker_async(
     descriptor: &StickerDescriptor,
     http: &dyn HttpTransport,
@@ -145,6 +156,8 @@ pub async fn fetch_sticker_async(
 ///
 /// The caller's [`HttpTransport`] must not follow HTTP redirects and is
 /// responsible for network/SSRF boundaries.
+/// On native targets, `transport::NativeHttpTransport` built with
+/// `DestinationPolicy::PublicOnly` provides that boundary.
 pub async fn fetch_sticker_original_async(
     url: &str,
     expected_md5: &str,
@@ -178,13 +191,12 @@ async fn fetch_sticker_source_async(
         })
         .await
         .map_err(|error| {
-            if crate::transport::find_transport_error(&error)
-                == Some(crate::transport::TransportError::ResponseTooLarge)
-            {
-                anyhow::anyhow!("sticker_response_too_large")
-            } else {
-                anyhow::anyhow!("sticker_fetch_failed")
-            }
+            super::download_failure(
+                &error,
+                "sticker_response_too_large",
+                "sticker_source_dns_not_public",
+                "sticker_fetch_failed",
+            )
         })?;
     ensure!(
         response.status == 200,

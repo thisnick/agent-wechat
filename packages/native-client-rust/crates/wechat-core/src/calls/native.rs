@@ -805,6 +805,7 @@ async fn stop_inner(
     worker.wait().await
 }
 
+#[derive(Clone)]
 enum ControlAdmission {
     Owner(BackendSink),
     Incoming(crate::calls::notifications::IncomingGuard),
@@ -854,95 +855,114 @@ impl FencedTransport {
     fn pre_answer_poll(&self, route: CallHostRoute) -> bool {
         route == CallHostRoute::LiveSync && matches!(self.admission, ControlAdmission::Incoming(_))
     }
-    fn wait_for_conference_sync<T>(
-        &self,
-        exchange: impl std::future::Future<Output = Result<T>>,
-    ) -> Result<T> {
-        self.runtime.block_on(async {
-            tokio::pin!(exchange);
-            let mut stop_check = tokio::time::interval(Duration::from_millis(20));
-            loop {
-                tokio::select! {
-                    biased;
-                    reply = &mut exchange => return reply,
-                    _ = stop_check.tick() => {
-                        if !self.worker.current()
-                            || self.worker.stop.load(Ordering::Acquire)
-                            || (self.worker.joined_commands_ready.load(Ordering::Acquire)
-                                && self.worker.has_commands())
-                        {
-                            return Err(CallLiveSyncInterrupted.into());
-                        }
-                    }
-                }
-            }
+    /// Resolves when a joined conference should stop its live-sync poll.
+    fn conference_interrupt(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        live_sync_interrupt(self.worker.clone(), |worker| worker.has_commands())
+    }
+    /// Resolves when a direct video call should stop its live-sync poll.
+    fn direct_interrupt(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        live_sync_interrupt(self.worker.clone(), |worker| {
+            worker.has_direct_commands() || worker.initial_camera_off_due()
         })
     }
-    fn wait_for_direct_sync<T>(
-        &self,
-        exchange: impl std::future::Future<Output = Result<T>>,
-    ) -> Result<T> {
-        self.runtime.block_on(async {
-            tokio::pin!(exchange);
-            let mut stop_check = tokio::time::interval(Duration::from_millis(20));
-            loop {
-                tokio::select! {
-                    biased;
-                    reply = &mut exchange => return reply,
-                    _ = stop_check.tick() => {
-                        if !self.worker.current()
-                            || self.worker.stop.load(Ordering::Acquire)
-                            || (self.worker.joined_commands_ready.load(Ordering::Acquire)
-                                && (self.worker.has_direct_commands()
-                                    || self.worker.initial_camera_off_due()))
-                        {
-                            return Err(CallLiveSyncInterrupted.into());
-                        }
-                    }
-                }
-            }
-        })
-    }
-    fn wait_for_incoming_sync<T>(
-        &self,
-        exchange: impl std::future::Future<Output = Result<T>>,
-    ) -> Result<T> {
+    /// Resolves when an answer is queued for a ringing incoming call.
+    fn incoming_interrupt(&self) -> Result<impl std::future::Future<Output = ()> + Send + 'static> {
         let mailbox = self
             .worker
             .incoming
-            .as_ref()
+            .clone()
             .context("Incoming mailbox missing")?;
+        Ok(async move {
+            mailbox.answer_queued.notified().await;
+            // Let a reply that is already ready win, as it did before.
+            tokio::task::yield_now().await;
+        })
+    }
+    #[cfg(test)]
+    fn wait_for_interrupt<T>(
+        &self,
+        exchange: impl std::future::Future<Output = Result<T>>,
+        interrupt: impl std::future::Future<Output = ()>,
+    ) -> Result<T> {
         self.runtime.block_on(async {
             tokio::select! {
                 biased;
                 reply = exchange => reply,
-                _ = mailbox.answer_queued.notified() => Err(CallLiveSyncInterrupted.into()),
+                () = interrupt => Err(CallLiveSyncInterrupted.into()),
             }
         })
     }
-    fn admits(&self, teardown: bool, rejecting: bool) -> bool {
-        if teardown {
-            return true;
-        }
-        if self
-            .worker
-            .incoming
-            .as_ref()
-            .is_some_and(|mailbox| mailbox.cancellation_pending())
-        {
-            return false;
-        }
-        if rejecting {
-            return self.admission.terminal_current();
-        }
-        self.admission.nonterminal_current() && self.worker.authorized()
+    #[cfg(test)]
+    fn wait_for_conference_sync<T>(
+        &self,
+        exchange: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        self.wait_for_interrupt(exchange, self.conference_interrupt())
     }
+    #[cfg(test)]
+    fn wait_for_direct_sync<T>(
+        &self,
+        exchange: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        self.wait_for_interrupt(exchange, self.direct_interrupt())
+    }
+    #[cfg(test)]
+    fn wait_for_incoming_sync<T>(
+        &self,
+        exchange: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        self.wait_for_interrupt(exchange, self.incoming_interrupt()?)
+    }
+    fn admits(&self, teardown: bool, rejecting: bool) -> bool {
+        admission_open(&self.worker, &self.admission, teardown, rejecting)
+    }
+}
+
+/// Resolves when the worker stops, loses authority, or (once joined) has
+/// `pending` commands to send, checked every 20 ms. It yields once before
+/// resolving so a live-sync reply that is already ready still wins.
+async fn live_sync_interrupt(worker: Arc<Worker>, pending: fn(&Worker) -> bool) {
+    let mut stop_check = tokio::time::interval(Duration::from_millis(20));
+    loop {
+        stop_check.tick().await;
+        if !worker.current()
+            || worker.stop.load(Ordering::Acquire)
+            || (worker.joined_commands_ready.load(Ordering::Acquire) && pending(&worker))
+        {
+            tokio::task::yield_now().await;
+            return;
+        }
+    }
+}
+
+/// Whether a call request may still be submitted under `admission`.
+fn admission_open(
+    worker: &Worker,
+    admission: &ControlAdmission,
+    teardown: bool,
+    rejecting: bool,
+) -> bool {
+    if teardown {
+        return true;
+    }
+    if worker
+        .incoming
+        .as_ref()
+        .is_some_and(|mailbox| mailbox.cancellation_pending())
+    {
+        return false;
+    }
+    if rejecting {
+        return admission.terminal_current();
+    }
+    admission.nonterminal_current() && worker.authorized()
 }
 impl FencedTransport {
     /// Operational evidence is independent of account-state adoption. In
     /// particular a valid reply survives a later writer/authority failure.
     fn retain_host_result(
-        &self,
+        account: &str,
+        call_id: &str,
         core: &Core,
         action: &str,
         route: CallHostRoute,
@@ -951,11 +971,11 @@ impl FencedTransport {
     ) -> Result<()> {
         match result {
             Ok(reply) => {
-                let label = format!("call-reply:{}:{action}", self.call_id);
-                let encrypted = core.vault.seal(&self.account, &label, reply)?;
+                let label = format!("call-reply:{}:{action}", call_id);
+                let encrypted = core.vault.seal(account, &label, reply)?;
                 core.store.finish_call_action(
-                    &self.account,
-                    &self.call_id,
+                    account,
+                    call_id,
                     action,
                     "received",
                     Some(&encrypted),
@@ -965,7 +985,7 @@ impl FencedTransport {
             Err(error) => {
                 let local_stop = error.is::<CallRpcNotSubmitted>() && !handed_off;
                 if local_stop {
-                    core.store.put_runtime(&self.account,&format!("call-host-diagnostic:{}:{action}",self.call_id),&serde_json::to_vec(&serde_json::json!({"cgi":route.command(),"stage":"presubmit","code":"admission_revoked","mayHaveSubmitted":false}))?)?;
+                    core.store.put_runtime(account,&format!("call-host-diagnostic:{}:{action}",call_id),&serde_json::to_vec(&serde_json::json!({"cgi":route.command(),"stage":"presubmit","code":"admission_revoked","mayHaveSubmitted":false}))?)?;
                 }
                 if let Some(error) =
                     error.downcast_ref::<wechat_protocol::calls::host_transport::CallHostRpcError>()
@@ -974,37 +994,26 @@ impl FencedTransport {
                         &serde_json::json!({"cgi":route.command(),"stage":error.stage.as_str(),"code":error.code,"value":error.value,"cryptoStep":error.crypto_step,"mayHaveSubmitted":handed_off || error.may_have_submitted()}),
                     )?;
                     core.store.put_runtime(
-                        &self.account,
-                        &format!("call-host-diagnostic:{}:{action}", self.call_id),
+                        account,
+                        &format!("call-host-diagnostic:{}:{action}", call_id),
                         &diagnostic,
                     )?;
                 }
                 if local_stop {
-                    core.store.finish_call_action_not_submitted(
-                        &self.account,
-                        &self.call_id,
-                        action,
-                    )?;
+                    core.store
+                        .finish_call_action_not_submitted(account, call_id, action)?;
                     return Ok(());
                 }
                 if route == CallHostRoute::LiveSync {
                     // Missing a read-only poll reply cannot revoke the known
                     // room's separately fenced cleanup. Retain its uncertainty
                     // without acknowledging it or granting a retry.
-                    core.store.finish_interrupted_live_sync(
-                        &self.account,
-                        &self.call_id,
-                        action,
-                    )?;
+                    core.store
+                        .finish_interrupted_live_sync(account, call_id, action)?;
                     return Ok(());
                 }
-                core.store.finish_call_action(
-                    &self.account,
-                    &self.call_id,
-                    action,
-                    "needs_review",
-                    None,
-                )?;
+                core.store
+                    .finish_call_action(account, call_id, action, "needs_review", None)?;
                 Ok(())
             }
         }
@@ -1063,6 +1072,14 @@ impl PersonalTransport for FencedTransport {
         if !self.admits(teardown, rejecting) {
             return Err(CallRpcNotSubmitted.into());
         }
+        // A pre-answer poll needs the incoming mailbox; check before spending
+        // a call action so a missing one leaves nothing half recorded.
+        #[cfg(not(test))]
+        let incoming = if self.pre_answer_poll(route) {
+            Some(self.incoming_interrupt()?)
+        } else {
+            None
+        };
         let ordinal = self.ordinal.fetch_add(1, Ordering::AcqRel);
         ensure!(ordinal < 4096, "Call action budget exhausted");
         let action = ordinal.to_string();
@@ -1086,30 +1103,39 @@ impl PersonalTransport for FencedTransport {
         // The account writer is not a network-lifetime lock. A fresh owner or
         // account change can now be accepted while this one exchange waits.
         drop(guard);
-        let handed_off = AtomicBool::new(false);
-        let handoff = || {
-            if !self.worker.authorized() || core.stopping.load(Ordering::Acquire) {
-                return Err(CallRpcNotSubmitted.into());
+        // The final check runs right before transport handoff, possibly on a
+        // detached task, so it owns what it reads.
+        let handed_off = Arc::new(AtomicBool::new(false));
+        let handoff = {
+            let (worker, admission, core, handed_off) = (
+                self.worker.clone(),
+                self.admission.clone(),
+                core.clone(),
+                handed_off.clone(),
+            );
+            move || {
+                crate::async_bridge::blocking_section(|| {
+                    if !worker.authorized() || core.stopping.load(Ordering::Acquire) {
+                        return Err(CallRpcNotSubmitted.into());
+                    }
+                    if !admission_open(&worker, &admission, teardown, rejecting) {
+                        return Err(CallRpcNotSubmitted.into());
+                    }
+                    if route == CallHostRoute::ConferenceJoin
+                        && !worker
+                            .conference
+                            .as_ref()
+                            .is_some_and(|pending| pending.current())
+                    {
+                        return Err(CallRpcNotSubmitted.into());
+                    }
+                    handed_off.store(true, Ordering::Release);
+                    if !matches!(route, CallHostRoute::AppAuth | CallHostRoute::LiveSync) {
+                        worker.mutations_submitted.store(true, Ordering::Release);
+                    }
+                    Ok(())
+                })
             }
-            if !self.admits(teardown, rejecting) {
-                return Err(CallRpcNotSubmitted.into());
-            }
-            if route == CallHostRoute::ConferenceJoin
-                && !self
-                    .worker
-                    .conference
-                    .as_ref()
-                    .is_some_and(|pending| pending.current())
-            {
-                return Err(CallRpcNotSubmitted.into());
-            }
-            handed_off.store(true, Ordering::Release);
-            if !matches!(route, CallHostRoute::AppAuth | CallHostRoute::LiveSync) {
-                self.worker
-                    .mutations_submitted
-                    .store(true, Ordering::Release);
-            }
-            Ok(())
         };
         // A unit-test build can never fall through into network transport.
         #[cfg(test)]
@@ -1128,42 +1154,69 @@ impl PersonalTransport for FencedTransport {
                 })
         };
         #[cfg(not(test))]
-        let reply_retained = AtomicBool::new(false);
+        let reply_retained = Arc::new(AtomicBool::new(false));
         #[cfg(not(test))]
-        let result = native.request_blocking(|operation| {
-            let retain = |reply: &[u8]| {
-                self.retain_host_result(&core, &action, route, &Ok(reply.to_vec()), true)?;
-                reply_retained.store(true, Ordering::Release);
-                Ok(())
+        let result = {
+            let retain = {
+                let (core, account, call_id, action, retained) = (
+                    core.clone(),
+                    self.account.clone(),
+                    self.call_id.clone(),
+                    action.clone(),
+                    reply_retained.clone(),
+                );
+                move |reply: &[u8]| {
+                    crate::async_bridge::blocking_section(|| {
+                        Self::retain_host_result(
+                            &account,
+                            &call_id,
+                            &core,
+                            &action,
+                            route,
+                            &Ok(reply.to_vec()),
+                            true,
+                        )
+                    })?;
+                    retained.store(true, Ordering::Release);
+                    Ok(())
+                }
             };
-            if self.pre_answer_poll(route) {
-                operation.call_live_sync(
-                    request,
-                    self.timeout,
-                    handoff,
-                    |exchange| self.wait_for_incoming_sync(exchange),
-                    retain,
-                )
-            } else if route == CallHostRoute::LiveSync && self.worker.is_conference() {
-                operation.call_live_sync(
-                    request,
-                    Duration::from_secs(60),
-                    handoff,
-                    |exchange| self.wait_for_conference_sync(exchange),
-                    retain,
-                )
-            } else if route == CallHostRoute::LiveSync && self.worker.call_type == CallType::Video {
-                operation.call_live_sync(
-                    request,
-                    self.timeout,
-                    handoff,
-                    |exchange| self.wait_for_direct_sync(exchange),
-                    retain,
-                )
-            } else {
-                operation.call_rpc(route, request, handoff, retain)
-            }
-        });
+            let request = request.to_vec();
+            crate::async_bridge::block_on_with(
+                &self.runtime,
+                native.request(async |operation| {
+                    if let Some(incoming) = incoming {
+                        operation
+                            .call_live_sync(request, self.timeout, handoff, incoming, retain)
+                            .await
+                    } else if route == CallHostRoute::LiveSync && self.worker.is_conference() {
+                        operation
+                            .call_live_sync(
+                                request,
+                                Duration::from_secs(60),
+                                handoff,
+                                self.conference_interrupt(),
+                                retain,
+                            )
+                            .await
+                    } else if route == CallHostRoute::LiveSync
+                        && self.worker.call_type == CallType::Video
+                    {
+                        operation
+                            .call_live_sync(
+                                request,
+                                self.timeout,
+                                handoff,
+                                self.direct_interrupt(),
+                                retain,
+                            )
+                            .await
+                    } else {
+                        operation.call_rpc(route, request, handoff, retain).await
+                    }
+                }),
+            )
+        };
         #[cfg(not(test))]
         if let Ok(accepted) = native.export_account_state() {
             exchanged = accepted;
@@ -1183,12 +1236,28 @@ impl PersonalTransport for FencedTransport {
             return result;
         }
         #[cfg(test)]
-        let retained = self.retain_host_result(&core, &action, route, &result, handed_off);
+        let retained = Self::retain_host_result(
+            &self.account,
+            &self.call_id,
+            &core,
+            &action,
+            route,
+            &result,
+            handed_off,
+        );
         #[cfg(not(test))]
         let retained = if reply_retained.load(Ordering::Acquire) {
             Ok(())
         } else {
-            self.retain_host_result(&core, &action, route, &result, handed_off)
+            Self::retain_host_result(
+                &self.account,
+                &self.call_id,
+                &core,
+                &action,
+                route,
+                &result,
+                handed_off,
+            )
         };
         let reacquired = self.runtime.block_on(core.lock_account(&self.account));
         retained?;

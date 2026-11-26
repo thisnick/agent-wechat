@@ -1,3 +1,6 @@
+// This module defines or still uses the blocking APIs deprecated in 3.2;
+// 4.0 removes them (#701).
+#![allow(deprecated)]
 use super::*;
 use crate::DeviceProfile;
 
@@ -1382,4 +1385,347 @@ async fn async_transport_cancelled_multichunk_voice_adopts_chunk1_cookie_and_sto
     }
     assert_eq!(http.calls.load(Ordering::Acquire), 1);
     assert_eq!(client.export_account_state().unwrap().cookie, b"v-chunk1");
+}
+
+/// Short-link HTTP that signals once the request is handed off and replies
+/// only when released.
+struct GatedHttp {
+    session: crate::mmtls::ShortSession,
+    reply: Mutex<Option<Vec<u8>>>,
+    submitted: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+}
+impl crate::transport::HttpTransport for GatedHttp {
+    fn send<'a>(
+        &'a self,
+        request: crate::transport::HttpRequest,
+    ) -> crate::transport::TransportFuture<'a, Result<crate::transport::HttpResponse>> {
+        let reply = self.reply.lock().unwrap().take().unwrap();
+        let (_, _, _, wire) =
+            crate::mmtls::tests::handle_mock_short_exchange(&self.session, &request.body, &reply)
+                .unwrap();
+        if let Some(tx) = self.submitted.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+        let release = self.release.lock().unwrap().take().unwrap();
+        Box::pin(async move {
+            let _ = release.await;
+            Ok(crate::transport::HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: wire,
+            })
+        })
+    }
+}
+
+/// A scripted transport client whose persistence can be made to fail.
+fn scoped_fixture(
+    replies: Vec<Result<Vec<u8>>>,
+    fail_storage: bool,
+) -> (
+    NativeClient,
+    Arc<ScriptedShortHttp>,
+    Arc<RecordingPersistence>,
+    AccountState,
+) {
+    let initial = client().export_account_state().unwrap();
+    let short_session = synthetic_short_session();
+    let http = Arc::new(ScriptedShortHttp {
+        session: short_session.clone(),
+        responses: Mutex::new(replies.into_iter().collect()),
+        seen_paths: Mutex::new(Vec::new()),
+        seen_packets: Mutex::new(Vec::new()),
+    });
+    let transport = crate::transport::ProtocolTransport::new(
+        Arc::new(UnusedStreamTransport),
+        http.clone(),
+        Arc::new(MockClock(AtomicU64::new(100))),
+    );
+    let storage = Arc::new(RecordingPersistence {
+        fail: AtomicBool::new(fail_storage),
+        cookies: Mutex::new(vec![]),
+    });
+    let client = NativeClient::from_account_with_transport_and_persistence(
+        initial.clone(),
+        NativeOptions::default(),
+        transport,
+        storage.clone(),
+    )
+    .unwrap();
+    client
+        .owned_account()
+        .unwrap()
+        .short_link
+        .put_at_ms("long.weixin.qq.com", short_session, 100);
+    (client, http, storage, initial)
+}
+
+fn heartbeat_reply(state: &AccountState, cookie: &[u8]) -> Vec<u8> {
+    use crate::protobuf as p;
+    let plain = p::message(&[p::bytes(1, &p::uint(1, 0)), p::uint(2, 90), p::uint(3, 0)]).unwrap();
+    synthetic_business_reply(state, 518, cookie, &plain)
+}
+
+#[tokio::test]
+async fn a_scoped_async_request_keeps_its_verified_reply_when_the_commit_fails() {
+    let initial = client().export_account_state().unwrap();
+    let (client, http, storage, _) =
+        scoped_fixture(vec![Ok(heartbeat_reply(&initial, b"c1"))], true);
+    let mut reply = None;
+    let committed = client
+        .request(async |request| {
+            assert_eq!(request.account().unwrap().uin, 1);
+            reply = Some(request.heartbeat(&[]).await);
+            Ok(())
+        })
+        .await;
+    // The verified reply survives; the failed commit is reported separately and
+    // neither adopts the cookie nor counts as "not submitted".
+    assert_eq!(reply.unwrap().unwrap().next_interval, 90);
+    let error = committed.unwrap_err();
+    assert!(error.is::<AccountPersistenceFailed>(), "{error:#}");
+    assert!(!error.is::<NativeRequestNotSubmitted>());
+    assert!(client.export_account_state().unwrap().cookie.is_empty());
+    assert!(storage.cookies.lock().unwrap().is_empty());
+    assert_eq!(http.seen_paths.lock().unwrap().len(), 1);
+    assert_eq!(client.account_status().unwrap().in_flight, 0);
+}
+
+#[tokio::test]
+async fn a_scoped_async_request_admits_one_operation_and_commits_its_cookie() {
+    let initial = client().export_account_state().unwrap();
+    let (client, http, storage, _) =
+        scoped_fixture(vec![Ok(heartbeat_reply(&initial, b"c1"))], false);
+    let mut second = None;
+    let interval = client
+        .request(async |request| {
+            let first = request.heartbeat(&[]).await?;
+            // A second operation must not relabel the first as unsent, and the
+            // request's state is only readable between operations.
+            second = Some(request.heartbeat(&[]).await);
+            assert_eq!(request.account().unwrap().cookie, b"c1");
+            Ok(first.next_interval)
+        })
+        .await
+        .unwrap();
+    assert_eq!(interval, 90);
+    let second = second.unwrap().unwrap_err();
+    assert_eq!(
+        second.to_string(),
+        "Account request context already consumed"
+    );
+    assert!(!second.is::<NativeRequestNotSubmitted>());
+    assert_eq!(http.seen_paths.lock().unwrap().len(), 1);
+    assert_eq!(client.export_account_state().unwrap().cookie, b"c1");
+    assert_eq!(
+        *storage.cookies.lock().unwrap(),
+        vec![(vec![], b"c1".to_vec())]
+    );
+    assert_eq!(client.account_status().unwrap().in_flight, 0);
+}
+
+#[tokio::test]
+async fn a_scoped_async_request_refuses_before_submission_when_it_cannot_run() {
+    // No transport: refused before entering the closure.
+    let blocking = client();
+    let mut entered = false;
+    let error = blocking
+        .request(async |_| {
+            entered = true;
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+    assert!(error.is::<NativeRequestNotSubmitted>());
+    assert!(!entered);
+
+    // A stopped owner: refused before entering the closure and without HTTP.
+    let (client, http, _, _) = scoped_fixture(vec![], false);
+    client.stop().unwrap();
+    let error = client
+        .request(async |request| request.heartbeat(&[]).await.map(|_| ()))
+        .await
+        .unwrap_err();
+    assert!(error.is::<NativeRequestNotSubmitted>());
+    assert!(http.seen_paths.lock().unwrap().is_empty());
+
+    // A fence that lands after admission but before handoff is reported as not
+    // submitted by the operation itself.
+    let (client, http, _, _) = scoped_fixture(vec![], false);
+    let stopper = client.clone();
+    let mut outcome = None;
+    let committed = client
+        .request(async |request| {
+            stopper.stop().unwrap();
+            outcome = Some(request.heartbeat(&[]).await);
+            Ok(())
+        })
+        .await;
+    assert!(outcome
+        .unwrap()
+        .unwrap_err()
+        .is::<NativeRequestNotSubmitted>());
+    assert!(committed.is_err());
+    assert!(http.seen_paths.lock().unwrap().is_empty());
+    assert_eq!(client.account_status().unwrap().in_flight, 0);
+}
+
+#[tokio::test]
+async fn a_scoped_operation_that_failed_before_submission_does_not_use_up_the_request() {
+    let initial = client().export_account_state().unwrap();
+    let (client, http, _, _) = scoped_fixture(vec![Ok(heartbeat_reply(&initial, b"c1"))], false);
+    client
+        .request(async |request| {
+            let refused = request
+                .send_text_guarded(
+                    "peer_user",
+                    "never sent",
+                    TextSendOptions {
+                        created_at: 1_700_000_010,
+                        client_message_id: 777,
+                        source: None,
+                    },
+                    || anyhow::bail!("guard refused"),
+                )
+                .await
+                .unwrap_err();
+            assert!(refused.to_string().contains("guard refused"));
+            request.heartbeat(&[]).await?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(http.seen_paths.lock().unwrap().len(), 1);
+    assert_eq!(client.export_account_state().unwrap().cookie, b"c1");
+}
+
+#[tokio::test]
+async fn a_scoped_operation_dropped_after_submission_still_completes_and_commits() {
+    let initial = client().export_account_state().unwrap();
+    let short_session = synthetic_short_session();
+    let (submitted_tx, mut submitted_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let http = Arc::new(GatedHttp {
+        session: short_session.clone(),
+        reply: Mutex::new(Some(heartbeat_reply(&initial, b"c-late"))),
+        submitted: Mutex::new(Some(submitted_tx)),
+        release: Mutex::new(Some(release_rx)),
+    });
+    let transport = crate::transport::ProtocolTransport::new(
+        Arc::new(UnusedStreamTransport),
+        http,
+        Arc::new(MockClock(AtomicU64::new(100))),
+    );
+    let client =
+        NativeClient::from_account_with_transport(initial, NativeOptions::default(), transport)
+            .unwrap();
+    client
+        .owned_account()
+        .unwrap()
+        .short_link
+        .put_at_ms("long.weixin.qq.com", short_session, 100);
+    let releaser = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        release_tx.send(()).unwrap();
+    });
+    client
+        .request(async |request| {
+            // Give up on the operation once it is submitted, as a timeout would.
+            let operation = request.heartbeat(&[]);
+            tokio::pin!(operation);
+            tokio::select! {
+                biased;
+                _ = &mut submitted_rx => {}
+                _ = &mut operation => panic!("the reply was gated"),
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    releaser.await.unwrap();
+    // The detached operation finished and the request committed its cookie.
+    assert_eq!(client.export_account_state().unwrap().cookie, b"c-late");
+    assert_eq!(client.account_status().unwrap().in_flight, 0);
+}
+
+/// A client whose single heartbeat reply (cookie `cookie`) is gated, plus the
+/// handoff signal and the release switch.
+fn gated_client(
+    cookie: &[u8],
+) -> (
+    NativeClient,
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let initial = client().export_account_state().unwrap();
+    let short_session = synthetic_short_session();
+    let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let http = Arc::new(GatedHttp {
+        session: short_session.clone(),
+        reply: Mutex::new(Some(heartbeat_reply(&initial, cookie))),
+        submitted: Mutex::new(Some(submitted_tx)),
+        release: Mutex::new(Some(release_rx)),
+    });
+    let transport = crate::transport::ProtocolTransport::new(
+        Arc::new(UnusedStreamTransport),
+        http,
+        Arc::new(MockClock(AtomicU64::new(100))),
+    );
+    let client =
+        NativeClient::from_account_with_transport(initial, NativeOptions::default(), transport)
+            .unwrap();
+    client
+        .owned_account()
+        .unwrap()
+        .short_link
+        .put_at_ms("long.weixin.qq.com", short_session, 100);
+    (client, submitted_rx, release_tx)
+}
+
+#[tokio::test]
+async fn an_abandoned_scoped_request_still_commits_its_in_flight_operation() {
+    let (client, submitted_rx, release_tx) = gated_client(b"c-abandoned");
+    let worker = client.clone();
+    let request = tokio::spawn(async move {
+        worker
+            .request(async |request| request.heartbeat(&[]).await.map(|_| ()))
+            .await
+    });
+    submitted_rx.await.unwrap();
+    // Drop the whole request future after handoff, as an outer timeout would.
+    request.abort();
+    let _ = request.await;
+    release_tx.send(()).unwrap();
+    while client.account_status().unwrap().in_flight != 0 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        client.export_account_state().unwrap().cookie,
+        b"c-abandoned"
+    );
+}
+
+#[tokio::test]
+async fn an_abandoned_scoped_request_commits_a_finished_operation() {
+    let (client, _submitted_rx, release_tx) = gated_client(b"c-finished");
+    release_tx.send(()).unwrap();
+    let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+    let worker = client.clone();
+    let request = tokio::spawn(async move {
+        worker
+            .request(async |request| {
+                request.heartbeat(&[]).await?;
+                finished_tx.send(()).unwrap();
+                // The closure is still running when its future is dropped.
+                std::future::pending::<Result<()>>().await
+            })
+            .await
+    });
+    finished_rx.await.unwrap();
+    request.abort();
+    let _ = request.await;
+    assert_eq!(client.export_account_state().unwrap().cookie, b"c-finished");
+    assert_eq!(client.account_status().unwrap().in_flight, 0);
 }

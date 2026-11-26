@@ -14,7 +14,9 @@ impl Core {
         self.resume_media_state(account, id, fence)?;
         let mut state = self.account_state(account)?;
         let raw = permit.transfer(self, account, || {
-            self.native_request(account, &mut state, |ctx| ctx.custom_stickers_raw(request))
+            self.native_request(account, &mut state, async |ctx| {
+                ctx.custom_stickers_raw(request).await
+            })
         })?;
         ensure!(raw.len() <= 2 * 1024 * 1024, "sticker_receipt_limit");
         retain(&raw)?;

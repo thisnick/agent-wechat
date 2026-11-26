@@ -3,8 +3,9 @@
 //! The address and token come from the authenticated detail reply and are used once. The request
 //! goes only to the Channels video host, pinned to a checked public address, without redirects or
 //! proxies. The first 128 KiB are decoded while bytes arrive; the rest is stored as received.
-use crate::transport::{HttpMethod, HttpRequest, HttpTransport};
+use crate::transport::{HttpBodySink, HttpMethod, HttpRequest, HttpResponseHead, HttpTransport};
 use anyhow::{ensure, Result};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
 use std::{io::Read, net::SocketAddr};
@@ -114,6 +115,10 @@ pub fn channels_video_url(media: &crate::ChannelsMedia) -> Result<url::Url> {
 ///
 /// `max_bytes` caps the transfer below [`MAX_CHANNELS_VIDEO_BYTES`]. The advertised size, when
 /// the reply gives one, must fit the cap and match the received length.
+#[deprecated(
+    since = "3.2.0",
+    note = "use `fetch_channels_video_async` with `NativeHttpTransport::new(DestinationPolicy::PublicOnly)`; blocking APIs are removed in 4.0 (#701)"
+)]
 #[cfg(not(target_arch = "wasm32"))]
 pub fn fetch_channels_video(
     media: &crate::ChannelsMedia,
@@ -160,6 +165,8 @@ fn split_http_list_unquoted(value: &str) -> Vec<&str> {
 /// `max_bytes` caps the transfer below [`MAX_CHANNELS_VIDEO_BYTES`]. The
 /// caller's [`HttpTransport`] must not follow HTTP redirects and is responsible
 /// for network/SSRF boundaries.
+/// On native targets, `transport::NativeHttpTransport` built with
+/// `DestinationPolicy::PublicOnly` provides that boundary.
 pub async fn fetch_channels_video_async(
     media: &crate::ChannelsMedia,
     max_bytes: usize,
@@ -174,89 +181,71 @@ pub async fn fetch_channels_video_async(
         "channels_media_too_large"
     );
     progress(0, None)?;
-    let response = http
-        .send(HttpRequest {
-            method: HttpMethod::Get,
-            url,
-            headers: vec![
-                ("Accept-Encoding".into(), "identity".into()),
-                ("User-Agent".into(), USER_AGENT.into()),
-                ("Referer".into(), REFERER.into()),
-            ],
-            body: Vec::new(),
-            timeout: timeout_for(media.file_size.or(media.cdn_file_size)),
-            max_response_bytes: cap as usize,
+    let counters = ChannelsCounters::default();
+    let mut sink = ChannelsSink {
+        cap,
+        stream: channels_prefix_keystream(media.decode_key()),
+        bytes: Vec::new(),
+        encoded_head: Vec::with_capacity(8),
+        content_type: None,
+        total: None,
+        failed: false,
+        counters: &counters,
+    };
+    let request = HttpRequest {
+        method: HttpMethod::Get,
+        url,
+        headers: vec![
+            ("Accept-Encoding".into(), "identity".into()),
+            ("User-Agent".into(), USER_AGENT.into()),
+            ("Referer".into(), REFERER.into()),
+        ],
+        body: Vec::new(),
+        timeout: timeout_for(media.file_size.or(media.cdn_file_size)),
+        max_response_bytes: cap as usize,
+    };
+    // Report progress from this task as pieces arrive, every 64 KiB as the
+    // blocking download did; the final count is reported once below. An
+    // error from `progress` (a cancelled job) drops the transfer and stops it.
+    let result = {
+        let mut transfer = http.send_streaming(request, &mut sink);
+        let mut reported = 0u64;
+        std::future::poll_fn(|context| {
+            let poll = transfer.as_mut().poll(context);
+            if poll.is_pending() {
+                let received = counters.received.load(Ordering::Acquire);
+                if received >= reported + PROGRESS_STEP {
+                    reported = received;
+                    if let Err(error) = progress(received, counters.total()) {
+                        return std::task::Poll::Ready(Err(Stop::Caller(error)));
+                    }
+                }
+            }
+            poll.map(|result| result.map(|_| ()).map_err(Stop::Transfer))
         })
         .await
-        .map_err(|error| {
-            if crate::transport::find_transport_error(&error)
-                == Some(crate::transport::TransportError::ResponseTooLarge)
-            {
-                anyhow::anyhow!("channels_media_too_large")
-            } else {
-                anyhow::anyhow!("channels_download_failed")
-            }
-        })?;
-    if response.status != 200 {
-        anyhow::bail!("CDN HTTP status {}", response.status);
+    };
+    match result {
+        Ok(()) => {}
+        Err(Stop::Caller(error)) => return Err(error),
+        // The sink's own checks keep their error codes.
+        Err(Stop::Transfer(error)) if sink.failed => return Err(error),
+        Err(Stop::Transfer(error)) => {
+            return Err(super::download_failure(
+                &error,
+                "channels_media_too_large",
+                "channels_download_failed",
+                "channels_download_failed",
+            ))
+        }
     }
-    ensure!(
-        response
-            .header_values("x-errno")
-            .into_iter()
-            .all(|errno| errno.trim() == "0"),
-        "channels_download_failed"
-    );
-    ensure!(
-        response
-            .header_values("content-encoding")
-            .into_iter()
-            .all(|v| v.trim().eq_ignore_ascii_case("identity")),
-        "channels_download_failed"
-    );
-    let raw_content_types = response.header_values("content-type");
-    let content_type_parts: Vec<&str> = raw_content_types
-        .iter()
-        .flat_map(|value| split_http_list_unquoted(value))
-        .collect();
-    ensure!(
-        content_type_parts.iter().all(|kind| {
-            let trimmed = kind.trim().to_ascii_lowercase();
-            trimmed.starts_with("video/") || trimmed.starts_with("application/octet-stream")
-        }),
-        "channels_download_failed"
-    );
-    let content_type = content_type_parts
-        .first()
-        .map(|kind| {
-            kind.to_ascii_lowercase()
-                .split(';')
-                .next()
-                .unwrap_or_default()
-                .trim()
-                .to_owned()
-        })
-        .filter(|kind| {
-            kind.len() <= 64
-                && kind.contains('/')
-                && kind
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"/.+-".contains(&b))
-        });
-    let total = response
-        .content_length()
-        .map_err(|_| anyhow::anyhow!("channels_download_failed"))?;
-    if let Some(length) = total {
-        ensure!(length <= cap, "channels_media_too_large");
-    }
-    ensure!(
-        response.body.len() as u64 <= cap,
-        "channels_media_too_large"
-    );
-    let mut bytes = response.body;
-    let head = bytes[..bytes.len().min(8)].to_vec();
-    let stream = channels_prefix_keystream(media.decode_key());
-    apply_channels_prefix(&mut bytes, 0, &stream);
+    let ChannelsSink {
+        bytes,
+        encoded_head,
+        content_type,
+        total,
+        ..
+    } = sink;
     progress(bytes.len() as u64, total)?;
     let facts = ChannelsDownloadFacts {
         advertised_bytes: media.file_size,
@@ -264,7 +253,7 @@ pub async fn fetch_channels_video_async(
         content_length: total,
         received_bytes: bytes.len() as u64,
         content_type,
-        encoded_box: channels_box_type(&head),
+        encoded_box: channels_box_type(&encoded_head),
         decoded_box: channels_box_type(&bytes),
     };
     let check = if bytes.is_empty() {
@@ -278,6 +267,137 @@ pub async fn fetch_channels_video_async(
         return Err(ChannelsDownloadFailure { check, facts }.into());
     }
     Ok(ChannelsVideo { bytes, facts })
+}
+
+/// Bytes between progress reports for a streamed Channels download.
+const PROGRESS_STEP: u64 = 64 * 1024;
+
+/// Byte counts shared between a streamed Channels download and the task that
+/// reports its progress.
+#[derive(Default)]
+struct ChannelsCounters {
+    received: AtomicU64,
+    total: AtomicU64,
+    total_known: AtomicBool,
+}
+
+impl ChannelsCounters {
+    fn total(&self) -> Option<u64> {
+        self.total_known
+            .load(Ordering::Acquire)
+            .then(|| self.total.load(Ordering::Acquire))
+    }
+}
+
+/// Why a streamed download stopped early.
+enum Stop {
+    /// The caller's progress callback returned an error.
+    Caller(anyhow::Error),
+    /// The transfer failed, or the sink rejected the response.
+    Transfer(anyhow::Error),
+}
+
+/// Checks the response head and decodes the body as it streams in, exactly as
+/// the blocking download does.
+struct ChannelsSink<'c> {
+    cap: u64,
+    stream: wechat_media::channels::ChannelsPrefixStream,
+    bytes: Vec<u8>,
+    encoded_head: Vec<u8>,
+    content_type: Option<String>,
+    total: Option<u64>,
+    /// The sink rejected the response; its error is returned unchanged.
+    failed: bool,
+    counters: &'c ChannelsCounters,
+}
+
+impl ChannelsSink<'_> {
+    fn check_head(&mut self, head: &HttpResponseHead) -> Result<()> {
+        if head.status != 200 {
+            anyhow::bail!("CDN HTTP status {}", head.status);
+        }
+        ensure!(
+            head.header_values("x-errno")
+                .into_iter()
+                .all(|errno| errno.trim() == "0"),
+            "channels_download_failed"
+        );
+        ensure!(
+            head.header_values("content-encoding")
+                .into_iter()
+                .all(|v| v.trim().eq_ignore_ascii_case("identity")),
+            "channels_download_failed"
+        );
+        let raw_content_types = head.header_values("content-type");
+        let content_type_parts: Vec<&str> = raw_content_types
+            .iter()
+            .flat_map(|value| split_http_list_unquoted(value))
+            .collect();
+        ensure!(
+            content_type_parts.iter().all(|kind| {
+                let trimmed = kind.trim().to_ascii_lowercase();
+                trimmed.starts_with("video/") || trimmed.starts_with("application/octet-stream")
+            }),
+            "channels_download_failed"
+        );
+        self.content_type = content_type_parts
+            .first()
+            .map(|kind| {
+                kind.to_ascii_lowercase()
+                    .split(';')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned()
+            })
+            .filter(|kind| {
+                kind.len() <= 64
+                    && kind.contains('/')
+                    && kind
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"/.+-".contains(&b))
+            });
+        self.total = head
+            .content_length()
+            .map_err(|_| anyhow::anyhow!("channels_download_failed"))?;
+        if let Some(length) = self.total {
+            ensure!(length <= self.cap, "channels_media_too_large");
+            self.counters.total.store(length, Ordering::Release);
+            self.counters.total_known.store(true, Ordering::Release);
+            self.bytes
+                .reserve(usize::try_from(length).unwrap_or(0).min(16 * 1024 * 1024));
+        }
+        Ok(())
+    }
+
+    fn accept(&mut self, piece: &[u8]) -> Result<()> {
+        ensure!(
+            (self.bytes.len() + piece.len()) as u64 <= self.cap,
+            "channels_media_too_large"
+        );
+        if self.encoded_head.len() < 8 {
+            let wanted = (8 - self.encoded_head.len()).min(piece.len());
+            self.encoded_head.extend_from_slice(&piece[..wanted]);
+        }
+        let offset = self.bytes.len() as u64;
+        let start = self.bytes.len();
+        self.bytes.extend_from_slice(piece);
+        apply_channels_prefix(&mut self.bytes[start..], offset, &self.stream);
+        self.counters
+            .received
+            .store(self.bytes.len() as u64, Ordering::Release);
+        Ok(())
+    }
+}
+
+impl HttpBodySink for ChannelsSink<'_> {
+    fn head(&mut self, head: &HttpResponseHead) -> Result<()> {
+        self.check_head(head).inspect_err(|_| self.failed = true)
+    }
+
+    fn chunk(&mut self, bytes: &[u8]) -> Result<()> {
+        self.accept(bytes).inspect_err(|_| self.failed = true)
+    }
 }
 
 fn timeout_for(expected: Option<u64>) -> Duration {
@@ -704,5 +824,103 @@ mod tests {
             err.downcast_ref::<ChannelsDownloadFailure>().unwrap().check,
             "length"
         );
+    }
+
+    #[tokio::test]
+    async fn async_channels_video_reports_progress_per_piece_and_stops_when_asked() {
+        use std::sync::Arc;
+        let mut plain: Vec<u8> = (0..CHANNELS_PREFIX_BYTES + 200_000)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        plain[..8].copy_from_slice(&[0, 0, 0, 32, b'f', b't', b'y', b'p']);
+        let mut encrypted = plain.clone();
+        apply_channels_prefix(&mut encrypted, 0, &channels_prefix_keystream(7));
+
+        /// Streams the body in 1000-byte pieces, yielding between them, and
+        /// records how many pieces it delivered before it was dropped.
+        struct PiecewiseHttp {
+            body: Vec<u8>,
+            delivered: Arc<AtomicU64>,
+        }
+        impl HttpTransport for PiecewiseHttp {
+            fn send<'a>(
+                &'a self,
+                _: HttpRequest,
+            ) -> crate::transport::TransportFuture<'a, Result<crate::transport::HttpResponse>>
+            {
+                unreachable!("the downloader streams")
+            }
+            fn send_streaming<'a>(
+                &'a self,
+                _: HttpRequest,
+                sink: &'a mut dyn HttpBodySink,
+            ) -> crate::transport::TransportFuture<'a, Result<HttpResponseHead>> {
+                Box::pin(async move {
+                    let head = HttpResponseHead {
+                        status: 200,
+                        headers: vec![
+                            ("Content-Type".into(), "video/mp4".into()),
+                            ("Content-Length".into(), self.body.len().to_string()),
+                        ],
+                    };
+                    sink.head(&head)?;
+                    for piece in self.body.chunks(1000) {
+                        tokio::task::yield_now().await;
+                        sink.chunk(piece)?;
+                        self.delivered.fetch_add(1, Ordering::AcqRel);
+                    }
+                    Ok(head)
+                })
+            }
+        }
+        let info = media(
+            "http://wxapp.tc.qq.com/251/20302/stodownload?encfilekey=a",
+            "&token=t",
+            7,
+            Some(encrypted.len() as u64),
+        );
+        let delivered = Arc::new(AtomicU64::new(0));
+        let http = PiecewiseHttp {
+            body: encrypted.clone(),
+            delivered: delivered.clone(),
+        };
+        let mut reports = Vec::new();
+        let video = fetch_channels_video_async(&info, usize::MAX, &http, |done, total| {
+            reports.push((done, total));
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(video.bytes, plain);
+        let pieces = encrypted.len().div_ceil(1000);
+        // A start report, one per 64 KiB received while streaming, and the
+        // final total once.
+        let streaming = &reports[1..reports.len() - 1];
+        assert!(!streaming.is_empty(), "{reports:?}");
+        assert!(streaming
+            .windows(2)
+            .all(|pair| pair[1].0 >= pair[0].0 + PROGRESS_STEP));
+        assert_eq!(
+            reports
+                .iter()
+                .filter(|r| r.0 == encrypted.len() as u64)
+                .count(),
+            1
+        );
+        assert_eq!(
+            reports.last(),
+            Some(&(encrypted.len() as u64, Some(encrypted.len() as u64)))
+        );
+
+        // A progress error stops the transfer and is returned unchanged.
+        delivered.store(0, Ordering::Release);
+        let error = fetch_channels_video_async(&info, usize::MAX, &http, |done, _| {
+            anyhow::ensure!(done < PROGRESS_STEP, "media_cancelled");
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "media_cancelled");
+        assert!(delivered.load(Ordering::Acquire) < pieces as u64);
     }
 }

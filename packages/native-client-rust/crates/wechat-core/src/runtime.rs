@@ -342,7 +342,7 @@ impl Core {
         Self::with_upstream(
             store,
             storage_key,
-            Arc::new(crate::upstream::NativeUpstream),
+            Arc::new(crate::upstream::NativeUpstream::new()?),
         )
     }
     /// Alternative upstreams still use the same account actors, vault and projection journals.
@@ -1412,8 +1412,8 @@ impl Core {
                     .context("auth_required")?;
                 let desired = core.store.runtime(&account, "desired")?;
                 let contacts = permit.transfer(&core, &account, || {
-                    core.native_request(&account, &mut state, |request| {
-                        request.lookup_contacts(&ids)
+                    core.native_request(&account, &mut state, async |request| {
+                        request.lookup_contacts(&ids).await
                     })
                 })?;
                 core.save_network_state(&account, &state, &expected, &fence, desired.as_deref())?;
@@ -1438,7 +1438,7 @@ impl Core {
                 let mut state = core.session_state(&account, &fence)?;
                 let expected = core.store.runtime(&account, "account-state")?.context("auth_required")?;
                 let desired = core.store.runtime(&account, "desired")?;
-                let roster = permit.transfer(&core, &account, || core.native_request(&account, &mut state, |request| request.lookup_room(&room, version)))?;
+                let roster = permit.transfer(&core, &account, || core.native_request(&account, &mut state, async |request| request.lookup_room(&room, version).await))?;
                 core.save_network_state(&account, &state, &expected, &fence, desired.as_deref())?;
                 Ok(json!({"id":roster.room_id,"version":roster.version,"items":roster.members.into_iter().map(|m|json!({"id":m.username,"nickname":m.nickname,"roomDisplayName":m.room_display_name})).collect::<Vec<_>>(),"profileProjection":"pending"}))
             }).await
@@ -1771,7 +1771,8 @@ impl Core {
             if !core.store.claim_send(&account, &id)? {
                 return Ok(());
             }
-            let mut admission_revoked = false;
+            // Set by the pre-submission guard, which may run on another thread.
+            let admission_revoked = Arc::new(AtomicBool::new(false));
             let result = if let Some(quote) = &payload.quote {
                 native
                     .send_quote(
@@ -1821,6 +1822,12 @@ impl Core {
                         server_message_id: result.server_message_id,
                     })
             } else if let Some((_, fence)) = &plain_authority {
+                let (guard_core, guard_account, guard_fence, revoked) = (
+                    core.clone(),
+                    account.clone(),
+                    fence.clone(),
+                    admission_revoked.clone(),
+                );
                 permit.transfer(&core, &account, || {
                     let reply = native.send_text_guarded(
                         &mut state,
@@ -1828,29 +1835,31 @@ impl Core {
                         &payload.text,
                         payload.created_at,
                         payload.client_id,
-                        &mut || {
-                            let check = (|| -> Result<()> {
+                        Box::new(move || {
+                            let (core, account, fence) =
+                                (&guard_core, &guard_account, &guard_fence);
+                            let check = crate::async_bridge::blocking_section(|| -> Result<()> {
                                 let current = core
                                     .store
-                                    .runtime(&account, "account-state")?
+                                    .runtime(account, "account-state")?
                                     .context("auth_required")?;
-                                core.session_state(&account, fence)?;
+                                core.session_state(account, fence)?;
                                 anyhow::ensure!(
                                     !core.stopping.load(Ordering::Acquire)
-                                        && core.store.runtime(&account, "desired")?.as_deref()
+                                        && core.store.runtime(account, "desired")?.as_deref()
                                             == Some(b"connected")
                                         && core.store.saved_login_authorization_current(
-                                            &account,
+                                            account,
                                             &current,
                                             fence.logout_epoch.as_deref(),
                                         )?,
                                     "text_send_admission_revoked",
                                 );
                                 Ok(())
-                            })();
-                            admission_revoked = check.is_err();
+                            });
+                            revoked.store(check.is_err(), Ordering::Release);
                             check
-                        },
+                        }),
                     );
                     Ok(reply.map(|result| SendReceipt {
                         accepted: result.accepted,
@@ -1879,7 +1888,7 @@ impl Core {
             // but cannot erase an authenticated, accepted send receipt.
             let authorization_saved = match &plain_authority {
                 Some((expected, fence)) => {
-                    !admission_revoked
+                    !admission_revoked.load(Ordering::Acquire)
                         && core
                             .save_network_state(
                                 &account,
@@ -1911,7 +1920,7 @@ impl Core {
                     None,
                     Some("service_rejected"),
                 )?,
-                Err(_) if admission_revoked => core.store.update_send(
+                Err(_) if admission_revoked.load(Ordering::Acquire) => core.store.update_send(
                     &account,
                     &id,
                     "failed",
@@ -2812,17 +2821,18 @@ pub(crate) mod tests {
                 _: &str,
                 _: u32,
                 _: u32,
-                before_submit: &mut dyn FnMut() -> Result<()>,
+                before_submit: crate::upstream::TextSendGuard,
             ) -> Result<wechat_protocol::wire::TextSendResult> {
+                let mut before_submit = Some(before_submit);
                 if self.submitted_before_pause {
-                    before_submit()?;
+                    before_submit.take().unwrap()()?;
                 }
                 self.paused.notify_one();
                 self.resume
                     .lock()
                     .unwrap()
                     .recv_timeout(Duration::from_secs(5))?;
-                if !self.submitted_before_pause {
+                if let Some(before_submit) = before_submit {
                     before_submit()?;
                 }
                 state.cookie = vec![3];

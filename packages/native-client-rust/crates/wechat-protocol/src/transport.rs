@@ -50,8 +50,16 @@ pub enum TransportError {
     Timeout,
     /// Connection attempt failed or the peer closed the connection unexpectedly.
     Disconnected,
+    /// The connection was established but failed or closed before the
+    /// response completed. CDN transfers retry the same address once for
+    /// this, as for a dropped keep-alive connection, rather than failing over.
+    Interrupted,
     /// The HTTP response body exceeded `HttpRequest::max_response_bytes`.
     ResponseTooLarge,
+    /// The destination is, or resolves to, an address the transport's policy
+    /// refuses, such as `DestinationPolicy::PublicOnly` on native targets. No
+    /// connection was made.
+    DestinationNotAllowed,
 }
 
 impl fmt::Display for TransportError {
@@ -59,7 +67,9 @@ impl fmt::Display for TransportError {
         match self {
             Self::Timeout => f.write_str("Transport operation timed out"),
             Self::Disconnected => f.write_str("Transport disconnected"),
+            Self::Interrupted => f.write_str("Transport connection interrupted"),
             Self::ResponseTooLarge => f.write_str("HTTP response body exceeds receive budget"),
+            Self::DestinationNotAllowed => f.write_str("Transport destination not allowed"),
         }
     }
 }
@@ -293,56 +303,114 @@ pub struct HttpResponse {
     pub body: Vec<u8>,
 }
 
+/// First value of header `name` (ASCII case-insensitive).
+fn header_in<'h>(headers: &'h [(String, String)], name: &str) -> Option<&'h str> {
+    headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+/// All values of header `name` (ASCII case-insensitive), in wire order.
+fn header_values_in<'h>(headers: &'h [(String, String)], name: &str) -> Vec<&'h str> {
+    headers
+        .iter()
+        .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+        .collect()
+}
+
 impl HttpResponse {
     /// Return the first header value matching `name` (ASCII case-insensitive).
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
+        header_in(&self.headers, name)
     }
 
     /// Return all header values matching `name` (ASCII case-insensitive), in
     /// wire order.
     pub fn header_values(&self, name: &str) -> Vec<&str> {
-        self.headers
-            .iter()
-            .filter(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
-            .collect()
+        header_values_in(&self.headers, name)
     }
 
     /// Parse and validate `Content-Length` if present. Rejects malformed values
     /// and conflicting duplicate headers.
     pub(crate) fn content_length(&self) -> Result<Option<u64>> {
-        let mut parsed = None;
-        for raw in self.header_values("content-length") {
-            let trimmed = raw.trim();
-            ensure!(
-                !trimmed.is_empty()
-                    && trimmed.len() <= 20
-                    && trimmed.bytes().all(|b| b.is_ascii_digit()),
-                "Invalid HTTP Content-Length header"
-            );
-            let value = trimmed
-                .parse::<u64>()
-                .map_err(|_| anyhow::anyhow!("Invalid HTTP Content-Length header"))?;
-            if let Some(prev) = parsed {
-                ensure!(prev == value, "Conflicting HTTP Content-Length headers");
-            } else {
-                parsed = Some(value);
-            }
-        }
-        Ok(parsed)
+        content_length_in(&self.headers)
     }
+}
+
+/// Parse and validate `Content-Length` if present, rejecting malformed values
+/// and conflicting duplicates.
+fn content_length_in(headers: &[(String, String)]) -> Result<Option<u64>> {
+    let mut parsed = None;
+    for raw in header_values_in(headers, "content-length") {
+        let trimmed = raw.trim();
+        ensure!(
+            !trimmed.is_empty()
+                && trimmed.len() <= 20
+                && trimmed.bytes().all(|b| b.is_ascii_digit()),
+            "Invalid HTTP Content-Length header"
+        );
+        let value = trimmed
+            .parse::<u64>()
+            .map_err(|_| anyhow::anyhow!("Invalid HTTP Content-Length header"))?;
+        if let Some(prev) = parsed {
+            ensure!(prev == value, "Conflicting HTTP Content-Length headers");
+        } else {
+            parsed = Some(value);
+        }
+    }
+    Ok(parsed)
+}
+
+/// Status and headers of an HTTP response whose body is delivered separately
+/// to an [`HttpBodySink`].
+#[derive(Clone, Debug)]
+pub struct HttpResponseHead {
+    /// Numeric HTTP status code (`100..=599`).
+    pub status: u16,
+    /// Response headers as `(name, value)` pairs.
+    pub headers: Vec<(String, String)>,
+}
+
+impl HttpResponseHead {
+    /// Return the first header value matching `name` (ASCII case-insensitive).
+    pub fn header(&self, name: &str) -> Option<&str> {
+        header_in(&self.headers, name)
+    }
+
+    /// Return all header values matching `name` (ASCII case-insensitive), in
+    /// wire order.
+    pub fn header_values(&self, name: &str) -> Vec<&str> {
+        header_values_in(&self.headers, name)
+    }
+
+    /// Parse and validate `Content-Length` if present, rejecting malformed
+    /// values and conflicting duplicates.
+    pub(crate) fn content_length(&self) -> Result<Option<u64>> {
+        content_length_in(&self.headers)
+    }
+}
+
+/// Receives an HTTP response streamed by [`HttpTransport::send_streaming`].
+pub trait HttpBodySink: MaybeSend {
+    /// Inspect the status and headers before any body bytes arrive. An error
+    /// stops the transfer and is returned to the caller unchanged.
+    fn head(&mut self, head: &HttpResponseHead) -> Result<()>;
+
+    /// Accept the next piece of the body, in order. Never called with an
+    /// empty slice. An error stops the transfer and is returned to the caller
+    /// unchanged.
+    fn chunk(&mut self, bytes: &[u8]) -> Result<()>;
 }
 
 /// Asynchronous HTTP request/response transport.
 ///
 /// Implementations must disable automatic redirects and honor
 /// `request.timeout` and `request.max_response_bytes`. Returning
-/// [`TransportError::Disconnected`] or [`TransportError::Timeout`] classifies
-/// transient failures for CDN IP failover and retry backoff; returning
+/// [`TransportError::Disconnected`] (no connection), [`TransportError::Interrupted`]
+/// (the connection failed after it was made) or [`TransportError::Timeout`]
+/// classifies transient failures for CDN IP failover and retry backoff; returning
 /// [`TransportError::ResponseTooLarge`] lets media downloaders preserve their
 /// exact size-limit error classification when a response exceeds
 /// `request.max_response_bytes`. Callers with only raw TCP sockets can wrap a
@@ -351,11 +419,46 @@ impl HttpResponse {
 pub trait HttpTransport: MaybeSend + MaybeSync {
     /// Execute a single bounded HTTP request without automatic redirects.
     fn send<'a>(&'a self, request: HttpRequest) -> TransportFuture<'a, Result<HttpResponse>>;
+
+    /// Execute a request like [`Self::send`], delivering the head and then
+    /// the body in pieces to `sink` as they arrive, so a caller can report
+    /// progress or stop a long download early. The whole body is still
+    /// bounded by `request.max_response_bytes` and `request.timeout`.
+    ///
+    /// The default implementation buffers the response with [`Self::send`]
+    /// and delivers the body in one piece; transports that can stream should
+    /// override it.
+    fn send_streaming<'a>(
+        &'a self,
+        request: HttpRequest,
+        sink: &'a mut dyn HttpBodySink,
+    ) -> TransportFuture<'a, Result<HttpResponseHead>> {
+        Box::pin(async move {
+            let response = self.send(request).await?;
+            let head = HttpResponseHead {
+                status: response.status,
+                headers: response.headers,
+            };
+            sink.head(&head)?;
+            if !response.body.is_empty() {
+                sink.chunk(&response.body)?;
+            }
+            Ok(head)
+        })
+    }
 }
 
 impl<T: HttpTransport + ?Sized> HttpTransport for Arc<T> {
     fn send<'a>(&'a self, request: HttpRequest) -> TransportFuture<'a, Result<HttpResponse>> {
         (**self).send(request)
+    }
+
+    fn send_streaming<'a>(
+        &'a self,
+        request: HttpRequest,
+        sink: &'a mut dyn HttpBodySink,
+    ) -> TransportFuture<'a, Result<HttpResponseHead>> {
+        (**self).send_streaming(request, sink)
     }
 }
 
@@ -400,6 +503,10 @@ pub struct ProtocolTransport {
     /// Monotonic and wall-clock time source.
     pub clock: Arc<dyn Clock>,
     spawner: Option<Arc<dyn TaskSpawner>>,
+    /// Whether async login may open a local TCP listener for a LAN risk
+    /// challenge.
+    #[cfg(not(target_arch = "wasm32"))]
+    lan_login: bool,
 }
 
 impl ProtocolTransport {
@@ -415,6 +522,8 @@ impl ProtocolTransport {
             http,
             clock,
             spawner: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            lan_login: false,
         }
     }
 
@@ -429,6 +538,8 @@ impl ProtocolTransport {
             http,
             clock,
             spawner: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            lan_login: false,
         }
     }
 
@@ -444,7 +555,29 @@ impl ProtocolTransport {
     pub fn spawner(&self) -> Option<&Arc<dyn TaskSpawner>> {
         self.spawner.as_ref()
     }
+
+    /// Let async QR login answer a LAN risk challenge by opening a temporary
+    /// local TCP listener (ports 8050–8100 on this host's IPv4 addresses), as
+    /// the blocking login does. [`Self::native`] enables this; enable it on
+    /// another bundle only when the host may accept connections from the
+    /// phone on the local network.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_lan_login(mut self) -> Self {
+        self.lan_login = true;
+        self
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn lan_login(&self) -> bool {
+        self.lan_login
+    }
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "native_transport.rs"]
+mod native;
+#[cfg(not(target_arch = "wasm32"))]
+pub use native::{DestinationPolicy, NativeHttpTransport, TokioSpawner, TokioStreamTransport};
 
 const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
 const MAX_HTTP_HEADERS: usize = 128;
@@ -551,19 +684,8 @@ fn format_http_request(request: &HttpRequest) -> Result<(String, u16, Vec<u8>)> 
         wire.extend_from_slice(format!("Content-Length: {}\r\n", request.body.len()).as_bytes());
     }
     for (name, value) in &request.headers {
-        ensure!(valid_header_name(name), "Invalid HTTP header name");
-        ensure!(valid_header_value(value), "Invalid HTTP header value");
-        if name.eq_ignore_ascii_case("host")
-            || name.eq_ignore_ascii_case("content-length")
-            || name.eq_ignore_ascii_case("transfer-encoding")
-        {
-            bail!("Restricted HTTP request header");
-        }
+        check_request_header(name, value)?;
         if name.eq_ignore_ascii_case("connection") {
-            ensure!(
-                value.eq_ignore_ascii_case("close"),
-                "Only Connection: close is supported"
-            );
             continue;
         }
         wire.extend_from_slice(name.as_bytes());
@@ -574,6 +696,27 @@ fn format_http_request(request: &HttpRequest) -> Result<(String, u16, Vec<u8>)> 
     wire.extend_from_slice(b"Connection: close\r\n\r\n");
     wire.extend_from_slice(&request.body);
     Ok((connect_host, port, wire))
+}
+
+/// Rules every transport applies to a caller-supplied request header: a valid
+/// name and value, no `Host`, `Content-Length` or `Transfer-Encoding` (the
+/// transport derives those), and `Connection` only as `close`.
+pub(crate) fn check_request_header(name: &str, value: &str) -> Result<()> {
+    ensure!(valid_header_name(name), "Invalid HTTP header name");
+    ensure!(valid_header_value(value), "Invalid HTTP header value");
+    if name.eq_ignore_ascii_case("host")
+        || name.eq_ignore_ascii_case("content-length")
+        || name.eq_ignore_ascii_case("transfer-encoding")
+    {
+        bail!("Restricted HTTP request header");
+    }
+    if name.eq_ignore_ascii_case("connection") {
+        ensure!(
+            value.eq_ignore_ascii_case("close"),
+            "Only Connection: close is supported"
+        );
+    }
+    Ok(())
 }
 
 fn remaining_deadline(clock: &dyn Clock, deadline_ms: u64) -> Result<Duration> {
@@ -712,7 +855,7 @@ async fn read_line_crlf(
             "HTTP chunk line exceeds limit"
         );
         let Some(n) = read_chunk_into(stream, &mut scratch, clock, deadline_ms).await? else {
-            return Err(TransportError::Disconnected.into());
+            return Err(TransportError::Interrupted.into());
         };
         pending.extend_from_slice(&scratch[..n]);
     }
@@ -738,7 +881,7 @@ async fn read_exact_buffered(
         let step = need.min(scratch.len());
         let Some(n) = read_chunk_into(stream, &mut scratch[..step], clock, deadline_ms).await?
         else {
-            return Err(TransportError::Disconnected.into());
+            return Err(TransportError::Interrupted.into());
         };
         out.extend_from_slice(&scratch[..n]);
         need -= n;
@@ -831,7 +974,7 @@ impl<S: StreamTransport> HttpTransport for HttpOverStream<S> {
                         read_chunk_into(&mut *stream, &mut scratch, &*self.clock, deadline_ms)
                             .await?
                     else {
-                        return Err(TransportError::Disconnected.into());
+                        return Err(TransportError::Interrupted.into());
                     };
                     pending.extend_from_slice(&scratch[..n]);
                 };
@@ -1314,7 +1457,7 @@ mod tests {
             );
         }
 
-        // Truncated Content-Length EOF classifies as TransportError::Disconnected and closes stream.
+        // Truncated Content-Length EOF classifies as TransportError::Interrupted and closes stream.
         let s_eof = Arc::new(SingleStreamTransport::new(
             "short.weixin.qq.com",
             80,
@@ -1338,7 +1481,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err.downcast_ref::<TransportError>(),
-            Some(&TransportError::Disconnected)
+            Some(&TransportError::Interrupted)
         );
         assert!(*s_eof.closed.lock().unwrap());
 

@@ -1,5 +1,8 @@
 //! Bounded native CDN transport. This uses the observed HTTP carrier on port 443,
 //! not HTTPS. Media encryption and advertised size/digests are checked separately.
+// This module defines or still uses the blocking APIs deprecated in 3.2;
+// 4.0 removes them (#701).
+#![allow(deprecated)]
 use crate::errors::{Service, ServiceRejected};
 use crate::transport::{
     find_transport_error, Clock, HttpMethod, HttpRequest, HttpTransport, TransportError,
@@ -53,16 +56,35 @@ mod channels_video;
 pub use channels_video::*;
 #[path = "sticker.rs"]
 mod sticker;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use sticker::public_ip;
 pub use sticker::*;
 #[path = "tp_media.rs"]
 mod tp_media;
 pub use tp_media::*;
 #[path = "upload_source.rs"]
 mod upload_source;
+#[cfg(not(target_arch = "wasm32"))]
+pub use upload_source::FileUploadSource;
 use upload_source::UploadRef;
 pub use upload_source::{
     AsyncDownloadSink, AsyncUploadSource, PreparedAsyncUpload, PreparedFileUpload,
 };
+
+/// Name a standalone download's transport failure with that downloader's own
+/// error codes: an oversized body, a refused destination, or anything else.
+pub(crate) fn download_failure(
+    error: &anyhow::Error,
+    too_large: &'static str,
+    not_public: &'static str,
+    failed: &'static str,
+) -> anyhow::Error {
+    match find_transport_error(error) {
+        Some(TransportError::ResponseTooLarge) => anyhow::anyhow!(too_large),
+        Some(TransportError::DestinationNotAllowed) => anyhow::anyhow!(not_public),
+        _ => anyhow::anyhow!(failed),
+    }
+}
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct CdnLocation {
@@ -1060,11 +1082,16 @@ impl<'a> AsyncCdnSession<'a> {
                         error,
                         prefer_failover: true,
                     },
-                    Some(TransportError::Timeout) => PostAttemptError::Retryable {
-                        error,
-                        prefer_failover: false,
-                    },
-                    Some(TransportError::ResponseTooLarge) | None => PostAttemptError::Fatal(error),
+                    Some(TransportError::Timeout | TransportError::Interrupted) => {
+                        PostAttemptError::Retryable {
+                            error,
+                            prefer_failover: false,
+                        }
+                    }
+                    Some(
+                        TransportError::ResponseTooLarge | TransportError::DestinationNotAllowed,
+                    )
+                    | None => PostAttemptError::Fatal(error),
                 })?;
         let status = response.status;
         if status != 200 {
@@ -1224,6 +1251,10 @@ impl CdnClient {
         AsyncCdnSession::new(self, endpoints, RetryPolicy::DEFAULT, http, clock)
     }
     /// Download and decrypt one bounded CDN media object into memory.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `CdnClient::download_async`; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn download(&self, descriptor: &MediaDescriptor) -> Result<DownloadedMedia> {
         self.download_with_progress(descriptor, |_, _| Ok(()))
@@ -1241,6 +1272,10 @@ impl CdnClient {
     }
     /// Download and decrypt one bounded CDN media object into memory while
     /// reporting cumulative ciphertext progress before each chunk.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `CdnClient::download_with_progress_async`; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn download_with_progress(
         &self,
@@ -1285,6 +1320,10 @@ impl CdnClient {
     /// is never held in memory. Every check [`Self::download_with_progress`]
     /// makes is made on the returned receipt. Until this returns `Ok`, the
     /// bytes in `sink` are unverified: on an error the caller must discard them.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `CdnClient::download_to_with_progress_async`; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn download_to_with_progress(
         &self,
@@ -1330,6 +1369,10 @@ impl CdnClient {
     /// for the object; it correlates requests and is not a credential. Only
     /// whole-file descriptors are accepted; the downloaded bytes get the same
     /// size and integrity checks as an ordinary file download.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `CdnClient::download_storage_with_progress_async`; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn download_storage_with_progress(
         &self,
@@ -1375,6 +1418,10 @@ impl CdnClient {
     /// Download an incoming voice note over CDN (`POST /download` with `filetype = 15`),
     /// bounded to [`MAX_VOICE_CDN_BYTES`] (16 MiB) and tolerating transcoded length
     /// differences from `expected_bytes`.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `CdnClient::download_voice_with_progress_async`; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn download_voice_with_progress(
         &self,
@@ -1553,6 +1600,10 @@ impl CdnClient {
         state.into_receipt()
     }
     /// Upload one prepared in-memory media object to WeChat CDN.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `CdnClient::upload_async`; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn upload(&self, prepared: &PreparedUpload) -> Result<UploadedMedia> {
         self.upload_with_progress(prepared, |_, _| Ok(()))
@@ -1570,6 +1621,10 @@ impl CdnClient {
     }
     /// Upload one prepared in-memory media object to WeChat CDN while reporting
     /// cumulative encrypted bytes sent before each chunk.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `CdnClient::upload_with_progress_async`; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn upload_with_progress(
         &self,
@@ -1598,6 +1653,10 @@ impl CdnClient {
     }
     /// [`Self::upload_with_progress`] for an upload read from a file in steps.
     /// The requests are the same as for the equivalent in-memory upload.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `CdnClient::upload_source_with_progress_async`; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn upload_file_with_progress(
         &self,
@@ -2879,6 +2938,10 @@ fn uploaded_variant(
 }
 impl CdnClient {
     /// Upload an image's prepared copies (standard, thumbnail, and optional original).
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `CdnClient::upload_image_async`; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn upload_image(&self, p: &PreparedImageUpload) -> Result<UploadedImage> {
         self.upload_image_with_progress(p, |_, _| Ok(()))
@@ -2896,6 +2959,10 @@ impl CdnClient {
     }
     /// Upload an image's original, standard and thumbnail copies, reporting the encrypted bytes
     /// of the original sent so far and their total before each request.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `CdnClient::upload_image_with_progress_async`; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn upload_image_with_progress(
         &self,
@@ -3007,6 +3074,10 @@ impl CdnClient {
         })
     }
     /// Upload a video's prepared playback, thumbnail, and optional original copies.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `CdnClient::upload_video_async`; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn upload_video(&self, p: &PreparedVideoUpload) -> Result<UploadedVideo> {
         self.upload_video_with_progress(p, |_, _| Ok(()))
@@ -3023,6 +3094,10 @@ impl CdnClient {
             .await
     }
     /// Upload a video's prepared copies while reporting cumulative encrypted bytes sent.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `CdnClient::upload_video_with_progress_async`; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn upload_video_with_progress(
         &self,
@@ -5800,6 +5875,65 @@ mod tests {
             .unwrap();
         assert_eq!(err.to_string(), "media_cancelled");
         assert_eq!(fence_calls.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn async_cdn_retries_the_same_address_after_an_interrupted_reply() {
+        let cdn = CdnClient::new(
+            CdnConfig {
+                version: 1,
+                uin: 12345,
+                client_version: 456,
+                client_os_type: "synthetic-client".into(),
+                auth_key: b"synthetic-auth".to_vec(),
+                server_ips: vec![Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(8, 8, 8, 8)],
+                front_id: 0,
+                location: None,
+            },
+            Duration::from_secs(25),
+        )
+        .unwrap();
+        let (descriptor, raw, ciphertext) =
+            download_fixture(UPLOAD_CHUNK + 200, MediaQuality::File);
+        let clock = RecordingClock::new(1_700_000_000);
+        for (failure, expected) in [
+            // A connection dropped after an earlier success: retry this address once.
+            (
+                TransportError::Interrupted,
+                ["1.1.1.1", "1.1.1.1", "1.1.1.1"],
+            ),
+            // No connection at all: move to the next address.
+            (
+                TransportError::Disconnected,
+                ["1.1.1.1", "1.1.1.1", "8.8.8.8"],
+            ),
+        ] {
+            let attempts = std::sync::atomic::AtomicUsize::new(0);
+            let seen_hosts = std::sync::Mutex::new(Vec::new());
+            let http = FnHttp(|req: HttpRequest| {
+                seen_hosts
+                    .lock()
+                    .unwrap()
+                    .push(req.url.host_str().unwrap().to_owned());
+                if attempts.fetch_add(1, Ordering::AcqRel) == 1 {
+                    return Err(failure.into());
+                }
+                let fields = unpack_cdn(&req.body)?;
+                let reply = download_reply(&fields, &descriptor, &ciphertext);
+                Ok(crate::transport::HttpResponse {
+                    status: 200,
+                    headers: vec![],
+                    body: pack_cdn(&reply)?,
+                })
+            });
+            let fresh = CdnClient::new(cdn.config.clone(), Duration::from_secs(25)).unwrap();
+            let downloaded = fresh
+                .download_async(&descriptor, &http, &clock)
+                .await
+                .unwrap();
+            assert_eq!(downloaded.bytes, raw);
+            assert_eq!(*seen_hosts.lock().unwrap(), expected, "{failure:?}");
+        }
     }
 
     #[tokio::test]

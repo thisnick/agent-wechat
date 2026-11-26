@@ -192,8 +192,9 @@ impl Core {
         for _ in 0..100 {
             let mut state = self.resume_media_state(account, id, &plan.fence)?;
             let raw = permit.transfer(self, account, || {
-                self.native_request(account, &mut state, |ctx| {
+                self.native_request(account, &mut state, async |ctx| {
                     ctx.sticker_pack_page_raw(wire::StickerPackFeed::Added, &cursor)
+                        .await
                 })
             })?;
             self.retain_pack_read(account, id, plan, &raw)?;
@@ -301,8 +302,8 @@ impl Core {
             if !plan.accepted && present != added {
                 let mut state = self.resume_media_state(account, id, &plan.fence)?;
                 let raw = permit.transfer(self, account, || {
-                    self.native_request(account, &mut state, |ctx| {
-                        ctx.sticker_pack_detail_raw(&pack)
+                    self.native_request(account, &mut state, async |ctx| {
+                        ctx.sticker_pack_detail_raw(&pack).await
                     })
                 })?;
                 self.retain_pack_read(account, id, &mut plan, &raw)?;
@@ -319,8 +320,8 @@ impl Core {
                     self.save_pack_job(account, id, &plan)?;
                     let mut state = self.resume_media_state(account, id, &plan.fence)?;
                     let raw = permit.transfer(self, account, || {
-                        self.native_request(account, &mut state, |ctx| {
-                            ctx.sticker_pack_acquisition_raw(&pack)
+                        self.native_request(account, &mut state, async |ctx| {
+                            ctx.sticker_pack_acquisition_raw(&pack).await
                         })
                     })?;
                     plan.grant_reply = Some(raw.clone());
@@ -339,8 +340,8 @@ impl Core {
                 self.save_pack_job(account, id, &plan)?;
                 let mut state = self.resume_media_state(account, id, &plan.fence)?;
                 let raw = permit.transfer(self, account, || {
-                    self.native_request(account, &mut state, |ctx| {
-                        ctx.sticker_pack_membership_raw(&pack, added)
+                    self.native_request(account, &mut state, async |ctx| {
+                        ctx.set_sticker_pack_membership_raw(&pack, added).await
                     })
                 })?;
                 plan.reply = Some(raw.clone());

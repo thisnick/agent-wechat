@@ -1,4 +1,7 @@
 //! Fresh pinned MMTLS handshake and authenticated shortlink exchange.
+// This module defines or still uses the blocking APIs deprecated in 3.2;
+// 4.0 removes them (#701).
+#![allow(deprecated)]
 use crate::crypto::*;
 use crate::transport::{
     AsyncByteStream, Clock, HttpMethod, HttpRequest, HttpTransport, ReadOutcome, StreamTransport,
@@ -570,6 +573,10 @@ impl HandshakeEstablished {
 // Legacy blocking MMTLS session kept for 3.x native compatibility (#701).
 // Prefer `AsyncSession` over `StreamTransport` for new code.
 /// Blocking MMTLS long-link session backed by `std::net::TcpStream`.
+#[deprecated(
+    since = "3.2.0",
+    note = "use `mmtls::AsyncSession` over a `transport::StreamTransport`; blocking APIs are removed in 4.0 (#701)"
+)]
 #[cfg(not(target_arch = "wasm32"))]
 pub struct Session {
     socket: TcpStream,
@@ -1183,6 +1190,10 @@ pub(crate) fn validate_short_route(path: &str) -> Result<()> {
 // Legacy blocking short-link helper kept for 3.x native compatibility (#701).
 // Prefer `short_exchange_async` over `HttpTransport` for new code.
 /// Blocking MMTLS short-link exchange using `reqwest::blocking`.
+#[deprecated(
+    since = "3.2.0",
+    note = "use `mmtls::short_exchange_async`; blocking APIs are removed in 4.0 (#701)"
+)]
 #[cfg(not(target_arch = "wasm32"))]
 pub fn short_exchange(
     session: &ShortSession,

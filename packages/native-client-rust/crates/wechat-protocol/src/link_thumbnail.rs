@@ -42,6 +42,10 @@ pub fn validate_link_thumbnail_url(value: &str) -> Result<url::Url> {
 // Legacy blocking thumbnail downloader kept for 3.x native compatibility (#701).
 // Prefer `fetch_link_thumbnail_async` over `HttpTransport` for new code.
 /// Download one bounded link-card thumbnail from a validated public host without redirects.
+#[deprecated(
+    since = "3.2.0",
+    note = "use `fetch_link_thumbnail_async` with `NativeHttpTransport::new(DestinationPolicy::PublicOnly)`; blocking APIs are removed in 4.0 (#701)"
+)]
 #[cfg(not(target_arch = "wasm32"))]
 pub fn fetch_link_thumbnail(
     value: &str,
@@ -61,6 +65,8 @@ pub fn fetch_link_thumbnail(
 ///
 /// The caller's [`HttpTransport`] must not follow HTTP redirects and is
 /// responsible for DNS/SSRF validation before connecting to non-literal hostnames.
+/// On native targets, `transport::NativeHttpTransport` built with
+/// `DestinationPolicy::PublicOnly` provides that boundary.
 pub async fn fetch_link_thumbnail_async(
     value: &str,
     http: &dyn HttpTransport,
@@ -79,13 +85,12 @@ pub async fn fetch_link_thumbnail_async(
         })
         .await
         .map_err(|error| {
-            if crate::transport::find_transport_error(&error)
-                == Some(crate::transport::TransportError::ResponseTooLarge)
-            {
-                anyhow::anyhow!("link_thumbnail_size_limit")
-            } else {
-                anyhow::anyhow!("link_thumbnail_fetch_failed")
-            }
+            super::download_failure(
+                &error,
+                "link_thumbnail_size_limit",
+                "link_thumbnail_dns_not_public",
+                "link_thumbnail_fetch_failed",
+            )
         })?;
     ensure!(response.status == 200, "link_thumbnail_fetch_failed");
     ensure!(
@@ -382,5 +387,39 @@ mod tests {
             .to_string(),
             "link_thumbnail_size_limit"
         );
+    }
+
+    #[tokio::test]
+    async fn native_public_only_transport_reports_private_hosts_as_not_public() {
+        // `localhost` passes URL validation but resolves to loopback, so the
+        // transport refuses it before connecting and the downloader keeps its
+        // `dns_not_public` code. The other downloaders share this mapping.
+        let http = crate::transport::NativeHttpTransport::new(
+            crate::transport::DestinationPolicy::PublicOnly,
+        )
+        .unwrap();
+        let error = fetch_link_thumbnail_async("http://localhost/a.png", &http, |_, _| Ok(()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "link_thumbnail_dns_not_public");
+        for (category, code) in [
+            (
+                crate::transport::TransportError::DestinationNotAllowed,
+                "not_public",
+            ),
+            (
+                crate::transport::TransportError::ResponseTooLarge,
+                "too_large",
+            ),
+            (crate::transport::TransportError::Timeout, "failed"),
+            (crate::transport::TransportError::Disconnected, "failed"),
+        ] {
+            let error = anyhow::Error::new(category).context("detail");
+            assert_eq!(
+                super::super::download_failure(&error, "too_large", "not_public", "failed")
+                    .to_string(),
+                code
+            );
+        }
     }
 }

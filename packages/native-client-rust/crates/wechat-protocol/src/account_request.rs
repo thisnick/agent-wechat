@@ -1,10 +1,17 @@
 //! Scoped operations for embedders that already execute on blocking workers.
+// This module defines or still uses the blocking APIs deprecated in 3.2;
+// 4.0 removes them (#701).
+#![allow(deprecated)]
 use super::*;
 
 /// A single logical operation borrowing this client's temporary request state.
 /// It is not an account owner and cannot outlive request_blocking. No operation
 /// accepts an independently mutable AccountState. Use ordinary async client
 /// methods unless the embedding application already owns a blocking worker.
+#[deprecated(
+    since = "3.2.0",
+    note = "use `AsyncAccountRequest` through `NativeClient::request`; blocking APIs are removed in 4.0 (#701)"
+)]
 pub struct AccountRequest<'a> {
     transport: &'a NativeClient,
     state: &'a mut AccountState,
@@ -332,6 +339,10 @@ impl NativeClient {
     /// Execute one scoped account operation on the caller's blocking worker.
     /// Uses the same admission, generation, storage and handoff barriers as async
     /// operations. No executor or independent credential owner is constructed.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `NativeClient::request`; blocking APIs are removed in 4.0 (#701)"
+    )]
     pub fn request_blocking<T>(
         &self,
         operation: impl FnOnce(&mut AccountRequest<'_>) -> Result<T>,
@@ -347,6 +358,10 @@ impl NativeClient {
 
     /// Explicit authentication renewal on an existing blocking worker. This
     /// never retries the operation whose rejection prompted the caller to renew.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `NativeClient::renew_session`; blocking APIs are removed in 4.0 (#701)"
+    )]
     pub fn renew_session_blocking(&self, computer_name: &str) -> Result<()> {
         if self.transport.is_some() {
             return Err(anyhow::anyhow!(
@@ -373,6 +388,10 @@ impl NativeClient {
     /// As [`Self::logout`], on the caller's blocking worker. No Tokio runtime
     /// is needed. Logout is submitted at most once and the owner stays stopped
     /// after rejection or uncertainty.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `NativeClient::logout`; blocking APIs are removed in 4.0 (#701)"
+    )]
     pub fn logout_blocking(&self) -> Result<crate::LogoutReply> {
         if self.transport.is_some() {
             return Err(anyhow::anyhow!(
@@ -385,6 +404,10 @@ impl NativeClient {
 
     /// As [`Self::shutdown`], on the caller's blocking worker. Do not call it
     /// from inside an account request: it waits for every request to finish.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `NativeClient::shutdown`; blocking APIs are removed in 4.0 (#701)"
+    )]
     pub fn shutdown_blocking(&self) -> Result<()> {
         self.owned_account()?.stop_and_drain_blocking()
     }

@@ -1,5 +1,8 @@
 //! Account data owned by NativeClient. Network workers take temporary snapshots;
 //! they never hold the state lock while waiting for transport.
+// This module defines or still uses the blocking APIs deprecated in 3.2;
+// 4.0 removes them (#701).
+#![allow(deprecated)]
 use super::{AccountState, NativeClient, NativeOptions};
 use crate::errors::AccountInterrupted;
 use anyhow::{ensure, Context, Result};
@@ -228,6 +231,10 @@ impl PendingLogout {
     /// Clients built with a [`crate::transport::ProtocolTransport`] must use
     /// [`Self::submit`] instead; calling this method refuses with
     /// [`NativeRequestNotSubmitted`].
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `PendingLogout::submit`; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn submit_blocking(self) -> Result<super::LogoutReply> {
         self.submit_guarded_blocking(|| Ok(()))
@@ -240,6 +247,10 @@ impl PendingLogout {
     /// Clients built with a [`crate::transport::ProtocolTransport`] must use
     /// [`Self::submit_guarded`] instead; calling this method refuses with
     /// [`NativeRequestNotSubmitted`].
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `PendingLogout::submit_guarded`; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn submit_guarded_blocking<F>(self, before_submit: F) -> Result<super::LogoutReply>
     where
@@ -692,6 +703,10 @@ impl NativeClient {
 
     /// Bind an accepted account to this client. Clones share the same owner;
     /// construction performs no network operation or credential persistence.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `NativeClient::from_account_with_transport` with `ProtocolTransport::native()`; a client without a transport runs on the blocking backend; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn from_account(state: AccountState, options: NativeOptions) -> Result<Self> {
         state.validate()?;
@@ -703,6 +718,10 @@ impl NativeClient {
     /// Use a data-only storage callback for accepted updates. The supplied state
     /// must already be loaded from accepted storage; construction does not write
     /// it back or treat importing bytes as a new authentication acceptance.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `NativeClient::from_account_with_transport_and_persistence` with `ProtocolTransport::native()`; a client without a transport runs on the blocking backend; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn from_account_with_persistence(
         state: AccountState,
@@ -961,36 +980,33 @@ impl NativeClient {
         Guard: FnOnce() -> Result<()> + crate::transport::MaybeSend + 'static,
     {
         if let Some(transport) = self.transport.clone() {
-            let owner = self.owned_account()?.clone();
-            let (exchange, mut state) = owner
-                .begin()
-                .map_err(|error| error.context(NativeRequestNotSubmitted))?;
             let options = self.options.clone();
-            return run_detached_exchange(&transport.clone(), move |cancellation| async move {
-                let mut prior_admission = false;
-                let result = async {
-                    let (cgi, path, request) = build(&state)?;
-                    let request = Zeroizing::new(request);
-                    let reply = Self::async_authenticated_rpc_step(
-                        &options,
-                        &transport,
-                        &owner.short_link,
-                        &exchange,
-                        &cancellation,
-                        &mut state,
-                        &mut prior_admission,
-                        cgi,
-                        path.as_ref(),
-                        &request,
-                        before_submit,
-                    )
-                    .await?;
-                    decode(&state, reply)
-                }
+            let runner = transport.clone();
+            return self
+                .run_account_exchange(&runner, move |mut parts| async move {
+                    let result = async {
+                        let (cgi, path, request) = build(&parts.state)?;
+                        let request = Zeroizing::new(request);
+                        let reply = Self::async_authenticated_rpc_step(
+                            &options,
+                            &transport,
+                            &parts.owner.short_link,
+                            &parts.exchange,
+                            &parts.cancellation,
+                            &mut parts.state,
+                            &mut parts.prior_admission,
+                            cgi,
+                            path.as_ref(),
+                            &request,
+                            before_submit,
+                        )
+                        .await?;
+                        decode(&parts.state, reply)
+                    }
+                    .await;
+                    (parts, result)
+                })
                 .await;
-                finish_account_exchange(exchange, &state, result)
-            })
-            .await;
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1145,6 +1161,11 @@ fn finish_account_exchange<T>(
         },
     }
 }
+
+#[path = "account_scoped.rs"]
+mod scoped;
+pub use scoped::AsyncAccountRequest;
+pub(crate) use scoped::RequestScope;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "account_request.rs"]

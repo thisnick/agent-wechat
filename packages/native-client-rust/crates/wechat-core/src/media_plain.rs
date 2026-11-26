@@ -67,7 +67,7 @@ impl PlainFile {
     /// byte. On any error nothing is left behind.
     pub(crate) fn write_with(
         prefix: &str,
-        write: impl FnOnce(&mut dyn Write) -> Result<()>,
+        write: impl FnOnce(&mut (dyn Write + Send)) -> Result<()>,
     ) -> Result<Self> {
         let directory = wechat_platform::private_tempdir(prefix)?;
         let path = directory.path().join("payload");

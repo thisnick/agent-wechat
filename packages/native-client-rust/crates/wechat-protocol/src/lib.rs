@@ -2,17 +2,20 @@
 //!
 //! Most server operations are **methods on [`NativeClient`]**, rather than free
 //! functions in this crate's Functions list. [`AccountState`] holds accepted
-//! credentials; transfer it once into [`NativeClient::from_account`]. Account
+//! credentials; transfer it once into [`NativeClient::from_account_with_transport`]. Account
 //! operations then share that owner. It is secret data, not an API access token.
+//! On native targets, bind clients to [`transport::ProtocolTransport::native`]
+//! with [`NativeClient::with_transport`] or
+//! [`NativeClient::from_account_with_transport`].
 //!
 //! | Task | Start here |
 //! | --- | --- |
-//! | QR login | [`NativeClient::start_qr_login`], [`NativeClient::poll_login`], [`NativeClient::complete_login`] |
+//! | QR login | [`NativeClient::start_qr_login_async`], [`NativeClient::poll_login_async`], [`NativeClient::complete_login_async`] |
 //! | Receive a sync page | [`NativeClient::sync`], [`wire::decode_add_message`] |
 //! | Send text | [`NativeClient::send_text`], [`TextSendResult`] |
 //! | Contacts and rooms | [`NativeClient::lookup_contacts`], [`NativeClient::lookup_room`] |
 //! | Attachments | [`media`], [`media_send`], [`NativeClient::send_file`] |
-//! | Logout and shutdown | [`NativeClient::logout`], [`NativeClient::shutdown`], and `_blocking` forms of both |
+//! | Logout and shutdown | [`NativeClient::logout`], [`NativeClient::shutdown`] |
 //! | Classify a failure | [`ServiceRejected`], [`is_session_rejected`], [`AccountInterrupted`], [`NativeRequestNotSubmitted`] |
 //! | Low-level encoding | [`wire`], [`protobuf`] |
 //!
@@ -56,9 +59,9 @@
 //!
 //! This library does not launch or load the official client. Peer responses pass
 //! pinned MMTLS signature and record authentication before business decode.
-//! Account-owned requests run blocking transport work on Tokio's blocking pool.
-//! Login bootstrap and remaining low-level operations
-//! are blocking and require a blocking worker in async applications.
+//! Clients bound to a [`transport::ProtocolTransport`] run every request on
+//! it asynchronously. The blocking login, request, push, CDN and download
+//! APIs are deprecated and are removed in 4.0 (#701).
 //!
 //! # Errors
 //!
@@ -75,11 +78,15 @@
 //!
 //! # Blocking embedders
 //!
-//! Applications that run their own blocking workers need no Tokio runtime:
-//! use [`NativeClient::request_blocking`],
+//! The blocking forms ([`NativeClient::request_blocking`],
 //! [`NativeClient::open_push_connection_blocking`],
 //! [`NativeClient::renew_session_blocking`], [`NativeClient::logout_blocking`],
-//! [`PendingLogout::submit_blocking`] and [`NativeClient::shutdown_blocking`].
+//! [`PendingLogout::submit_blocking`] and [`NativeClient::shutdown_blocking`])
+//! are deprecated. Use [`NativeClient::request`],
+//! [`NativeClient::open_push_connection`], [`NativeClient::renew_session`],
+//! [`NativeClient::logout`], [`PendingLogout::submit`] and
+//! [`NativeClient::shutdown`] instead.
+
 pub mod business;
 
 pub mod calls;

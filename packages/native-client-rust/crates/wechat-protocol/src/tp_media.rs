@@ -6,6 +6,9 @@
 //! message's 16-byte `aeskey` (or `tpthumbaeskey`). The server caps single responses at 512 KiB
 //! and returns `206 Partial Content`, so transfers loop over contiguous byte ranges and decrypt
 //! directly into a streaming sink.
+// This module defines or still uses the blocking APIs deprecated in 3.2;
+// 4.0 removes them (#701).
+#![allow(deprecated)]
 use super::{
     AsyncDownloadSink, DownloadReceipt, DownloadedMedia, MediaQuality, MAX_CDN_TRANSFER_BYTES,
     MAX_LARGE_FILE_BYTES, MAX_VIDEO_DOWNLOAD_BYTES,
@@ -102,6 +105,10 @@ pub fn validate_tp_auth_key(value: &str) -> Result<()> {
 // Legacy blocking WeCom downloaders kept for 3.x native compatibility (#701).
 // Prefer `fetch_tp_media_async` and `fetch_tp_media_to_async` for new code.
 /// Download and decrypt an Enterprise WeChat media object into memory.
+#[deprecated(
+    since = "3.2.0",
+    note = "use `fetch_tp_media_async` with `NativeHttpTransport::new(DestinationPolicy::PublicOnly)`; blocking APIs are removed in 4.0 (#701)"
+)]
 #[cfg(not(target_arch = "wasm32"))]
 pub fn fetch_tp_media(
     descriptor: &TpMediaDescriptor,
@@ -115,6 +122,10 @@ pub fn fetch_tp_media(
 /// Download and decrypt an Enterprise WeChat media object directly into `sink`, verifying range
 /// framing, PKCS#7 padding, size limits, and any advertised length or MD5 digest. Until this
 /// returns `Ok`, bytes written to `sink` are unverified and must be discarded on error.
+#[deprecated(
+    since = "3.2.0",
+    note = "use `fetch_tp_media_to_async` with `NativeHttpTransport::new(DestinationPolicy::PublicOnly)`; blocking APIs are removed in 4.0 (#701)"
+)]
 #[cfg(not(target_arch = "wasm32"))]
 pub fn fetch_tp_media_to(
     descriptor: &TpMediaDescriptor,
@@ -136,6 +147,8 @@ pub fn fetch_tp_media_to(
 ///
 /// The caller's [`HttpTransport`] must not follow HTTP redirects and is
 /// responsible for network/SSRF boundaries.
+/// On native targets, `transport::NativeHttpTransport` built with
+/// `DestinationPolicy::PublicOnly` provides that boundary.
 pub async fn fetch_tp_media_async(
     descriptor: &TpMediaDescriptor,
     http: &dyn HttpTransport,
@@ -153,7 +166,9 @@ pub async fn fetch_tp_media_async(
 /// written to `sink` are unverified and must be discarded on error.
 ///
 /// The caller's [`HttpTransport`] must not follow HTTP redirects and is
-/// responsible for network/SSRF boundaries. Because [`HttpTransport::send`]
+/// responsible for network/SSRF boundaries (on native targets,
+/// `transport::NativeHttpTransport` built with
+/// `DestinationPolicy::PublicOnly`). Because [`HttpTransport::send`]
 /// buffers each response up to `max_response_bytes` before status and headers
 /// are inspected, chunk 0 sets `max_response_bytes` to the larger of 512 KiB
 /// and the object's ciphertext limit (so a server that ignores `Range` with a
@@ -255,13 +270,12 @@ pub async fn fetch_tp_media_to_async(
             })
             .await
             .map_err(|error| {
-                if crate::transport::find_transport_error(&error)
-                    == Some(crate::transport::TransportError::ResponseTooLarge)
-                {
-                    anyhow::anyhow!("tp_media_size_limit")
-                } else {
-                    anyhow::anyhow!("tp_media_fetch_failed")
-                }
+                super::download_failure(
+                    &error,
+                    "tp_media_size_limit",
+                    "tp_media_dns_not_public",
+                    "tp_media_fetch_failed",
+                )
             })?;
 
         let status = response.status;
