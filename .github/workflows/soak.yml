@@ -1,0 +1,102 @@
+name: Soak
+
+# Repeats ordinary activity against the local upstream simulator and checks that
+# the hub's own storage stops growing (scripts/smoke/soak.mjs). Pull requests
+# call this with a short run beside the native jobs, so it adds no wall-clock
+# time. The nightly run is ten times longer and varies its seed; rerun a failure
+# with the seed it printed.
+on:
+  workflow_call:
+    inputs:
+      rounds:
+        description: Rounds of activity
+        type: number
+        default: 6
+      seed:
+        description: Seed for activity counts and order
+        type: number
+        default: 1
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: Rounds of activity
+        type: number
+        default: 60
+      seed:
+        description: Seed for activity counts and order; 0 uses the run number
+        type: number
+        default: 0
+  schedule:
+    - cron: '41 9 * * *'
+
+permissions:
+  contents: read
+
+env:
+  # Same compile settings as the native jobs.
+  CARGO_PROFILE_DEV_OPT_LEVEL: 1
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+jobs:
+  soak:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    concurrency:
+      # The caller's workflow name keeps the weekly native run from cancelling
+      # the nightly one.
+      group: soak-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+      cancel-in-progress: true
+    defaults:
+      run:
+        working-directory: packages/native-client-rust
+    env:
+      # A scheduled run has no inputs.
+      SOAK_ROUNDS: ${{ inputs.rounds || 60 }}
+      SOAK_SEED: ${{ inputs.seed || github.run_number }}
+      SOAK_CHECKPOINT_EVERY: ${{ (inputs.rounds || 60) > 10 && 5 || 2 }}
+      SOAK_IDLE_SECONDS: ${{ (inputs.rounds || 60) > 10 && 30 || 12 }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Identify native build dependencies
+        id: cache-key
+        run: python ../../scripts/ci/cache-key.py rust --github-output
+      - uses: dtolnay/rust-toolchain@stable
+        id: rust
+        with:
+          toolchain: 1.93.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/native-client-rust -> target
+          add-rust-environment-hash-key: false
+          key: soak-${{ steps.rust.outputs.cachekey }}-opt${{ env.CARGO_PROFILE_DEV_OPT_LEVEL }}-debug${{ env.CARGO_PROFILE_DEV_DEBUG }}-${{ env.CARGO_PROFILE_TEST_DEBUG }}-${{ steps.cache-key.outputs.rust }}
+          # Only the simulator's dependencies; the nightly and main-branch runs
+          # save them and pull requests read them.
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - name: Install native build tools
+        uses: ./.github/actions/apt-install
+        with:
+          packages: cmake
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      - name: Build the simulator and hub
+        run: cargo build --profile test --locked -p wechat-simulator
+      - name: Repeat activity and check that storage stops growing
+        env:
+          SOAK_DATA_DIR: ${{ runner.temp }}/soak-data
+          SOAK_REPORT: ${{ runner.temp }}/soak-report.json
+        run: |
+          echo "Rounds $SOAK_ROUNDS, seed $SOAK_SEED"
+          node ../../scripts/smoke/soak.mjs
+      # Synthetic accounts and data only.
+      - name: Keep the measurements and data folder
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: soak-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/soak-report.json
+            ${{ runner.temp }}/soak-data
+          retention-days: 7
+          if-no-files-found: ignore

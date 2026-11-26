@@ -394,6 +394,8 @@ impl Store {
         })
     }
     pub fn put_runtime(&self, id: &str, key: &str, value: &[u8]) -> Result<()> {
+        // A key this long is a bug, such as a key that grows on each retry.
+        anyhow::ensure!(key.len() <= crate::MAX_RUNTIME_KEY, "runtime_key_too_long");
         self.control(id,|db|{db.execute("INSERT INTO runtime VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![key,value])?;Ok(())})
     }
     pub fn clear_runtime(&self, id: &str, key: &str) -> Result<()> {

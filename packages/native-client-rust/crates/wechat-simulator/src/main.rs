@@ -53,6 +53,14 @@ enum Commands {
         #[arg(long, default_value = "127.0.0.1:0")]
         listen: SocketAddr,
     },
+    /// Report, as JSON, what a stopped hub keeps in each account's runtime
+    /// table and any database copies left beside its stores. It never writes a
+    /// database, but reading one that has a log to replay creates its WAL index.
+    Audit {
+        /// Data folder given to `hub`
+        #[arg(long)]
+        data_dir: PathBuf,
+    },
 }
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -69,7 +77,88 @@ async fn main() -> Result<()> {
             upstream,
             listen,
         } => hub(&data_dir, upstream, listen).await,
+        Commands::Audit { data_dir } => audit(&data_dir),
     }
+}
+/// Reads each account's `control.sqlite`. Run it only while the hub is stopped.
+fn audit(root: &Path) -> Result<()> {
+    fn leftovers(
+        directory: &Path,
+        admission: &mut Vec<String>,
+        recovery: &mut Vec<String>,
+    ) -> Result<()> {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let path = entry.path().display().to_string();
+            if name.starts_with(".sqlite-admission-") {
+                admission.push(path);
+            } else if name.starts_with(".sqlite-recovery-") {
+                recovery.push(path);
+            }
+        }
+        Ok(())
+    }
+    let hub = root.join("hub");
+    let (mut admission, mut recovery) = (vec![], vec![]);
+    let mut accounts = serde_json::Map::new();
+    if hub.is_dir() {
+        leftovers(&hub, &mut admission, &mut recovery)?;
+        let directory = hub.join("accounts");
+        if directory.is_dir() {
+            for entry in std::fs::read_dir(&directory)? {
+                let entry = entry?;
+                let agent = entry.path().join("agent");
+                let database = agent.join("control.sqlite");
+                if !database.is_file() {
+                    continue;
+                }
+                leftovers(&agent, &mut admission, &mut recovery)?;
+                let size = |suffix: &str| {
+                    std::fs::metadata(agent.join(format!("control.sqlite{suffix}")))
+                        .map_or(0, |m| m.len())
+                };
+                let (wal, journal) = (size("-wal"), size("-journal"));
+                // With nothing to replay, `immutable` opens without locks or a
+                // WAL index. Otherwise read normally so committed log frames count.
+                let mode = if wal == 0 && journal == 0 {
+                    "immutable=1"
+                } else {
+                    "mode=ro"
+                };
+                let uri = format!("file:{}?{mode}", uri_path(&database));
+                let db = rusqlite::Connection::open_with_flags(
+                    uri,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                        | rusqlite::OpenFlags::SQLITE_OPEN_URI
+                        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                )?;
+                let mut report = serde_json::to_value(wechat_store::audit_runtime(&db)?)?;
+                report["fileBytes"] = json!(std::fs::metadata(&database)?.len());
+                report["walBytes"] = json!(wal);
+                report["journalBytes"] = json!(journal);
+                accounts.insert(entry.file_name().to_string_lossy().into_owned(), report);
+            }
+        }
+    }
+    admission.sort();
+    recovery.sort();
+    println!(
+        "{}",
+        json!({"accounts":accounts,"leftovers":{"admission":admission,"recovery":recovery}})
+    );
+    Ok(())
+}
+/// Percent-encodes the characters a SQLite URI path treats specially.
+fn uri_path(path: &Path) -> String {
+    let mut out = String::new();
+    for c in path.display().to_string().chars() {
+        match c {
+            '%' | '?' | '#' | ' ' => out.push_str(&format!("%{:02X}", c as u32)),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 fn loopback(address: SocketAddr) -> Result<()> {
     ensure!(address.ip().is_loopback(), "simulator_requires_loopback");

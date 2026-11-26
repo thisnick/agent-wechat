@@ -57,15 +57,20 @@ pub(super) fn contact(db: &Connection, account: &str, username: &str) -> Result<
         p::uint(83, 0),
     ];
     let name = if group {
-        let (name, muted, joined): (String, bool, bool) = db.query_row(
-            "SELECT name,muted,joined FROM groups WHERE account=?1 AND room=?2",
+        let (name, muted, joined, version): (String, bool, bool, u32) = db.query_row(
+            "SELECT name,muted,joined,version FROM groups WHERE account=?1 AND room=?2",
             params![account, username],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )?;
         fields.extend([
             p::uint(17, u64::from(!muted)),
             p::uint(85, if joined { 1 } else { 2 }),
         ]);
+        // Member (53) and detail (64) versions announce a change that the hub
+        // refreshes. A group nobody else has changed carries neither.
+        if version > 1 {
+            fields.extend([p::uint(53, version.into()), p::uint(64, version.into())]);
+        }
         name
     } else {
         label(username).into()
@@ -351,10 +356,10 @@ pub(super) fn mutate(db: &mut Connection, session: &Session, rpc: &GroupRpc) -> 
 pub(super) fn roster(db: &Connection, session: &Session, room: &str) -> Result<Vec<u8>> {
     check_session(db, session)?;
     validate_destination(db, &session.account, room)?;
-    let (raw, my_name): (String, String) = db.query_row(
-        "SELECT members,my_name FROM groups WHERE account=?1 AND room=?2",
+    let (raw, my_name, version): (String, String, u32) = db.query_row(
+        "SELECT members,my_name,version FROM groups WHERE account=?1 AND room=?2",
         params![session.account, room],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
     let mut members: Vec<String> = serde_json::from_str(&raw)?;
     members.push(own(&session.account));
@@ -362,7 +367,7 @@ pub(super) fn roster(db: &Connection, session: &Session, room: &str) -> Result<V
     let mut fields = vec![
         p::bytes(1, &p::uint(1, 0)),
         p::bytes(2, room.as_bytes()),
-        p::uint(3, 1),
+        p::uint(3, version.into()),
         p::bytes(5, own(&session.account).as_bytes()),
         p::uint(6, members.len() as u64),
     ];
@@ -391,15 +396,15 @@ pub(super) fn roster(db: &Connection, session: &Session, room: &str) -> Result<V
 pub(super) fn detail(db: &Connection, session: &Session, room: &str) -> Result<Vec<u8>> {
     check_session(db, session)?;
     validate_destination(db, &session.account, room)?;
-    let announcement: String = db.query_row(
-        "SELECT announcement FROM groups WHERE account=?1 AND room=?2",
+    let (announcement, version): (String, u32) = db.query_row(
+        "SELECT announcement,version FROM groups WHERE account=?1 AND room=?2",
         params![session.account, room],
-        |r| r.get(0),
+        |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     p::message(&[
         p::bytes(1, &p::int32(1, 0)),
         p::bytes(2, announcement.as_bytes()),
-        p::uint(3, 1),
+        p::uint(3, version.into()),
         p::bytes(4, own(&session.account).as_bytes()),
         p::uint(5, clock(db)?.into()),
     ])

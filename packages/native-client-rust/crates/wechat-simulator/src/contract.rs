@@ -102,6 +102,32 @@ pub enum Request {
         room: String,
     },
 }
+impl Request {
+    /// The request's `op` tag, for counting what the hub asked for.
+    pub fn op(&self) -> &'static str {
+        match self {
+            Self::StartLogin { .. } => "start_login",
+            Self::PollLogin { .. } => "poll_login",
+            Self::CompleteLogin { .. } => "complete_login",
+            Self::RefreshLogin { .. } => "refresh_login",
+            Self::Logout { .. } => "logout",
+            Self::Heartbeat { .. } => "heartbeat",
+            Self::Sync { .. } => "sync",
+            Self::SendText { .. } => "send_text",
+            Self::SendTextWithSource { .. } => "send_text_with_source",
+            Self::SendQuote { .. } => "send_quote",
+            Self::Poll { .. } => "poll",
+            Self::Media { .. } => "media",
+            Self::Read { .. } => "read",
+            Self::Contacts { .. } => "contacts",
+            Self::Avatar { .. } => "avatar",
+            Self::GroupMutation { .. } => "group_mutation",
+            Self::ContactMutation { .. } => "contact_mutation",
+            Self::GroupDetail { .. } => "group_detail",
+            Self::Room { .. } => "room",
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -192,6 +218,24 @@ pub enum GroupFault {
     LostAcknowledgment,
 }
 
+/// Metadata lookups that [`Control::MetadataFault`] can fail.
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MetadataKind {
+    Contacts,
+    Room,
+    GroupDetail,
+}
+impl MetadataKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Contacts => "contacts",
+            Self::Room => "room",
+            Self::GroupDetail => "group_detail",
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Control {
@@ -218,6 +262,25 @@ pub enum Control {
     GroupFault {
         account: String,
         fault: GroupFault,
+    },
+    /// Another member changed a joined group. Its name or announcement is
+    /// updated, its member and detail versions advance, and the group's contact
+    /// record is delivered through sync, so the hub refreshes it.
+    GroupChange {
+        account: String,
+        room: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        announcement: Option<String>,
+    },
+    /// The account's next `count` valid lookups of one metadata kind, for any
+    /// group or contact, fail as if the network dropped them. `count` 0 clears
+    /// the fault. The state reports what remains.
+    MetadataFault {
+        account: String,
+        kind: MetadataKind,
+        count: u32,
     },
     SendFault {
         account: String,
