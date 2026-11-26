@@ -118,20 +118,24 @@ impl StreamTransport for TokioStreamTransport {
                         anyhow::Error::new(TransportError::Disconnected)
                             .context(format!("Native connection failed: {error}"))
                     })?;
+            let mut last_error = None;
             for address in addresses {
                 match tokio::time::timeout_at(deadline, TcpStream::connect(address)).await {
                     Ok(Ok(stream)) => {
                         return Ok(Box::new(TokioByteStream { stream }) as Box<dyn AsyncByteStream>)
                     }
-                    Ok(Err(_)) => continue,
+                    Ok(Err(error)) => last_error = Some(error),
                     Err(_) => {
                         return Err(anyhow::Error::new(TransportError::Timeout)
                             .context("Native connection failed"))
                     }
                 }
             }
-            Err(anyhow::Error::new(TransportError::Disconnected)
-                .context("Native connection failed"))
+            let message = match last_error {
+                Some(error) => format!("Native connection failed: {error}"),
+                None => "Native connection failed: host has no addresses".to_owned(),
+            };
+            Err(anyhow::Error::new(TransportError::Disconnected).context(message))
         })
     }
 }
@@ -812,6 +816,13 @@ mod tests {
         assert_eq!(
             find_transport_error(&error),
             Some(TransportError::Disconnected)
+        );
+        // The last per-address cause stays in the message.
+        let message = error.to_string();
+        assert!(
+            message.len() > "Native connection failed: ".len()
+                && message.starts_with("Native connection failed: "),
+            "{error:#}"
         );
     }
 
