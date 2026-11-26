@@ -212,8 +212,14 @@ impl Core {
                 .as_deref()
                 .context("sticker_source_unavailable")?;
             crate::upstream::require_native(self.upstream.kind())?;
+            let http = crate::upstream::public_media_http(&*self.upstream)?;
             let (bytes, _) = permit.transfer(self, account, || {
-                wechat_protocol::media::fetch_sticker_original(url, &plan.content_id, |_, _| Ok(()))
+                crate::async_bridge::block_on(wechat_protocol::media::fetch_sticker_original_async(
+                    url,
+                    &plan.content_id,
+                    &*http,
+                    |_, _| Ok(()),
+                ))
             })?;
             self.resume_media_state(account, id, &plan.fence)?;
             self.validate_sticker_send_membership(account, &plan.request.source)?;

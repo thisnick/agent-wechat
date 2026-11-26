@@ -5,6 +5,8 @@ use wechat_protocol::{AccountPersistence, AsyncAccountRequest, NativeClient};
 
 pub(super) struct BoundUpstream {
     client: NativeClient,
+    transport: wechat_protocol::transport::ProtocolTransport,
+    public_http: Arc<dyn wechat_protocol::transport::HttpTransport>,
 }
 
 struct PersistAccount {
@@ -120,6 +122,11 @@ impl Core {
         }
         Ok(Arc::new(BoundUpstream {
             client: self.native_account(account, NativeOptions::default())?,
+            transport: self
+                .upstream
+                .protocol_transport()
+                .context("Native account owners need the upstream's protocol transport")?,
+            public_http: crate::upstream::public_media_http(&*self.upstream)?,
         }))
     }
 
@@ -303,6 +310,12 @@ impl crate::upstream::Upstream for BoundUpstream {
     fn native(&self, options: NativeOptions) -> Result<NativeClient> {
         self.client.with_request_options(options)
     }
+    fn protocol_transport(&self) -> Option<wechat_protocol::transport::ProtocolTransport> {
+        Some(self.transport.clone())
+    }
+    fn public_media_http(&self) -> Option<Arc<dyn wechat_protocol::transport::HttpTransport>> {
+        Some(self.public_http.clone())
+    }
     forward!(sync(cursor: &[u8]) -> wechat_protocol::SyncBatch => sync);
     forward!(heartbeat(cursor: &[u8]) -> wechat_protocol::Heartbeat => heartbeat);
     forward!(group_mutation_raw(request: &wechat_protocol::GroupRpc) -> Vec<u8> => group_mutation_raw);
@@ -411,8 +424,11 @@ impl crate::upstream::Upstream for BoundUpstream {
             }
             Err(error) => return Err(error),
         };
-        let transport =
-            wechat_protocol::media::CdnClient::new(configuration.clone(), Duration::from_secs(25))?;
+        let transport = crate::upstream::media::NativeMediaTransport::new(
+            configuration.clone(),
+            Duration::from_secs(25),
+            &self.transport,
+        )?;
         configuration.auth_key.fill(0);
         Ok(Box::new(transport))
     }
@@ -460,7 +476,12 @@ impl crate::upstream::Upstream for BoundUpstream {
         .map_err(|error| channels_stage(error, "channels_detail_failed"))?;
         drop((ticket, page));
         checkpoint()?;
-        wechat_protocol::media::fetch_channels_video(&media, max_bytes, progress)
+        block_on(wechat_protocol::media::fetch_channels_video_async(
+            &media,
+            max_bytes,
+            &*self.public_http,
+            progress,
+        ))
     }
     fn submit_media(
         &self,

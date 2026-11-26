@@ -60,7 +60,12 @@ destination class. Give the standalone media downloaders
 checked public addresses (every resolved address, and any literal IP in the
 URL) and otherwise fails with `TransportError::DestinationNotAllowed`, which
 the downloaders report as their existing codes (`*_dns_not_public`, or
-`channels_download_failed` for Channels videos). Use
+`channels_download_failed` for Channels videos). `HttpTransport::send_streaming`
+delivers a body in pieces to an `HttpBodySink` (the default buffers through
+`send`); `NativeHttpTransport` streams, so long Channels downloads report
+progress and can stop early. A connection that fails after it was made is
+`TransportError::Interrupted`, which CDN transfers retry on the same address.
+Use
 `media::FileUploadSource` (or `PreparedAsyncUpload::from_file`) to stream an
 upload from a file, and a `tokio::fs::File` as an `AsyncDownloadSink`.
 

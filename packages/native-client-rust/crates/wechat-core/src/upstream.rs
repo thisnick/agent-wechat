@@ -1,15 +1,18 @@
 //! Simulation and bootstrap dispatch. NativeClient owns live account state;
 //! Core retains daemon permissions, journals and official-profile integration.
 use crate::async_bridge::block_on;
-use anyhow::{bail, ensure, Result};
+use anyhow::{bail, ensure, Context, Result};
 use std::{
     path::Path,
+    sync::Arc,
     time::{Duration, Instant},
 };
 use wechat_protocol::{
     media_send::MediaSendResult,
     push::Notification,
-    transport::ProtocolTransport,
+    transport::{
+        DestinationPolicy, HttpTransport, NativeHttpTransport, ProtocolTransport, SystemClock,
+    },
     wire::{Heartbeat, SyncBatch, TextSendResult},
     AccountState, DeviceProfile, LoginAttempt, LoginStatus, NativeClient, NativeOptions,
 };
@@ -156,6 +159,12 @@ pub trait Upstream: Send + Sync {
     /// The async transport native account owners and login clients use.
     /// Simulators have none.
     fn protocol_transport(&self) -> Option<ProtocolTransport> {
+        None
+    }
+    /// HTTP transport for media URLs carried in messages (avatars, stickers,
+    /// link thumbnails, Enterprise WeChat media, Channels videos): it connects
+    /// only to checked public addresses. Simulators have none.
+    fn public_media_http(&self) -> Option<Arc<dyn HttpTransport>> {
         None
     }
     fn start_qr_login(
@@ -435,7 +444,10 @@ pub trait Upstream: Send + Sync {
     }
     fn download_avatar(&self, _state: &mut AccountState, source: &str) -> Result<Vec<u8>> {
         require_native(self.kind())?;
-        wechat_protocol::media::download_advertised_avatar(source)
+        let http = public_media_http(self)?;
+        block_on(wechat_protocol::media::download_advertised_avatar_async(
+            source, &*http,
+        ))
     }
     fn download_sticker(
         &self,
@@ -444,7 +456,13 @@ pub trait Upstream: Send + Sync {
         progress: media::Progress<'_>,
     ) -> Result<(Vec<u8>, wechat_protocol::media::ImageInspection)> {
         require_native(self.kind())?;
-        wechat_protocol::media::fetch_sticker(descriptor, progress)
+        let http = public_media_http(self)?;
+        block_on(wechat_protocol::media::fetch_sticker_async(
+            descriptor,
+            &*http,
+            &SystemClock::new(),
+            progress,
+        ))
     }
     fn download_tp_media(
         &self,
@@ -452,16 +470,29 @@ pub trait Upstream: Send + Sync {
         progress: media::Progress<'_>,
     ) -> Result<wechat_protocol::media::DownloadedMedia> {
         require_native(self.kind())?;
-        wechat_protocol::media::fetch_tp_media(descriptor, progress)
+        let http = public_media_http(self)?;
+        block_on(wechat_protocol::media::fetch_tp_media_async(
+            descriptor,
+            &*http,
+            &SystemClock::new(),
+            progress,
+        ))
     }
     fn download_tp_media_to(
         &self,
         descriptor: &wechat_protocol::media::TpMediaDescriptor,
         progress: media::Progress<'_>,
-        sink: &mut dyn std::io::Write,
+        sink: &mut (dyn std::io::Write + Send),
     ) -> Result<wechat_protocol::media::DownloadReceipt> {
         require_native(self.kind())?;
-        wechat_protocol::media::fetch_tp_media_to(descriptor, progress, sink)
+        let http = public_media_http(self)?;
+        block_on(wechat_protocol::media::fetch_tp_media_to_async(
+            descriptor,
+            &*http,
+            &SystemClock::new(),
+            progress,
+            &mut media::WriteSink(sink),
+        ))
     }
     /// Resolve a Channels post's playback material and download its decoded video. Each
     /// authenticated step is submitted once; `checkpoint` runs between steps and stops the
@@ -495,10 +526,12 @@ pub trait Upstream: Send + Sync {
     }
 }
 
-/// The network: login clients and account owners share one native async
-/// transport (Tokio streams and a pooled HTTP/1.1 client).
+/// The network: login clients, account owners and CDN transfers share one
+/// native async transport (Tokio streams and a pooled HTTP/1.1 client);
+/// message media URLs use a separate public-address-only HTTP client.
 pub(crate) struct NativeUpstream {
     transport: ProtocolTransport,
+    public_http: Arc<dyn HttpTransport>,
 }
 impl NativeUpstream {
     pub(crate) fn new() -> Result<Self> {
@@ -509,7 +542,10 @@ impl NativeUpstream {
         if let Ok(spawner) = wechat_protocol::transport::TokioSpawner::current() {
             transport = transport.with_spawner(std::sync::Arc::new(spawner));
         }
-        Ok(Self { transport })
+        Ok(Self {
+            transport,
+            public_http: Arc::new(NativeHttpTransport::new(DestinationPolicy::PublicOnly)?),
+        })
     }
 }
 impl Upstream for NativeUpstream {
@@ -525,6 +561,18 @@ impl Upstream for NativeUpstream {
     fn protocol_transport(&self) -> Option<ProtocolTransport> {
         Some(self.transport.clone())
     }
+    fn public_media_http(&self) -> Option<Arc<dyn HttpTransport>> {
+        Some(self.public_http.clone())
+    }
+}
+
+/// The upstream's public-address-only media HTTP transport.
+pub(crate) fn public_media_http<U: Upstream + ?Sized>(
+    upstream: &U,
+) -> Result<Arc<dyn HttpTransport>> {
+    upstream
+        .public_media_http()
+        .context("Native media downloads need the upstream's public HTTP transport")
 }
 
 struct NativeChallenge {

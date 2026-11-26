@@ -13,9 +13,9 @@ use std::{
 use wechat_protocol::{
     file_upload::FileUploadReservation,
     media::{
-        CdnClient, LargeCdnRoute, MediaDescriptor, MediaQuality, PreparedFileUpload,
-        PreparedImageUpload, PreparedVideoUpload, StickerDescriptor, TpMediaDescriptor,
-        UploadedImage, UploadedMedia, UploadedVideo,
+        LargeCdnRoute, MediaDescriptor, MediaQuality, PreparedAsyncUpload, PreparedImageUpload,
+        PreparedVideoUpload, StickerDescriptor, TpMediaDescriptor, UploadedImage, UploadedMedia,
+        UploadedVideo,
     },
 };
 use wechat_store::{MediaAssetRecord, MediaJobRecord, OwnedMediaSource};
@@ -2171,8 +2171,11 @@ impl Core {
                     .as_ref()
                     .map(|_| self.media_authorization_fence(account))
                     .transpose()?;
+                let http = crate::upstream::public_media_http(&*self.upstream)?;
                 let bytes = cdn_transfer(permit.as_deref_mut(), self, account, || {
-                    wechat_protocol::media::fetch_link_thumbnail(&url, progress)
+                    crate::async_bridge::block_on(
+                        wechat_protocol::media::fetch_link_thumbnail_async(&url, &*http, progress),
+                    )
                 })?;
                 if let Some(fence) = fence {
                     self.resume_media_state(account, id, &fence)?;
@@ -2258,9 +2261,14 @@ impl Core {
             }
             DownloadPlan::SavedSticker { id: sticker, url } => {
                 let fence = self.media_authorization_fence(account)?;
+                let http = crate::upstream::public_media_http(&*self.upstream)?;
                 let (bytes, inspection) =
                     cdn_transfer(permit.as_deref_mut(), self, account, || {
-                        wechat_protocol::media::fetch_sticker_original(&url, &sticker, &progress)
+                        crate::async_bridge::block_on(
+                            wechat_protocol::media::fetch_sticker_original_async(
+                                &url, &sticker, &*http, &progress,
+                            ),
+                        )
                     })?;
                 self.resume_media_state(account, id, &fence)?;
                 self.write_saved_cache(account, id, &sticker, &bytes)?;
@@ -3150,6 +3158,23 @@ pub(crate) fn classify_error(error: &anyhow::Error) -> String {
     }
     "media_processing_failed".into()
 }
+impl Core {
+    /// The account's CDN with `config` on the daemon's native async transport.
+    pub(crate) fn native_media_transport(
+        &self,
+        config: wechat_protocol::media::CdnConfig,
+    ) -> Result<crate::upstream::media::NativeMediaTransport> {
+        let transport = self
+            .upstream
+            .protocol_transport()
+            .context("unsupported_simulator_operation")?;
+        crate::upstream::media::NativeMediaTransport::new(
+            config,
+            Duration::from_secs(25),
+            &transport,
+        )
+    }
+}
 fn validate_destination(value: &str) -> Result<()> {
     ensure!(
         !value.is_empty()
@@ -3934,13 +3959,14 @@ impl Core {
                         })?
                     };
                     self.save_state(account, state)?;
-                    let cdn = CdnClient::new(conf, Duration::from_secs(25))?;
+                    let cdn = self.native_media_transport(conf)?;
                     let fence = self.media_authorization_fence(account)?;
                     // Readback only needs the digest, so nothing is kept.
                     let downloaded = cdn_transfer(permit, self, account, || {
-                        cdn.download_to_with_progress(
+                        crate::upstream::media::MediaTransport::download_to(
+                            &cdn,
                             &uploaded.descriptor,
-                            |n, t| self.progress_media(account, id, n, t),
+                            &|n, t| self.progress_media(account, id, n, t),
                             &mut std::io::sink(),
                         )
                     })?;
@@ -4121,7 +4147,7 @@ impl Core {
         match plan.request.kind {
             MediaKind::File => {
                 if plan.uploaded_file.is_none() {
-                    let prepared = PreparedFileUpload::new(
+                    let prepared = PreparedAsyncUpload::from_file(
                         source_file.open()?,
                         source_file.byte_length,
                         &source_file.md5,
@@ -4139,11 +4165,7 @@ impl Core {
                         .transpose()?;
                     let uploaded = cdn_transfer(permit.as_deref_mut(), self, account, || {
                         if modern_file {
-                            cdn.native()?.upload_large_file_from_file_with_progress(
-                                &prepared,
-                                material.task_id,
-                                callback,
-                            )
+                            cdn.upload_large_file(&prepared, material.task_id, &callback)
                         } else {
                             cdn.upload_file(&prepared, &callback)
                         }
@@ -4283,7 +4305,7 @@ impl Core {
                         .original_video_material
                         .as_ref()
                         .context("video_preparation_missing")?;
-                    let prepared = PreparedFileUpload::new(
+                    let prepared = PreparedAsyncUpload::from_file(
                         source_file.open()?,
                         source_file.byte_length,
                         &source_file.md5,
@@ -8051,7 +8073,7 @@ mod tests {
                 &self,
                 descriptor: &TpMediaDescriptor,
                 progress: crate::upstream::media::Progress<'_>,
-                sink: &mut dyn std::io::Write,
+                sink: &mut (dyn std::io::Write + Send),
             ) -> Result<wechat_protocol::media::DownloadReceipt> {
                 let (bytes, receipt) = self.download_tp_media(descriptor, progress)?.into_parts();
                 sink.write_all(&bytes)?;
