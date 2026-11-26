@@ -666,10 +666,9 @@ impl LargeFileUploadFailure {
 /// Why a large-file CDN upload stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LargeFileUploadCause {
-    /// The CDN answered with a nonzero `retcode`.
+    /// The CDN answered with a nonzero `retcode` that is not retried, or kept
+    /// answering with one after the retries the official client allows.
     ServiceRejected,
-    /// The CDN asked for a retry, back-off or new route, which this client does not follow.
-    RoutingControl,
     /// A reply parsed but did not match its request: sequence, version, offset or a missing field.
     ReplyInvalid,
     /// Replies stayed empty or unparseable after the session's retries.
@@ -687,7 +686,6 @@ impl LargeFileUploadCause {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ServiceRejected => "service_rejected",
-            Self::RoutingControl => "routing_control",
             Self::ReplyInvalid => "reply_invalid",
             Self::ReplyUnreadable => "reply_unreadable",
             Self::HttpStatus => "http_status",
@@ -938,6 +936,30 @@ impl<'a> CdnSession<'a> {
         ensure!(!self.endpoints.is_empty(), "Invalid CDN config");
         Ok((sequence, pack_cdn(fields)?))
     }
+
+    /// Move to the next CDN address on a new connection, as the official client
+    /// does after a server error it retries.
+    pub(crate) fn switch_endpoint(&mut self) {
+        self.http = None;
+        if self.endpoints.len() > 1 {
+            self.current_ip = (self.current_ip + 1) % self.endpoints.len();
+            self.had_success_on_current_ip = false;
+        }
+    }
+
+    /// One large-file request, first moving to the next CDN address when asked.
+    pub(crate) fn post_large(
+        &mut self,
+        path: &str,
+        fields: &CdnFields,
+        check_fence: &mut dyn FnMut() -> Result<()>,
+        switch_endpoint: bool,
+    ) -> std::result::Result<(CdnFields, u32), CdnPostFailure> {
+        if switch_endpoint {
+            self.switch_endpoint();
+        }
+        self.post_counted(path, fields, check_fence)
+    }
 }
 
 async fn sleep_with_fence_async(
@@ -1130,6 +1152,24 @@ impl<'a> AsyncCdnSession<'a> {
         );
         ensure!(!self.endpoints.is_empty(), "Invalid CDN config");
         Ok((sequence, pack_cdn(fields)?))
+    }
+
+    /// Move to the next CDN address, as the official client does after a server
+    /// error it retries.
+    pub(crate) fn switch_endpoint(&mut self) {
+        if self.endpoints.len() > 1 {
+            self.current_ip = (self.current_ip + 1) % self.endpoints.len();
+            self.had_success_on_current_ip = false;
+        }
+    }
+
+    /// Wait before retrying a server error, polling the caller's fence.
+    pub(crate) async fn wait(
+        &self,
+        delay: Duration,
+        check_fence: &mut impl FnMut() -> Result<()>,
+    ) -> Result<()> {
+        sleep_with_fence_async(self.clock, delay, self.policy.sleep_slice, check_fence).await
     }
 }
 

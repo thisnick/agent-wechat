@@ -38,7 +38,7 @@ impl CdnClient {
             &self.config,
             UploadRef::Memory(prepared),
             task_id,
-            |path, fields, fence| session.post_counted(path, fields, fence),
+            |path, fields, fence, switch| session.post_large(path, fields, fence, switch),
             progress,
         )
     }
@@ -61,7 +61,7 @@ impl CdnClient {
             &self.config,
             UploadRef::File(prepared),
             task_id,
-            |path, fields, fence| session.post_counted(path, fields, fence),
+            |path, fields, fence, switch| session.post_large(path, fields, fence, switch),
             progress,
         )
     }
@@ -80,7 +80,7 @@ impl CdnClient {
             self,
             UploadRef::Memory(prepared),
             task_id,
-            |path, fields, fence| session.post_counted(path, fields, fence),
+            |path, fields, fence, switch| session.post_large(path, fields, fence, switch),
             progress,
         )
     }
@@ -98,7 +98,7 @@ impl CdnClient {
             self,
             UploadRef::File(prepared),
             task_id,
-            |path, fields, fence| session.post_counted(path, fields, fence),
+            |path, fields, fence, switch| session.post_large(path, fields, fence, switch),
             progress,
         )
     }
@@ -203,7 +203,7 @@ fn upload_video_original(
     client: &CdnClient,
     prepared: UploadRef<'_>,
     task_id: u64,
-    mut post: impl FnMut(&str, &CdnFields, &mut dyn FnMut() -> Result<()>) -> CountedPost,
+    mut post: impl FnMut(&str, &CdnFields, &mut dyn FnMut() -> Result<()>, bool) -> CountedPost,
     progress: impl FnMut(u64, Option<u64>) -> Result<()>,
 ) -> Result<UploadedMedia> {
     ensure!(
@@ -213,7 +213,7 @@ fn upload_video_original(
     prepared.validate()?;
     if prepared.encrypted_len() < MAX_CDN_TRANSFER_BYTES {
         client.upload_with_transport(prepared, progress, |path, fields, fence| {
-            post(path, fields, fence)
+            post(path, fields, fence, false)
                 .map(|(reply, _)| reply)
                 .map_err(|failure| failure.error)
         })
@@ -292,7 +292,47 @@ fn common_fields(
     fields
 }
 
-const ROUTING_CONTROL: &str = "Unsupported large-file upload retry or routing control";
+/// Server codes the official client retries when a reply carries no `isretry`:
+/// its retryable list without the download and redirect codes.
+const RETRYABLE_SERVER_CODES: [i32; 8] = [
+    -5_103_179, // DataIDChanged
+    -5_103_202, // SendDataOnInvalidConn
+    -5_103_205, // InvalidOffset
+    -5_103_211, // FileMd5NotEqual
+    -5_103_215, // DataChecksumNotEqual
+    -5_103_216, // AckRetransNoCompleteFile
+    -5_103_217, // ResumeTooOldData
+    -5_202_163,
+];
+/// Server errors retried during one upload, as in the official client.
+const MAX_SERVER_RETRIES: u32 = 8;
+/// Wait before retrying a server error the official client does not retry at
+/// once, when the reply gives no `retrysec`.
+const SERVER_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+/// Whether and when to retry a large-file request the CDN rejected, following
+/// the official client: `isretry` decides when present, otherwise the code does,
+/// and a `retrysec` below 900 sets the wait. The retry uses a new sequence number
+/// on the next CDN address and is otherwise unchanged.
+fn server_retry_delay(reply: &CdnFields, code: i32) -> Option<Duration> {
+    let retry = match reply.get("isretry") {
+        Some(_) => integer(reply, "isretry").ok()? != 0,
+        None => RETRYABLE_SERVER_CODES.contains(&code),
+    };
+    if !retry {
+        return None;
+    }
+    if let Ok(seconds) = integer(reply, "retrysec") {
+        if (0..900).contains(&seconds) {
+            return Some(Duration::from_secs(seconds as u64));
+        }
+    }
+    Some(if code == -5_202_163 {
+        SERVER_RETRY_DELAY
+    } else {
+        Duration::ZERO
+    })
+}
 
 /// A large-file request's reply and the HTTP attempts it took, or why it failed.
 #[cfg(not(target_arch = "wasm32"))]
@@ -346,12 +386,7 @@ impl Step {
 
     /// A reply arrived but was rejected or did not match the request.
     fn reply(self, error: anyhow::Error, attempts: u32) -> anyhow::Error {
-        let cause = if error.to_string() == ROUTING_CONTROL {
-            LargeFileUploadCause::RoutingControl
-        } else {
-            LargeFileUploadCause::ReplyInvalid
-        };
-        self.stopped(error, attempts, cause)
+        self.stopped(error, attempts, LargeFileUploadCause::ReplyInvalid)
     }
 }
 
@@ -362,9 +397,8 @@ fn validate_reply(reply: &CdnFields, sequence: u32, version: u32) -> Result<()> 
     );
     let code = integer(reply, "retcode")?;
     ServiceRejected::check_wide(Service::LargeFileUpload, code)?;
-    for key in ["isretry", "retrysec", "isoverload", "isgetcdn"] {
-        ensure!(integer(reply, key)? == 0, ROUTING_CONTROL);
-    }
+    // Like the official client, a successful reply's isretry, retrysec,
+    // isoverload and isgetcdn are not acted on.
     ensure!(
         integer(reply, "ver")? == i64::from(version),
         "Large-file reply version mismatch"
@@ -514,11 +548,12 @@ fn upload_large_file(
     conf: &CdnConfig,
     prepared: UploadRef<'_>,
     task_id: u64,
-    mut post: impl FnMut(&str, &CdnFields, &mut dyn FnMut() -> Result<()>) -> CountedPost,
+    mut post: impl FnMut(&str, &CdnFields, &mut dyn FnMut() -> Result<()>, bool) -> CountedPost,
     mut progress: impl FnMut(u64, Option<u64>) -> Result<()>,
 ) -> Result<UploadedMedia> {
     let total = validate_large_file_inputs(conf, prepared, task_id)?;
     let mut sequence = 0u32;
+    let mut server_retries = 0u32;
     // Protocol rejections and unexpected controls are never retried. The session
     // retries transient HTTP/TCP failures and unreadable replies by resending the
     // same bytes, which the CDN answers with the same reply, even for a block it
@@ -531,21 +566,36 @@ fn upload_large_file(
          acknowledged: u64,
          progress: &mut dyn FnMut(u64, Option<u64>) -> Result<()>| {
             progress(acknowledged, Some(total)).map_err(|error| step.local(error))?;
-            sequence += 1;
-            let mut fields = common_fields(conf, prepared, task_id, sequence);
+            let mut fields = common_fields(conf, prepared, task_id, sequence + 1);
             fields.extend(extra);
-            let path = format!(
-                "/cdn/{}/{sequence}/{}/{}",
-                conf.uin,
-                prepared.kind().filetype(),
-                step.phase
-            );
-            let (reply, attempts) =
-                post(&path, &fields, &mut || progress(acknowledged, Some(total)))
+            let mut switch_endpoint = false;
+            loop {
+                sequence += 1;
+                put(&mut fields, "seq", sequence);
+                let path = format!(
+                    "/cdn/{}/{sequence}/{}/{}",
+                    conf.uin,
+                    prepared.kind().filetype(),
+                    step.phase
+                );
+                let mut fence = || progress(acknowledged, Some(total));
+                let (reply, attempts) = post(&path, &fields, &mut fence, switch_endpoint)
                     .map_err(|failure| step.post(failure))?;
-            validate_reply(&reply, sequence, conf.version)
-                .map_err(|error| step.reply(error, attempts))?;
-            Ok::<_, anyhow::Error>((reply, attempts))
+                let Err(error) = validate_reply(&reply, sequence, conf.version) else {
+                    return Ok::<_, anyhow::Error>((reply, attempts));
+                };
+                let delay = ServiceRejected::find(&error)
+                    .and_then(|rejected| server_retry_delay(&reply, rejected.code));
+                match delay {
+                    Some(delay) if server_retries < MAX_SERVER_RETRIES => {
+                        server_retries += 1;
+                        sleep_with_fence(delay, CDN_RETRY_SLEEP_SLICE, &mut fence)
+                            .map_err(|error| step.local(error))?;
+                        switch_endpoint = true;
+                    }
+                    _ => return Err(step.reply(error, attempts)),
+                }
+            }
         };
 
     let step = Step::new("apply", None);
@@ -605,6 +655,7 @@ struct LargeFileExchange<'a, 's, 't> {
     task_id: u64,
     total: u64,
     sequence: u32,
+    server_retries: u32,
     session: &'s mut AsyncCdnSession<'t>,
 }
 
@@ -617,25 +668,41 @@ impl LargeFileExchange<'_, '_, '_> {
         progress: &mut impl FnMut(u64, Option<u64>) -> Result<()>,
     ) -> Result<(CdnFields, u32)> {
         progress(acknowledged, Some(self.total)).map_err(|error| step.local(error))?;
-        self.sequence += 1;
-        let seq = self.sequence;
-        let mut fields = common_fields(self.conf, self.prepared, self.task_id, seq);
-        fields.extend(extra);
-        let path = format!(
-            "/cdn/{}/{seq}/{}/{}",
-            self.conf.uin,
-            self.prepared.kind().filetype(),
-            step.phase
-        );
         let total = self.total;
-        let (reply, attempts) = self
-            .session
-            .post_counted(&path, &fields, || progress(acknowledged, Some(total)))
-            .await
-            .map_err(|failure| step.post(failure))?;
-        validate_reply(&reply, seq, self.conf.version)
-            .map_err(|error| step.reply(error, attempts))?;
-        Ok((reply, attempts))
+        let mut fields = common_fields(self.conf, self.prepared, self.task_id, self.sequence + 1);
+        fields.extend(extra);
+        loop {
+            self.sequence += 1;
+            let seq = self.sequence;
+            put(&mut fields, "seq", seq);
+            let path = format!(
+                "/cdn/{}/{seq}/{}/{}",
+                self.conf.uin,
+                self.prepared.kind().filetype(),
+                step.phase
+            );
+            let (reply, attempts) = self
+                .session
+                .post_counted(&path, &fields, || progress(acknowledged, Some(total)))
+                .await
+                .map_err(|failure| step.post(failure))?;
+            let Err(error) = validate_reply(&reply, seq, self.conf.version) else {
+                return Ok((reply, attempts));
+            };
+            let delay = ServiceRejected::find(&error)
+                .and_then(|rejected| server_retry_delay(&reply, rejected.code));
+            match delay {
+                Some(delay) if self.server_retries < MAX_SERVER_RETRIES => {
+                    self.server_retries += 1;
+                    self.session
+                        .wait(delay, &mut || progress(acknowledged, Some(total)))
+                        .await
+                        .map_err(|error| step.local(error))?;
+                    self.session.switch_endpoint();
+                }
+                _ => return Err(step.reply(error, attempts)),
+            }
+        }
     }
 }
 
@@ -653,6 +720,7 @@ async fn upload_large_file_async(
         task_id,
         total,
         sequence: 0,
+        server_retries: 0,
         session,
     };
 
@@ -728,7 +796,7 @@ mod tests {
             conf,
             UploadRef::Memory(prepared),
             task_id,
-            |path, fields, _| counted(post(path, fields)),
+            |path, fields, _, _| counted(post(path, fields)),
             progress,
         )
     }
@@ -743,7 +811,7 @@ mod tests {
             client,
             UploadRef::Memory(prepared),
             task_id,
-            |path, fields, _| counted(post(path, fields)),
+            |path, fields, _, _| counted(post(path, fields)),
             progress,
         )
     }
@@ -855,6 +923,8 @@ mod tests {
         prepared: &'a PreparedUpload,
         block_size: usize,
         requests: usize,
+        /// Requests answered by [`Peer::reject`]; each used a sequence number.
+        rejected: usize,
     }
 
     impl<'a> Peer<'a> {
@@ -863,7 +933,33 @@ mod tests {
                 prepared,
                 block_size,
                 requests: 0,
+                rejected: 0,
             }
+        }
+
+        /// Answer the next request with a server error, as the CDN does: `ver` 0,
+        /// `offset` 0 and the request's own sequence number.
+        fn reject(&mut self, fields: &CdnFields, code: i64, isretry: Option<i64>) -> CdnFields {
+            self.rejected += 1;
+            let sequence = integer(fields, "seq").unwrap();
+            assert_eq!(sequence as usize, self.requests + self.rejected);
+            let mut reply = CdnFields::new();
+            for (key, value) in [
+                ("ver", 0),
+                ("seq", sequence),
+                ("retcode", code),
+                ("retrysec", 0),
+                ("isoverload", 0),
+                ("isgetcdn", 0),
+                ("offset", 0),
+                ("fin", 0),
+            ] {
+                put(&mut reply, key, value);
+            }
+            if let Some(isretry) = isretry {
+                put(&mut reply, "isretry", isretry);
+            }
+            reply
         }
 
         fn blocks(&self) -> usize {
@@ -872,9 +968,10 @@ mod tests {
 
         fn respond(&mut self, path: &str, fields: &CdnFields) -> Result<CdnFields> {
             self.requests += 1;
-            let sequence = self.requests;
+            let step = self.requests;
+            let sequence = step + self.rejected;
             let kind = self.prepared.kind.filetype();
-            let phase = match sequence {
+            let phase = match step {
                 1 => "apply",
                 n if n <= self.blocks() + 1 => "uploadblock",
                 n if n == self.blocks() + 2 => "fin",
@@ -951,7 +1048,7 @@ mod tests {
                     reply.insert("upinfo_0".into(), b"apply-token".to_vec());
                 }
                 "uploadblock" => {
-                    let index = sequence - 2;
+                    let index = step - 2;
                     let offset = index * self.block_size;
                     let end = (offset + self.block_size).min(self.prepared.encrypted.len());
                     let expected = &self.prepared.encrypted[offset..end];
@@ -1025,7 +1122,7 @@ mod tests {
             &config(),
             UploadRef::File(&file),
             987654321,
-            |path, fields, _| counted(peer.respond(path, fields)),
+            |path, fields, _, _| counted(peer.respond(path, fields)),
             |_, _| Ok(()),
         )
         .unwrap();
@@ -1045,7 +1142,7 @@ mod tests {
             &config(),
             UploadRef::File(&file),
             987654321,
-            |path, fields, _| {
+            |path, fields, _, _| {
                 phases.push(path.rsplit('/').next().unwrap().to_string());
                 counted(peer.respond(path, fields))
             },
@@ -1330,11 +1427,8 @@ mod tests {
         for (key, value) in [
             ("seq", 2),
             ("ver", 2),
+            // A rejection whose isretry is 0 is not retried.
             ("retcode", -1),
-            ("isretry", 1),
-            ("retrysec", 1),
-            ("isoverload", 1),
-            ("isgetcdn", 1),
             ("hit", 1),
             ("type_0", 5),
             ("num", 2),
@@ -1383,14 +1477,170 @@ mod tests {
             validate_reply(&reply, 1, 1).unwrap_err().to_string(),
             "Large-file reply version mismatch"
         );
-        put(&mut reply, "isretry", 1);
-        assert_eq!(
-            validate_reply(&reply, 1, 1).unwrap_err().to_string(),
-            "Unsupported large-file upload retry or routing control"
-        );
-        put(&mut reply, "isretry", 0);
         put(&mut reply, "ver", 1);
         validate_reply(&reply, 1, 1).unwrap();
+        // A successful reply's controls are not acted on, as in the official client.
+        for key in ["isretry", "isoverload", "isgetcdn"] {
+            put(&mut reply, key, 1);
+        }
+        validate_reply(&reply, 1, 1).unwrap();
+    }
+
+    #[test]
+    fn server_errors_are_retried_as_the_official_client_does() {
+        // isretry=1 on a rejected block: retried with a new sequence number on the
+        // next address, the block itself unchanged.
+        let memory = prepared();
+        let mut peer = Peer::new(memory, 1024 * 1024);
+        let mut sent = vec![];
+        let result = super::upload_large_file(
+            &config(),
+            UploadRef::Memory(memory),
+            987654321,
+            |path, fields, _, switch| {
+                let block = path
+                    .ends_with("/uploadblock")
+                    .then(|| integer(fields, "offset").unwrap());
+                sent.push((block, switch, fields.get("blockdata").cloned()));
+                if block == Some(2 * 1024 * 1024) && peer.rejected == 0 {
+                    return counted(Ok(peer.reject(fields, -5103202, Some(1))));
+                }
+                counted(peer.respond(path, fields))
+            },
+            |_, _| Ok(()),
+        );
+        if let Err(error) = result {
+            panic!("{error:#}");
+        }
+        let tries: Vec<_> = sent
+            .iter()
+            .filter(|(block, _, _)| *block == Some(2 * 1024 * 1024))
+            .collect();
+        assert_eq!(tries.len(), 2);
+        assert_eq!(tries[0].2, tries[1].2, "the block is resent unchanged");
+        assert_eq!(
+            (tries[0].1, tries[1].1),
+            (false, true),
+            "the retry moves address"
+        );
+        assert_eq!(peer.requests, peer.blocks() + 3);
+
+        // Without isretry the code decides: retried codes continue, others stop.
+        for (code, retried) in [(-5103215, true), (-5103015, false)] {
+            let mut peer = Peer::new(memory, 1024 * 1024);
+            let result = super::upload_large_file(
+                &config(),
+                UploadRef::Memory(memory),
+                987654321,
+                |path, fields, _, _| {
+                    if path.ends_with("/fin") && peer.rejected == 0 {
+                        return counted(Ok(peer.reject(fields, code, None)));
+                    }
+                    counted(peer.respond(path, fields))
+                },
+                |_, _| Ok(()),
+            );
+            assert_eq!(result.is_ok(), retried, "{code}");
+        }
+
+        // isretry=0 stops even on a code that would otherwise be retried.
+        let mut peer = Peer::new(memory, 1024 * 1024);
+        let error = super::upload_large_file(
+            &config(),
+            UploadRef::Memory(memory),
+            987654321,
+            |path, fields, _, _| {
+                if path.ends_with("/apply") {
+                    return counted(Ok(peer.reject(fields, -5103202, Some(0))));
+                }
+                counted(peer.respond(path, fields))
+            },
+            |_, _| Ok(()),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(ServiceRejected::find(&error).unwrap().code, -5103202);
+        assert_eq!(peer.rejected, 1);
+    }
+
+    #[test]
+    fn server_retries_stop_after_eight_and_keep_the_last_code() {
+        let memory = prepared();
+        let mut peer = Peer::new(memory, 1024 * 1024);
+        let error = super::upload_large_file(
+            &config(),
+            UploadRef::Memory(memory),
+            987654321,
+            |path, fields, _, _| {
+                if path.ends_with("/uploadblock") && integer(fields, "offset").unwrap() == 0 {
+                    return counted(Ok(peer.reject(fields, -5103216, Some(1))));
+                }
+                counted(peer.respond(path, fields))
+            },
+            |_, _| Ok(()),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(peer.rejected, MAX_SERVER_RETRIES as usize + 1);
+        assert_eq!(ServiceRejected::find(&error).unwrap().code, -5103216);
+        assert_eq!(
+            LargeFileUploadFailure::find(&error),
+            Some(&LargeFileUploadFailure {
+                phase: "uploadblock",
+                block: Some(0),
+                attempts: 1,
+                cause: LargeFileUploadCause::ServiceRejected,
+            })
+        );
+    }
+
+    #[test]
+    fn a_server_retry_wait_honours_retrysec_and_cancellation() {
+        let memory = prepared();
+        let mut reply = CdnFields::new();
+        put(&mut reply, "isretry", 1);
+        put(&mut reply, "retrysec", 7);
+        assert_eq!(
+            server_retry_delay(&reply, -5103015),
+            Some(Duration::from_secs(7))
+        );
+        put(&mut reply, "retrysec", 900);
+        assert_eq!(server_retry_delay(&reply, -5103202), Some(Duration::ZERO));
+        assert_eq!(
+            server_retry_delay(&reply, -5202163),
+            Some(SERVER_RETRY_DELAY)
+        );
+        put(&mut reply, "isretry", 0);
+        assert_eq!(server_retry_delay(&reply, -5103202), None);
+
+        // A cancellation during the wait stops at once, without another request.
+        let mut peer = Peer::new(memory, 1024 * 1024);
+        let mut cancelled = false;
+        let started = Instant::now();
+        let error = super::upload_large_file(
+            &config(),
+            UploadRef::Memory(memory),
+            987654321,
+            |path, fields, _, _| {
+                if path.ends_with("/apply") {
+                    let mut reply = peer.reject(fields, -5103202, Some(1));
+                    put(&mut reply, "retrysec", 60);
+                    return counted(Ok(reply));
+                }
+                counted(peer.respond(path, fields))
+            },
+            |_, _| {
+                if std::mem::replace(&mut cancelled, true) {
+                    bail!("media_cancelled");
+                }
+                Ok(())
+            },
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.root_cause().to_string(), "media_cancelled");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!((peer.rejected, peer.requests), (1, 0));
     }
 
     #[test]
@@ -1487,28 +1737,26 @@ mod tests {
             "Large-file upload stopped at uploadblock block 2"
         );
 
-        // A retry or routing control on `fin` is not followed.
+        // Like the official client, a successful reply's controls are not acted on.
         let mut peer = Peer::new(prepared(), 1024 * 1024);
-        let error = upload_large_file(
+        let uploaded = upload_large_file(
             &config(),
             prepared(),
             987654321,
             |path, fields| {
                 let mut reply = peer.respond(path, fields)?;
                 if path.ends_with("/fin") {
-                    put(&mut reply, "isoverload", 1);
+                    for key in ["isoverload", "isgetcdn", "isretry"] {
+                        put(&mut reply, key, 1);
+                    }
+                    put(&mut reply, "retrysec", 30);
                 }
                 Ok(reply)
             },
             |_, _| Ok(()),
         )
-        .err()
         .unwrap();
-        let failure = LargeFileUploadFailure::find(&error).unwrap();
-        assert_eq!(
-            (failure.phase, failure.block, failure.cause),
-            ("fin", None, LargeFileUploadCause::RoutingControl)
-        );
+        assert_eq!(uploaded.descriptor.file_id, "completed-object");
 
         // Cancellation reported by progress after the second block is local.
         let mut peer = Peer::new(prepared(), 1024 * 1024);
@@ -1662,7 +1910,7 @@ mod tests {
             &conf,
             UploadRef::Memory(memory),
             987654321,
-            |path, fields, fence| session.post_counted(path, fields, fence),
+            |path, fields, fence, switch| session.post_large(path, fields, fence, switch),
             |_, _| Ok(()),
         )
         .unwrap();
@@ -1710,7 +1958,7 @@ mod tests {
             &conf,
             UploadRef::Memory(memory),
             987654321,
-            |path, fields, fence| session.post_counted(path, fields, fence),
+            |path, fields, fence, switch| session.post_large(path, fields, fence, switch),
             |_, _| Ok(()),
         )
         .unwrap();
@@ -1754,7 +2002,7 @@ mod tests {
             &conf,
             UploadRef::Memory(memory),
             987654321,
-            |path, fields, fence| session.post_counted(path, fields, fence),
+            |path, fields, fence, switch| session.post_large(path, fields, fence, switch),
             |_, _| Ok(()),
         )
         .err()
@@ -1871,5 +2119,90 @@ mod tests {
             .unwrap();
         assert_eq!(uploaded_src.descriptor.file_id, "completed-object");
         assert_eq!(uploaded_src.sha256, memory.sha256);
+    }
+    #[tokio::test]
+    async fn async_upload_resends_unreadable_replies_and_retries_server_errors() {
+        use std::sync::Mutex;
+
+        struct InstantClock;
+        impl Clock for InstantClock {
+            fn monotonic_ms(&self) -> u64 {
+                1000
+            }
+            fn unix_time_ms(&self) -> Result<u64> {
+                Ok(1_700_000_000_000)
+            }
+        }
+
+        // Block 1 first gets an empty 200 (resent with the same sequence number);
+        // block 2 is first rejected with isretry=1 (retried with a new one).
+        struct FlakyHttp(Mutex<(Peer<'static>, Vec<(i64, i64)>)>);
+        impl HttpTransport for FlakyHttp {
+            fn send<'a>(
+                &'a self,
+                request: HttpRequest,
+            ) -> crate::transport::TransportFuture<'a, Result<crate::transport::HttpResponse>>
+            {
+                let outcome = (|| {
+                    let fields = unpack_cdn(&request.body)?;
+                    let mut state = self.0.lock().unwrap();
+                    let (peer, sent) = &mut *state;
+                    let offset = if request.url.path().ends_with("/uploadblock") {
+                        integer(&fields, "offset")?
+                    } else {
+                        -1
+                    };
+                    let seen = sent.iter().filter(|(o, _)| *o == offset).count();
+                    sent.push((offset, integer(&fields, "seq")?));
+                    let body = match (offset, seen) {
+                        (0x10_0000, 0) => vec![],
+                        (0x20_0000, 0) => pack_cdn(&peer.reject(&fields, -5103202, Some(1)))?,
+                        _ => pack_cdn(&peer.respond(request.url.path(), &fields)?)?,
+                    };
+                    Ok(crate::transport::HttpResponse {
+                        status: 200,
+                        headers: vec![],
+                        body,
+                    })
+                })();
+                Box::pin(async move { outcome })
+            }
+        }
+
+        let memory = prepared();
+        let cdn = CdnClient::new(config(), Duration::from_secs(5)).unwrap();
+        let http = FlakyHttp(Mutex::new((Peer::new(memory, 1024 * 1024), vec![])));
+        let uploaded = cdn
+            .upload_large_file_with_progress_async(
+                memory,
+                987654321,
+                &http,
+                &InstantClock,
+                |_, _| Ok(()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(uploaded.descriptor.file_id, "completed-object");
+        let state = http.0.lock().unwrap();
+        let seqs = |offset| -> Vec<i64> {
+            state
+                .1
+                .iter()
+                .filter(|(o, _)| *o == offset)
+                .map(|(_, seq)| *seq)
+                .collect()
+        };
+        let [first, second] = seqs(0x10_0000)[..] else {
+            panic!("block 1 is sent twice")
+        };
+        assert_eq!(first, second, "an unreadable reply is resent unchanged");
+        let [first, second] = seqs(0x20_0000)[..] else {
+            panic!("block 2 is sent twice")
+        };
+        assert_eq!(
+            second,
+            first + 1,
+            "a server retry takes the next sequence number"
+        );
     }
 }
