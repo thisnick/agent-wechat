@@ -691,15 +691,8 @@ input:focus-visible {
   width: 144px;
   height: 144px;
 }
-/* WebKit lays out its native audio controls for a small system font; the
-   page font inherited into their shadow tree makes the time labels overflow
-   and overlap the scrubber in Safari/WKWebView. Give the controls an explicit
-   small system font instead of the 14px DM Sans they would inherit. */
 .media-audio {
   width: min(300px, 100%);
-  font: 12px -apple-system, system-ui, sans-serif;
-  letter-spacing: normal;
-  line-height: normal;
 }
 .account-settings {
   display: grid;
