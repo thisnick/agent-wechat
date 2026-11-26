@@ -19,6 +19,8 @@ mod pagination;
 mod read_snapshot;
 mod recalls;
 mod retention;
+pub mod runtime_keys;
+pub use runtime_keys::{audit_runtime, RuntimeAudit, MAX_RUNTIME_KEY};
 #[cfg(test)]
 mod schema_interface_tests;
 mod settings;

@@ -62,9 +62,9 @@ pub const REVIEW_LIMIT: i64 = 100;
 const DAY: i64 = 86_400;
 /// Finished sends, jobs and mutations stay whole for inspection this long.
 const WHOLE_DAYS: i64 = 1;
-const RECEIPT_DAYS: i64 = 30;
+pub(crate) const RECEIPT_DAYS: i64 = 30;
 /// Raw replies kept for investigating a decoder failure without a new request.
-const RAW_DAYS: i64 = 7;
+pub(crate) const RAW_DAYS: i64 = 7;
 const SEND_RECEIPT_DAYS: i64 = 90;
 const MUTATION_RECEIPT_DAYS: i64 = 365;
 const MARK_DAYS: i64 = 400;
@@ -601,104 +601,16 @@ pub enum RuntimeRetention {
     Retire(&'static str, i64),
 }
 
-/// A group refresh job and its held marker use the bare `<hash>` key. Earlier
-/// releases also saved superseded copies under these names with a suffix
-/// (`incoming-group-pending:<hash>:superseded:<n>…`, and the same under
-/// `incoming-group-held:` once one failed). They are copies of response bodies:
-/// the refresh queue skips any suffixed key and nothing reads them (#722).
-fn legacy_group_refresh_copy(key: &str) -> bool {
-    ["incoming-group-pending:", "incoming-group-held:"]
-        .iter()
-        .filter_map(|prefix| key.strip_prefix(prefix))
-        .any(|rest| rest.contains(':'))
-}
-
-/// Retention for one runtime key. Duplicate guards cover one batch, command,
-/// message, operation or minute and are consulted only while that work runs
-/// or shortly after. A key naming an unfinished sync batch is always kept.
+/// Retention for one runtime key, from its kind in
+/// [`crate::runtime_keys::RUNTIME_KINDS`]. A key whose tail doesn't fit its
+/// kind follows the kind its prefix matched, as prefixes alone decided before;
+/// a key of no kind is kept. A key naming an unfinished sync batch is always
+/// kept by the caller.
 pub fn aged_runtime(key: &str) -> RuntimeRetention {
-    // Per-command projection receipts and their phase markers.
-    const COMMAND: [&str; 11] = [
-        "projected:",
-        "blocked-control:",
-        // The newest job.updated event of a job, for merging progress.
-        "job-event:",
-        "apply-origin:",
-        "contact-fields:projected:",
-        "contact-mute:projected:",
-        "contact-pin:projected:",
-        "partial-thread-entry-read:projected:",
-        "partial-thread-exit-read:projected:",
-        "friend-message-stage:projected:",
-        "friend-attention-stage:projected:",
-    ];
-    // Once-only event receipts for one message, command, operation or minute.
-    const EVENT: [&str; 32] = [
-        "message:",
-        "message-expanded:",
-        "voice-updated:",
-        "remote-thread-read:",
-        "control-observed:",
-        "control-no-local-effect:",
-        "control-skipped:",
-        "contact:",
-        "contact-pin-event:",
-        "contact-pin:",
-        "contact-delete:",
-        "group-fields:",
-        "friend-message-event:",
-        "friend-attention:",
-        "partial-thread-entry-read:",
-        "partial-thread-exit-read:",
-        "group-refreshed:",
-        "group-refresh-held:",
-        "received:",
-        "blocked-v2:",
-        "blocked:",
-        "group-members:",
-        "group-detail:",
-        "read-thread:",
-        "contact-mutation-event:",
-        "contact-mutation:",
-        "thread-pin:",
-        "group-mutation:",
-        "auto-media-job:",
-        "auto-media-unavailable:",
-        "worker:",
-        "push:",
-    ];
-    // Raw replies kept for investigation and call diagnostics. No code reads
-    // them back.
-    const RAW: [&str; 11] = [
-        "metadata-wire:",
-        "metadata-unavailable:",
-        "incoming-group-receipt:",
-        "incoming-group-superseded:",
-        "call-host-diagnostic:",
-        "call-media-error:",
-        "call-media-diagnostic:",
-        "call-conference-receive:",
-        "call-conference-failure:",
-        "call-conference-phase:",
-        "call-conference-profile:",
-    ];
-    if let Some(event) = key.strip_prefix("event:") {
-        return if EVENT.iter().any(|prefix| event.starts_with(prefix)) {
-            RuntimeRetention::Remove(RECEIPT_DAYS)
-        } else {
-            RuntimeRetention::Keep
-        };
-    }
-    if COMMAND.iter().any(|p| key.starts_with(p)) {
-        RuntimeRetention::Remove(RECEIPT_DAYS)
-    } else if RAW.iter().any(|p| key.starts_with(p)) || legacy_group_refresh_copy(key) {
-        RuntimeRetention::Remove(RAW_DAYS)
-    } else if key.starts_with("metadata-receipt:") {
-        RuntimeRetention::RemoveFinishedMetadata
-    } else if key.starts_with("thread-read-notification:") {
-        RuntimeRetention::Retire(READ_NOTIFICATION, RECEIPT_DAYS)
-    } else {
-        RuntimeRetention::Keep
+    match crate::runtime_keys::runtime_kind(key) {
+        crate::runtime_keys::RuntimeLookup::Kind(kind)
+        | crate::runtime_keys::RuntimeLookup::Malformed(kind) => kind.retention,
+        crate::runtime_keys::RuntimeLookup::Unknown => RuntimeRetention::Keep,
     }
 }
 
@@ -2607,6 +2519,11 @@ mod tests {
             ("metadata-wire:u", Remove(RAW_DAYS)),
             ("incoming-group-held:x", Keep),
             ("incoming-group-pending:x", Keep),
+            (
+                "incoming-group-superseded:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:1",
+                Remove(RAW_DAYS),
+            ),
+            // A key whose tail doesn't fit its kind follows its prefix.
             ("incoming-group-superseded:x:1", Remove(RAW_DAYS)),
             (
                 "incoming-group-pending:x:superseded:1:superseded:2",
@@ -2616,7 +2533,7 @@ mod tests {
             // Not a job: the refresh queue skips any suffixed key.
             ("incoming-group-pending:x:other", Remove(RAW_DAYS)),
             (
-                "thread-read-notification:h",
+                "thread-read-notification:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                 Retire(READ_NOTIFICATION, RECEIPT_DAYS),
             ),
             ("retention-day:2026-01-01", Keep),

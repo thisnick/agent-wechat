@@ -43,3 +43,19 @@ deprecated items allow the lint, until 4.0 deletes them.
 | Blocking `NativeClient` login and escape hatches (`start_*_login`, `poll_login`, `complete_login`, `refresh_qr_login`, `*_blocking`, `spawn_blocking` fallbacks) | `NativeClient::with_transport`, `from_account_with_transport*` with `ProtocolTransport::native()` on native targets, `*_login_async`, and `NativeClient` async RPCs |
 | Blocking `CdnSession`, `CdnClient::{download*, upload*}`, `PreparedFileUpload` | `CdnClient::*_async` over `NativeHttpTransport` (`DestinationPolicy::System`), `PreparedAsyncUpload::from_file` / `FileUploadSource`, `AsyncDownloadSink` |
 | Blocking `download_advertised_avatar`, `fetch_sticker*`, `fetch_link_thumbnail`, `fetch_tp_media*`, `fetch_channels_video` | `download_advertised_avatar_async`, `fetch_sticker*_async`, `fetch_link_thumbnail_async`, `fetch_tp_media*_async`, `fetch_channels_video_async` over `NativeHttpTransport` (`DestinationPolicy::PublicOnly`) |
+
+## Runtime notes
+
+Every key written to an account's `runtime` table belongs to a kind listed in
+`crates/wechat-store/src/runtime_keys.rs`, with its key shape, retention, growth
+and reason. Retention reads lifetimes from that list.
+
+- A new kind of key needs an entry. A kind that grows with traffic must either be
+  removed by retention, be removed by another cleanup (`OtherCleanup`), be kept
+  on purpose (`Archive`, naming the decision) or be a tracked `Leak("#issue")`.
+- Keep variable parts bounded and hashed when they can contain `:` or grow.
+  `put_runtime` refuses keys over `MAX_RUNTIME_KEY`.
+- `scripts/smoke/soak.mjs` repeats activity against the simulator and fails on a
+  key of no kind, queued work that never drains, per-entity notes that keep
+  growing, traffic notes that grow faster over time, leftover admission copies,
+  or requests while idle. Run it after changing sync, refresh or retention code.

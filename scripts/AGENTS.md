@@ -93,6 +93,7 @@ logs in to WeChat or sends a message.
 | `node scripts/smoke/platform.mjs /abs/path/to/wx` | A built `wx` |
 | `node scripts/smoke/package.mjs DIR` | `pnpm install`, and artifacts from `release/build.sh` or `release/portable-build.mjs` in `DIR` |
 | `node scripts/smoke/simulator.mjs` | Binaries from `cargo build --workspace --profile test`; `pnpm native:simulator:smoke` builds and runs it |
+| `node scripts/smoke/soak.mjs` | `wx-dev` from `cargo build --profile test -p wechat-simulator`. `SOAK_ROUNDS`, `SOAK_SEED`, `SOAK_CHECKPOINT_EVERY` and `SOAK_IDLE_SECONDS` size the run; CI runs 6 rounds on pull requests and 60 nightly (`soak.yml`). |
 | `node --experimental-strip-types scripts/smoke/calls-api.mjs` | `pnpm build` and the same Rust binaries. `WX_BINARY` and `WX_CALLS_FIXTURE_BINARY` override their paths. |
 | `python3 scripts/smoke/container.py IMAGE` | Docker and an image from `pnpm build:image` |
 | `python3 scripts/smoke/service.py /abs/path/to/wx` | `systemd-analyze` with a running user session |

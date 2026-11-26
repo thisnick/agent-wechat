@@ -3,7 +3,7 @@ use anyhow::{bail, ensure, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::{io::Cursor, path::Path, sync::Mutex};
+use std::{collections::BTreeMap, io::Cursor, path::Path, sync::Mutex};
 use wechat_protocol::{
     protobuf as p,
     wire::{Heartbeat, SyncBatch, SyncCommand},
@@ -24,6 +24,8 @@ mod media;
 /// This database is synthetic remote state, never the hub's registry/profile.
 pub struct Engine {
     db: Mutex<Connection>,
+    /// Requests the hub made since this process started, by `op`.
+    requests: Mutex<BTreeMap<&'static str, u64>>,
 }
 impl Engine {
     pub fn open(path: &Path) -> Result<Self> {
@@ -77,7 +79,17 @@ impl Engine {
         CREATE TABLE IF NOT EXISTS group_faults(account TEXT PRIMARY KEY, fault TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS saved_login_faults(account TEXT PRIMARY KEY, code INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS contact_settings(account TEXT NOT NULL, username TEXT NOT NULL, remark TEXT NOT NULL DEFAULT '', privacy INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(account,username));
+        CREATE TABLE IF NOT EXISTS metadata_faults(account TEXT NOT NULL, kind TEXT NOT NULL, remaining INTEGER NOT NULL, PRIMARY KEY(account,kind));
         INSERT OR IGNORE INTO groups(account,room,name,members) SELECT account,room,name,members FROM group_creations;")?;
+        // Member and detail versions advance when another member changes a group.
+        let versioned: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('groups') WHERE name='version')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !versioned {
+            db.execute_batch("ALTER TABLE groups ADD COLUMN version INTEGER NOT NULL DEFAULT 1")?;
+        }
         // Upgrade only synthetic fixture snapshots from the earlier UI preview.
         // Existing messages, group identities and membership stay intact.
         if db
@@ -127,9 +139,18 @@ impl Engine {
             }
             db.execute("INSERT OR REPLACE INTO meta VALUES('group-fixtures',2)", [])?;
         }
-        Ok(Self { db: Mutex::new(db) })
+        Ok(Self {
+            db: Mutex::new(db),
+            requests: Mutex::default(),
+        })
     }
     pub(crate) fn request(&self, request: Request) -> Result<Value> {
+        *self
+            .requests
+            .lock()
+            .map_err(|_| anyhow::anyhow!("simulator_unavailable"))?
+            .entry(request.op())
+            .or_default() += 1;
         let mut db = self
             .db
             .lock()
@@ -152,9 +173,15 @@ impl Engine {
                 contacts::mutate(&mut db, &session, &request)?,
             )?),
             Request::GroupDetail { session, room } => {
+                check_session(&db, &session)?;
+                validate_destination(&db, &session.account, &room)?;
+                take_metadata_fault(&db, &session.account, MetadataKind::GroupDetail)?;
                 Ok(serde_json::to_value(groups::detail(&db, &session, &room)?)?)
             }
             Request::Room { session, room } => {
+                check_session(&db, &session)?;
+                validate_destination(&db, &session.account, &room)?;
+                take_metadata_fault(&db, &session.account, MetadataKind::Room)?;
                 Ok(serde_json::to_value(groups::roster(&db, &session, &room)?)?)
             }
             Request::Read {
@@ -198,6 +225,10 @@ impl Engine {
             Request::Contacts { session, ids } => {
                 check_session(&db, &session)?;
                 ensure!(!ids.is_empty() && ids.len() <= 200, "invalid_contact_batch");
+                for username in &ids {
+                    validate_destination(&db, &session.account, username)?;
+                }
+                take_metadata_fault(&db, &session.account, MetadataKind::Contacts)?;
                 let mut fields = vec![p::bytes(1, &p::uint(1, 0)), p::uint(2, ids.len() as u64)];
                 for username in &ids {
                     validate_destination(&db, &session.account, username)?;
@@ -504,6 +535,49 @@ impl Engine {
                 )?;
             }
 
+            Control::GroupChange {
+                account,
+                room,
+                name,
+                announcement,
+            } => {
+                ensure!(
+                    name.as_ref()
+                        .is_none_or(|v| !v.is_empty() && v.len() <= 256)
+                        && announcement.as_ref().is_none_or(|v| v.len() <= 4096)
+                        && (name.is_some() || announcement.is_some()),
+                    "invalid_group_change"
+                );
+                seed(&mut db, &account)?;
+                let tx = db.transaction()?;
+                let changed = tx.execute(
+                    "UPDATE groups SET name=coalesce(?3,name),announcement=coalesce(?4,announcement),version=version+1 WHERE account=?1 AND room=?2 AND joined=1",
+                    params![account, room, name, announcement],
+                )?;
+                ensure!(changed == 1, "unknown_synthetic_peer");
+                append(
+                    &tx,
+                    &account,
+                    &SyncCommand {
+                        id: 2,
+                        payload: groups::contact(&tx, &account, &room)?,
+                    },
+                )?;
+                notify(&tx, &account, 1)?;
+                tx.commit()?;
+            }
+            Control::MetadataFault {
+                account,
+                kind,
+                count,
+            } => {
+                ensure!(count <= 100, "metadata_fault_limit");
+                seed(&mut db, &account)?;
+                db.execute(
+                    "INSERT OR REPLACE INTO metadata_faults VALUES(?1,?2,?3)",
+                    params![account, kind.name(), count],
+                )?;
+            }
             Control::ReceiveMedia {
                 account,
                 peer,
@@ -725,9 +799,18 @@ impl Engine {
                 [&id],
                 |r| r.get(0),
             )?;
-            accounts.push(json!({"id":id,"generation":generation,"revoked":revoked,"notifications":notification,"head":head(&db,&id)?,"acceptedSends":accepted,"acceptedMediaSends":media_accepted,"groupCount":db.query_row("SELECT COUNT(*) FROM groups WHERE account=?1",[&id],|r|r.get::<_,u64>(0))?}));
+            let faults = db
+                .prepare("SELECT kind,remaining FROM metadata_faults WHERE account=?1")?
+                .query_map([&id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u64>(1)?)))?
+                .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
+            accounts.push(json!({"id":id,"generation":generation,"revoked":revoked,"notifications":notification,"head":head(&db,&id)?,"acceptedSends":accepted,"acceptedMediaSends":media_accepted,"groupCount":db.query_row("SELECT COUNT(*) FROM groups WHERE account=?1",[&id],|r|r.get::<_,u64>(0))?,"metadataFaults":faults}));
         }
-        Ok(json!({"scenario":"basic","clock":clock(&db)?,"accounts":accounts}))
+        let requests = self
+            .requests
+            .lock()
+            .map_err(|_| anyhow::anyhow!("simulator_unavailable"))?
+            .clone();
+        Ok(json!({"scenario":"basic","clock":clock(&db)?,"accounts":accounts,"requests":requests}))
     }
 }
 
@@ -803,6 +886,15 @@ fn notify(db: &Connection, account: &str, count: u32) -> Result<()> {
         )? == 1,
         "unknown_synthetic_account"
     );
+    Ok(())
+}
+/// Fail this lookup if a [`Control::MetadataFault`] still has failures left.
+fn take_metadata_fault(db: &Connection, account: &str, kind: MetadataKind) -> Result<()> {
+    let taken = db.execute(
+        "UPDATE metadata_faults SET remaining=remaining-1 WHERE account=?1 AND kind=?2 AND remaining>0",
+        params![account, kind.name()],
+    )?;
+    ensure!(taken == 0, "simulated_metadata_unavailable");
     Ok(())
 }
 fn append(db: &Connection, account: &str, command: &SyncCommand) -> Result<()> {
