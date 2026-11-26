@@ -75,7 +75,8 @@ impl Tail {
                     && tail.get(..64).is_some_and(hex)
                     && tail.as_bytes().get(64) == Some(&b':')
             }
-            Self::Suffixed => tail.contains(':') && !tail.chars().any(char::is_control),
+            // Like the rule it replaces: any `:` at all.
+            Self::Suffixed => tail.contains(':'),
             Self::Text => !tail.is_empty() && !tail.chars().any(char::is_control),
         }
     }
@@ -679,6 +680,7 @@ mod tests {
                 format!("{}x", kind.prefix),
                 format!("{well_formed}:extra"),
                 format!("{}\u{1}", kind.prefix),
+                format!("{}x:\u{1}", kind.prefix),
                 // Multi-byte text across byte 64 of the tail.
                 format!("{}{}", kind.prefix, "\u{4e2d}".repeat(30)),
             ] {
