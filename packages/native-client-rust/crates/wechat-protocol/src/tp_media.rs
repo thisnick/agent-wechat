@@ -102,6 +102,10 @@ pub fn validate_tp_auth_key(value: &str) -> Result<()> {
 // Legacy blocking WeCom downloaders kept for 3.x native compatibility (#701).
 // Prefer `fetch_tp_media_async` and `fetch_tp_media_to_async` for new code.
 /// Download and decrypt an Enterprise WeChat media object into memory.
+#[deprecated(
+    since = "3.2.0",
+    note = "use `fetch_tp_media_async` with `NativeHttpTransport::new(DestinationPolicy::PublicOnly)`; blocking APIs are removed in 4.0 (#701)"
+)]
 #[cfg(not(target_arch = "wasm32"))]
 pub fn fetch_tp_media(
     descriptor: &TpMediaDescriptor,
@@ -115,6 +119,10 @@ pub fn fetch_tp_media(
 /// Download and decrypt an Enterprise WeChat media object directly into `sink`, verifying range
 /// framing, PKCS#7 padding, size limits, and any advertised length or MD5 digest. Until this
 /// returns `Ok`, bytes written to `sink` are unverified and must be discarded on error.
+#[deprecated(
+    since = "3.2.0",
+    note = "use `fetch_tp_media_to_async` with `NativeHttpTransport::new(DestinationPolicy::PublicOnly)`; blocking APIs are removed in 4.0 (#701)"
+)]
 #[cfg(not(target_arch = "wasm32"))]
 pub fn fetch_tp_media_to(
     descriptor: &TpMediaDescriptor,

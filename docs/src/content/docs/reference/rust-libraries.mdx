@@ -183,8 +183,8 @@ uses temporary files. `WriteOptions::durable_intent_id` refers to your saved
 recovery record; the library cannot verify that record exists.
 
 <Aside title="Good to know">
-Account-owned async methods use transport workers. Blocking bootstrap methods
-need a blocking worker in async applications. Fresh test logins may replace an
+The blocking login, request, push, CDN and download methods are deprecated
+and are removed in 4.0; each deprecation note names its async replacement. Fresh test logins may replace an
 existing desktop session; examples retain credentials only in memory. Encrypt
 saved credentials and investigate uncertain sends before retrying. Profile
 writers require exclusive ownership, matching keys and supported schemas.

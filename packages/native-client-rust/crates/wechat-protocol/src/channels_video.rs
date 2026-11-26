@@ -115,6 +115,10 @@ pub fn channels_video_url(media: &crate::ChannelsMedia) -> Result<url::Url> {
 ///
 /// `max_bytes` caps the transfer below [`MAX_CHANNELS_VIDEO_BYTES`]. The advertised size, when
 /// the reply gives one, must fit the cap and match the received length.
+#[deprecated(
+    since = "3.2.0",
+    note = "use `fetch_channels_video_async` with `NativeHttpTransport::new(DestinationPolicy::PublicOnly)`; blocking APIs are removed in 4.0 (#701)"
+)]
 #[cfg(not(target_arch = "wasm32"))]
 pub fn fetch_channels_video(
     media: &crate::ChannelsMedia,

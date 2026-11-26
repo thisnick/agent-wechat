@@ -1195,6 +1195,10 @@ impl NativeClient {
     /// Request one QR challenge for the supplied device. Display
     /// [`LoginAttempt::qr_png`] privately, poll for phone approval, then call
     /// [`Self::complete_login`]. This does not grant authorization by itself.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `start_qr_login_async` on a client from `NativeClient::with_transport`; blocking APIs are removed in 4.0 (#701)"
+    )]
     pub fn start_qr_login(
         &self,
         device: DeviceProfile,
@@ -1204,6 +1208,10 @@ impl NativeClient {
     }
     /// QR approval for an existing installation retains its selected key-info.
     /// This neither bypasses phone approval nor imports active authorization.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `start_profile_qr_login_async` on a client from `NativeClient::with_transport`; blocking APIs are removed in 4.0 (#701)"
+    )]
     pub fn start_profile_qr_login(
         &self,
         device: DeviceProfile,
@@ -1250,6 +1258,10 @@ impl NativeClient {
     }
     /// Initiates phone approval for an existing remembered device without a QR.
     /// The caller chooses this fallback explicitly; no automatic auth retries occur.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `start_saved_device_login_async` on a client from `NativeClient::with_transport`; blocking APIs are removed in 4.0 (#701)"
+    )]
     pub fn start_saved_device_login(
         &self,
         state: &AccountState,
@@ -1268,6 +1280,10 @@ impl NativeClient {
         )
     }
     /// Use remembered official-profile trust without inventing active session keys.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `start_profile_saved_device_login_async` on a client from `NativeClient::with_transport`; blocking APIs are removed in 4.0 (#701)"
+    )]
     pub fn start_profile_saved_device_login(
         &self,
         device: &DeviceProfile,
@@ -1350,6 +1366,10 @@ impl NativeClient {
     }
     /// Poll an existing challenge. Only [`LoginStatus::Approved`] permits
     /// [`Self::complete_login`]; expired/rejected/cancelled attempts must stop.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `poll_login_async` on a client from `NativeClient::with_transport`; blocking APIs are removed in 4.0 (#701)"
+    )]
     pub fn poll_login(&self, attempt: &mut LoginAttempt) -> Result<LoginStatus> {
         self.poll_login_guarded(
             attempt,
@@ -1359,6 +1379,10 @@ impl NativeClient {
     }
     /// The guard bounds the temporary LAN listener even while a blocking poll
     /// or upload is in flight. It must not perform blocking work itself.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `poll_login_guarded_async` on a client from `NativeClient::with_transport`; blocking APIs are removed in 4.0 (#701)"
+    )]
     pub fn poll_login_guarded(
         &self,
         attempt: &mut LoginAttempt,
@@ -1430,6 +1454,10 @@ impl NativeClient {
     }
     /// Exchange an approved challenge for secret account credentials once.
     /// Keep the returned state in memory or an encrypted application vault.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `complete_login_async` on a client from `NativeClient::with_transport`; blocking APIs are removed in 4.0 (#701)"
+    )]
     pub fn complete_login(&self, attempt: &mut LoginAttempt) -> Result<AccountState> {
         attempt.stop_lan_login();
         attempt.validate()?;
@@ -1473,6 +1501,10 @@ impl NativeClient {
         bail!("Native authentication redirect limit reached")
     }
     /// Replace an expired, unscanned QR while preserving installation key-info.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `refresh_qr_login_async` on a client from `NativeClient::with_transport`; blocking APIs are removed in 4.0 (#701)"
+    )]
     pub fn refresh_qr_login(&self, attempt: &LoginAttempt) -> Result<LoginAttempt> {
         self.check_snapshot_transport()?;
         ensure!(

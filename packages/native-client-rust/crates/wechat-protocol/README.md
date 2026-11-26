@@ -15,8 +15,8 @@ The crate-level Functions list mainly contains helper functions.
 
 | Task | API |
 | --- | --- |
-| Login | `start_qr_login_async`, `poll_login_async` / `poll_login_guarded_async`, `complete_login_async` with `with_transport(options, ProtocolTransport::native()?)` (blocking `start_qr_login`, `poll_login`, `complete_login` remain for 3.x) |
-| Receive | `sync`, `sync_scene`, `heartbeat`, `open_push_connection` / `open_push_connection_blocking` |
+| Login | `start_qr_login_async`, `poll_login_async` / `poll_login_guarded_async`, `complete_login_async` with `with_transport(options, ProtocolTransport::native()?)` |
+| Receive | `sync`, `sync_scene`, `heartbeat`, `open_push_connection` |
 | Send | `send_text`, `send_share`, `send_quote`, `send_file`, `send_image`, `send_video`, `send_voice` |
 | Contacts | `lookup_contacts`, `lookup_openim_contact`, `lookup_room`, `init_contacts` |
 | Lower-level operations | `transport`, `wire`, `media`, group request builders and response decoders |
@@ -102,6 +102,11 @@ targets, add `getrandom = { version = "0.4", features = ["wasm_js"] }` and
 returned is visible inside the closure before the account update commits, so a
 verified reply survives a later commit failure such as `AccountPersistenceFailed`
 or a logout fence. It runs on the caller's task: don't drop it after submission.
+
+The blocking APIs (`request_blocking`, `open_push_connection_blocking`, the
+blocking login methods, the blocking `CdnClient` methods, `PreparedFileUpload`
+and the blocking downloaders) are deprecated since 3.2 and are removed in 4.0.
+Each deprecation note names its async replacement.
 
 Embedders that already use blocking workers can use `request_blocking` for one
 scoped operation, or `open_push_connection_blocking` for persistent notifications.

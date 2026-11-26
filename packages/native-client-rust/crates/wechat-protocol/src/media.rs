@@ -1248,6 +1248,10 @@ impl CdnClient {
         AsyncCdnSession::new(self, endpoints, RetryPolicy::DEFAULT, http, clock)
     }
     /// Download and decrypt one bounded CDN media object into memory.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `CdnClient::download_async`; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn download(&self, descriptor: &MediaDescriptor) -> Result<DownloadedMedia> {
         self.download_with_progress(descriptor, |_, _| Ok(()))
@@ -1265,6 +1269,10 @@ impl CdnClient {
     }
     /// Download and decrypt one bounded CDN media object into memory while
     /// reporting cumulative ciphertext progress before each chunk.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `CdnClient::download_with_progress_async`; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn download_with_progress(
         &self,
@@ -1309,6 +1317,10 @@ impl CdnClient {
     /// is never held in memory. Every check [`Self::download_with_progress`]
     /// makes is made on the returned receipt. Until this returns `Ok`, the
     /// bytes in `sink` are unverified: on an error the caller must discard them.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `CdnClient::download_to_with_progress_async`; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn download_to_with_progress(
         &self,
@@ -1354,6 +1366,10 @@ impl CdnClient {
     /// for the object; it correlates requests and is not a credential. Only
     /// whole-file descriptors are accepted; the downloaded bytes get the same
     /// size and integrity checks as an ordinary file download.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `CdnClient::download_storage_with_progress_async`; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn download_storage_with_progress(
         &self,
@@ -1399,6 +1415,10 @@ impl CdnClient {
     /// Download an incoming voice note over CDN (`POST /download` with `filetype = 15`),
     /// bounded to [`MAX_VOICE_CDN_BYTES`] (16 MiB) and tolerating transcoded length
     /// differences from `expected_bytes`.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `CdnClient::download_voice_with_progress_async`; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn download_voice_with_progress(
         &self,
@@ -1577,6 +1597,10 @@ impl CdnClient {
         state.into_receipt()
     }
     /// Upload one prepared in-memory media object to WeChat CDN.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `CdnClient::upload_async`; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn upload(&self, prepared: &PreparedUpload) -> Result<UploadedMedia> {
         self.upload_with_progress(prepared, |_, _| Ok(()))
@@ -1594,6 +1618,10 @@ impl CdnClient {
     }
     /// Upload one prepared in-memory media object to WeChat CDN while reporting
     /// cumulative encrypted bytes sent before each chunk.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `CdnClient::upload_with_progress_async`; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn upload_with_progress(
         &self,
@@ -1622,6 +1650,10 @@ impl CdnClient {
     }
     /// [`Self::upload_with_progress`] for an upload read from a file in steps.
     /// The requests are the same as for the equivalent in-memory upload.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `CdnClient::upload_source_with_progress_async`; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn upload_file_with_progress(
         &self,
@@ -2903,6 +2935,10 @@ fn uploaded_variant(
 }
 impl CdnClient {
     /// Upload an image's prepared copies (standard, thumbnail, and optional original).
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `CdnClient::upload_image_async`; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn upload_image(&self, p: &PreparedImageUpload) -> Result<UploadedImage> {
         self.upload_image_with_progress(p, |_, _| Ok(()))
@@ -2920,6 +2956,10 @@ impl CdnClient {
     }
     /// Upload an image's original, standard and thumbnail copies, reporting the encrypted bytes
     /// of the original sent so far and their total before each request.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `CdnClient::upload_image_with_progress_async`; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn upload_image_with_progress(
         &self,
@@ -3031,6 +3071,10 @@ impl CdnClient {
         })
     }
     /// Upload a video's prepared playback, thumbnail, and optional original copies.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `CdnClient::upload_video_async`; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn upload_video(&self, p: &PreparedVideoUpload) -> Result<UploadedVideo> {
         self.upload_video_with_progress(p, |_, _| Ok(()))
@@ -3047,6 +3091,10 @@ impl CdnClient {
             .await
     }
     /// Upload a video's prepared copies while reporting cumulative encrypted bytes sent.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `CdnClient::upload_video_with_progress_async`; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn upload_video_with_progress(
         &self,

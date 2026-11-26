@@ -24,6 +24,10 @@ pub fn validate_avatar_url(value: &str) -> Result<url::Url> {
 // Legacy blocking downloader kept for 3.x native compatibility (#701).
 // Prefer `download_advertised_avatar_async` over `HttpTransport` for new code.
 /// Download one contact avatar from a validated WeChat avatar host without redirects.
+#[deprecated(
+    since = "3.2.0",
+    note = "use `download_advertised_avatar_async` with `NativeHttpTransport::new(DestinationPolicy::PublicOnly)`; blocking APIs are removed in 4.0 (#701)"
+)]
 #[cfg(not(target_arch = "wasm32"))]
 pub fn download_advertised_avatar(value: &str) -> Result<Vec<u8>> {
     let url = validate_avatar_url(value)?;

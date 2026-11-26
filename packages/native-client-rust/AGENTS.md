@@ -27,6 +27,11 @@ surfaces are scheduled for retirement in `#701`.
 
 ## Legacy APIs to avoid in new code
 
+The blocking APIs below are `#[deprecated]` since 3.2 and are removed in
+4.0 (#701). No workspace crate outside `wechat-protocol` uses them; CI's
+warning-denying Clippy keeps it that way. Inside `wechat-protocol` the
+deprecated items may still use each other until they are deleted.
+
 | Legacy (avoid in new code; tracked in `#701`) | Preferred replacement |
 | --- | --- |
 | `openssl-crypto` feature, `crypto::openssl_backend`, `crypto::Ecdh::generate`, `crypto::Ecdh::from_private`, `crypto::cbc` | `pure-rust-crypto` feature, `crypto::Curve`, `Ecdh::generate_for`, `Ecdh::from_private_for`, `crypto::cbc_encrypt`, `crypto::cbc_decrypt` |

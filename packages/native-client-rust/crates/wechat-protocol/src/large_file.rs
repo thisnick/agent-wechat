@@ -24,6 +24,10 @@ fn acknowledged_bitmap(next_block: usize) -> Vec<u8> {
 impl CdnClient {
     /// Upload one ordinary file using previously persisted source/key material.
     /// Object readback and business-message submission remain separate operations.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `CdnClient::upload_large_file_with_progress_async`; blocking APIs are removed in 4.0 (#701)"
+    )]
     pub fn upload_large_file_with_progress(
         &self,
         prepared: &PreparedUpload,
@@ -47,6 +51,10 @@ impl CdnClient {
     /// [`Self::upload_large_file_with_progress`] for an upload read from a
     /// file in steps. The requests are the same; the block that ends the
     /// object is sent only after the whole file matched its digests.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `CdnClient::upload_large_file_from_source_with_progress_async`; blocking APIs are removed in 4.0 (#701)"
+    )]
     pub fn upload_large_file_from_file_with_progress(
         &self,
         prepared: &PreparedFileUpload,
@@ -70,6 +78,10 @@ impl CdnClient {
     /// Upload the unmodified original as a separate type-4 object. The normal
     /// rendition and thumbnail use their own paired upload and final metadata.
     /// Persist the task ID and prepared material before calling this method.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `CdnClient::upload_video_original_with_progress_async`; blocking APIs are removed in 4.0 (#701)"
+    )]
     pub fn upload_video_original_with_progress(
         &self,
         prepared: &PreparedUpload,
@@ -88,6 +100,10 @@ impl CdnClient {
 
     /// [`Self::upload_video_original_with_progress`] for an original read from
     /// a file in steps.
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `CdnClient::upload_video_original_from_source_with_progress_async`; blocking APIs are removed in 4.0 (#701)"
+    )]
     pub fn upload_video_original_from_file_with_progress(
         &self,
         prepared: &PreparedFileUpload,

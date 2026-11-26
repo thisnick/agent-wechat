@@ -82,6 +82,10 @@ pub fn validate_sticker_url(value: &str) -> Result<url::Url> {
 // Legacy blocking sticker downloaders kept for 3.x native compatibility (#701).
 // Prefer `fetch_sticker_async` and `fetch_sticker_original_async` for new code.
 /// Download and verify one sticker image from a validated sticker CDN host.
+#[deprecated(
+    since = "3.2.0",
+    note = "use `fetch_sticker_async` with `NativeHttpTransport::new(DestinationPolicy::PublicOnly)`; blocking APIs are removed in 4.0 (#701)"
+)]
 #[cfg(not(target_arch = "wasm32"))]
 pub fn fetch_sticker(
     descriptor: &StickerDescriptor,
@@ -104,6 +108,10 @@ pub fn fetch_sticker(
 
 /// Fetch an original whose metadata has no advertised length. Enforces the same
 /// host, DNS, stream-size, MD5 and image checks without inventing a source length.
+#[deprecated(
+    since = "3.2.0",
+    note = "use `fetch_sticker_original_async` with `NativeHttpTransport::new(DestinationPolicy::PublicOnly)`; blocking APIs are removed in 4.0 (#701)"
+)]
 #[cfg(not(target_arch = "wasm32"))]
 pub fn fetch_sticker_original(
     url: &str,

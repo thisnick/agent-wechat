@@ -228,6 +228,10 @@ impl PendingLogout {
     /// Clients built with a [`crate::transport::ProtocolTransport`] must use
     /// [`Self::submit`] instead; calling this method refuses with
     /// [`NativeRequestNotSubmitted`].
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `PendingLogout::submit`; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn submit_blocking(self) -> Result<super::LogoutReply> {
         self.submit_guarded_blocking(|| Ok(()))
@@ -240,6 +244,10 @@ impl PendingLogout {
     /// Clients built with a [`crate::transport::ProtocolTransport`] must use
     /// [`Self::submit_guarded`] instead; calling this method refuses with
     /// [`NativeRequestNotSubmitted`].
+    #[deprecated(
+        since = "3.2.0",
+        note = "use `PendingLogout::submit_guarded`; blocking APIs are removed in 4.0 (#701)"
+    )]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn submit_guarded_blocking<F>(self, before_submit: F) -> Result<super::LogoutReply>
     where

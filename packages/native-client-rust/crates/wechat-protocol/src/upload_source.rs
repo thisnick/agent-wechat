@@ -26,6 +26,10 @@ fn ciphertext_len(plaintext: usize) -> usize {
 /// the way, and the request that ends the object is only made once every byte
 /// read matched. Persist the key and file key before the first request, as
 /// for [`PreparedUpload`].
+#[deprecated(
+    since = "3.2.0",
+    note = "use `PreparedAsyncUpload::from_file`; blocking APIs are removed in 4.0 (#701)"
+)]
 #[derive(Clone)]
 pub struct PreparedFileUpload {
     /// CDN object type to upload as.
