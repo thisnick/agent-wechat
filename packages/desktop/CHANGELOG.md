@@ -1,5 +1,24 @@
 # @agent-wechat/desktop
 
+## 3.1.1
+
+### Patch Changes
+
+- [#709](https://github.com/thisnick/agent-wechat/pull/709) [`239a696`](https://github.com/thisnick/agent-wechat/commit/239a69674dda2e970cdf14f32fb3df9cad2492cb) Thanks [@thisnick](https://github.com/thisnick)! - Make large-file uploads (files and original videos over 25 MiB) handle CDN errors like the official client, and say why an upload stopped:
+
+  - A CDN error that the reply marks as retryable (`isretry`), or a code the official client retries, is retried with a new sequence number on the next CDN address. The retry waits `retrysec` when given, otherwise the official backoff. At most 8 server errors are retried per upload, waiting 15 minutes in total at most. Before, any CDN error stopped the upload.
+  - A successful reply's `isretry`, `retrysec`, `isoverload` and `isgetcdn` no longer stop the upload, as in the official client.
+  - An empty or unreadable CDN reply is retried like a dropped connection on every CDN transfer, uploads and downloads, resending the same request.
+  - A CDN rejection now sets `serviceStage: "large_file_upload"` and `serviceCode` on the job, with reason `media_service_rejected`, instead of `media_processing_failed` with no detail. A large-file job that stops during the transfer also includes `result.cdnUploadFailure` with the request (`apply`, `uploadblock`, `fin` or `complete`), the block, the attempts for that request, the server errors retried and a fixed cause.
+
+- [#707](https://github.com/thisnick/agent-wechat/pull/707) [`7889f30`](https://github.com/thisnick/agent-wechat/commit/7889f30a981f0625a1858b0e7fc3566374349769) Thanks [@thisnick](https://github.com/thisnick)! - Fix the voice note player in Safari and the macOS app, where the overflow (»)
+  button could be drawn on top of the play button. WebKit doesn't always lay out
+  its native media controls again after the media loads or after the page returns
+  from the background, so the voice player now makes WebKit redo that layout. Removes
+  the font override from the previous attempt, which had no visible effect.
+- Updated dependencies [[`7889f30`](https://github.com/thisnick/agent-wechat/commit/7889f30a981f0625a1858b0e7fc3566374349769)]:
+  - @agent-wechat/client-ui@0.7.2
+
 ## 3.1.0
 
 ### Patch Changes
