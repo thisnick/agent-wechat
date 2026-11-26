@@ -5,10 +5,7 @@
 //! proxies. The first 128 KiB are decoded while bytes arrive; the rest is stored as received.
 use crate::transport::{HttpBodySink, HttpMethod, HttpRequest, HttpResponseHead, HttpTransport};
 use anyhow::{ensure, Result};
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
-};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
 use std::{io::Read, net::SocketAddr};
@@ -180,7 +177,7 @@ pub async fn fetch_channels_video_async(
         "channels_media_too_large"
     );
     progress(0, None)?;
-    let counters = Arc::new(ChannelsCounters::default());
+    let counters = ChannelsCounters::default();
     let mut sink = ChannelsSink {
         cap,
         stream: channels_prefix_keystream(media.decode_key()),
@@ -189,7 +186,7 @@ pub async fn fetch_channels_video_async(
         content_type: None,
         total: None,
         failed: false,
-        counters: counters.clone(),
+        counters: &counters,
     };
     let request = HttpRequest {
         method: HttpMethod::Get,
@@ -203,18 +200,21 @@ pub async fn fetch_channels_video_async(
         timeout: timeout_for(media.file_size.or(media.cdn_file_size)),
         max_response_bytes: cap as usize,
     };
-    // Report progress from this task as pieces arrive. An error from
-    // `progress` (a cancelled job) drops the transfer and stops the download.
+    // Report progress from this task as pieces arrive, every 64 KiB as the
+    // blocking download did; the final count is reported once below. An
+    // error from `progress` (a cancelled job) drops the transfer and stops it.
     let result = {
         let mut transfer = http.send_streaming(request, &mut sink);
         let mut reported = 0u64;
         std::future::poll_fn(|context| {
             let poll = transfer.as_mut().poll(context);
-            let received = counters.received.load(Ordering::Acquire);
-            if received != reported {
-                reported = received;
-                if let Err(error) = progress(received, counters.total()) {
-                    return std::task::Poll::Ready(Err(Stop::Caller(error)));
+            if poll.is_pending() {
+                let received = counters.received.load(Ordering::Acquire);
+                if received >= reported + PROGRESS_STEP {
+                    reported = received;
+                    if let Err(error) = progress(received, counters.total()) {
+                        return std::task::Poll::Ready(Err(Stop::Caller(error)));
+                    }
                 }
             }
             poll.map(|result| result.map(|_| ()).map_err(Stop::Transfer))
@@ -265,18 +265,23 @@ pub async fn fetch_channels_video_async(
     Ok(ChannelsVideo { bytes, facts })
 }
 
+/// Bytes between progress reports for a streamed Channels download.
+const PROGRESS_STEP: u64 = 64 * 1024;
+
 /// Byte counts shared between a streamed Channels download and the task that
 /// reports its progress.
 #[derive(Default)]
 struct ChannelsCounters {
     received: AtomicU64,
-    /// Advertised length plus one, or zero when unknown.
     total: AtomicU64,
+    total_known: AtomicBool,
 }
 
 impl ChannelsCounters {
     fn total(&self) -> Option<u64> {
-        self.total.load(Ordering::Acquire).checked_sub(1)
+        self.total_known
+            .load(Ordering::Acquire)
+            .then(|| self.total.load(Ordering::Acquire))
     }
 }
 
@@ -290,7 +295,7 @@ enum Stop {
 
 /// Checks the response head and decodes the body as it streams in, exactly as
 /// the blocking download does.
-struct ChannelsSink {
+struct ChannelsSink<'c> {
     cap: u64,
     stream: wechat_media::channels::ChannelsPrefixStream,
     bytes: Vec<u8>,
@@ -299,10 +304,10 @@ struct ChannelsSink {
     total: Option<u64>,
     /// The sink rejected the response; its error is returned unchanged.
     failed: bool,
-    counters: Arc<ChannelsCounters>,
+    counters: &'c ChannelsCounters,
 }
 
-impl ChannelsSink {
+impl ChannelsSink<'_> {
     fn check_head(&mut self, head: &HttpResponseHead) -> Result<()> {
         if head.status != 200 {
             anyhow::bail!("CDN HTTP status {}", head.status);
@@ -353,9 +358,8 @@ impl ChannelsSink {
             .map_err(|_| anyhow::anyhow!("channels_download_failed"))?;
         if let Some(length) = self.total {
             ensure!(length <= self.cap, "channels_media_too_large");
-            self.counters
-                .total
-                .store(length.saturating_add(1), Ordering::Release);
+            self.counters.total.store(length, Ordering::Release);
+            self.counters.total_known.store(true, Ordering::Release);
             self.bytes
                 .reserve(usize::try_from(length).unwrap_or(0).min(16 * 1024 * 1024));
         }
@@ -382,7 +386,7 @@ impl ChannelsSink {
     }
 }
 
-impl HttpBodySink for ChannelsSink {
+impl HttpBodySink for ChannelsSink<'_> {
     fn head(&mut self, head: &HttpResponseHead) -> Result<()> {
         self.check_head(head).inspect_err(|_| self.failed = true)
     }
@@ -820,7 +824,8 @@ mod tests {
 
     #[tokio::test]
     async fn async_channels_video_reports_progress_per_piece_and_stops_when_asked() {
-        let mut plain: Vec<u8> = (0..CHANNELS_PREFIX_BYTES + 4096)
+        use std::sync::Arc;
+        let mut plain: Vec<u8> = (0..CHANNELS_PREFIX_BYTES + 200_000)
             .map(|i| (i % 251) as u8)
             .collect();
         plain[..8].copy_from_slice(&[0, 0, 0, 32, b'f', b't', b'y', b'p']);
@@ -884,9 +889,20 @@ mod tests {
         .unwrap();
         assert_eq!(video.bytes, plain);
         let pieces = encrypted.len().div_ceil(1000);
-        // A start report, one per piece, and the final total.
-        assert!(reports.len() >= pieces, "{reports:?}");
-        assert!(reports.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+        // A start report, one per 64 KiB received while streaming, and the
+        // final total once.
+        let streaming = &reports[1..reports.len() - 1];
+        assert!(!streaming.is_empty(), "{reports:?}");
+        assert!(streaming
+            .windows(2)
+            .all(|pair| pair[1].0 >= pair[0].0 + PROGRESS_STEP));
+        assert_eq!(
+            reports
+                .iter()
+                .filter(|r| r.0 == encrypted.len() as u64)
+                .count(),
+            1
+        );
         assert_eq!(
             reports.last(),
             Some(&(encrypted.len() as u64, Some(encrypted.len() as u64)))
@@ -895,7 +911,7 @@ mod tests {
         // A progress error stops the transfer and is returned unchanged.
         delivered.store(0, Ordering::Release);
         let error = fetch_channels_video_async(&info, usize::MAX, &http, |done, _| {
-            anyhow::ensure!(done < 2000, "media_cancelled");
+            anyhow::ensure!(done < PROGRESS_STEP, "media_cancelled");
             Ok(())
         })
         .await

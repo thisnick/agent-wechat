@@ -366,13 +366,19 @@ impl NativeHttpTransport {
 }
 
 /// Collects a whole response for [`HttpTransport::send`].
-#[derive(Default)]
 struct BufferSink {
     body: Vec<u8>,
+    limit: usize,
 }
 
 impl HttpBodySink for BufferSink {
-    fn head(&mut self, _head: &HttpResponseHead) -> Result<()> {
+    fn head(&mut self, head: &HttpResponseHead) -> Result<()> {
+        // The advertised length (already checked against the budget) sizes
+        // the buffer up front, capped so a lying header cannot reserve much.
+        if let Ok(Some(length)) = head.content_length() {
+            let length = usize::try_from(length).unwrap_or(usize::MAX);
+            self.body.reserve(length.min(self.limit).min(1024 * 1024));
+        }
         Ok(())
     }
 
@@ -385,7 +391,10 @@ impl HttpBodySink for BufferSink {
 impl HttpTransport for NativeHttpTransport {
     fn send<'a>(&'a self, request: HttpRequest) -> TransportFuture<'a, Result<HttpResponse>> {
         Box::pin(async move {
-            let mut sink = BufferSink::default();
+            let mut sink = BufferSink {
+                body: Vec::new(),
+                limit: request.max_response_bytes,
+            };
             let head = self.exchange(request, &mut sink).await?;
             Ok(HttpResponse {
                 status: head.status,

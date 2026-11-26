@@ -460,7 +460,7 @@ pub trait Upstream: Send + Sync {
         block_on(wechat_protocol::media::fetch_sticker_async(
             descriptor,
             &*http,
-            &SystemClock::new(),
+            &*media_clock(self),
             progress,
         ))
     }
@@ -474,7 +474,7 @@ pub trait Upstream: Send + Sync {
         block_on(wechat_protocol::media::fetch_tp_media_async(
             descriptor,
             &*http,
-            &SystemClock::new(),
+            &*media_clock(self),
             progress,
         ))
     }
@@ -489,7 +489,7 @@ pub trait Upstream: Send + Sync {
         block_on(wechat_protocol::media::fetch_tp_media_to_async(
             descriptor,
             &*http,
-            &SystemClock::new(),
+            &*media_clock(self),
             progress,
             &mut media::WriteSink(sink),
         ))
@@ -563,6 +563,17 @@ impl Upstream for NativeUpstream {
     }
     fn public_media_http(&self) -> Option<Arc<dyn HttpTransport>> {
         Some(self.public_http.clone())
+    }
+}
+
+/// The clock media downloads check expiry against: the protocol transport's,
+/// or the system clock for upstreams without one.
+pub(crate) fn media_clock<U: Upstream + ?Sized>(
+    upstream: &U,
+) -> Arc<dyn wechat_protocol::transport::Clock> {
+    match upstream.protocol_transport() {
+        Some(transport) => transport.clock,
+        None => Arc::new(SystemClock::new()),
     }
 }
 

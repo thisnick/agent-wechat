@@ -878,6 +878,8 @@ field wechat_protocol::transport::HttpRequest::url | url::Url | Validated target
 field wechat_protocol::transport::HttpResponse::body | alloc::vec::Vec<u8> | Response body bytes (at most `request.max_response_bytes`).
 field wechat_protocol::transport::HttpResponse::headers | alloc::vec::Vec<(alloc::string::String, alloc::string::String)> | Response headers as `(name, value)` pairs.
 field wechat_protocol::transport::HttpResponse::status | u16 | Numeric HTTP status code (`100..=599`).
+field wechat_protocol::transport::HttpResponseHead::headers | alloc::vec::Vec<(alloc::string::String, alloc::string::String)> | Response headers as `(name, value)` pairs.
+field wechat_protocol::transport::HttpResponseHead::status | u16 | Numeric HTTP status code (`100..=599`).
 field wechat_protocol::transport::ProtocolTransport::clock | alloc::sync::Arc<dyn wechat_protocol::transport::Clock> | Monotonic and wall-clock time source.
 field wechat_protocol::transport::ProtocolTransport::http | alloc::sync::Arc<dyn wechat_protocol::transport::HttpTransport> | HTTP transport for MMTLS short-link exchanges.
 field wechat_protocol::transport::ProtocolTransport::streams | alloc::sync::Arc<dyn wechat_protocol::transport::StreamTransport> | Raw byte-stream transport for MMTLS long-link handshakes and persistent push connections.
@@ -1672,10 +1674,15 @@ fn wechat_protocol::transport::Clock::monotonic_ms | required fn(&self) -> u64 |
 fn wechat_protocol::transport::Clock::sleep | provided fn<'a>(&'a self, _duration: core::time::Duration) -> wechat_protocol::transport::TransportFuture<'a, ()> | Asynchronously wait for `duration`.
 fn wechat_protocol::transport::Clock::unix_time_ms | required fn(&self) -> anyhow::Result<u64> | Current Unix timestamp in milliseconds since `1970-01-01T00:00:00Z`.
 fn wechat_protocol::transport::Clock::unix_time_secs | provided fn(&self) -> anyhow::Result<u32> | Current Unix timestamp in whole seconds as a 32-bit wire timestamp.
+fn wechat_protocol::transport::HttpBodySink::chunk | required fn(&mut self, bytes: &[u8]) -> anyhow::Result<()> | Accept the next piece of the body, in order. Never called with an empty slice. An error stops the transfer and is returned to the caller unchanged.
+fn wechat_protocol::transport::HttpBodySink::head | required fn(&mut self, head: &wechat_protocol::transport::HttpResponseHead) -> anyhow::Result<()> | Inspect the status and headers before any body bytes arrive. An error stops the transfer and is returned to the caller unchanged.
 fn wechat_protocol::transport::HttpOverStream::new | fn(streams: S, clock: alloc::sync::Arc<dyn wechat_protocol::transport::Clock>) -> Self | Wrap `streams` with a strict plaintext HTTP/1.1 client using `clock` for end-to-end request deadlines.
 fn wechat_protocol::transport::HttpResponse::header | fn(&self, name: &str) -> core::option::Option<&str> | Return the first header value matching `name` (ASCII case-insensitive).
 fn wechat_protocol::transport::HttpResponse::header_values | fn(&self, name: &str) -> alloc::vec::Vec<&str> | Return all header values matching `name` (ASCII case-insensitive), in wire order.
+fn wechat_protocol::transport::HttpResponseHead::header | fn(&self, name: &str) -> core::option::Option<&str> | Return the first header value matching `name` (ASCII case-insensitive).
+fn wechat_protocol::transport::HttpResponseHead::header_values | fn(&self, name: &str) -> alloc::vec::Vec<&str> | Return all header values matching `name` (ASCII case-insensitive), in wire order.
 fn wechat_protocol::transport::HttpTransport::send | required fn<'a>(&'a self, request: wechat_protocol::transport::HttpRequest) -> wechat_protocol::transport::TransportFuture<'a, anyhow::Result<wechat_protocol::transport::HttpResponse>> | Execute a single bounded HTTP request without automatic redirects.
+fn wechat_protocol::transport::HttpTransport::send_streaming | provided fn<'a>(&'a self, request: wechat_protocol::transport::HttpRequest, sink: &'a mut dyn wechat_protocol::transport::HttpBodySink) -> wechat_protocol::transport::TransportFuture<'a, anyhow::Result<wechat_protocol::transport::HttpResponseHead>> | Execute a request like [`Self::send`], delivering the head and then the body in pieces to `sink` as they arrive, so a caller can report progress or stop a long download early. The whole body is still bounded by `request.max_response_bytes` and `request.timeout`.
 fn wechat_protocol::transport::NativeHttpTransport::new | fn(policy: wechat_protocol::transport::native::DestinationPolicy) -> anyhow::Result<Self> | Construct a transport that connects according to `policy`.
 fn wechat_protocol::transport::NativeHttpTransport::policy | fn(&self) -> wechat_protocol::transport::native::DestinationPolicy | The destination policy this transport enforces.
 fn wechat_protocol::transport::ProtocolTransport::from_streams | fn(streams: alloc::sync::Arc<dyn wechat_protocol::transport::StreamTransport>, clock: alloc::sync::Arc<dyn wechat_protocol::transport::Clock>) -> Self | Construct a transport bundle backed solely by a [`StreamTransport`] and [`Clock`], routing short-link HTTP exchanges through [`HttpOverStream`].
@@ -1871,6 +1878,7 @@ impl core::clone::Clone for wechat_protocol::transport::DestinationPolicy | impl
 impl core::clone::Clone for wechat_protocol::transport::HttpMethod | impl | -
 impl core::clone::Clone for wechat_protocol::transport::HttpRequest | impl | -
 impl core::clone::Clone for wechat_protocol::transport::HttpResponse | impl | -
+impl core::clone::Clone for wechat_protocol::transport::HttpResponseHead | impl | -
 impl core::clone::Clone for wechat_protocol::transport::ProtocolTransport | impl | -
 impl core::clone::Clone for wechat_protocol::transport::ReadOutcome | impl | -
 impl core::clone::Clone for wechat_protocol::transport::SystemClock | impl | -
@@ -2194,6 +2202,7 @@ impl core::fmt::Debug for wechat_protocol::transport::DestinationPolicy | impl |
 impl core::fmt::Debug for wechat_protocol::transport::HttpMethod | impl | -
 impl core::fmt::Debug for wechat_protocol::transport::HttpRequest | impl | -
 impl core::fmt::Debug for wechat_protocol::transport::HttpResponse | impl | -
+impl core::fmt::Debug for wechat_protocol::transport::HttpResponseHead | impl | -
 impl core::fmt::Debug for wechat_protocol::transport::NativeHttpTransport | impl | -
 impl core::fmt::Debug for wechat_protocol::transport::ReadOutcome | impl | -
 impl core::fmt::Debug for wechat_protocol::transport::SystemClock | impl | -
@@ -2760,6 +2769,7 @@ struct wechat_protocol::sticker_upload::StickerUploadAcknowledgement | struct { 
 struct wechat_protocol::transport::HttpOverStream | struct<S> { private fields } | Strict plaintext HTTP/1.1 client layered on top of a [`StreamTransport`].
 struct wechat_protocol::transport::HttpRequest | struct { public fields } | Bounded HTTP request prepared by `wechat-protocol` after host, route, and payload validation.
 struct wechat_protocol::transport::HttpResponse | struct { public fields } | Bounded HTTP response returned by an [`HttpTransport`].
+struct wechat_protocol::transport::HttpResponseHead | struct { public fields } | Status and headers of an HTTP response whose body is delivered separately to an [`HttpBodySink`].
 struct wechat_protocol::transport::NativeHttpTransport | struct { private fields } | [`HttpTransport`] backed by an asynchronous `reqwest` client.
 struct wechat_protocol::transport::ProtocolTransport | struct { private fields } | Pluggable async transport bundle for [`crate::NativeClient`] and async login operations.
 struct wechat_protocol::transport::SystemClock | #[cfg(not(target_arch = \"wasm32\"))] struct { private fields } | System-backed [`Clock`] using `std::time::Instant` and `std::time::SystemTime`.
@@ -2786,6 +2796,7 @@ trait wechat_protocol::media::AsyncDownloadSink | trait: wechat_protocol::transp
 trait wechat_protocol::media::AsyncUploadSource | trait: wechat_protocol::transport::MaybeSend + wechat_protocol::transport::MaybeSync | Random-access asynchronous byte source for streaming encrypted CDN uploads (for example a browser File System Access `File` slice, OPFS handle, or custom object reader) without buffering the whole file in memory.
 trait wechat_protocol::transport::AsyncByteStream | trait: wechat_protocol::transport::MaybeSend | Bidirectional ordered byte stream for MMTLS long-link sessions and plaintext HTTP/1.1-over-TCP exchanges.
 trait wechat_protocol::transport::Clock | trait: wechat_protocol::transport::MaybeSend + wechat_protocol::transport::MaybeSync | Monotonic and wall-clock time source for deadlines, short-link ticket lifetimes, and wire timestamps.
+trait wechat_protocol::transport::HttpBodySink | trait: wechat_protocol::transport::MaybeSend | Receives an HTTP response streamed by [`HttpTransport::send_streaming`].
 trait wechat_protocol::transport::HttpTransport | trait: wechat_protocol::transport::MaybeSend + wechat_protocol::transport::MaybeSync | Asynchronous HTTP request/response transport.
 trait wechat_protocol::transport::MaybeSend | #[cfg(not(target_arch = \"wasm32\"))] trait: core::marker::Send | `Send` bound on native targets, unconstrained on single-threaded `wasm32`.
 trait wechat_protocol::transport::MaybeSync | #[cfg(not(target_arch = \"wasm32\"))] trait: core::marker::Sync | `Sync` bound on native targets, unconstrained on single-threaded `wasm32`.
@@ -2951,5 +2962,6 @@ variant wechat_protocol::transport::ReadOutcome::Eof | - | The peer closed the s
 variant wechat_protocol::transport::ReadOutcome::TimedOut | - | The per-call timeout elapsed without new bytes arriving.
 variant wechat_protocol::transport::TransportError::DestinationNotAllowed | - | The destination is, or resolves to, an address the transport's policy refuses, such as `DestinationPolicy::PublicOnly` on native targets. No connection was made.
 variant wechat_protocol::transport::TransportError::Disconnected | - | Connection attempt failed or the peer closed the connection unexpectedly.
+variant wechat_protocol::transport::TransportError::Interrupted | - | The connection was established but failed or closed before the response completed. CDN transfers retry the same address once for this, as for a dropped keep-alive connection, rather than failing over.
 variant wechat_protocol::transport::TransportError::ResponseTooLarge | - | The HTTP response body exceeded `HttpRequest::max_response_bytes`.
 variant wechat_protocol::transport::TransportError::Timeout | - | Connection, read, or write deadline elapsed.

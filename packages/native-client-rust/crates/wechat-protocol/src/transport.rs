@@ -303,48 +303,64 @@ pub struct HttpResponse {
     pub body: Vec<u8>,
 }
 
+/// First value of header `name` (ASCII case-insensitive).
+fn header_in<'h>(headers: &'h [(String, String)], name: &str) -> Option<&'h str> {
+    headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+/// All values of header `name` (ASCII case-insensitive), in wire order.
+fn header_values_in<'h>(headers: &'h [(String, String)], name: &str) -> Vec<&'h str> {
+    headers
+        .iter()
+        .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+        .collect()
+}
+
 impl HttpResponse {
     /// Return the first header value matching `name` (ASCII case-insensitive).
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
+        header_in(&self.headers, name)
     }
 
     /// Return all header values matching `name` (ASCII case-insensitive), in
     /// wire order.
     pub fn header_values(&self, name: &str) -> Vec<&str> {
-        self.headers
-            .iter()
-            .filter(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
-            .collect()
+        header_values_in(&self.headers, name)
     }
 
     /// Parse and validate `Content-Length` if present. Rejects malformed values
     /// and conflicting duplicate headers.
     pub(crate) fn content_length(&self) -> Result<Option<u64>> {
-        let mut parsed = None;
-        for raw in self.header_values("content-length") {
-            let trimmed = raw.trim();
-            ensure!(
-                !trimmed.is_empty()
-                    && trimmed.len() <= 20
-                    && trimmed.bytes().all(|b| b.is_ascii_digit()),
-                "Invalid HTTP Content-Length header"
-            );
-            let value = trimmed
-                .parse::<u64>()
-                .map_err(|_| anyhow::anyhow!("Invalid HTTP Content-Length header"))?;
-            if let Some(prev) = parsed {
-                ensure!(prev == value, "Conflicting HTTP Content-Length headers");
-            } else {
-                parsed = Some(value);
-            }
-        }
-        Ok(parsed)
+        content_length_in(&self.headers)
     }
+}
+
+/// Parse and validate `Content-Length` if present, rejecting malformed values
+/// and conflicting duplicates.
+fn content_length_in(headers: &[(String, String)]) -> Result<Option<u64>> {
+    let mut parsed = None;
+    for raw in header_values_in(headers, "content-length") {
+        let trimmed = raw.trim();
+        ensure!(
+            !trimmed.is_empty()
+                && trimmed.len() <= 20
+                && trimmed.bytes().all(|b| b.is_ascii_digit()),
+            "Invalid HTTP Content-Length header"
+        );
+        let value = trimmed
+            .parse::<u64>()
+            .map_err(|_| anyhow::anyhow!("Invalid HTTP Content-Length header"))?;
+        if let Some(prev) = parsed {
+            ensure!(prev == value, "Conflicting HTTP Content-Length headers");
+        } else {
+            parsed = Some(value);
+        }
+    }
+    Ok(parsed)
 }
 
 /// Status and headers of an HTTP response whose body is delivered separately
@@ -360,31 +376,19 @@ pub struct HttpResponseHead {
 impl HttpResponseHead {
     /// Return the first header value matching `name` (ASCII case-insensitive).
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
+        header_in(&self.headers, name)
     }
 
     /// Return all header values matching `name` (ASCII case-insensitive), in
     /// wire order.
     pub fn header_values(&self, name: &str) -> Vec<&str> {
-        self.headers
-            .iter()
-            .filter(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
-            .collect()
+        header_values_in(&self.headers, name)
     }
 
     /// Parse and validate `Content-Length` if present, rejecting malformed
     /// values and conflicting duplicates.
     pub(crate) fn content_length(&self) -> Result<Option<u64>> {
-        HttpResponse {
-            status: self.status,
-            headers: self.headers.clone(),
-            body: Vec::new(),
-        }
-        .content_length()
+        content_length_in(&self.headers)
     }
 }
 
@@ -404,8 +408,9 @@ pub trait HttpBodySink: MaybeSend {
 ///
 /// Implementations must disable automatic redirects and honor
 /// `request.timeout` and `request.max_response_bytes`. Returning
-/// [`TransportError::Disconnected`] or [`TransportError::Timeout`] classifies
-/// transient failures for CDN IP failover and retry backoff; returning
+/// [`TransportError::Disconnected`] (no connection), [`TransportError::Interrupted`]
+/// (the connection failed after it was made) or [`TransportError::Timeout`]
+/// classifies transient failures for CDN IP failover and retry backoff; returning
 /// [`TransportError::ResponseTooLarge`] lets media downloaders preserve their
 /// exact size-limit error classification when a response exceeds
 /// `request.max_response_bytes`. Callers with only raw TCP sockets can wrap a
@@ -850,7 +855,7 @@ async fn read_line_crlf(
             "HTTP chunk line exceeds limit"
         );
         let Some(n) = read_chunk_into(stream, &mut scratch, clock, deadline_ms).await? else {
-            return Err(TransportError::Disconnected.into());
+            return Err(TransportError::Interrupted.into());
         };
         pending.extend_from_slice(&scratch[..n]);
     }
@@ -876,7 +881,7 @@ async fn read_exact_buffered(
         let step = need.min(scratch.len());
         let Some(n) = read_chunk_into(stream, &mut scratch[..step], clock, deadline_ms).await?
         else {
-            return Err(TransportError::Disconnected.into());
+            return Err(TransportError::Interrupted.into());
         };
         out.extend_from_slice(&scratch[..n]);
         need -= n;
@@ -969,7 +974,7 @@ impl<S: StreamTransport> HttpTransport for HttpOverStream<S> {
                         read_chunk_into(&mut *stream, &mut scratch, &*self.clock, deadline_ms)
                             .await?
                     else {
-                        return Err(TransportError::Disconnected.into());
+                        return Err(TransportError::Interrupted.into());
                     };
                     pending.extend_from_slice(&scratch[..n]);
                 };
@@ -1452,7 +1457,7 @@ mod tests {
             );
         }
 
-        // Truncated Content-Length EOF classifies as TransportError::Disconnected and closes stream.
+        // Truncated Content-Length EOF classifies as TransportError::Interrupted and closes stream.
         let s_eof = Arc::new(SingleStreamTransport::new(
             "short.weixin.qq.com",
             80,
@@ -1476,7 +1481,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err.downcast_ref::<TransportError>(),
-            Some(&TransportError::Disconnected)
+            Some(&TransportError::Interrupted)
         );
         assert!(*s_eof.closed.lock().unwrap());
 

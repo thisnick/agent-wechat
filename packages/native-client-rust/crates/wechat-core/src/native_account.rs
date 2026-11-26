@@ -239,6 +239,18 @@ impl Core {
         Ok(Some(current))
     }
 
+    /// The account's CDN with `config` on the daemon's native async transport.
+    pub(crate) fn native_media_transport(
+        &self,
+        config: wechat_protocol::media::CdnConfig,
+    ) -> Result<crate::upstream::media::NativeMediaTransport> {
+        let transport = self
+            .upstream
+            .protocol_transport()
+            .context("unsupported_simulator_operation")?;
+        crate::upstream::media::NativeMediaTransport::new(config, &transport)
+    }
+
     pub(crate) fn native_request<T>(
         &self,
         account: &str,
@@ -426,7 +438,6 @@ impl crate::upstream::Upstream for BoundUpstream {
         };
         let transport = crate::upstream::media::NativeMediaTransport::new(
             configuration.clone(),
-            Duration::from_secs(25),
             &self.transport,
         )?;
         configuration.auth_key.fill(0);

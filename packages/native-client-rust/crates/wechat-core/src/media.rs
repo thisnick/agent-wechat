@@ -3158,23 +3158,6 @@ pub(crate) fn classify_error(error: &anyhow::Error) -> String {
     }
     "media_processing_failed".into()
 }
-impl Core {
-    /// The account's CDN with `config` on the daemon's native async transport.
-    pub(crate) fn native_media_transport(
-        &self,
-        config: wechat_protocol::media::CdnConfig,
-    ) -> Result<crate::upstream::media::NativeMediaTransport> {
-        let transport = self
-            .upstream
-            .protocol_transport()
-            .context("unsupported_simulator_operation")?;
-        crate::upstream::media::NativeMediaTransport::new(
-            config,
-            Duration::from_secs(25),
-            &transport,
-        )
-    }
-}
 fn validate_destination(value: &str) -> Result<()> {
     ensure!(
         !value.is_empty()

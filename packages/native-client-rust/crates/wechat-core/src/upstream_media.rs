@@ -97,14 +97,15 @@ pub struct NativeMediaTransport {
     clock: Arc<dyn Clock>,
 }
 
+/// Per-request CDN deadline for daemon media transfers.
+const CDN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
+
 impl NativeMediaTransport {
-    pub fn new(
-        config: CdnConfig,
-        timeout: std::time::Duration,
-        transport: &ProtocolTransport,
-    ) -> Result<Self> {
+    /// The account's CDN from its `config`, on `transport`'s HTTP client and
+    /// clock.
+    pub fn new(config: CdnConfig, transport: &ProtocolTransport) -> Result<Self> {
         Ok(Self {
-            cdn: CdnClient::new(config, timeout)?,
+            cdn: CdnClient::new(config, CDN_TIMEOUT)?,
             http: transport.http.clone(),
             clock: transport.clock.clone(),
         })
