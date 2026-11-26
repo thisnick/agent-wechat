@@ -1,7 +1,7 @@
 ---
 title: Rust 开发库
 description: 在 Rust 中使用原生微信协议、Profile 与语音媒体库。
-sourceHash: "feebac213596"
+sourceHash: "5da8936ce242"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -120,7 +120,8 @@ cargo run --manifest-path packages/native-client-rust/Cargo.toml -p wechat-proto
 `wechat-protocol` 通过 `wechat_protocol::transport` 支持自定义异步传输（`StreamTransport`、`HttpTransport`、`HttpOverStream`、`Clock`、`TaskSpawner` 与 `ProtocolTransport`）。仅提供原始 TCP 流的宿主（例如使用 Direct Sockets 的浏览器 Isolated Web App）可以通过 `ProtocolTransport::from_streams(streams, clock)` 包装 `StreamTransport`。在 `wasm32` 或非 Tokio 执行器上，请使用 `ProtocolTransport::with_spawner` 挂载任务派生器（例如 `wasm_bindgen_futures::spawn_local`），这样即使取消进行中的账号请求，仍会等待该次交换完成，并采纳经过校验的回复。
 
 - 异步登录请使用 `NativeClient::with_transport`（`start_qr_login_async`、`poll_login_async`、`complete_login_async`）。
-- 异步账号 RPC 与 `open_push_connection`（`AsyncPushConnection`）请使用 `NativeClient::from_account_with_transport`。
+- 异步账号 RPC 与 `open_push_connection`（`AsyncPushConnection`）请使用 `NativeClient::from_account_with_transport`。`client.request(async |request| ...)` 会运行一个有范围限定的操作；即使之后保存账号更新失败，也能保留其已验证的回复，与 `request_blocking` 相同。
+- 使用原生的 `ProtocolTransport::native()` 时，`poll_login_async` 与 `poll_login_guarded_async` 会像阻塞式登录一样，通过临时本地监听器应答局域网风险验证挑战。
 - 使用 `media::CdnClient` 的异步方法（`download_async`、`download_to_with_progress_async`、`download_voice_with_progress_async`、`upload_async`、`upload_source_with_progress_async`、`upload_image_async`、`upload_video_async`、`upload_large_file_with_progress_async`、`upload_large_file_from_source_with_progress_async`），流式的 `AsyncDownloadSink` / `AsyncUploadSource`（`PreparedAsyncUpload`），以及异步独立下载器（`download_advertised_avatar_async`、`fetch_sticker_async`、`fetch_link_thumbnail_async`、`fetch_tp_media_async`、`fetch_tp_media_to_async`、`fetch_channels_video_async`），它们可基于任意 `HttpTransport` 与 `Clock` 运行。
 - 在 `wasm32-unknown-unknown` 上，`wechat-media` 与 `wechat-protocol`（`default-features = false, features = ["pure-rust-crypto"]`）会自动省略操作系统套接字、`reqwest` 与原生媒体工具。在应用 crate 中，请配置 `getrandom` 0.4 的后端（浏览器中需添加 `getrandom = { version = "0.4", features = ["wasm_js"] }`，并使用 `RUSTFLAGS='--cfg getrandom_backend="wasm_js"'` 构建）。
 
