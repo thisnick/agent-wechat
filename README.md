@@ -92,20 +92,20 @@ See [CLI examples](https://thisnick.github.io/agent-wechat/use/cli/),
 | Area | What you can do |
 | --- | --- |
 | Conversations | Use DMs and groups; browse and search locally stored history; read unread counts and mark chats read. |
-| Messages | Send and receive text, images, videos, files, and voice notes; recall eligible own messages and display incoming recalls. |
+| Messages | Send and receive text, images, videos, files, and voice notes; receive images, videos, files, and stickers from WeCom (Enterprise WeChat) users, including in external groups; recall eligible own messages and display incoming recalls. |
 | Images and video | Preview and download available quality variants, including original images/video; send compressed or full-resolution original images, and normal or original-quality video. |
-| Voice notes | Play received notes and send audio as native voice notes. Longer audio can split into multiple notes; playback validation for longer notes remains incomplete. |
-| Voice calls | Make and answer direct WeChat voice calls with the [`wx calls` CLI](https://thisnick.github.io/agent-wechat/reference/calls/) or the [OpenClaw plugin](https://thisnick.github.io/agent-wechat/openclaw/calling/) after enabling voice calling in the plugin. Desktop voice calling is coming soon. |
-| Rich content | Read embedded quotes, link-card metadata, and forwarded conversations. Forwarded bundles become text; their nested attachments remain placeholders. |
+| Voice notes | Play received notes, including notes longer than 60 seconds, and send audio as native voice notes. Longer audio can split into multiple notes; playback validation for longer notes remains incomplete. |
+| Calls | Make and answer direct and group voice and video calls in the desktop app and with the [`wx calls` CLI](https://thisnick.github.io/agent-wechat/reference/calls/). The [OpenClaw plugin](https://thisnick.github.io/agent-wechat/openclaw/calling/) can make and answer voice calls after you enable calling in the plugin; it doesn't handle video. |
+| Rich content | Read embedded quotes, link-card metadata, and forwarded conversations, including large ones that WeChat sends as a separate download. Forwarded bundles become text; their nested attachments remain placeholders. A large bundle that can't be downloaded shows as unavailable. |
 | WeChat Channels | Receive Channels cards with their cover, publisher, description, and length, and download the post's video. |
 | Stickers | Receive stickers, including animated originals. Save images, GIFs, and MOV/MP4 clips as custom stickers; reorder or remove Saved stickers; browse and add eligible free official packs and export a pack as GIFs; send stickers from Saved or added packs. Sends use GIF originals; paid packs are unsupported. |
 | Mentions | Send real member mentions or mention everyone where permitted; inspect incoming mention metadata. |
-| Contacts | Find people by WeChat ID, send and accept friend requests, and remove contacts while keeping your chat history. Set per-contact privacy with Chats Only, Hide My Posts, and Hide Their Posts. |
+| Contacts | Find people by WeChat ID, send and accept friend requests, and remove contacts while keeping your chat history. Set or clear your remark (private name) for a contact, and set per-contact privacy with Chats Only, Hide My Posts, and Hide Their Posts. |
 | Contacts and groups | Find contacts/groups, search a group's members, read member lists and avatars, and refresh saved metadata. |
 | Group management | Create/rename/leave groups, add/remove members, set your group display name, clear announcements, and mute notifications, subject to account permissions. Some profile updates remain partial. |
 | Organization | Pin/unpin supported chats and mute/unmute ordinary contacts and groups. |
 | Media storage | Configure per-account automatic downloads, save verified media, and inspect transfer progress and unavailable-media status. |
-| Desktop | Conversation search and category filters, media views, quote navigation, mention picker, sticker picker, native file saving, tray behavior, and notifications, in English or Simplified Chinese. See platform acceptance status above. |
+| Desktop | Conversation search and category filters, media views, quote navigation, mention picker, sticker picker, voice and video calls (camera preview, picture-in-picture, full-screen video), contact cards with remark and privacy editing, native file saving, tray behavior, and notifications, in English or Simplified Chinese. See platform acceptance status above. |
 | Automation | Use the `wx` CLI or authenticated HTTP API; follow replayable events and inspect send/download jobs. |
 
 Media availability depends on the received source, supported formats, and size
@@ -125,7 +125,7 @@ its stored conversations, contacts, groups, and media.
 | Profile data | Read | Write |
 | --- | --- | --- |
 | Messages | Stored history and supported rich content | Newly received and accepted outgoing messages; supported recall updates |
-| Contacts | Saved contacts, avatars, friend request history, and contact privacy settings | Supported sync updates, friend request records, contact removals, and privacy changes |
+| Contacts | Saved contacts, avatars, friend request history, and contact privacy settings | Supported sync updates, friend request records, contact removals, and remark and privacy changes |
 | Groups | Details, rosters, names, and notification settings | Supported synchronized fields and group-operation results; some updates remain partial |
 | Media | Supported cached images, video, files, and voice | Supported downloaded/sent cache files and associated resource records |
 | Conversation state | Conversations, unread state, supported pin/mute settings | Supported read-state, pinning, and notification updates |
@@ -200,6 +200,11 @@ The same API used by the desktop app, CLI, and OpenClaw is available for your ow
 scripts, integrations, and clients. Read the
 [architecture guide](https://thisnick.github.io/agent-wechat/how-it-works/architecture/)
 for the component boundaries and storage model.
+
+To work without the daemon, use the
+[Rust libraries](https://thisnick.github.io/agent-wechat/reference/rust-libraries/)
+for the protocol, profiles, and calls, published on crates.io. `wechat-protocol`
+can be built without OpenSSL and for WebAssembly (`wasm32`).
 
 Upgrading an older installation? Follow the [migration guide](https://thisnick.github.io/agent-wechat/setup/migrate/) and retain your profiles and backups.
 
