@@ -1,7 +1,7 @@
 ---
 title: Rust 开发库
 description: 在 Rust 中使用原生微信协议、Profile 与语音媒体库。
-sourceHash: "feebac213596"
+sourceHash: "8ea21127065c"
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -118,6 +118,8 @@ cargo run --manifest-path packages/native-client-rust/Cargo.toml -p wechat-proto
 ## 可插拔异步传输与 WebAssembly \{#pluggable-async-transport-and-webassembly}
 
 `wechat-protocol` 通过 `wechat_protocol::transport` 支持自定义异步传输（`StreamTransport`、`HttpTransport`、`HttpOverStream`、`Clock`、`TaskSpawner` 与 `ProtocolTransport`）。仅提供原始 TCP 流的宿主（例如使用 Direct Sockets 的浏览器 Isolated Web App）可以通过 `ProtocolTransport::from_streams(streams, clock)` 包装 `StreamTransport`。在 `wasm32` 或非 Tokio 执行器上，请使用 `ProtocolTransport::with_spawner` 挂载任务派生器（例如 `wasm_bindgen_futures::spawn_local`），这样即使取消进行中的账号请求，仍会等待该次交换完成，并采纳经过校验的回复。
+
+在原生目标上，`ProtocolTransport::native()` 会构建默认的组合：Tokio TCP 流、池化的 HTTP/1.1 客户端以及系统时钟。请在 Tokio 运行时内调用它。对于消息中传入的媒体 URL（头像、表情、链接缩略图、企业微信媒体和视频号视频），请为下载器传入 `NativeHttpTransport::new(DestinationPolicy::PublicOnly)`：只有当宿主解析到的每个地址都是公网地址时才会建立连接，否则以 `TransportError::DestinationNotAllowed` 失败。`media::FileUploadSource` 与 `PreparedAsyncUpload::from_file` 可从文件中流式上传，`tokio::fs::File` 可用作 `AsyncDownloadSink`。
 
 - 异步登录请使用 `NativeClient::with_transport`（`start_qr_login_async`、`poll_login_async`、`complete_login_async`）。
 - 异步账号 RPC 与 `open_push_connection`（`AsyncPushConnection`）请使用 `NativeClient::from_account_with_transport`。
