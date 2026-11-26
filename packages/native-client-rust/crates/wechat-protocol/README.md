@@ -101,8 +101,10 @@ targets, add `getrandom = { version = "0.4", features = ["wasm_js"] }` and
 `AsyncAccountRequest`) on the configured transport. Whatever the operation
 returned is visible inside the closure before the account update commits, so a
 verified reply survives a later commit failure such as `AccountPersistenceFailed`
-or a logout fence. If the request's future is dropped, a submitted operation
-still completes and its verified cookie is committed.
+or a logout fence. With Tokio or a configured spawner, a submitted operation
+still completes after its future is dropped, and its verified cookie is
+committed. Without one (for example on wasm32 or a custom transport with no
+spawner), the operation runs inline: don't drop it after submission.
 
 The blocking APIs (`request_blocking`, `open_push_connection_blocking`, the
 `*_blocking` logout and shutdown forms, the blocking login methods, the
