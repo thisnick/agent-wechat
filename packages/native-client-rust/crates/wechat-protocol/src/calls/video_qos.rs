@@ -14,12 +14,19 @@ use crate::calls::video_packet::{
 use std::collections::BTreeMap;
 
 const NACK_MAX_GAP: u64 = 32;
-const NACK_MAX_HISTORY: u64 = 48;
-const NACK_REORDER_DELAY_MS: u64 = 35;
-const NACK_RETRY_INTERVAL_MS: u64 = 90;
-const NACK_MAX_AGE_MS: u64 = 350;
+/// Gaps further than this many packets behind the newest are forgotten. It covers
+/// NACK_TRACK_MS at a few hundred packets per second, so a retransmission arriving after a
+/// keyframe burst is still accepted.
+const NACK_MAX_HISTORY: u64 = 256;
+/// The wait before a missing packet is NACKed follows measured arrival jitter, bounded to
+/// this range, as the official receiver does.
+const NACK_MIN_REORDER_DELAY_MS: u64 = 20;
+const NACK_MAX_REORDER_DELAY_MS: u64 = 100;
+/// Official senders keep sent packets for 300 ms, so older gaps are not NACKed.
+const NACK_MAX_AGE_MS: u64 = 300;
+/// Gaps stay tracked a little longer so a retransmission still in flight is accepted.
+const NACK_TRACK_MS: u64 = 600;
 const NACK_MIN_DATAGRAM_SPACING_MS: u64 = 40;
-const NACK_MAX_ATTEMPTS: u8 = 3;
 
 /// Maximum duration P-frames are held awaiting a clean recovery IDR after an
 /// unrecovered packet drop (aligned with receive transcoder post-drop IDR hold).
@@ -42,16 +49,17 @@ const KEYFRAME_SIZE_TOGGLE_MS: u64 = 4000;
 #[derive(Clone, Copy, Debug)]
 struct PendingNack {
     first_missing_ms: u64,
-    last_sent_ms: Option<u64>,
-    attempts: u8,
+    /// Each gap is NACKed once: official senders retransmit a packet at most once.
+    nacked: bool,
 }
 
 /// Tracks missing 16-bit `pkg_seq` numbers on inbound RSM video and emits bounded
-/// `0x06` ARQ/NACK half-open `[start, end)` ranges after a short reorder grace window.
+/// `0x06` ARQ/NACK half-open `[start, end)` ranges after a jitter-based reorder wait.
 pub struct VideoNackTracker {
     highest_seq: Option<u64>,
     missing: BTreeMap<u64, PendingNack>,
     last_datagram_sent_ms: Option<u64>,
+    reorder_delay_ms: u64,
     arq_seq: u8,
     arq_recovered_total: u64,
 }
@@ -69,6 +77,7 @@ impl VideoNackTracker {
             highest_seq: None,
             missing: BTreeMap::new(),
             last_datagram_sent_ms: None,
+            reorder_delay_ms: NACK_MIN_REORDER_DELAY_MS,
             arq_seq: 0,
             arq_recovered_total: 0,
         }
@@ -79,8 +88,15 @@ impl VideoNackTracker {
         self.highest_seq = None;
         self.missing.clear();
         self.last_datagram_sent_ms = None;
+        self.reorder_delay_ms = NACK_MIN_REORDER_DELAY_MS;
         self.arq_seq = 0;
         self.arq_recovered_total = 0;
+    }
+
+    /// Set the reorder wait from the current packet arrival jitter, bounded to 20..=100 ms.
+    pub fn set_jitter_ms(&mut self, jitter_ms: u32) {
+        self.reorder_delay_ms =
+            u64::from(jitter_ms).clamp(NACK_MIN_REORDER_DELAY_MS, NACK_MAX_REORDER_DELAY_MS);
     }
 
     /// Total number of missing packets recovered after at least one NACK attempt.
@@ -105,6 +121,19 @@ impl VideoNackTracker {
         self.observe_seq(seq16, now_ms)
     }
 
+    /// Whether `pkg_seq` is a gap this tracker is still waiting for. A retransmission that
+    /// does not fill such a gap was not requested and can be ignored.
+    pub fn is_missing(&self, pkg_seq: u16) -> bool {
+        let Some(highest) = self.highest_seq else {
+            return false;
+        };
+        let back = (highest as u16).wrapping_sub(pkg_seq) as i16;
+        back > 0
+            && highest
+                .checked_sub(back as u64)
+                .is_some_and(|seq| self.missing.contains_key(&seq))
+    }
+
     /// Observe one 16-bit media packet sequence (`pkg_seq`) at `now_ms`.
     ///
     /// Returns `true` when this packet resolved a previously NACKed gap.
@@ -122,8 +151,7 @@ impl VideoNackTracker {
                 for missing_seq in (highest + 1)..new_highest {
                     self.missing.entry(missing_seq).or_insert(PendingNack {
                         first_missing_ms: now_ms,
-                        last_sent_ms: None,
-                        attempts: 0,
+                        nacked: false,
                     });
                 }
             } else if gap > NACK_MAX_GAP {
@@ -139,7 +167,7 @@ impl VideoNackTracker {
             let back = u64::from(delta.unsigned_abs());
             if let Some(seq) = highest.checked_sub(back) {
                 if let Some(entry) = self.missing.remove(&seq) {
-                    if entry.attempts > 0 {
+                    if entry.nacked {
                         self.arq_recovered_total = self.arq_recovered_total.saturating_add(1);
                         return true;
                     }
@@ -153,15 +181,16 @@ impl VideoNackTracker {
 
     /// Poll due `0x06` ARQ/NACK missing packet sequence ranges at `now_ms`.
     ///
-    /// Returns `Some((arq_seq, ranges))` ready for [`crate::calls::video_packet::encode_video_nack`],
-    /// enforcing reorder delay, retry backoff, maximum attempts and minimum datagram spacing.
+    /// Returns `Some((request_count, ranges))`: a wrapping local count of NACK datagrams (for
+    /// logs only; it is not sent) and ranges ready for [`crate::calls::video_packet::encode_video_nack`],
+    /// enforcing the reorder wait, one NACK per gap and minimum datagram spacing.
     pub fn poll_due_ranges(&mut self, now_ms: u64) -> Option<(u8, Vec<(u16, u16)>)> {
         let highest = self.highest_seq?;
-        // Keep attempt-exhausted entries until NACK_MAX_AGE_MS / NACK_MAX_HISTORY so a
-        // retransmission triggered by the final attempt still registers as ARQ-recovered.
+        // Keep entries until NACK_TRACK_MS / NACK_MAX_HISTORY so the retransmission they
+        // trigger still registers as ARQ-recovered.
         self.missing.retain(|&seq, entry| {
             highest.saturating_sub(seq) <= NACK_MAX_HISTORY
-                && now_ms.saturating_sub(entry.first_missing_ms) <= NACK_MAX_AGE_MS
+                && now_ms.saturating_sub(entry.first_missing_ms) <= NACK_TRACK_MS
         });
         if self.missing.is_empty() {
             return None;
@@ -176,17 +205,9 @@ impl VideoNackTracker {
             .missing
             .iter()
             .filter_map(|(&seq, entry)| {
-                if entry.attempts >= NACK_MAX_ATTEMPTS {
-                    return None;
-                }
-                let is_due = if entry.attempts == 0 {
-                    now_ms.saturating_sub(entry.first_missing_ms) >= NACK_REORDER_DELAY_MS
-                } else {
-                    entry
-                        .last_sent_ms
-                        .is_some_and(|t| now_ms.saturating_sub(t) >= NACK_RETRY_INTERVAL_MS)
-                };
-                is_due.then_some(seq)
+                let age = now_ms.saturating_sub(entry.first_missing_ms);
+                (!entry.nacked && age >= self.reorder_delay_ms && age <= NACK_MAX_AGE_MS)
+                    .then_some(seq)
             })
             .collect();
         if due_seqs.is_empty() {
@@ -221,8 +242,7 @@ impl VideoNackTracker {
         }
         for seq in sent_seqs {
             if let Some(entry) = self.missing.get_mut(&seq) {
-                entry.attempts = entry.attempts.saturating_add(1);
-                entry.last_sent_ms = Some(now_ms);
+                entry.nacked = true;
             }
         }
         self.arq_seq = self.arq_seq.wrapping_add(1);
@@ -321,6 +341,11 @@ impl VideoP2sAccumulator {
     /// Return `true` when at least one inbound video packet or frame arrived in the current window.
     pub fn has_active_window(&self) -> bool {
         self.rx_pkts_in_window > 0 || self.rx_frames_in_window > 0
+    }
+
+    /// Smoothed packet inter-arrival jitter in milliseconds.
+    pub fn jitter_ms(&self) -> u32 {
+        self.jitter_ms_x16 / 16
     }
 
     /// Record one parsed inbound RSM video packet at `now_ms`.
@@ -1020,12 +1045,12 @@ mod tests {
         // Anchor near 16-bit wraparound and skip 0xffff and 0x0000.
         assert!(!tracker.observe_seq(0xfffe, 0));
         assert!(!tracker.observe_seq(0x0001, 5));
-        assert!(tracker.poll_due_ranges(25).is_none());
+        assert!(tracker.poll_due_ranges(20).is_none());
 
-        // 0xffff arrives during reorder grace -> only [0x0000, 0x0001) is NACKed.
-        assert!(!tracker.observe_seq(0xffff, 28));
+        // 0xffff arrives during the reorder wait -> only [0x0000, 0x0001) is NACKed.
+        assert!(!tracker.observe_seq(0xffff, 22));
         let (seq1, ranges1) = tracker
-            .poll_due_ranges(45)
+            .poll_due_ranges(25)
             .expect("missing 0x0000 should trigger NACK after reorder delay");
         assert_eq!(seq1, 1);
         assert_eq!(ranges1, vec![(0x0000, 0x0001)]);
@@ -1035,20 +1060,53 @@ mod tests {
         assert_eq!(tracker.arq_recovered_total(), 1);
         assert!(tracker.poll_due_ranges(200).is_none());
 
-        // Contiguous range [0x0002, 0x0005) retries 3 times then stops emitting.
+        // Contiguous range [0x0002, 0x0005) is NACKed once and never repeated.
         assert!(!tracker.observe_seq(0x0005, 210));
-        let (_, r_a) = tracker.poll_due_ranges(250).expect("attempt 1");
+        let (_, r_a) = tracker.poll_due_ranges(250).expect("single NACK");
         assert_eq!(r_a, vec![(0x0002, 0x0005)]);
-        assert!(tracker.poll_due_ranges(270).is_none());
-        let (_, r_b) = tracker.poll_due_ranges(345).expect("attempt 2");
-        assert_eq!(r_b, vec![(0x0002, 0x0005)]);
-        let (_, r_c) = tracker.poll_due_ranges(440).expect("attempt 3");
-        assert_eq!(r_c, vec![(0x0002, 0x0005)]);
+        assert!(tracker.poll_due_ranges(345).is_none());
         assert!(tracker.poll_due_ranges(540).is_none());
     }
 
     #[test]
-    fn nack_tracker_emits_wraparound_range_and_counts_final_attempt_recovery() {
+    fn nack_tracker_reports_only_outstanding_gaps_as_missing() {
+        let mut tracker = VideoNackTracker::new();
+        assert!(!tracker.is_missing(5));
+        assert!(!tracker.observe_seq(0xfffe, 0));
+        assert!(!tracker.observe_seq(0x0002, 0));
+        for seq in [0xffff, 0x0000, 0x0001] {
+            assert!(tracker.is_missing(seq));
+        }
+        // Received, newer and long-past sequences are not missing.
+        assert!(!tracker.is_missing(0xfffe));
+        assert!(!tracker.is_missing(0x0002));
+        assert!(!tracker.is_missing(0x0003));
+        assert!(!tracker.is_missing(0x8000));
+        assert!(!tracker.observe_seq(0x0000, 10));
+        assert!(!tracker.is_missing(0x0000));
+    }
+
+    #[test]
+    fn nack_tracker_reorder_wait_follows_jitter_within_bounds() {
+        let mut tracker = VideoNackTracker::new();
+        tracker.set_jitter_ms(60);
+        assert!(!tracker.observe_seq(10, 0));
+        assert!(!tracker.observe_seq(12, 0));
+        assert!(tracker.poll_due_ranges(59).is_none());
+        assert_eq!(tracker.poll_due_ranges(60).unwrap().1, vec![(11, 12)]);
+
+        // Large jitter is capped at 100 ms, tiny jitter floored at 20 ms.
+        tracker.set_jitter_ms(500);
+        assert!(!tracker.observe_seq(14, 100));
+        assert!(tracker.poll_due_ranges(199).is_none());
+        assert_eq!(tracker.poll_due_ranges(200).unwrap().1, vec![(13, 14)]);
+        tracker.set_jitter_ms(1);
+        assert!(!tracker.observe_seq(16, 300));
+        assert_eq!(tracker.poll_due_ranges(320).unwrap().1, vec![(15, 16)]);
+    }
+
+    #[test]
+    fn nack_tracker_emits_wraparound_range_and_counts_late_recovery() {
         let mut tracker = VideoNackTracker::new();
         assert!(!tracker.observe_seq(0xfffe, 0));
         assert!(!tracker.observe_seq(0x0001, 5));
@@ -1057,11 +1115,8 @@ mod tests {
             .expect("wrap-straddling range [0xffff, 0x0001) should be emitted");
         assert_eq!(arq0, 1);
         assert_eq!(ranges0, vec![(0xffff, 0x0001)]);
-
-        assert_eq!(tracker.poll_due_ranges(140).unwrap().0, 2);
-        assert_eq!(tracker.poll_due_ranges(235).unwrap().0, 3);
-        // Keep tracked until NACK_MAX_AGE_MS even after 3rd attempt so late ARQ replies count.
-        assert!(tracker.poll_due_ranges(240).is_none());
+        assert!(tracker.poll_due_ranges(140).is_none());
+        // Keep tracked until NACK_TRACK_MS so a late retransmission still counts.
         assert!(tracker.observe_seq(0xffff, 260));
         assert!(tracker.observe_seq(0x0000, 265));
         assert_eq!(tracker.arq_recovered_total(), 2);

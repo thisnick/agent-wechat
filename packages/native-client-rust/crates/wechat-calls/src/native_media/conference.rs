@@ -378,7 +378,6 @@ pub fn run_conference_media_with_video<H: ConferenceMediaHost>(
                                     selected.own_member,
                                     member_id,
                                     stream_id,
-                                    arq_seq,
                                     &ranges,
                                 );
                                 if let Ok(datagram) =

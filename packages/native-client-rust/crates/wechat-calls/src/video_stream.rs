@@ -108,6 +108,28 @@ impl VideoStreamReceiver {
         raw: &[u8],
         now_ms: u64,
     ) -> VideoIngestBatch {
+        self.ingest_rsm_packet(channel_stream_id, raw, false, now_ms)
+    }
+
+    /// Ingest the original RSM packet carried by a `0x67` ARQ response (a retransmission
+    /// answering one of our NACKs). It joins its pending frame like any other packet and
+    /// counts toward the P2S `u16RecvArqRespPkgs` field.
+    pub(crate) fn ingest_rsm_arq_response(
+        &mut self,
+        channel_stream_id: u8,
+        raw: &[u8],
+        now_ms: u64,
+    ) -> VideoIngestBatch {
+        self.ingest_rsm_packet(channel_stream_id, raw, true, now_ms)
+    }
+
+    fn ingest_rsm_packet(
+        &mut self,
+        channel_stream_id: u8,
+        raw: &[u8],
+        arq_response: bool,
+        now_ms: u64,
+    ) -> VideoIngestBatch {
         let header = match parse_rsm_packet_header(raw) {
             Ok(h) => h,
             Err(err) => {
@@ -122,11 +144,27 @@ impl VideoStreamReceiver {
             }
         };
 
+        // Accept a retransmission only for a packet we are still missing: it was requested,
+        // and a replayed or duplicate one cannot reopen frames that already finished.
+        if arq_response
+            && !header
+                .pkg_seq
+                .is_some_and(|seq| self.nack_tracker.is_missing(seq))
+        {
+            return VideoIngestBatch {
+                header: Some(header),
+                frames: Vec::new(),
+                assembly_dropped: false,
+                ingest_error: None,
+            };
+        }
         self.keyframe_policy
             .observe_packet(channel_stream_id, &header);
-        let arq_recovered = self.nack_tracker.observe_header(&header, now_ms);
+        let gap_filled = self.nack_tracker.observe_header(&header, now_ms);
+        let arq_recovered = arq_response || gap_filled;
         self.telemetry
             .observe_packet(&header, raw.len(), arq_recovered, now_ms);
+        self.nack_tracker.set_jitter_ms(self.telemetry.jitter_ms());
 
         let mut frames = Vec::new();
         let mut assembly_dropped = false;
@@ -430,6 +468,40 @@ mod tests {
         assert_eq!(rx.last_total_pkg_seq(), None);
         assert!(!rx.is_keyframe_synced());
         assert!(!rx.has_active_video_window());
+    }
+
+    #[test]
+    fn arq_responses_fill_only_requested_gaps_and_count_once() {
+        let mut rx = VideoStreamReceiver::new(0);
+        let mut tx = RsmVideoPacketizer::new(7, 2)
+            .with_orientation(1)
+            .with_chunk_bytes(80)
+            .unwrap();
+        let mut p_frame = vec![0, 0, 0, 1, 0x41, 0x9a];
+        p_frame.extend((0..180u16).map(|i| (i & 0xff) as u8));
+        let pkts = tx
+            .packetize(VideoWireCodec::H264, &p_frame, 1_000, 15, 300)
+            .unwrap();
+        assert_eq!(pkts.len(), 3);
+
+        // An unrequested retransmission (nothing is missing yet) is ignored entirely.
+        let unrequested = rx.ingest_rsm_arq_response(2, &pkts[0], 10);
+        assert!(unrequested.frames.is_empty());
+
+        // Packet 1 is lost; once packet 2 reveals the gap, its retransmission completes the frame.
+        assert!(rx.ingest_rsm(2, &pkts[0], 20).frames.is_empty());
+        assert!(rx.ingest_rsm(2, &pkts[2], 25).frames.is_empty());
+        let recovered = rx.ingest_rsm_arq_response(2, &pkts[1], 80);
+        assert_eq!(recovered.frames.len(), 1);
+        assert!(!recovered.frames[0].prior_frames_dropped);
+
+        // A duplicate of the same retransmission no longer matches a gap and is ignored.
+        assert!(rx
+            .ingest_rsm_arq_response(2, &pkts[1], 90)
+            .frames
+            .is_empty());
+        let report = rx.snapshot_p2s(7, 1, 0x1d, 1_100);
+        assert_eq!(report.recv_arq_resp_pkgs, 1);
     }
 
     #[test]

@@ -225,6 +225,7 @@ impl ConferenceReceiver {
         self.report.authenticated_packets += 1;
         if matches!(opened.packed_kind & 0xf0, 0x20 | 0x60) {
             if let Ok(kind) = classify_video_channel_payload(opened.payload()) {
+                let arq_response = matches!(kind, VideoChannelPayload::ArqResponse(_));
                 match kind {
                     VideoChannelPayload::IRequest(req) => {
                         if std::env::var("WX_CALL_VIDEO_TRACE").as_deref() == Ok("1") {
@@ -258,15 +259,19 @@ impl ConferenceReceiver {
                         }
                         self.report.feedback_packets += 1;
                     }
-                    VideoChannelPayload::RsmVideo(raw) => {
+                    VideoChannelPayload::RsmVideo(raw) | VideoChannelPayload::ArqResponse(raw) => {
                         if (opened.packed_kind & 0xf0) != 0x20 {
                             self.report.control_packets += 1;
                             return Ok(out);
                         }
                         self.anchor_video_clock(elapsed_ms);
-                        let batch =
+                        let stream_id = opened.packed_kind & 0x0f;
+                        let batch = if arq_response {
                             self.video
-                                .ingest_rsm(opened.packed_kind & 0x0f, raw, elapsed_ms);
+                                .ingest_rsm_arq_response(stream_id, raw, elapsed_ms)
+                        } else {
+                            self.video.ingest_rsm(stream_id, raw, elapsed_ms)
+                        };
                         out.need_keyframe = batch.assembly_dropped;
                         self.ready_video.extend(batch.frames);
                         while self.ready_video.len() > MAX_READY_VIDEO_FRAMES {
