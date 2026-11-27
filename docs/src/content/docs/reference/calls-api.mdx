@@ -752,9 +752,12 @@ answered, `rejected`, `busy`, `no_response`, or `left`), using the same
 }
 ```
 
-Repeated unchanged status codes produce no event. Clients should ignore unknown
-future server event `type` names on both the control and media sockets after
-handshake completion so additive server messages do not disconnect active calls.
+Repeated unchanged status codes produce no event. Upgrade call clients together
+with the daemon when enabling a build that emits `call.peer_status`, as older
+protocol 3 clients close the socket on unrecognized event types. Upgraded
+clients ignore unknown future server event `type` names on both the control and
+media sockets after handshake completion so additive server messages do not
+disconnect active calls.
 
 ### Track generations and errors
 

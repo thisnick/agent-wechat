@@ -248,7 +248,7 @@ wx calls session status --session | takes <SESSION>, default default | Named ses
 wx calls session stop | - | Stop a running headless call session cleanly
 wx calls session stop --dir | takes <DIR> | Explicit private session directory to stop instead of resolving by name
 wx calls session stop --no-hangup | switch | Disconnect without first hanging up any active owned call
-wx calls session stop --timeout | takes <TIMEOUT>, default 15 | Seconds to wait for the session process to exit (1 to 120)
+wx calls session stop --timeout | takes <TIMEOUT>, default 65 | Seconds to wait for the session process to exit (1 to 120)
 wx calls session stop <NAME> | position 1, default default | Session name to stop (defaults to "default")
 wx calls session unmute | - | Unmute the local microphone and notify the peer or conference
 wx calls session unmute --dir | takes <DIR> | Explicit private session directory instead of the default runtime directory

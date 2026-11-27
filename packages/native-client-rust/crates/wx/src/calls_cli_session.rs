@@ -156,7 +156,7 @@ pub(crate) enum SessionCommand {
         #[arg(long)]
         no_hangup: bool,
         /// Seconds to wait for the session process to exit (1 to 120).
-        #[arg(long, default_value_t = 15, value_parser = clap::value_parser!(u64).range(1..=120))]
+        #[arg(long, default_value_t = 65, value_parser = clap::value_parser!(u64).range(1..=120))]
         timeout: u64,
     },
     /// Show the session's current call state, offers, peer status, controls and live media metrics.
@@ -1528,14 +1528,17 @@ async fn stop_session(session_dir: &Path, hangup: bool, wait_timeout: Duration) 
             "wasRunning": false,
         }));
     }
+    let deadline = Instant::now() + wait_timeout;
+    let ipc_wait = wait_timeout
+        .saturating_sub(Duration::from_secs(2))
+        .max(Duration::from_secs(1));
     let reply = ipc_call_dir(
         session_dir,
         json!({ "op": "stop", "hangup": hangup }),
-        wait_timeout.min(Duration::from_secs(15)),
+        ipc_wait,
     )
     .await
     .ok();
-    let deadline = Instant::now() + wait_timeout;
     let mut signaled = false;
     while session_process_alive(&meta) {
         if Instant::now() >= deadline {
@@ -1631,15 +1634,17 @@ async fn ipc_follow_events(session_dir: &Path, after: u64) -> Result<()> {
         writer.write_all(payload.as_bytes()).await?;
         writer.flush().await?;
         let mut lines = BufReader::new(reader).lines();
-        loop {
+        let res = loop {
             tokio::select! {
-                _ = tokio::signal::ctrl_c() => return Ok(()),
+                _ = tokio::signal::ctrl_c() => break Ok(()),
                 line = lines.next_line() => {
-                    let Some(line) = line? else { return Ok(()); };
+                    let Some(line) = line? else { break Ok(()); };
                     println!("{line}");
                 }
             }
-        }
+        };
+        drop(writer);
+        res
     }
     #[cfg(windows)]
     {
@@ -1649,15 +1654,17 @@ async fn ipc_follow_events(session_dir: &Path, after: u64) -> Result<()> {
         writer.write_all(payload.as_bytes()).await?;
         writer.flush().await?;
         let mut lines = BufReader::new(reader).lines();
-        loop {
+        let res = loop {
             tokio::select! {
-                _ = tokio::signal::ctrl_c() => return Ok(()),
+                _ = tokio::signal::ctrl_c() => break Ok(()),
                 line = lines.next_line() => {
-                    let Some(line) = line? else { return Ok(()); };
+                    let Some(line) = line? else { break Ok(()); };
                     println!("{line}");
                 }
             }
-        }
+        };
+        drop(writer);
+        res
     }
 }
 
@@ -1679,10 +1686,12 @@ async fn ipc_roundtrip(
         writer.write_all(payload.as_bytes()).await?;
         writer.flush().await?;
         let mut lines = BufReader::new(reader).lines();
-        lines
+        let res = lines
             .next_line()
             .await?
-            .context("call session closed IPC connection without a reply")
+            .context("call session closed IPC connection without a reply");
+        drop(writer);
+        res
     }
     #[cfg(windows)]
     {
@@ -1693,10 +1702,12 @@ async fn ipc_roundtrip(
         writer.write_all(payload.as_bytes()).await?;
         writer.flush().await?;
         let mut lines = BufReader::new(reader).lines();
-        lines
+        let res = lines
             .next_line()
             .await?
-            .context("call session closed IPC connection without a reply")
+            .context("call session closed IPC connection without a reply");
+        drop(writer);
+        res
     }
 }
 
@@ -5327,6 +5338,7 @@ async fn handle_ipc_stream<R, W>(
     bus.touch_activity();
     let req_id = req.get("id").cloned();
     let op = req.get("op").and_then(Value::as_str).unwrap_or("");
+    let mut peer_reader = lines.into_inner().into_inner().into_inner();
     if op == "events.follow" {
         let _waiter = bus.enter_waiter();
         let after = req.get("after").and_then(Value::as_u64).unwrap_or(0);
@@ -5342,26 +5354,17 @@ async fn handle_ipc_stream<R, W>(
             }
         }
         let _ = writer.flush().await;
+        let mut eof_buf = [0u8; 64];
         loop {
-            match rx.recv().await {
-                Ok(ev) => {
-                    let seq = ev["seq"].as_u64().unwrap_or(0);
-                    if seq <= last_sent {
-                        continue;
-                    }
-                    last_sent = seq;
-                    let stopped = ev["type"].as_str() == Some("session.stopped");
-                    let text = format!("{}\n", serde_json::to_string(&ev).unwrap_or_default());
-                    if writer.write_all(text.as_bytes()).await.is_err() {
-                        return;
-                    }
-                    let _ = writer.flush().await;
-                    if stopped {
-                        return;
+            tokio::select! {
+                read = peer_reader.read(&mut eof_buf) => {
+                    match read {
+                        Ok(0) | Err(_) => return,
+                        Ok(_) => {}
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    for ev in bus.events_after(last_sent, EVENT_BUFFER_CAP) {
+                ev = rx.recv() => match ev {
+                    Ok(ev) => {
                         let seq = ev["seq"].as_u64().unwrap_or(0);
                         if seq <= last_sent {
                             continue;
@@ -5377,8 +5380,26 @@ async fn handle_ipc_stream<R, W>(
                             return;
                         }
                     }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        for ev in bus.events_after(last_sent, EVENT_BUFFER_CAP) {
+                            let seq = ev["seq"].as_u64().unwrap_or(0);
+                            if seq <= last_sent {
+                                continue;
+                            }
+                            last_sent = seq;
+                            let stopped = ev["type"].as_str() == Some("session.stopped");
+                            let text = format!("{}\n", serde_json::to_string(&ev).unwrap_or_default());
+                            if writer.write_all(text.as_bytes()).await.is_err() {
+                                return;
+                            }
+                            let _ = writer.flush().await;
+                            if stopped {
+                                return;
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return,
                 }
-                Err(broadcast::error::RecvError::Closed) => return,
             }
         }
     }
@@ -5396,7 +5417,20 @@ async fn handle_ipc_stream<R, W>(
             "events": bus.events_after(after, limit),
         }))
     } else if op == "wait" {
-        run_wait_request(&bus, &req).await
+        let mut eof_buf = [0u8; 64];
+        let wait_fut = run_wait_request(&bus, &req);
+        tokio::pin!(wait_fut);
+        loop {
+            tokio::select! {
+                res = &mut wait_fut => break res,
+                read = peer_reader.read(&mut eof_buf) => {
+                    match read {
+                        Ok(0) | Err(_) => return,
+                        Ok(_) => {}
+                    }
+                }
+            }
+        }
     } else {
         let (tx, rx) = oneshot::channel();
         let flushed = if op == "stop" {
@@ -6770,5 +6804,46 @@ mod tests {
         );
         let rotated_text = fs::read_to_string(&rotated).unwrap();
         assert!(!rotated_text.contains("first-run"));
+    }
+
+    #[tokio::test]
+    async fn disconnected_follower_and_waiter_release_waiter_guard_immediately() {
+        for req_line in [
+            "{\"op\":\"events.follow\",\"after\":0}\n",
+            "{\"op\":\"wait\",\"after\":0,\"timeout\":60,\"events\":[\"call.offered\"]}\n",
+        ] {
+            let bus = SharedEventBus::new(None, None).unwrap();
+            let (cmd_tx, _cmd_rx) = mpsc::channel(4);
+            let (mut client_sock, server_sock) = tokio::io::duplex(4096);
+            let bus_h = bus.clone();
+            let handler = tokio::spawn(async move {
+                let (r, w) = tokio::io::split(server_sock);
+                handle_ipc_stream(r, w, bus_h, cmd_tx, None).await;
+            });
+
+            client_sock.write_all(req_line.as_bytes()).await.unwrap();
+            client_sock.flush().await.unwrap();
+            for _ in 0..40 {
+                if bus.has_active_waiters() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(
+                bus.has_active_waiters(),
+                "handler should hold active waiter for {req_line}"
+            );
+
+            // Simulate Ctrl-C / peer disconnect with no events flowing.
+            drop(client_sock);
+            tokio::time::timeout(Duration::from_secs(2), handler)
+                .await
+                .expect("handler must exit promptly on peer disconnect")
+                .unwrap();
+            assert!(
+                !bus.has_active_waiters(),
+                "WaiterGuard must be released on peer disconnect for {req_line}"
+            );
+        }
     }
 }
