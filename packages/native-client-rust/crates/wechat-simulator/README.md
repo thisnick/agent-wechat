@@ -80,6 +80,7 @@ Representative JSON control bodies:
 {"op":"advertise_image","account":"personal","peer":"sim_mei"}
 {"op":"receive_media","account":"personal","peer":"sim_mei","kind":"sticker"}
 {"op":"receive_media","account":"personal","peer":"<group room ID>","sender":"sim_daniel","kind":"image"}
+{"op":"seed_groups","account":"personal","count":100}
 ```
 
 Account IDs contain lowercase ASCII letters, digits, underscores or hyphens, up

@@ -254,3 +254,40 @@ fn logout_generation_change_prevents_source_replay() {
     assert_eq!(core.store.incoming_group_refreshes("one").unwrap().len(), 1);
     assert_eq!(core.group_info("one", ROOM).unwrap()["name"], "Phone title");
 }
+
+#[tokio::test]
+async fn early_wake_in_polling_mode_refreshes_groups_without_sending_heartbeat() {
+    struct NoHeartbeat;
+    impl crate::upstream::Upstream for NoHeartbeat {
+        fn kind(&self) -> crate::upstream::UpstreamKind {
+            crate::upstream::UpstreamKind::Native
+        }
+        fn heartbeat(
+            &self,
+            _: &mut AccountState,
+            _: &[u8],
+        ) -> Result<wechat_protocol::wire::Heartbeat> {
+            bail!("unexpected heartbeat on early wake")
+        }
+    }
+
+    let (_temp, mut core) = fixture();
+    Arc::get_mut(&mut Arc::get_mut(&mut core).unwrap().shared)
+        .unwrap()
+        .upstream = Arc::new(NoHeartbeat);
+    let _source = stage_source(&core, false, 0, false);
+    assert!(!core.push_connected("one"));
+
+    let outcome = core.tick_with_poll_heartbeat("one", false).await.unwrap();
+    assert!(!outcome.push_connected);
+    assert_eq!(outcome.heartbeat_interval, None);
+    assert!(core
+        .store
+        .incoming_group_refreshes("one")
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        core.group_info("one", ROOM).unwrap()["name"],
+        "Fresh phone title"
+    );
+}

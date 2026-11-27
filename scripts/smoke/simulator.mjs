@@ -334,6 +334,52 @@ async function verifyQuoteMentionRestart(journey) {
   assert.equal(remoteAccount.acceptedMediaSends, 0);
 }
 
+// Seeds many groups before login and checks that background member-list fills
+// complete well below the old 1-group-per-5s cadence.
+async function bulkGroupFillJourney() {
+  const account = "group_fill";
+  const count = 20;
+  const seeded = await control({ op: "seed_groups", account, count });
+  assert.equal(seeded.groups.length, count);
+  await a.createAccount(account);
+  const operation = await a.login(account, { strategy: "qr", qrRefresh: { mode: "manual", maxRefreshes: 0 } }, `login-${account}`);
+  await waitFor(`${account} QR ready`, async () => (await a.operation(account, operation.id)).state === "awaiting_scan");
+  await control({ op: "login", account, status: "approved" });
+  await waitFor(`${account} signed in`, async () => {
+    const current = await a.operation(account, operation.id);
+    if (["failed", "expired", "rejected"].includes(current.state)) throw new Error(JSON.stringify(current));
+    return current.state === "succeeded";
+  }, 60000);
+  const loginAt = Date.now();
+  await waitFor(`${account} push connected`, async () => (await a.account(account)).incomingTransport === "simulator_push", 120000);
+  const pushAt = Date.now();
+  const remaining = new Set(seeded.groups);
+  let cursor = "0";
+  // Generous limit after catch-up sync to avoid CI flakes while still catching
+  // a regression to 1 group per 5s (~90-100s+ of pure tick sleeps for 20 groups).
+  await waitFor(`all ${count} seeded groups refreshed`, async () => {
+    const page = await a.events(account, cursor, 200);
+    for (const event of page.items) {
+      cursor = event.cursor;
+      if (event.kind === "group.updated" && event.data?.source === "remote_sync_refresh") {
+        remaining.delete(event.data.groupId);
+      }
+    }
+    return remaining.size === 0;
+  }, 60000);
+  for (const room of seeded.groups) {
+    const page = await a.groupMembers(account, room);
+    const ids = page.items.map(member => member.id);
+    assert.equal(ids.length, 3, `${room}: expected 3 members`);
+    for (const expected of ["sim_daniel", "sim_mei", `sim_${account}`]) {
+      assert.ok(ids.includes(expected), `${room}: missing ${expected}`);
+    }
+  }
+  console.error(`${account} filled ${count} group member lists in ${((Date.now() - loginAt) / 1000).toFixed(2)}s (${((Date.now() - pushAt) / 1000).toFixed(2)}s after push connect)`);
+  const logout = await a.logout(account, `logout-${account}`);
+  await waitFor(`${account} logout committed`, async () => (await a.operation(account, logout.id)).state === "succeeded");
+}
+
 try {
   remote = await start("upstream");
   controlToken = (await readFile(remote.ready.controlTokenFile, "utf8")).trim();
@@ -395,6 +441,7 @@ try {
 
   await pinJourney([streamA, streamB]);
   const quoteMentionReceipts = await quoteMentionJourney();
+  await bulkGroupFillJourney();
 
   const beforeInbound = streamA.events.at(-1).cursor;
   await control({ op: "inbound", account: "personal", peer: "sim_mei", body: "Incoming through real sync" });
@@ -620,7 +667,7 @@ try {
   if (process.platform !== "win32") assert.equal(launcher.child.exitCode, 0);
   await assert.rejects(stat(launcher.ready.dataDir), error => error.code === "ENOENT");
   await assert.rejects(fetch(launcherRemote));
-  console.log(JSON.stringify({ ok: true, checks: ["real QR login and profile projection", "two SDK event consumers", "actual wx CLI status and message fetch", "direct/group CLI and API pin/unpin with independent remote refresh", "group owner capability and denied all-members send without an intent", "pin/mute independence and keyed replay", "queued/accepted/uncertain sends", "quoted SDK and CLI member/Everyone mentions, inline positions, lost ACKs and restart recovery", "local_send without default echo", "fault-injected echo deduplication", "synthetic phone self-send and File Transfer", "50 MP image preparation, cached copies and idempotent replay", "legacy MOV normal/original CLI/API sends, exact original download and idempotent replay", "incoming/live and catchup origins", "inbound push", "SSE resume", "restart and catch-up", "account isolation", "revocation/logout", "virtual clock expiry", "advertised media stays unavailable", "unhandled status controls do not block live messages", "unknown sync retention", "launcher startup/shutdown and cleanup"] }));
+  console.log(JSON.stringify({ ok: true, checks: ["real QR login and profile projection", "two SDK event consumers", "actual wx CLI status and message fetch", "direct/group CLI and API pin/unpin with independent remote refresh", "group owner capability and denied all-members send without an intent", "pin/mute independence and keyed replay", "queued/accepted/uncertain sends", "quoted SDK and CLI member/Everyone mentions, inline positions, lost ACKs and restart recovery", "20-group member-list background fill", "local_send without default echo", "fault-injected echo deduplication", "synthetic phone self-send and File Transfer", "50 MP image preparation, cached copies and idempotent replay", "legacy MOV normal/original CLI/API sends, exact original download and idempotent replay", "incoming/live and catchup origins", "inbound push", "SSE resume", "restart and catch-up", "account isolation", "revocation/logout", "virtual clock expiry", "advertised media stays unavailable", "unhandled status controls do not block live messages", "unknown sync retention", "launcher startup/shutdown and cleanup"] }));
 } finally {
   for (const subscription of subscriptions) subscription.controller.abort();
   await Promise.allSettled(subscriptions.map(subscription => subscription.done));

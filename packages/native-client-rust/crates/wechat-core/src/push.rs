@@ -41,15 +41,23 @@ impl Core {
         expected: &[u8],
         fence: &SessionFence,
     ) -> Result<()> {
-        self.push_state(account, fence)?;
+        let current = self.push_state(account, fence)?;
         self.check_state_profile(account, state)?;
         if let Some(accepted) = self.persisted_native_state(account, state)? {
             let _ = self.project_saved_login(account, &accepted);
             return Ok(());
         }
-        let sealed = self
-            .vault
-            .seal(account, "account-state", &serde_json::to_vec(state)?)?;
+        // Concurrent requests may reseal identical credentials with a new nonce.
+        // Preserve that stored record when the returned state already matches it.
+        // A changed cookie or credential still requires the original CAS below.
+        let current_bytes = zeroize::Zeroizing::new(serde_json::to_vec(&current)?);
+        let returned_bytes = zeroize::Zeroizing::new(serde_json::to_vec(state)?);
+        if current_bytes.as_slice() == returned_bytes.as_slice()
+            && self.store.runtime(account, "account-state")?.as_deref() != Some(expected)
+        {
+            return Ok(());
+        }
+        let sealed = self.vault.seal(account, "account-state", &returned_bytes)?;
         self.store.save_push_authorization(
             account,
             &sealed,
@@ -140,6 +148,9 @@ impl Core {
             .await?;
         self.drain_contact_sync(account, &fence).await?;
         ready.store(true, Ordering::Release);
+        // Exit any longer polling sleep so push-connected housekeeping and
+        // backed-off background work resume on the shorter push cadence.
+        self.wake_account(account);
         // The official client sends sticker pieces on the long link while it is
         // connected. This session runs them between polls until it ends.
         let long_link = connection
@@ -414,5 +425,37 @@ mod tests {
             }),
             Duration::from_secs(149)
         );
+    }
+    #[test]
+    fn save_push_state_preserves_concurrent_identical_reseal_but_rejects_stale_cookie_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&tmp.path().join("data")).unwrap());
+        store.create_account("one").unwrap();
+        let core = Core::new(store.clone(), None).unwrap();
+        let state = super::super::tests::state();
+        core.save_state("one", &state).unwrap();
+        store.put_runtime("one", "desired", b"connected").unwrap();
+        store
+            .mark_validated_if_active("one", &core.ownership_generation)
+            .unwrap();
+        let fence = SessionFence {
+            authorization: authorization(&state).unwrap(),
+            logout_epoch: None,
+        };
+        let expected = store.runtime("one", "account-state").unwrap().unwrap();
+        // Reseal the exact same credentials with a fresh nonce, as another
+        // concurrent request may do while push I/O is in flight.
+        core.save_state("one", &state).unwrap();
+        let resealed = store.runtime("one", "account-state").unwrap().unwrap();
+        assert_ne!(resealed, expected);
+        assert!(core
+            .save_push_state("one", &state, &expected, &fence)
+            .is_ok());
+        // A mutated cookie still requires the original CAS and fails against a stale expected record.
+        let mut rotated = state.clone();
+        rotated.cookie = vec![9, 8, 7];
+        assert!(core
+            .save_push_state("one", &rotated, &expected, &fence)
+            .is_err());
     }
 }

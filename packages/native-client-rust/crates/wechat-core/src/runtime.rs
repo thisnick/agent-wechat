@@ -107,6 +107,12 @@ pub(crate) fn authorization(state: &AccountState) -> Result<[u8; 32]> {
     .into())
 }
 
+struct TickOutcome {
+    push_connected: bool,
+    heartbeat_interval: Option<u64>,
+    retry_delay: Option<u64>,
+}
+
 pub struct Core {
     pub store: Arc<Store>,
     pub(crate) shared: Arc<CoreShared>,
@@ -2389,6 +2395,7 @@ impl Core {
             let waker = self.account_waker(&account.id);
             tokio::spawn(async move {
                 let mut delay = 1;
+                let mut next_poll_heartbeat: Option<Instant> = None;
                 loop {
                     tokio::select! {
                         _ = tokio::time::sleep(Duration::from_secs(delay)) => {}
@@ -2415,12 +2422,41 @@ impl Core {
                             .as_deref()
                             != Some(core.ownership_generation.as_bytes());
                     if desired.as_deref() != Some(b"connected") || auto_disabled {
+                        next_poll_heartbeat = None;
                         delay = 2;
                         continue;
                     }
                     let _ = core.recover_read_projections(&account.id).await;
-                    match core.tick(&account.id).await {
-                        Ok(interval) => delay = interval,
+                    let allow_poll_heartbeat =
+                        next_poll_heartbeat.is_none_or(|deadline| Instant::now() >= deadline);
+                    match core
+                        .tick_with_poll_heartbeat(&account.id, allow_poll_heartbeat)
+                        .await
+                    {
+                        Ok(outcome) => {
+                            if outcome.push_connected {
+                                next_poll_heartbeat = None;
+                                delay = outcome.retry_delay.map_or(5, |retry| retry.min(5));
+                            } else if let Some(interval) = outcome.heartbeat_interval {
+                                next_poll_heartbeat =
+                                    Some(Instant::now() + Duration::from_secs(interval));
+                                delay = outcome
+                                    .retry_delay
+                                    .map_or(interval, |retry| retry.min(interval));
+                            } else {
+                                let remaining = next_poll_heartbeat
+                                    .map(|deadline| {
+                                        deadline
+                                            .saturating_duration_since(Instant::now())
+                                            .as_secs()
+                                            .clamp(1, 30)
+                                    })
+                                    .unwrap_or(5);
+                                delay = outcome
+                                    .retry_delay
+                                    .map_or(remaining, |retry| retry.min(remaining));
+                            }
+                        }
                         Err(error) => {
                             let code = if authentication_required(&error) {
                                 "auth_required"
@@ -2433,6 +2469,7 @@ impl Core {
                                 "account.connection",
                                 &json!({"state":code}),
                             );
+                            next_poll_heartbeat = None;
                             delay = (delay * 2).clamp(5, 60);
                         }
                     }
@@ -2453,17 +2490,39 @@ impl Core {
     pub(crate) fn wake_account(&self, account: &str) {
         self.account_waker(account).notify_one();
     }
+    #[cfg(test)]
     async fn tick(self: &Arc<Self>, account: &str) -> Result<u64> {
+        let outcome = self.tick_with_poll_heartbeat(account, true).await?;
+        Ok(outcome
+            .heartbeat_interval
+            .or(outcome.retry_delay)
+            .unwrap_or(5))
+    }
+    async fn tick_with_poll_heartbeat(
+        self: &Arc<Self>,
+        account: &str,
+        allow_poll_heartbeat: bool,
+    ) -> Result<TickOutcome> {
         self.session_request(account, "polling", |fence| {
-            self.tick_session(account, fence)
+            self.tick_session(account, fence, allow_poll_heartbeat)
         })
         .await
     }
-    async fn tick_session(self: &Arc<Self>, account: &str, fence: SessionFence) -> Result<u64> {
-        if self.push_connected(account) {
-            // The persistent connection owns account heartbeats and incoming
-            // sync while healthy. Keep local recovery and queued sends moving;
-            // a failed push connection immediately restores bounded polling.
+    async fn tick_session(
+        self: &Arc<Self>,
+        account: &str,
+        fence: SessionFence,
+        allow_poll_heartbeat: bool,
+    ) -> Result<TickOutcome> {
+        // The persistent push connection owns account heartbeats and incoming
+        // sync while healthy. Recheck push_connected after acquiring the replay
+        // lock and running local housekeeping so a tick that waited for initial
+        // push catch-up never sends a stale polling heartbeat after push is up.
+        // Holding `replay` across the bounded `GROUPS_PER_PASS` batch keeps
+        // source-batch resumption serialized with live sync while FIFO mutex
+        // ordering lets live sync run between passes and `permit.transfer`
+        // keeps reads, sends and disconnect unblocked around every RPC.
+        let (push_connected, retry_delay, heartbeat) = {
             let replay = self.lock_sync_replay(account).await?;
             let guard = self.lock_account(account).await?;
             let core = self.clone();
@@ -2475,7 +2534,14 @@ impl Core {
                 };
                 core.session_state(&owned, &fence)?;
                 let _ = core.recover_text_projections(&owned)?;
-                if core.refresh_incoming_groups(&owned, true)? > 0 {
+                if core.refresh_incoming_groups_with_permit(
+                    &owned,
+                    true,
+                    Some(&mut permit),
+                    Some(&fence),
+                    Some(b"connected"),
+                )? > 0
+                {
                     core.project_pending_with_yield(
                         &owned,
                         false,
@@ -2486,8 +2552,13 @@ impl Core {
                 }
                 core.refresh_contact_remarks(&owned, true)?;
                 if core.store.pending_sync_count(&owned)? == 0 {
-                    core.publish_profile_checkpoint(&owned)?;
+                    if core.push_connected(&owned) {
+                        core.publish_profile_checkpoint(&owned)?;
+                    } else {
+                        let _ = core.publish_profile_checkpoint(&owned);
+                    }
                 }
+                // BigXml expansion and heartbeat do not advance the replay journal; release the replay lock before I/O.
                 drop(replay);
                 if core.refresh_big_xml_with_permit(
                     &owned,
@@ -2498,103 +2569,81 @@ impl Core {
                 )? > 0
                     && core.store.pending_sync_count(&owned)? == 0
                 {
-                    core.publish_profile_checkpoint(&owned)?;
+                    if core.push_connected(&owned) {
+                        core.publish_profile_checkpoint(&owned)?;
+                    } else {
+                        let _ = core.publish_profile_checkpoint(&owned);
+                    }
                 }
                 let _ = core.settle_stale_streaming_voices(&owned, chrono::Utc::now().timestamp());
-                Ok(())
-            })
-            .await?;
-            self.drain_queued_sends(account).await?;
-            return Ok(5);
-        }
-        let heartbeat = {
-            let replay = self.lock_sync_replay(account).await?;
-            let guard = self.lock_account(account).await?;
-            let core = self.clone();
-            let account = account.to_string();
-            blocking(move || {
-                let mut permit = crate::account_network::AccountNetworkPermit {
-                    guard: Some(guard),
-                    runtime: tokio::runtime::Handle::current(),
-                };
-                core.session_state(&account, &fence)?;
-                let _ = core.recover_text_projections(&account)?;
-                if core.refresh_incoming_groups(&account, true)? > 0 {
-                    core.project_pending_with_yield(
-                        &account,
-                        false,
-                        Some(&mut || {
-                            core.yield_sync_writer(
-                                &account,
-                                &mut permit,
-                                &fence,
-                                Some(b"connected"),
-                            )
-                        }),
-                    )?;
+                let retry_delay = core.next_incoming_group_retry_delay(&owned, 30)?;
+                if core.push_connected(&owned) {
+                    return Ok((true, retry_delay, None));
                 }
-                core.refresh_contact_remarks(&account, true)?;
-                if core.store.pending_sync_count(&account)? == 0 {
-                    let _ = core.publish_profile_checkpoint(&account);
+                if !allow_poll_heartbeat {
+                    return Ok((false, retry_delay, None));
                 }
-                // BigXml expansion and heartbeat do not advance the replay journal; release the replay lock before I/O.
-                drop(replay);
-                if core.refresh_big_xml_with_permit(
-                    &account,
-                    true,
-                    Some(&mut permit),
-                    Some(&fence),
-                    Some(b"connected"),
-                )? > 0
-                    && core.store.pending_sync_count(&account)? == 0
-                {
-                    let _ = core.publish_profile_checkpoint(&account);
-                }
-                let _ =
-                    core.settle_stale_streaming_voices(&account, chrono::Utc::now().timestamp());
                 let expected = core
                     .store
-                    .runtime(&account, "account-state")?
+                    .runtime(&owned, "account-state")?
                     .context("auth_required")?;
-                let mut state = core.session_state(&account, &fence)?;
-                let cursor = core.cursor(&account)?;
-                let native = core.account_upstream(&account)?;
+                let mut state = core.session_state(&owned, &fence)?;
+                let cursor = core.cursor(&owned)?;
+                let native = core.account_upstream(&owned)?;
                 let beat =
-                    permit.transfer(&core, &account, || native.heartbeat(&mut state, &cursor))?;
-                core.save_network_state(&account, &state, &expected, &fence, Some(b"connected"))?;
+                    permit.transfer(&core, &owned, || native.heartbeat(&mut state, &cursor))?;
+                core.save_network_state(&owned, &state, &expected, &fence, Some(b"connected"))?;
                 core.store.put_runtime(
-                    &account,
+                    &owned,
                     "validated-generation",
                     core.ownership_generation.as_bytes(),
                 )?;
 
-                core.bind_call_authorization(&account, &state)?;
-                Ok(beat)
+                core.bind_call_authorization(&owned, &state)?;
+                Ok((false, retry_delay, Some(beat)))
             })
             .await?
         };
-        if self.stopping.load(Ordering::SeqCst)
-            || self.store.runtime(account, "desired")?.as_deref() != Some(b"connected")
-        {
-            return Ok(5);
-        }
-        if heartbeat.selector & 7 != 0
-            || self.store.runtime(account, "history-caught-up")?.is_none()
-        {
-            for _ in 0..8 {
-                if self.stopping.load(Ordering::SeqCst)
-                    || self.store.runtime(account, "desired")?.as_deref() != Some(b"connected")
-                {
-                    break;
-                }
-                let result = self.sync(account).await?;
-                if result["continuation"] != true {
-                    break;
+        if let Some(heartbeat) = heartbeat {
+            if self.stopping.load(Ordering::SeqCst)
+                || self.store.runtime(account, "desired")?.as_deref() != Some(b"connected")
+            {
+                return Ok(TickOutcome {
+                    push_connected: false,
+                    heartbeat_interval: None,
+                    retry_delay,
+                });
+            }
+            if !self.push_connected(account)
+                && (heartbeat.selector & 7 != 0
+                    || self.store.runtime(account, "history-caught-up")?.is_none())
+            {
+                for _ in 0..8 {
+                    if self.stopping.load(Ordering::SeqCst)
+                        || self.store.runtime(account, "desired")?.as_deref() != Some(b"connected")
+                        || self.push_connected(account)
+                    {
+                        break;
+                    }
+                    let result = self.sync(account).await?;
+                    if result["continuation"] != true {
+                        break;
+                    }
                 }
             }
+            self.drain_queued_sends(account).await?;
+            return Ok(TickOutcome {
+                push_connected: self.push_connected(account),
+                heartbeat_interval: Some((heartbeat.next_interval as u64).clamp(5, 30)),
+                retry_delay,
+            });
         }
         self.drain_queued_sends(account).await?;
-        Ok((heartbeat.next_interval as u64).clamp(5, 30))
+        Ok(TickOutcome {
+            push_connected,
+            heartbeat_interval: None,
+            retry_delay,
+        })
     }
     async fn drain_queued_sends(self: &Arc<Self>, account: &str) -> Result<()> {
         for id in self.store.queued_sends(account)? {
