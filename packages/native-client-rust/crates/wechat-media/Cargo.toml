@@ -1,6 +1,6 @@
 [package]
 name = "wechat-media"
-version = "3.2.0"
+version = "3.2.1"
 edition.workspace = true
 license.workspace = true
 publish = ["crates-io"]
@@ -21,7 +21,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 jpeg-decoder = { version = "0.3.2", default-features = false }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-wechat-platform = { path = "../wechat-platform", version = "=3.2.0" }
+wechat-platform = { path = "../wechat-platform", version = "=3.2.1" }
 serde_json.workspace = true
 zip = { version = "9.5.1", default-features = false, features = ["deflate"] }
 md-5 = "0.10"

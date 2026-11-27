@@ -21,7 +21,7 @@ dependencies = [
 
 [[package]]
 name = "agent-wechat-desktop"
-version = "3.2.0"
+version = "3.2.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6118,7 +6118,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-audio"
-version = "3.2.0"
+version = "3.2.1"
 dependencies = [
  "coreaudio-rs",
  "coreaudio-sys",
@@ -6130,7 +6130,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-call-client"
-version = "3.2.0"
+version = "3.2.1"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -6148,7 +6148,7 @@ dependencies = [
 
 [[package]]
 name = "wechat-call-contracts"
-version = "3.2.0"
+version = "3.2.1"
 dependencies = [
  "schemars 1.2.3",
  "serde",
@@ -6158,11 +6158,11 @@ dependencies = [
 
 [[package]]
 name = "wechat-calls"
-version = "3.2.0"
+version = "3.2.1"
 
 [[package]]
 name = "wechat-platform"
-version = "3.2.0"
+version = "3.2.1"
 dependencies = [
  "libc",
  "tempfile",
