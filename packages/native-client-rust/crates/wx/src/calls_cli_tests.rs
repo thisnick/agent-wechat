@@ -87,7 +87,7 @@ pub(super) async fn assert_client_hello(
     };
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&text).unwrap(),
-        serde_json::json!({"type":"call.hello","supportedProtocolVersions":[4,3]})
+        serde_json::json!({"type":"call.hello","supportedProtocolVersions":[3]})
     );
 }
 

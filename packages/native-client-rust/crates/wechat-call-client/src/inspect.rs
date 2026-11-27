@@ -5,7 +5,7 @@ use crate::{
     audio::{SignalLevel, LEVEL_FLOOR_DB},
     video::{find_ffmpeg, DecodedFrame},
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -1166,12 +1166,34 @@ impl CallMediaInspector {
         }
     }
 
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    pub fn active_recording_dir(&self) -> Option<&Path> {
+        self.recorder.as_ref().map(CallRecorder::dir)
+    }
+
     pub fn start_recording(&mut self, dir: PathBuf) -> Result<RecordingReport> {
-        self.stop_recording();
+        ensure!(
+            self.recorder.is_none(),
+            "a recording is already active; stop or detach it before starting a new recording"
+        );
         let recorder = CallRecorder::start(dir, self.sample_rate, 1)?;
         let report = recorder.current_report();
         self.recorder = Some(recorder);
         Ok(report)
+    }
+
+    /// Install a freshly started [`CallRecorder`], returning its initial report and any
+    /// previously active recorder so callers can finalize the previous one off-thread.
+    pub fn replace_recorder(
+        &mut self,
+        recorder: CallRecorder,
+    ) -> (RecordingReport, Option<CallRecorder>) {
+        let report = recorder.current_report();
+        let previous = self.recorder.replace(recorder);
+        (report, previous)
     }
 
     /// Take the active [`CallRecorder`] so callers in async runtimes can run
@@ -1584,6 +1606,36 @@ mod tests {
         assert!(Path::new(report.manifest.as_deref().unwrap()).is_file());
         let video_out = report.video_rx_tracks.get(&65_538).unwrap();
         assert!(Path::new(video_out).is_file());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn start_recording_refuses_while_active_until_detached_or_stopped() {
+        let base = std::env::temp_dir().join(format!(
+            "wx-inspect-active-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let dir1 = base.join("rec-1");
+        let dir2 = base.join("rec-2");
+        let mut inspector = CallMediaInspector::new(16_000);
+        inspector.start_recording(dir1.clone()).unwrap();
+        assert_eq!(inspector.active_recording_dir(), Some(dir1.as_path()));
+        let err = inspector.start_recording(dir2.clone()).unwrap_err();
+        assert!(err.to_string().contains("already active"), "err: {err}");
+
+        let detached = inspector.take_recorder().expect("recorder detached");
+        assert!(inspector.active_recording_dir().is_none());
+        inspector.start_recording(dir2.clone()).unwrap();
+        assert_eq!(inspector.active_recording_dir(), Some(dir2.as_path()));
+
+        let rep1 = detached.finish().unwrap();
+        assert!(Path::new(rep1.manifest.as_deref().unwrap()).is_file());
+        let rep2 = inspector.stop_recording().unwrap();
+        assert!(Path::new(rep2.manifest.as_deref().unwrap()).is_file());
         let _ = std::fs::remove_dir_all(&base);
     }
 }

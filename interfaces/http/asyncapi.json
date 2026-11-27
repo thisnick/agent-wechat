@@ -3,7 +3,7 @@
   "channels": {
     "control": {
       "address": "/v1/accounts/{a}/calls/socket",
-      "description": "Call commands and events as JSON text. Send call.hello within five seconds of connecting, then wait for hello. Negotiates v4 (adds call.peer_status; clients ignore unknown future event types after hello) or legacy v3 (suppresses call.peer_status). Authenticate with an Authorization: Bearer header or a single-use ?ticket= issued by POST /v1/accounts/{a}/calls/tickets.",
+      "description": "Call commands and events as JSON text. Send call.hello within five seconds of connecting, then wait for hello. Authenticate with an Authorization: Bearer header or a single-use ?ticket= issued by POST /v1/accounts/{a}/calls/tickets.",
       "messages": {
         "client.call.answer": {
           "$ref": "#/components/messages/client.call.answer"
@@ -516,7 +516,7 @@
         "description": "Announce the protocol versions this client supports. Send it within five\nseconds of opening the control socket, before any command.",
         "properties": {
           "supportedProtocolVersions": {
-            "description": "One to eight distinct positive version numbers. The daemon selects\nthe highest supported version (v4 or v3 on `/calls/socket`, v3 on\n`/media`) and answers `protocol.error` when the list includes none.",
+            "description": "One to eight distinct positive version numbers. The daemon speaks a\nsingle version and answers `protocol.error` when the list does not\ninclude it.",
             "items": {
               "format": "uint32",
               "minimum": 0,
@@ -2694,12 +2694,12 @@
     }
   },
   "info": {
-    "description": "Call commands, events and audio on two WebSockets of the agent-wechat daemon. Control negotiates protocol version 4 (with legacy v3 fallback); media speaks protocol version 3. The daemon's HTTP routes are described in openapi.json.",
+    "description": "Call commands, events and audio on two WebSockets of the agent-wechat daemon. Both speak call protocol version 3. The daemon's HTTP routes are described in openapi.json.",
     "license": {
       "name": "MIT"
     },
     "title": "agent-wechat calls WebSocket API",
-    "version": "4"
+    "version": "3"
   },
   "operations": {
     "controlReceive": {

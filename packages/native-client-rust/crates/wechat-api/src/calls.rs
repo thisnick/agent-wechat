@@ -36,8 +36,7 @@ use wechat_core::{
     call_types::{
         CallClientHello, CallCommand, CallErrorCode, CallEvent, CallMediaCommand,
         CallProtocolErrorCode, CallSnapshot, CallTicketRequest, CallTicketResponse,
-        CallTicketSocket, CallTrack, AUDIO_SEND_TRACK_ID, CALL_CONTROL_PROTOCOL_VERSION,
-        CALL_CONTROL_SUPPORTED_VERSIONS, CALL_PROTOCOL_VERSION,
+        CallTicketSocket, CallTrack, AUDIO_SEND_TRACK_ID, CALL_PROTOCOL_VERSION,
     },
     calls::service::{CallService, CallServiceError, MediaDelivery, MediaReceiveQueue},
 };
@@ -202,8 +201,8 @@ pub(crate) const SOCKETS: &[CallSocket] = &[
         name: "control",
         path: CONTROL_PATH,
         scope: CALLS_SCOPE,
-        protocol_version: CALL_CONTROL_PROTOCOL_VERSION,
-        doc: "Call commands and events as JSON text. Send call.hello within five seconds of connecting, then wait for hello. Negotiates v4 (adds call.peer_status; clients ignore unknown future event types after hello) or legacy v3 (suppresses call.peer_status). Authenticate with an Authorization: Bearer header or a single-use ?ticket= issued by POST /v1/accounts/{a}/calls/tickets.",
+        protocol_version: CALL_PROTOCOL_VERSION,
+        doc: "Call commands and events as JSON text. Send call.hello within five seconds of connecting, then wait for hello. Authenticate with an Authorization: Bearer header or a single-use ?ticket= issued by POST /v1/accounts/{a}/calls/tickets.",
         client: &[
             SocketMessage {
                 type_name: "CallClientHello",
@@ -433,8 +432,7 @@ fn client_versions(value: &serde_json::Value) -> Result<Vec<u32>, ()> {
 async fn negotiate(
     sink: &mut SplitSink<WebSocket, Message>,
     input: &mut SplitStream<WebSocket>,
-    supported_versions: &[u32],
-) -> Option<(serde_json::Value, u32)> {
+) -> Option<serde_json::Value> {
     let deadline = Instant::now() + ATTACH_TIMEOUT;
     let first = loop {
         match tokio::time::timeout_at(deadline, input.next()).await {
@@ -453,25 +451,16 @@ async fn negotiate(
     };
     let versions = first.as_ref().ok_or(()).and_then(client_versions);
     let error = match versions {
-        Ok(ref versions) => {
-            if let Some(selected) = supported_versions
-                .iter()
-                .copied()
-                .filter(|version| versions.contains(version))
-                .max()
-            {
-                return first.map(|value| (value, selected));
-            }
-            CallEvent::ProtocolError {
-                code: CallProtocolErrorCode::UnsupportedProtocolVersion,
-                client_versions: versions.clone(),
-                server_versions: supported_versions.to_vec(),
-            }
-        }
+        Ok(ref versions) if versions.contains(&CALL_PROTOCOL_VERSION) => return first,
+        Ok(versions) => CallEvent::ProtocolError {
+            code: CallProtocolErrorCode::UnsupportedProtocolVersion,
+            client_versions: versions,
+            server_versions: vec![CALL_PROTOCOL_VERSION],
+        },
         Err(()) => CallEvent::ProtocolError {
             code: CallProtocolErrorCode::InvalidProtocolVersion,
             client_versions: vec![],
-            server_versions: supported_versions.to_vec(),
+            server_versions: vec![CALL_PROTOCOL_VERSION],
         },
     };
     let _ = send_event(sink, &error).await;
@@ -488,9 +477,7 @@ async fn negotiate(
 
 async fn control_socket(socket: WebSocket, app: App, claims: Claims, account: String) {
     let (mut sink, mut input) = socket.split();
-    let Some((first, negotiated_version)) =
-        negotiate(&mut sink, &mut input, CALL_CONTROL_SUPPORTED_VERSIONS).await
-    else {
+    let Some(first) = negotiate(&mut sink, &mut input).await else {
         return;
     };
     if ensure_current(&app, &claims).await.is_err() {
@@ -516,7 +503,6 @@ async fn control_socket(socket: WebSocket, app: App, claims: Claims, account: St
     else {
         return;
     };
-    let emit_peer_status = negotiated_version >= CALL_CONTROL_PROTOCOL_VERSION;
     let client_id = connection.client_id.clone();
     let mut valid_tick = interval(Duration::from_secs(1));
     let mut ping_tick = interval(Duration::from_secs(15));
@@ -530,13 +516,7 @@ async fn control_socket(socket: WebSocket, app: App, claims: Claims, account: St
                 if !send(&mut sink, Message::Ping(Default::default())).await { break; }
             }
             event = connection.events.recv() => {
-                let Some(mut event) = event else { break; };
-                if !emit_peer_status && matches!(event, CallEvent::PeerStatus { .. }) {
-                    continue;
-                }
-                if let CallEvent::Hello { protocol_version, .. } = &mut event {
-                    *protocol_version = negotiated_version;
-                }
+                let Some(event) = event else { break; };
                 if ensure_current(&app, &claims).await.is_err()
                     || service.validate_control(&client_id).await.is_err()
                     || !send_event(&mut sink, &event).await { break; }
@@ -574,7 +554,7 @@ async fn media_socket(socket: WebSocket, app: App, claims: Claims, account: Stri
         return;
     };
     let (mut sink, mut input) = socket.split();
-    let Some((first, _)) = negotiate(&mut sink, &mut input, &[CALL_PROTOCOL_VERSION]).await else {
+    let Some(first) = negotiate(&mut sink, &mut input).await else {
         return;
     };
     if ensure_current(&app, &claims).await.is_err() {

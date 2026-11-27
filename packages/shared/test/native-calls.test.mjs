@@ -59,7 +59,7 @@ class MockCallServer {
     const id = `client-${++this.counter}`;
     const socket = new MockSocket(value => {
       const command = JSON.parse(value);
-      if (command.type === 'call.hello') { assert.deepEqual(command.supportedProtocolVersions, [4, 3]); return; }
+      if (command.type === 'call.hello') { assert.deepEqual(command.supportedProtocolVersions, [3]); return; }
       if (this.hold) return;
       if (command.type === 'call.ready') { socket.ready = command.ready; this.result(socket, command.requestId); }
       else if (command.type === 'call.answer' || command.type === 'call.dial') {
@@ -667,14 +667,4 @@ test('call.peer_status is delivered and unknown future server event types are ig
   const preHelloClient = client(preHelloServer);
   await assert.rejects(preHelloClient.connect(), error => error.code === 'missing_hello');
   preHelloClient.close();
-
-  // Control socket accepts both protocolVersion 4 and legacy 3.
-  for (const version of [3, 4]) {
-    const versioned = new MockCallServer();
-    versioned.protocolVersion = version;
-    const versionedClient = client(versioned);
-    const hello = await versionedClient.connect();
-    assert.equal(hello.protocolVersion, version);
-    versionedClient.close();
-  }
 });

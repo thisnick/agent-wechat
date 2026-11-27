@@ -26,8 +26,7 @@ use wechat_call_contracts::call_types::{
     CallAudioFormat, CallCapabilities, CallClientHello, CallCommand, CallCommandStatus,
     CallConferenceInvitation, CallEvent, CallInvitationResult, CallOffer, CallParticipantControl,
     CallParticipantStatus, CallPendingOffer, CallState, CallTrack, CallVideoCapabilities, CallView,
-    CallsAvailability, CALL_CONTROL_PROTOCOL_VERSION, CALL_CONTROL_SUPPORTED_VERSIONS,
-    CALL_PROTOCOL_VERSION,
+    CallsAvailability, CALL_PROTOCOL_VERSION,
 };
 
 pub type Socket = WebSocketStream<reqwest::Upgraded>;
@@ -289,16 +288,14 @@ pub fn parse_call_event_str(text: &str) -> Result<Option<CallEvent>> {
             serde_json::to_value(code)?
         );
     }
-    if kind == "hello" {
-        let server_version = value["protocolVersion"].as_u64().unwrap_or(1);
-        if !CALL_CONTROL_SUPPORTED_VERSIONS
-            .iter()
-            .any(|supported| u64::from(*supported) == server_version)
-        {
-            bail!(
-                "unsupported call protocol version: client {CALL_CONTROL_SUPPORTED_VERSIONS:?}, daemon [{server_version}]"
-            );
-        }
+    if kind == "hello"
+        && value["protocolVersion"].as_u64().unwrap_or(1) != u64::from(CALL_PROTOCOL_VERSION)
+    {
+        bail!(
+            "unsupported call protocol version: client [{}], daemon [{}]",
+            CALL_PROTOCOL_VERSION,
+            value["protocolVersion"].as_u64().unwrap_or(1)
+        );
     }
     if !is_known_call_event_type(kind) {
         debug_call(
@@ -412,10 +409,7 @@ impl ControlClient {
         send_json(
             &mut socket,
             &CallClientHello::Hello {
-                supported_protocol_versions: vec![
-                    CALL_CONTROL_PROTOCOL_VERSION,
-                    CALL_PROTOCOL_VERSION,
-                ],
+                supported_protocol_versions: vec![CALL_PROTOCOL_VERSION],
             },
         )
         .await?;
@@ -426,7 +420,7 @@ impl ControlClient {
         .await
         .context("call socket hello timed out")??;
         let CallEvent::Hello {
-            protocol_version,
+            protocol_version: CALL_PROTOCOL_VERSION,
             conference_invitations,
             client_id,
             capabilities,
@@ -440,9 +434,6 @@ impl ControlClient {
         else {
             bail!("unsupported call socket hello");
         };
-        if !CALL_CONTROL_SUPPORTED_VERSIONS.contains(protocol_version) {
-            bail!("unsupported call socket hello");
-        }
         Ok((
             Self {
                 socket,

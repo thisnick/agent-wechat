@@ -298,9 +298,9 @@ scope: StickerSyncScope, };
 export type StickerSyncScope = "saved" | "added" | "all";
 export type CallClientHello = { "type": "call.hello",
 /**
- * One to eight distinct positive version numbers. The daemon selects
- * the highest supported version (v4 or v3 on `/calls/socket`, v3 on
- * `/media`) and answers `protocol.error` when the list includes none.
+ * One to eight distinct positive version numbers. The daemon speaks a
+ * single version and answers `protocol.error` when the list does not
+ * include it.
  */
 supportedProtocolVersions: Array<number>, };
 export type CallParticipant = {

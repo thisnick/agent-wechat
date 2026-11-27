@@ -251,7 +251,7 @@ enum FilePcmBackend {
     Ffmpeg {
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
         child: std::sync::Arc<std::sync::Mutex<Option<Child>>>,
-        rx: std::sync::mpsc::Receiver<FfmpegAudioEvent>,
+        rx: Option<std::sync::mpsc::Receiver<FfmpegAudioEvent>>,
         worker: Option<std::thread::JoinHandle<()>>,
         eof: bool,
         finished_emitted: bool,
@@ -337,6 +337,9 @@ impl FilePcmBackend {
                             }
                         }
                     }
+                    if stop_bg.load(std::sync::atomic::Ordering::Acquire) {
+                        break;
+                    }
                     if filled > 0 {
                         produced_any = true;
                         raw[filled..].fill(0);
@@ -355,10 +358,12 @@ impl FilePcmBackend {
                         break;
                     }
                     if hit_eof {
-                        let exit_ok = child_bg
-                            .lock()
-                            .ok()
-                            .and_then(|mut guard| guard.as_mut().and_then(|c| c.wait().ok()))
+                        if stop_bg.load(std::sync::atomic::Ordering::Acquire) {
+                            break;
+                        }
+                        let proc = child_bg.lock().ok().and_then(|mut guard| guard.take());
+                        let exit_ok = proc
+                            .and_then(|mut c| c.wait().ok())
                             .is_none_or(|status| status.success());
                         if !exit_ok || (loop_forever && !produced_any) {
                             let _ = tx.send(FfmpegAudioEvent::Error(
@@ -375,7 +380,7 @@ impl FilePcmBackend {
         Ok(Self::Ffmpeg {
             stop,
             child: child_slot,
-            rx,
+            rx: Some(rx),
             worker: Some(worker),
             eof: false,
             finished_emitted: false,
@@ -426,6 +431,10 @@ impl FilePcmBackend {
                 if *eof {
                     return Ok((vec![0i16; count], false));
                 }
+                let Some(rx) = rx.as_ref() else {
+                    *eof = true;
+                    return Ok((vec![0i16; count], false));
+                };
                 match rx.try_recv() {
                     Ok(FfmpegAudioEvent::Frame(mut samples)) => {
                         samples.resize(count, 0);
@@ -456,16 +465,19 @@ impl Drop for FilePcmBackend {
         if let Self::Ffmpeg {
             stop,
             child,
+            rx,
             worker,
             ..
         } = self
         {
             stop.store(true, std::sync::atomic::Ordering::Release);
-            if let Ok(mut guard) = child.lock() {
-                if let Some(mut proc) = guard.take() {
-                    let _ = proc.kill();
-                    let _ = proc.wait();
-                }
+            // Drop the receiver before joining so a worker blocked in `sync_channel::send`
+            // unblocks immediately instead of deadlocking `Drop`.
+            drop(rx.take());
+            let proc = child.lock().ok().and_then(|mut guard| guard.take());
+            if let Some(mut proc) = proc {
+                let _ = proc.kill();
+                let _ = proc.wait();
             }
             if let Some(handle) = worker.take() {
                 let _ = handle.join();
@@ -830,6 +842,90 @@ mod tests {
         assert_eq!(io.next_frame(format, false).unwrap(), (vec![0; 320], false));
 
         io.stop().await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ffmpeg_backend_drop_unblocks_full_sync_channel_worker() {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let child = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let (tx, rx) = std::sync::mpsc::sync_channel::<FfmpegAudioEvent>(2);
+        let filled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let filled_bg = filled.clone();
+        let worker = std::thread::spawn(move || {
+            for i in 0..16 {
+                if i == 2 {
+                    filled_bg.store(true, std::sync::atomic::Ordering::Release);
+                }
+                if tx.send(FfmpegAudioEvent::Frame(vec![0i16; 320])).is_err() {
+                    break;
+                }
+            }
+        });
+        while !filled.load(std::sync::atomic::Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        // Give the worker a moment to enter the blocking `tx.send` on the full channel.
+        std::thread::sleep(Duration::from_millis(20));
+
+        let backend = FilePcmBackend::Ffmpeg {
+            stop,
+            child,
+            rx: Some(rx),
+            worker: Some(worker),
+            eof: false,
+            finished_emitted: false,
+        };
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(backend);
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("dropping Ffmpeg backend must not deadlock on full sync_channel");
+    }
+
+    #[tokio::test]
+    async fn ffmpeg_looping_file_source_drops_and_swaps_without_hanging() {
+        if find_ffmpeg(None).is_none() {
+            return;
+        }
+        let format = AudioFormat::new(16_000, 1, 20).unwrap();
+        let dir = std::env::temp_dir().join(format!("wx-audio-ffmpeg-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 44.1 kHz WAV does not match 16 kHz, forcing the FFmpeg decoder backend.
+        let wav_path = dir.join("clip-44k.wav");
+        let mut writer = WavWriter::create(&wav_path, 44_100, 1).unwrap();
+        writer.write_samples(&[2000i16; 4410]).unwrap();
+        writer.finish().unwrap();
+
+        let mut io = CallAudioIo::open(
+            AudioSourceSpec::File {
+                path: wav_path,
+                loop_forever: true,
+            },
+            AudioSinkSpec::Null,
+            format,
+        )
+        .await
+        .unwrap();
+        // Let FFmpeg saturate the bounded 32-frame channel without `-re`.
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        let _ = io.next_frame(format, false).unwrap();
+
+        // Both hot-swapping away from the looping FFmpeg source and stopping must finish quickly.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            io.set_input(AudioSourceSpec::Silence, format),
+        )
+        .await
+        .expect("set_input away from looping FFmpeg source must not deadlock")
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), io.stop())
+            .await
+            .expect("stop after FFmpeg source must not deadlock")
+            .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

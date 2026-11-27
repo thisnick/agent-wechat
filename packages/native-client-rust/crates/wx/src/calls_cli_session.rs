@@ -20,17 +20,20 @@ use std::{
     io::{BufWriter, Read, Write},
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    sync::{broadcast, mpsc, oneshot, watch, Semaphore},
+    sync::{broadcast, mpsc, oneshot, watch, Notify, Semaphore},
     time::timeout,
 };
 use tokio_tungstenite::tungstenite::Message;
 use wechat_call_client::{
-    inspect::{CallMediaInspector, MediaInspectionReport, RecordingReport},
+    inspect::{CallMediaInspector, CallRecorder, MediaInspectionReport, RecordingReport},
     media::MediaClient,
     synthetic_audio::{AudioSinkSpec, AudioSourceSpec, CallAudioIo},
     transport::{event_json, parse_call_event_str, send_json},
@@ -50,6 +53,9 @@ const EVENT_BUFFER_CAP: usize = 4096;
 const MEDIA_CLOSED_END_GRACE: Duration = Duration::from_secs(10);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_IPC_LINE_BYTES: usize = 256 * 1024;
+const MAX_EVENT_LOG_BYTES: u64 = 16 * 1024 * 1024;
+const STDIO_QUEUE_CAP: usize = 512;
+const SHUTDOWN_RECORDING_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Connection details captured by `main.rs` so `wx calls session start` can spawn
 /// `wx calls session run` without placing bearer tokens on command-line arguments.
@@ -859,7 +865,7 @@ pub(crate) async fn run_local(command: SessionCommand, json: bool) -> Result<()>
         }
         SessionCommand::Hangup { target } => {
             let resp =
-                ipc_call(&target, json!({ "op": "hangup" }), Duration::from_secs(20)).await?;
+                ipc_call(&target, json!({ "op": "hangup" }), Duration::from_secs(45)).await?;
             output.print(&resp)
         }
         SessionCommand::Conference { command: Some(cmd) } => match cmd {
@@ -1020,7 +1026,7 @@ pub(crate) async fn run_local(command: SessionCommand, json: bool) -> Result<()>
                 let resp = ipc_call(
                     &target,
                     json!({ "op": "record.stop" }),
-                    Duration::from_secs(30),
+                    Duration::from_secs(60),
                 )
                 .await?;
                 output.print(&resp)
@@ -1311,8 +1317,9 @@ async fn start_detached(
 
     let log_path = session_dir.join("session.log");
     let log_file = wechat_platform::OpenOptions::new()
+        .write(true)
         .create(true)
-        .append(true)
+        .truncate(true)
         .mode(0o600)
         .custom_flags(wechat_platform::NOFOLLOW)
         .open(&log_path)?;
@@ -1697,34 +1704,183 @@ async fn ipc_roundtrip(
 // Foreground session engine & event bus
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StdioPriority {
+    Stats,
+    Event,
+    Reply,
+}
+
+struct StdioOutbound {
+    line: String,
+    priority: StdioPriority,
+}
+
+struct StdioQueueInner {
+    queue: VecDeque<StdioOutbound>,
+    closed: bool,
+}
+
+/// Bounded outbound NDJSON queue for `--stdio` mode that drops periodic `media.stats`
+/// before lifecycle events or command replies when the parent falls behind.
+struct StdioQueue {
+    cap: usize,
+    inner: Mutex<StdioQueueInner>,
+    notify: Notify,
+}
+
+impl StdioQueue {
+    fn new(cap: usize) -> Arc<Self> {
+        Arc::new(Self {
+            cap: cap.max(1),
+            inner: Mutex::new(StdioQueueInner {
+                queue: VecDeque::with_capacity(cap.min(64)),
+                closed: false,
+            }),
+            notify: Notify::new(),
+        })
+    }
+
+    fn push(&self, line: String, priority: StdioPriority) {
+        let mut guard = self.inner.lock().expect("stdio queue lock");
+        if guard.closed {
+            return;
+        }
+        if guard.queue.len() >= self.cap {
+            match priority {
+                StdioPriority::Stats => {
+                    if let Some(pos) = guard
+                        .queue
+                        .iter()
+                        .position(|item| item.priority == StdioPriority::Stats)
+                    {
+                        guard.queue.remove(pos);
+                    } else {
+                        return;
+                    }
+                }
+                StdioPriority::Event => {
+                    if let Some(pos) = guard
+                        .queue
+                        .iter()
+                        .position(|item| item.priority == StdioPriority::Stats)
+                    {
+                        guard.queue.remove(pos);
+                    } else if let Some(pos) = guard
+                        .queue
+                        .iter()
+                        .position(|item| item.priority == StdioPriority::Event)
+                    {
+                        guard.queue.remove(pos);
+                    } else {
+                        return;
+                    }
+                }
+                StdioPriority::Reply => {
+                    if let Some(pos) = guard
+                        .queue
+                        .iter()
+                        .position(|item| item.priority == StdioPriority::Stats)
+                    {
+                        guard.queue.remove(pos);
+                    } else if let Some(pos) = guard
+                        .queue
+                        .iter()
+                        .position(|item| item.priority == StdioPriority::Event)
+                    {
+                        guard.queue.remove(pos);
+                    } else if guard.queue.len() >= self.cap.saturating_mul(2) {
+                        guard.queue.pop_front();
+                    }
+                }
+            }
+        }
+        guard.queue.push_back(StdioOutbound { line, priority });
+        drop(guard);
+        self.notify.notify_one();
+    }
+
+    fn close(&self) {
+        let mut guard = self.inner.lock().expect("stdio queue lock");
+        guard.closed = true;
+        drop(guard);
+        self.notify.notify_waiters();
+    }
+
+    async fn pop_wait(&self) -> Option<String> {
+        loop {
+            let notified = self.notify.notified();
+            {
+                let mut guard = self.inner.lock().expect("stdio queue lock");
+                if let Some(item) = guard.queue.pop_front() {
+                    return Some(item.line);
+                }
+                if guard.closed {
+                    return None;
+                }
+            }
+            notified.await;
+        }
+    }
+}
+
+fn open_event_log(path: &Path) -> Result<BufWriter<File>> {
+    let file = wechat_platform::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(wechat_platform::NOFOLLOW)
+        .open(path)?;
+    ensure!(
+        file.metadata()?.is_file() && wechat_platform::private_file(&file)?,
+        "session event log must be a private owned regular file"
+    );
+    Ok(BufWriter::new(file))
+}
+
 struct EventBusState {
     seq: u64,
     ring: VecDeque<Value>,
+    log_path: Option<PathBuf>,
     log_file: Option<BufWriter<File>>,
+    log_bytes: u64,
+    max_log_bytes: u64,
+}
+
+struct WaiterGuard {
+    bus: Arc<SharedEventBus>,
+}
+
+impl Drop for WaiterGuard {
+    fn drop(&mut self) {
+        self.bus.active_waiters.fetch_sub(1, Ordering::AcqRel);
+        self.bus.touch_activity();
+    }
 }
 
 struct SharedEventBus {
     inner: Mutex<EventBusState>,
     tx: broadcast::Sender<Value>,
     media_watch: watch::Sender<Option<(String, MediaInspectionReport)>>,
-    stdio_tx: Option<mpsc::UnboundedSender<String>>,
+    stdio_queue: Option<Arc<StdioQueue>>,
+    started_at: Instant,
+    last_activity_ms: AtomicU64,
+    active_waiters: AtomicUsize,
 }
 
 impl SharedEventBus {
-    fn new(
+    fn new(log_path: Option<&Path>, stdio_queue: Option<Arc<StdioQueue>>) -> Result<Arc<Self>> {
+        Self::with_max_log_bytes(log_path, stdio_queue, MAX_EVENT_LOG_BYTES)
+    }
+
+    fn with_max_log_bytes(
         log_path: Option<&Path>,
-        stdio_tx: Option<mpsc::UnboundedSender<String>>,
+        stdio_queue: Option<Arc<StdioQueue>>,
+        max_log_bytes: u64,
     ) -> Result<Arc<Self>> {
         let log_file = match log_path {
-            Some(path) => {
-                let file = wechat_platform::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .mode(0o600)
-                    .custom_flags(wechat_platform::NOFOLLOW)
-                    .open(path)?;
-                Some(BufWriter::new(file))
-            }
+            Some(path) => Some(open_event_log(path)?),
             None => None,
         };
         let (tx, _) = broadcast::channel(512);
@@ -1733,12 +1889,45 @@ impl SharedEventBus {
             inner: Mutex::new(EventBusState {
                 seq: 0,
                 ring: VecDeque::with_capacity(256),
+                log_path: log_path.map(Path::to_path_buf),
                 log_file,
+                log_bytes: 0,
+                max_log_bytes: max_log_bytes.max(1),
             }),
             tx,
             media_watch,
-            stdio_tx,
+            stdio_queue,
+            started_at: Instant::now(),
+            last_activity_ms: AtomicU64::new(0),
+            active_waiters: AtomicUsize::new(0),
         }))
+    }
+
+    fn touch_activity(&self) {
+        let ms = Instant::now()
+            .saturating_duration_since(self.started_at)
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        self.last_activity_ms.store(ms, Ordering::Release);
+    }
+
+    fn idle_for(&self, now: Instant) -> Duration {
+        let now_ms = now
+            .saturating_duration_since(self.started_at)
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        let last_ms = self.last_activity_ms.load(Ordering::Acquire);
+        Duration::from_millis(now_ms.saturating_sub(last_ms))
+    }
+
+    fn has_active_waiters(&self) -> bool {
+        self.active_waiters.load(Ordering::Acquire) > 0
+    }
+
+    fn enter_waiter(self: &Arc<Self>) -> WaiterGuard {
+        self.active_waiters.fetch_add(1, Ordering::AcqRel);
+        self.touch_activity();
+        WaiterGuard { bus: self.clone() }
     }
 
     fn current_seq(&self) -> u64 {
@@ -1772,6 +1961,7 @@ impl SharedEventBus {
 
     fn emit(&self, mut payload: Value) -> u64 {
         let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let is_stats = payload.get("type").and_then(Value::as_str) == Some("media.stats");
         let (seq, serialized) = {
             let mut guard = self.inner.lock().expect("event bus lock");
             guard.seq += 1;
@@ -1782,9 +1972,26 @@ impl SharedEventBus {
                 obj.remove("ownerToken");
             }
             let line = serde_json::to_string(&payload).unwrap_or_default();
+            let line_bytes = (line.len() + 1) as u64;
+            if guard.log_file.is_some()
+                && guard.log_bytes > 0
+                && guard.log_bytes.saturating_add(line_bytes) > guard.max_log_bytes
+            {
+                if let Some(mut old) = guard.log_file.take() {
+                    let _ = old.flush();
+                }
+                if let Some(path) = guard.log_path.clone() {
+                    let rotated = path.with_extension("jsonl.1");
+                    let _ = fs::rename(&path, &rotated);
+                    guard.log_file = open_event_log(&path).ok();
+                    guard.log_bytes = 0;
+                }
+            }
             if let Some(file) = guard.log_file.as_mut() {
-                let _ = writeln!(file, "{line}");
-                let _ = file.flush();
+                if writeln!(file, "{line}").is_ok() {
+                    let _ = file.flush();
+                    guard.log_bytes = guard.log_bytes.saturating_add(line_bytes);
+                }
             }
             if guard.ring.len() >= EVENT_BUFFER_CAP {
                 guard.ring.pop_front();
@@ -1793,8 +2000,13 @@ impl SharedEventBus {
             (seq, line)
         };
         let _ = self.tx.send(payload);
-        if let Some(tx) = &self.stdio_tx {
-            let _ = tx.send(serialized);
+        if let Some(queue) = &self.stdio_queue {
+            let prio = if is_stats {
+                StdioPriority::Stats
+            } else {
+                StdioPriority::Event
+            };
+            queue.push(serialized, prio);
         }
         seq
     }
@@ -1803,6 +2015,186 @@ impl SharedEventBus {
         let raw = event_json(event).unwrap_or_else(|_| "{}".into());
         let value: Value = serde_json::from_str(&raw).unwrap_or_else(|_| json!({}));
         self.emit(value)
+    }
+}
+
+struct InFlightRecording {
+    call_id: String,
+    dir: PathBuf,
+    stop_waiters: Vec<(u64, oneshot::Sender<Result<Value>>)>,
+    end_waiters: Vec<(bool, oneshot::Sender<Result<Value>>)>,
+}
+
+struct FinishedRecording {
+    id: u64,
+    call_id: String,
+    result: Result<RecordingReport>,
+}
+
+struct RecordingJobs {
+    next_id: u64,
+    in_flight: HashMap<u64, InFlightRecording>,
+    done_tx: mpsc::UnboundedSender<FinishedRecording>,
+}
+
+impl RecordingJobs {
+    fn new() -> (Self, mpsc::UnboundedReceiver<FinishedRecording>) {
+        let (done_tx, done_rx) = mpsc::unbounded_channel();
+        (
+            Self {
+                next_id: 1,
+                in_flight: HashMap::new(),
+                done_tx,
+            },
+            done_rx,
+        )
+    }
+
+    fn is_empty(&self) -> bool {
+        self.in_flight.is_empty()
+    }
+
+    fn dir_in_use(&self, dir: &Path) -> bool {
+        self.in_flight.values().any(|job| job.dir == dir)
+    }
+
+    fn next_auto_dir(&mut self, root: &Path, call_id: &str) -> PathBuf {
+        let seq = self.next_id;
+        self.next_id += 1;
+        let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
+        root.join(format!(
+            "{stamp}-{seq}-{}",
+            wechat_call_client::inspect::sanitize_filename_part(call_id)
+        ))
+    }
+
+    fn latest_for_call_mut(&mut self, call_id: &str) -> Option<&mut InFlightRecording> {
+        self.in_flight
+            .iter_mut()
+            .filter(|(_, job)| job.call_id == call_id)
+            .max_by_key(|(&id, _)| id)
+            .map(|(_, job)| job)
+    }
+
+    fn latest_any_mut(&mut self) -> Option<&mut InFlightRecording> {
+        self.in_flight
+            .iter_mut()
+            .max_by_key(|(&id, _)| id)
+            .map(|(_, job)| job)
+    }
+
+    fn spawn(
+        &mut self,
+        call_id: String,
+        recorder: CallRecorder,
+        stop_waiters: Vec<(u64, oneshot::Sender<Result<Value>>)>,
+        end_waiters: Vec<(bool, oneshot::Sender<Result<Value>>)>,
+    ) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        let dir = recorder.dir().to_path_buf();
+        self.in_flight.insert(
+            id,
+            InFlightRecording {
+                call_id: call_id.clone(),
+                dir,
+                stop_waiters,
+                end_waiters,
+            },
+        );
+        let tx = self.done_tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = recorder.finish();
+            let _ = tx.send(FinishedRecording {
+                id,
+                call_id,
+                result,
+            });
+        });
+        id
+    }
+
+    fn complete(
+        &mut self,
+        finished: FinishedRecording,
+        active_call: &mut Option<ActiveSessionCall>,
+        bus: &Arc<SharedEventBus>,
+        last_recording: &mut Option<RecordingReport>,
+    ) {
+        let Some(job) = self.in_flight.remove(&finished.id) else {
+            return;
+        };
+        match finished.result {
+            Ok(report) => {
+                if let Some(call) = active_call
+                    .as_mut()
+                    .filter(|c| c.call_id == finished.call_id)
+                {
+                    call.inspector.record_finished_report(report.clone());
+                }
+                *last_recording = Some(report.clone());
+                bus.emit(json!({
+                    "type": "recording.stopped",
+                    "callId": finished.call_id,
+                    "recording": report,
+                }));
+                for (before_seq, reply) in job.stop_waiters {
+                    let _ = reply.send(Ok(json!({
+                        "callId": finished.call_id,
+                        "recording": report,
+                        "eventSeq": before_seq,
+                    })));
+                }
+                let seq = bus.current_seq();
+                for (ended, waiter) in job.end_waiters {
+                    let _ = waiter.send(Ok(json!({
+                        "callId": finished.call_id,
+                        "hadCall": true,
+                        "ended": ended,
+                        "eventSeq": seq,
+                        "recording": report,
+                    })));
+                }
+            }
+            Err(err) => {
+                let msg = format!("recording finish failed: {err}");
+                bus.emit(json!({
+                    "type": "session.error",
+                    "message": msg,
+                }));
+                for (_, reply) in job.stop_waiters {
+                    let _ = reply.send(Err(anyhow!("{msg}")));
+                }
+                let seq = bus.current_seq();
+                for (ended, waiter) in job.end_waiters {
+                    let _ = waiter.send(Ok(json!({
+                        "callId": finished.call_id,
+                        "hadCall": true,
+                        "ended": ended,
+                        "eventSeq": seq,
+                        "recording": Value::Null,
+                    })));
+                }
+            }
+        }
+    }
+
+    fn fail_remaining(&mut self, bus: &Arc<SharedEventBus>, reason: &str) {
+        let seq = bus.current_seq();
+        for (_, job) in self.in_flight.drain() {
+            for (_, reply) in job.stop_waiters {
+                let _ = reply.send(Err(anyhow!("{reason}")));
+            }
+            for (ended, waiter) in job.end_waiters {
+                let _ = waiter.send(Ok(json!({
+                    "callId": job.call_id,
+                    "hadCall": true,
+                    "ended": ended,
+                    "eventSeq": seq,
+                    "recording": Value::Null,
+                })));
+            }
+        }
     }
 }
 
@@ -1983,11 +2375,12 @@ async fn run_foreground(
     )?;
     let mut audio_io = CallAudioIo::open(audio_source, audio_sink, audio_format).await?;
 
-    let (stdio_tx, mut stdio_writer_task) = if stdio {
-        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let (mut stdio_queue, mut stdio_writer_task) = if stdio {
+        let queue = StdioQueue::new(STDIO_QUEUE_CAP);
+        let queue_r = queue.clone();
         let writer = tokio::spawn(async move {
             let mut out = tokio::io::stdout();
-            while let Some(line) = rx.recv().await {
+            while let Some(line) = queue_r.pop_wait().await {
                 if out.write_all(line.as_bytes()).await.is_err()
                     || out.write_all(b"\n").await.is_err()
                     || out.flush().await.is_err()
@@ -1996,11 +2389,11 @@ async fn run_foreground(
                 }
             }
         });
-        (Some(tx), Some(writer))
+        (Some(queue), Some(writer))
     } else {
         (None, None)
     };
-    let bus = SharedEventBus::new(Some(&session_dir.join("events.jsonl")), stdio_tx.clone())?;
+    let bus = SharedEventBus::new(Some(&session_dir.join("events.jsonl")), stdio_queue.clone())?;
 
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<EngineCommand>(128);
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
@@ -2131,7 +2524,7 @@ async fn run_foreground(
     let mut stdio_task = if stdio {
         let cmd_tx_c = cmd_tx.clone();
         let bus_c = bus.clone();
-        let out_tx = stdio_tx.clone().expect("stdio stdout tx");
+        let out_queue = stdio_queue.clone().expect("stdio stdout queue");
         let shutdown_c = shutdown_tx.clone();
         Some(tokio::spawn(async move {
             let mut lines = BufReader::new(tokio::io::stdin()).lines();
@@ -2140,6 +2533,7 @@ async fn run_foreground(
                 if trimmed.is_empty() {
                     continue;
                 }
+                bus_c.touch_activity();
                 let parsed: Result<Value, _> = serde_json::from_str(trimmed);
                 let mut stop_flushed_tx: Option<oneshot::Sender<()>> = None;
                 let reply_json = match parsed {
@@ -2179,7 +2573,7 @@ async fn run_foreground(
                             {
                                 Err(anyhow!("session stopped"))
                             } else {
-                                match timeout(Duration::from_secs(45), rx).await {
+                                match timeout(Duration::from_secs(65), rx).await {
                                     Ok(Ok(res)) => res,
                                     Ok(Err(_)) => Err(anyhow!("session stopped")),
                                     Err(_) => {
@@ -2199,7 +2593,7 @@ async fn run_foreground(
                     Err(err) => ipc_err(None, "invalid_arguments", format!("invalid JSON: {err}")),
                 };
                 let line = serde_json::to_string(&reply_json).unwrap_or_default();
-                let _ = out_tx.send(line);
+                out_queue.push(line, StdioPriority::Reply);
                 if let Some(ftx) = stop_flushed_tx {
                     let _ = ftx.send(());
                     return;
@@ -2222,7 +2616,7 @@ async fn run_foreground(
     let mut waiting_offer: Option<WaitingPendingOffer> = None;
     let mut last_media_report: Option<MediaInspectionReport> = None;
     let mut last_recording: Option<RecordingReport> = None;
-    let mut last_activity = Instant::now();
+    let (mut rec_jobs, mut rec_done_rx) = RecordingJobs::new();
     let mut last_stats_emitted = Instant::now();
     let mut last_wav_flush = Instant::now();
     let mut stop_reason: Option<String> = None;
@@ -2466,7 +2860,7 @@ async fn run_foreground(
                 }
             }
             Some(eng_cmd) = cmd_rx.recv() => {
-                last_activity = Instant::now();
+                bus.touch_activity();
                 let op = eng_cmd.request.get("op").and_then(Value::as_str).unwrap_or("");
                 if op == "stop" {
                     stop_hangup = eng_cmd.request.get("hangup").and_then(Value::as_bool).unwrap_or(true);
@@ -2492,10 +2886,15 @@ async fn run_foreground(
                     active_call: &mut active_call,
                     pending: &mut pending,
                     waiting_offer: &mut waiting_offer,
-                    last_media_report: &last_media_report,
+                    last_media_report: &mut last_media_report,
                     last_recording: &mut last_recording,
+                    rec_jobs: &mut rec_jobs,
                 };
                 handle_engine_command(ctx, eng_cmd.request, eng_cmd.reply).await;
+            }
+            Some(finished) = rec_done_rx.recv() => {
+                bus.touch_activity();
+                rec_jobs.complete(finished, &mut active_call, &bus, &mut last_recording);
             }
             event = control.next_event() => {
                 let event = match event {
@@ -2508,6 +2907,7 @@ async fn run_foreground(
                         break Err(err);
                     }
                 };
+                bus.touch_activity();
                 control.update(&event);
                 bus.emit_call_event(&event);
                 handle_control_event(
@@ -2527,6 +2927,7 @@ async fn run_foreground(
                     &bus,
                     &mut last_media_report,
                     &mut last_recording,
+                    &mut rec_jobs,
                 )
                 .await;
             }
@@ -2768,7 +3169,7 @@ async fn run_foreground(
                     }
                 }
                 if let Some(call) = active_call.as_mut() {
-                    last_activity = now;
+                    bus.touch_activity();
                     if call
                         .hangup_started_at
                         .is_some_and(|at| now.saturating_duration_since(at) > COMMAND_TIMEOUT)
@@ -2831,43 +3232,74 @@ async fn run_foreground(
                         call.media_closed_at = None;
                         call.media_attach_failed = true;
                     }
-                } else if options.idle_timeout > 0
-                    && now.saturating_duration_since(last_activity)
-                        >= Duration::from_secs(options.idle_timeout)
-                {
-                    stop_reason = Some("idle_timeout".into());
-                    break Ok(());
+                } else {
+                    let keep_alive = control.offer.is_some()
+                        || control.pending_offer.is_some()
+                        || !pending.is_empty()
+                        || waiting_offer.is_some()
+                        || !rec_jobs.is_empty()
+                        || bus.has_active_waiters();
+                    if keep_alive {
+                        bus.touch_activity();
+                    } else if options.idle_timeout > 0
+                        && bus.idle_for(now) >= Duration::from_secs(options.idle_timeout)
+                    {
+                        stop_reason = Some("idle_timeout".into());
+                        break Ok(());
+                    }
                 }
             }
         }
     };
 
-    // Clean teardown: hang up active owned call if requested, finalize recordings, close sockets.
-    let mut final_recording = last_recording.clone();
+    // Clean teardown: hang up active owned call if requested, drain background recordings, close sockets.
     if let Some(mut call) = active_call.take() {
         call.video_capture.take();
         if stop_hangup {
             let _ = super::audio::terminate_owned(&mut control, &call.call_id).await;
         }
-        if let Some(rec) = stop_inspector_recording(&mut call.inspector).await {
-            bus.emit(json!({
-                "type": "recording.stopped",
-                "callId": call.call_id,
-                "recording": rec,
-            }));
-            final_recording = Some(rec);
-        }
-        for waiter in call.end_waiters.drain(..) {
-            let _ = waiter.send(Ok(json!({
-                "callId": call.call_id,
-                "hadCall": true,
-                "ended": true,
-                "eventSeq": bus.current_seq(),
-                "recording": final_recording,
-            })));
-        }
         drop(call.media);
+        let end_waiters: Vec<(bool, oneshot::Sender<Result<Value>>)> =
+            call.end_waiters.drain(..).map(|w| (true, w)).collect();
+        if let Some(rec) = call.inspector.take_recorder() {
+            rec_jobs.spawn(call.call_id.clone(), rec, Vec::new(), end_waiters);
+        } else if let Some(job) = rec_jobs.latest_for_call_mut(&call.call_id) {
+            job.end_waiters.extend(end_waiters);
+        } else {
+            let seq = bus.current_seq();
+            for (ended, waiter) in end_waiters {
+                let _ = waiter.send(Ok(json!({
+                    "callId": call.call_id,
+                    "hadCall": true,
+                    "ended": ended,
+                    "eventSeq": seq,
+                    "recording": last_recording,
+                })));
+            }
+        }
     }
+
+    let drain_deadline = tokio::time::Instant::now() + SHUTDOWN_RECORDING_DRAIN_TIMEOUT;
+    while !rec_jobs.is_empty() {
+        let now = tokio::time::Instant::now();
+        if now >= drain_deadline {
+            rec_jobs.fail_remaining(
+                &bus,
+                "timed out waiting for recording finish during shutdown",
+            );
+            break;
+        }
+        match timeout(drain_deadline - now, rec_done_rx.recv()).await {
+            Ok(Some(finished)) => {
+                rec_jobs.complete(finished, &mut active_call, &bus, &mut last_recording);
+            }
+            _ => {
+                rec_jobs.fail_remaining(&bus, "recording worker stopped during shutdown");
+                break;
+            }
+        }
+    }
+    let final_recording = last_recording.clone();
 
     let _ = audio_io.stop().await;
     control.close().await;
@@ -2897,7 +3329,9 @@ async fn run_foreground(
     if let Some(task) = stdio_task.take() {
         task.abort();
     }
-    drop(stdio_tx);
+    if let Some(queue) = stdio_queue.take() {
+        queue.close();
+    }
     drop(bus);
     if let Some(writer) = stdio_writer_task.take() {
         let _ = timeout(Duration::from_secs(2), writer).await;
@@ -2910,16 +3344,6 @@ async fn run_foreground(
     drop(lock_file);
 
     loop_result
-}
-
-async fn stop_inspector_recording(inspector: &mut CallMediaInspector) -> Option<RecordingReport> {
-    let recorder = inspector.take_recorder()?;
-    let report = tokio::task::spawn_blocking(move || recorder.finish())
-        .await
-        .ok()?
-        .ok()?;
-    inspector.record_finished_report(report.clone());
-    Some(report)
 }
 
 async fn next_active_media(active: &mut Option<ActiveSessionCall>) -> Result<Message> {
@@ -2993,8 +3417,9 @@ struct CommandContext<'a> {
     active_call: &'a mut Option<ActiveSessionCall>,
     pending: &'a mut HashMap<String, PendingRequest>,
     waiting_offer: &'a mut Option<WaitingPendingOffer>,
-    last_media_report: &'a Option<MediaInspectionReport>,
+    last_media_report: &'a mut Option<MediaInspectionReport>,
     last_recording: &'a mut Option<RecordingReport>,
+    rec_jobs: &'a mut RecordingJobs,
 }
 
 async fn handle_engine_command(
@@ -3338,19 +3763,14 @@ async fn handle_engine_command(
                 .cloned();
             match view {
                 Some(view) if view.state == CallState::Ended => {
-                    let rec = stop_inspector_recording(&mut call.inspector).await;
-                    if let Some(r) = &rec {
-                        *ctx.last_recording = Some(r.clone());
-                    }
-                    let cid = call.call_id.clone();
-                    *ctx.active_call = None;
-                    let _ = reply.send(Ok(json!({
-                        "callId": cid,
-                        "hadCall": true,
-                        "ended": true,
-                        "eventSeq": before_seq,
-                        "recording": rec,
-                    })));
+                    call.end_waiters.push(reply);
+                    finalize_active_call(
+                        ctx.active_call,
+                        ctx.bus,
+                        ctx.last_media_report,
+                        ctx.rec_jobs,
+                        true,
+                    );
                 }
                 Some(view) if view.state == CallState::Ending => {
                     call.hangup_started_at.get_or_insert_with(Instant::now);
@@ -3388,6 +3808,13 @@ async fn handle_engine_command(
                             );
                         }
                         Err(err) => {
+                            rollback_failed_hangup(
+                                call,
+                                ctx.current_video_source,
+                                ctx.control,
+                                ctx.bus,
+                            )
+                            .await;
                             let _ = reply.send(Err(err));
                         }
                     }
@@ -4004,14 +4431,32 @@ async fn handle_engine_command(
                 .and_then(Value::as_str)
                 .map(PathBuf::from)
                 .unwrap_or_else(|| {
-                    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
-                    ctx.session_dir.join("recordings").join(format!(
-                        "{stamp}-{}",
-                        wechat_call_client::inspect::sanitize_filename_part(&call.call_id)
-                    ))
+                    ctx.rec_jobs
+                        .next_auto_dir(&ctx.session_dir.join("recordings"), &call.call_id)
                 });
-            match call.inspector.start_recording(dir) {
-                Ok(report) => {
+            if call.inspector.active_recording_dir() == Some(dir.as_path())
+                || ctx.rec_jobs.dir_in_use(&dir)
+            {
+                let _ = reply.send(Err(anyhow!(
+                    "recording directory {} is already in use; choose a new directory or wait for the active recording to finish",
+                    dir.display()
+                )));
+                return;
+            }
+            // Start the new recorder first so a bad directory leaves any active recording intact,
+            // then detach any previous active recorder (including `--record-dir`) to finalize on a
+            // background blocking task so FFmpeg encoding never stalls the session actor loop.
+            match CallRecorder::start(dir, call.inspector.sample_rate(), 1) {
+                Ok(new_recorder) => {
+                    let (report, prev) = call.inspector.replace_recorder(new_recorder);
+                    if let Some(old_recorder) = prev {
+                        ctx.rec_jobs.spawn(
+                            call.call_id.clone(),
+                            old_recorder,
+                            Vec::new(),
+                            Vec::new(),
+                        );
+                    }
                     ctx.bus.emit(json!({
                         "type": "recording.started",
                         "callId": call.call_id,
@@ -4029,27 +4474,31 @@ async fn handle_engine_command(
             }
         }
         "record.stop" => {
-            let Some(call) = ctx.active_call.as_mut() else {
+            if let Some(call) = ctx.active_call.as_mut() {
+                if let Some(recorder) = call.inspector.take_recorder() {
+                    ctx.rec_jobs.spawn(
+                        call.call_id.clone(),
+                        recorder,
+                        vec![(before_seq, reply)],
+                        Vec::new(),
+                    );
+                } else if let Some(job) = ctx.rec_jobs.latest_for_call_mut(&call.call_id) {
+                    job.stop_waiters.push((before_seq, reply));
+                } else {
+                    let _ = reply.send(Ok(json!({
+                        "callId": call.call_id,
+                        "recording": Value::Null,
+                        "eventSeq": before_seq,
+                    })));
+                }
+            } else if let Some(job) = ctx.rec_jobs.latest_any_mut() {
+                job.stop_waiters.push((before_seq, reply));
+            } else {
                 let _ = reply.send(Ok(json!({
                     "recording": ctx.last_recording,
                     "eventSeq": before_seq,
                 })));
-                return;
-            };
-            let report = stop_inspector_recording(&mut call.inspector).await;
-            if let Some(r) = &report {
-                *ctx.last_recording = Some(r.clone());
-                ctx.bus.emit(json!({
-                    "type": "recording.stopped",
-                    "callId": call.call_id,
-                    "recording": r,
-                }));
             }
-            let _ = reply.send(Ok(json!({
-                "callId": call.call_id,
-                "recording": report,
-                "eventSeq": before_seq,
-            })));
         }
         other => {
             let _ = reply.send(Err(failure(
@@ -4316,6 +4765,20 @@ async fn submit_staged_action(
     }
 }
 
+async fn rollback_failed_hangup(
+    call: &mut ActiveSessionCall,
+    current_video_source: &CameraSource,
+    control: &mut Control,
+    bus: &SharedEventBus,
+) {
+    call.stopping = false;
+    call.pending_hangup = false;
+    call.hangup_started_at = None;
+    if call.camera_enabled && call.video_allowed {
+        let _ = start_session_video_capture(call, current_video_source, control, bus).await;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_control_event(
     event: &CallEvent,
@@ -4333,7 +4796,8 @@ async fn handle_control_event(
     session_dir: &Path,
     bus: &Arc<SharedEventBus>,
     last_media_report: &mut Option<MediaInspectionReport>,
-    last_recording: &mut Option<RecordingReport>,
+    _last_recording: &mut Option<RecordingReport>,
+    rec_jobs: &mut RecordingJobs,
 ) {
     match event {
         CallEvent::CommandResult {
@@ -4396,6 +4860,7 @@ async fn handle_control_event(
                     }
                     PendingKind::Hangup => {
                         if let Some(call) = active_call.as_mut() {
+                            rollback_failed_hangup(call, current_video_source, control, bus).await;
                             for waiter in call.end_waiters.drain(..) {
                                 let _ = waiter.send(Err(anyhow!("hangup rejected: {code_str}")));
                             }
@@ -4455,11 +4920,7 @@ async fn handle_control_event(
                     bus.publish_media(None);
                     let mut inspector = CallMediaInspector::new(control.format.sample_rate);
                     if let Some(rec_root) = &options.record_dir {
-                        let rec_dir = rec_root.join(format!(
-                            "{}-{}",
-                            chrono::Utc::now().format("%Y%m%dT%H%M%SZ"),
-                            wechat_call_client::inspect::sanitize_filename_part(&cid)
-                        ));
+                        let rec_dir = rec_jobs.next_auto_dir(rec_root, &cid);
                         match inspector.start_recording(rec_dir) {
                             Ok(report) => {
                                 bus.emit(json!({
@@ -4523,11 +4984,7 @@ async fn handle_control_event(
                     bus.publish_media(None);
                     let mut inspector = CallMediaInspector::new(control.format.sample_rate);
                     if let Some(rec_root) = &options.record_dir {
-                        let rec_dir = rec_root.join(format!(
-                            "{}-{}",
-                            chrono::Utc::now().format("%Y%m%dT%H%M%SZ"),
-                            wechat_call_client::inspect::sanitize_filename_part(&cid)
-                        ));
+                        let rec_dir = rec_jobs.next_auto_dir(rec_root, &cid);
                         match inspector.start_recording(rec_dir) {
                             Ok(report) => {
                                 bus.emit(json!({
@@ -4637,10 +5094,9 @@ async fn handle_control_event(
                             active_call,
                             bus,
                             last_media_report,
-                            last_recording,
+                            rec_jobs,
                             view.state == CallState::Ended,
-                        )
-                        .await;
+                        );
                     }
                     CallState::Ending => {
                         call.pending_hangup = false;
@@ -4691,6 +5147,7 @@ async fn handle_control_event(
                     }
                     Err(err) => {
                         if let Some(call) = active_call.as_mut() {
+                            rollback_failed_hangup(call, current_video_source, control, bus).await;
                             for waiter in call.end_waiters.drain(..) {
                                 let _ = waiter.send(Err(anyhow!("{err:#}")));
                             }
@@ -4701,8 +5158,7 @@ async fn handle_control_event(
         }
         CallEvent::Availability { availability } if !availability.busy => {
             if active_call.is_some() {
-                finalize_active_call(active_call, bus, last_media_report, last_recording, true)
-                    .await;
+                finalize_active_call(active_call, bus, last_media_report, rec_jobs, true);
             }
             bus.publish_media(None);
             if desired_ready
@@ -4775,39 +5231,40 @@ async fn handle_control_event(
     }
 }
 
-async fn finalize_active_call(
+fn finalize_active_call(
     active_call: &mut Option<ActiveSessionCall>,
     bus: &Arc<SharedEventBus>,
     last_media_report: &mut Option<MediaInspectionReport>,
-    last_recording: &mut Option<RecordingReport>,
+    rec_jobs: &mut RecordingJobs,
     ended: bool,
 ) {
     let Some(mut call) = active_call.take() else {
         return;
     };
     call.video_capture.take();
-    let rec = stop_inspector_recording(&mut call.inspector).await;
-    if let Some(r) = &rec {
-        *last_recording = Some(r.clone());
-        bus.emit(json!({
-            "type": "recording.stopped",
-            "callId": call.call_id,
-            "recording": r,
-        }));
-    }
+    drop(call.media);
     let final_media = call.inspector.report(Instant::now());
     *last_media_report = Some(final_media);
     bus.publish_media(None);
-    for waiter in call.end_waiters.drain(..) {
-        let _ = waiter.send(Ok(json!({
-            "callId": call.call_id,
-            "hadCall": true,
-            "ended": ended,
-            "eventSeq": bus.current_seq(),
-            "recording": rec,
-        })));
+
+    let end_waiters: Vec<(bool, oneshot::Sender<Result<Value>>)> =
+        call.end_waiters.drain(..).map(|w| (ended, w)).collect();
+    if let Some(rec) = call.inspector.take_recorder() {
+        rec_jobs.spawn(call.call_id.clone(), rec, Vec::new(), end_waiters);
+    } else if let Some(job) = rec_jobs.latest_for_call_mut(&call.call_id) {
+        job.end_waiters.extend(end_waiters);
+    } else {
+        let seq = bus.current_seq();
+        for (ended, waiter) in end_waiters {
+            let _ = waiter.send(Ok(json!({
+                "callId": call.call_id,
+                "hadCall": true,
+                "ended": ended,
+                "eventSeq": seq,
+                "recording": Value::Null,
+            })));
+        }
     }
-    drop(call.media);
 }
 
 // ---------------------------------------------------------------------------
@@ -4867,9 +5324,11 @@ async fn handle_ipc_stream<R, W>(
             return;
         }
     }
+    bus.touch_activity();
     let req_id = req.get("id").cloned();
     let op = req.get("op").and_then(Value::as_str).unwrap_or("");
     if op == "events.follow" {
+        let _waiter = bus.enter_waiter();
         let after = req.get("after").and_then(Value::as_u64).unwrap_or(0);
         let mut rx = bus.subscribe();
         let mut last_sent = after;
@@ -4984,6 +5443,7 @@ fn matches_media_entry(args: &SessionWaitArgs, entry: &(String, MediaInspectionR
 }
 
 async fn run_wait_request(bus: &Arc<SharedEventBus>, request: &Value) -> Result<Value> {
+    let _waiter = bus.enter_waiter();
     let args: SessionWaitArgs =
         serde_json::from_value(request.clone()).context("invalid wait filter arguments")?;
     let max_wait = Duration::from_secs(args.timeout.clamp(1, 3600));
@@ -5264,6 +5724,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct MockDaemonState {
         commands: Arc<Mutex<Vec<Value>>>,
+        reject_next_hangups: Arc<AtomicUsize>,
     }
 
     fn test_jpeg(r: u8, g: u8, b: u8) -> Vec<u8> {
@@ -5429,6 +5890,23 @@ mod tests {
                         .await;
                 }
                 "call.hangup" | "call.cancel" => {
+                    if state
+                        .reject_next_hangups
+                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+                        .is_ok()
+                    {
+                        let res = CallEvent::CommandResult {
+                            request_id: rid,
+                            status: CallCommandStatus::Error,
+                            call_id: Some("call-mock-1".into()),
+                            owner_token: None,
+                            code: Some(wechat_core::call_types::CallErrorCode::Stale),
+                        };
+                        let _ = socket
+                            .send(AxumMsg::Text(serde_json::to_string(&res).unwrap().into()))
+                            .await;
+                        continue;
+                    }
                     let res = CallEvent::CommandResult {
                         request_id: rid,
                         status: CallCommandStatus::Accepted,
@@ -5890,5 +6368,407 @@ mod tests {
         handler.await.unwrap();
         let reply = write_task.await.unwrap();
         assert!(reply.contains("exceeds size limit"), "got reply: {reply}");
+    }
+
+    #[tokio::test]
+    async fn record_start_during_active_recording_finishes_first_asynchronously_without_stalling() {
+        let state = MockDaemonState::default();
+        let router = Router::new()
+            .route(
+                "/v1/accounts/test-account/calls/socket",
+                get(mock_control_ws),
+            )
+            .route(
+                "/v1/accounts/test-account/calls/{call_id}/media",
+                get(mock_media_ws),
+            )
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        let temp = tempfile::tempdir().unwrap();
+        let session_dir = temp.path().join("sess");
+        let rec_root = temp.path().join("auto-rec");
+        let rec_second = temp.path().join("manual-rec");
+
+        let remote = super::super::tests::remote(addr);
+        let opts = SessionRunOptions {
+            name: "rec-test".into(),
+            dir: Some(session_dir.clone()),
+            ready: true,
+            audio: "tone:440:0.3".into(),
+            output: "null".into(),
+            video: "off".into(),
+            receive_video_codec: "jpeg".into(),
+            record_dir: Some(rec_root.clone()),
+            snapshot_interval: 0,
+            stats_interval: 200,
+            idle_timeout: 60,
+        };
+        let runner = tokio::spawn(async move {
+            run_foreground(&remote, opts, false, false, None)
+                .await
+                .unwrap();
+        });
+
+        for _ in 0..40 {
+            if let Ok(st) = ipc_call_dir(
+                &session_dir,
+                json!({ "op": "status" }),
+                Duration::from_millis(400),
+            )
+            .await
+            {
+                if st["session"]["ready"] == true {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let dial_res = ipc_call_dir(
+            &session_dir,
+            json!({ "op": "dial", "contact": "wxid_bob", "video": true, "cameraOff": true }),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        let after_dial = dial_res["eventSeq"].as_u64().unwrap();
+
+        // Wait for a few audio/video frames so the auto-recording captures real media.
+        ipc_call_dir(
+            &session_dir,
+            json!({
+                "op": "wait",
+                "after": after_dial,
+                "timeout": 5,
+                "audioFrames": 5,
+                "videoFrames": 2
+            }),
+            Duration::from_secs(6),
+        )
+        .await
+        .unwrap();
+
+        // Starting a new recording while auto-recording is active must return promptly,
+        // detach the first recording asynchronously, and emit `recording.stopped` for it.
+        let rec2_start = ipc_call_dir(
+            &session_dir,
+            json!({ "op": "record.start", "dir": rec_second.display().to_string() }),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rec2_start["recording"]["active"], true);
+        let after_rec2_start = rec2_start["eventSeq"].as_u64().unwrap();
+
+        // First recording completes asynchronously and emits `recording.stopped`.
+        let first_stopped = ipc_call_dir(
+            &session_dir,
+            json!({
+                "op": "wait",
+                "after": after_rec2_start,
+                "timeout": 15,
+                "events": ["recording.stopped"]
+            }),
+            Duration::from_secs(16),
+        )
+        .await
+        .unwrap();
+        let first_manifest = first_stopped["event"]["recording"]["manifest"]
+            .as_str()
+            .expect("first recording manifest");
+        assert!(Path::new(first_manifest).is_file());
+        assert!(
+            Path::new(first_manifest).starts_with(&rec_root),
+            "first recording should live under auto-rec: {first_manifest}"
+        );
+
+        // Stop the second recording and verify its manifest is also written.
+        let rec2_stop = ipc_call_dir(
+            &session_dir,
+            json!({ "op": "record.stop" }),
+            Duration::from_secs(15),
+        )
+        .await
+        .unwrap();
+        let second_manifest = rec2_stop["recording"]["manifest"]
+            .as_str()
+            .expect("second recording manifest");
+        assert!(Path::new(second_manifest).is_file());
+        assert!(Path::new(second_manifest).starts_with(&rec_second));
+
+        ipc_call_dir(
+            &session_dir,
+            json!({ "op": "hangup" }),
+            Duration::from_secs(8),
+        )
+        .await
+        .unwrap();
+        ipc_call_dir(
+            &session_dir,
+            json!({ "op": "stop", "hangup": false }),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        runner.await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn idle_timeout_waits_for_active_wait_then_stops_when_idle() {
+        let state = MockDaemonState::default();
+        let router = Router::new()
+            .route(
+                "/v1/accounts/test-account/calls/socket",
+                get(mock_control_ws),
+            )
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        let temp = tempfile::tempdir().unwrap();
+        let session_dir = temp.path().join("sess-idle");
+        let remote = super::super::tests::remote(addr);
+        let opts = SessionRunOptions {
+            name: "idle-test".into(),
+            dir: Some(session_dir.clone()),
+            ready: true,
+            audio: "silence".into(),
+            output: "null".into(),
+            video: "off".into(),
+            receive_video_codec: "jpeg".into(),
+            record_dir: None,
+            snapshot_interval: 0,
+            stats_interval: 0,
+            idle_timeout: 1,
+        };
+        let runner = tokio::spawn(async move {
+            run_foreground(&remote, opts, false, false, None)
+                .await
+                .unwrap();
+        });
+
+        for _ in 0..40 {
+            if let Ok(st) = ipc_call_dir(
+                &session_dir,
+                json!({ "op": "status" }),
+                Duration::from_millis(300),
+            )
+            .await
+            {
+                if st["session"]["ready"] == true {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+
+        // A 2-second wait exceeds the 1-second idle timeout; the session must stay alive
+        // throughout the wait (returning wait_timeout, NOT session_stopped).
+        let wait_err = ipc_call_dir(
+            &session_dir,
+            json!({
+                "op": "wait",
+                "after": 0,
+                "timeout": 2,
+                "events": ["call.offered"]
+            }),
+            Duration::from_secs(5),
+        )
+        .await
+        .expect_err("wait should time out without session stopping");
+        let err_msg = wait_err.to_string();
+        assert!(
+            err_msg.contains("timed out"),
+            "expected wait_timeout, got: {err_msg}"
+        );
+
+        // Session is still alive right after wait returns; once left idle >1s it exits cleanly.
+        tokio::time::timeout(Duration::from_secs(4), runner)
+            .await
+            .expect("session should stop after becoming idle")
+            .unwrap();
+        let events_log = fs::read_to_string(session_dir.join("events.jsonl")).unwrap();
+        assert!(
+            events_log.contains("\"reason\":\"idle_timeout\""),
+            "expected idle_timeout stop event, got: {events_log}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn rejected_hangup_rolls_back_stopping_and_keeps_call_active() {
+        let state = MockDaemonState::default();
+        state.reject_next_hangups.store(1, Ordering::Release);
+        let router = Router::new()
+            .route(
+                "/v1/accounts/test-account/calls/socket",
+                get(mock_control_ws),
+            )
+            .route(
+                "/v1/accounts/test-account/calls/{call_id}/media",
+                get(mock_media_ws),
+            )
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        let temp = tempfile::tempdir().unwrap();
+        let session_dir = temp.path().join("sess-hangup-reject");
+        let remote = super::super::tests::remote(addr);
+        let opts = SessionRunOptions {
+            name: "hangup-rollback".into(),
+            dir: Some(session_dir.clone()),
+            ready: true,
+            audio: "tone:440:0.25".into(),
+            output: "null".into(),
+            video: "off".into(),
+            receive_video_codec: "jpeg".into(),
+            record_dir: None,
+            snapshot_interval: 0,
+            stats_interval: 0,
+            idle_timeout: 60,
+        };
+        let runner = tokio::spawn(async move {
+            run_foreground(&remote, opts, false, false, None)
+                .await
+                .unwrap();
+        });
+
+        for _ in 0..40 {
+            if let Ok(st) = ipc_call_dir(
+                &session_dir,
+                json!({ "op": "status" }),
+                Duration::from_millis(300),
+            )
+            .await
+            {
+                if st["session"]["ready"] == true {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+
+        ipc_call_dir(
+            &session_dir,
+            json!({ "op": "dial", "contact": "wxid_bob" }),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        ipc_call_dir(
+            &session_dir,
+            json!({ "op": "wait", "after": 0, "timeout": 5, "audioFrames": 3 }),
+            Duration::from_secs(6),
+        )
+        .await
+        .unwrap();
+
+        // First hangup is rejected with stale_revision; session must roll back `stopping`
+        // and allow a subsequent hangup to succeed.
+        let err = ipc_call_dir(
+            &session_dir,
+            json!({ "op": "hangup" }),
+            Duration::from_secs(5),
+        )
+        .await
+        .expect_err("first hangup should be rejected");
+        assert!(err.to_string().contains("hangup rejected"), "err: {err}");
+
+        let st = ipc_call_dir(
+            &session_dir,
+            json!({ "op": "status" }),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert_eq!(st["local"]["owned"], true);
+        assert_eq!(st["local"]["mediaAttached"], true);
+
+        let ok = ipc_call_dir(
+            &session_dir,
+            json!({ "op": "hangup" }),
+            Duration::from_secs(8),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ok["ended"], true);
+
+        ipc_call_dir(
+            &session_dir,
+            json!({ "op": "stop", "hangup": false }),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        runner.await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn stdio_queue_bounds_size_and_drops_media_stats_first() {
+        let queue = StdioQueue::new(3);
+        queue.push("stats-1".into(), StdioPriority::Stats);
+        queue.push("event-1".into(), StdioPriority::Event);
+        queue.push("stats-2".into(), StdioPriority::Stats);
+        // Queue is full (3). Pushing a reply must evict stats-1 first, keeping event-1 & stats-2.
+        queue.push("reply-1".into(), StdioPriority::Reply);
+        // Pushing another event must evict stats-2, keeping event-1 & reply-1.
+        queue.push("event-2".into(), StdioPriority::Event);
+        // Queue now has [event-1, reply-1, event-2]; a new stats entry is dropped without evicting them.
+        queue.push("stats-3".into(), StdioPriority::Stats);
+        queue.close();
+
+        let mut drained = Vec::new();
+        while let Some(line) = queue.pop_wait().await {
+            drained.push(line);
+        }
+        assert_eq!(drained, vec!["event-1", "reply-1", "event-2"]);
+    }
+
+    #[test]
+    fn event_log_truncates_on_restart_and_rotates_at_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let log_path = temp.path().join("events.jsonl");
+
+        let bus1 = SharedEventBus::with_max_log_bytes(Some(&log_path), None, 256).unwrap();
+        bus1.emit(json!({ "type": "old.event", "payload": "first-run" }));
+        drop(bus1);
+
+        // Starting a new bus on the same file truncates previous run's entries and starts seq at 1.
+        let bus2 = SharedEventBus::with_max_log_bytes(Some(&log_path), None, 256).unwrap();
+        for i in 0..8 {
+            bus2.emit(json!({
+                "type": "new.event",
+                "idx": i,
+                "pad": "aaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }));
+        }
+        drop(bus2);
+
+        let current = fs::read_to_string(&log_path).unwrap();
+        assert!(
+            !current.contains("first-run"),
+            "restart must truncate old log"
+        );
+        let rotated = log_path.with_extension("jsonl.1");
+        assert!(
+            rotated.is_file(),
+            "event log should rotate once size cap is exceeded"
+        );
+        let rotated_text = fs::read_to_string(&rotated).unwrap();
+        assert!(!rotated_text.contains("first-run"));
     }
 }
