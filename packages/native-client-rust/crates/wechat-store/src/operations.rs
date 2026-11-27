@@ -516,6 +516,9 @@ impl Store {
             let now = chrono::Utc::now().to_rfc3339();
             for (id, kind) in &rows {
                 tx.execute("UPDATE operations SET state='failed',result_json=?1,updated_at=?2 WHERE id=?3", params![serde_json::to_string(&serde_json::json!({"code":"operation_interrupted","stagedDataRetained":true}))?,now,id])?;
+                if kind == "login" {
+                    tx.execute("DELETE FROM runtime WHERE key=?1", [format!("qr:{id}")])?;
+                }
                 tx.execute("INSERT INTO events(kind,data_json,created_at)VALUES('operation.updated',?1,?2)", params![serde_json::to_string(&serde_json::json!({"id":id,"kind":kind,"state":"failed"}))?,now])?;
             }
             tx.commit()?;
@@ -1039,12 +1042,16 @@ mod tests {
                 })
                 .unwrap();
         }
+        store
+            .put_runtime("test", "qr:active-login", b"sealed-qr")
+            .unwrap();
         store.control("test", |db| { db.execute_batch("CREATE TRIGGER reject_restart_event BEFORE INSERT ON events WHEN NEW.kind='operation.updated' BEGIN SELECT RAISE(ABORT,'event unavailable'); END;")?; Ok(()) }).unwrap();
         assert!(store.recover_interrupted_operations("test").is_err());
         assert_eq!(
             store.operation("test", "active-sync").unwrap().state,
             "running"
         );
+        assert!(store.runtime("test", "qr:active-login").unwrap().is_some());
         store
             .control("test", |db| {
                 db.execute_batch("DROP TRIGGER reject_restart_event;")?;
@@ -1056,6 +1063,7 @@ mod tests {
             store.operation("test", "active-login").unwrap().result["code"],
             "operation_interrupted"
         );
+        assert!(store.runtime("test", "qr:active-login").unwrap().is_none());
         assert_eq!(store.operation("test", "done").unwrap().state, "succeeded");
         assert_eq!(store.operation("test", "logout").unwrap().state, "running");
         assert_eq!(store.recover_interrupted_operations("test").unwrap(), 0);
