@@ -6,8 +6,11 @@ import path from 'node:path';
 import test from 'node:test';
 
 import {
+  DEFAULT_BASE_NAME,
   DEFAULT_MAX_SINGLE_UNTRACKED_BYTES,
   buildApplyScript,
+  buildLockAcquireScript,
+  buildLockReleaseScript,
   createStandaloneSeedBundle,
   deriveSandboxName,
   filterUntrackedPaths,
@@ -16,6 +19,7 @@ import {
   parseBoatExecOutput,
   parseBundlePrerequisites,
   parseJsonOutput,
+  parseProbeOutput,
   parsePullSpec,
   parseRustToolchainChannel,
   pickSandboxAction,
@@ -82,33 +86,34 @@ test('parseArgs parses presets, passthrough commands, strict numeric flags, and 
   assert.throws(() => parseArgs(['--timeout', '5m']), /integer >= 0/);
 });
 
-test('deriveSandboxName sanitizes branch names and disambiguates worktrees/detached HEAD', () => {
-  assert.equal(
-    deriveSandboxName({
-      branch: 'feat/Voice_Fix#123',
-      worktreePath: '/repo/main',
-      isSecondaryWorktree: false,
-    }),
-    'aw-build-feat-voice-fix-123',
-  );
+test('deriveSandboxName always hashes checkout path to avoid clone and seed-name collisions', () => {
+  const feat = deriveSandboxName({
+    branch: 'feat/Voice_Fix#123',
+    worktreePath: '/repo/clone-a',
+  });
+  assert.match(feat, /^aw-build-feat-voice-fix-123-[0-9a-f]{6}$/);
 
-  const wt1 = deriveSandboxName({
+  const cloneA = deriveSandboxName({
     branch: 'main',
-    worktreePath: '/repo/worktrees/agent-1',
-    isSecondaryWorktree: true,
+    worktreePath: '/repo/clone-a',
   });
-  const wt2 = deriveSandboxName({
+  const cloneB = deriveSandboxName({
     branch: 'main',
-    worktreePath: '/repo/worktrees/agent-2',
-    isSecondaryWorktree: true,
+    worktreePath: '/repo/clone-b',
   });
-  assert.match(wt1, /^aw-build-main-[0-9a-f]{6}$/);
-  assert.notEqual(wt1, wt2);
+  assert.match(cloneA, /^aw-build-main-[0-9a-f]{6}$/);
+  assert.notEqual(cloneA, cloneB);
+
+  const baseBranch = deriveSandboxName({
+    branch: 'base',
+    worktreePath: '/repo/clone-a',
+  });
+  assert.match(baseBranch, /^aw-build-base-[0-9a-f]{6}$/);
+  assert.notEqual(baseBranch, DEFAULT_BASE_NAME);
 
   const detached = deriveSandboxName({
     branch: 'HEAD',
-    worktreePath: '/repo/main',
-    isSecondaryWorktree: false,
+    worktreePath: '/repo/clone-a',
   });
   assert.match(detached, /^aw-build-detached-[0-9a-f]{6}$/);
 });
@@ -241,6 +246,14 @@ test('pickSandboxAction prioritizes reuse > resume > wait-transition > fork-base
   });
   assert.equal(baseStoppingPlan.action, 'wait-transition');
   assert.equal(baseStoppingPlan.sandbox.id, 'bx_base_stopping');
+
+  const busyPlan = pickSandboxAction({
+    sandboxes: [{ id: 'bx_busy', name: 'aw-build-feat', state: 'busy' }],
+    targetName: 'aw-build-feat',
+    baseName: 'aw-build-base',
+  });
+  assert.equal(busyPlan.action, 'busy');
+  assert.equal(busyPlan.sandbox.id, 'bx_busy');
 });
 
 test('parseJsonOutput and parseBoatExecOutput parse JSON/JSONL and reject malformed or failed exec output', () => {
@@ -318,9 +331,68 @@ test('stop/delete --dry-run do not invoke boat', () => {
       assert.equal(parsed.subcommand, sub);
       assert.equal(parsed.targetName, 'aw-build-dry');
     }
+
+    // Running against the reserved seed sandbox name must fail before touching boat.
+    const reserved = spawnSync(
+      process.execPath,
+      [path.resolve(import.meta.dirname, 'run.mjs'), '--name', DEFAULT_BASE_NAME, '--', 'true'],
+      {
+        cwd: path.resolve(import.meta.dirname, '../..'),
+        encoding: 'utf8',
+        env: { ...process.env, PATH: `${tmp}:${process.env.PATH || ''}` },
+      },
+    );
+    assert.notEqual(reserved.status, 0);
+    assert.match(reserved.stderr, /reserved for the warm seed sandbox/);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+test('remote run lock prevents concurrent runs, respects ownership, and supports --force-unlock', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'aw-boat-lock-'));
+  try {
+    const lockDir = path.join(tmp, 'run.lock');
+    assert.equal(parseArgs(['--force-unlock', '--preset', 'rust-fmt']).forceUnlock, true);
+
+    const out1 = runBash(buildLockAcquireScript(lockDir, 'run-1'));
+    assert.match(out1, /LOCK_ACQUIRED=1/);
+
+    const out2 = runBash(buildLockAcquireScript(lockDir, 'run-2'));
+    assert.match(out2, /LOCK_ACQUIRED=0/);
+    assert.match(out2, /LOCK_HOLDER=run-1/);
+
+    // Wrong owner cannot release lock-1.
+    runBash(buildLockReleaseScript(lockDir, 'run-2'));
+    assert.ok(fs.existsSync(lockDir));
+
+    // Real owner releases lock cleanly.
+    runBash(buildLockReleaseScript(lockDir, 'run-1'));
+    assert.ok(!fs.existsSync(lockDir));
+
+    // Force-unlock replaces a stale lock.
+    runBash(buildLockAcquireScript(lockDir, 'stale-run'));
+    const forced = runBash(buildLockAcquireScript(lockDir, 'run-3', { forceUnlock: true }));
+    assert.match(forced, /LOCK_ACQUIRED=1/);
+    assert.equal(fs.readFileSync(path.join(lockDir, 'owner'), 'utf8').trim(), 'run-3');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('parseProbeOutput extracts REMOTE_HOME on both missing and existing repos', () => {
+  const missing = parseProbeOutput('REMOTE_HOME=/home/builder\nHAS_REPO=0\n');
+  assert.equal(missing.remoteHome, '/home/builder');
+  assert.equal(missing.hasRepo, false);
+
+  const present = parseProbeOutput(
+    'REMOTE_HOME=/home/builder\nHAS_REPO=1\nIS_SHALLOW=true\nREMOTE_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nREMOTE_CLEAN=1\nRECENT_BEGIN\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nRECENT_END\n',
+  );
+  assert.equal(present.remoteHome, '/home/builder');
+  assert.equal(present.hasRepo, true);
+  assert.equal(present.isShallow, true);
+  assert.equal(present.remoteClean, true);
+  assert.deepEqual(present.recentCommits, ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa']);
 });
 
 test('prepareLocalSync handles uncommitted edits, force-staged files, dangling symlinks, size guard, and worktrees', () => {

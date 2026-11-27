@@ -5,7 +5,7 @@
  *
  * See scripts/boat/boat.md for usage and design details.
  */
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -19,9 +19,11 @@ export const DEFAULT_EXCLUDES = ['work'];
 export const DEFAULT_MAX_SINGLE_UNTRACKED_BYTES = 10 * 1024 * 1024; // 10 MiB
 export const DEFAULT_MAX_TOTAL_UNTRACKED_BYTES = 50 * 1024 * 1024; // 50 MiB
 
-const RUNNING_STATES = new Set(['idle', 'running', 'busy', 'ready']);
+const RUNNING_STATES = new Set(['idle', 'running', 'ready']);
+const BUSY_STATES = new Set(['busy']);
 const TRANSITION_STATES = new Set(['stopping', 'pending', 'starting', 'resuming']);
 const FORKABLE_STATES = new Set(['stopped', 'idle', 'running', 'busy', 'ready']);
+export const DEFAULT_REMOTE_LOCK_DIR = '/tmp/aw-boat-run.lock';
 
 export function shellQuote(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
@@ -68,7 +70,7 @@ export function sanitizeSlug(raw, maxLen = 40) {
   return slug.slice(0, maxLen).replace(/-+$/g, '') || 'worktree';
 }
 
-export function deriveSandboxName({ branch, worktreePath, isSecondaryWorktree }) {
+export function deriveSandboxName({ branch, worktreePath }) {
   const hash = createHash('sha256')
     .update(path.resolve(worktreePath || REPO_ROOT))
     .digest('hex')
@@ -76,11 +78,10 @@ export function deriveSandboxName({ branch, worktreePath, isSecondaryWorktree })
   if (!branch || branch === 'HEAD') {
     return `aw-build-detached-${hash}`;
   }
+  // Always include the checkout path hash so separate clones on the same branch never collide
+  // and a branch named `base` cannot collide with the reserved seed name `aw-build-base`.
   const slug = sanitizeSlug(branch, 36);
-  if (isSecondaryWorktree) {
-    return `aw-build-${slug}-${hash}`;
-  }
-  return `aw-build-${slug}`;
+  return `aw-build-${slug}-${hash}`;
 }
 
 export function toPublicHttpsUrl(remoteUrl) {
@@ -184,6 +185,11 @@ export function pickSandboxAction({ sandboxes, targetName, baseName, noFork = fa
     .filter((box) => box && box.name === targetName && box.state !== 'error')
     .sort(byNewest);
 
+  const busy = matches.find((box) => BUSY_STATES.has(box.state));
+  if (busy) {
+    return { action: 'busy', sandbox: busy };
+  }
+
   const running = matches.find((box) => RUNNING_STATES.has(box.state));
   if (running) {
     return { action: 'reuse-running', sandbox: running };
@@ -277,6 +283,7 @@ export function parseArgs(argv) {
     withDocsFonts: false,
     skipSetup: false,
     skipWarmBuild: false,
+    forceUnlock: false,
     dryRun: false,
     command: [],
   };
@@ -357,6 +364,9 @@ export function parseArgs(argv) {
       case '--skip-warm-build':
         opts.skipWarmBuild = true;
         break;
+      case '--force-unlock':
+        opts.forceUnlock = true;
+        break;
       case '--dry-run':
         opts.dryRun = true;
         break;
@@ -388,7 +398,7 @@ Presets:
   verify        rust-lint + rust-test + generate-types --check + interfaces --check
 
 Options:
-  --name <name>             Sandbox name (default: aw-build-<branch>)
+  --name <name>             Sandbox name (default: aw-build-<branch>-<path-hash>)
   --base-name <name>        Warm seed sandbox to fork from (default: aw-build-base)
   --type <size>             Boat machine size: small, default, large, xlarge (default: default)
   --ttl <secs>              Auto-stop TTL in seconds (default: 3600)
@@ -405,6 +415,7 @@ Options:
   --with-docs-fonts         Install fonts-noto-cjk during setup
   --skip-setup              Skip running scripts/boat/setup.sh
   --skip-warm-build         (seed only) Skip initial Cargo warm compile
+  --force-unlock            Clear a stale remote run lock before starting
   --dry-run                 Print the planned action without mutating Boat sandboxes
 `;
 }
@@ -786,9 +797,100 @@ git read-tree refs/boat/head
 `;
 }
 
+export function buildLockAcquireScript(lockDir, runId, { forceUnlock = false } = {}) {
+  return `
+set -eu
+LOCK_DIR=${shellQuote(lockDir)}
+OWNER_FILE="$LOCK_DIR/owner"
+${forceUnlock ? 'rm -rf "$LOCK_DIR"' : ''}
+if mkdir "$LOCK_DIR" 2>/dev/null; then
+  printf '%s\\n' ${shellQuote(runId)} > "$OWNER_FILE"
+  echo "LOCK_ACQUIRED=1"
+  exit 0
+fi
+HOLDER="$(cat "$OWNER_FILE" 2>/dev/null || echo unknown)"
+echo "LOCK_ACQUIRED=0"
+echo "LOCK_HOLDER=$HOLDER"
+`;
+}
+
+export function buildLockReleaseScript(lockDir, runId) {
+  return `
+set -eu
+LOCK_DIR=${shellQuote(lockDir)}
+OWNER_FILE="$LOCK_DIR/owner"
+if [ -f "$OWNER_FILE" ] && [ "$(cat "$OWNER_FILE" 2>/dev/null || true)" = ${shellQuote(runId)} ]; then
+  rm -rf "$LOCK_DIR"
+fi
+`;
+}
+
+function acquireRemoteLock(sandboxId, targetName, runId, { forceUnlock = false } = {}) {
+  const out = runBoatExecCapture(
+    sandboxId,
+    buildLockAcquireScript(DEFAULT_REMOTE_LOCK_DIR, runId, { forceUnlock }),
+    { timeout: 60 },
+  );
+  let acquired = false;
+  let holder = 'unknown';
+  for (const rawLine of out.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line === 'LOCK_ACQUIRED=1') acquired = true;
+    else if (line.startsWith('LOCK_HOLDER=')) holder = line.slice('LOCK_HOLDER='.length) || 'unknown';
+  }
+  if (!acquired) {
+    throw new Error(
+      `Sandbox ${targetName} (${sandboxId}) is currently locked by another active run (${holder}). ` +
+        'Wait for it to finish, pass --name <other> to use a separate sandbox, or pass --force-unlock if a previous run was killed.',
+    );
+  }
+}
+
+function releaseRemoteLock(sandboxId, runId) {
+  runBoatExecCapture(sandboxId, buildLockReleaseScript(DEFAULT_REMOTE_LOCK_DIR, runId), {
+    timeout: 30,
+  });
+}
+
+export function parseProbeOutput(out) {
+  const info = {
+    remoteHome: null,
+    hasRepo: false,
+    isShallow: false,
+    remoteHead: null,
+    remoteLast: null,
+    remoteClean: false,
+    recentCommits: [],
+  };
+  let inRecent = false;
+  for (const rawLine of String(out || '').split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line === 'RECENT_BEGIN') {
+      inRecent = true;
+      continue;
+    }
+    if (line === 'RECENT_END') {
+      inRecent = false;
+      continue;
+    }
+    if (inRecent) {
+      if (/^[0-9a-f]{40}$/.test(line)) info.recentCommits.push(line);
+      continue;
+    }
+    if (line.startsWith('REMOTE_HOME=')) info.remoteHome = line.slice('REMOTE_HOME='.length) || null;
+    else if (line === 'HAS_REPO=1') info.hasRepo = true;
+    else if (line === 'IS_SHALLOW=true') info.isShallow = true;
+    else if (line.startsWith('REMOTE_HEAD=')) info.remoteHead = line.slice('REMOTE_HEAD='.length) || null;
+    else if (line.startsWith('REMOTE_LAST=')) info.remoteLast = line.slice('REMOTE_LAST='.length) || null;
+    else if (line === 'REMOTE_CLEAN=1') info.remoteClean = true;
+  }
+  return info;
+}
+
 function probeRemoteRepo(sandboxId) {
   const probeScript = `
 set -eu
+echo "REMOTE_HOME=$HOME"
 if [ ! -d "$HOME/${DEFAULT_REMOTE_DIR}/.git" ]; then
   echo "HAS_REPO=0"
   exit 0
@@ -808,36 +910,7 @@ git rev-list -n 200 HEAD 2>/dev/null || true
 echo "RECENT_END"
 `;
   const out = runBoatExecCapture(sandboxId, probeScript, { timeout: 60 });
-  const info = {
-    hasRepo: false,
-    isShallow: false,
-    remoteHead: null,
-    remoteLast: null,
-    remoteClean: false,
-    recentCommits: [],
-  };
-  let inRecent = false;
-  for (const rawLine of out.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (line === 'RECENT_BEGIN') {
-      inRecent = true;
-      continue;
-    }
-    if (line === 'RECENT_END') {
-      inRecent = false;
-      continue;
-    }
-    if (inRecent) {
-      if (/^[0-9a-f]{40}$/.test(line)) info.recentCommits.push(line);
-      continue;
-    }
-    if (line === 'HAS_REPO=1') info.hasRepo = true;
-    else if (line === 'IS_SHALLOW=true') info.isShallow = true;
-    else if (line.startsWith('REMOTE_HEAD=')) info.remoteHead = line.slice('REMOTE_HEAD='.length) || null;
-    else if (line.startsWith('REMOTE_LAST=')) info.remoteLast = line.slice('REMOTE_LAST='.length) || null;
-    else if (line === 'REMOTE_CLEAN=1') info.remoteClean = true;
-  }
-  return info;
+  return parseProbeOutput(out);
 }
 
 export function createStandaloneSeedBundle(repoRoot, realHead, tempDir) {
@@ -863,13 +936,21 @@ export function createStandaloneSeedBundle(repoRoot, realHead, tempDir) {
   return bundlePath;
 }
 
-function bootstrapRemoteRepo({ sandboxId, publicHttpsUrl, repoRoot, realHead, tempDir }) {
+function bootstrapRemoteRepo({
+  sandboxId,
+  remoteRepoPath,
+  remoteSeedPath,
+  publicHttpsUrl,
+  repoRoot,
+  realHead,
+  tempDir,
+}) {
   if (publicHttpsUrl) {
     console.log(`[boat] Cloning ${publicHttpsUrl} (depth 50) directly into sandbox ${sandboxId}...`);
     const cloneScript = `
 set -euo pipefail
-rm -rf "$HOME/${DEFAULT_REMOTE_DIR}"
-GIT_TERMINAL_PROMPT=0 git clone --depth 50 ${shellQuote(publicHttpsUrl)} "$HOME/${DEFAULT_REMOTE_DIR}"
+rm -rf ${shellQuote(remoteRepoPath)}
+GIT_TERMINAL_PROMPT=0 git clone --depth 50 ${shellQuote(publicHttpsUrl)} ${shellQuote(remoteRepoPath)}
 `;
     try {
       runBoatExecCapture(sandboxId, cloneScript, { timeout: 300 });
@@ -883,13 +964,13 @@ GIT_TERMINAL_PROMPT=0 git clone --depth 50 ${shellQuote(publicHttpsUrl)} "$HOME/
   const seedBundle = createStandaloneSeedBundle(repoRoot, realHead, tempDir);
   const sizeMiB = (fs.statSync(seedBundle).size / 1024 / 1024).toFixed(1);
   console.log(`[boat] Uploading seed bundle (${sizeMiB} MiB) to ${sandboxId}...`);
-  runBoat(['scp', seedBundle, `${sandboxId}:/tmp/aw-seed.bundle`]);
+  runBoat(['scp', seedBundle, `${sandboxId}:${remoteSeedPath}`]);
   const initScript = `
 set -euo pipefail
-rm -rf "$HOME/${DEFAULT_REMOTE_DIR}"
-git init -q "$HOME/${DEFAULT_REMOTE_DIR}"
-cd "$HOME/${DEFAULT_REMOTE_DIR}"
-${buildSeedUnpackSnippet('/tmp/aw-seed.bundle', realHead)}
+rm -rf ${shellQuote(remoteRepoPath)}
+git init -q ${shellQuote(remoteRepoPath)}
+cd ${shellQuote(remoteRepoPath)}
+${buildSeedUnpackSnippet(remoteSeedPath, realHead)}
 git checkout -q -f -B boat-build refs/boat/head
 git update-ref refs/boat/last HEAD
 `;
@@ -914,11 +995,21 @@ export function findCommonBase(repoRoot, remoteCommits, realHead, { isShallow = 
   return null;
 }
 
-function syncRepoToSandbox({ sandboxId, localSync, gitInfo }) {
+function syncRepoToSandbox({ sandboxId, runId, localSync, gitInfo }) {
+  const remoteSeedPath = `/tmp/aw-seed-${runId}.bundle`;
+  const remoteSyncPath = `/tmp/aw-sync-${runId}.bundle`;
+
   let remote = probeRemoteRepo(sandboxId);
+  if (!remote.remoteHome) {
+    throw new Error(`Could not determine $HOME on sandbox ${sandboxId}.`);
+  }
+  const remoteRepoPath = path.posix.join(remote.remoteHome, DEFAULT_REMOTE_DIR);
+
   if (!remote.hasRepo) {
     bootstrapRemoteRepo({
       sandboxId,
+      remoteRepoPath,
+      remoteSeedPath,
       publicHttpsUrl: gitInfo.publicHttpsUrl,
       repoRoot: REPO_ROOT,
       realHead: localSync.realHead,
@@ -944,7 +1035,7 @@ function syncRepoToSandbox({ sandboxId, localSync, gitInfo }) {
     remote.remoteClean
   ) {
     console.log(`[boat] Sync: already at ${shortHead} (0 B transferred${skipNote})`);
-    return;
+    return { remoteRepoPath };
   }
 
   const remoteCommitSet = new Set(remote.recentCommits);
@@ -986,7 +1077,7 @@ function syncRepoToSandbox({ sandboxId, localSync, gitInfo }) {
     try {
       const fetchDirectScript = `
 set -euo pipefail
-cd "$HOME/${DEFAULT_REMOTE_DIR}"
+cd ${shellQuote(remoteRepoPath)}
 GIT_TERMINAL_PROMPT=0 git fetch --depth 1 ${shellQuote(gitInfo.publicHttpsUrl)} ${shellQuote(realHead)}
 git update-ref refs/boat/head FETCH_HEAD
 `;
@@ -1018,33 +1109,36 @@ git update-ref refs/boat/head FETCH_HEAD
         ? `${Math.max(1, Math.round(bytes / 1024))} KiB`
         : `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
     console.log(`[boat] Sync: ${shortHead}${dirtyNote} (incremental bundle ${sizeLabel}${skipNote})`);
-    runBoat(['scp', incrementalBundlePath, `${sandboxId}:/tmp/aw-sync.bundle`]);
+    runBoat(['scp', incrementalBundlePath, `${sandboxId}:${remoteSyncPath}`]);
     uploadedBundle = true;
   } else {
     needSeedReset = true;
     console.log(`[boat] Sync: ${shortHead}${dirtyNote} (diverged shallow history; uploading fresh seed bundle${skipNote})`);
     const seedBundle = createStandaloneSeedBundle(REPO_ROOT, realHead, localSync.tempDir);
-    runBoat(['scp', seedBundle, `${sandboxId}:/tmp/aw-seed.bundle`]);
+    runBoat(['scp', seedBundle, `${sandboxId}:${remoteSeedPath}`]);
     if (isDirty) {
       const dirtyBundle = path.join(localSync.tempDir, 'dirty.bundle');
       runGit(['bundle', 'create', dirtyBundle, `^${realHead}`, 'refs/heads/boat-target'], {
         cwd: REPO_ROOT,
         env: localSync.stageEnv,
       });
-      runBoat(['scp', dirtyBundle, `${sandboxId}:/tmp/aw-sync.bundle`]);
+      runBoat(['scp', dirtyBundle, `${sandboxId}:${remoteSyncPath}`]);
       uploadedBundle = true;
     }
   }
 
   const applyScript = buildApplyScript({
-    remoteDir: `/home/user/${DEFAULT_REMOTE_DIR}`,
+    remoteDir: remoteRepoPath,
     needSeedReset,
     headAlreadyOnRemote,
     realHead,
     isDirty,
     uploadedBundle,
+    seedBundlePath: remoteSeedPath,
+    syncBundlePath: remoteSyncPath,
   });
   runBoatExecCapture(sandboxId, applyScript, { timeout: 300 });
+  return { remoteRepoPath };
 }
 
 function sleepMs(ms) {
@@ -1081,6 +1175,13 @@ async function ensureSandbox({ targetName, baseName, type, typeExplicit, ttl, no
     );
   }
 
+  if (plan.action === 'busy') {
+    throw new Error(
+      `Sandbox ${plan.sandbox.name} (${plan.sandbox.id}) is currently busy. ` +
+        'Wait for it to finish or pass --name <other> to run in a separate sandbox.',
+    );
+  }
+
   if (plan.action === 'reuse-running') {
     if (typeExplicit && plan.sandbox.type && plan.sandbox.type !== type) {
       console.warn(
@@ -1088,8 +1189,7 @@ async function ensureSandbox({ targetName, baseName, type, typeExplicit, ttl, no
       );
     }
     console.log(`[boat] Reusing running sandbox ${plan.sandbox.name} (${plan.sandbox.id})`);
-    runBoat(['extend', plan.sandbox.id, '--ttl', String(ttl)]);
-    return { sandboxId: plan.sandbox.id, created: false, forked: false };
+    return { sandboxId: plan.sandbox.id, created: false, forked: false, reusedRunning: true };
   }
 
   if (plan.action === 'resume') {
@@ -1101,7 +1201,7 @@ async function ensureSandbox({ targetName, baseName, type, typeExplicit, ttl, no
       resumeArgs.push('--type', type);
     }
     runBoat(resumeArgs);
-    return { sandboxId: plan.sandbox.id, created: false, forked: false };
+    return { sandboxId: plan.sandbox.id, created: false, forked: false, reusedRunning: false };
   }
 
   if (plan.action === 'fork-base') {
@@ -1200,11 +1300,11 @@ function stopSandbox(sandboxId, label) {
   runBoat(['stop', sandboxId, '-y']);
 }
 
-function pullArtifacts(sandboxId, pulls) {
+function pullArtifacts(sandboxId, remoteRepoPath, pulls) {
   for (const { remotePath, localPath } of pulls) {
     const fullRemote = remotePath.startsWith('/')
       ? remotePath
-      : `/home/user/${DEFAULT_REMOTE_DIR}/${remotePath}`;
+      : path.posix.join(remoteRepoPath, remotePath);
     const fullLocal = path.resolve(process.cwd(), localPath);
     fs.mkdirSync(path.dirname(fullLocal), { recursive: true });
     console.log(`[boat] Pulling ${fullRemote} -> ${path.relative(process.cwd(), fullLocal) || fullLocal}`);
@@ -1230,7 +1330,6 @@ async function main(argv = process.argv.slice(2)) {
       : deriveSandboxName({
           branch: gitInfo.branch,
           worktreePath: REPO_ROOT,
-          isSecondaryWorktree: gitInfo.isSecondaryWorktree,
         }));
 
   if (opts.subcommand === 'status') {
@@ -1293,6 +1392,12 @@ async function main(argv = process.argv.slice(2)) {
       ? 'true'
       : `cargo +${rustToolchain} build --workspace --exclude wechat-protocol --all-targets --profile test --locked --manifest-path packages/native-client-rust/Cargo.toml`;
   } else {
+    if (targetName === opts.baseName) {
+      throw new Error(
+        `Sandbox name "${targetName}" is reserved for the warm seed sandbox. ` +
+          'Use `node scripts/boat/run.mjs seed` to update it, or choose another --name.',
+      );
+    }
     if (opts.preset && opts.command.length > 0) {
       throw new Error('Specify either --preset <name> or -- <command...>, not both.');
     }
@@ -1343,7 +1448,10 @@ async function main(argv = process.argv.slice(2)) {
     }
   }
 
+  const runId = `${process.pid}-${randomBytes(4).toString('hex')}`;
   let sandboxId = null;
+  let lockAcquired = false;
+  let canStopSandbox = false;
   let interruptedSignal = null;
   let cleanedUp = false;
 
@@ -1351,7 +1459,14 @@ async function main(argv = process.argv.slice(2)) {
     if (cleanedUp) return;
     cleanedUp = true;
     localSync.cleanup();
-    if (sandboxId && !opts.keep) {
+    if (sandboxId && lockAcquired) {
+      try {
+        releaseRemoteLock(sandboxId, runId);
+      } catch (unlockErr) {
+        console.error(`[boat] Warning: failed to release lock on ${sandboxId}: ${unlockErr.message}`);
+      }
+    }
+    if (sandboxId && canStopSandbox && !opts.keep) {
       try {
         stopSandbox(sandboxId, targetName);
       } catch (stopErr) {
@@ -1390,8 +1505,18 @@ async function main(argv = process.argv.slice(2)) {
       keep: opts.keep,
     });
     sandboxId = ensured.sandboxId;
+    // Only stop an already-running sandbox if we actually acquire its lock; never stop under another run.
+    canStopSandbox = !ensured.reusedRunning;
 
-    syncRepoToSandbox({ sandboxId, localSync, gitInfo });
+    acquireRemoteLock(sandboxId, targetName, runId, { forceUnlock: opts.forceUnlock });
+    lockAcquired = true;
+    canStopSandbox = true;
+
+    if (ensured.reusedRunning) {
+      runBoat(['extend', sandboxId, '--ttl', String(opts.ttl)]);
+    }
+
+    const { remoteRepoPath } = syncRepoToSandbox({ sandboxId, runId, localSync, gitInfo });
 
     if (!opts.skipSetup) {
       await runRemoteSetup(sandboxId, { withDocsFonts: opts.withDocsFonts });
@@ -1401,7 +1526,7 @@ async function main(argv = process.argv.slice(2)) {
     const exitCode = await runRemoteCommand(sandboxId, remoteCommand, { timeout: opts.timeout });
 
     if (exitCode === 0 && !interruptedSignal && opts.pulls.length > 0) {
-      pullArtifacts(sandboxId, opts.pulls);
+      pullArtifacts(sandboxId, remoteRepoPath, opts.pulls);
     }
 
     if (interruptedSignal) {

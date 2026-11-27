@@ -30,9 +30,9 @@ node scripts/boat/run.mjs seed
 
 ## How incremental builds work (committed & uncommitted files)
 
-- **One sandbox per branch/worktree (`aw-build-<branch>`):** Multiple agents don't overwrite each other's files or fight over Cargo's lockfile. On each run, `run.mjs` checks `boat list --all --json` and picks the fastest path:
-  1. Reuse `aw-build-<branch>` if running.
-  2. Resume `aw-build-<branch>` if stopped (restoring warm `target/`, `~/.cargo`, and `node_modules/`).
+- **One sandbox per checkout & branch (`aw-build-<branch>-<hash>`):** Separate clones, worktrees, and branches each get a distinct sandbox name (including a checkout path hash so two clones on `main` or a branch named `base` never collide with each other or with the reserved `aw-build-base` seed). On each run, `run.mjs` checks `boat list --all --json` and picks the fastest path:
+  1. Reuse `aw-build-<branch>-<hash>` if idle/running (refusing if `busy` or if an atomic per-sandbox lock under `/tmp/aw-boat-run.lock` is held by another concurrent run; pass `--name <other>` for parallel runs from the same checkout, or `--force-unlock` if a previous run was killed).
+  2. Resume `aw-build-<branch>-<hash>` if stopped (restoring warm `target/`, `/usr/local/cargo`, and `node_modules/`).
   3. Fork `aw-build-base` if a warm seed exists.
   4. Create a fresh sandbox and run [setup.sh](./setup.sh).
 - **Zero-token `git bundle` sync:**
