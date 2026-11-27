@@ -4,7 +4,8 @@ description: CLI voice and video calls, conference controls and OpenClaw setup.
 ---
 
 Use `wx` to make direct or conference voice and video calls with this computer's
-microphone, speakers and camera. OpenClaw setup (voice-only) is in
+microphone, speakers and camera, or drive headless calls with `wx calls session`
+for scripts and automation. OpenClaw setup (voice-only) is in
 [Set up calling](/openclaw/calling/).
 
 ## Check availability
@@ -106,6 +107,51 @@ interrupt it. Enter `cancel` to close a picker.
 Use the [Calls API](../calls-api/) and [media reference](../calls-media/) for
 authentication, ownership, binary `WXCM` audio/video frames and codec
 negotiation.
+
+## Headless sessions for automation
+
+`wx calls session` runs a call client in the background (or in the foreground
+with `wx calls session run --stdio`) without a terminal screen or real audio and camera hardware.
+Start one session per account, drive it with sequential commands, wait on
+events or media thresholds, and inspect recordings or snapshots.
+
+| Command | Behavior |
+| --- | --- |
+| `wx calls session start --name NAME --ready` | Start a background session with synthetic audio (`--audio`) and video (`--video`) |
+| `wx calls session dial --session NAME CONTACT [--video]` | Place a direct voice or video call |
+| `wx calls session answer / reject / hangup --session NAME` | Answer or reject an incoming offer, or hang up the active call |
+| `wx calls session conference start / join / invite` | Start, join, or invite contacts into a group conference |
+| `wx calls session mute / unmute / camera on\|off` | Toggle local microphone or camera and notify the other side |
+| `wx calls session audio SOURCE` / `video SOURCE` | Switch outgoing audio or video live mid-call |
+| `wx calls session wait --session NAME [FILTERS]` | Block until an event (`--event`, `--state`, `--peer-status`, `--control-kind`, `--participant`) or media metric (`--audio-frames`, `--dominant-hz`, `--video-frames`) matches |
+| `wx calls session status / events / snapshot / record` | Inspect state, read NDJSON events, save decoded JPEG/PNG frames, or record WAV/video |
+| `wx calls session stop NAME` | Hang up any active call, finalize recordings and exit |
+
+Synthetic sources need no microphone, speaker or camera:
+
+- **Audio (`--audio`)**: `silence` (default), `tone[:HZ[:AMP[:ON_MS:OFF_MS]]]` (pure sine or pulsed tone), `file:PATH[:loop|:once]`, or `device[:ID]`.
+- **Output (`--output`)**: `null` (default; meters and records without opening speakers) or `device[:ID]`.
+- **Video (`--video`)**: `test` (animated `testsrc2`, default), `smpte` (color bars), `color:NAME|#RRGGBB`, `file:PATH`, `off`, `auto`, or a device path.
+
+```sh
+wx --account alice calls session start --name alice --audio tone:440 --video test --record-dir /tmp/alice-rec --json
+wx --account bob calls session start --name bob --ready --audio tone:880 --video color:green --json
+
+BOB_SEQ=$(wx calls session status --session bob --json | jq -r .session.eventSeq)
+ALICE_SEQ=$(wx calls session dial --session alice wxid_bob --video --json | jq -r .eventSeq)
+wx calls session wait --session bob --after "$BOB_SEQ" --event call.offered --json
+wx calls session wait --session alice --after "$ALICE_SEQ" --peer-status acknowledged --json
+wx calls session answer --session bob --json
+
+wx calls session wait --session bob --audio-frames 20 --dominant-hz 440 --video-frames 5 --json
+wx calls session snapshot --session bob --out /tmp/bob-frame.jpg --json
+wx calls session hangup --session alice --json
+wx calls session stop alice && wx calls session stop bob
+```
+
+`wait` scans buffered events with sequence numbers greater than `--after` (default `0`). In a session that handles multiple calls, capture the previous command's `eventSeq` (or `status`'s `session.eventSeq`) and pass it to `--after` so `wait` matches only newer events.
+
+Sessions stop automatically after `--idle-timeout` seconds of inactivity (default `600`; pass `0` to disable). Active calls, ringing offers, pending commands, incoming control events, and open `wait` or `events --follow` commands keep the session alive.
 
 :::note[Good to know]
 This build limits native calls to 20 minutes; longer calls still need validation.

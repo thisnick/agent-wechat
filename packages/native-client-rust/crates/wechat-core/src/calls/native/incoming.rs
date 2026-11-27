@@ -449,10 +449,10 @@ impl Actor {
                     }
                     return Err(error);
                 }
-                if self.media.is_some() && self.worker.media_stop.load(Ordering::Acquire) {
-                    return self.exit();
-                }
-                if self.worker.call_type == CallType::Video {
+                if self.media.is_some() {
+                    if self.worker.media_stop.load(Ordering::Acquire) {
+                        return self.exit();
+                    }
                     self.worker
                         .joined_commands_ready
                         .store(true, Ordering::Release);
@@ -462,9 +462,11 @@ impl Actor {
                     let tasks = &mut self.tasks;
                     let session = self.session.as_mut().expect("incoming session");
                     let worker = &self.worker;
+                    let is_video = self.worker.call_type == CallType::Video;
                     let last_av_ts = &mut self.last_av_ts;
                     drain_direct_switch_av(worker, &mut |cam| {
                         let mic = !worker.muted.load(Ordering::Acquire);
+                        let cam = is_video && cam;
                         let now = u64::try_from(
                             SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros(),
                         )?;
@@ -609,6 +611,14 @@ impl Actor {
             }
         }
         let progress = result?;
+        if let (Some(sink), Some(code)) = (
+            self.sink.as_ref(),
+            self.session
+                .as_ref()
+                .and_then(|session| session.peer_member_status()),
+        ) {
+            let _ = self.transport.runtime.block_on(sink.peer_status(code));
+        }
         if matches!(progress, SyncProgress::MediaReady) {
             if let (Some(sink), Some(muted)) = (
                 self.sink.as_ref(),
@@ -1087,6 +1097,9 @@ impl Actor {
         }
         let session = self.session.as_mut().context("Missing incoming session")?;
         let media = session.take_media(&self.state, self.authority, connection_index, udp_index)?;
+        if let Some(code) = session.peer_member_status() {
+            let _ = self.transport.runtime.block_on(sink.peer_status(code));
+        }
         if let Some(muted) = session.peer_microphone_muted() {
             let _ = self.transport.runtime.block_on(sink.peer_microphone(muted));
         }
@@ -1108,6 +1121,15 @@ impl Actor {
                 self.inner.config.direct_camera_off_grace,
                 self.inner.config.direct_camera_off_recovery_grace,
             );
+        }
+        if self.worker.muted.load(Ordering::Acquire) {
+            if let Ok(mut queue) = self.worker.direct_commands.lock() {
+                let (reply, _) = oneshot::channel();
+                queue.push_back(DirectCommand {
+                    sets_camera: false,
+                    reply,
+                });
+            }
         }
         let config = self.inner.config.clone();
         let worker = self.worker.clone();

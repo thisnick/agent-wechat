@@ -43,6 +43,10 @@ impl NativeIncomingSession {
     pub fn is_video(&self) -> bool {
         self.invite.video_mode
     }
+    /// Latest authenticated signaling status code reported for the remote caller.
+    pub fn peer_member_status(&self) -> Option<u32> {
+        self.base.peer_member_status()
+    }
     /// Current remote microphone state from the authenticated AV snapshot.
     pub fn peer_microphone_muted(&self) -> Option<bool> {
         (self.phase == IncomingPhase::Joined)
@@ -184,6 +188,7 @@ impl NativeIncomingSession {
             identity: room,
             peer: expected_caller.to_owned(),
             origin: ControlOrigin::Incoming,
+            peer_status: None,
             peer_joined: None,
             terminal: None,
             invitation_pending: false,

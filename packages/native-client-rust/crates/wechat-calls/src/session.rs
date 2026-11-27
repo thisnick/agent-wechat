@@ -146,6 +146,7 @@ struct PersonalControl {
     identity: VoiceRoom,
     peer: String,
     origin: ControlOrigin,
+    peer_status: Option<u32>,
     peer_joined: Option<bool>,
     terminal: Option<RemoteTermination>,
     invitation_pending: bool,
@@ -241,6 +242,19 @@ impl NativePersonalSession {
     }
     pub fn phase(&self) -> PersonalPhase {
         self.phase
+    }
+    /// Latest authenticated signaling status code reported for the direct peer
+    /// (for example `2` invited, `3` acknowledged/ringing, `1` joined, `4` left,
+    /// `6` busy, `7` rejected, `8` no response).
+    pub fn peer_member_status(&self) -> Option<u32> {
+        self.active
+            .as_ref()
+            .and_then(|room| room.members.get(&room.peer).map(|member| member.status))
+            .or_else(|| {
+                self.control
+                    .as_ref()
+                    .and_then(|control| control.peer_status)
+            })
     }
     /// Current authenticated remote microphone state while joined. This is
     /// independent of membership, codec selection and whether media is audible.
@@ -450,6 +464,7 @@ impl NativePersonalSession {
             },
             peer: peer.to_owned(),
             origin: ControlOrigin::Outgoing { invite_id },
+            peer_status: None,
             peer_joined: None,
             terminal: None,
             invitation_pending: false,
@@ -479,11 +494,11 @@ impl NativePersonalSession {
                     .is_none_or(|peer| peer.member != own_member),
             "Initial personal member identity mismatch"
         );
-        let peer_joined = members.get(peer).is_some_and(|peer| peer.status == 1);
-        let pending = members
-            .get(peer)
-            .is_some_and(|peer| matches!(peer.status, 2 | 3));
+        let peer_status = members.get(peer).map(|peer| peer.status);
+        let peer_joined = peer_status == Some(1);
+        let pending = matches!(peer_status, Some(2 | 3));
         let control = self.control.as_mut().expect("allocated control");
+        control.peer_status = peer_status;
         control.peer_joined = Some(peer_joined);
         control.invitation_pending = pending;
         if pending {
@@ -791,11 +806,9 @@ impl NativePersonalSession {
         if let Some(action) = terminal {
             next.cookies = response.cookies.unwrap_or_default();
             let control = self.control.as_mut().expect("personal control");
-            control.peer_joined = Some(
-                next.members
-                    .get(&next.peer)
-                    .is_some_and(|member| member.status == 1),
-            );
+            let peer_status = next.members.get(&next.peer).map(|member| member.status);
+            control.peer_status = peer_status;
+            control.peer_joined = Some(peer_status == Some(1));
             control.invitation_pending = invitation_pending;
             control.pending_recipients = pending_recipients;
             control.terminal = Some(action);
@@ -820,15 +833,14 @@ impl NativePersonalSession {
         if media_result.is_ok() {
             next.cookies = response.cookies.unwrap_or_default();
         }
-        let joined = next
-            .members
-            .get(&next.peer)
-            .is_some_and(|member| member.status == 1);
-        self.control
+        let peer_status = next.members.get(&next.peer).map(|member| member.status);
+        let joined = peer_status == Some(1);
+        let control = self
+            .control
             .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("Missing allocated control"))?
-            .peer_joined = Some(joined);
-        let control = self.control.as_mut().expect("personal control");
+            .ok_or_else(|| anyhow::anyhow!("Missing allocated control"))?;
+        control.peer_status = peer_status;
+        control.peer_joined = Some(joined);
         control.invitation_pending = invitation_pending;
         control.pending_recipients = pending_recipients;
         self.phase = if (joined || !invitation_pending) && local_status == 1 {
@@ -950,10 +962,11 @@ impl NativePersonalSession {
         let reply =
             app_frame::decode_transfer_reply(&self.app, current, CallOperation::SwitchAv, &reply)?;
         let values = fields(&reply)?;
+        // Proto3 omits zero-valued scalar fields (`own_member == 0` on the caller).
         ensure!(
             number(&values, 1, None)? == identity.room
                 && number(&values, 2, None)? == identity.room_key
-                && number(&values, 3, None)? == u64::from(identity.own_member),
+                && number(&values, 3, Some(0))? == u64::from(identity.own_member),
             "Personal SwitchAV response context mismatch"
         );
         if let Some(raw_av) = p::optional_data(&values, 4)? {
@@ -1404,7 +1417,9 @@ fn av(raw: &[u8], own: u16, peer: u16) -> Result<(u32, AvSnapshot)> {
     for raw in repeated(&values, 4, 2)? {
         let values = fields(raw)?;
         only(&values, &[1, 2, 3, 4, 5])?;
-        let member = u16::try_from(number(&values, 1, None)?)?;
+        // Proto3 omits zero-valued scalar fields (`member_id == 0` or `status == 0`
+        // when both microphone and camera are off).
+        let member = u16::try_from(number(&values, 1, Some(0))?)?;
         ensure!(
             [own, peer].contains(&member) && !members.contains_key(&member),
             "Unexpected AV member"
@@ -1415,7 +1430,7 @@ fn av(raw: &[u8], own: u16, peer: u16) -> Result<(u32, AvSnapshot)> {
         members.insert(
             member,
             (
-                u32::try_from(number(&values, 2, None)?)?,
+                u32::try_from(number(&values, 2, Some(0))?)?,
                 p::optional_data(&values, 3)?
                     .map(|info| {
                         ensure!(info.len() <= 1024, "Microphone metadata too large");
@@ -1522,7 +1537,7 @@ fn av_update_allowed(room: &ActiveRoom, av: &AvSnapshot, own: &str) -> bool {
         av.len() == 2
             && av
                 .get(&local.member)
-                .is_some_and(|(status, info)| *status == 1 && info.is_none())
+                .is_some_and(|(status, _)| *status <= 1)
             && av.get(&peer.member).is_some_and(|(status, _)| *status <= 1)
     }
 }
@@ -1715,6 +1730,7 @@ mod tests {
                 let path: &[u8] = match command {
                     3361 => b"/cloudim/cloud-bin/cloudvoipmtjoin",
                     3095 => b"/cloudim/cloud-bin/cloudvoipmtreject",
+                    3197 => b"/cloudim/cloud-bin/cloudvoipmtswitchav",
                     3380 => b"/cloudim/cloud-bin/cloudvoipmtexit",
                     _ => bail!("Unexpected synthetic Cloud command"),
                 };
@@ -1736,6 +1752,16 @@ mod tests {
                     assert_eq!(number(&inner, 8, None)?, 0);
                     assert_eq!(number(&inner, 11, None)?, 7);
                     assert_eq!(number(&inner, 12, None)?, 9);
+                } else if command == 3197 {
+                    assert_eq!(number(&inner, 3, None)?, 7);
+                    assert_eq!(number(&inner, 4, None)?, 9);
+                    assert_eq!(number(&inner, 5, None)?, 0);
+                    let av_status = number(&inner, 6, None)?;
+                    assert!(av_status <= if expect_video { 3 } else { 1 });
+                    assert!(number(&inner, 7, None)? > 0);
+                    if !expect_video {
+                        assert!(p::optional(&inner, 9)?.is_none());
+                    }
                 } else {
                     assert_eq!(number(&inner, 3, None)?, 7);
                     assert_eq!(number(&inner, 4, None)?, 9);
@@ -2517,6 +2543,7 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(session.control.as_ref().unwrap().terminal, Some(action));
+            assert_eq!(session.peer_member_status(), peer);
             assert!(session.active.is_none());
             assert!(!session.media_ready(&state, authority()).unwrap());
             if local {
@@ -3015,5 +3042,186 @@ mod tests {
                 .unwrap_err()
                 .is::<UnsupportedCallMedia>());
         }
+    }
+
+    #[test]
+    fn peer_member_status_tracks_ringing_and_direct_voice_switch_av_permits_mute() {
+        let av_blob = |seq: u32, own_av: u32, peer_av: u32| {
+            // Omit zero-valued proto3 scalar fields (`member == 0`, `status == 0`) and
+            // include opaque field 3 metadata on the local member after SwitchAV to
+            // exercise live server encoding on direct voice calls.
+            let mut own_fields = Vec::new();
+            if own_av != 0 {
+                own_fields.push(p::uint(2, u64::from(own_av)));
+            }
+            if seq >= 3 {
+                own_fields.push(p::bytes(3, &[]));
+            }
+            let own = p::message(&own_fields).unwrap();
+            let mut peer_fields = vec![p::uint(1, 1)];
+            if peer_av != 0 {
+                peer_fields.push(p::uint(2, u64::from(peer_av)));
+            }
+            let peer = p::message(&peer_fields).unwrap();
+            p::message(&[
+                p::uint(3, u64::from(seq)),
+                p::bytes(4, &own),
+                p::bytes(4, &peer),
+            ])
+            .unwrap()
+        };
+        let switch_reply = |seq: u32, own_av: u32, peer_av: u32| {
+            let av_bytes = av_blob(seq, own_av, peer_av);
+            // Omit field 3 (`own_member == 0`) to match proto3 server replies for caller.
+            let result =
+                p::message(&[p::uint(1, 7), p::uint(2, 9), p::bytes(4, &av_bytes)]).unwrap();
+            let cloud =
+                p::message(&[p::bytes(1, &[8, 0]), p::uint(2, 17), p::bytes(3, &result)]).unwrap();
+            let frame = app_frame::TaskFrame {
+                command: 3197,
+                integers: BTreeMap::from([
+                    (4, 0),
+                    (7, 0),
+                    (8, 0),
+                    (21, 0),
+                    (22, 17),
+                    (23, 0),
+                    (25, 0),
+                    (26, 0),
+                ]),
+                strings: BTreeMap::new(),
+                payload: cloud,
+            }
+            .encode()
+            .unwrap();
+            host_reply(&p::message(&[p::uint(1, 0), p::bytes(2, &frame)]).unwrap())
+        };
+        let av_sync = |seq: u32, own_av: u32, peer_av: u32| {
+            let av_bytes = av_blob(seq, own_av, peer_av);
+            let notify = p::message(&[
+                p::uint(3, 7),
+                p::uint(4, 9),
+                p::bytes(
+                    5,
+                    &p::message(&[p::uint(1, 12), p::bytes(2, &av_bytes)]).unwrap(),
+                ),
+            ])
+            .unwrap();
+            let cmd = p::message(&[p::uint(1, 10002), p::bytes(2, &notify)]).unwrap();
+            let item = p::message(&[p::uint(1, 1), p::bytes(2, &cmd)]).unwrap();
+            host_reply(&p::message(&[p::bytes(1, &item), p::bytes(2, b"av")]).unwrap())
+        };
+        let joined_seq3 = {
+            let roster = p::message(&[
+                p::uint(1, 7),
+                p::uint(2, 9),
+                p::uint(3, 3),
+                p::bytes(4, &member("own", 0, 1)),
+                p::bytes(4, &member("peer", 1, 1)),
+            ])
+            .unwrap();
+            let av_bytes = av_blob(2, 1, 1);
+            let notify = p::message(&[
+                p::uint(3, 7),
+                p::uint(4, 9),
+                p::bytes(
+                    5,
+                    &p::message(&[p::uint(1, 10), p::bytes(2, &roster)]).unwrap(),
+                ),
+                p::bytes(
+                    5,
+                    &p::message(&[p::uint(1, 12), p::bytes(2, &av_bytes)]).unwrap(),
+                ),
+            ])
+            .unwrap();
+            let cmd = p::message(&[p::uint(1, 10002), p::bytes(2, &notify)]).unwrap();
+            let item = p::message(&[p::uint(1, 1), p::bytes(2, &cmd)]).unwrap();
+            host_reply(&p::message(&[p::bytes(1, &item), p::bytes(2, b"joined")]).unwrap())
+        };
+        let transport = RecordingTransport {
+            inner: FakeTransport(std::cell::RefCell::new(std::collections::VecDeque::from([
+                (CallHostRoute::AppAuth, auth_reply()),
+                (CallHostRoute::Invite, invite_reply()),
+                (
+                    CallHostRoute::LiveSync,
+                    roster_sync(2, Some(1), Some(3), false),
+                ),
+                (CallHostRoute::LiveSync, joined_seq3),
+                (CallHostRoute::Transfer, switch_reply(3, 0, 1)),
+                (CallHostRoute::LiveSync, av_sync(4, 0, 0)),
+                (CallHostRoute::Transfer, switch_reply(5, 1, 0)),
+            ]))),
+            requests: Default::default(),
+        };
+        let mut state = state();
+        let mut session = caller_with(&transport, &mut state);
+        // After invite, peer starts at status 2 (invited).
+        assert_eq!(session.peer_member_status(), Some(2));
+        // After ringing poll, peer advances to status 3 (acknowledged).
+        assert_eq!(
+            session
+                .poll(
+                    &transport,
+                    &mut state,
+                    authority(),
+                    TaskIds { sdk: 2, host: 3 }
+                )
+                .unwrap(),
+            SyncProgress::Waiting
+        );
+        assert_eq!(session.peer_member_status(), Some(3));
+        // After join, peer advances to status 1 (joined).
+        assert_eq!(
+            session
+                .poll(
+                    &transport,
+                    &mut state,
+                    authority(),
+                    TaskIds { sdk: 3, host: 4 }
+                )
+                .unwrap(),
+            SyncProgress::MediaReady
+        );
+        assert_eq!(session.peer_member_status(), Some(1));
+        let _media = session.take_media(&state, authority(), 0, 0).unwrap();
+        // Direct voice call can submit SwitchAV mute (audio=false, video=false) and receive AV=0 update cleanly.
+        session
+            .switch_av(
+                &transport,
+                &mut state,
+                authority(),
+                false,
+                false,
+                1000,
+                TaskIds { sdk: 4, host: 5 },
+            )
+            .unwrap();
+        assert_eq!(session.peer_microphone_muted(), Some(false));
+        // Peer muting on a direct voice call arrives via LiveSync AV=0 while local AV is also 0.
+        assert_eq!(
+            session
+                .poll(
+                    &transport,
+                    &mut state,
+                    authority(),
+                    TaskIds { sdk: 5, host: 6 }
+                )
+                .unwrap(),
+            SyncProgress::MediaReady
+        );
+        assert_eq!(session.peer_microphone_muted(), Some(true));
+        // Direct voice call can unmute back (audio=true, video=false).
+        session
+            .switch_av(
+                &transport,
+                &mut state,
+                authority(),
+                true,
+                false,
+                1001,
+                TaskIds { sdk: 6, host: 7 },
+            )
+            .unwrap();
+        assert_eq!(session.peer_microphone_muted(), Some(true));
     }
 }

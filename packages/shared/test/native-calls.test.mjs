@@ -613,3 +613,58 @@ test('default maxBufferedBytes permits legal max PCM and video frames and sendVi
     assert.throws(() => media.sendVideo(validNal, 1, { rotationDegrees: 45 }), error => error.code === 'invalid_media');
   } finally { owner.close(); }
 });
+
+test('call.peer_status is delivered and unknown future server event types are ignored safely', async () => {
+  const server = new MockCallServer();
+  const owner = client(server);
+  try {
+    await owner.connect();
+    await owner.ready('ready-unknown', true);
+    await owner.dial('dial-unknown', 'synthetic-contact');
+    const media = await owner.attachMedia('call-1');
+    const events = owner.events()[Symbol.asyncIterator]();
+
+    // Unknown future events on both control and media sockets are ignored without closing.
+    server.controls[0].receive({ type: 'call.future_notice', callId: 'call-1', extra: { ok: true } });
+    server.media[0].receive({ type: 'media.future_hint', callId: 'call-1', bitrateKbps: 500 });
+    assert.equal(server.controls[0].readyState, 1);
+    assert.equal(server.media[0].readyState, 1);
+
+    // call.peer_status is validated and delivered in order.
+    const ack = {
+      type: 'call.peer_status',
+      callId: 'call-1',
+      participantId: 'synthetic-contact',
+      status: { code: 3, kind: 'acknowledged' },
+    };
+    server.controls[0].receive(ack);
+    let event;
+    do { event = (await events.next()).value; } while (event.type !== 'call.peer_status');
+    assert.deepEqual(event, ack);
+
+    // Malformed call.peer_status still fails closed.
+    server.controls[0].receive({
+      type: 'call.peer_status',
+      callId: 'call-1',
+      participantId: 'synthetic-contact',
+      status: { code: 3, kind: 'joined' },
+    });
+    assert.equal(server.controls[0].readyState, 3);
+    media.close();
+  } finally { owner.close(); }
+
+  // Unknown event before hello must fail closed with missing_hello.
+  const preHelloServer = {
+    factory: () => {
+      const socket = new MockSocket(() => {});
+      queueMicrotask(() => {
+        socket.open();
+        socket.receive({ type: 'call.future_before_hello' });
+      });
+      return socket;
+    },
+  };
+  const preHelloClient = client(preHelloServer);
+  await assert.rejects(preHelloClient.connect(), error => error.code === 'missing_hello');
+  preHelloClient.close();
+});

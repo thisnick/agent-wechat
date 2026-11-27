@@ -331,10 +331,10 @@ after answering/connecting:
 Mute outgoing audio (`call.mute`), toggle the local camera on a video call
 (`call.camera`), or clear queued outgoing audio (`call.clear_audio`); see
 [stream generations](../calls-media/#mute-camera-toggle-and-interrupt).
-`call.mute` silences this client's outgoing stream in the daemon. For a conference,
-it also requests our room microphone state. `call.camera` requests our camera
-state and advances the video send track generation. Neither controls
-another participant's devices.
+`call.mute` silences this client's outgoing stream in the daemon and requests our
+room microphone state on direct voice, direct video and conference calls.
+`call.camera` requests our camera state and advances the video send track
+generation. Neither controls another participant's devices.
 
 ```json
 {
@@ -732,6 +732,32 @@ and `call.state`. An omitted `controls` means no state has been reported.
 Conference microphone and camera changes appear in `participants`
 (`microphoneEnabled`, `cameraEnabled`) and `participant.updated`; an omitted
 value is unknown, not `false`.
+
+### Direct-call peer signaling status
+
+For direct calls, `call.peer_status` reports changes in the peer's room
+signaling status (`acknowledged` once the peer's device rings, `joined` when
+answered, `rejected`, `busy`, `no_response`, or `left`), using the same
+`{code, kind}` table as conference participants:
+
+```json
+{
+  "type": "call.peer_status",
+  "callId": "example-call",
+  "participantId": "example-contact",
+  "status": {
+    "code": 3,
+    "kind": "acknowledged"
+  }
+}
+```
+
+Repeated unchanged status codes produce no event. Upgrade call clients together
+with the daemon when enabling a build that emits `call.peer_status`, as older
+protocol 3 clients close the socket on unrecognized event types. Upgraded
+clients ignore unknown future server event `type` names on both the control and
+media sockets after handshake completion so additive server messages do not
+disconnect active calls.
 
 ### Track generations and errors
 

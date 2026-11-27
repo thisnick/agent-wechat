@@ -106,6 +106,12 @@ server CallEvent[call.offered].offer.callType | string, required, values voice|v
 server CallEvent[call.offered].offer.callerId | string, required | Contact ID of the caller.
 server CallEvent[call.offered].offer.kind | string, required, values direct|conference | Whether the call is direct or a conference.
 server CallEvent[call.offered].offer.revision | integer, required, min 0, format uint32 | Increases when the offer changes. Send the latest value as `expectedRevision` when answering or rejecting.
+server CallEvent[call.peer_status] | message, socket control | The other party of a direct call changed signaling status, such as acknowledging ringing, joining, rejecting, being busy, not answering, or leaving. It needs no reply.
+server CallEvent[call.peer_status].callId | string, required | ID of the direct call.
+server CallEvent[call.peer_status].participantId | string, required | Contact ID of the other party.
+server CallEvent[call.peer_status].status | object, required | Signaling status reported by the service.
+server CallEvent[call.peer_status].status.code | integer, required, min 0, format uint32 | The status number the service reported. Keep it for codes `kind` does not name.
+server CallEvent[call.peer_status].status.kind | string, required, values undefined|joined|invited|acknowledged|left|cancelled|busy|rejected|no_response|unknown | What the code means.
 server CallEvent[call.pending] | message, socket control | An incoming call that cannot be answered yet, or null when none is pending.
 server CallEvent[call.pending].offer | object, required, nullable | The pending call, or null to clear it.
 server CallEvent[call.pending].offer.callId | string, required | ID of the incoming call.

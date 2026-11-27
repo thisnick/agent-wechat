@@ -10,9 +10,7 @@ use wechat_protocol::calls::incoming::{ConferenceJoinContext, NotificationPayloa
 mod receive;
 
 fn participant(member: wechat_calls::session::ConferenceMember) -> CallParticipant {
-    use crate::call_types::{
-        CallMembership, CallParticipantStatus, CallParticipantStatusKind as Kind,
-    };
+    use crate::call_types::{CallMembership, CallParticipantStatus};
     let membership = match member.status {
         1 => CallMembership::Joined,
         2 | 3 => CallMembership::Invited,
@@ -23,21 +21,7 @@ fn participant(member: wechat_calls::session::ConferenceMember) -> CallParticipa
         participant_id: format!("member-{}", member.member_id),
         contact_id: member.username,
         membership,
-        status: Some(CallParticipantStatus {
-            code: member.status,
-            kind: match member.status {
-                0 => Kind::Undefined,
-                1 => Kind::Joined,
-                2 => Kind::Invited,
-                3 => Kind::Acknowledged,
-                4 => Kind::Left,
-                5 => Kind::Cancelled,
-                6 => Kind::Busy,
-                7 => Kind::Rejected,
-                8 => Kind::NoResponse,
-                _ => Kind::Unknown,
-            },
-        }),
+        status: Some(CallParticipantStatus::from_code(member.status)),
         microphone_enabled: if membership == CallMembership::Left {
             None
         } else {

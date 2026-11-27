@@ -204,6 +204,12 @@ try {
         && update.control.kind === "microphone" && update.control.muted === muted;
     }));
   }
+  await control("peer_status", { code: 3 });
+  await until("peer status delivered to owner and observer", () => [winnerEvents, observing].every(reader => {
+    const update = reader.events.findLast(event => event.type === "call.peer_status");
+    return update?.callId === offer.callId && update.participantId === "synthetic-peer"
+      && update.status.code === 3 && update.status.kind === "acknowledged";
+  }));
   const lateObserver = new NativeCallsClient(options); watch(lateObserver);
   const lateHello = await lateObserver.connect();
   assert.deepEqual(lateHello.currentCall.controls, [{ participantId: "synthetic-peer", control: { kind: "microphone", muted: false } }]);

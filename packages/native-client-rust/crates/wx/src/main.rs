@@ -1550,10 +1550,20 @@ fn query(path: String, values: &[(&str, Option<String>)]) -> String {
     )
 }
 async fn run(cli: Cli) -> Result<()> {
-    // Record the parent first, while the process that started serve is still running.
+    // Record the parent first, while the process that started serve/session is still running.
     let parent = match &cli.command {
         Command::Serve {
             exit_with_parent: true,
+        }
+        | Command::Calls {
+            command:
+                Some(calls_cli::CallsCommand::Session {
+                    command:
+                        Some(calls_cli::session::SessionCommand::Run {
+                            exit_with_parent: true,
+                            ..
+                        }),
+                }),
         } => Some(parent_watch::ParentWatch::new().context("cannot watch the parent process")?),
         _ => None,
     };
@@ -1591,6 +1601,68 @@ async fn run(cli: Cli) -> Result<()> {
             .print_help()?;
         println!();
         return Ok(());
+    }
+    if matches!(
+        &cli.command,
+        Command::Calls {
+            command: Some(calls_cli::CallsCommand::Session { command: None })
+        }
+    ) {
+        let mut command = cli_help::command();
+        command.build();
+        command
+            .find_subcommand_mut("calls")
+            .and_then(|calls| calls.find_subcommand_mut("session"))
+            .context("missing session command")?
+            .print_help()?;
+        println!();
+        return Ok(());
+    }
+    if matches!(
+        &cli.command,
+        Command::Calls {
+            command: Some(calls_cli::CallsCommand::Session {
+                command: Some(calls_cli::session::SessionCommand::Conference { command: None }),
+            })
+        }
+    ) {
+        let mut command = cli_help::command();
+        command.build();
+        command
+            .find_subcommand_mut("calls")
+            .and_then(|calls| calls.find_subcommand_mut("session"))
+            .and_then(|session| session.find_subcommand_mut("conference"))
+            .context("missing session conference command")?
+            .print_help()?;
+        println!();
+        return Ok(());
+    }
+    if matches!(
+        &cli.command,
+        Command::Calls {
+            command: Some(calls_cli::CallsCommand::Session {
+                command: Some(calls_cli::session::SessionCommand::Record { command: None }),
+            })
+        }
+    ) {
+        let mut command = cli_help::command();
+        command.build();
+        command
+            .find_subcommand_mut("calls")
+            .and_then(|calls| calls.find_subcommand_mut("session"))
+            .and_then(|session| session.find_subcommand_mut("record"))
+            .context("missing session record command")?
+            .print_help()?;
+        println!();
+        return Ok(());
+    }
+    if let Command::Calls {
+        command: Some(calls_cli::CallsCommand::Session { command: Some(cmd) }),
+    } = &cli.command
+    {
+        if !cmd.needs_daemon() {
+            return calls_cli::session::run_local(cmd.clone(), cli.json).await;
+        }
     }
     if matches!(cli.command, Command::Licenses) {
         return output.print(
@@ -1795,7 +1867,9 @@ async fn run(cli: Cli) -> Result<()> {
     } else {
         None
     };
-    let mut r = Remote::with_token(client, env_token)?;
+    let resolved_token_file = env_token.is_none().then(|| client.token_file.clone());
+    let mut r = Remote::with_token(client, env_token.clone())?;
+    let ca_cert_file = cli.ca_cert_file.clone();
     if let Some(path) = cli.ca_cert_file {
         let certificate = reqwest::Certificate::from_pem(&std::fs::read(path)?)
             .context("invalid additional CA certificate")?;
@@ -1896,7 +1970,21 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Status => r.get("v1/status").await?,
         Command::Stickers { command } => stickers_cli::run(&r, command).await?,
         Command::Calls { command } => {
-            return calls_cli::run(&r, command.context("choose a calls command")?, cli.json).await;
+            let spawn = calls_cli::session::SessionSpawnContext {
+                endpoint: r.base.as_str().trim_end_matches('/').to_owned(),
+                account: r.account.clone().unwrap_or_default(),
+                token_file: resolved_token_file,
+                ephemeral_token: env_token,
+                ca_cert_file,
+            };
+            return calls_cli::run(
+                &r,
+                &spawn,
+                command.context("choose a calls command")?,
+                cli.json,
+                parent,
+            )
+            .await;
         }
         Command::Contacts {
             command: Some(ContactCommand::Search { query }),

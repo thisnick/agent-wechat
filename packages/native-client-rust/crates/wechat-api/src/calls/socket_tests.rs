@@ -340,6 +340,46 @@ async fn protocol_negotiation_rejects_legacy_and_invalid_lists_before_actions() 
 }
 
 #[tokio::test]
+async fn control_socket_delivers_peer_status_and_control_events() {
+    let f = Fixture::new(true).await;
+    let mut socket = f.raw_socket("/v1/accounts/one/calls/socket", OWNER).await;
+    command(
+        &mut socket,
+        json!({"type":"call.hello","supportedProtocolVersions":[3]}),
+    )
+    .await;
+    assert_eq!(
+        json_event(&mut socket).await["protocolVersion"],
+        CALL_PROTOCOL_VERSION
+    );
+
+    ready(&mut socket, "r1").await;
+    command(
+        &mut socket,
+        json!({"type":"call.dial","requestId":"d1","callType":"voice","target":{"kind":"direct","contactId":"peer-1"}}),
+    )
+    .await;
+    let connected = until(&mut socket, |ev| {
+        ev["type"] == "call.state" && ev["call"]["state"] == "connected"
+    })
+    .await;
+    let call_id = connected["call"]["callId"]
+        .as_str()
+        .expect("callId")
+        .to_owned();
+
+    let sink = f.backend.sink.lock().unwrap().clone().expect("active sink");
+    sink.peer_status(3).await.unwrap();
+    sink.peer_microphone(true).await.unwrap();
+
+    let peer_status = until(&mut socket, |ev| ev["type"] == "call.peer_status").await;
+    assert_eq!(peer_status["callId"], call_id);
+    assert_eq!(peer_status["status"]["kind"], "acknowledged");
+    let control = until(&mut socket, |ev| ev["type"] == "call.control").await;
+    assert_eq!(control["control"]["muted"], true);
+}
+
+#[tokio::test]
 async fn websocket_upgrade_checks_bearer_scope_account_and_origin() {
     let f = Fixture::new(false).await;
     f.grant("other-account", &["calls"], &["two"]);

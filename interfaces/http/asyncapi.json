@@ -53,6 +53,9 @@
         "server.call.offered": {
           "$ref": "#/components/messages/server.call.offered"
         },
+        "server.call.peer_status": {
+          "$ref": "#/components/messages/server.call.peer_status"
+        },
         "server.call.pending": {
           "$ref": "#/components/messages/server.call.pending"
         },
@@ -312,6 +315,15 @@
         },
         "summary": "An incoming call that can be answered or rejected now.",
         "title": "CallEvent[call.offered]"
+      },
+      "server.call.peer_status": {
+        "contentType": "application/json",
+        "name": "call.peer_status",
+        "payload": {
+          "$ref": "#/components/schemas/CallEvent.call.peer_status"
+        },
+        "summary": "The other party of a direct call changed signaling status, such as acknowledging ringing, joining, rejecting, being busy, not answering, or leaving. It needs no reply.",
+        "title": "CallEvent[call.peer_status]"
       },
       "server.call.pending": {
         "contentType": "application/json",
@@ -1184,6 +1196,35 @@
         "required": [
           "type",
           "offer"
+        ],
+        "type": "object"
+      },
+      "CallEvent.call.peer_status": {
+        "additionalProperties": false,
+        "description": "The other party of a direct call changed signaling status, such as\nacknowledging ringing, joining, rejecting, being busy, not answering, or\nleaving. It needs no reply.",
+        "properties": {
+          "callId": {
+            "description": "ID of the direct call.",
+            "type": "string"
+          },
+          "participantId": {
+            "description": "Contact ID of the other party.",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/CallParticipantStatus",
+            "description": "Signaling status reported by the service."
+          },
+          "type": {
+            "const": "call.peer_status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "callId",
+          "participantId",
+          "status"
         ],
         "type": "object"
       },
@@ -2731,6 +2772,9 @@
         },
         {
           "$ref": "#/channels/control/messages/server.call.offered"
+        },
+        {
+          "$ref": "#/channels/control/messages/server.call.peer_status"
         },
         {
           "$ref": "#/channels/control/messages/server.call.pending"

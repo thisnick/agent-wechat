@@ -429,6 +429,25 @@ pub struct CallParticipantStatus {
     pub kind: CallParticipantStatusKind,
 }
 
+impl CallParticipantStatus {
+    /// Classify a raw service participant status code without inventing membership.
+    pub const fn from_code(code: u32) -> Self {
+        let kind = match code {
+            0 => CallParticipantStatusKind::Undefined,
+            1 => CallParticipantStatusKind::Joined,
+            2 => CallParticipantStatusKind::Invited,
+            3 => CallParticipantStatusKind::Acknowledged,
+            4 => CallParticipantStatusKind::Left,
+            5 => CallParticipantStatusKind::Cancelled,
+            6 => CallParticipantStatusKind::Busy,
+            7 => CallParticipantStatusKind::Rejected,
+            8 => CallParticipantStatusKind::NoResponse,
+            _ => CallParticipantStatusKind::Unknown,
+        };
+        Self { code, kind }
+    }
+}
+
 /// What a participant status code means. Cancelled, busy, rejected and no
 /// response do not by themselves mean a participant left.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, TS, JsonSchema, PartialEq, Eq)]
@@ -1062,6 +1081,20 @@ pub enum CallEvent {
         participant_id: String,
         /// The control and its new value.
         control: CallControl,
+    },
+    /// The other party of a direct call changed signaling status, such as
+    /// acknowledging ringing, joining, rejecting, being busy, not answering, or
+    /// leaving. It needs no reply.
+    #[serde(rename = "call.peer_status")]
+    PeerStatus {
+        /// ID of the direct call.
+        #[serde(rename = "callId")]
+        call_id: String,
+        /// Contact ID of the other party.
+        #[serde(rename = "participantId")]
+        participant_id: String,
+        /// Signaling status reported by the service.
+        status: CallParticipantStatus,
     },
     /// Whether this account is in a call changed.
     #[serde(rename = "calls.availability")]

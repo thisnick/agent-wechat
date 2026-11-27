@@ -346,9 +346,6 @@ impl CallBackend for NativeCallBackend {
             }
             worker.muted.store(muted, Ordering::Release);
             if !worker.is_conference() {
-                if worker.call_type != CallType::Video {
-                    return Ok(());
-                }
                 let (reply, received) = oneshot::channel();
                 {
                     let mut commands = worker
@@ -647,7 +644,7 @@ impl CallBackend for NativeCallBackend {
         let inner = self.inner.clone();
         Box::pin(async move {
             let worker = active(&inner, &request.identity)?;
-            if !worker.current()
+            if !worker.authorized()
                 || !request.is_current()
                 || request.generation != worker.generation.load(Ordering::Acquire)
             {
@@ -656,13 +653,27 @@ impl CallBackend for NativeCallBackend {
             if request.format != CallAudioFormat::default() || request.samples.len() != 320 {
                 return Err(service_error(CallErrorCode::InvalidRequest));
             }
-            worker
-                .audio
-                .try_send(QueuedAudio {
-                    request,
-                    queued: Instant::now(),
-                })
-                .map_err(|_| service_error(CallErrorCode::Capacity))?;
+            if worker.media_stop.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            match worker.audio.try_send(QueuedAudio {
+                request,
+                queued: Instant::now(),
+            }) {
+                Ok(()) => {}
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    // Media worker already exited or is exiting while authority is still valid;
+                    // absorb late PCM until the control actor finishes Ending/Ended teardown
+                    // instead of dropping the control client prematurely.
+                    if worker.authorized() {
+                        return Ok(());
+                    }
+                    return Err(service_error(CallErrorCode::Stale));
+                }
+                Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                    return Err(service_error(CallErrorCode::Capacity));
+                }
+            }
             worker
                 .metrics
                 .tx_enqueued_frames
@@ -687,23 +698,33 @@ impl CallBackend for NativeCallBackend {
         let inner = self.inner.clone();
         Box::pin(async move {
             let worker = active(&inner, &request.identity)?;
-            if !worker.current()
+            if !worker.authorized()
                 || !request.is_current()
                 || request.generation != worker.video_generation.load(Ordering::Acquire)
             {
                 return Err(service_error(CallErrorCode::Stale));
             }
-            if !worker.camera_enabled.load(Ordering::Acquire) {
+            if !worker.camera_enabled.load(Ordering::Acquire)
+                || worker.media_stop.load(Ordering::Acquire)
+            {
                 return Ok(());
             }
-            worker
-                .video
-                .try_send(QueuedVideo {
-                    request,
-                    queued: Instant::now(),
-                })
-                .map_err(|_| service_error(CallErrorCode::Capacity))?;
-            Ok(())
+            match worker.video.try_send(QueuedVideo {
+                request,
+                queued: Instant::now(),
+            }) {
+                Ok(()) => Ok(()),
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    if worker.authorized() {
+                        Ok(())
+                    } else {
+                        Err(service_error(CallErrorCode::Stale))
+                    }
+                }
+                Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                    Err(service_error(CallErrorCode::Capacity))
+                }
+            }
         })
     }
     fn clear_video(&self, identity: CallIdentity, generation: u32) -> BackendFuture<()> {
@@ -1199,9 +1220,7 @@ impl PersonalTransport for FencedTransport {
                                 retain,
                             )
                             .await
-                    } else if route == CallHostRoute::LiveSync
-                        && self.worker.call_type == CallType::Video
-                    {
+                    } else if route == CallHostRoute::LiveSync {
                         operation
                             .call_live_sync(
                                 request,
@@ -1439,6 +1458,9 @@ fn run_control(
         worker.stop.store(true, Ordering::Release);
     }
     let _ = admitted.send(Ok(BackendOutcome::Admitted));
+    if let Some(code) = session.peer_member_status() {
+        let _ = runtime.block_on(sink.peer_status(code));
+    }
     let ringing_end = Instant::now() + inner.config.ring_timeout;
     while !worker.stop.load(Ordering::Acquire) {
         ensure!(worker.authorized(), "Call authority revoked");
@@ -1457,10 +1479,17 @@ fn run_control(
         }
         match session.poll(&transport, &mut state, auth, tasks.next()?) {
             Ok(SyncProgress::Terminal(_)) => {
+                if let Some(code) = session.peer_member_status() {
+                    let _ = runtime.block_on(sink.peer_status(code));
+                }
                 worker.stop.store(true, Ordering::Release);
                 break;
             }
-            Ok(_) => {}
+            Ok(_) => {
+                if let Some(code) = session.peer_member_status() {
+                    let _ = runtime.block_on(sink.peer_status(code));
+                }
+            }
             Err(error) if error.is::<CallLiveSyncInterrupted>() => continue,
             Err(error)
                 if error.is::<CallRpcNotSubmitted>() || error.is::<UnsupportedCallMedia>() =>
@@ -1493,6 +1522,9 @@ fn run_control(
     );
     let (connection_index, udp_index) = media::select_relay_indices(&session.relay_candidates()?);
     let negotiated = session.take_media(&state, auth, connection_index, udp_index)?;
+    if let Some(code) = session.peer_member_status() {
+        let _ = runtime.block_on(sink.peer_status(code));
+    }
     if let Some(muted) = session.peer_microphone_muted() {
         let _ = runtime.block_on(sink.peer_microphone(muted));
     }
@@ -1527,6 +1559,15 @@ fn run_control(
             inner.config.direct_camera_off_recovery_grace,
         );
     }
+    if worker.muted.load(Ordering::Acquire) {
+        if let Ok(mut queue) = worker.direct_commands.lock() {
+            let (reply, _) = oneshot::channel();
+            queue.push_back(DirectCommand {
+                sets_camera: false,
+                reply,
+            });
+        }
+    }
     worker.joined_commands_ready.store(true, Ordering::Release);
     let control_result = (|| -> Result<()> {
         while !worker.stop.load(Ordering::Acquire)
@@ -1538,25 +1579,26 @@ fn run_control(
                 worker.stop.store(true, Ordering::Release);
                 break;
             }
-            if is_video {
-                drain_direct_switch_av(worker, &mut |cam| {
-                    let mic = !worker.muted.load(Ordering::Acquire);
-                    let now =
-                        u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
-                    last_av_ts = last_av_ts.saturating_add(1).max(now);
-                    session.switch_av(
-                        &transport,
-                        &mut state,
-                        auth,
-                        mic,
-                        cam,
-                        last_av_ts,
-                        tasks.next()?,
-                    )
-                })?;
-            }
+            drain_direct_switch_av(worker, &mut |cam| {
+                let mic = !worker.muted.load(Ordering::Acquire);
+                let cam = is_video && cam;
+                let now = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
+                last_av_ts = last_av_ts.saturating_add(1).max(now);
+                session.switch_av(
+                    &transport,
+                    &mut state,
+                    auth,
+                    mic,
+                    cam,
+                    last_av_ts,
+                    tasks.next()?,
+                )
+            })?;
             match session.poll(&transport, &mut state, auth, tasks.next()?) {
                 Ok(SyncProgress::MediaReady) => {
+                    if let Some(code) = session.peer_member_status() {
+                        let _ = runtime.block_on(sink.peer_status(code));
+                    }
                     if let Some(muted) = session.peer_microphone_muted() {
                         let _ = runtime.block_on(sink.peer_microphone(muted));
                     }
@@ -1565,10 +1607,17 @@ fn run_control(
                     }
                 }
                 Ok(SyncProgress::Terminal(_)) => {
-                    worker.media_stop.store(true, Ordering::Release);
+                    if let Some(code) = session.peer_member_status() {
+                        let _ = runtime.block_on(sink.peer_status(code));
+                    }
                     break;
                 }
-                Ok(SyncProgress::Waiting) => bail!("Peer left current voice state"),
+                Ok(SyncProgress::Waiting) => {
+                    if let Some(code) = session.peer_member_status() {
+                        let _ = runtime.block_on(sink.peer_status(code));
+                    }
+                    bail!("Peer left current voice state")
+                }
                 Err(error) if error.is::<CallLiveSyncInterrupted>() => continue,
                 Err(error)
                     if error.is::<CallRpcNotSubmitted>() || error.is::<UnsupportedCallMedia>() =>
@@ -1661,6 +1710,13 @@ fn drain_direct_switch_av(
     }
     if !preserve_startup_video_bit && !not_submitted {
         worker.cancel_initial_camera_off();
+    }
+    if let Err(error) = &raw_result {
+        if std::env::var("WX_CALL_VIDEO_TRACE").as_deref() == Ok("1") {
+            eprintln!(
+                "[wechat-call-video] direct switch_av(camera={wire_camera}) failed: {error:#}"
+            );
+        }
     }
     let result = raw_result.map_err(|error| {
         if error.is::<CallRpcNotSubmitted>() {

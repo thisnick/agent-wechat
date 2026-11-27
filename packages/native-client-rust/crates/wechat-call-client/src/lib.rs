@@ -5,7 +5,9 @@
 //! camera enumeration, and `WXCM` v3 WebSocket framing are implemented once.
 
 pub mod audio;
+pub mod inspect;
 pub mod media;
+pub mod synthetic_audio;
 pub mod transport;
 pub mod video;
 

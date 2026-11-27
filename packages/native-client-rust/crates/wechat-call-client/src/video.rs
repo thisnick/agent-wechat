@@ -200,6 +200,10 @@ pub enum CameraSource {
     Off,
     /// Generate a synthetic animated FFmpeg `testsrc2` pattern (for headless/container testing).
     Test,
+    /// Generate FFmpeg `smptebars` color bars (for headless/container testing).
+    Smpte,
+    /// Generate a solid color frame via FFmpeg `color=c=...` (for headless/container testing).
+    Color(String),
     /// Loop a local video or image file via FFmpeg.
     File(PathBuf),
     /// Use an explicit camera device path or platform capture name/index.
@@ -222,6 +226,21 @@ impl CameraSource {
         if trimmed.eq_ignore_ascii_case("test") {
             return Ok(Self::Test);
         }
+        if trimmed.eq_ignore_ascii_case("smpte") {
+            return Ok(Self::Smpte);
+        }
+        if let Some(color) = trimmed.strip_prefix("color:") {
+            let color = color.trim();
+            ensure!(
+                !color.is_empty()
+                    && color.len() <= 32
+                    && color
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'#' | b'@' | b'.')),
+                "invalid color camera source (use e.g. color:red or color:#00ff00)"
+            );
+            return Ok(Self::Color(color.to_owned()));
+        }
         if let Some(path) = trimmed.strip_prefix("file:") {
             ensure!(!path.trim().is_empty(), "camera file path is required");
             return Ok(Self::File(PathBuf::from(path)));
@@ -243,6 +262,8 @@ impl CameraSource {
             Self::Auto => "auto".into(),
             Self::Off => "off".into(),
             Self::Test => "test".into(),
+            Self::Smpte => "smpte".into(),
+            Self::Color(spec) => format!("color:{spec}"),
             Self::File(path) => format!("file:{}", path.display()),
             Self::Device(device) => device.clone(),
         }
@@ -453,6 +474,16 @@ pub fn client_video_capabilities(
     daemon_supports_video: bool,
     override_ffmpeg: Option<&Path>,
 ) -> Option<CallVideoCapabilities> {
+    client_video_capabilities_with_receive(daemon_supports_video, override_ffmpeg, None)
+}
+
+/// Compute video capabilities this client should advertise in `call.ready`, with
+/// an optional receive-codec preference override (defaulting to standalone JPEG).
+pub fn client_video_capabilities_with_receive(
+    daemon_supports_video: bool,
+    override_ffmpeg: Option<&Path>,
+    receive_codecs: Option<Vec<CallVideoCodec>>,
+) -> Option<CallVideoCapabilities> {
     if !daemon_supports_video {
         return None;
     }
@@ -469,9 +500,12 @@ pub fn client_video_capabilities(
             send_codecs.push(CallVideoCodec::Jpeg);
         }
     }
+    let receive_codecs = receive_codecs
+        .filter(|list| !list.is_empty())
+        .unwrap_or_else(|| vec![CallVideoCodec::Jpeg]);
     Some(CallVideoCapabilities {
         send_codecs,
-        receive_codecs: vec![CallVideoCodec::Jpeg],
+        receive_codecs,
         max_width: Some(640),
         max_height: Some(480),
         max_fps: Some(15),
@@ -740,7 +774,11 @@ fn resolve_device_input(source: &CameraSource, ffmpeg: &Path) -> Result<String> 
                 bail!("no default camera capture backend; pass --camera test or --camera-off")
             }
         }
-        CameraSource::Off | CameraSource::Test | CameraSource::File(_) => {
+        CameraSource::Off
+        | CameraSource::Test
+        | CameraSource::Smpte
+        | CameraSource::Color(_)
+        | CameraSource::File(_) => {
             unreachable!("handled before resolve_device_input")
         }
     }
@@ -771,6 +809,32 @@ fn spawn_capture(
                 "lavfi",
                 "-i",
                 &format!("testsrc2=size={width}x{height}:rate={fps}"),
+            ]);
+        }
+        CameraSource::Smpte => {
+            cmd.args([
+                "-re",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("smptebars=size={width}x{height}:rate={fps}"),
+            ]);
+        }
+        CameraSource::Color(spec) => {
+            ensure!(
+                !spec.is_empty()
+                    && spec.len() <= 32
+                    && spec
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'#' | b'@' | b'.')),
+                "invalid color specification: {spec}"
+            );
+            cmd.args([
+                "-re",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("color=c={spec}:size={width}x{height}:rate={fps}"),
             ]);
         }
         CameraSource::File(path) => {
@@ -1682,14 +1746,20 @@ impl ReceiveVideo {
 
     /// Drain frames completed by the background JPEG decoder (RGB mode).
     pub fn poll_decoded(&mut self) -> bool {
+        !self.poll_decoded_ids().is_empty()
+    }
+
+    /// Drain frames completed by the background JPEG decoder and return the track
+    /// IDs that received a newly decoded frame.
+    pub fn poll_decoded_ids(&mut self) -> Vec<u32> {
         let Some(latest) = &self.decoded_latest else {
-            return false;
+            return Vec::new();
         };
         let pending = match latest.lock() {
             Ok(mut guard) => std::mem::take(&mut *guard),
-            Err(_) => return false,
+            Err(_) => return Vec::new(),
         };
-        let mut updated = false;
+        let mut updated = Vec::new();
         for (_, done) in pending {
             if self
                 .retired
@@ -1710,7 +1780,7 @@ impl ReceiveVideo {
             if entry.track.participant_id().is_none() {
                 self.peer_camera_off = false;
             }
-            updated = true;
+            updated.push(done.track_id);
         }
         updated
     }
@@ -1981,5 +2051,31 @@ mod tests {
             FLAG_KEYFRAME | FLAG_CODEC_CONFIG | FLAG_ROTATE_90
         );
         assert!(resumed.bytes.ends_with(&[0x65, 0x99]));
+    }
+
+    #[test]
+    fn camera_source_parse_accepts_synthetic_patterns_and_rejects_filter_injection() {
+        assert_eq!(CameraSource::parse("smpte").unwrap(), CameraSource::Smpte);
+        assert_eq!(
+            CameraSource::parse("color:red").unwrap(),
+            CameraSource::Color("red".into())
+        );
+        assert_eq!(
+            CameraSource::parse("color:#00ff00@0.5").unwrap(),
+            CameraSource::Color("#00ff00@0.5".into())
+        );
+        for bad in [
+            "color:",
+            "color:red:duration=1",
+            "color:red,testsrc",
+            "color:-x",
+            "color:red;echo",
+            &format!("color:{}", "a".repeat(33)),
+        ] {
+            assert!(
+                CameraSource::parse(bad).is_err(),
+                "expected {bad:?} to be rejected"
+            );
+        }
     }
 }

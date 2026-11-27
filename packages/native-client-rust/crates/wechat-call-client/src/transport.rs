@@ -25,8 +25,8 @@ use tokio_tungstenite::{
 use wechat_call_contracts::call_types::{
     CallAudioFormat, CallCapabilities, CallClientHello, CallCommand, CallCommandStatus,
     CallConferenceInvitation, CallEvent, CallInvitationResult, CallOffer, CallParticipantControl,
-    CallPendingOffer, CallTrack, CallVideoCapabilities, CallView, CallsAvailability,
-    CALL_PROTOCOL_VERSION,
+    CallParticipantStatus, CallPendingOffer, CallState, CallTrack, CallVideoCapabilities, CallView,
+    CallsAvailability, CALL_PROTOCOL_VERSION,
 };
 
 pub type Socket = WebSocketStream<reqwest::Upgraded>;
@@ -233,15 +233,48 @@ pub async fn receive(socket: &mut Socket, label: &str) -> Result<Message> {
     }
 }
 
-pub async fn receive_event(socket: &mut Socket, label: &str) -> Result<CallEvent> {
-    let Message::Text(text) = receive(socket, label).await? else {
-        bail!("unexpected binary control message");
-    };
+fn is_known_call_event_type(kind: &str) -> bool {
+    matches!(
+        kind,
+        "call.invitation_result"
+            | "protocol.error"
+            | "conference.invitations"
+            | "hello"
+            | "command.result"
+            | "call.offered"
+            | "call.pending"
+            | "call.state"
+            | "participant.updated"
+            | "call.control"
+            | "call.peer_status"
+            | "calls.availability"
+            | "track.added"
+            | "track.updated"
+            | "track.removed"
+            | "media.ready"
+            | "video.keyframe_requested"
+            | "call.error"
+    )
+}
+
+/// Parse a JSON text frame from a call WebSocket.
+///
+/// Returns `Ok(None)` when the server sent a well-formed JSON object whose
+/// `type` tag is not recognized by this client, allowing clients to ignore
+/// additive future server messages without disconnecting an active call.
+pub fn parse_call_event_str(text: &str) -> Result<Option<CallEvent>> {
     if text.len() > 16 * 1024 {
         bail!("call event exceeds the message limit");
     }
-    let value: serde_json::Value = serde_json::from_str(&text).context("invalid call event")?;
-    if value["type"] == "protocol.error" {
+    let value: serde_json::Value = serde_json::from_str(text).context("invalid call event")?;
+    let Some(kind) = value
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty() && s.len() <= 128 && !s.chars().any(char::is_control))
+    else {
+        bail!("invalid call event");
+    };
+    if kind == "protocol.error" {
         let CallEvent::ProtocolError {
             client_versions,
             server_versions,
@@ -255,7 +288,7 @@ pub async fn receive_event(socket: &mut Socket, label: &str) -> Result<CallEvent
             serde_json::to_value(code)?
         );
     }
-    if value["type"] == "hello"
+    if kind == "hello"
         && value["protocolVersion"].as_u64().unwrap_or(1) != u64::from(CALL_PROTOCOL_VERSION)
     {
         bail!(
@@ -264,7 +297,26 @@ pub async fn receive_event(socket: &mut Socket, label: &str) -> Result<CallEvent
             value["protocolVersion"].as_u64().unwrap_or(1)
         );
     }
+    if !is_known_call_event_type(kind) {
+        debug_call(
+            "event",
+            format_args!("ignoring unknown event type {kind:?}"),
+        );
+        return Ok(None);
+    }
     let event = serde_json::from_value(value).context("invalid call event")?;
+    Ok(Some(event))
+}
+
+/// Receive one event strictly (used during initial `hello`/`media.ready`
+/// handshakes so unknown event types fail closed prior to handshake completion).
+pub async fn receive_strict_event(socket: &mut Socket, label: &str) -> Result<CallEvent> {
+    let Message::Text(text) = receive(socket, label).await? else {
+        bail!("unexpected binary control message");
+    };
+    let Some(event) = parse_call_event_str(&text)? else {
+        bail!("unexpected unknown event before handshake");
+    };
     if call_debug_enabled() {
         match event_json(&event) {
             Ok(line) => debug_call(label, format_args!("<- {line}")),
@@ -272,6 +324,24 @@ pub async fn receive_event(socket: &mut Socket, label: &str) -> Result<CallEvent
         }
     }
     Ok(event)
+}
+
+pub async fn receive_event(socket: &mut Socket, label: &str) -> Result<CallEvent> {
+    loop {
+        let Message::Text(text) = receive(socket, label).await? else {
+            bail!("unexpected binary control message");
+        };
+        let Some(event) = parse_call_event_str(&text)? else {
+            continue;
+        };
+        if call_debug_enabled() {
+            match event_json(&event) {
+                Ok(line) => debug_call(label, format_args!("<- {line}")),
+                Err(error) => debug_call(label, format_args!("could not format event: {error}")),
+            }
+        }
+        return Ok(event);
+    }
 }
 
 /// Serialize a [`CallEvent`] to JSON with secret `ownerToken` fields stripped.
@@ -327,6 +397,8 @@ pub struct ControlClient {
     pub pending_offer: Option<CallPendingOffer>,
     pub tracks: BTreeMap<(String, u32), CallTrack>,
     pub call: Option<CallView>,
+    pub peer_status: Option<CallParticipantStatus>,
+    peer_status_call_id: Option<String>,
     pub format: CallAudioFormat,
     pub video_capabilities: Option<CallVideoCapabilities>,
 }
@@ -341,9 +413,12 @@ impl ControlClient {
             },
         )
         .await?;
-        let event = timeout(STARTUP_TIMEOUT, receive_event(&mut socket, "control"))
-            .await
-            .context("call socket hello timed out")??;
+        let event = timeout(
+            STARTUP_TIMEOUT,
+            receive_strict_event(&mut socket, "control"),
+        )
+        .await
+        .context("call socket hello timed out")??;
         let CallEvent::Hello {
             protocol_version: CALL_PROTOCOL_VERSION,
             conference_invitations,
@@ -372,6 +447,8 @@ impl ControlClient {
                 pending_offer: current_pending_offer.clone(),
                 tracks: BTreeMap::new(),
                 call: current_call.clone(),
+                peer_status: None,
+                peer_status_call_id: None,
                 format: *audio_format,
                 video_capabilities: video_capabilities.clone(),
             },
@@ -442,14 +519,34 @@ impl ControlClient {
             }
             CallEvent::State { call } => {
                 if self
+                    .peer_status_call_id
+                    .as_deref()
+                    .is_some_and(|id| id != call.call_id)
+                {
+                    self.peer_status = None;
+                    self.peer_status_call_id = None;
+                }
+                if self
                     .call
                     .as_ref()
                     .is_none_or(|old| old.call_id != call.call_id || old.revision <= call.revision)
                 {
                     self.call = Some(call.clone());
                 }
-                if call.state == wechat_call_contracts::call_types::CallState::Ended {
+                if call.state == CallState::Ended {
                     self.tracks.retain(|(id, _), _| id != &call.call_id);
+                }
+            }
+            CallEvent::PeerStatus {
+                call_id, status, ..
+            } => {
+                let matches_or_new_call = self
+                    .call
+                    .as_ref()
+                    .is_none_or(|call| call.call_id == *call_id || call.state == CallState::Ended);
+                if matches_or_new_call {
+                    self.peer_status = Some(*status);
+                    self.peer_status_call_id = Some(call_id.clone());
                 }
             }
             CallEvent::Control {
@@ -476,6 +573,8 @@ impl ControlClient {
                 self.offer = None;
                 if !availability.busy {
                     self.tracks.clear();
+                    self.peer_status = None;
+                    self.peer_status_call_id = None;
                 }
             }
             _ => {}
@@ -667,5 +766,40 @@ mod tests {
         assert!(control.tracks.is_empty());
         control.close().await;
         server.await.unwrap();
+    }
+
+    #[test]
+    fn parse_call_event_ignores_unknown_server_types_and_parses_peer_status() {
+        let unknown = parse_call_event_str(
+            r#"{"type":"call.future_telemetry","callId":"call-1","metric":42}"#,
+        )
+        .unwrap();
+        assert!(unknown.is_none());
+
+        let parsed = parse_call_event_str(
+            r#"{"type":"call.peer_status","callId":"call-1","participantId":"bob","status":{"code":3,"kind":"acknowledged"}}"#,
+        )
+        .unwrap()
+        .expect("peer_status event");
+        match parsed {
+            CallEvent::PeerStatus {
+                call_id,
+                participant_id,
+                status,
+            } => {
+                assert_eq!(call_id, "call-1");
+                assert_eq!(participant_id, "bob");
+                assert_eq!(status.code, 3);
+                assert_eq!(
+                    status.kind,
+                    wechat_call_contracts::call_types::CallParticipantStatusKind::Acknowledged
+                );
+            }
+            other => panic!("unexpected event: {}", event_json(&other).unwrap()),
+        }
+
+        // Known event types with malformed payloads must still fail closed.
+        assert!(parse_call_event_str(r#"{"type":"call.peer_status","callId":"call-1"}"#).is_err());
+        assert!(parse_call_event_str(r#"{"notType":"x"}"#).is_err());
     }
 }
