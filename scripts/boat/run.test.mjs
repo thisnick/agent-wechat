@@ -10,6 +10,7 @@ import {
   DEFAULT_MAX_SINGLE_UNTRACKED_BYTES,
   buildApplyScript,
   buildLockAcquireScript,
+  buildLockMarkStoppingScript,
   buildLockReleaseScript,
   createStandaloneSeedBundle,
   deriveSandboxName,
@@ -349,32 +350,50 @@ test('stop/delete --dry-run do not invoke boat', () => {
   }
 });
 
-test('remote run lock prevents concurrent runs, respects ownership, and supports --force-unlock', () => {
+test('remote run lock prevents concurrent runs, guards stop transitions, and supports resume/force-unlock', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'aw-boat-lock-'));
   try {
-    const lockDir = path.join(tmp, 'run.lock');
+    const lockPath = path.join(tmp, 'run.lock');
     assert.equal(parseArgs(['--force-unlock', '--preset', 'rust-fmt']).forceUnlock, true);
 
-    const out1 = runBash(buildLockAcquireScript(lockDir, 'run-1'));
+    const out1 = runBash(buildLockAcquireScript(lockPath, 'run-1'));
     assert.match(out1, /LOCK_ACQUIRED=1/);
 
-    const out2 = runBash(buildLockAcquireScript(lockDir, 'run-2'));
+    const out2 = runBash(buildLockAcquireScript(lockPath, 'run-2'));
     assert.match(out2, /LOCK_ACQUIRED=0/);
-    assert.match(out2, /LOCK_HOLDER=run-1/);
+    assert.match(out2, /LOCK_HOLDER=active:run-1/);
 
-    // Wrong owner cannot release lock-1.
-    runBash(buildLockReleaseScript(lockDir, 'run-2'));
-    assert.ok(fs.existsSync(lockDir));
+    // Wrong owner cannot release or mark stopping.
+    runBash(buildLockReleaseScript(lockPath, 'run-2'));
+    runBash(buildLockMarkStoppingScript(lockPath, 'run-2'));
+    assert.equal(fs.readFileSync(lockPath, 'utf8').trim(), 'active:run-1');
 
-    // Real owner releases lock cleanly.
-    runBash(buildLockReleaseScript(lockDir, 'run-1'));
-    assert.ok(!fs.existsSync(lockDir));
+    // Marking stopping blocks concurrent reuse-running runs (allowStoppedLock=false),
+    // but allows exactly one resuming run (allowStoppedLock=true) to reclaim it.
+    runBash(buildLockMarkStoppingScript(lockPath, 'run-1'));
+    assert.equal(fs.readFileSync(lockPath, 'utf8').trim(), 'stopping:run-1');
 
-    // Force-unlock replaces a stale lock.
-    runBash(buildLockAcquireScript(lockDir, 'stale-run'));
-    const forced = runBash(buildLockAcquireScript(lockDir, 'run-3', { forceUnlock: true }));
+    const blockedReuse = runBash(buildLockAcquireScript(lockPath, 'run-reuse', { allowStoppedLock: false }));
+    assert.match(blockedReuse, /LOCK_ACQUIRED=0/);
+    assert.match(blockedReuse, /LOCK_HOLDER=stopping:run-1/);
+
+    const resumedWinner = runBash(buildLockAcquireScript(lockPath, 'run-resume-1', { allowStoppedLock: true }));
+    assert.match(resumedWinner, /LOCK_ACQUIRED=1/);
+
+    // A second concurrent resumer sees active:run-resume-1 (not stopping:*) and is refused.
+    const resumedLoser = runBash(buildLockAcquireScript(lockPath, 'run-resume-2', { allowStoppedLock: true }));
+    assert.match(resumedLoser, /LOCK_ACQUIRED=0/);
+    assert.match(resumedLoser, /LOCK_HOLDER=active:run-resume-1/);
+
+    // Real owner releases lock cleanly (the --keep path).
+    runBash(buildLockReleaseScript(lockPath, 'run-resume-1'));
+    assert.ok(!fs.existsSync(lockPath));
+
+    // Force-unlock replaces a stale active lock.
+    runBash(buildLockAcquireScript(lockPath, 'stale-run'));
+    const forced = runBash(buildLockAcquireScript(lockPath, 'run-3', { forceUnlock: true }));
     assert.match(forced, /LOCK_ACQUIRED=1/);
-    assert.equal(fs.readFileSync(path.join(lockDir, 'owner'), 'utf8').trim(), 'run-3');
+    assert.equal(fs.readFileSync(lockPath, 'utf8').trim(), 'active:run-3');
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

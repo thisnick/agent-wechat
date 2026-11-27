@@ -23,7 +23,7 @@ const RUNNING_STATES = new Set(['idle', 'running', 'ready']);
 const BUSY_STATES = new Set(['busy']);
 const TRANSITION_STATES = new Set(['stopping', 'pending', 'starting', 'resuming']);
 const FORKABLE_STATES = new Set(['stopped', 'idle', 'running', 'busy', 'ready']);
-export const DEFAULT_REMOTE_LOCK_DIR = '/tmp/aw-boat-run.lock';
+export const DEFAULT_REMOTE_LOCK_PATH = '/tmp/aw-boat-run.lock';
 
 export function shellQuote(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
@@ -797,38 +797,91 @@ git read-tree refs/boat/head
 `;
 }
 
-export function buildLockAcquireScript(lockDir, runId, { forceUnlock = false } = {}) {
+function wrapWithMutex(lockPath, body) {
   return `
 set -eu
-LOCK_DIR=${shellQuote(lockDir)}
-OWNER_FILE="$LOCK_DIR/owner"
-${forceUnlock ? 'rm -rf "$LOCK_DIR"' : ''}
-if mkdir "$LOCK_DIR" 2>/dev/null; then
-  printf '%s\\n' ${shellQuote(runId)} > "$OWNER_FILE"
-  echo "LOCK_ACQUIRED=1"
-  exit 0
+LOCK_STATE=${shellQuote(lockPath)}
+LOCK_FLOCK="${'${LOCK_STATE}'}.flock"
+LOCK_MUTEX="${'${LOCK_STATE}'}.mutex"
+_aw_run_locked() {
+${body}
+}
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$LOCK_FLOCK"
+  flock -x 9
+  _aw_run_locked
+else
+  _aw_tries=0
+  while ! mkdir "$LOCK_MUTEX" 2>/dev/null; do
+    _aw_tries=$((_aw_tries + 1))
+    if [ "$_aw_tries" -gt 200 ]; then
+      echo "Timed out waiting for lock mutex" >&2
+      exit 1
+    fi
+    sleep 0.05
+  done
+  trap 'rmdir "$LOCK_MUTEX" 2>/dev/null || true' EXIT
+  _aw_run_locked
 fi
-HOLDER="$(cat "$OWNER_FILE" 2>/dev/null || echo unknown)"
-echo "LOCK_ACQUIRED=0"
-echo "LOCK_HOLDER=$HOLDER"
 `;
 }
 
-export function buildLockReleaseScript(lockDir, runId) {
-  return `
-set -eu
-LOCK_DIR=${shellQuote(lockDir)}
-OWNER_FILE="$LOCK_DIR/owner"
-if [ -f "$OWNER_FILE" ] && [ "$(cat "$OWNER_FILE" 2>/dev/null || true)" = ${shellQuote(runId)} ]; then
-  rm -rf "$LOCK_DIR"
-fi
-`;
+export function buildLockAcquireScript(
+  lockPath,
+  runId,
+  { forceUnlock = false, allowStoppedLock = false } = {},
+) {
+  return wrapWithMutex(
+    lockPath,
+    `  CURRENT="$(cat "$LOCK_STATE" 2>/dev/null || true)"
+  if [ -z "$CURRENT" ] || [ ${forceUnlock ? '1' : '0'} -eq 1 ]; then
+    printf 'active:%s\\n' ${shellQuote(runId)} > "$LOCK_STATE"
+    echo "LOCK_ACQUIRED=1"
+    return 0
+  fi
+  if [ ${allowStoppedLock ? '1' : '0'} -eq 1 ]; then
+    case "$CURRENT" in
+      stopping:*)
+        printf 'active:%s\\n' ${shellQuote(runId)} > "$LOCK_STATE"
+        echo "LOCK_ACQUIRED=1"
+        return 0
+        ;;
+    esac
+  fi
+  echo "LOCK_ACQUIRED=0"
+  echo "LOCK_HOLDER=$CURRENT"`,
+  );
 }
 
-function acquireRemoteLock(sandboxId, targetName, runId, { forceUnlock = false } = {}) {
+export function buildLockMarkStoppingScript(lockPath, runId) {
+  return wrapWithMutex(
+    lockPath,
+    `  CURRENT="$(cat "$LOCK_STATE" 2>/dev/null || true)"
+  if [ "$CURRENT" = ${shellQuote(`active:${runId}`)} ]; then
+    printf 'stopping:%s\\n' ${shellQuote(runId)} > "$LOCK_STATE"
+  fi`,
+  );
+}
+
+export function buildLockReleaseScript(lockPath, runId) {
+  return wrapWithMutex(
+    lockPath,
+    `  CURRENT="$(cat "$LOCK_STATE" 2>/dev/null || true)"
+  if [ "$CURRENT" = ${shellQuote(`active:${runId}`)} ]; then
+    rm -f "$LOCK_STATE"
+  fi`,
+  );
+}
+
+function acquireRemoteLock(
+  sandboxId,
+  targetName,
+  runId,
+  { forceUnlock = false, allowStoppedLock = false } = {},
+) {
   const out = runBoatExecCapture(
     sandboxId,
-    buildLockAcquireScript(DEFAULT_REMOTE_LOCK_DIR, runId, { forceUnlock }),
+    buildLockAcquireScript(DEFAULT_REMOTE_LOCK_PATH, runId, { forceUnlock, allowStoppedLock }),
     { timeout: 60 },
   );
   let acquired = false;
@@ -840,14 +893,20 @@ function acquireRemoteLock(sandboxId, targetName, runId, { forceUnlock = false }
   }
   if (!acquired) {
     throw new Error(
-      `Sandbox ${targetName} (${sandboxId}) is currently locked by another active run (${holder}). ` +
+      `Sandbox ${targetName} (${sandboxId}) is currently locked by another run (${holder}). ` +
         'Wait for it to finish, pass --name <other> to use a separate sandbox, or pass --force-unlock if a previous run was killed.',
     );
   }
 }
 
+function markRemoteLockStopping(sandboxId, runId) {
+  runBoatExecCapture(sandboxId, buildLockMarkStoppingScript(DEFAULT_REMOTE_LOCK_PATH, runId), {
+    timeout: 30,
+  });
+}
+
 function releaseRemoteLock(sandboxId, runId) {
-  runBoatExecCapture(sandboxId, buildLockReleaseScript(DEFAULT_REMOTE_LOCK_DIR, runId), {
+  runBoatExecCapture(sandboxId, buildLockReleaseScript(DEFAULT_REMOTE_LOCK_PATH, runId), {
     timeout: 30,
   });
 }
@@ -1189,7 +1248,13 @@ async function ensureSandbox({ targetName, baseName, type, typeExplicit, ttl, no
       );
     }
     console.log(`[boat] Reusing running sandbox ${plan.sandbox.name} (${plan.sandbox.id})`);
-    return { sandboxId: plan.sandbox.id, created: false, forked: false, reusedRunning: true };
+    return {
+      sandboxId: plan.sandbox.id,
+      created: false,
+      forked: false,
+      reusedRunning: true,
+      resumed: false,
+    };
   }
 
   if (plan.action === 'resume') {
@@ -1201,7 +1266,13 @@ async function ensureSandbox({ targetName, baseName, type, typeExplicit, ttl, no
       resumeArgs.push('--type', type);
     }
     runBoat(resumeArgs);
-    return { sandboxId: plan.sandbox.id, created: false, forked: false, reusedRunning: false };
+    return {
+      sandboxId: plan.sandbox.id,
+      created: false,
+      forked: false,
+      reusedRunning: false,
+      resumed: true,
+    };
   }
 
   if (plan.action === 'fork-base') {
@@ -1451,7 +1522,6 @@ async function main(argv = process.argv.slice(2)) {
   const runId = `${process.pid}-${randomBytes(4).toString('hex')}`;
   let sandboxId = null;
   let lockAcquired = false;
-  let canStopSandbox = false;
   let interruptedSignal = null;
   let cleanedUp = false;
 
@@ -1459,19 +1529,30 @@ async function main(argv = process.argv.slice(2)) {
     if (cleanedUp) return;
     cleanedUp = true;
     localSync.cleanup();
-    if (sandboxId && lockAcquired) {
+    if (!sandboxId || !lockAcquired) {
+      // Never touch or stop a sandbox whose lock we did not acquire.
+      return;
+    }
+    if (opts.keep) {
       try {
         releaseRemoteLock(sandboxId, runId);
       } catch (unlockErr) {
         console.error(`[boat] Warning: failed to release lock on ${sandboxId}: ${unlockErr.message}`);
       }
+      return;
     }
-    if (sandboxId && canStopSandbox && !opts.keep) {
-      try {
-        stopSandbox(sandboxId, targetName);
-      } catch (stopErr) {
-        console.error(`[boat] Warning: failed to stop ${sandboxId}: ${stopErr.message}`);
-      }
+    // Keep the lock held (marked `stopping:<runId>`) across `boat stop` so a concurrent
+    // `reuse-running` run cannot slip in before stop completes; a later resume from `stopped`
+    // atomically reclaims `stopping:*` (or finds /tmp cleared after a cold stop).
+    try {
+      markRemoteLockStopping(sandboxId, runId);
+    } catch (markErr) {
+      console.error(`[boat] Warning: failed to mark lock stopping on ${sandboxId}: ${markErr.message}`);
+    }
+    try {
+      stopSandbox(sandboxId, targetName);
+    } catch (stopErr) {
+      console.error(`[boat] Warning: failed to stop ${sandboxId}: ${stopErr.message}`);
     }
   };
 
@@ -1505,12 +1586,12 @@ async function main(argv = process.argv.slice(2)) {
       keep: opts.keep,
     });
     sandboxId = ensured.sandboxId;
-    // Only stop an already-running sandbox if we actually acquire its lock; never stop under another run.
-    canStopSandbox = !ensured.reusedRunning;
 
-    acquireRemoteLock(sandboxId, targetName, runId, { forceUnlock: opts.forceUnlock });
+    acquireRemoteLock(sandboxId, targetName, runId, {
+      forceUnlock: opts.forceUnlock,
+      allowStoppedLock: Boolean(ensured.resumed || ensured.forked),
+    });
     lockAcquired = true;
-    canStopSandbox = true;
 
     if (ensured.reusedRunning) {
       runBoat(['extend', sandboxId, '--ttl', String(opts.ttl)]);
